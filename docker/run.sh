@@ -34,7 +34,11 @@ show_banner() {
     echo ' |___\__,_|\___|\__,_|  |_____/_/\_\ .__/|_|\___/|_|  \___|_|   '
     echo '                                    |_|                           '
     echo -e "${NC}"
-    echo -e "  ${DIM}Autonomous Research Framework${NC}  ${CYAN}github.com/ChicagoHAI/idea-explorer${NC}"
+    local version=""
+    if [ -f "$PROJECT_ROOT/config/VERSION" ]; then
+        version=$(cat "$PROJECT_ROOT/config/VERSION" | tr -d '[:space:]')
+    fi
+    echo -e "  ${DIM}Autonomous Research Framework${NC}  ${CYAN}v${version:-unknown}${NC}  ${DIM}github.com/ChicagoHAI/idea-explorer${NC}"
     echo ""
 }
 
@@ -51,9 +55,16 @@ show_status() {
         echo -e "    Docker .............. ${RED}[MISSING]${NC} install docker first"
     fi
 
-    # Docker image
+    # Docker image (with version check)
     if docker image inspect "$IMAGE_NAME" &> /dev/null; then
-        echo -e "    Docker image ........ ${GREEN}[OK]${NC} $IMAGE_NAME"
+        local host_version=$(cat "$PROJECT_ROOT/config/VERSION" 2>/dev/null | tr -d '[:space:]')
+        local cached_version=$(cat "$PROJECT_ROOT/.docker-image-version" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$host_version" ] && [ -n "$cached_version" ] && [ "$host_version" != "$cached_version" ]; then
+            echo -e "    Docker image ........ ${YELLOW}[OUTDATED]${NC} image v${cached_version}, code v${host_version}"
+            echo -e "                          Run: ${BOLD}./idea-explorer build${NC} to update"
+        else
+            echo -e "    Docker image ........ ${GREEN}[OK]${NC} $IMAGE_NAME"
+        fi
     else
         echo -e "    Docker image ........ ${YELLOW}[MISSING]${NC} run: ./idea-explorer setup"
     fi
@@ -236,10 +247,31 @@ check_env_file() {
 # Build the container image
 # -----------------------------------------------------------------------------
 cmd_build() {
-    echo -e "${BLUE}Building idea-explorer container image...${NC}"
+    local version=$(cat "$PROJECT_ROOT/config/VERSION" 2>/dev/null | tr -d '[:space:]')
+    echo -e "${BLUE}Building idea-explorer container image${version:+ (v${version})}...${NC}"
     cd "$PROJECT_ROOT"
     docker build -t "$IMAGE_NAME" -f docker/Dockerfile .
-    echo -e "${GREEN}Build complete!${NC}"
+
+    # Cache the image version for fast pre-run checks
+    if [ -n "$version" ]; then
+        echo "$version" > "$PROJECT_ROOT/.docker-image-version"
+    fi
+
+    echo -e "${GREEN}Build complete!${version:+ (v${version})}${NC}"
+}
+
+# -----------------------------------------------------------------------------
+# Quick version check (no Docker overhead) for pre-run warnings
+# -----------------------------------------------------------------------------
+warn_if_outdated() {
+    local host_version=$(cat "$PROJECT_ROOT/config/VERSION" 2>/dev/null | tr -d '[:space:]')
+    local cached_version=$(cat "$PROJECT_ROOT/.docker-image-version" 2>/dev/null | tr -d '[:space:]')
+
+    if [ -n "$host_version" ] && [ -n "$cached_version" ] && [ "$host_version" != "$cached_version" ]; then
+        echo -e "${YELLOW}Warning: Docker image may be outdated (image: v${cached_version}, code: v${host_version})${NC}"
+        echo -e "${YELLOW}Run './idea-explorer build' to update.${NC}"
+        echo ""
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -284,6 +316,7 @@ cmd_fetch() {
 
     ensure_directories
     check_env_file
+    warn_if_outdated
 
     local gpu_flags=$(get_gpu_flags)
     local user_flags=$(get_user_flags)
@@ -322,6 +355,7 @@ cmd_submit() {
 
     ensure_directories
     check_env_file
+    warn_if_outdated
 
     local gpu_flags=$(get_gpu_flags)
     local user_flags=$(get_user_flags)
@@ -377,6 +411,7 @@ cmd_run() {
 
     ensure_directories
     check_env_file
+    warn_if_outdated
 
     local gpu_flags=$(get_gpu_flags)
     local user_flags=$(get_user_flags)
@@ -505,22 +540,50 @@ check_prerequisites() {
     fi
 }
 
-# Check Docker image: pull if needed
+# Check Docker image: pull if needed, update if outdated
 check_image() {
     echo -e "  ${BOLD}Step 2/5: Docker image${NC}"
 
-    if docker image inspect "$IMAGE_NAME" &> /dev/null; then
-        echo -e "    ${GREEN}[OK]${NC} Image already present: $IMAGE_NAME"
-        echo ""
-        return
+    local host_version=""
+    if [ -f "$PROJECT_ROOT/config/VERSION" ]; then
+        host_version=$(cat "$PROJECT_ROOT/config/VERSION" | tr -d '[:space:]')
     fi
 
-    echo -e "    Pulling ghcr.io/chicagohai/idea-explorer:latest..."
+    if docker image inspect "$IMAGE_NAME" &> /dev/null; then
+        # Image exists — check if version matches host code
+        local image_version=""
+        image_version=$(docker run --rm --entrypoint python "$IMAGE_NAME" \
+            -c "exec(open('/app/src/__version__.py').read()); print(__version__)" 2>/dev/null || echo "")
+
+        if [ -n "$host_version" ] && [ -n "$image_version" ] && [ "$host_version" = "$image_version" ]; then
+            echo -e "    ${GREEN}[OK]${NC} Image up to date (v${image_version})"
+            echo "$image_version" > "$PROJECT_ROOT/.docker-image-version"
+            echo ""
+            return
+        elif [ -n "$host_version" ] && [ -n "$image_version" ]; then
+            echo -e "    ${YELLOW}[OUTDATED]${NC} Image v${image_version}, host code v${host_version}"
+            echo -e "    Pulling updated image..."
+        else
+            # Can't determine version — image predates version system, pull latest
+            echo -e "    ${YELLOW}[WARN]${NC} Cannot determine image version, pulling latest..."
+        fi
+    else
+        echo -e "    Pulling ghcr.io/chicagohai/idea-explorer:latest..."
+    fi
+
+    # Try pulling latest image
     if docker pull ghcr.io/chicagohai/idea-explorer:latest; then
         docker tag ghcr.io/chicagohai/idea-explorer:latest "$IMAGE_NAME"
-        echo -e "    ${GREEN}[OK]${NC} Image ready (tagged as $IMAGE_NAME)"
+        # Cache the new image version
+        local new_version=""
+        new_version=$(docker run --rm --entrypoint python "$IMAGE_NAME" \
+            -c "exec(open('/app/src/__version__.py').read()); print(__version__)" 2>/dev/null || echo "")
+        if [ -n "$new_version" ]; then
+            echo "$new_version" > "$PROJECT_ROOT/.docker-image-version"
+        fi
+        echo -e "    ${GREEN}[OK]${NC} Image ready${new_version:+ (v${new_version})}"
     else
-        echo -e "    ${YELLOW}[WARN]${NC} Pull failed — you can build locally with: ./idea-explorer build"
+        echo -e "    ${YELLOW}[WARN]${NC} Pull failed — build locally with: ./idea-explorer build"
     fi
     echo ""
 }

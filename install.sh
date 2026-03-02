@@ -63,10 +63,18 @@ main() {
         echo -ne "  Update with git pull? [Y/n] "
         read update_choice < /dev/tty
         if [[ ! "$update_choice" =~ ^[Nn] ]]; then
-            echo -e "  Updating..."
+            echo -e "  Updating code..."
             git -C "$install_dir" pull --ff-only || {
                 echo -e "  ${YELLOW}[WARN]${NC} git pull failed — continuing with existing version"
             }
+            # Force pull the latest Docker image to stay in sync with updated code
+            echo -e "  Updating Docker image..."
+            if docker pull ghcr.io/chicagohai/idea-explorer:latest 2>/dev/null; then
+                docker tag ghcr.io/chicagohai/idea-explorer:latest chicagohai/idea-explorer:latest
+                echo -e "  ${GREEN}[OK]${NC} Docker image updated"
+            else
+                echo -e "  ${YELLOW}[WARN]${NC} Docker image pull failed — run './idea-explorer build' later"
+            fi
         fi
     else
         echo -e "  Cloning to ${BOLD}$install_dir${NC}..."

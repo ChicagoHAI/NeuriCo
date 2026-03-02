@@ -1,6 +1,6 @@
 [project]
 name = "idea-explorer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Autonomous research framework that takes structured research ideas and orchestrates AI agents to design, execute, analyze, and document experiments across diverse domains"
 readme = "README.md"
 requires-python = ">=3.10"

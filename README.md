@@ -37,34 +37,30 @@ Idea Explorer is an autonomous research framework that takes structured research
 <details open>
 <summary><b>Quick Start</b></summary>
 
-**One-liner install** (clones repo, pulls Docker image, walks you through setup):
+**1. Install** (clones repo, pulls Docker image, walks you through setup):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/idea-explorer/main/install.sh | bash
 ```
 
-**Or set up manually:**
+**2. Run** — pick or submit an idea on [IdeaHub](https://hypogenic.ai/ideahub) and go:
 
 ```bash
-# 1. Clone the repo (needed for CLI scripts, config, and templates)
-git clone https://github.com/ChicagoHAI/idea-explorer
-cd idea-explorer
-
-# 2. Run the interactive setup wizard
-./idea-explorer setup
-
-# Or do each step yourself:
-cp .env.example .env   # Edit .env: add GITHUB_TOKEN, OPENAI_API_KEY
-docker pull ghcr.io/chicagohai/idea-explorer:latest    # Pull pre-built (~2 min)
-docker tag ghcr.io/chicagohai/idea-explorer:latest chicagohai/idea-explorer:latest
-claude   # Login to your AI CLI (one-time, on host machine)
-
-# 3. Run from IdeaHub (easiest way to start)
-./idea-explorer fetch https://hypogenic.ai/ideahub/idea/HGVv4Z0ALWVHZ9YsstWT \
-    --submit --run --provider claude --full-permissions
+./idea-explorer fetch <ideahub_url> --submit --run --provider claude --write-paper --full-permissions
 ```
 
-That's it! The agent fetches the idea, creates a GitHub repo, runs experiments, and pushes results.
+That's it! The agent fetches the idea, creates a GitHub repo, runs experiments, writes a paper, and pushes everything.
+
+<details>
+<summary>Manual setup (alternative to one-liner)</summary>
+
+```bash
+git clone https://github.com/ChicagoHAI/idea-explorer
+cd idea-explorer
+./idea-explorer setup      # Interactive wizard: pulls Docker image, configures API keys
+```
+
+</details>
 
 </details>
 
@@ -206,13 +202,13 @@ Browse ideas at [IdeaHub](https://hypogenic.ai/ideahub), then fetch and run:
 
 ```bash
 # Docker
-./idea-explorer fetch <ideahub_url> --submit --run --provider claude --full-permissions
+./idea-explorer fetch <ideahub_url> --submit --run --provider claude --write-paper --full-permissions
 
 # Native
-uv run python src/cli/fetch_from_ideahub.py <ideahub_url> --submit --run --provider claude --full-permissions
+uv run python src/cli/fetch_from_ideahub.py <ideahub_url> --submit --run --provider claude --write-paper --full-permissions
 ```
 
-This one command: fetches the idea, converts it to YAML, submits it, creates a GitHub repo, and runs the research agent.
+This one command: fetches the idea, converts it to YAML, submits it, creates a GitHub repo, runs the research agent, and writes a LaTeX paper.
 
 You can also break it into steps:
 

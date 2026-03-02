@@ -31,6 +31,39 @@ echo -e "${BLUE}========================================${NC}"
 echo ""
 
 # -----------------------------------------------------------------------------
+# Check version compatibility between Docker image and host code
+# -----------------------------------------------------------------------------
+check_version_compatibility() {
+    # Image version: baked into Docker image at /app/src/__version__.py
+    local image_version=""
+    if [ -f /app/src/__version__.py ]; then
+        image_version=$(python -c "exec(open('/app/src/__version__.py').read()); print(__version__)" 2>/dev/null || echo "")
+    fi
+
+    # Host version: mounted from host via config/ directory
+    local host_version=""
+    if [ -f /app/config/VERSION ]; then
+        host_version=$(cat /app/config/VERSION | tr -d '[:space:]')
+    fi
+
+    if [ -n "$image_version" ]; then
+        echo -e "${BLUE}Version:${NC} ${image_version}"
+    fi
+
+    # Compare versions if both are available
+    if [ -n "$image_version" ] && [ -n "$host_version" ] && [ "$image_version" != "$host_version" ]; then
+        echo ""
+        echo -e "  ${RED}WARNING: VERSION MISMATCH${NC}"
+        echo -e "  Docker image version:  ${RED}${image_version}${NC}"
+        echo -e "  Host code version:     ${GREEN}${host_version}${NC}"
+        echo ""
+        echo -e "  Your Docker image is out of date. Some features may not work."
+        echo -e "  Update with: ${BOLD:-}./idea-explorer build${NC}"
+        echo ""
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Validate environment variables
 # -----------------------------------------------------------------------------
 validate_env() {
@@ -189,6 +222,7 @@ show_help() {
 # -----------------------------------------------------------------------------
 
 # Run all setup steps
+check_version_compatibility
 validate_env
 setup_git
 check_gpu
