@@ -84,19 +84,19 @@ show_status() {
     fi
 
     # Claude credentials
-    if [ -d "$HOME/.claude" ]; then
+    if [ -d "$HOME/.claude" ] && [ "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
         echo -e "    Claude credentials .. ${GREEN}[OK]${NC} ~/.claude found"
     else
         echo -e "    Claude credentials .. ${DIM}[--]${NC} not configured"
     fi
 
     # Codex credentials
-    if [ -d "$HOME/.codex" ]; then
+    if [ -d "$HOME/.codex" ] && [ "$(ls -A "$HOME/.codex" 2>/dev/null)" ]; then
         echo -e "    Codex credentials ... ${GREEN}[OK]${NC} ~/.codex found"
     fi
 
     # Gemini credentials
-    if [ -d "$HOME/.gemini" ]; then
+    if [ -d "$HOME/.gemini" ] && [ "$(ls -A "$HOME/.gemini" 2>/dev/null)" ]; then
         echo -e "    Gemini credentials .. ${GREEN}[OK]${NC} ~/.gemini found"
     fi
 
@@ -157,21 +157,21 @@ get_cli_credential_mounts() {
     echo -e "${BLUE}Checking CLI credentials...${NC}" >&2
 
     # Claude Code credentials (~/.claude/)
-    if [ -d "$HOME/.claude" ]; then
+    if [ -d "$HOME/.claude" ] && [ "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
         mounts="$mounts -v \"$HOME/.claude:/tmp/.claude\""
         echo -e "  ${GREEN}[OK]${NC} Mounting Claude credentials" >&2
         found_any=true
     fi
 
     # Codex credentials (~/.codex/)
-    if [ -d "$HOME/.codex" ]; then
+    if [ -d "$HOME/.codex" ] && [ "$(ls -A "$HOME/.codex" 2>/dev/null)" ]; then
         mounts="$mounts -v \"$HOME/.codex:/tmp/.codex\""
         echo -e "  ${GREEN}[OK]${NC} Mounting Codex credentials" >&2
         found_any=true
     fi
 
     # Gemini CLI credentials (~/.gemini/)
-    if [ -d "$HOME/.gemini" ]; then
+    if [ -d "$HOME/.gemini" ] && [ "$(ls -A "$HOME/.gemini" 2>/dev/null)" ]; then
         mounts="$mounts -v \"$HOME/.gemini:/tmp/.gemini\""
         echo -e "  ${GREEN}[OK]${NC} Mounting Gemini credentials" >&2
         found_any=true
@@ -485,8 +485,10 @@ cmd_login() {
     local gpu_flags=$(get_gpu_flags)
 
     # Note: No --user flag for login - we run as the container user to write credentials
+    # Set HOME=/tmp so CLI tools write credentials to the mounted volumes at /tmp/.xxx
     eval "docker run -it --rm \
         $gpu_flags \
+        -e HOME=/tmp \
         --env-file \"$PROJECT_ROOT/.env\" \
         -v \"$HOME/.claude:/tmp/.claude\" \
         -v \"$HOME/.codex:/tmp/.codex\" \
@@ -609,6 +611,38 @@ mask_value() {
     fi
 }
 
+# Read input with masked display (shows * for each character typed)
+# Usage: read_masked VARNAME
+# Sets the named variable to the entered value.
+read_masked() {
+    local __resultvar="$1"
+    local value="" char=""
+
+    while true; do
+        # Read one character at a time, silently
+        IFS= read -r -s -n 1 char < /dev/tty
+
+        # Enter (empty char) → done
+        if [[ -z "$char" ]]; then
+            break
+        fi
+
+        # Backspace (0x7f) or Ctrl-H (0x08) → remove last char
+        if [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\x08' ]]; then
+            if [ ${#value} -gt 0 ]; then
+                value="${value%?}"
+                echo -ne '\b \b' >&2
+            fi
+        else
+            value+="$char"
+            echo -ne '*' >&2
+        fi
+    done
+
+    echo "" >&2  # Newline after input
+    eval "$__resultvar=\$value"
+}
+
 # Return formatted status string for a config variable
 # Usage: format_status "VAR_NAME" [is_secret]
 # is_secret: "true" to mask the value, anything else shows full value
@@ -663,18 +697,18 @@ prompt_secret() {
     local value=""
     if [ "$required" = "optional" ]; then
         echo -ne "    > ${DIM}[Enter to skip]${NC} "
-        read -s value < /dev/tty
-        echo ""
     else
         echo -ne "    > "
-        read -s value < /dev/tty
-        echo ""
     fi
+    read_masked value
 
     if [ -z "$value" ]; then
         echo -e "    ${DIM}[SKIP]${NC} $label skipped"
         return 1
     fi
+
+    # Show masked confirmation so user can verify what they entered
+    echo -e "    ${DIM}Entered: $(mask_value "$value") (${#value} chars)${NC}"
 
     # Validate prefix if provided (GitHub tokens can be ghp_ or github_pat_)
     if [ -n "$prefix" ] && [[ ! "$value" == $prefix* ]]; then
@@ -761,14 +795,32 @@ setup_login_provider() {
     local host_dir="$3"
     local container_dir="$4"
 
+    # Skip if credentials already exist
+    if [ -d "$host_dir" ] && [ "$(ls -A "$host_dir" 2>/dev/null)" ]; then
+        echo ""
+        echo -e "    ${GREEN}[OK]${NC} $display_name credentials already configured"
+        echo -ne "    Re-login? [y/N] "
+        local relogin=""
+        read relogin < /dev/tty
+        if [[ ! "$relogin" =~ ^[Yy] ]]; then
+            echo ""
+            return
+        fi
+    fi
+
     mkdir -p "$host_dir"
     echo ""
     echo -e "    ${BOLD}${YELLOW}═══════════════════════════════════════════════════════════${NC}"
     echo -e "    ${BOLD}${YELLOW}  Setting up: $display_name${NC}"
     echo -e "    ${BOLD}${YELLOW}${NC}"
     echo -e "    ${BOLD}${YELLOW}  1. Press Enter to launch $display_name in a container${NC}"
-    echo -e "    ${BOLD}${YELLOW}  2. Complete the OAuth login flow in your browser${NC}"
-    echo -e "    ${BOLD}${YELLOW}  3. Once logged in, press Ctrl+C twice to exit and continue${NC}"
+    echo -e "    ${BOLD}${YELLOW}  2. $display_name will prompt you to sign in via your browser${NC}"
+    echo -e "    ${BOLD}${YELLOW}     (an OAuth link will appear — click it or paste it)${NC}"
+    echo -e "    ${BOLD}${YELLOW}  3. After signing in, you'll see the $display_name chat interface${NC}"
+    echo -e "    ${BOLD}${YELLOW}${NC}"
+    echo -e "    ${BOLD}${RED}  >>> Once you see the chat prompt, press Ctrl+C TWICE to exit <<<${NC}"
+    echo -e "    ${BOLD}${YELLOW}${NC}"
+    echo -e "    ${BOLD}${YELLOW}  Your credentials will be saved automatically.${NC}"
     echo -e "    ${BOLD}${YELLOW}═══════════════════════════════════════════════════════════${NC}"
     echo ""
     echo -ne "    Press Enter to launch $display_name..."
@@ -777,6 +829,7 @@ setup_login_provider() {
     local gpu_flags=$(get_gpu_flags 2>/dev/null)
     eval "docker run -it --rm \
         $gpu_flags \
+        -e HOME=/tmp \
         --env-file \"$PROJECT_ROOT/.env\" \
         -v \"$host_dir:$container_dir\" \
         -w /tmp \
@@ -837,10 +890,22 @@ cmd_setup() {
     echo -e "    ${DIM}Each provider uses OAuth — you'll login inside a Docker container.${NC}"
     echo -e "    ${DIM}You can set up multiple providers now, or add more later with: ./idea-explorer login${NC}"
     echo ""
+    # Detect existing credentials
+    local claude_status="" codex_status="" gemini_status=""
+    if [ -d "$HOME/.claude" ] && [ "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
+        claude_status=" ${GREEN}[already configured]${NC}"
+    fi
+    if [ -d "$HOME/.codex" ] && [ "$(ls -A "$HOME/.codex" 2>/dev/null)" ]; then
+        codex_status=" ${GREEN}[already configured]${NC}"
+    fi
+    if [ -d "$HOME/.gemini" ] && [ "$(ls -A "$HOME/.gemini" 2>/dev/null)" ]; then
+        gemini_status=" ${GREEN}[already configured]${NC}"
+    fi
+
     echo -e "    ${BOLD}Which providers do you want to log in to?${NC}"
-    echo "      [1] Claude (recommended)"
-    echo "      [2] Codex"
-    echo "      [3] Gemini"
+    echo -e "      [1] Claude (recommended)${claude_status}"
+    echo -e "      [2] Codex${codex_status}"
+    echo -e "      [3] Gemini${gemini_status}"
     echo "      [4] Skip for now"
     echo -e "    ${DIM}Enter one or more numbers, e.g. 1 2 or 1,2,3${NC}"
     echo -ne "    > "
@@ -924,6 +989,12 @@ cmd_setup() {
 
     echo ""
     echo -e "  ${GREEN}Setup complete!${NC} You're ready to go."
+    echo ""
+    echo -e "  ${BOLD}Config files:${NC}"
+    echo -e "  ${DIM}  API keys & credentials .... .env${NC}"
+    echo -e "  ${DIM}  Workspace config .......... config/workspace.yaml${NC}"
+    echo -e "  ${DIM}  CLI credentials ........... ~/.claude/  ~/.codex/  ~/.gemini/${NC}"
+    echo ""
     echo -e "  ${DIM}To change configuration later, run: ./idea-explorer config${NC}"
     echo ""
 
@@ -1000,6 +1071,11 @@ setup_env_interactive() {
     echo ""
 
     echo -e "    ${GREEN}[OK]${NC} Configuration complete"
+    echo ""
+    echo -e "    ${BOLD}Where your settings are stored:${NC}"
+    echo -e "    ${DIM}  API keys & credentials .... .env${NC}"
+    echo -e "    ${DIM}  Workspace config .......... config/workspace.yaml${NC}"
+    echo -e "    ${DIM}  CLI credentials ........... ~/.claude/  ~/.codex/  ~/.gemini/${NC}"
     echo ""
     echo -e "    ${DIM}Tip: To add more API keys or change settings later, run:${NC}"
     echo -e "    ${DIM}  ./idea-explorer config${NC}"
