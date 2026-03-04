@@ -615,32 +615,46 @@ mask_value() {
 # Read input with masked display (shows * for each character typed)
 # Usage: read_masked VARNAME
 # Sets the named variable to the entered value.
+# Falls back to stty-based silent read if char-by-char mode fails (e.g. curl|bash).
 read_masked() {
     local __resultvar="$1"
     local value="" char=""
 
-    while true; do
-        # Read one character at a time, silently
-        IFS= read -r -s -n 1 char < /dev/tty
+    # Test if char-by-char reading works (can fail in curl|bash or non-interactive contexts)
+    if (IFS= read -r -s -n 1 -t 0 char < /dev/tty) 2>/dev/null; then
+        # Char-by-char mode works — read with * masking
+        char=""
+        while true; do
+            IFS= read -r -s -n 1 char < /dev/tty
 
-        # Enter (empty char) → done
-        if [[ -z "$char" ]]; then
-            break
-        fi
-
-        # Backspace (0x7f) or Ctrl-H (0x08) → remove last char
-        if [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\x08' ]]; then
-            if [ ${#value} -gt 0 ]; then
-                value="${value%?}"
-                echo -ne '\b \b' >&2
+            # Enter (empty char) → done
+            if [[ -z "$char" ]]; then
+                break
             fi
-        else
-            value+="$char"
-            echo -ne '*' >&2
-        fi
-    done
 
-    echo "" >&2  # Newline after input
+            # Backspace (0x7f) or Ctrl-H (0x08) → remove last char
+            if [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\x08' ]]; then
+                if [ ${#value} -gt 0 ]; then
+                    value="${value%?}"
+                    echo -ne '\b \b' >&2
+                fi
+            else
+                value+="$char"
+                echo -ne '*' >&2
+            fi
+        done
+        echo "" >&2
+    else
+        # Fallback: use stty to disable echo, read whole line, restore echo
+        # Reliable in all contexts (curl|bash, ssh, tmux, etc.)
+        local old_settings
+        old_settings=$(stty -g < /dev/tty 2>/dev/null) || true
+        stty -echo < /dev/tty 2>/dev/null || true
+        IFS= read -r value < /dev/tty
+        stty "$old_settings" < /dev/tty 2>/dev/null || stty echo < /dev/tty 2>/dev/null || true
+        echo "" >&2
+    fi
+
     printf -v "$__resultvar" '%s' "$value"
 }
 
