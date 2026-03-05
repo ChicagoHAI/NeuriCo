@@ -85,6 +85,8 @@ show_status() {
     # Claude credentials
     if [ -d "$HOME/.claude" ] && [ "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
         echo -e "    Claude credentials .. ${GREEN}[OK]${NC} ~/.claude found"
+    elif [ -d "$HOME/.claude" ]; then
+        echo -e "    Claude credentials .. ${YELLOW}[EMPTY]${NC} ~/.claude exists but empty — run: ./neurico login"
     else
         echo -e "    Claude credentials .. ${DIM}[--]${NC} not configured"
     fi
@@ -92,11 +94,15 @@ show_status() {
     # Codex credentials
     if [ -d "$HOME/.codex" ] && [ "$(ls -A "$HOME/.codex" 2>/dev/null)" ]; then
         echo -e "    Codex credentials ... ${GREEN}[OK]${NC} ~/.codex found"
+    elif [ -d "$HOME/.codex" ]; then
+        echo -e "    Codex credentials ... ${YELLOW}[EMPTY]${NC} ~/.codex exists but empty"
     fi
 
     # Gemini credentials
     if [ -d "$HOME/.gemini" ] && [ "$(ls -A "$HOME/.gemini" 2>/dev/null)" ]; then
         echo -e "    Gemini credentials .. ${GREEN}[OK]${NC} ~/.gemini found"
+    elif [ -d "$HOME/.gemini" ]; then
+        echo -e "    Gemini credentials .. ${YELLOW}[EMPTY]${NC} ~/.gemini exists but empty"
     fi
 
     echo ""
@@ -153,26 +159,43 @@ get_cli_credential_mounts() {
     local mounts=""
     local found_any=false
 
+    # Explicitly tell Claude Code where to find/store credentials
+    mounts="$mounts -e CLAUDE_CONFIG_DIR=/tmp/.claude"
+
     echo -e "${BLUE}Checking CLI credentials...${NC}" >&2
 
     # Claude Code credentials (~/.claude/)
-    if [ -d "$HOME/.claude" ] && [ "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
+    # Always mount if directory exists (even if empty) so credentials written
+    # inside the container persist to the host for subsequent runs.
+    if [ -d "$HOME/.claude" ]; then
         mounts="$mounts -v \"$HOME/.claude:/tmp/.claude\""
-        echo -e "  ${GREEN}[OK]${NC} Mounting Claude credentials" >&2
+        if [ "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
+            echo -e "  ${GREEN}[OK]${NC} Mounting Claude credentials" >&2
+        else
+            echo -e "  ${DIM}[--]${NC} Mounting ~/.claude (empty — run: ./neurico login)" >&2
+        fi
         found_any=true
     fi
 
     # Codex credentials (~/.codex/)
-    if [ -d "$HOME/.codex" ] && [ "$(ls -A "$HOME/.codex" 2>/dev/null)" ]; then
+    if [ -d "$HOME/.codex" ]; then
         mounts="$mounts -v \"$HOME/.codex:/tmp/.codex\""
-        echo -e "  ${GREEN}[OK]${NC} Mounting Codex credentials" >&2
+        if [ "$(ls -A "$HOME/.codex" 2>/dev/null)" ]; then
+            echo -e "  ${GREEN}[OK]${NC} Mounting Codex credentials" >&2
+        else
+            echo -e "  ${DIM}[--]${NC} Mounting ~/.codex (empty)" >&2
+        fi
         found_any=true
     fi
 
     # Gemini CLI credentials (~/.gemini/)
-    if [ -d "$HOME/.gemini" ] && [ "$(ls -A "$HOME/.gemini" 2>/dev/null)" ]; then
+    if [ -d "$HOME/.gemini" ]; then
         mounts="$mounts -v \"$HOME/.gemini:/tmp/.gemini\""
-        echo -e "  ${GREEN}[OK]${NC} Mounting Gemini credentials" >&2
+        if [ "$(ls -A "$HOME/.gemini" 2>/dev/null)" ]; then
+            echo -e "  ${GREEN}[OK]${NC} Mounting Gemini credentials" >&2
+        else
+            echo -e "  ${DIM}[--]${NC} Mounting ~/.gemini (empty)" >&2
+        fi
         found_any=true
     fi
 
@@ -439,6 +462,39 @@ cmd_run() {
 }
 
 # -----------------------------------------------------------------------------
+# Update CLI tools (Claude, Codex, Gemini) to latest versions
+# -----------------------------------------------------------------------------
+cmd_update_tools() {
+    echo -e "${BLUE}Updating AI CLI tools to latest versions...${NC}"
+    echo ""
+
+    local gpu_flags=$(get_gpu_flags)
+
+    eval "docker run --rm \
+        $gpu_flags \
+        \"$IMAGE_NAME\" \
+        bash -c '
+            echo \"Updating Claude Code...\"
+            curl -fsSL https://claude.ai/install.sh | bash 2>&1 | tail -3 || true
+            echo \"\"
+            echo \"Updating Codex...\"
+            npm install -g @openai/codex@latest 2>&1 | tail -1 || true
+            echo \"\"
+            echo \"Updating Gemini CLI...\"
+            npm install -g @google/gemini-cli@latest 2>&1 | tail -1 || true
+            echo \"\"
+            echo \"Versions installed:\"
+            echo \"  Claude Code: \$(claude --version 2>/dev/null || /root/.local/bin/claude --version 2>/dev/null || echo unknown)\"
+            echo \"  Codex:       \$(codex --version 2>/dev/null || echo unknown)\"
+            echo \"  Gemini:      \$(gemini --version 2>/dev/null || echo unknown)\"
+        '"
+
+    echo ""
+    echo -e "${YELLOW}Note:${NC} Updates are applied to the running container only."
+    echo "To persist updates permanently, rebuild: ./neurico build"
+}
+
+# -----------------------------------------------------------------------------
 # Docker Compose operations
 # -----------------------------------------------------------------------------
 cmd_up() {
@@ -487,10 +543,12 @@ cmd_login() {
     # Use --user to match host UID so writes to mounted credential dirs succeed.
     # The entrypoint detects the non-writable /home/researcher and sets HOME=/tmp,
     # which makes CLI tools write to /tmp/.claude etc. (the mounted volumes).
+    # CLAUDE_CONFIG_DIR explicitly tells Claude Code where to store credentials.
     eval "docker run -it --rm \
         $gpu_flags \
         $user_flags \
         --env-file \"$PROJECT_ROOT/.env\" \
+        -e CLAUDE_CONFIG_DIR=/tmp/.claude \
         -v \"$HOME/.claude:/tmp/.claude\" \
         -v \"$HOME/.codex:/tmp/.codex\" \
         -v \"$HOME/.gemini:/tmp/.gemini\" \
@@ -845,10 +903,12 @@ setup_login_provider() {
 
     local gpu_flags=$(get_gpu_flags 2>/dev/null)
     local user_flags=$(get_user_flags)
+    # CLAUDE_CONFIG_DIR explicitly tells Claude Code where to write credentials
     eval "docker run -it --rm \
         $gpu_flags \
         $user_flags \
         --env-file \"$PROJECT_ROOT/.env\" \
+        -e CLAUDE_CONFIG_DIR=$container_dir \
         -v \"$host_dir:$container_dir\" \
         -w /tmp \
         \"$IMAGE_NAME\" \
@@ -1264,6 +1324,7 @@ cmd_help() {
     echo "  fetch <url> [--submit]    Fetch idea from IdeaHub"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
+    echo "  update-tools              Update Claude/Codex/Gemini to latest versions"
     echo "  up                        Start container in background (compose)"
     echo "  down                      Stop background container (compose)"
     echo "  logs                      View container logs (compose)"
@@ -1316,6 +1377,9 @@ case "$ACTION" in
         ;;
     run)
         cmd_run "$@"
+        ;;
+    update-tools)
+        cmd_update_tools
         ;;
     up)
         cmd_up

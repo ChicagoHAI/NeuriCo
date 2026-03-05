@@ -228,6 +228,14 @@ setup_git
 check_gpu
 start_paper_finder
 
+# Optional: update CLI tools at startup (opt-in via NEURICO_UPDATE_TOOLS=1)
+if [ "${NEURICO_UPDATE_TOOLS:-0}" = "1" ]; then
+    echo -e "${BLUE}Updating CLI tools (NEURICO_UPDATE_TOOLS=1)...${NC}"
+    npm install -g @openai/codex@latest @google/gemini-cli@latest 2>/dev/null || true
+    curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash 2>/dev/null || true
+    echo ""
+fi
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Container Ready${NC}"
 echo -e "${GREEN}========================================${NC}"
