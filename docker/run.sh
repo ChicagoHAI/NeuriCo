@@ -621,7 +621,7 @@ mask_value() {
 # stty < /dev/tty explicitly targets the real terminal device.
 read_masked() {
     local __resultvar="$1"
-    local value="" char=""
+    local _input="" _char=""
 
     # Save terminal settings and disable echo via stty on /dev/tty
     local old_stty
@@ -632,21 +632,21 @@ read_masked() {
 
     while true; do
         # Read one character at a time (no -s flag — stty handles echo suppression)
-        IFS= read -r -n 1 char < /dev/tty
+        IFS= read -r -n 1 _char < /dev/tty
 
         # Enter (empty char) → done
-        if [[ -z "$char" ]]; then
+        if [[ -z "$_char" ]]; then
             break
         fi
 
         # Backspace (0x7f) or Ctrl-H (0x08) → remove last char
-        if [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\x08' ]]; then
-            if [ ${#value} -gt 0 ]; then
-                value="${value%?}"
+        if [[ "$_char" == $'\x7f' ]] || [[ "$_char" == $'\x08' ]]; then
+            if [ ${#_input} -gt 0 ]; then
+                _input="${_input%?}"
                 echo -ne '\b \b' >&2
             fi
         else
-            value+="$char"
+            _input+="$_char"
             echo -ne '*' >&2
         fi
     done
@@ -657,7 +657,7 @@ read_masked() {
     stty "$old_stty" < /dev/tty 2>/dev/null
     trap - INT TERM
 
-    printf -v "$__resultvar" '%s' "$value"
+    printf -v "$__resultvar" '%s' "$_input"
 }
 
 # Return formatted status string for a config variable
