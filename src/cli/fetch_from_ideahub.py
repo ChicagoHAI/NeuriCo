@@ -707,7 +707,7 @@ def main():
 
             except Exception as e:
                 print(f"\n❌ Research execution failed: {e}")
-                print(f"   You can retry with: python src/core/runner.py {idea_id}")
+                print(f"   You can retry with: ./neurico run {idea_id} --provider claude --full-permissions")
 
         # Final instructions (only show if we didn't already run)
         if not args.run:
@@ -721,12 +721,12 @@ def main():
                 print(f"   # Add datasets, documents, etc.")
                 provider_str = f" --provider {args.provider}" if args.provider else ""
                 print(f"\n2. Run the research:")
-                print(f"   python src/core/runner.py {idea_id}{provider_str}")
+                print(f"   ./neurico run {idea_id}{provider_str} --full-permissions")
                 print(f"\n   Results will be pushed to: {github_repo_url}")
             else:
                 provider_str = f" --provider {args.provider}" if args.provider else ""
                 print(f"\nRun the research:")
-                print(f"  python src/core/runner.py {idea_id}{provider_str}")
+                print(f"  ./neurico run {idea_id}{provider_str} --full-permissions")
     else:
         print(f"\nTo submit this idea:")
         print(f"  python src/cli/submit.py {output_path}")

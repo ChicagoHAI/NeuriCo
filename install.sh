@@ -68,7 +68,9 @@ main() {
             }
             # Force pull the latest Docker image to stay in sync with updated code
             echo -e "  Updating Docker image..."
-            if docker pull ghcr.io/chicagohai/neurico:latest 2>/dev/null; then
+            local _pull_platform=""
+            [[ "$(uname)" == "Darwin" ]] && _pull_platform="--platform linux/amd64"
+            if docker pull $_pull_platform ghcr.io/chicagohai/neurico:latest 2>/dev/null; then
                 docker tag ghcr.io/chicagohai/neurico:latest chicagohai/neurico:latest
                 echo -e "  ${GREEN}[OK]${NC} Docker image updated"
             else

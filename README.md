@@ -13,7 +13,7 @@
 
 <hr>
 
-**NeuriCo** (**Neuri**al **Co**-Scientist, inspired by Enrico Fermi) is an autonomous research framework that takes structured research ideas and orchestrates AI agents to design, execute, analyze, and document experiments across diverse domains.
+**NeuriCo** (**Neur**al **Co**-Scientist, inspired by Enrico Fermi) is an autonomous research framework that takes structured research ideas and orchestrates AI agents to design, execute, analyze, and document experiments across diverse domains.
 
 <div align="center">
 <img src="assets/neurico-6x.gif" alt="NeuriCo Demo" width="700"/>
@@ -46,6 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh 
 **2. Run** — pick or submit an idea on [IdeaHub](https://hypogenic.ai/ideahub) and go:
 
 ```bash
+cd NeuriCo
 ./neurico fetch <ideahub_url> --submit --run --provider claude --write-paper --full-permissions
 ```
 

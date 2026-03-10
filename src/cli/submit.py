@@ -224,11 +224,11 @@ def main():
             print(f"   cd {workspace_path}")
             print(f"   # Add datasets, documents, etc.")
             print(f"\n2. Run the research:")
-            print(f"   python src/core/runner.py {idea_id}")
+            print(f"   ./neurico run {idea_id} --provider claude --full-permissions")
             print(f"\n   Results will be pushed to: {github_repo_url}")
         else:
             print(f"\nRun the research:")
-            print(f"  python src/core/runner.py {idea_id}")
+            print(f"  ./neurico run {idea_id} --provider claude --full-permissions")
 
         print()
 

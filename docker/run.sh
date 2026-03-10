@@ -23,6 +23,16 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
+# macOS BSD sed requires an explicit empty-string backup argument for in-place editing.
+# GNU sed on Linux does not. This wrapper handles both.
+sed_inplace() {
+    if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' "$@"
+    else
+        sed -i "$@"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # ASCII Art Banner
 # -----------------------------------------------------------------------------
@@ -85,12 +95,20 @@ show_status() {
     fi
 
     # Claude credentials
-    if [ -d "$HOME/.claude" ] && [ "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
-        echo -e "    Claude credentials .. ${GREEN}[OK]${NC} ~/.claude found"
-    elif [ -d "$HOME/.claude" ]; then
-        echo -e "    Claude credentials .. ${YELLOW}[EMPTY]${NC} ~/.claude exists but empty — run: ./neurico login"
+    # On macOS, credentials live in the Keychain — always check there.
+    # On Linux, check ~/.claude/.credentials.json directly.
+    local _claude_ok=false
+    if [[ "$(uname)" == "Darwin" ]]; then
+        if security find-generic-password -s "Claude Code-credentials" -w &>/dev/null; then
+            _claude_ok=true
+        fi
+    elif [ -s "$HOME/.claude/.credentials.json" ]; then
+        _claude_ok=true
+    fi
+    if [ "$_claude_ok" = true ]; then
+        echo -e "    Claude credentials .. ${GREEN}[OK]${NC}"
     else
-        echo -e "    Claude credentials .. ${DIM}[--]${NC} not configured"
+        echo -e "    Claude credentials .. ${DIM}[--]${NC} not configured — run: ./neurico login"
     fi
 
     # Codex credentials
@@ -125,7 +143,7 @@ check_docker() {
 # Get user ID flags to match host user (fixes permission issues with mounted volumes)
 # -----------------------------------------------------------------------------
 get_user_flags() {
-    echo "--user $(id -u):$(id -g)"
+    echo ""
 }
 
 # -----------------------------------------------------------------------------
@@ -162,15 +180,28 @@ get_cli_credential_mounts() {
     local found_any=false
 
     # Explicitly tell Claude Code where to find/store credentials
-    mounts="$mounts -e CLAUDE_CONFIG_DIR=/tmp/.claude"
+    mounts="$mounts -e CLAUDE_CONFIG_DIR=/home/neurico/.claude"
 
     echo -e "${BLUE}Checking CLI credentials...${NC}" >&2
 
     # Claude Code credentials (~/.claude/)
+    # On macOS, Claude Code stores credentials in the Keychain rather than
+    # ~/.claude/.credentials.json. Extract them so Docker can mount the file.
+    if [[ "$(uname)" == "Darwin" ]]; then
+        local creds_file="$HOME/.claude/.credentials.json"
+        local keychain_creds
+        keychain_creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+        if [ -n "$keychain_creds" ]; then
+            mkdir -p "$HOME/.claude"
+            echo "$keychain_creds" > "$creds_file"
+            echo -e "  ${GREEN}[OK]${NC} Extracted Claude credentials from Keychain" >&2
+        fi
+    fi
+
     # Always mount if directory exists (even if empty) so credentials written
     # inside the container persist to the host for subsequent runs.
     if [ -d "$HOME/.claude" ]; then
-        mounts="$mounts -v \"$HOME/.claude:/tmp/.claude\""
+        mounts="$mounts -v \"$HOME/.claude:/home/neurico/.claude\""
         if [ "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
             echo -e "  ${GREEN}[OK]${NC} Mounting Claude credentials" >&2
         else
@@ -181,7 +212,7 @@ get_cli_credential_mounts() {
 
     # Codex credentials (~/.codex/)
     if [ -d "$HOME/.codex" ]; then
-        mounts="$mounts -v \"$HOME/.codex:/tmp/.codex\""
+        mounts="$mounts -v \"$HOME/.codex:/home/neurico/.codex\""
         if [ "$(ls -A "$HOME/.codex" 2>/dev/null)" ]; then
             echo -e "  ${GREEN}[OK]${NC} Mounting Codex credentials" >&2
         else
@@ -192,7 +223,7 @@ get_cli_credential_mounts() {
 
     # Gemini CLI credentials (~/.gemini/)
     if [ -d "$HOME/.gemini" ]; then
-        mounts="$mounts -v \"$HOME/.gemini:/tmp/.gemini\""
+        mounts="$mounts -v \"$HOME/.gemini:/home/neurico/.gemini\""
         if [ "$(ls -A "$HOME/.gemini" 2>/dev/null)" ]; then
             echo -e "  ${GREEN}[OK]${NC} Mounting Gemini credentials" >&2
         else
@@ -221,9 +252,9 @@ get_workspace_dir() {
 
     # Try user config first, then template
     if [ -f "$config_file" ]; then
-        parent_dir=$(grep -E '^\s*parent_dir:' "$config_file" | sed 's/.*parent_dir:\s*["'\'']\?\([^"'\'']*\)["'\'']\?.*/\1/' | tr -d ' ')
+        parent_dir=$(grep -E '^\s*parent_dir:' "$config_file" | sed 's/^[[:space:]]*parent_dir:[[:space:]]*//' | tr -d "\"' ")
     elif [ -f "$template_file" ]; then
-        parent_dir=$(grep -E '^\s*parent_dir:' "$template_file" | sed 's/.*parent_dir:\s*["'\'']\?\([^"'\'']*\)["'\'']\?.*/\1/' | tr -d ' ')
+        parent_dir=$(grep -E '^\s*parent_dir:' "$template_file" | sed 's/^[[:space:]]*parent_dir:[[:space:]]*//' | tr -d "\"' ")
     fi
 
     # Default to ./workspaces if not found or empty
@@ -300,9 +331,15 @@ cmd_update() {
     local local_digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_NAME" 2>/dev/null | sed 's/.*@//')
     local remote_digest=$(docker manifest inspect "$REGISTRY_IMAGE" 2>/dev/null | grep -o '"digest": "sha256:[a-f0-9]*"' | head -1 | cut -d'"' -f4)
 
+    # Force amd64 on macOS — nvidia/cuda has no arm64 build
+    local pull_platform=""
+    if [[ "$(uname)" == "Darwin" ]]; then
+        pull_platform="--platform linux/amd64"
+    fi
+
     if [ -n "$local_digest" ] && [ -n "$remote_digest" ] && [ "$local_digest" = "$remote_digest" ]; then
         echo -e "    ${GREEN}[OK]${NC} Image already up to date"
-    elif docker pull "$REGISTRY_IMAGE"; then
+    elif docker pull $pull_platform "$REGISTRY_IMAGE"; then
         docker tag "$REGISTRY_IMAGE" "$IMAGE_NAME"
         echo -e "    ${GREEN}[OK]${NC} Image updated"
     else
@@ -320,7 +357,14 @@ cmd_build() {
     local version=$(cat "$PROJECT_ROOT/config/VERSION" 2>/dev/null | tr -d '[:space:]')
     echo -e "${BLUE}Building neurico container image${version:+ (v${version})}...${NC}"
     cd "$PROJECT_ROOT"
-    docker build -t "$IMAGE_NAME" -f docker/Dockerfile .
+    # nvidia/cuda base images only exist for linux/amd64.
+    # On macOS (Apple Silicon), force amd64 so Docker Desktop uses Rosetta emulation.
+    local platform_flag=""
+    if [[ "$(uname)" == "Darwin" ]]; then
+        platform_flag="--platform linux/amd64"
+        echo -e "  ${DIM}macOS detected — building for linux/amd64 (runs via Rosetta emulation)${NC}"
+    fi
+    docker build $platform_flag -t "$IMAGE_NAME" -f docker/Dockerfile .
 
     echo -e "${GREEN}Build complete!${version:+ (v${version})}${NC}"
 }
@@ -358,11 +402,11 @@ cmd_bump_version() {
     echo -e "  ${GREEN}[OK]${NC} config/VERSION"
 
     # 2. src/__version__.py
-    sed -i "s/__version__ = \".*\"/__version__ = \"$new_version\"/" "$PROJECT_ROOT/src/__version__.py"
+    sed_inplace "s/__version__ = \".*\"/__version__ = \"$new_version\"/" "$PROJECT_ROOT/src/__version__.py"
     echo -e "  ${GREEN}[OK]${NC} src/__version__.py"
 
     # 3. pyproject.toml
-    sed -i "s/^version = \".*\"/version = \"$new_version\"/" "$PROJECT_ROOT/pyproject.toml"
+    sed_inplace "s/^version = \".*\"/version = \"$new_version\"/" "$PROJECT_ROOT/pyproject.toml"
     echo -e "  ${GREEN}[OK]${NC} pyproject.toml"
 
     # 4. Update uv.lock if uv is available
@@ -477,32 +521,50 @@ cmd_submit() {
     check_env_file
     warn_if_outdated
 
-    local gpu_flags=$(get_gpu_flags)
-    local user_flags=$(get_user_flags)
-    local credential_mounts=$(get_cli_credential_mounts)
     local idea_file="$1"
     shift
 
+    # Parse out --run, --provider, --full-permissions — these are runner flags,
+    # not submit.py flags. Remaining args are passed through to submit.py.
+    local do_run=false
+    local provider="claude"
+    local full_permissions=false
+    local submit_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --run) do_run=true ;;
+            --provider) provider="$2"; shift ;;
+            --provider=*) provider="${1#*=}" ;;
+            --full-permissions) full_permissions=true ;;
+            *) submit_args+=("$1") ;;
+        esac
+        shift
+    done
+
+    local gpu_flags=$(get_gpu_flags)
+    local user_flags=$(get_user_flags)
+    local credential_mounts=$(get_cli_credential_mounts)
+
     # Handle relative vs absolute paths for idea file
+    local idea_path mount_flag=""
     if [[ "$idea_file" = /* ]]; then
-        # Absolute path - mount the parent directory
         local idea_dir=$(dirname "$idea_file")
         local idea_name=$(basename "$idea_file")
-        local mount_flag="-v \"$idea_dir:/input:ro\""
-        local idea_path="/input/$idea_name"
+        mount_flag="-v \"$idea_dir:/input:ro\""
+        idea_path="/input/$idea_name"
     else
-        # Relative path - assume it's in ideas/ directory
-        local idea_path="/app/$idea_file"
-        local mount_flag=""
+        idea_path="/app/$idea_file"
     fi
 
     local workspace_dir=$(get_workspace_dir)
-
     local tty_flag=$(get_tty_flag)
 
     echo -e "${BLUE}Submitting research idea...${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
 
+    # Run submit and capture output so we can extract the idea_id for --run
+    local output_file
+    output_file=$(mktemp)
     eval "docker run $tty_flag --rm \
         $gpu_flags \
         $user_flags \
@@ -517,7 +579,24 @@ cmd_submit() {
         $mount_flag \
         -w /app \
         \"$IMAGE_NAME\" \
-        python /app/src/cli/submit.py \"$idea_path\" $@"
+        python /app/src/cli/submit.py \"$idea_path\" ${submit_args[*]+"${submit_args[*]}"}" \
+        | tee "$output_file"
+
+    if [ "$do_run" = true ]; then
+        local idea_id
+        idea_id=$(grep "^Idea ID:" "$output_file" | sed 's/^Idea ID:[[:space:]]*//' | tr -d '[:space:]')
+        rm -f "$output_file"
+        if [ -n "$idea_id" ]; then
+            echo ""
+            local run_flags=""
+            [ "$full_permissions" = true ] && run_flags="--full-permissions"
+            cmd_run "$idea_id" --provider "$provider" $run_flags
+        else
+            echo -e "${RED}[ERROR]${NC} Could not extract idea ID from submit output — run manually with: ./neurico run <idea_id>"
+        fi
+    else
+        rm -f "$output_file"
+    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -639,26 +718,24 @@ cmd_login() {
     echo "After logging in, exit the shell. Your credentials will be saved."
     echo ""
 
-    # For login, we need write access to credential directories
-    # Create them on host if they don't exist
     mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini"
 
-    local gpu_flags=$(get_gpu_flags)
-    local user_flags=$(get_user_flags)
+    # Skip login if credentials already exist
+    if [ -s "$HOME/.claude/.credentials.json" ]; then
+        echo -e "  ${GREEN}[OK]${NC} Already logged in to Claude (credentials found at ~/.claude/.credentials.json)"
+        echo -e "         To force re-login, delete that file and run this command again."
+        return 0
+    fi
 
-    # Use --user to match host UID so writes to mounted credential dirs succeed.
-    # The entrypoint detects the non-writable /home/researcher and sets HOME=/tmp,
-    # which makes CLI tools write to /tmp/.claude etc. (the mounted volumes).
-    # CLAUDE_CONFIG_DIR explicitly tells Claude Code where to store credentials.
+    local gpu_flags=$(get_gpu_flags)
+
     eval "docker run -it --rm \
         $gpu_flags \
-        $user_flags \
         --env-file \"$PROJECT_ROOT/.env\" \
-        -e CLAUDE_CONFIG_DIR=/tmp/.claude \
-        -v \"$HOME/.claude:/tmp/.claude\" \
-        -v \"$HOME/.codex:/tmp/.codex\" \
-        -v \"$HOME/.gemini:/tmp/.gemini\" \
-        -w /tmp \
+        -v \"$HOME/.claude:/home/neurico/.claude\" \
+        -v \"$HOME/.codex:/home/neurico/.codex\" \
+        -v \"$HOME/.gemini:/home/neurico/.gemini\" \
+        -w /home/neurico \
         \"$IMAGE_NAME\" \
         bash"
 }
@@ -740,7 +817,12 @@ check_image() {
     fi
 
     if [ "$needs_pull" = true ]; then
-        if docker pull "$REGISTRY_IMAGE"; then
+        # Force amd64 on macOS — nvidia/cuda has no arm64 build
+        local pull_platform=""
+        if [[ "$(uname)" == "Darwin" ]]; then
+            pull_platform="--platform linux/amd64"
+        fi
+        if docker pull $pull_platform "$REGISTRY_IMAGE"; then
             docker tag "$REGISTRY_IMAGE" "$IMAGE_NAME"
             echo -e "    ${GREEN}[OK]${NC} Image updated"
         else
@@ -844,9 +926,9 @@ config_set_env() {
     local var_name="$1"
     local value="$2"
     if grep -q "^${var_name}=" "$PROJECT_ROOT/.env" 2>/dev/null; then
-        sed -i "s|^${var_name}=.*|${var_name}=${value}|" "$PROJECT_ROOT/.env"
+        sed_inplace "s|^${var_name}=.*|${var_name}=${value}|" "$PROJECT_ROOT/.env"
     elif grep -q "^# *${var_name}=" "$PROJECT_ROOT/.env" 2>/dev/null; then
-        sed -i "s|^# *${var_name}=.*|${var_name}=${value}|" "$PROJECT_ROOT/.env"
+        sed_inplace "s|^# *${var_name}=.*|${var_name}=${value}|" "$PROJECT_ROOT/.env"
     else
         echo "${var_name}=${value}" >> "$PROJECT_ROOT/.env"
     fi
@@ -897,9 +979,9 @@ prompt_secret() {
 
     # Write to .env
     if grep -q "^${env_var}=" "$PROJECT_ROOT/.env" 2>/dev/null; then
-        sed -i "s|^${env_var}=.*|${env_var}=${value}|" "$PROJECT_ROOT/.env"
+        sed_inplace "s|^${env_var}=.*|${env_var}=${value}|" "$PROJECT_ROOT/.env"
     elif grep -q "^# *${env_var}=" "$PROJECT_ROOT/.env" 2>/dev/null; then
-        sed -i "s|^# *${env_var}=.*|${env_var}=${value}|" "$PROJECT_ROOT/.env"
+        sed_inplace "s|^# *${env_var}=.*|${env_var}=${value}|" "$PROJECT_ROOT/.env"
     else
         echo "${env_var}=${value}" >> "$PROJECT_ROOT/.env"
     fi
@@ -1162,7 +1244,7 @@ cmd_setup() {
             fi
             ;;
         3)
-            run_cmd="./neurico submit ideas/examples/ml_regularization_test.yaml --run --provider $provider_flag --full-permissions"
+            run_cmd="./neurico submit ideas/examples/math_example.yaml --run --provider $provider_flag --full-permissions"
             ;;
     esac
 
@@ -1213,9 +1295,9 @@ setup_env_interactive() {
         "Repos will be created under this org. Leave empty to use your personal account."
     if [ -n "$REPLY" ]; then
         if grep -q "^GITHUB_ORG=" "$PROJECT_ROOT/.env" 2>/dev/null; then
-            sed -i "s|^GITHUB_ORG=.*|GITHUB_ORG=$REPLY|" "$PROJECT_ROOT/.env"
+            sed_inplace "s|^GITHUB_ORG=.*|GITHUB_ORG=$REPLY|" "$PROJECT_ROOT/.env"
         elif grep -q "^# *GITHUB_ORG=" "$PROJECT_ROOT/.env" 2>/dev/null; then
-            sed -i "s|^# *GITHUB_ORG=.*|GITHUB_ORG=$REPLY|" "$PROJECT_ROOT/.env"
+            sed_inplace "s|^# *GITHUB_ORG=.*|GITHUB_ORG=$REPLY|" "$PROJECT_ROOT/.env"
         else
             echo "GITHUB_ORG=$REPLY" >> "$PROJECT_ROOT/.env"
         fi
@@ -1236,7 +1318,7 @@ setup_env_interactive() {
         if [ ! -f "$ws_config" ] && [ -f "$PROJECT_ROOT/config/workspace.yaml.example" ]; then
             cp "$PROJECT_ROOT/config/workspace.yaml.example" "$ws_config"
         fi
-        sed -i "s|parent_dir:.*|parent_dir: \"$REPLY\"|" "$ws_config"
+        sed_inplace "s|parent_dir:.*|parent_dir: \"$REPLY\"|" "$ws_config"
         echo -e "    ${GREEN}[OK]${NC} Workspace directory set to $REPLY"
     else
         echo -e "    ${DIM}[OK]${NC} Using default: ./workspaces"
@@ -1387,7 +1469,7 @@ cmd_config() {
                     if [ ! -f "$ws_config" ] && [ -f "$PROJECT_ROOT/config/workspace.yaml.example" ]; then
                         cp "$PROJECT_ROOT/config/workspace.yaml.example" "$ws_config"
                     fi
-                    sed -i "s|parent_dir:.*|parent_dir: \"$REPLY\"|" "$ws_config"
+                    sed_inplace "s|parent_dir:.*|parent_dir: \"$REPLY\"|" "$ws_config"
                     echo -e "    ${GREEN}[OK]${NC} Workspace directory set to $REPLY"
                 else
                     echo -e "    ${DIM}[SKIP]${NC} No change"
