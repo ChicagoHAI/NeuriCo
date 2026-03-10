@@ -10,6 +10,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 IMAGE_NAME="chicagohai/neurico:latest"
+REGISTRY_IMAGE="ghcr.io/chicagohai/neurico:latest"
 
 # Colors for output
 RED='\033[0;31m'
@@ -54,15 +55,16 @@ show_status() {
         echo -e "    Docker .............. ${RED}[MISSING]${NC} install docker first"
     fi
 
-    # Docker image (with version check)
+    # Docker image (with registry update check)
     if docker image inspect "$IMAGE_NAME" &> /dev/null; then
-        local host_version=$(cat "$PROJECT_ROOT/config/VERSION" 2>/dev/null | tr -d '[:space:]')
-        local cached_version=$(cat "$PROJECT_ROOT/.docker-image-version" 2>/dev/null | tr -d '[:space:]')
-        if [ -n "$host_version" ] && [ -n "$cached_version" ] && [ "$host_version" != "$cached_version" ]; then
-            echo -e "    Docker image ........ ${YELLOW}[OUTDATED]${NC} image v${cached_version}, code v${host_version}"
-            echo -e "                          Run: ${BOLD}./neurico build${NC} to update"
+        local local_digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_NAME" 2>/dev/null | sed 's/.*@//')
+        local remote_digest=$(docker manifest inspect "$REGISTRY_IMAGE" 2>/dev/null | grep -o '"digest": "sha256:[a-f0-9]*"' | head -1 | cut -d'"' -f4)
+        if [ -n "$local_digest" ] && [ -n "$remote_digest" ] && [ "$local_digest" != "$remote_digest" ]; then
+            echo -e "    Docker image ........ ${YELLOW}[UPDATE AVAILABLE]${NC} run: ${BOLD}./neurico update${NC}"
+        elif [ -n "$local_digest" ] && [ -n "$remote_digest" ]; then
+            echo -e "    Docker image ........ ${GREEN}[OK]${NC} up to date"
         else
-            echo -e "    Docker image ........ ${GREEN}[OK]${NC} $IMAGE_NAME"
+            echo -e "    Docker image ........ ${GREEN}[OK]${NC} $IMAGE_NAME (could not check registry)"
         fi
     else
         echo -e "    Docker image ........ ${YELLOW}[MISSING]${NC} run: ./neurico setup"
@@ -266,6 +268,52 @@ check_env_file() {
 }
 
 # -----------------------------------------------------------------------------
+# Update NeuriCo: pull latest code and Docker image
+# -----------------------------------------------------------------------------
+cmd_update() {
+    echo -e "${BLUE}Updating NeuriCo...${NC}"
+    echo ""
+
+    # Step 1: Update code
+    echo -e "  ${BOLD}Step 1/2: Code${NC}"
+    if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree &>/dev/null; then
+        # Check for uncommitted changes
+        if ! git -C "$PROJECT_ROOT" diff --quiet 2>/dev/null || ! git -C "$PROJECT_ROOT" diff --cached --quiet 2>/dev/null; then
+            echo -e "    ${YELLOW}[SKIP]${NC} Uncommitted changes detected — pull skipped"
+            echo -e "    Commit or stash your changes, then re-run ./neurico update"
+        else
+            local branch=$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)
+            if git -C "$PROJECT_ROOT" pull --ff-only 2>/dev/null; then
+                echo -e "    ${GREEN}[OK]${NC} Code updated (${branch})"
+            else
+                echo -e "    ${YELLOW}[WARN]${NC} git pull failed — you may have diverged from upstream"
+                echo -e "    Try: cd $PROJECT_ROOT && git pull --rebase"
+            fi
+        fi
+    else
+        echo -e "    ${YELLOW}[SKIP]${NC} Not a git repository"
+    fi
+    echo ""
+
+    # Step 2: Update Docker image
+    echo -e "  ${BOLD}Step 2/2: Docker image${NC}"
+    local local_digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_NAME" 2>/dev/null | sed 's/.*@//')
+    local remote_digest=$(docker manifest inspect "$REGISTRY_IMAGE" 2>/dev/null | grep -o '"digest": "sha256:[a-f0-9]*"' | head -1 | cut -d'"' -f4)
+
+    if [ -n "$local_digest" ] && [ -n "$remote_digest" ] && [ "$local_digest" = "$remote_digest" ]; then
+        echo -e "    ${GREEN}[OK]${NC} Image already up to date"
+    elif docker pull "$REGISTRY_IMAGE"; then
+        docker tag "$REGISTRY_IMAGE" "$IMAGE_NAME"
+        echo -e "    ${GREEN}[OK]${NC} Image updated"
+    else
+        echo -e "    ${RED}[FAIL]${NC} Pull failed — check your network or try './neurico build'"
+    fi
+    echo ""
+
+    echo -e "${GREEN}Update complete.${NC}"
+}
+
+# -----------------------------------------------------------------------------
 # Build the container image
 # -----------------------------------------------------------------------------
 cmd_build() {
@@ -274,24 +322,73 @@ cmd_build() {
     cd "$PROJECT_ROOT"
     docker build -t "$IMAGE_NAME" -f docker/Dockerfile .
 
-    # Cache the image version for fast pre-run checks
-    if [ -n "$version" ]; then
-        echo "$version" > "$PROJECT_ROOT/.docker-image-version"
-    fi
-
     echo -e "${GREEN}Build complete!${version:+ (v${version})}${NC}"
 }
 
 # -----------------------------------------------------------------------------
-# Quick version check (no Docker overhead) for pre-run warnings
+# Bump version across all files
+# Usage: ./neurico bump-version <new_version>
+#   e.g. ./neurico bump-version 0.3.0
+# -----------------------------------------------------------------------------
+cmd_bump_version() {
+    local new_version="$1"
+    if [ -z "$new_version" ]; then
+        local current=$(cat "$PROJECT_ROOT/config/VERSION" 2>/dev/null | tr -d '[:space:]')
+        echo -e "${RED}Usage: $0 bump-version <new_version>${NC}"
+        echo -e "Current version: ${CYAN}${current}${NC}"
+        echo ""
+        echo "Examples:"
+        echo "  $0 bump-version 0.3.0"
+        echo "  $0 bump-version 1.0.0"
+        exit 1
+    fi
+
+    # Validate format: must be X.Y.Z
+    if ! echo "$new_version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo -e "${RED}Error: Version must be in X.Y.Z format (e.g., 0.3.0)${NC}"
+        exit 1
+    fi
+
+    local current=$(cat "$PROJECT_ROOT/config/VERSION" 2>/dev/null | tr -d '[:space:]')
+    echo -e "${BLUE}Bumping version: ${current} → ${new_version}${NC}"
+    echo ""
+
+    # 1. config/VERSION
+    echo "$new_version" > "$PROJECT_ROOT/config/VERSION"
+    echo -e "  ${GREEN}[OK]${NC} config/VERSION"
+
+    # 2. src/__version__.py
+    sed -i "s/__version__ = \".*\"/__version__ = \"$new_version\"/" "$PROJECT_ROOT/src/__version__.py"
+    echo -e "  ${GREEN}[OK]${NC} src/__version__.py"
+
+    # 3. pyproject.toml
+    sed -i "s/^version = \".*\"/version = \"$new_version\"/" "$PROJECT_ROOT/pyproject.toml"
+    echo -e "  ${GREEN}[OK]${NC} pyproject.toml"
+
+    # 4. Update uv.lock if uv is available
+    if command -v uv &> /dev/null; then
+        (cd "$PROJECT_ROOT" && uv lock 2>/dev/null)
+        echo -e "  ${GREEN}[OK]${NC} uv.lock"
+    else
+        echo -e "  ${YELLOW}[SKIP]${NC} uv.lock (uv not installed — run 'uv lock' manually)"
+    fi
+
+    echo ""
+    echo -e "${GREEN}Version bumped to ${new_version}${NC}"
+    echo -e "${DIM}Don't forget to commit and push to trigger a new Docker image build.${NC}"
+}
+
+# -----------------------------------------------------------------------------
+# Quick update check: compare local image digest against registry
 # -----------------------------------------------------------------------------
 warn_if_outdated() {
-    local host_version=$(cat "$PROJECT_ROOT/config/VERSION" 2>/dev/null | tr -d '[:space:]')
-    local cached_version=$(cat "$PROJECT_ROOT/.docker-image-version" 2>/dev/null | tr -d '[:space:]')
+    # Skip check if no network or registry is unreachable (don't slow down the user)
+    local local_digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_NAME" 2>/dev/null | sed 's/.*@//')
+    local remote_digest=$(docker manifest inspect "$REGISTRY_IMAGE" 2>/dev/null | grep -o '"digest": "sha256:[a-f0-9]*"' | head -1 | cut -d'"' -f4)
 
-    if [ -n "$host_version" ] && [ -n "$cached_version" ] && [ "$host_version" != "$cached_version" ]; then
-        echo -e "${YELLOW}Warning: Docker image may be outdated (image: v${cached_version}, code: v${host_version})${NC}"
-        echo -e "${YELLOW}Run './neurico build' to update.${NC}"
+    if [ -n "$local_digest" ] && [ -n "$remote_digest" ] && [ "$local_digest" != "$remote_digest" ]; then
+        echo -e "${YELLOW}Update available: a newer Docker image exists on the registry.${NC}"
+        echo -e "${YELLOW}Run './neurico update' to pull the latest image.${NC}"
         echo ""
     fi
 }
@@ -302,6 +399,7 @@ warn_if_outdated() {
 cmd_shell() {
     ensure_directories
     check_env_file
+    warn_if_outdated
 
     local gpu_flags=$(get_gpu_flags)
     local user_flags=$(get_user_flags)
@@ -609,50 +707,45 @@ check_prerequisites() {
     fi
 }
 
-# Check Docker image: pull if needed, update if outdated
+# Check Docker image: pull if newer version exists on registry
 check_image() {
     echo -e "  ${BOLD}Step 2/5: Docker image${NC}"
 
-    local host_version=""
-    if [ -f "$PROJECT_ROOT/config/VERSION" ]; then
-        host_version=$(cat "$PROJECT_ROOT/config/VERSION" | tr -d '[:space:]')
-    fi
+    local needs_pull=false
 
     if docker image inspect "$IMAGE_NAME" &> /dev/null; then
-        # Image exists — check if version matches host code
-        local image_version=""
-        image_version=$(docker run --rm --entrypoint python "$IMAGE_NAME" \
-            -c "exec(open('/app/src/__version__.py').read()); print(__version__)" 2>/dev/null || echo "")
+        # Image exists — compare digest against registry to detect updates
+        local local_digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_NAME" 2>/dev/null | sed 's/.*@//')
+        local remote_digest=$(docker manifest inspect "$REGISTRY_IMAGE" 2>/dev/null | grep -o '"digest": "sha256:[a-f0-9]*"' | head -1 | cut -d'"' -f4)
 
-        if [ -n "$host_version" ] && [ -n "$image_version" ] && [ "$host_version" = "$image_version" ]; then
-            echo -e "    ${GREEN}[OK]${NC} Image up to date (v${image_version})"
-            echo "$image_version" > "$PROJECT_ROOT/.docker-image-version"
+        if [ -n "$local_digest" ] && [ -n "$remote_digest" ]; then
+            if [ "$local_digest" = "$remote_digest" ]; then
+                echo -e "    ${GREEN}[OK]${NC} Image is up to date"
+                echo ""
+                return
+            else
+                echo -e "    ${YELLOW}[UPDATE AVAILABLE]${NC} Newer image found on registry"
+                echo -e "    Pulling latest image..."
+                needs_pull=true
+            fi
+        else
+            # Can't check registry (network issue?) — keep existing image
+            echo -e "    ${GREEN}[OK]${NC} Image exists (could not check registry for updates)"
             echo ""
             return
-        elif [ -n "$host_version" ] && [ -n "$image_version" ]; then
-            echo -e "    ${YELLOW}[OUTDATED]${NC} Image v${image_version}, host code v${host_version}"
-            echo -e "    Pulling updated image..."
-        else
-            # Can't determine version — image predates version system, pull latest
-            echo -e "    ${YELLOW}[WARN]${NC} Cannot determine image version, pulling latest..."
         fi
     else
-        echo -e "    Pulling ghcr.io/chicagohai/neurico:latest..."
+        echo -e "    No local image found. Pulling $REGISTRY_IMAGE..."
+        needs_pull=true
     fi
 
-    # Try pulling latest image
-    if docker pull ghcr.io/chicagohai/neurico:latest; then
-        docker tag ghcr.io/chicagohai/neurico:latest "$IMAGE_NAME"
-        # Cache the new image version
-        local new_version=""
-        new_version=$(docker run --rm --entrypoint python "$IMAGE_NAME" \
-            -c "exec(open('/app/src/__version__.py').read()); print(__version__)" 2>/dev/null || echo "")
-        if [ -n "$new_version" ]; then
-            echo "$new_version" > "$PROJECT_ROOT/.docker-image-version"
+    if [ "$needs_pull" = true ]; then
+        if docker pull "$REGISTRY_IMAGE"; then
+            docker tag "$REGISTRY_IMAGE" "$IMAGE_NAME"
+            echo -e "    ${GREEN}[OK]${NC} Image updated"
+        else
+            echo -e "    ${YELLOW}[WARN]${NC} Pull failed — build locally with: ./neurico build"
         fi
-        echo -e "    ${GREEN}[OK]${NC} Image ready${new_version:+ (v${new_version})}"
-    else
-        echo -e "    ${YELLOW}[WARN]${NC} Pull failed — build locally with: ./neurico build"
     fi
     echo ""
 }
@@ -1329,13 +1422,15 @@ cmd_help() {
     echo "Commands:"
     echo "  setup                     Interactive setup wizard (start here!)"
     echo "  config                    Configure API keys and settings"
-    echo "  build                     Build the container image"
+    echo "  update                    Pull the latest Docker image from registry"
+    echo "  build                     Build the container image locally"
     echo "  login [provider]          Login to CLI tools (claude/codex/gemini)"
     echo "  shell                     Start an interactive shell"
     echo "  fetch <url> [--submit]    Fetch idea from IdeaHub"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
     echo "  update-tools              Update Claude/Codex/Gemini to latest versions"
+    echo "  bump-version <version>    Bump version across all files (e.g., 0.3.0)"
     echo "  up                        Start container in background (compose)"
     echo "  down                      Stop background container (compose)"
     echo "  logs                      View container logs (compose)"
@@ -1371,6 +1466,9 @@ case "$ACTION" in
     config)
         cmd_config
         ;;
+    update)
+        cmd_update
+        ;;
     build)
         cmd_build
         ;;
@@ -1391,6 +1489,9 @@ case "$ACTION" in
         ;;
     update-tools)
         cmd_update_tools
+        ;;
+    bump-version)
+        cmd_bump_version "$@"
         ;;
     up)
         cmd_up

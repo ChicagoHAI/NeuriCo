@@ -11,6 +11,7 @@
 #   ./neurico run <id> [options]       # Run research
 #   ./neurico shell                    # Interactive shell
 #   ./neurico build                    # Build container
+#   ./neurico bump-version 0.3.0      # Bump version everywhere
 #   ./neurico help                     # Show help
 #
 # =============================================================================
