@@ -88,7 +88,11 @@ main() {
     echo -e "  Launching interactive setup wizard..."
     echo ""
     cd "$install_dir"
-    exec ./neurico setup
+    if [ "${QUICK:-0}" = "1" ]; then
+        exec ./neurico setup --quick
+    else
+        exec ./neurico setup
+    fi
 }
 
 main

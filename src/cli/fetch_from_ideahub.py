@@ -152,8 +152,11 @@ _DOMAIN_KEYWORDS = {
     'artificial_intelligence': ['llm', 'language model', 'nlp', 'text', 'gpt', 'bert', 'transformer', 'prompt', 'token'],
     'computer_vision': ['vision', 'image', 'cnn', 'object detection', 'segmentation', 'diffusion'],
     'reinforcement_learning': ['reinforcement', ' rl ', 'reward', 'policy', 'agent', 'environment'],
-    'ml': ['regression', 'classification', 'clustering', 'supervised', 'unsupervised', 'gradient', 'neural'],
+    'machine_learning': ['regression', 'classification', 'clustering', 'supervised', 'unsupervised', 'gradient', 'neural'],
     'data_science': ['data analysis', 'statistics', 'prediction', 'forecasting', 'tabular'],
+    'battery': ['battery', 'lithium', 'sodium', 'electrolyte', 'electrode', 'cathode', 'anode',
+                 'electrochemical', 'cycling', 'capacity', 'coulombic', 'impedance', 'solid-state',
+                 'electrolysis', 'fuel cell', 'supercapacitor', 'energy storage'],
     'scientific_computing': ['simulation', 'numerical', 'physics', 'biology', 'chemistry', 'molecular'],
     'systems': ['distributed', 'database', 'network', 'operating system', 'compiler'],
     'theory': ['algorithm', 'complexity', 'optimization'],
@@ -305,9 +308,10 @@ The AI research agent will handle finding datasets, designing experiments, and i
 
 1. **Required fields**:
    - title: Use the provided title
-   - domain: Infer from: machine_learning, data_science, systems, theory, mathematics, scientific_computing, nlp, computer_vision, reinforcement_learning, artificial_intelligence
+   - domain: Infer from: machine_learning, data_science, systems, theory, mathematics, battery, scientific_computing, nlp, computer_vision, reinforcement_learning, artificial_intelligence
      Use "mathematics" for research centered on proofs, theorems, conjectures, or mathematical structures (algebra, analysis, topology, combinatorics, number theory, dynamical systems, etc.)
      Use "theory" for algorithmic analysis, complexity theory, or formal methods that are more CS-oriented
+     Use "battery" for electrochemical energy storage research: battery cycling, electrode materials, electrolytes, capacity fade, impedance spectroscopy, fuel cells, supercapacitors
    - hypothesis: Extract the research question or reformulate the idea as a testable hypothesis
 
 2. **Optional fields** (only include if present in the content):

@@ -40,16 +40,21 @@ domains:
   systems:
     name: "Systems"
     description: "Performance benchmarking, optimization, distributed systems"
-    has_template: true
+    has_template: false  # Will use default
 
   theory:
     name: "Theory"
     description: "Algorithmic analysis, complexity theory, formal methods"
-    has_template: true
+    has_template: false  # Will use default
 
   mathematics:
     name: "Mathematics"
     description: "Pure and applied mathematics: algebra, analysis, topology, number theory, combinatorics, geometry, proofs"
+    has_template: true
+
+  battery:
+    name: "Battery Research"
+    description: "Electrochemical energy storage: lithium-ion, solid-state, sodium-ion batteries, supercapacitors, fuel cells, electrode materials, electrolytes"
     has_template: true
 
   scientific_computing:

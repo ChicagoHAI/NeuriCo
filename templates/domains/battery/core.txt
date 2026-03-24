@@ -1,0 +1,165 @@
+# Battery Research Domain Guidance
+
+This template provides specialized guidance for battery and electrochemical energy storage research, including electrochemical characterization, materials analysis, computational modeling, and data reporting standards.
+
+## Domain Overview
+
+Battery research in this context covers:
+- Lithium-ion batteries: cathode materials (NMC, LFP, NCA), anode materials (graphite, silicon, lithium metal), electrolytes (liquid, solid, polymer)
+- Next-generation systems: solid-state batteries, sodium-ion, lithium-sulfur, lithium-air, zinc-air
+- Supercapacitors: EDLCs, pseudocapacitors, hybrid devices
+- Fuel cells: PEM, solid oxide, alkaline
+- Cross-cutting topics: electrode-electrolyte interfaces, degradation mechanisms, safety, battery management systems
+
+## How to Interpret Base Methodology for Battery Research
+
+The base researcher template is designed for general empirical research. For battery research, interpret each phase as its electrochemical equivalent:
+
+| Base Phase | Battery Research Equivalent |
+|---|---|
+| Planning | Cell design & test matrix — define chemistry, electrode composition, cell format, cycling protocols |
+| Data Collection | Electrochemical measurements — galvanostatic cycling, CV, EIS, GITT |
+| Implementation | Data processing pipelines — parsing instrument files, equivalent circuit fitting, capacity calculations |
+| Experimentation | Protocol execution — formation cycles, rate capability, long-term cycling, temperature studies |
+| Analysis | Performance evaluation — capacity fade trends, coulombic efficiency, degradation mechanisms, modeling |
+| Documentation | Figures & reporting — voltage profiles, cycling plots, Nyquist plots with proper conventions |
+
+## Electrochemical Characterization Methods
+
+### Galvanostatic Charge/Discharge (GCD)
+- Constant current cycling between voltage limits
+- Primary output: voltage vs. capacity profiles, capacity vs. cycle number
+- Always report: C-rate (and the theoretical capacity used to define it), voltage window, temperature
+- Use CC-CV (constant current-constant voltage) protocol where appropriate and state the cutoff current
+
+### Cyclic Voltammetry (CV)
+- Sweep potential at constant rate, measure current response
+- Identifies redox peaks, reaction reversibility, and kinetics
+- Report: scan rate, voltage window, cycle number shown
+- For multi-rate studies: use Randles-Sevcik analysis for diffusion coefficients
+- Plot current vs. potential (not vs. time)
+
+### Electrochemical Impedance Spectroscopy (EIS)
+- AC perturbation across frequency range (typically 1 MHz to 10 mHz)
+- Nyquist plot (Z_real vs. -Z_imag) and Bode plot (|Z| and phase vs. frequency)
+- Equivalent circuit fitting: state the model used, report chi-squared goodness of fit
+- Common elements: R_s (solution resistance), R_ct (charge transfer), CPE (constant phase element), W (Warburg)
+- Always report: state of charge, temperature, perturbation amplitude (typically 5-10 mV)
+
+### Galvanostatic Intermittent Titration Technique (GITT)
+- Current pulses followed by rest periods to measure equilibrium potential
+- Calculates solid-state diffusion coefficients
+- Report: pulse duration, rest duration, current magnitude, assumptions (e.g., semi-infinite diffusion)
+
+### Rate Capability Testing
+- Cycling at progressively increasing C-rates, then returning to low rate
+- Demonstrates power performance and rate-dependent capacity retention
+- Always include the recovery cycles at low rate to show reversibility
+- Plot capacity vs. C-rate (not just vs. cycle number)
+
+### Differential Capacity Analysis (dQ/dV)
+- Derivative of capacity with respect to voltage
+- Reveals phase transitions, degradation mechanisms, and side reactions
+- Sensitive to subtle changes that voltage profiles may not show
+- Useful for tracking degradation over cycling: peak shifts indicate structural changes
+
+## Data Reporting Standards
+
+### Always Report
+- Active material mass loading (mg/cm2) and electrode composition (e.g., 80:10:10 active:binder:conductive)
+- Electrolyte composition and quantity (or electrolyte-to-capacity ratio, uL/mAh)
+- Cell format (coin cell CR2032, pouch cell, Swagelok, etc.)
+- Voltage window (e.g., 2.5-4.2 V vs. Li/Li+)
+- C-rate definition: state the theoretical capacity value used (e.g., 1C = 170 mAh/g for LFP)
+- Temperature (ambient is insufficient — state the actual value, e.g., 25 +/- 1 deg C)
+- Number of cells tested and error bars (minimum 3 cells for statistical validity)
+- Current collector material and separator type
+
+### Capacity Normalization
+- **Gravimetric capacity** (mAh/g): normalized to active material mass — most common in academic literature
+- **Areal capacity** (mAh/cm2): normalized to electrode area — more relevant for practical cells
+- **Volumetric capacity** (mAh/cm3): normalized to electrode volume — important for space-constrained applications
+- Always state which normalization is used. For practical relevance, report at least gravimetric AND areal capacity.
+- For full cells: report capacity based on the limiting electrode and state which one
+
+### Terminology (IUPAC Convention)
+- For rechargeable batteries, use "positive electrode" and "negative electrode" rather than "cathode" and "anode"
+  (In secondary batteries, cathode/anode swap during charge vs. discharge; positive/negative are unambiguous)
+- Use "specific capacity" (per mass) vs. "capacity" (absolute, in mAh)
+- Use "coulombic efficiency" (not "columbic" or "Coulombic efficiency" — lowercase c is acceptable per IUPAC)
+- "State of charge" (SOC) and "depth of discharge" (DOD) — define the reference points
+
+## Computational Tools
+
+### Battery-Specific Python Libraries
+- **PyBaMM**: Physics-based battery modeling (SPM, DFN, equivalent circuit); open-source, well-documented
+- **impedance.py**: EIS equivalent circuit fitting and analysis
+- **cellpy**: Cycling data processing and analysis; reads various instrument file formats
+- **galvani**: Parse electrochemical data files from Biologic, Gamry, and other potentiostats
+- **pymatgen**: Materials analysis — crystal structure, phase diagrams, electrochemical stability windows
+
+### General Scientific Python
+- **NumPy/SciPy**: Numerical computation, curve fitting, signal processing
+- **pandas**: Tabular data management for cycling records
+- **matplotlib**: Publication-quality electrochemistry plots
+- **scikit-learn**: Machine learning for property prediction, clustering, feature analysis
+
+### Atomistic Simulation (if applicable)
+- **ASE** (Atomic Simulation Environment): Structure manipulation, calculator interface
+- **VASP/Quantum ESPRESSO**: DFT calculations for voltage prediction, migration barriers, electronic structure
+- **LAMMPS**: Molecular dynamics for electrolyte transport, interface studies
+
+### Databases
+- **Materials Project** (materialsproject.org): Computed properties for ~150K materials, including ~5K battery electrodes
+- **AFLOW** (aflowlib.org): High-throughput computed materials data
+- **Battery Data Genome** (batterydata.energy.gov): Experimental cycling datasets
+
+## REPORT.md Structure for Battery Research
+
+When writing REPORT.md, use this structure instead of the default:
+
+1. **Executive Summary**: Key findings — best achieved capacity, cycling stability, rate performance
+2. **Research Question**: The hypothesis or problem being investigated
+3. **Materials and Methods**: Cell chemistry, electrode preparation details, electrolyte, cell format, equipment
+4. **Electrochemical Performance**:
+   - Initial capacity and voltage profiles
+   - Rate capability results
+   - Long-term cycling stability with coulombic efficiency
+5. **Degradation Analysis** (if applicable): Capacity fade mechanisms, impedance evolution, post-mortem analysis
+6. **Computational/Modeling Results** (if applicable): Simulation setup, validation against experimental data, predictions
+7. **Comparison with Literature**: Table comparing key metrics against published results for similar systems
+8. **Discussion**: Interpretation of results, structure-property relationships, practical implications
+9. **Conclusions**: Summary of contributions and recommended next steps
+10. **References**: Full citations for all referenced works
+
+## Quality Checklist
+
+Before finalizing your work, verify:
+
+- [ ] Active material mass loading is stated (mg/cm2)
+- [ ] Electrode composition is fully specified (active:binder:conductive additive ratio)
+- [ ] C-rate is defined with the theoretical capacity value used
+- [ ] Voltage window is explicitly stated with reference electrode
+- [ ] Temperature is reported as an actual measured value
+- [ ] Electrolyte composition and quantity are specified
+- [ ] Coulombic efficiency is plotted alongside capacity vs. cycle number
+- [ ] Error bars are shown (from minimum 3 replicate cells)
+- [ ] Capacity normalization basis is clearly stated
+- [ ] Rate capability includes recovery cycles at low rate
+- [ ] Sufficient cycle count for meaningful trend analysis (not just 10-20 cycles)
+- [ ] EIS data includes equivalent circuit model and fit quality
+- [ ] Comparison table with published literature values is included
+- [ ] All figures have proper axis labels, units, and legends
+
+## Common Pitfalls in Battery Research
+
+1. **Low mass loading**: Loading <1 mg/cm2 inflates rate capability and masks transport limitations. Academic results at low loading often do not translate to practical cells (commercial: 5-20 mg/cm2)
+2. **Excess electrolyte**: Flooding cells with electrolyte masks poor coulombic efficiency and hides electrolyte decomposition. Report the electrolyte-to-capacity ratio (uL/mAh)
+3. **Single-cell reporting**: Reporting results from one cell without error bars hides variability. Battery testing inherently has cell-to-cell variation — always test replicates
+4. **Confusing capacity metrics**: Mixing gravimetric, volumetric, and areal capacity without clear labels. State the normalization basis every time
+5. **Insufficient cycling**: 50-100 cycles may not reveal degradation trends that emerge over 500+ cycles. Long-term stability claims require long-term data
+6. **Half-cell extrapolation**: Half-cell results (vs. Li metal) cannot directly predict full-cell performance due to excess lithium inventory, different failure modes, and reference electrode effects
+7. **Improper EIS interpretation**: Fitting Nyquist data with overly complex equivalent circuits without physical justification. Use the simplest model that fits the data
+8. **Ignoring formation cycles**: Not reporting or standardizing formation protocol. Formation cycles affect SEI quality and all subsequent performance
+9. **Cherry-picking data**: Reporting only the best-performing cell instead of the average across replicates
+10. **Missing coulombic efficiency**: Capacity vs. cycle plots without CE data hide side reactions and irreversible losses. CE is often more revealing than capacity for degradation analysis

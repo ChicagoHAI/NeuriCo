@@ -1151,12 +1151,128 @@ setup_login_provider() {
 # Interactive setup wizard
 # -----------------------------------------------------------------------------
 cmd_setup() {
+    # Parse --quick flag
+    local quick_mode=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --quick) quick_mode=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
     show_banner
 
     echo -e "${BOLD}  Welcome to NeuriCo!${NC}"
     echo -e "  ${DIM}This wizard will get you set up in a few minutes.${NC}"
     echo ""
 
+    # If --quick not explicitly passed, ask the user
+    if [ "$quick_mode" = false ]; then
+        echo -e "  ${BOLD}How do you want to set up NeuriCo?${NC}"
+        echo -e "    [1] Quick setup ${DIM}(recommended — just log in and go)${NC}"
+        echo -e "    [2] Full setup  ${DIM}(configure GitHub, API keys, workspace)${NC}"
+        echo -ne "  > "
+        local setup_mode=""
+        read setup_mode < /dev/tty
+        if [[ "$setup_mode" != "2" ]]; then
+            quick_mode=true
+        fi
+        echo ""
+    fi
+
+    if [ "$quick_mode" = true ]; then
+        _setup_quick
+    else
+        _setup_full
+    fi
+}
+
+# Quick setup: prerequisites → config (defaults) → Claude login → run first idea
+_setup_quick() {
+    # ── Step 1: Prerequisites ──
+    echo -e "  ${BOLD}Step 1/3: Prerequisites${NC}"
+    check_prerequisites
+
+    # ── Step 2: Docker image ──
+    check_image
+
+    # ── Step 2: Configuration ──
+    echo -e "  ${BOLD}Step 2/3: Configuration${NC}"
+    if [ ! -f "$PROJECT_ROOT/.env" ]; then
+        touch "$PROJECT_ROOT/.env"
+    fi
+    echo -e "    ${GREEN}[OK]${NC} Configuration ready (using defaults)"
+    echo -e "    ${DIM}Research workspaces will be saved to: ./workspaces/${NC}"
+    echo -e "    ${DIM}Tip: Run './neurico config' to change this or add GitHub/API keys later.${NC}"
+    echo ""
+
+    # ── Step 3: Claude Login ──
+    echo -e "  ${BOLD}Step 3/3: Log in to Claude${NC}"
+    echo -e "    ${DIM}Claude uses OAuth — you'll sign in via your browser.${NC}"
+    echo ""
+    setup_login_provider "Claude" "claude" "$HOME/.claude" "/tmp/.claude"
+    echo ""
+
+    # ── Run first idea (optional) ──
+    echo -e "  ${GREEN}Setup complete!${NC} You're ready to go."
+    echo ""
+    echo -e "  ${BOLD}Run your first idea (optional)${NC}"
+
+    prompt_choice "How would you like to provide your research idea?" \
+        "IdeaHub URL (paste a link from hypogenic.ai/ideahub)" \
+        "Try an example idea (built-in)" \
+        "Skip — I'll run later"
+
+    local idea_choice="$REPLY"
+    local run_cmd=""
+
+    case "$idea_choice" in
+        1)
+            echo -ne "    Paste your IdeaHub URL: "
+            read ideahub_url < /dev/tty
+            if [ -n "$ideahub_url" ]; then
+                run_cmd="./neurico fetch $ideahub_url --submit --run --provider claude --full-permissions --no-github"
+            else
+                echo -e "    ${YELLOW}[SKIP]${NC} No URL provided"
+            fi
+            ;;
+        2)
+            run_cmd="./neurico submit ideas/examples/math_example.yaml --run --provider claude --full-permissions --no-github"
+            ;;
+    esac
+
+    echo ""
+    echo -e "  ${BOLD}Config files:${NC}"
+    echo -e "  ${DIM}  CLI credentials ........... ~/.claude/${NC}"
+    echo ""
+    echo -e "  ${DIM}To add GitHub, API keys, or change settings later, run: ./neurico config${NC}"
+    echo ""
+
+    if [ -n "$run_cmd" ]; then
+        echo -e "  Run this to get started:"
+        echo ""
+        echo -e "    ${BOLD}cd $PROJECT_ROOT && $run_cmd${NC}"
+        echo ""
+
+        if [ -t 0 ]; then
+            echo -ne "  Run it now? [Y/n] "
+            read run_now < /dev/tty
+            if [[ ! "$run_now" =~ ^[Nn] ]]; then
+                cd "$PROJECT_ROOT"
+                exec $run_cmd
+            fi
+        fi
+    else
+        echo "  Next steps:"
+        echo -e "    ${BOLD}cd $PROJECT_ROOT${NC}"
+        echo "    ./neurico fetch <ideahub_url> --submit --run --provider claude --full-permissions --no-github"
+        echo "    ./neurico help"
+        echo ""
+    fi
+}
+
+# Full setup: prerequisites → config → multi-provider login → run first idea
+_setup_full() {
     # ── Step 1: Prerequisites ──
     check_prerequisites
 
@@ -1544,6 +1660,7 @@ cmd_help() {
     echo ""
     echo "Commands:"
     echo "  setup                     Interactive setup wizard (start here!)"
+    echo "  setup --quick             Quick setup (skip GitHub & API keys, just log in)"
     echo "  config                    Configure API keys and settings"
     echo "  update                    Pull the latest Docker image from registry"
     echo "  build                     Build the container image locally"
@@ -1560,7 +1677,8 @@ cmd_help() {
     echo "  help                      Show this help message"
     echo ""
     echo "First-time setup:"
-    echo "  $0 setup                  # Interactive wizard (recommended)"
+    echo "  $0 setup                  # Interactive wizard (choose quick or full)"
+    echo "  $0 setup --quick          # Quick setup (recommended for most users)"
     echo ""
     echo "Daily usage:"
     echo "  $0 fetch https://ideahub.example.com/idea/123 --submit --run --provider claude --full-permissions"
@@ -1584,7 +1702,7 @@ fi
 
 case "$ACTION" in
     setup)
-        cmd_setup
+        cmd_setup "$@"
         ;;
     config)
         cmd_config
