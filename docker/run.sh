@@ -300,11 +300,15 @@ ensure_directories() {
     mkdir -p "$PROJECT_ROOT/ideas/submitted"
     mkdir -p "$PROJECT_ROOT/ideas/in_progress"
     mkdir -p "$PROJECT_ROOT/ideas/completed"
-    # Make the entire project directory world-accessible so any UID inside the
-    # container can read/write. This avoids UID mismatch issues with shared Docker images.
-    chmod -R a+rwX "$PROJECT_ROOT" 2>/dev/null || true
+    # Make the mount-point directories themselves world-accessible so the
+    # container (which runs as neurico, UID 1000) can read/write into them.
+    # NOT recursive — workspaces can contain millions of files from research
+    # runs, and a recursive chmod hangs for minutes. The container's entrypoint
+    # sets umask 000, so all NEW files it creates are already world-writable.
+    chmod a+rwX "$PROJECT_ROOT" 2>/dev/null || true
+    chmod -R a+rwX "$PROJECT_ROOT/logs" "$PROJECT_ROOT/ideas" 2>/dev/null || true
     # Workspace may be outside PROJECT_ROOT (configurable in config/workspace.yaml)
-    chmod -R a+rwX "$workspace_dir" 2>/dev/null || true
+    chmod a+rwX "$workspace_dir" 2>/dev/null || true
     # Make CLI credential dirs readable/writable by any UID. The container user
     # (neurico, uid 1000) may differ from the host user. Without this, the
     # container cannot read existing credentials or write new ones during login.
