@@ -6,6 +6,13 @@
 
 set -e
 
+# Make all files created by the container world-readable/writable so that any
+# host user can manage (read/delete) workspace files regardless of UID mismatch.
+# The container runs as neurico (UID 1000) which maps to a different user on
+# most host systems, so without this, only that mapped user (or root) could
+# delete generated repos.
+umask 000
+
 # Ensure PATH includes Python venv, uv-managed Python, and uv (in case not inherited from Dockerfile ENV)
 export PATH="/app/.venv/bin:/python/bin:/usr/local/bin:${PATH}"
 

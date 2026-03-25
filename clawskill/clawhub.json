@@ -1,0 +1,50 @@
+{
+  "name": "neurico",
+  "version": "0.2.0",
+  "tagline": "NeuriCo: idea in, paper out. Autonomous agents for research experiments.",
+  "description": "NeuriCo (Neural Co-Scientist) is an autonomous research framework that takes structured research ideas (YAML) and orchestrates AI agents (Claude Code, Codex, Gemini) to design, execute, analyze, and document scientific experiments. It produces runnable code, experimental results with plots, LaTeX papers compiled to PDF, and GitHub repositories -- all from a minimal input of title, domain, and hypothesis. Supports 9 research domains including machine learning, data science, NLP, computer vision, reinforcement learning, systems, theory, scientific computing, and artificial intelligence. Features include automated literature review via Semantic Scholar, dataset discovery, baseline identification, experiment execution with GPU support, and academic paper generation in NeurIPS/ICML/ACL formats.",
+  "category": "Research & Science",
+  "tags": [
+    "autonomous-research",
+    "ai-scientist",
+    "experiment-automation",
+    "research-agent",
+    "paper-writing",
+    "literature-review",
+    "hypothesis-testing",
+    "scientific-computing",
+    "claude-code",
+    "codex",
+    "gemini",
+    "latex",
+    "docker",
+    "multi-agent",
+    "machine-learning",
+    "data-science",
+    "reproducible-research"
+  ],
+  "license": "Apache-2.0",
+  "repository": "https://github.com/ChicagoHAI/neurico",
+  "homepage": "https://github.com/ChicagoHAI/neurico",
+  "support_url": "https://github.com/ChicagoHAI/neurico/issues",
+  "authors": [
+    "Haokun Liu",
+    "Chenhao Tan"
+  ],
+  "requirements": {
+    "minimal": ["git", "docker"],
+    "alternative_minimal": ["git", "python>=3.10", "uv"],
+    "recommended": ["github-token"],
+    "optional": [
+      "openai-api-key",
+      "s2-api-key",
+      "openrouter-key",
+      "cohere-api-key",
+      "hf-token",
+      "wandb-api-key"
+    ]
+  },
+  "supported_providers": ["claude-code", "codex", "gemini"],
+  "input_format": "yaml",
+  "output_artifacts": ["code", "results", "plots", "latex-paper", "github-repo", "report"]
+}

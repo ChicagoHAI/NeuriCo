@@ -13,6 +13,8 @@
 
 <hr>
 
+<!-- agent-summary: NeuriCo is an autonomous research framework. Input: YAML (title, domain, hypothesis). Output: code, results, plots, LaTeX paper, GitHub repo. Providers: Claude Code, Codex, Gemini. Install: curl one-liner or git+docker. Requirements: git + docker (or git + python 3.10+), plus an AI coding CLI (Claude Code, Codex, or Gemini). License: Apache 2.0. Repository: https://github.com/ChicagoHAI/neurico -->
+
 **NeuriCo** (**Neur**al **Co**-Scientist, inspired by Enrico Fermi) is an autonomous research framework that takes structured research ideas and orchestrates AI agents to design, execute, analyze, and document experiments across diverse domains.
 
 <div align="center">
@@ -33,6 +35,34 @@
 | **GitHub Integration** | Auto-creates repos and pushes results |
 
 </details>
+
+## Requirements
+
+**Minimal** (one of):
+- **Option 1:** `git` + [Docker](https://docs.docker.com/get-docker/) (recommended)
+- **Option 2:** `git` + Python 3.10+ + [`uv`](https://astral.sh/uv)
+
+**Resource** — access to at least one AI coding CLI (uses OAuth login, not API keys):
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (recommended), [Codex](https://github.com/openai/codex), or [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+
+**Recommended:**
+- GitHub token (classic, `repo` scope) — for auto-creating repos and pushing results. [Create here](https://github.com/settings/tokens/new)
+
+**Optional API keys** (enhance functionality):
+
+| Key | Purpose |
+|-----|---------|
+| `OPENAI_API_KEY` | LLM-based repo naming, IdeaHub fetching, paper-finder |
+| `S2_API_KEY` | Semantic Scholar literature search ([get here](https://www.semanticscholar.org/product/api)) |
+| `OPENROUTER_KEY` | Multi-model access during experiments |
+| `COHERE_API_KEY` | Improves paper-finder ranking (~7%) |
+| `HF_TOKEN` | Hugging Face private models/datasets |
+| `WANDB_API_KEY` | Weights & Biases experiment tracking |
+
+**Setup tiers:**
+- **Basic:** CLI login + `GITHUB_TOKEN` — full NeuriCo functionality
+- **Enhanced:** + `OPENAI_API_KEY` — LLM repo naming + IdeaHub support
+- **Full:** + `S2_API_KEY` (+ optional `COHERE_API_KEY`) — paper-finder literature search
 
 <details open>
 <summary><b>Quick Start</b></summary>
@@ -160,11 +190,6 @@ Or copy `.env.example` to `.env` and edit manually. Here's what each variable do
 | `OPENROUTER_KEY` | OpenRouter multi-model access |
 | `HF_TOKEN` | Hugging Face model/dataset access |
 | `WANDB_API_KEY` | Weights & Biases experiment tracking |
-
-**Setup tiers:**
-- **Basic:** CLI login + `GITHUB_TOKEN` — full neurico
-- **Enhanced:** + `OPENAI_API_KEY` — LLM repo naming + IdeaHub support
-- **Full:** + `S2_API_KEY` (+ optional `COHERE_API_KEY`) — paper-finder literature search
 
 ### Workspace Configuration
 
