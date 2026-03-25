@@ -58,7 +58,7 @@ class PromptGenerator:
         """
         Load a template file, checking for a domain-specific override first.
 
-        Looks for templates/agents/domains/{domain}/{filename} before falling
+        Looks for templates/domains/{domain}/{filename} before falling
         back to the universal template at template_path. Override only activates
         if the override file physically exists.
 
@@ -70,7 +70,7 @@ class PromptGenerator:
             Template content as string
         """
         filename = Path(template_path).name
-        override_path = f"agents/domains/{domain}/{filename}"
+        override_path = f"domains/{domain}/{filename}"
 
         try:
             return self.load_template(override_path)
