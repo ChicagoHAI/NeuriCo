@@ -523,13 +523,15 @@ def main():
     )
     parser.add_argument(
         "--full-permissions",
-        action="store_true",
-        help="Allow full permissions to CLI agents (claude: --dangerously-skip-permissions, others: --yolo)"
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow full permissions to CLI agents (claude: --dangerously-skip-permissions, others: --yolo) (default: True, use --no-full-permissions to disable)"
     )
     parser.add_argument(
         "--write-paper",
-        action="store_true",
-        help="Generate paper draft after experiments complete (requires --run)"
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Generate paper draft after experiments complete (default: True, use --no-write-paper to disable)"
     )
     parser.add_argument(
         "--paper-style",
@@ -551,10 +553,9 @@ def main():
         print("❌ Error: --run requires --submit flag")
         sys.exit(1)
 
-    # Validate --write-paper requires --run
-    if args.write_paper and not args.run:
-        print("❌ Error: --write-paper requires --run flag")
-        sys.exit(1)
+    # If not running, silently disable write-paper (it defaults to True)
+    if not args.run:
+        args.write_paper = False
 
     # Validate URL
     if not args.url.startswith('http'):
