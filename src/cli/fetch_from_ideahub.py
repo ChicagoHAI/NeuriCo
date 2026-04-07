@@ -611,7 +611,7 @@ def main():
                 idea = manager.get_idea(idea_id)
                 title = idea.get('idea', {}).get('title', idea_id)
                 domain = idea.get('idea', {}).get('domain', 'research')
-                description = f"{domain.replace('_', ' ').title()} research: {title}"
+                description = title
 
                 # Create repository
                 repo_info = github_manager.create_research_repo(
