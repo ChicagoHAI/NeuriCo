@@ -128,19 +128,61 @@ class ConfigLoader:
         domain_config = config.get('domains', {}).get(domain, {})
         return domain_config.get('has_template', False)
 
-    def get_domain_paper_style(self, domain: str) -> Optional[str]:
+    def get_default_paper_style(self) -> str:
         """
-        Get the default paper style for a domain.
+        Get the global default paper style (used when a domain has no
+        specific paper_style set).
+
+        Returns:
+            Paper style name (e.g. 'neurips')
+        """
+        config = self.get_domains_config()
+        return config.get('default_paper_style', 'neurips')
+
+    def get_domain_paper_style(self, domain: str) -> str:
+        """
+        Get the paper style for a domain. Falls back to the global
+        default_paper_style if the domain has no specific style set.
 
         Args:
             domain: Domain name
 
         Returns:
-            Paper style name (e.g. 'ams', 'finance') or None if no default
+            Paper style name (e.g. 'ams', 'finance', 'neurips')
         """
         config = self.get_domains_config()
         domain_config = config.get('domains', {}).get(domain, {})
-        return domain_config.get('paper_style', None)
+        return domain_config.get('paper_style') or self.get_default_paper_style()
+
+    def get_domain_keywords(self, domain: str) -> List[str]:
+        """
+        Get the keyword list used for inferring this domain from text.
+
+        Args:
+            domain: Domain name
+
+        Returns:
+            List of keywords (empty list if none defined)
+        """
+        config = self.get_domains_config()
+        domain_config = config.get('domains', {}).get(domain, {})
+        return domain_config.get('keywords', []) or []
+
+    def get_all_domain_keywords(self) -> Dict[str, List[str]]:
+        """
+        Get the full {domain_name: keywords} mapping for all configured domains.
+
+        Used by the IdeaHub fetcher to infer the most likely domain from
+        an idea's title/description/tags.
+
+        Returns:
+            Dict mapping domain name to its keyword list
+        """
+        config = self.get_domains_config()
+        return {
+            name: (entry.get('keywords') or [])
+            for name, entry in config.get('domains', {}).items()
+        }
 
     def get_domain_display_name(self, domain: str) -> str:
         """

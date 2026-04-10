@@ -415,8 +415,9 @@ Paper-finder starts automatically in Docker — no extra setup needed.
 - **[docs/WORKFLOW.md](docs/WORKFLOW.md)** - Complete workflow guide
 - **[docs/IDEAHUB_INTEGRATION.md](docs/IDEAHUB_INTEGRATION.md)** - IdeaHub integration
 - **[ARCHITECTURE_AND_ROADMAP.md](ARCHITECTURE_AND_ROADMAP.md)** - Architecture, template system, and roadmap
-- **[DESIGN.md](DESIGN.md)** - Comprehensive design document
 - **[docs/GITHUB_INTEGRATION.md](docs/GITHUB_INTEGRATION.md)** - GitHub setup and usage
+- **[config/domains.yaml](config/domains.yaml)** - Research domain definitions (single source of truth)
+- **[templates/README.md](templates/README.md)** - Prompt template system overview
 - **[ideas/schema.yaml](ideas/schema.yaml)** - Full specification schema
 - **[ideas/examples/](ideas/examples/)** - Example research ideas
 

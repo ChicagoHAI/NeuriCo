@@ -321,11 +321,16 @@ def run_paper_writer(
 
 if __name__ == "__main__":
     import argparse
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from core.config_loader import ConfigLoader
+
+    default_style = ConfigLoader().get_default_paper_style()
 
     parser = argparse.ArgumentParser(description="Generate academic paper from experiment results")
     parser.add_argument("work_dir", type=Path, help="Workspace directory with experiment results")
     parser.add_argument("--provider", default="claude", choices=["claude", "codex", "gemini"])
-    parser.add_argument("--style", default="neurips", help="Paper style (must match a directory in templates/paper_styles/)")
+    parser.add_argument("--style", default=default_style, help="Paper style (must match a directory in templates/paper_styles/)")
     parser.add_argument("--timeout", type=int, default=3600)
     parser.add_argument("--no-permissions", action="store_true", help="Require permission prompts")
 
