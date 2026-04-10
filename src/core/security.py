@@ -13,7 +13,7 @@ from typing import Dict, Set, Optional
 from pathlib import Path
 
 
-# Environment variables that should NEVER be passed to subprocesses
+
 # These are sensitive credentials that could be echoed in logs
 SENSITIVE_ENV_VARS: Set[str] = {
     # OpenAI
@@ -83,27 +83,6 @@ API_KEY_PATTERNS = [
 # Compile patterns once for performance
 _COMPILED_PATTERNS = [(re.compile(pattern), replacement)
                        for pattern, replacement in API_KEY_PATTERNS]
-
-
-def get_safe_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """
-    Get environment variables with sensitive keys removed.
-
-    Args:
-        base_env: Base environment dict. If None, uses os.environ.
-
-    Returns:
-        Environment dict with sensitive keys removed.
-    """
-    if base_env is None:
-        base_env = os.environ
-
-    safe_env = {}
-    for key, value in base_env.items():
-        if key.upper() not in SENSITIVE_ENV_VARS:
-            safe_env[key] = value
-
-    return safe_env
 
 
 def sanitize_text(text: str) -> str:
