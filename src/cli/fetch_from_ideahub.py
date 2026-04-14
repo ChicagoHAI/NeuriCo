@@ -147,32 +147,20 @@ def fetch_ideahub_content(url: str) -> dict:
         sys.exit(1)
 
 
-# Domain inference keyword map for template-based fallback
-_DOMAIN_KEYWORDS = {
-    'artificial_intelligence': ['llm', 'language model', 'nlp', 'text', 'gpt', 'bert', 'transformer', 'prompt', 'token'],
-    'computer_vision': ['vision', 'image', 'cnn', 'object detection', 'segmentation', 'diffusion'],
-    'reinforcement_learning': ['reinforcement', ' rl ', 'reward', 'policy', 'agent', 'environment'],
-    'machine_learning': ['regression', 'classification', 'clustering', 'supervised', 'unsupervised', 'gradient', 'neural'],
-    'data_science': ['data analysis', 'statistics', 'prediction', 'forecasting', 'tabular'],
-    'battery': ['battery', 'lithium', 'sodium', 'electrolyte', 'electrode', 'cathode', 'anode',
-                 'electrochemical', 'cycling', 'capacity', 'coulombic', 'impedance', 'solid-state',
-                 'electrolysis', 'fuel cell', 'supercapacitor', 'energy storage'],
-    'scientific_computing': ['simulation', 'numerical', 'physics', 'biology', 'chemistry', 'molecular'],
-    'systems': ['distributed', 'database', 'network', 'operating system', 'compiler'],
-    'theory': ['algorithm', 'complexity', 'optimization'],
-    'mathematics': ['theorem', 'proof', 'conjecture', 'lemma', 'algebra', 'topology',
-                    'number theory', 'combinatorics', 'graph theory', 'manifold',
-                    'homomorphism', 'isomorphism', 'eigenvalue', 'differential equation',
-                    'synchronization', 'bifurcation', 'dynamical system'],
-}
-
-
 def _infer_domain(title: str, description: str, tags: list) -> str:
-    """Infer research domain from title, description, and tags using keyword matching."""
+    """Infer research domain from title, description, and tags using keyword matching.
+
+    Reads keywords from config/domains.yaml — no hardcoding here.
+    """
+    from core.config_loader import ConfigLoader
+    loader = ConfigLoader()
+    keyword_map = loader.get_all_domain_keywords()
+    default = loader.get_default_domain()
+
     text = f"{title} {description} {' '.join(tags)}".lower()
-    best_domain = 'artificial_intelligence'
+    best_domain = default
     best_count = 0
-    for domain, keywords in _DOMAIN_KEYWORDS.items():
+    for domain, keywords in keyword_map.items():
         count = sum(1 for kw in keywords if kw in text)
         if count > best_count:
             best_count = count
@@ -278,6 +266,16 @@ def convert_to_yaml(ideahub_content: dict) -> dict:
     with open(example_path, 'r') as f:
         example_content = f.read()
 
+    # Build domain reference dynamically from config (single source of truth)
+    from core.config_loader import ConfigLoader
+    loader = ConfigLoader()
+    domains_cfg = loader.get_domains_config().get('domains', {})
+    domain_lines = [
+        f"     - {name}: {entry.get('description', '')}".rstrip()
+        for name, entry in domains_cfg.items()
+    ]
+    domain_reference = "\n".join(domain_lines)
+
     # Create prompt for GPT - minimal formatting only
     prompt = f"""You are converting a research idea from IdeaHub to a simple YAML format.
 
@@ -308,10 +306,8 @@ The AI research agent will handle finding datasets, designing experiments, and i
 
 1. **Required fields**:
    - title: Use the provided title
-   - domain: Infer from: machine_learning, data_science, systems, theory, mathematics, battery, scientific_computing, nlp, computer_vision, reinforcement_learning, artificial_intelligence
-     Use "mathematics" for research centered on proofs, theorems, conjectures, or mathematical structures (algebra, analysis, topology, combinatorics, number theory, dynamical systems, etc.)
-     Use "theory" for algorithmic analysis, complexity theory, or formal methods that are more CS-oriented
-     Use "battery" for electrochemical energy storage research: battery cycling, electrode materials, electrolytes, capacity fade, impedance spectroscopy, fuel cells, supercapacitors
+   - domain: Pick the best fit from this list (defined in config/domains.yaml):
+{domain_reference}
    - hypothesis: Extract the research question or reformulate the idea as a testable hypothesis
 
 2. **Optional fields** (only include if present in the content):
