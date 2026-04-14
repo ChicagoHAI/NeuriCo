@@ -24,6 +24,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.idea_manager import IdeaManager
 from core.config_loader import ConfigLoader
 from core.security import sanitize_text
+from core.cost_estimator import (
+    PROVIDERS,
+    aggregate_usage,
+    estimate_cost_usd,
+    load_pricing_table,
+)
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -345,6 +351,7 @@ class ResearchRunner:
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
 
             # Return result info
+            self._print_terminal_cost_summary(work_dir=work_dir, provider=provider)
             return {
                 'work_dir': work_dir,
                 'github_url': github_url,
@@ -403,6 +410,7 @@ class ResearchRunner:
 
             # Prepare command
             log_file = work_dir / "logs" / f"execution_{provider}.log"
+            transcript_file = work_dir / "logs" / f"execution_{provider}_transcript.jsonl"
 
             # Build command - raw CLI by default, scribe if requested
             if use_scribe:
@@ -429,13 +437,14 @@ class ResearchRunner:
 
             print(f"   Command: {cmd}")
             print(f"   Log file: {log_file}")
+            print(f"   Transcript: {transcript_file}")
             print()
             print("=" * 80)
             print("AGENT OUTPUT (streaming)")
             print("=" * 80)
             print()
 
-            with open(log_file, 'w') as log_f:
+            with open(log_file, 'w') as log_f, open(transcript_file, 'w') as transcript_f:
                 # Start process in workspace directory
                 process = subprocess.Popen(
                     shlex.split(cmd),
@@ -458,6 +467,7 @@ class ResearchRunner:
                         sanitized_line = sanitize_text(line)
                         print(sanitized_line, end='')
                         log_f.write(sanitized_line)
+                        transcript_f.write(sanitized_line)
 
                 # Wait for completion
                 return_code = process.wait(timeout=timeout)
@@ -524,6 +534,7 @@ https://github.com/ChicagoHAI/neurico
                 print(f"   GitHub: {github_url}")
 
         # Return result info
+        self._print_terminal_cost_summary(work_dir=work_dir, provider=provider)
         return {
             'work_dir': work_dir,
             'github_url': github_url,
@@ -648,11 +659,92 @@ https://github.com/ChicagoHAI/neurico
                 print(f"Warning: Failed to push to GitHub: {e}")
                 print("   Changes are available locally")
 
+        self._print_terminal_cost_summary(work_dir=work_dir, provider=provider)
         return {
             'work_dir': work_dir,
             'github_url': github_url,
             'success': result['success']
         }
+
+    def _collect_transcript_files(self, work_dir: Path) -> List[Path]:
+        """Collect transcript files generated during a run."""
+        logs_dir = Path(work_dir) / "logs"
+        if not logs_dir.exists():
+            return []
+        return sorted(logs_dir.glob("*_transcript.jsonl"))
+
+    def _print_terminal_cost_summary(self, work_dir: Path, provider: str) -> None:
+        """
+        Print provider pricing table and estimated run cost.
+
+        Pricing is read from environment variables:
+          - NEURICO_COST_CLAUDE_INPUT_PER_1M
+          - NEURICO_COST_CLAUDE_OUTPUT_PER_1M
+          - NEURICO_COST_CODEX_INPUT_PER_1M
+          - NEURICO_COST_CODEX_OUTPUT_PER_1M
+          - NEURICO_COST_GEMINI_INPUT_PER_1M
+          - NEURICO_COST_GEMINI_OUTPUT_PER_1M
+        """
+        all_transcript_files = self._collect_transcript_files(work_dir)
+        if not all_transcript_files:
+            print("\n⚠️  No transcript files found, skipping cost summary.")
+            return
+
+        # NOTE: assumes single-provider run; may extend to multi-provider later.
+        transcript_files = [
+            path for path in all_transcript_files
+            if path.name.endswith(f"_{provider}_transcript.jsonl")
+        ]
+        if not transcript_files:
+            print(
+                f"\n⚠️  No transcript files found for provider '{provider}', "
+                "skipping cost summary."
+            )
+            return
+
+        usage = aggregate_usage(transcript_files)
+        pricing_table = load_pricing_table()
+
+        # Build a compact fixed-width table for terminal output.
+        header = (
+            f"{'Provider':<10} {'Input/M':>10} {'Output/M':>10} "
+            f"{'InTok':>12} {'OutTok':>12} {'Est USD':>12}"
+        )
+        print()
+        print("=" * 80)
+        print("COST ESTIMATOR")
+        print("=" * 80)
+        print(header)
+        print("-" * len(header))
+
+        for row_provider in PROVIDERS:
+            pricing = pricing_table[row_provider]
+            in_rate = "N/A" if pricing.input_per_1m is None else f"{pricing.input_per_1m:.4f}"
+            out_rate = "N/A" if pricing.output_per_1m is None else f"{pricing.output_per_1m:.4f}"
+
+            if row_provider == provider:
+                in_tok = usage.input_tokens
+                out_tok = usage.output_tokens
+                est_cost = estimate_cost_usd(usage, pricing)
+                est_cost_text = "N/A" if est_cost is None else f"{est_cost:.6f}"
+            else:
+                in_tok = 0
+                out_tok = 0
+                est_cost_text = "-"
+
+            print(
+                f"{row_provider:<10} {in_rate:>10} {out_rate:>10} "
+                f"{in_tok:>12} {out_tok:>12} {est_cost_text:>12}"
+            )
+
+        print("-" * len(header))
+        print(f"Transcripts scanned: {len(transcript_files)}")
+        print(f"Run provider: {provider}")
+        print(
+            "Pricing env vars: NEURICO_COST_<PROVIDER>_INPUT_PER_1M / "
+            "NEURICO_COST_<PROVIDER>_OUTPUT_PER_1M"
+        )
+        print("=" * 80)
 
     def _copy_workspace_resources(self, work_dir: Path):
         """
