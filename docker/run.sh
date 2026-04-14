@@ -1652,6 +1652,77 @@ cmd_config() {
 # -----------------------------------------------------------------------------
 # Show help
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Interactive mode: run a single agent inside Docker (internal command)
+# Used by the interactive manager to invoke individual agents
+# -----------------------------------------------------------------------------
+cmd__run_agent() {
+    if [ -z "$1" ]; then
+        echo -e "${RED}Usage: $0 _run-agent <agent_name> --workspace <path> --provider <provider> --run-id <id> --idea-file <path>${NC}"
+        echo "Agents: resource_finder, experiment_runner, paper_writer, comment_handler"
+        exit 1
+    fi
+
+    ensure_directories
+    check_env_file
+
+    local gpu_flags=$(get_gpu_flags)
+    local user_flags=$(get_user_flags)
+    local credential_mounts=$(get_cli_credential_mounts)
+    local workspace_dir=$(get_workspace_dir)
+
+    echo -e "${BLUE}Running agent: $1${NC}"
+    echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
+
+    eval "docker run --rm \
+        $gpu_flags \
+        $user_flags \
+        --env-file \"$PROJECT_ROOT/.env\" \
+        -e NEURICO_WORKSPACE=/workspaces \
+        -v \"$workspace_dir:/workspaces\" \
+        -v \"$PROJECT_ROOT/ideas:/app/ideas\" \
+        -v \"$PROJECT_ROOT/logs:/app/logs\" \
+        -v \"$PROJECT_ROOT/config:/app/config:ro\" \
+        -v \"$PROJECT_ROOT/templates:/app/templates:ro\" \
+        $credential_mounts \
+        -w /app \
+        \"$IMAGE_NAME\" \
+        python /app/src/core/agent_runner.py $@"
+}
+
+# -----------------------------------------------------------------------------
+# Interactive mode: launch the manager on the host
+# The manager runs outside Docker and uses _run-agent to invoke agents
+# -----------------------------------------------------------------------------
+cmd_interactive() {
+    if [ -z "$1" ]; then
+        echo -e "${RED}Usage: $0 interactive <idea_id> [--provider claude] [--engagement balanced]${NC}"
+        exit 1
+    fi
+
+    # The manager runs on the HOST, not inside Docker
+    # It needs Python available on the host
+    if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
+        echo -e "${RED}Python 3 is required on the host for interactive mode.${NC}"
+        echo "Install Python 3.10+ and try again."
+        exit 1
+    fi
+
+    local python_cmd="python3"
+    if ! command -v python3 &> /dev/null; then
+        python_cmd="python"
+    fi
+
+    echo -e "${BLUE}Starting NeuriCo Interactive Mode...${NC}"
+    echo ""
+
+    # Pass all arguments to the manager
+    # The manager will handle idea loading, Docker invocations, and user interaction
+    NEURICO_PROJECT_ROOT="$PROJECT_ROOT" \
+    NEURICO_WORKSPACE_DIR="$(get_workspace_dir)" \
+        $python_cmd "$PROJECT_ROOT/src/interactive/manager.py" "$@"
+}
+
 cmd_help() {
     show_banner
     show_status
@@ -1669,6 +1740,7 @@ cmd_help() {
     echo "  fetch <url> [--submit]    Fetch idea from IdeaHub"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
+    echo "  interactive <id>          Interactive mode with human-in-the-loop"
     echo "  update-tools              Update Claude/Codex/Gemini to latest versions"
     echo "  bump-version <version>    Bump version across all files (e.g., 0.3.0)"
     echo "  up                        Start container in background (compose)"
@@ -1683,6 +1755,7 @@ cmd_help() {
     echo "Daily usage:"
     echo "  $0 fetch https://ideahub.example.com/idea/123 --submit --run --provider claude --full-permissions"
     echo "  $0 run my-idea-id --provider claude --full-permissions"
+    echo "  $0 interactive my-idea-id --provider claude"
     echo "  $0 shell"
     echo ""
 }
@@ -1727,6 +1800,12 @@ case "$ACTION" in
         ;;
     run)
         cmd_run "$@"
+        ;;
+    _run-agent)
+        cmd__run_agent "$@"
+        ;;
+    interactive)
+        cmd_interactive "$@"
         ;;
     update-tools)
         cmd_update_tools
