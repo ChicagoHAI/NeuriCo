@@ -18,6 +18,14 @@ import sys
 import os
 import yaml
 
+# Force UTF-8 stdout/stderr on Windows where the default is cp1252.
+# Claude CLI output contains Unicode characters that cp1252 cannot represent,
+# causing a UnicodeEncodeError when print() tries to write them to the terminal.
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -230,7 +238,7 @@ class ResearchRunner:
 
                     # Save updated metadata
                     idea_path = self.idea_manager.ideas_dir / "submitted" / f"{idea_id}.yaml"
-                    with open(idea_path, 'w') as f:
+                    with open(idea_path, 'w', encoding='utf-8') as f:
                         yaml.dump(idea, f, default_flow_style=False, sort_keys=False)
 
                     # Clone repository
@@ -337,7 +345,10 @@ class ResearchRunner:
                         print(f"\n⚠️  Paper generation failed (research still succeeded)")
 
             except Exception as e:
+                import traceback
                 print(f"\n❌ Pipeline error: {e}")
+                with open(work_dir / "pipeline_error.log", 'w', encoding='utf-8') as _ef:
+                    traceback.print_exc(file=_ef)
                 success = False
                 # Don't raise - let finally block handle cleanup
             finally:
@@ -445,7 +456,6 @@ class ResearchRunner:
                     env=env,
                     text=True,
                     encoding='utf-8',
-                    errors='replace',
                     bufsize=1,
                     cwd=str(work_dir)
                 )

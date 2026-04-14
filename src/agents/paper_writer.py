@@ -11,6 +11,13 @@ from typing import Dict, Any
 import subprocess
 import shlex
 import os
+import sys
+
+# Force UTF-8 stdout on Windows so print() can handle Unicode from the Claude CLI.
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 CLI_COMMANDS = {
     'claude': 'claude -p',
@@ -42,7 +49,7 @@ def _load_style_config(style: str) -> Dict[str, Any]:
     }
 
     if config_path.exists():
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
             return {**default_config, **config}
     else:
@@ -238,7 +245,7 @@ def run_paper_writer(
     # Save prompt for debugging
     logs_dir = work_dir / "logs"
     logs_dir.mkdir(exist_ok=True)
-    (logs_dir / "paper_writer_prompt.txt").write_text(prompt)
+    (logs_dir / "paper_writer_prompt.txt").write_text(prompt, encoding='utf-8')
 
     # Build command
     cmd = CLI_COMMANDS.get(provider, 'claude -p')
@@ -274,7 +281,6 @@ def run_paper_writer(
                 env=env,
                 text=True,
                 encoding='utf-8',
-                errors='replace',
                 cwd=str(work_dir)
             )
 

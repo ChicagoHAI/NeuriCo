@@ -179,7 +179,6 @@ def run_resource_finder(
                 env=env,
                 text=True,
                 encoding='utf-8',
-                errors='replace',
                 bufsize=1,
                 cwd=str(work_dir)
             )
