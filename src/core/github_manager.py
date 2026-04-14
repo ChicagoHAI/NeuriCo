@@ -16,6 +16,7 @@ import shlex
 from datetime import datetime
 
 from core.security import sanitize_logs_directory
+from core.retry import retry_call
 
 try:
     from github import Github, GithubException, Auth
@@ -163,15 +164,20 @@ class GitHubManager:
         print(f"   Visibility: {'Private' if private else 'Public'}")
 
         try:
-            # auto_init=True creates an initial commit with README, ensuring the
-            # 'main' branch exists. The agent will overwrite README.md later.
-            # gitignore_template="Python" adds a Python .gitignore in that initial commit.
-            repo = self.owner.create_repo(
-                name=repo_name,
-                description=description,
-                private=private,
-                auto_init=True,
-                gitignore_template="Python",
+            def _create_repo():
+                return self.owner.create_repo(
+                    name=repo_name,
+                    description=description,
+                    private=private,
+                    auto_init=True,
+                    gitignore_template="Python",
+                )
+
+            repo = retry_call(
+                _create_repo,
+                max_retries=3,
+                base_delay=2.0,
+                retryable_exceptions=(ConnectionError, TimeoutError, OSError),
             )
 
             print(f"✅ Repository created: {repo.html_url}")
@@ -312,7 +318,12 @@ class GitHubManager:
 
                 # Push using refspec HEAD:refs/heads/{branch} so it works even if
                 # the local branch name differs (e.g., "master" vs "main" on older git)
-                origin.push(f"HEAD:refs/heads/{branch}")
+                retry_call(
+                    lambda: origin.push(f"HEAD:refs/heads/{branch}"),
+                    max_retries=3,
+                    base_delay=2.0,
+                    retryable_exceptions=(ConnectionError, TimeoutError, OSError),
+                )
                 print(f"   ✓ Pushed to {branch}")
 
                 return True
@@ -388,12 +399,20 @@ class GitHubManager:
         try:
             repo = self.owner.get_repo(repo_name)
 
-            # Create PR
-            pr = repo.create_pull(
-                title=title,
-                body=body,
-                head=head_branch,
-                base=base_branch
+            # Create PR with retry on transient errors
+            def _create_pr():
+                return repo.create_pull(
+                    title=title,
+                    body=body,
+                    head=head_branch,
+                    base=base_branch,
+                )
+
+            pr = retry_call(
+                _create_pr,
+                max_retries=3,
+                base_delay=2.0,
+                retryable_exceptions=(ConnectionError, TimeoutError, OSError),
             )
 
             print(f"✅ Pull request created: {pr.html_url}")
@@ -529,11 +548,20 @@ Examples:
 
 Output ONLY the repository name, nothing else."""
 
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=30
+            def _call_openai():
+                return client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=30,
+                )
+
+            response = retry_call(
+                _call_openai,
+                max_retries=3,
+                base_delay=2.0,
+                max_delay=30.0,
+                retryable_exceptions=(ConnectionError, TimeoutError, OSError),
             )
 
             slug = response.choices[0].message.content.strip()

@@ -18,3 +18,10 @@ workspace:
 
   # Default permissions for created workspace directories (octal)
   permissions: 0o755
+
+# Retry configuration for API calls and subprocess launches
+retry:
+  max_attempts: 3
+  backoff_factor: 2.0
+  initial_delay: 1.0
+  max_delay: 60.0

@@ -22,6 +22,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.security import sanitize_text
+from core.retry import retry_call
 
 
 # CLI commands for different providers
@@ -167,18 +168,27 @@ def run_resource_finder(
     completion_marker = work_dir / ".resource_finder_complete"
     start_time = time.time()
 
+    def _launch_subprocess():
+        """Launch the CLI agent subprocess (retried on transient launch failures)."""
+        return subprocess.Popen(
+            shlex.split(cmd),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            text=True,
+            bufsize=1,
+            cwd=str(work_dir)
+        )
+
     try:
         with open(log_file, 'w') as log_f, open(transcript_file, 'w') as transcript_f:
-            # Start process in workspace directory
-            process = subprocess.Popen(
-                shlex.split(cmd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                text=True,
-                bufsize=1,
-                cwd=str(work_dir)
+            # Start process in workspace directory (retry on launch failures like EAGAIN)
+            process = retry_call(
+                _launch_subprocess,
+                max_retries=3,
+                base_delay=1.0,
+                retryable_exceptions=(OSError,),
             )
 
             # Send prompt

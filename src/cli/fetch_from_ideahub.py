@@ -28,6 +28,8 @@ if env_local.exists():
 elif env_file.exists():
     load_dotenv(env_file)
 
+from core.retry import retry_call
+
 # Check if GitHub integration is available
 try:
     from core.github_manager import GitHubManager
@@ -50,12 +52,27 @@ def fetch_ideahub_content(url: str) -> dict:
     print(f"   URL: {url}")
 
     try:
-        # Fetch page
+        # Fetch page with retry on transient network errors
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
+
+        def _fetch():
+            resp = requests.get(url, headers=headers, timeout=30)
+            resp.raise_for_status()
+            return resp
+
+        response = retry_call(
+            _fetch,
+            max_retries=3,
+            base_delay=2.0,
+            retryable_exceptions=(
+                requests.ConnectionError,
+                requests.Timeout,
+                ConnectionError,
+                TimeoutError,
+            ),
+        )
 
         # Parse HTML
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -360,20 +377,27 @@ idea:
 
     try:
         print("   Calling GPT API...")
-        response = client.chat.completions.create(
-            model="gpt-4.1",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a research assistant that formats research ideas into minimal YAML. Only include information explicitly provided - do not invent datasets, methods, or metrics. Return valid YAML without markdown formatting."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.1,  # Lower temperature for more conservative output
-            max_tokens=2000  # Reduced since we want minimal output
+
+        def _call_openai():
+            return client.chat.completions.create(
+                model="gpt-4.1",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a research assistant that formats research ideas into minimal YAML. Only include information explicitly provided - do not invent datasets, methods, or metrics. Return valid YAML without markdown formatting.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+
+        response = retry_call(
+            _call_openai,
+            max_retries=3,
+            base_delay=2.0,
+            max_delay=30.0,
+            retryable_exceptions=(ConnectionError, TimeoutError, OSError),
         )
 
         yaml_content = response.choices[0].message.content.strip()

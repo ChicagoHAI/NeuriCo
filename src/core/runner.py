@@ -26,6 +26,7 @@ from core.config_loader import ConfigLoader
 from core.security import sanitize_text
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
+from core.retry import retry_call
 
 try:
     from core.github_manager import GitHubManager
@@ -435,9 +436,9 @@ class ResearchRunner:
             print("=" * 80)
             print()
 
-            with open(log_file, 'w') as log_f:
-                # Start process in workspace directory
-                process = subprocess.Popen(
+            def _launch_subprocess():
+                """Launch the CLI agent subprocess (retried on transient launch failures)."""
+                return subprocess.Popen(
                     shlex.split(cmd),
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
@@ -446,6 +447,15 @@ class ResearchRunner:
                     text=True,
                     bufsize=1,
                     cwd=str(work_dir)
+                )
+
+            with open(log_file, 'w') as log_f:
+                # Start process in workspace directory (retry on launch failures like EAGAIN)
+                process = retry_call(
+                    _launch_subprocess,
+                    max_retries=3,
+                    base_delay=1.0,
+                    retryable_exceptions=(OSError,),
                 )
 
                 # Send session instructions
