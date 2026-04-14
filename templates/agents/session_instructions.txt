@@ -337,7 +337,12 @@ When you reach Phase 6, create these files with ACTUAL results from your experim
 
    Include key visualizations/tables inline (as markdown).
 
-2. README.md - Quick overview containing:
+2. REPORT.html - After writing REPORT.md, generate the HTML report by executing the following:
+
+    python3 /path/to/NeuriCo/src/utils/generate_html.py . --output REPORT.html
+
+  This produces a self-contained REPORT.html with embedded figures alongside REPORT.md.
+3. README.md - Quick overview containing:
    - Brief project description (2-3 sentences)
    - Key findings summary (bullet points, 3-5 main results from your experiments)
    - How to reproduce (environment setup, run instructions)
