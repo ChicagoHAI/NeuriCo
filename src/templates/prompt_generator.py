@@ -459,17 +459,17 @@ Location: {run_dir}
         lit_review_path = work_dir / "literature_review.md"
 
         if report_path.exists():
-            report_content = report_path.read_text()
+            report_content = report_path.read_text(encoding='utf-8')
         else:
             report_content = "No REPORT.md found"
 
         if planning_path.exists():
-            planning_content = planning_path.read_text()
+            planning_content = planning_path.read_text(encoding='utf-8')
         else:
             planning_content = "No planning.md found"
 
         if lit_review_path.exists():
-            lit_review_content = lit_review_path.read_text()
+            lit_review_content = lit_review_path.read_text(encoding='utf-8')
         else:
             lit_review_content = "No literature_review.md found"
 
@@ -478,7 +478,7 @@ Location: {run_dir}
         idea_yaml_path = work_dir / ".neurico" / "idea.yaml"
         if idea_yaml_path.exists():
             try:
-                idea_meta = yaml.safe_load(idea_yaml_path.read_text())
+                idea_meta = yaml.safe_load(idea_yaml_path.read_text(encoding='utf-8'))
                 submitter = idea_meta.get('idea', {}).get('metadata', {}).get('author')
                 if submitter:
                     author_line = f"{submitter} and NeuriCo"

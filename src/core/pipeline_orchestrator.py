@@ -30,7 +30,7 @@ class PipelineState:
 
         # Initialize or load state
         if self.state_file.exists():
-            with open(self.state_file, 'r') as f:
+            with open(self.state_file, 'r', encoding='utf-8') as f:
                 self.state = json.load(f)
         else:
             self.state = {
@@ -43,7 +43,7 @@ class PipelineState:
 
     def _save(self):
         """Save state to disk."""
-        with open(self.state_file, 'w') as f:
+        with open(self.state_file, 'w', encoding='utf-8') as f:
             json.dump(self.state, f, indent=2)
 
     def start_stage(self, stage_name: str):
@@ -227,7 +227,7 @@ class ResearchPipelineOrchestrator:
         finally:
             # Save final results
             results_file = self.work_dir / ".neurico" / "pipeline_results.json"
-            with open(results_file, 'w') as f:
+            with open(results_file, 'w', encoding='utf-8') as f:
                 json.dump(results, f, indent=2)
 
             print()
@@ -411,7 +411,8 @@ class ResearchPipelineOrchestrator:
             success = False
             start_time = time.time()
 
-            with open(log_file, 'w') as log_f, open(transcript_file, 'w') as transcript_f:
+            with open(log_file, 'w', encoding='utf-8') as log_f, \
+                 open(transcript_file, 'w', encoding='utf-8') as transcript_f:
                 process = subprocess.Popen(
                     shlex.split(cmd),
                     stdin=subprocess.PIPE,
@@ -419,6 +420,7 @@ class ResearchPipelineOrchestrator:
                     stderr=subprocess.STDOUT,
                     env=env,
                     text=True,
+                    encoding='utf-8',
                     bufsize=1,
                     cwd=str(self.work_dir)
                 )

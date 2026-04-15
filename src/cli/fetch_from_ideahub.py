@@ -270,12 +270,12 @@ def convert_to_yaml(ideahub_content: dict) -> dict:
 
     # Read schema for reference
     schema_path = Path(__file__).parent.parent.parent / "ideas" / "schema.yaml"
-    with open(schema_path, 'r') as f:
+    with open(schema_path, 'r', encoding='utf-8') as f:
         schema_content = f.read()
 
     # Read example for reference
     example_path = Path(__file__).parent.parent.parent / "ideas" / "examples" / "ai_chain_of_thought_evaluation.yaml"
-    with open(example_path, 'r') as f:
+    with open(example_path, 'r', encoding='utf-8') as f:
         example_content = f.read()
 
     # Create prompt for GPT - minimal formatting only
@@ -635,7 +635,7 @@ def main():
 
                 # Save updated metadata
                 idea_path = manager.ideas_dir / "submitted" / f"{idea_id}.yaml"
-                with open(idea_path, 'w') as f:
+                with open(idea_path, 'w', encoding='utf-8') as f:
                     yaml.dump(idea, f, default_flow_style=False, sort_keys=False)
 
                 print(f"✅ Repository created: {github_repo_url}")
