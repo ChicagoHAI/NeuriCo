@@ -58,6 +58,7 @@ properties:
           - computer_vision
           - reinforcement_learning
           - artificial_intelligence
+          - particle_physics
         description: "Primary research domain"
 
       hypothesis:

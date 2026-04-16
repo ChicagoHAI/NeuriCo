@@ -69,6 +69,11 @@ domains:
     description: "Numerical methods, simulations, computational science"
     has_template: false  # Will use default
 
+  particle_physics:
+    name: "Particle Physics"
+    description: "Beyond-the-Standard-Model (BSM) model building with near-future experimental testability: addressing open SM problems (hierarchy, dark matter, neutrino masses, flavor anomalies, strong CP, muon g-2), respecting existing constraints (LHC, flavor, EWPO, cosmology, direct detection), and making falsifiable predictions for HL-LHC, FCC, DUNE, Belle II, LZ/XLZD, Hyper-K, IceCube-Gen2, and CMB-S4."
+    has_template: true
+
 # Validation settings
 validation:
   # Whether to allow unknown domains (will use default_domain)
