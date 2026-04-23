@@ -1,73 +1,202 @@
 # Research Domain Configuration
-# This file defines available research domains for NeuriCo
+# This file is the SINGLE SOURCE OF TRUTH for research domains in NeuriCo.
+#
+# Adding a new domain:
+#   1. Add an entry below with name, description, and (optional) keywords/paper_style
+#   2. (Optional) Create templates/domains/<domain_name>/core.txt for domain methodology
+#   3. (Optional) Create templates/domains/<domain_name>/{paper_writer,resource_finder,session_instructions}.txt
+#      for agent overrides
+#   4. (Optional) Create templates/paper_styles/<paper_style>/ if you need a new LaTeX style
+#
+# Source code reads everything from this file — no source edits needed for new domains.
 
 # Default domain to use when an unknown domain is specified
 default_domain: artificial_intelligence
 
+# Default paper style (used when a domain has no specific paper_style set)
+default_paper_style: neurips
+
 # Available research domains
-# Each domain should have a corresponding template in templates/domains/<domain>/core.txt
 domains:
   artificial_intelligence:
     name: "Artificial Intelligence"
     description: "LLM research, prompt engineering, AI agents, benchmarks"
     has_template: true
+    keywords:
+      - llm
+      - language model
+      - nlp
+      - text
+      - gpt
+      - bert
+      - transformer
+      - prompt
+      - token
 
   machine_learning:
     name: "Machine Learning"
     description: "Model training, evaluation, hyperparameter tuning"
     has_template: true
+    keywords:
+      - regression
+      - classification
+      - clustering
+      - supervised
+      - unsupervised
+      - gradient
+      - neural
 
   data_science:
     name: "Data Science"
     description: "Exploratory data analysis, statistical analysis, visualization"
     has_template: true
+    keywords:
+      - data analysis
+      - statistics
+      - prediction
+      - forecasting
+      - tabular
 
   nlp:
     name: "Natural Language Processing"
     description: "Traditional NLP tasks (non-LLM), text processing"
     has_template: false  # Will use default
+    keywords:
+      - tokenization
+      - parsing
+      - named entity
+      - sentiment
+      - syntactic
+      - dependency parsing
 
   computer_vision:
     name: "Computer Vision"
     description: "Image processing, object detection, visual analysis"
     has_template: false  # Will use default
+    keywords:
+      - vision
+      - image
+      - cnn
+      - object detection
+      - segmentation
+      - diffusion
 
   reinforcement_learning:
     name: "Reinforcement Learning"
     description: "Agent training, policy evaluation, RL algorithms"
     has_template: false  # Will use default
+    keywords:
+      - reinforcement
+      - " rl "
+      - reward
+      - policy
+      - agent
+      - environment
 
   systems:
     name: "Systems"
     description: "Performance benchmarking, optimization, distributed systems"
     has_template: false  # Will use default
+    keywords:
+      - distributed
+      - database
+      - network
+      - operating system
+      - compiler
 
   theory:
     name: "Theory"
     description: "Algorithmic analysis, complexity theory, formal methods"
     has_template: false  # Will use default
+    keywords:
+      - algorithm
+      - complexity
+      - optimization
 
   mathematics:
     name: "Mathematics"
     description: "Pure and applied mathematics: algebra, analysis, topology, number theory, combinatorics, geometry, proofs"
     has_template: true
     paper_style: ams
+    keywords:
+      - theorem
+      - proof
+      - conjecture
+      - lemma
+      - algebra
+      - topology
+      - number theory
+      - combinatorics
+      - graph theory
+      - manifold
+      - homomorphism
+      - isomorphism
+      - eigenvalue
+      - differential equation
+      - synchronization
+      - bifurcation
+      - dynamical system
 
   finance:
     name: "Finance"
     description: "Empirical finance: banking, corporate finance, asset pricing, financial regulation, panel data analysis"
     has_template: true
     paper_style: finance
+    keywords:
+      - bank
+      - banking
+      - tax shield
+      - capital structure
+      - leverage
+      - corporate finance
+      - asset pricing
+      - equity
+      - dividend
+      - call report
+      - compustat
+      - crsp
+      - sec filing
+      - fdic
+      - effective tax rate
+      - difference-in-differences
+      - panel regression
+      - event study
+      - binscatter
 
   battery:
     name: "Battery Research"
     description: "Electrochemical energy storage: lithium-ion, solid-state, sodium-ion batteries, supercapacitors, fuel cells, electrode materials, electrolytes"
     has_template: true
+    keywords:
+      - battery
+      - lithium
+      - sodium
+      - electrolyte
+      - electrode
+      - cathode
+      - anode
+      - electrochemical
+      - cycling
+      - capacity
+      - coulombic
+      - impedance
+      - solid-state
+      - electrolysis
+      - fuel cell
+      - supercapacitor
+      - energy storage
 
   scientific_computing:
     name: "Scientific Computing"
     description: "Numerical methods, simulations, computational science"
     has_template: false  # Will use default
+    keywords:
+      - simulation
+      - numerical
+      - physics
+      - biology
+      - chemistry
+      - molecular
 
 # Validation settings
 validation:
