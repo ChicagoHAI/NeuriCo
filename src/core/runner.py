@@ -13,10 +13,17 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 import subprocess
 import shlex
-from datetime import datetime
 import sys
 import os
 import yaml
+
+# Force UTF-8 stdout/stderr on Windows where the default is cp1252.
+# Claude CLI output contains Unicode characters that cp1252 cannot represent,
+# causing a UnicodeEncodeError when print() tries to write them to the terminal.
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -114,7 +121,8 @@ class ResearchRunner:
                     paper_style: str = None,
                     paper_timeout: int = 3600,
                     no_hash: bool = False,
-                    private: bool = False) -> Dict[str, Any]:
+                    private: bool = False,
+                    force_fresh: bool = False) -> Dict[str, Any]:
         """
         Execute research for a given idea.
 
@@ -134,6 +142,7 @@ class ResearchRunner:
             write_paper: Generate paper draft after experiments (default: False)
             paper_style: Paper template style (neurips, icml, acl, ams). None = auto-detect from domain
             paper_timeout: Timeout for paper writing in seconds
+            force_fresh: Ignore existing local workspace and start a new run from scratch
 
         Returns:
             Dictionary with:
@@ -188,6 +197,7 @@ class ResearchRunner:
                     print(f"   Continuing with local version...")
 
                 work_dir = existing_workspace
+                is_resuming = (work_dir / ".neurico" / "pipeline_state.json").exists()
 
                 # Get GitHub URL from remote
                 try:
@@ -229,7 +239,7 @@ class ResearchRunner:
 
                     # Save updated metadata
                     idea_path = self.idea_manager.ideas_dir / "submitted" / f"{idea_id}.yaml"
-                    with open(idea_path, 'w') as f:
+                    with open(idea_path, 'w', encoding='utf-8') as f:
                         yaml.dump(idea, f, default_flow_style=False, sort_keys=False)
 
                     # Clone repository
@@ -251,6 +261,7 @@ class ResearchRunner:
                     )
 
                     work_dir = repo_info['local_path']
+                    is_resuming = False
                     print(f"\n✅ Working in GitHub repository")
                     print(f"   URL: {github_url}")
                     print(f"   Local: {work_dir}\n")
@@ -262,12 +273,24 @@ class ResearchRunner:
                     # Fall through to local setup below
 
         if not self.use_github:
-            # Local execution (original behavior)
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            run_id = f"{idea_id}_{provider}_{timestamp}"
-            work_dir = self.runs_dir / run_id
-            work_dir.mkdir(parents=True, exist_ok=True)
-            print(f"📁 Working directory: {work_dir}\n")
+            existing_workspace = idea.get('idea', {}).get('metadata', {}).get('local_workspace')
+
+            if not force_fresh and existing_workspace and Path(existing_workspace).exists():
+                work_dir = Path(existing_workspace)
+                is_resuming = (work_dir / ".neurico" / "pipeline_state.json").exists()
+                print(f"\n✅ Using existing workspace: {work_dir}\n")
+            else:
+                work_dir = self.runs_dir / idea_id
+                work_dir.mkdir(parents=True, exist_ok=True)
+                is_resuming = False
+
+                # Persist workspace path in idea metadata for future runs
+                idea.setdefault('idea', {}).setdefault('metadata', {})['local_workspace'] = str(work_dir)
+                idea_path = self.idea_manager.get_idea_path(idea_id)
+                with open(idea_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(idea, f, default_flow_style=False, sort_keys=False)
+
+                print(f"📁 Working directory: {work_dir}\n")
 
         # Create subdirectories
         (work_dir / "logs").mkdir(parents=True, exist_ok=True)
@@ -295,6 +318,22 @@ class ResearchRunner:
                 work_dir=work_dir,
                 templates_dir=self.project_root / "templates"
             )
+
+            # If resuming into an existing workspace, check which stages already completed
+            # and skip them — read pipeline_state.json directly rather than relying on
+            # resume_pipeline() which is not wired up for production use.
+            if is_resuming and not skip_resource_finder:
+                state_file = work_dir / ".neurico" / "pipeline_state.json"
+                try:
+                    import json as _json
+                    with open(state_file, 'r', encoding='utf-8') as _f:
+                        _state = _json.load(_f)
+                    rf_stage = _state.get('stages', {}).get('resource_finder', {})
+                    if rf_stage.get('status') == 'completed' and rf_stage.get('success'):
+                        print("⏭️  Resource finder already completed — skipping.")
+                        skip_resource_finder = True
+                except Exception:
+                    pass  # Unreadable state file — run all stages normally
 
             try:
                 pipeline_result = orchestrator.run_pipeline(
@@ -434,7 +473,7 @@ class ResearchRunner:
             print("=" * 80)
             print()
 
-            with open(log_file, 'w') as log_f:
+            with open(log_file, 'w', encoding='utf-8') as log_f:
                 # Start process in workspace directory
                 process = subprocess.Popen(
                     shlex.split(cmd),
@@ -443,6 +482,7 @@ class ResearchRunner:
                     stderr=subprocess.STDOUT,
                     env=env,
                     text=True,
+                    encoding='utf-8',
                     bufsize=1,
                     cwd=str(work_dir)
                 )
@@ -917,6 +957,11 @@ def main():
         help="Timeout for paper writing in seconds (default: 3600 = 60 min)"
     )
     parser.add_argument(
+        "--force-fresh",
+        action="store_true",
+        help="Ignore existing local workspace and start a new run from scratch"
+    )
+    parser.add_argument(
         "--comment-mode",
         action="store_true",
         help="Run in comment mode: make targeted improvements based on comments in the idea file"
@@ -967,7 +1012,8 @@ def main():
             paper_style=args.paper_style,
             paper_timeout=args.paper_timeout,
             no_hash=args.no_hash,
-            private=args.private
+            private=args.private,
+            force_fresh=args.force_fresh
         )
 
         print()

@@ -620,7 +620,7 @@ Output ONLY the repository name, nothing else."""
         metadata_dir.mkdir(exist_ok=True)
 
         # Save full idea spec
-        with open(metadata_dir / "idea.yaml", 'w') as f:
+        with open(metadata_dir / "idea.yaml", 'w', encoding='utf-8') as f:
             yaml.dump(idea_spec, f, default_flow_style=False, sort_keys=False)
 
         print("✓ Added idea metadata to .neurico/idea.yaml")
@@ -654,7 +654,7 @@ def main():
 
     # Add test file
     test_file = Path(repo.working_dir) / "test.txt"
-    test_file.write_text("Hello from NeuriCo!")
+    test_file.write_text("Hello from NeuriCo!", encoding='utf-8')
 
     # Test commit and push
     manager.commit_and_push(
