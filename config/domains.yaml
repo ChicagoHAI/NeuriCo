@@ -198,6 +198,63 @@ domains:
       - chemistry
       - molecular
 
+  particle_physics:
+    name: "Particle Physics"
+    description: "Beyond-the-Standard-Model (BSM) model building with near-future experimental testability: addressing open SM problems (hierarchy, dark matter, neutrino masses, flavor anomalies, strong CP, muon g-2), respecting existing constraints (LHC, flavor, EWPO, cosmology, direct detection), and making falsifiable predictions for HL-LHC, FCC, DUNE, Belle II, LZ/XLZD, Hyper-K, IceCube-Gen2, and CMB-S4."
+    has_template: true
+    keywords:
+      - bsm
+      - beyond standard model
+      - standard model
+      - higgs
+      - supersymmetry
+      - susy
+      - dark matter
+      - wimp
+      - neutrino
+      - sterile neutrino
+      - axion
+      - alp
+      - lepton flavor
+      - flavor violation
+      - cp violation
+      - parton
+      - gauge boson
+      - electroweak
+      - collider
+      - lhc
+      - hl-lhc
+      - fcc
+      - belle ii
+      - dune
+      - hyper-k
+      - icecube
+      - lz
+      - xenon
+      - madgraph
+      - feynrules
+      - pythia
+      - delphes
+      - micromegas
+      - feynman
+      - cross section
+      - branching ratio
+      - hierarchy problem
+      - hidden sector
+      - dark photon
+      - effective field theory
+      - smeft
+      - seesaw
+      - leptoquark
+      - muon g-2
+      - edm
+      - cmb-s4
+      - snowmass
+      - particle physics
+      - high energy physics
+      - hep-ph
+      - hep-ex
+
 # Validation settings
 validation:
   # Whether to allow unknown domains (will use default_domain)
