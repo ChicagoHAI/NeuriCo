@@ -15,6 +15,7 @@ import subprocess
 import shlex
 from datetime import datetime
 
+from core.retry import call_with_retry
 from core.security import sanitize_logs_directory
 
 try:
@@ -166,12 +167,20 @@ class GitHubManager:
             # auto_init=True creates an initial commit with README, ensuring the
             # 'main' branch exists. The agent will overwrite README.md later.
             # gitignore_template="Python" adds a Python .gitignore in that initial commit.
-            repo = self.owner.create_repo(
-                name=repo_name,
-                description=description,
-                private=private,
-                auto_init=True,
-                gitignore_template="Python",
+            def _create_repo():
+                return self.owner.create_repo(
+                    name=repo_name,
+                    description=description,
+                    private=private,
+                    auto_init=True,
+                    gitignore_template="Python",
+                )
+
+            repo = call_with_retry(
+                _create_repo,
+                max_retries=3,
+                base_delay=2.0,
+                retryable_exceptions=(ConnectionError, TimeoutError, OSError),
             )
 
             print(f"✅ Repository created: {repo.html_url}")
@@ -386,14 +395,27 @@ class GitHubManager:
             PR URL if successful, None otherwise
         """
         try:
-            repo = self.owner.get_repo(repo_name)
+            repo = call_with_retry(
+                lambda: self.owner.get_repo(repo_name),
+                max_retries=3,
+                base_delay=2.0,
+                retryable_exceptions=(ConnectionError, TimeoutError, OSError),
+            )
 
             # Create PR
-            pr = repo.create_pull(
-                title=title,
-                body=body,
-                head=head_branch,
-                base=base_branch
+            def _create_pr():
+                return repo.create_pull(
+                    title=title,
+                    body=body,
+                    head=head_branch,
+                    base=base_branch,
+                )
+
+            pr = call_with_retry(
+                _create_pr,
+                max_retries=3,
+                base_delay=2.0,
+                retryable_exceptions=(ConnectionError, TimeoutError, OSError),
             )
 
             print(f"✅ Pull request created: {pr.html_url}")
@@ -529,11 +551,20 @@ Examples:
 
 Output ONLY the repository name, nothing else."""
 
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=30
+            def _call_openai():
+                return client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=30,
+                )
+
+            response = call_with_retry(
+                _call_openai,
+                max_retries=3,
+                base_delay=2.0,
+                max_delay=30.0,
+                retryable_exceptions=(ConnectionError, TimeoutError, OSError),
             )
 
             slug = response.choices[0].message.content.strip()
