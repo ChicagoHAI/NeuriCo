@@ -45,6 +45,7 @@ venv/
 env/
 ENV/
 .venv
+.coverage
 
 # IDE
 .vscode/
