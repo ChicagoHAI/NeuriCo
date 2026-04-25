@@ -8,17 +8,31 @@ This module orchestrates the multi-agent research pipeline:
 
 The orchestrator manages agent execution flow, monitors completion, handles errors,
 and tracks pipeline state.
+
+Context-management responsibilities:
+- Maintain STATE.md via StateManager
+- Record working directory checks at stage boundaries
+- Validate each stage before transitioning to the next one
+- Generate phase summaries for focused handoff
+- Pass prior summaries and state snapshots to the experiment runner prompt
 """
 
+from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Dict, Any
 import json
 from datetime import datetime
 import time
+import subprocess
+import shlex
+import os
 
 from agents.resource_finder import run_resource_finder
-from templates.research_agent_instructions import generate_instructions
 
+from core.state_manager import StateManager
+from core.validators import StageValidator
+from core.context_summarizer import ContextSummarizer
+from core.security import sanitize_text
 
 class PipelineState:
     """Tracks pipeline execution state."""
@@ -30,7 +44,7 @@ class PipelineState:
 
         # Initialize or load state
         if self.state_file.exists():
-            with open(self.state_file, 'r') as f:
+            with open(self.state_file, 'r', encoding='utf-8') as f:
                 self.state = json.load(f)
         else:
             self.state = {
@@ -41,12 +55,12 @@ class PipelineState:
             }
             self._save()
 
-    def _save(self):
+    def _save(self) -> None:
         """Save state to disk."""
-        with open(self.state_file, 'w') as f:
+        with open(self.state_file, 'w', encoding='utf-8') as f:
             json.dump(self.state, f, indent=2)
 
-    def start_stage(self, stage_name: str):
+    def start_stage(self, stage_name: str) -> None:
         """Mark a stage as started."""
         self.state['current_stage'] = stage_name
         self.state['stages'][stage_name] = {
@@ -58,7 +72,7 @@ class PipelineState:
         }
         self._save()
 
-    def complete_stage(self, stage_name: str, success: bool, outputs: Optional[Dict] = None):
+    def complete_stage(self, stage_name: str, success: bool, outputs: Optional[Dict] = None) -> None:
         """Mark a stage as completed."""
         if stage_name not in self.state['stages']:
             self.state['stages'][stage_name] = {}
@@ -72,7 +86,7 @@ class PipelineState:
         self.state['current_stage'] = None
         self._save()
 
-    def mark_completed(self):
+    def mark_completed(self) -> None:
         """Mark entire pipeline as completed."""
         self.state['completed'] = True
         self.state['completed_at'] = datetime.now().isoformat()
@@ -105,6 +119,8 @@ class ResearchPipelineOrchestrator:
     1. resource_finder: Gather papers, datasets, code (CLI agent)
     2. (optional) human_review: Wait for human approval
     3. experiment_runner: Run experiments and analysis (CLI agent by default, Scribe optional)
+    
+    The orchestrator owns stage transitions and context management policy. Agents own the actual research work.
     """
 
     def __init__(self, work_dir: Path, templates_dir: Optional[Path] = None):
@@ -117,12 +133,115 @@ class ResearchPipelineOrchestrator:
         """
         self.work_dir = Path(work_dir)
         self.state = PipelineState(self.work_dir)
+        self.state_manager = StateManager(self.work_dir)
+        self.validator = StageValidator(self.work_dir)
+        self.summarizer = ContextSummarizer(self.work_dir)
 
         # Auto-detect templates directory if not provided
         if templates_dir is None:
             templates_dir = Path(__file__).parent.parent.parent / "templates"
         self.templates_dir = templates_dir
+    def _initialize_runtime_state(self):
+        """Initialize STATE.md and internal state artifacts if missing."""
+        if self.state_manager.get_current() is None:
+            self.state_manager.initialize(
+                current_stage="resource_finder",
+                current_phase="starting",
+                status="active",
+                what_is_done=["Workspace initialized"],
+                key_findings=[],
+                next_steps=["Run resource finder"],
+                cwd=str(self.work_dir),
+                notes="Pipeline execution initialized.",
+            )
+        else:
+            self.state_manager.update(
+                current_stage="pipeline",
+                current_phase="resuming",
+                status="active",
+                what_is_done=["Pipeline resumed with existing state"],
+                cwd=str(self.work_dir),
+                event="pipeline_resume",
+            )
 
+    def _record_cwd_check(self, stage_name: str, phase_name: str) -> None:
+        """
+        Record an orchestrator-level working-directory check.
+
+        Agents also receive instructions to run `pwd` inside their shell session.
+        It records the orchestrator-side expectation before launching or transitioning stages.
+        """
+        self.state_manager.check_working_directory(
+            expected_dir=self.work_dir,
+            actual_dir=self.work_dir,
+            current_stage=stage_name,
+            current_phase=phase_name,
+        )
+
+    def _validate_stage_or_raise(self, stage_name: str, idea: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Run stage validator and raise on failure.
+        """
+        result = self.validator.validate_stage(stage_name, idea)
+        if not result["passed"]:
+            self.state_manager.mark_failure(
+                reason=f"{stage_name} validation failed: {result['summary']}",
+                current_stage=stage_name,
+                current_phase="validation",
+                cwd=str(self.work_dir),
+                recoverable=result.get("recoverable", True),
+            )
+            raise RuntimeError(f"{stage_name} validation failed: {result['summary']}")
+        self.state_manager.update(
+            current_stage=stage_name,
+            current_phase="validated",
+            status="active",
+            append_done=[f"{stage_name} validation passed"],
+            cwd=str(self.work_dir),
+            event=f"{stage_name}_validation_passed",
+        )
+        return result
+    
+    def _summarize_and_update_state(self, from_stage: str, next_stage: Optional[str], idea: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Generate stage handoff summary and update STATE.md.
+
+        ContextSummarizer writes: 
+        - .neurico/phase_summary.json
+        - .neurico/phase_summary_<stage>.json
+
+        Args: 
+        - from_stage: stage that just completed
+        - next_stage: next stage, or None if pipeline is done
+        - idea: idea specification
+
+        Returns: summary dictionary
+        """
+        summary = self.summarizer.summarize_stage(from_stage, idea)
+
+        self.state_manager.update(
+            current_stage=from_stage,
+            current_phase="summarized",
+            status="active",
+            append_done=[f"{from_stage} summarized"],
+            append_findings=summary.get("key_findings", []),
+            append_next_steps=summary.get("next_steps", []),
+            cwd=str(self.work_dir),
+            notes=summary.get("summary_text", ""),
+            event=f"{from_stage}_summary_created",
+        )
+
+        if next_stage:
+            self.state_manager.update(
+                current_stage=next_stage,
+                current_phase="ready",
+                status="active",
+                append_done=[f"Ready to start {next_stage}"],
+                cwd=str(self.work_dir),
+                event=f"{next_stage}_ready",
+            )
+        return summary
+    
     def run_pipeline(
         self,
         idea: Dict[str, Any],
@@ -162,15 +281,29 @@ class ResearchPipelineOrchestrator:
         print("=" * 80)
         print()
 
-        results = {
+        results: Dict[str, Any] = {
             'success': False,
             'stages': {},
             'work_dir': str(self.work_dir)
         }
 
+        self._initialize_runtime_state()
+
         try:
             # STAGE 1: Resource Finder
             if not skip_resource_finder:
+                self._record_cwd_check("resource_finder", "starting")
+
+                self.state_manager.update(
+                    current_stage="resource_finder",
+                    current_phase="running",
+                    status="active",
+                    append_done=["Starting resource finder stage"],
+                    next_steps=["Gather papers, datasets, code, and literature review"],
+                    cwd=str(self.work_dir),
+                    event="resource_finder_start",
+                )
+
                 results['stages']['resource_finder'] = self._run_resource_finder(
                     idea=idea,
                     provider=provider,
@@ -185,10 +318,38 @@ class ResearchPipelineOrchestrator:
                     print("   1. Review logs and fix issues")
                     print("   2. Re-run with --skip-resource-finder if resources are already gathered")
                     print("   3. Manually add resources to workspace and continue")
+
+                    self.state_manager.mark_failure(
+                        reason="Resource finder stage failed before validation.",
+                        current_stage="resource_finder",
+                        current_phase="failed",
+                        cwd=str(self.work_dir),
+                        recoverable=True,
+                    )
                     return results
+                
+                validation_result = self._validate_stage_or_raise("resource_finder", idea)
+                resource_summary = self._summarize_and_update_state(
+                    from_stage="resource_finder",
+                    next_stage="experiment_runner",
+                    idea=idea,
+                )
+
+                results["stages"]["resource_finder"]["validation"] = validation_result
+                results["stages"]["resource_finder"]["summary"] = resource_summary
+
             else:
                 print("⏭️  Skipping resource finder stage (resources assumed to be ready)")
                 self.state.complete_stage('resource_finder', success=True, outputs={'skipped': True})
+                self.state_manager.update(
+                    current_stage="experiment_runner",
+                    current_phase="ready",
+                    status="active",
+                    append_done=["Skipped resource finder stage"],
+                    next_steps=["Run experiment runner using existing resources"],
+                    cwd=str(self.work_dir),
+                    event="resource_finder_skipped",
+                )
                 results['stages']['resource_finder'] = {'success': True, 'skipped': True}
 
             # STAGE 2: Human Review (Optional)
@@ -201,6 +362,18 @@ class ResearchPipelineOrchestrator:
                     return results
 
             # STAGE 3: Experiment Runner
+            self._record_cwd_check("experiment_runner", "starting")
+
+            self.state_manager.update(
+                current_stage="experiment_runner",
+                current_phase="running",
+                status="active",
+                append_done=["Starting experiment runner stage"],
+                next_steps=["Run implementation, experiments, analysis, and documentation"],
+                cwd=str(self.work_dir),
+                event="experiment_runner_start",
+            )
+
             results['stages']['experiment_runner'] = self._run_experiment_runner(
                 idea=idea,
                 provider=provider,
@@ -210,24 +383,56 @@ class ResearchPipelineOrchestrator:
             )
 
             if results['stages']['experiment_runner']['success']:
+                experiment_validation = self._validate_stage_or_raise("experiment_runner", idea)
+                experiment_summary = self._summarize_and_update_state(
+                    from_stage="experiment_runner",
+                    next_stage=None,
+                    idea=idea,
+                )
+                results["stages"]["experiment_runner"]["validation"] = experiment_validation
+                results["stages"]["experiment_runner"]["summary"] = experiment_summary
                 print()
                 print("🎉 PIPELINE COMPLETED SUCCESSFULLY!")
                 self.state.mark_completed()
+                self.state_manager.update(
+                    current_stage="runner",
+                    current_phase="post_pipeline",
+                    status="active",
+                    append_done=["Multi-agent pipeline completed successfully"],
+                    next_steps=["Optionally generate paper draft"],
+                    cwd=str(self.work_dir),
+                    notes="Pipeline completed successfully.",
+                    event="pipeline_completed",
+                )
                 results['success'] = True
             else:
                 print()
                 print("⚠️  Experiment runner stage completed with issues.")
+                self.state_manager.mark_failure(
+                    reason="Experiment runner completed with issues.",
+                    current_stage="experiment_runner",
+                    current_phase="failed",
+                    cwd=str(self.work_dir),
+                    recoverable=True,
+                )
 
         except Exception as e:
             print()
             print(f"❌ Pipeline error: {e}")
             results['error'] = str(e)
+            self.state_manager.mark_failure(
+                reason=f"Pipeline error: {e}",
+                current_stage="pipeline",
+                current_phase="error",
+                cwd=str(self.work_dir),
+                recoverable=True,
+            )
             raise
 
         finally:
             # Save final results
             results_file = self.work_dir / ".neurico" / "pipeline_results.json"
-            with open(results_file, 'w') as f:
+            with open(results_file, 'w', encoding='utf-8') as f:
                 json.dump(results, f, indent=2)
 
             print()
@@ -304,8 +509,24 @@ class ResearchPipelineOrchestrator:
 
         if approved:
             print("✅ Proceeding to experiment runner stage...")
+            self.state_manager.update(
+                current_stage="human_review",
+                current_phase="approved",
+                status="completed",
+                append_done=["Human review approved continuation"],
+                cwd=str(self.work_dir),
+                event="human_review_approved",
+            )
         else:
             print("🛑 Pipeline stopped by user.")
+            self.state_manager.update(
+                current_stage="human_review",
+                current_phase="stopped",
+                status="cancelled",
+                append_done=["Human review stopped continuation"],
+                cwd=str(self.work_dir),
+                event="human_review_stopped",
+            )            
 
         return result
 
@@ -326,22 +547,20 @@ class ResearchPipelineOrchestrator:
 
         self.state.start_stage('experiment_runner')
 
-        # Import here to avoid circular dependency
-        import subprocess
-        import shlex
-        import os
-        from core.security import sanitize_text
-
         try:
             # Generate prompt (without Phase 0, resource-aware)
             from templates.prompt_generator import PromptGenerator
 
             prompt_generator = PromptGenerator(self.templates_dir)
+            phase_summary = self.summarizer.load_phase_summary()
+            state_snapshot = self.state_manager.get_current()
             prompt = prompt_generator.generate_research_prompt(idea, root_dir=self.work_dir)
 
+            logs_dir = self.work_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+
             # Save prompt
-            prompt_file = self.work_dir / "logs" / "research_prompt.txt"
-            prompt_file.parent.mkdir(parents=True, exist_ok=True)
+            prompt_file = logs_dir / "research_prompt.txt"
             with open(prompt_file, 'w', encoding='utf-8') as f:
                 f.write(prompt)
 
@@ -351,15 +570,17 @@ class ResearchPipelineOrchestrator:
 
             # Generate session instructions (resource-aware version)
             domain = idea.get('idea', {}).get('domain', 'general')
-            session_instructions = generate_instructions(
+            session_instructions = prompt_generator.generate_session_instructions(
                 prompt=prompt,
                 work_dir=str(self.work_dir),
                 use_scribe=use_scribe,
-                domain=domain
+                domain=domain,
+                phase_summary=phase_summary,
+                state_snapshot=state_snapshot.to_dict() if state_snapshot else None,
             )
 
             # Save session instructions
-            session_file = self.work_dir / "logs" / "session_instructions.txt"
+            session_file = logs_dir / "session_instructions.txt"
             with open(session_file, 'w', encoding='utf-8') as f:
                 f.write(session_instructions)
 
@@ -367,6 +588,8 @@ class ResearchPipelineOrchestrator:
             if use_scribe:
                 cmd = f"scribe {provider}"
             else:
+                if provider not in CLI_COMMANDS:
+                    raise ValueError(f"Unsupported provider: {provider}")
                 cmd = CLI_COMMANDS[provider]
 
             # Add permission flags
@@ -387,8 +610,8 @@ class ResearchPipelineOrchestrator:
             elif provider == "gemini":
                 cmd += " --output-format stream-json"
 
-            log_file = self.work_dir / "logs" / f"execution_{provider}.log"
-            transcript_file = self.work_dir / "logs" / f"execution_{provider}_transcript.jsonl"
+            log_file = logs_dir / f"execution_{provider}.log"
+            transcript_file = logs_dir / f"execution_{provider}_transcript.jsonl"
 
             mode_str = "scribe (notebooks)" if use_scribe else "raw CLI"
             print(f"▶️  Launching {provider} in {mode_str} mode...")
@@ -406,12 +629,26 @@ class ResearchPipelineOrchestrator:
             env['PYTHONUNBUFFERED'] = '1'
             if use_scribe:
                 env['SCRIBE_RUN_DIR'] = str(self.work_dir)
+            
+            # Disable Gemini IDE integration to avoid cwd mismatch issues
+            if provider == "gemini":
+                env["GEMINI_CLI_IDE_DISABLE"] = "1"
 
             # Execute agent
             success = False
             start_time = time.time()
+            process = None
 
-            with open(log_file, 'w') as log_f, open(transcript_file, 'w') as transcript_f:
+            self.state_manager.update(
+                current_stage="experiment_runner",
+                current_phase="agent_running",
+                status="active",
+                append_done=["Experiment runner agent launched"],
+                cwd=str(self.work_dir),
+                event="experiment_runner_agent_launched",
+            )
+
+            with open(log_file, 'w', encoding='utf-8') as log_f, open(transcript_file, 'w', encoding='utf-8') as transcript_f:
                 process = subprocess.Popen(
                     shlex.split(cmd),
                     stdin=subprocess.PIPE,
@@ -424,12 +661,14 @@ class ResearchPipelineOrchestrator:
                 )
 
                 # Send session instructions
+                assert process.stdin is not None
                 process.stdin.write(session_instructions)
                 process.stdin.close()
 
                 # Stream output to both log file and transcript file (sanitized for security)
                 # For Claude/Codex with JSON flags, the output IS the transcript
                 # For Gemini, the output is regular text but sessions are saved separately
+                assert process.stdout is not None
                 for line in iter(process.stdout.readline, ''):
                     if line:
                         sanitized_line = sanitize_text(line)
@@ -463,28 +702,52 @@ class ResearchPipelineOrchestrator:
 
             self.state.complete_stage('experiment_runner', success, result)
 
+            self.state_manager.update(
+                current_stage="experiment_runner",
+                current_phase="completed" if success else "completed_with_issues",
+                status="completed" if success else "warning",
+                append_done=["Experiment runner completed"],
+                cwd=str(self.work_dir),
+                event="experiment_runner_completed",
+            )
+
             return result
 
         except subprocess.TimeoutExpired:
             print(f"\n⏱️  Experiment runner timed out after {timeout} seconds")
-            process.kill()
+            if process is not None:
+                process.kill()
             result = {'success': False, 'error': 'timeout'}
             self.state.complete_stage('experiment_runner', False, result)
+            self.state_manager.mark_failure(
+                reason=f"Experiment runner timed out after {timeout} seconds.",
+                current_stage="experiment_runner",
+                current_phase="timeout",
+                cwd=str(self.work_dir),
+                recoverable=True,
+            )            
             return result
 
         except Exception as e:
             print(f"❌ Experiment runner stage failed: {e}")
             result = {'success': False, 'error': str(e)}
-            self.state.complete_stage('experiment_runner', False, result)
+            self.state.complete_stage("experiment_runner", False, result)
+            self.state_manager.mark_failure(
+                reason=f"Experiment runner stage failed: {e}",
+                current_stage="experiment_runner",
+                current_phase="failed",
+                cwd=str(self.work_dir),
+                recoverable=True,
+            )
             raise
 
     def get_pipeline_status(self) -> Dict[str, Any]:
         """Get current pipeline execution status."""
         return {
-            'current_stage': self.state.state.get('current_stage'),
-            'completed': self.state.state.get('completed', False),
-            'stages': self.state.state.get('stages', {}),
-            'state_file': str(self.state.state_file)
+            "current_stage": self.state.state.get("current_stage"),
+            "completed": self.state.state.get("completed", False),
+            "stages": self.state.state.get("stages", {}),
+            "state_file": str(self.state.state_file),
         }
 
     def resume_pipeline(
@@ -518,7 +781,6 @@ class ResearchPipelineOrchestrator:
         resource_finder_done = self.state.is_stage_completed('resource_finder')
         experiment_runner_done = self.state.is_stage_completed('experiment_runner')
 
-        skip_resource_finder = resource_finder_done
 
         print(f"   Resource Finder: {'✅ Completed' if resource_finder_done else '❌ Not completed'}")
         print(f"   Experiment Runner: {'✅ Completed' if experiment_runner_done else '❌ Not completed'}")
