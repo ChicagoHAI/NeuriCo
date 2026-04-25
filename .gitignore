@@ -80,3 +80,4 @@ Thumbs.db
 # Paper-finder build artifacts
 services/paper-finder/.venv/
 services/paper-finder/**/__pycache__/
+tmp_runtime_test/
