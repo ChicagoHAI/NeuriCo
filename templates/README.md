@@ -2,6 +2,8 @@
 
 This directory contains all prompt templates that guide NeuriCo's research agents.
 
+Templates are dynamically composed at runtime using execution context (state, summaries, constraints), rather than being static instructions. They ensure agents can stay aligned with goals, retain important context, produce consistent and structured outputs.
+
 ## Directory Structure
 
 ```
@@ -43,6 +45,27 @@ When a research idea specifies `domain: X`, the system loads templates in this o
    - Check `domains/X/{agent_template}.txt` — domain-specific override
    - Fall back to `agents/{agent_template}.txt` — universal default
 
+## Context management
+
+Templates are augmented at runtime with current execution state, prior phase summary, top-k priorization rule, workspace directory.
+
+Sources:
+- 'STATE.md'
+- '.neurico/phase_summary.json
+- '.neurico/phase_summary_<stage>.json
+
+This enables:
+- State continuity -> agents do not forget progress
+- Context compression -> summaries replace raw history
+- Controlled exploration -> top-k filtering limits scope
+- Execution safety -> agents operate within workspace
+
+Key constraints:
+Agents must:
+- Operate within `workspaces/<run_id>`
+- Follow top-k priorities
+- Rely on summarized context
+
 ## Adding a New Domain
 
 1. Create `templates/domains/<domain_name>/core.txt` with domain-specific methodology
@@ -51,3 +74,6 @@ When a research idea specifies `domain: X`, the system loads templates in this o
 4. (Optional) Add agent override files in the same directory if the domain needs significantly different agent behavior (e.g., mathematics overrides the paper writer for AMS LaTeX format)
 
 See `domains/mathematics/` for an example with agent overrides, or `domains/battery/` for a simpler domain with only `core.txt`.
+
+
+
