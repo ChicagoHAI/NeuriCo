@@ -53,6 +53,14 @@ class IdeaManager:
                          self.completed_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
 
+    def get_idea_path(self, idea_id: str) -> Path:
+        """Return the current file path for an idea, searching all status directories."""
+        for directory in [self.submitted_dir, self.in_progress_dir, self.completed_dir]:
+            idea_path = directory / f"{idea_id}.yaml"
+            if idea_path.exists():
+                return idea_path
+        raise FileNotFoundError(f"Idea file not found for: {idea_id}")
+
     def submit_idea(self, idea_spec: Dict[str, Any],
                    validate: bool = True) -> str:
         """
