@@ -303,7 +303,7 @@ class ContextSummarizer:
     def _score_candidate(self, text: str, candidate_type: str, idea: Optional[Dict[str, Any]]) -> float:
         """
         Score a candidate by:
-        - relevance
+        - relevance (weighted)
         - evidence strength
         - feasibility
         - idea alignment
