@@ -172,11 +172,17 @@ USER neurico
 WORKDIR /app
 
 # Configure git and CLI dirs for neurico user
+# .codex-container is the container-private CODEX_HOME (see entrypoint.sh).
+# .codex-host is the read-only mount target for the host's ~/.codex (see docker/run.sh).
 RUN git config --global user.email "noreply@neurico.dev" \
     && git config --global user.name "NeuriCo" \
     && git config --global init.defaultBranch main \
-    && mkdir -p ~/.claude ~/.codex ~/.gemini ~/.cache/uv \
+    && mkdir -p ~/.claude ~/.codex ~/.codex-container ~/.codex-host ~/.gemini ~/.cache/uv \
     && echo 'PS1="neurico:\w\$ "' >> ~/.bashrc
+
+# Bypass Gemini CLI's trusted-folders check in headless container runs
+# (introduced ~April 2026; without this --yolo is forced back to "default").
+ENV GEMINI_CLI_TRUST_WORKSPACE=true
 
 # Set environment variable for workspace location
 ENV NEURICO_WORKSPACE=/workspaces
