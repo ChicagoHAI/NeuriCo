@@ -245,7 +245,7 @@ def run_comment_handler(
         elif provider == "claude":
             cmd += " --dangerously-skip-permissions"
         elif provider == "gemini":
-            cmd += " --yolo"
+            cmd += " --yolo --skip-trust"
 
     # Add transcript/JSON output flags
     transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
