@@ -376,7 +376,7 @@ class ResearchPipelineOrchestrator:
                 elif provider == "claude":
                     cmd += " --dangerously-skip-permissions"
                 elif provider == "gemini":
-                    cmd += " --yolo"
+                    cmd += " --yolo --skip-trust"
 
             # Add streaming JSON output flags for detailed logging
             # All providers now output streaming JSON for consistent transcript format

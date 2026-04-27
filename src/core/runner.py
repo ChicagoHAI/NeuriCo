@@ -455,7 +455,7 @@ class ResearchRunner:
                 elif provider == "claude":
                     cmd += " --dangerously-skip-permissions"
                 elif provider == "gemini":
-                    cmd += " --yolo"
+                    cmd += " --yolo --skip-trust"
 
             # Add streaming JSON output flags for detailed logging
             if provider == "claude":

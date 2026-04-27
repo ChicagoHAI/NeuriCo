@@ -25,6 +25,35 @@ if [ ! -w "${HOME:-/}" ]; then
     export HOME=/tmp
 fi
 
+# -----------------------------------------------------------------------------
+# Codex isolation: redirect CODEX_HOME to a container-private dir.
+#
+# Codex (≥0.122, April 2026) chmods session files and config.toml to 0600 and
+# validates ownership. When ~/.codex is bind-mounted from the host, the
+# container's neurico (UID 1000) can't chown/chmod files owned by the host
+# user, and writes from the container clobber host file ownership.
+#
+# Solution: mount the host ~/.codex read-only at ~/.codex-host and copy
+# auth.json (+ config.toml if present) into a container-only ~/.codex-container.
+# Set CODEX_HOME so codex reads/writes there. Login flows skip this redirect
+# (NEURICO_LOGIN_ONLY=1) so they can write fresh credentials back to the host.
+# -----------------------------------------------------------------------------
+if [ "${NEURICO_LOGIN_ONLY:-0}" != "1" ]; then
+    if [ -d "$HOME/.codex-host" ]; then
+        mkdir -p "$HOME/.codex-container"
+        # Seed credentials from the host (read-only mount) into the
+        # container-private dir on every start so refreshed host tokens are
+        # picked up. Skip silently if files don't exist yet.
+        for f in auth.json config.toml; do
+            if [ -f "$HOME/.codex-host/$f" ]; then
+                cp "$HOME/.codex-host/$f" "$HOME/.codex-container/$f" 2>/dev/null || true
+                chmod 600 "$HOME/.codex-container/$f" 2>/dev/null || true
+            fi
+        done
+        export CODEX_HOME="$HOME/.codex-container"
+    fi
+fi
+
 # Color output for better visibility
 RED='\033[0;31m'
 GREEN='\033[0;32m'
