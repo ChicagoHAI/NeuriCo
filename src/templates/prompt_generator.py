@@ -10,7 +10,7 @@ This module generates complete prompts for research agents by:
 from pathlib import Path
 from typing import Dict, Any, Optional
 import yaml
-from jinja2 import Environment, FileSystemLoader, Template, select_autoescape
+from jinja2 import Environment, FileSystemLoader, Template
 import sys
 
 # Add parent directory to path for imports
@@ -44,7 +44,7 @@ class PromptGenerator:
         # Set up Jinja2 environment
         self.env = Environment(
             loader=FileSystemLoader(str(self.template_dir)),
-            autoescape=select_autoescape(),
+            autoescape=False,
             trim_blocks=True,
             lstrip_blocks=True
         )
