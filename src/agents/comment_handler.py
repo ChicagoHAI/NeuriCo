@@ -245,7 +245,7 @@ def run_comment_handler(
         elif provider == "claude":
             cmd += " --dangerously-skip-permissions"
         elif provider == "gemini":
-            cmd += " --yolo"
+            cmd += " --yolo --skip-trust"
 
     # Add transcript/JSON output flags
     transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
@@ -276,7 +276,8 @@ def run_comment_handler(
     start_time = time.time()
 
     try:
-        with open(log_file, 'w') as log_f, open(transcript_file, 'w') as transcript_f:
+        with open(log_file, 'w', encoding='utf-8') as log_f, \
+             open(transcript_file, 'w', encoding='utf-8') as transcript_f:
             process = subprocess.Popen(
                 shlex.split(cmd),
                 stdin=subprocess.PIPE,
@@ -284,6 +285,7 @@ def run_comment_handler(
                 stderr=subprocess.STDOUT,
                 env=env,
                 text=True,
+                encoding='utf-8',
                 bufsize=1,
                 cwd=str(work_dir)
             )

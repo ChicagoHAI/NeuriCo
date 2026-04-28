@@ -231,7 +231,7 @@ def run_resource_finder(
         elif provider == "claude":
             cmd += " --dangerously-skip-permissions"
         elif provider == "gemini":
-            cmd += " --yolo"
+            cmd += " --yolo --skip-trust"
 
     # Add transcript/JSON output flags for structured logging
     transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
@@ -286,6 +286,7 @@ def run_resource_finder(
                 stderr=subprocess.STDOUT,
                 env=env,
                 text=True,
+                encoding='utf-8',
                 bufsize=1,
                 cwd=str(work_dir)
             )

@@ -1,0 +1,427 @@
+{{ session_start }}
+{{ priority_section }}
+CRITICAL: Environment Setup
+────────────────────────────────────────────────────────────────────────────────
+You MUST use an isolated environment for this project. DO NOT use the
+neurico environment or any existing system environment.
+
+REQUIRED STEPS (in order):
+
+1. Check if a virtual environment already exists (the resource finder may have created one):
+
+   If .venv/ directory exists:
+   - Skip to step 3 (activate it)
+   - The pyproject.toml should already exist
+
+   If .venv/ does NOT exist:
+   - Create a fresh virtual environment using uv:
+     uv venv
+
+2. Initialize project dependencies file (if not already present):
+   Check: ls pyproject.toml 2>/dev/null || echo "NEED_PYPROJECT"
+
+   If pyproject.toml does NOT exist:
+
+   cat > pyproject.toml << 'EOF'
+   [project]
+   name = "research-workspace"
+   version = "0.1.0"
+   description = "Particle physics (BSM) research workspace"
+   requires-python = ">=3.10"
+   dependencies = []
+
+   [build-system]
+   requires = ["hatchling"]
+   build-backend = "hatchling.build"
+   EOF
+
+   CRITICAL: This ensures uv won't search parent directories for pyproject.toml
+   and contaminate the neurico environment!
+
+3. Activate the environment:
+   source .venv/bin/activate
+
+4. For package installations, use this priority order:
+
+   FIRST CHOICE - uv add (manages pyproject.toml automatically):
+   uv add <package-name>
+
+   Examples useful for BSM phenomenology:
+   - uv add numpy scipy matplotlib pandas
+   - uv add flavio           # Flavor observables (B-physics, LFV, etc.)
+   - uv add iminuit          # Maximum-likelihood fits
+   - uv add pyslha           # SLHA spectrum file I/O
+   - uv add pypdf            # PDF chunker
+   - uv add sympy            # Symbolic Lagrangian manipulation if needed
+
+   SECOND CHOICE - uv pip install <package-name>
+   LAST RESORT - pip install <package-name>
+
+   NEVER use conda or conda install!
+
+   Heavy HEP tools (MadGraph, Pythia, Delphes, FeynRules, SModelS, micrOMEGAs,
+   CheckMATE, MadAnalysis5) are NOT Python packages — they are built from source
+   or extracted from tarballs. The resource finder should have cloned them under
+   code/. Build / install them there as needed; do NOT try to pip-install them.
+
+5. Dependency Management:
+   - 'uv add' updates pyproject.toml automatically
+   - Verify with: cat pyproject.toml
+   - If you used pip: pip freeze > requirements.txt
+   - Document non-Python tool versions explicitly in REPORT.md
+
+WHY: Using an isolated environment ensures:
+- No pollution of the neurico environment
+- Reproducibility of the BSM analysis
+- Clean tracking of all dependencies
+
+════════════════════════════════════════════════════════════════════════════════
+
+GPU AND COMPUTATIONAL RESOURCES
+────────────────────────────────────────────────────────────────────────────────
+
+At the START of your session, check for GPU availability:
+
+1. Run GPU detection:
+   nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv 2>/dev/null || echo "NO_GPU"
+
+2. GPUs are rarely the bottleneck for BSM phenomenology — most heavy lifting is
+   CPU-bound Monte Carlo (MadGraph, Pythia, Delphes). However:
+   - ML-based surrogate models for parameter scans benefit from GPU
+   - Large Bayesian global fits (GAMBIT-style) can use GPU for likelihood evaluation
+   - PyTorch / JAX-based recasters can use GPU
+
+3. If NO GPU available:
+   - Fine. BSM phenomenology runs on CPU. Reduce MC statistics if wall-clock matters.
+
+════════════════════════════════════════════════════════════════════════════════
+
+CRITICAL: Resources Have Been Pre-Gathered
+────────────────────────────────────────────────────────────────────────────────
+IMPORTANT: A separate resource-finding agent has already gathered research
+resources for you. Your workspace should contain:
+
+- literature_review.md: BSM-focused literature synthesis
+- resources.md: Catalog of all papers, constraints, and code
+- constraints.md: Structured summary of constraints the model must satisfy
+- papers/: Downloaded research papers (PDFs)
+- datasets/constraints/: Digitized experimental limits and cosmological parameters
+- code/: Cloned repositories (MadGraph, SModelS, FeynRules examples, etc.)
+- models/: UFO model files (if pre-existing UFO models were found)
+
+READ THESE RESOURCES FIRST before starting model construction!
+
+IMPORTANT PHILOSOPHY: This is a fully-automated research system. Your goal is to
+produce a concrete, constrained, testable BSM proposal in a single session.
+
+WHAT "FULLY-AUTOMATED" MEANS:
+✓ Complete ALL phases (1-6) in a SINGLE CONTINUOUS SESSION
+✓ Make reasonable decisions autonomously without waiting for user input
+✓ Move immediately from one phase to the next
+✓ Use the pre-gathered resources effectively
+✓ Document decisions, but keep moving forward
+✓ Deliver REPORT.md with actual results at the end
+
+YOU WILL NOT GET ADDITIONAL INSTRUCTIONS between phases.
+This prompt contains everything you need. Execute it completely from start to finish.
+
+════════════════════════════════════════════════════════════════════════════════
+
+CRITICAL: BSM Research — Computational Approach Guidance
+────────────────────────────────────────────────────────────────────────────────
+
+BSM phenomenology in a single session is mostly about: constructing a model,
+computing its observables with standard tools, and projecting its reach at a
+named near-future facility.
+
+✓ YOU CAN DO IN THIS SESSION:
+  - Literature-based model specification (Lagrangian, particle content, symmetries)
+  - FeynRules → UFO generation for the model (or reuse an existing UFO)
+  - MadGraph5_aMC@NLO LO cross-section and event generation at parton level
+  - Pythia8 + Delphes for fast showered and fast-simulated collider events
+  - micrOMEGAs for thermal relic density and DM direct/indirect detection rates
+  - flavio / SuperIso for flavor observables
+  - SModelS for recasting LHC Run 2 exclusions
+  - Parameter scans over a reasonable-size grid (hundreds to a few thousand points)
+  - Analytical estimates (tree-level cross-sections, decay widths, relic abundance
+    approximations) where the full tool is overkill or unavailable
+  - Asymptotic / Asimov significance projections at a target future facility
+
+✗ YOU CANNOT (usually) DO IN THIS SESSION, but can plan for:
+  - Full NLO QCD + parton-shower matching for every point in a scan
+  - Geant4 full detector simulation
+  - Global fits with millions of likelihood evaluations (GAMBIT-scale)
+  - Lattice-QCD computations of hadronic matrix elements
+
+IF YOUR ANALYSIS REQUIRES FULL NLO OR GEANT4:
+  - Use LO + Delphes for the main scan; note NLO K-factors from literature where available
+  - Note the approximation explicitly in REPORT.md
+  - Document an HPC plan (run cards, expected resources) rather than running it here
+
+TOOLS TO PRIORITIZE:
+  - MadGraph5_aMC@NLO for LO cross-sections and parton-level events
+  - Pythia8 for shower + hadronization
+  - Delphes (with an appropriate detector card: CMS, ATLAS, HL-LHC, FCC-hh, Belle II)
+  - micrOMEGAs for DM observables
+  - flavio for flavor observables
+  - SModelS for LHC Run 2 recasting (do this early in the scan — it's cheap and high-impact)
+  - numpy + scipy + matplotlib for scans, fits, and plots
+
+════════════════════════════════════════════════════════════════════════════════
+
+Execute the following research task:
+
+{{ prompt }}
+
+════════════════════════════════════════════════════════════════════════════════
+
+EXECUTION WORKFLOW (FOLLOW THIS SEQUENCE - DO NOT STOP BETWEEN PHASES):
+────────────────────────────────────────────────────────────────────────────────
+
+BEFORE YOU START: Review Pre-Gathered Resources (5-10 min)
+  ✓ READ literature_review.md to understand the BSM landscape and prior art
+  ✓ READ constraints.md to see what the model must satisfy
+  ✓ READ resources.md to see available tools and UFO models
+  ✓ Browse papers/ for key references
+  ✓ Check models/ for any pre-existing UFO models for this BSM class
+
+  → WHEN COMPLETE: Immediately proceed to Phase 1 (Planning / Model Specification)
+
+Phase 1: Planning & Model Specification (25-45 min)
+  ✓ FIRST: Write "Motivation & Novelty Assessment" in planning.md
+    - Which SM problem does this model address? Name it.
+    - What existing BSM approaches attempt to address it, and how does this one differ?
+    - What is the "delta" this proposal brings to the literature?
+  ✓ Specify the model precisely:
+    - Gauge group (SM + any extension)
+    - Particle content with full quantum numbers (SU(3)_C, SU(2)_L, U(1)_Y,
+      plus any BSM symmetry — Z_2, U(1)', discrete flavor, etc.)
+    - Lagrangian (or a list of all new interaction terms)
+    - Free parameters and their physically motivated ranges
+  ✓ List the constraints this model must satisfy (from constraints.md), in
+    estimated order of exclusion impact. Typical priority:
+    1. LHC Run 2 direct searches (if new colored or EW-charged states)
+    2. Flavor (if couplings to SM fermions beyond SM structure)
+    3. Relic density upper bound (if DM candidate)
+    4. Direct DM detection (if DM-nucleon coupling)
+    5. EWPO (always worth a sanity check for new EW-charged states)
+    6. (g−2)_μ (if couplings to muons)
+    7. Cosmology: Planck N_eff, BBN (if new light states)
+  ✓ Pick the near-future facility and observable you will project to:
+    - Facility name (HL-LHC, Belle II, DUNE, LZ, IceCube-Gen2, CMB-S4, etc.)
+    - Integrated luminosity / exposure target
+    - Observable / final state
+    - Why this is the most sensitive channel
+  ✓ Write plan.md (2-3 pages): model, parameters, constraint checklist, projection target
+
+  → WHEN COMPLETE: Immediately proceed to Phase 2 (Environment & Tool Setup)
+  → DO NOT WAIT for user confirmation — this is fully automated!
+
+Phase 2: Environment & Tool Setup (10-25 min)
+  ✓ Set up isolated virtual environment (uv venv + pyproject.toml)
+  ✓ Install lightweight Python deps (numpy, scipy, matplotlib, flavio, iminuit, etc.)
+  ✓ Verify cloned repositories under code/ are present and usable:
+    - MadGraph: can you run ./mg5_aMC with --help?
+    - Pythia / Delphes: are binaries built, or do you need to compile?
+    - SModelS: does `runSModelS.py --help` work?
+    - micrOMEGAs: is the relevant model directory compilable?
+  ✓ If a UFO model for this BSM class exists under models/, load it into MadGraph:
+      ./mg5_aMC
+      > import model /path/to/UFO_model
+      > display particles
+    Confirm particle content matches your specification.
+  ✓ If no UFO model exists, generate one from FeynRules:
+    - Write or reuse a FeynRules model file (.fr)
+    - Run FeynRules → UFO export
+    - Validate: import into MadGraph, display particles + interactions
+  ✓ Run a SMOKE TEST: generate a trivial process (e.g., pp > Z, or pp > h → invisible)
+    at parton level with default parameters. Verify non-zero cross-section.
+
+  → WHEN COMPLETE: Immediately proceed to Phase 3 (Implementation)
+
+Phase 3: Model Implementation and Observable Pipelines (50-90 min)
+  {{ code_workflow }}
+  ✓ Implement the full observable pipeline for the proposed model:
+    - Parameter-space sampling harness (grid or random scan; save each point's parameters to a log)
+    - Per-point wrapper that calls MadGraph / micrOMEGAs / flavio / SModelS as needed
+    - Constraint-checking routine: for each point, compute predicted observables and
+      compare against the bounds in constraints.md; mark pass / fail with the failing
+      constraint recorded
+  ✓ Build reference/baseline comparisons:
+    - At least one known benchmark point from literature (from literature_review.md)
+      where the expected cross-section / relic density / branching ratio is known,
+      so you can sanity-check your pipeline against it
+  ✓ Write clean, commented code in experiments/ (or similar organized directory)
+  ✓ Test incrementally — verify a single point runs end-to-end before launching a full scan
+
+  → WHEN COMPLETE: Immediately proceed to Phase 4 (Parameter-Space Scan and Constraint Checking)
+
+Phase 4: Parameter-Space Scan and Constraint Checking (45-90 min)
+  ✓ Run the parameter scan with the planned sampling density
+  ✓ For each point, evaluate all constraints in priority order
+  ✓ Record the surviving allowed region (points passing all constraints)
+  ✓ Produce 2D projection plots of the allowed region in the most-informative parameter planes
+  ✓ Identify 3-5 benchmark points (BPs) that:
+    - Pass every constraint with margin
+    - Span the interesting region (edges of allowed space, representative mass scales)
+    - Include at least one BP that is reachable in the near-term (high signal rate)
+  ✓ Run the target-facility projection for each BP:
+    - Generate signal events at the facility's CoM energy
+    - Apply analysis selection (recasting an existing search where possible)
+    - Estimate dominant background
+    - Compute significance vs. luminosity (Asimov formula), and find the
+      luminosity-to-5σ and 95%-CL-exclusion curves
+  ✓ Save results systematically to results/ (per-point JSON/CSV, plot PDFs, tables)
+
+  ⚠️  STOP-AND-REDIRECT RULE:
+      If the scan finds NO allowed points — the model is fully excluded — do NOT
+      press on to produce a paper about a dead model. Instead:
+      1. Identify the dominant excluding constraint (record it)
+      2. Consider a minimal structural fix: add a Z_2, raise a mass, suppress a portal,
+         introduce a cancellation; pick ONE targeted modification
+      3. Document the exclusion and the fix, re-scan with the modified model
+      4. If still fully excluded after ONE modification attempt, STOP the scan,
+         document the result cleanly in REPORT.md as "null result — this direction
+         is excluded by [constraint X]", and proceed to Phase 5 anyway. A clear
+         null result is a valid outcome.
+
+  → WHEN COMPLETE: Immediately proceed to Phase 5 (Analysis & Comparison)
+
+Phase 5: Analysis, Projection, and Comparison with Prior Art (30-60 min)
+  ✓ Analyze the surviving allowed region:
+    - What physical features characterize surviving points? (mass hierarchy, coupling
+      structure, mixing angle range, etc.)
+    - Is the survival driven by a fine-tuning or a symmetry?
+  ✓ Project the target-facility reach:
+    - 5σ discovery luminosity for each BP
+    - 95% CL exclusion projection
+    - Compare with currently excluded region to show what's genuinely new
+  ✓ Complementarity: what OTHER facilities would test this model in overlapping or
+    orthogonal ways? (e.g., LHC + direct detection for DM; LHC + flavor for leptoquarks)
+  ✓ Compare to prior art identified in literature_review.md:
+    - How does the allowed region here relate to regions explored by previous BSM proposals?
+    - Is this model more predictive, or more constrained, or does it access a previously
+      unexplored corner?
+  ✓ Systematics and caveats:
+    - LO vs. NLO: where does this matter, and what K-factors should be applied?
+    - Detector approximation: Delphes vs. full sim — which conclusions survive?
+    - PDF / scale uncertainty on cross-sections
+    - Any hadronic matrix-element uncertainties (for flavor / DM)
+  ✓ Produce final publication-quality plots:
+    - Allowed-region plot in most-informative 2D projection
+    - Signal-vs-background kinematic distributions at the target facility
+    - Significance-vs-luminosity curve
+    - Constraint-summary table
+
+  → WHEN COMPLETE: Immediately proceed to Phase 6 (Documentation)
+
+Phase 6: Final Documentation (20-40 min) - MANDATORY BEFORE ENDING SESSION
+  ✓ Create REPORT.md with ACTUAL results using this BSM-specific structure:
+    1. Executive Summary — SM problem, model in one sentence, key prediction, target facility
+    2. Motivation & Prior Art — why the SM problem matters; the landscape of BSM responses; this model's specific gap
+    3. Model Definition — gauge group, particle content table with quantum numbers, Lagrangian, free parameters and ranges
+    4. Existing Constraints — table of every constraint checked, with numerical bound and model prediction side by side
+    5. Allowed Parameter Space — plots + description of surviving region
+    6. Benchmark Points — table of 3-5 BPs with full parameter values and predictions
+    7. Projections at the Target Facility — analysis setup, signal, background, significance vs. luminosity, discovery / exclusion reach
+    8. Complementarity and Discussion — how other facilities test the same model; caveats and limitations
+    9. Reproducibility — FeynRules source (if new), UFO location, MadGraph run cards, analysis scripts, all in the workspace
+    10. References — every paper and experimental result cited, with INSPIRE / arXiv IDs
+  ✓ Create README.md with project overview and headline findings
+  ✓ If the model was excluded, document this clearly — a null result is still valuable output
+  ✓ Ensure code is clean and commented; scan pipeline should be re-runnable
+  ✓ Verify workspace structure: plan.md, literature_review.md, constraints.md, resources.md, REPORT.md, README.md, results/, experiments/, models/, papers/, datasets/
+
+  → WHEN COMPLETE: Session is finished
+
+CRITICAL REMINDERS:
+- This is a SINGLE CONTINUOUS SESSION covering all 6 phases
+- Resources have been PRE-GATHERED for you — use them!
+- Never stop between phases waiting for user input
+- If you encounter issues, document them and continue
+- Even if the scan fully excludes the model, complete Phase 6 with a clear null-result REPORT.md
+- REPORT.md is mandatory — it's the primary deliverable
+- A clean excluded-model result is more useful than a handwavy proposal
+
+WORKSPACE DIRECTORY AND DIRECTORY SAFETY:
+────────────────────────────────────────────────────────────────────────────────
+You are running in the project workspace directory: {{ work_dir }}
+
+WORKING DIRECTORY VERIFICATION:
+Before creating or writing ANY files, ALWAYS verify you are in the correct directory:
+
+1. Run `pwd` to check your current directory
+2. You should be in: {{ work_dir }}
+3. If you're somewhere else, run: cd {{ work_dir }}
+
+MANDATORY VERIFICATION POINTS - Run `pwd` and verify location:
+✓ Before creating any new directories (mkdir results, mkdir figures, etc.)
+✓ Before saving any output files
+✓ Before running MadGraph / micrOMEGAs / SModelS (they write to cwd)
+✓ After any cd command - ALWAYS cd back to workspace root afterward
+✓ When starting each new phase of work
+
+SAFE PATTERN FOR DIRECTORY CHANGES:
+If you need to cd into a subdirectory (e.g., MadGraph's event directory), ALWAYS return:
+  pwd
+  cd code/mg5amcnlo && ./bin/mg5_aMC run_card.dat && cd -
+  pwd
+
+⚠️  NEVER create files in parent directory (cd .. is dangerous!)
+⚠️  All your work MUST stay within this workspace directory
+
+Remember:
+- READ literature_review.md, constraints.md, resources.md first (in your current directory)
+- Use pre-cloned tools from code/ directory (relative to current directory)
+- Use pre-digitized constraint data from datasets/constraints/
+{{ code_reminder }}
+- Use markdown files (.md) for documentation
+- Save outputs to organized directories: results/, figures/, logs/, experiments/
+- Follow the BSM-specific methodology from the particle_physics domain guidelines
+
+────────────────────────────────────────────────────────────────────────────────
+PHASE 6 REQUIREMENTS - WHAT TO INCLUDE IN FINAL DOCUMENTATION
+────────────────────────────────────────────────────────────────────────────────
+
+When you reach Phase 6, create these files with ACTUAL results from your scan:
+
+1. REPORT.md — BSM research report with the 10-section structure above. Include key
+   plots inline (markdown image embeds), the constraint-summary table, and the
+   benchmark-point table. Quote numerical values with units and uncertainties.
+
+2. README.md — Quick overview:
+   - 2-3 sentence description (model, SM problem it targets, key prediction)
+   - 3-5 bullet-point headline findings (or the null result)
+   - Reproduction instructions (environment, how to re-run the scan)
+   - File-structure overview
+   - Link to REPORT.md
+
+3. If applicable, a model-card file models/model_card.md documenting:
+   - Full Lagrangian
+   - Particle content table (name, spin, SU(3)_C, SU(2)_L, U(1)_Y, BSM charges)
+   - UFO file location
+   - Validated benchmark points with parameter values
+
+IMPORTANT NOTES:
+- Do NOT create placeholder stub reports during planning — wait until Phase 6
+- If the scan fails or the model is excluded, document this clearly and completely
+- REPORT.md is the PRIMARY DELIVERABLE — it must contain actual findings
+- A clean null result is a valid and valuable output; don't fabricate a positive result
+
+────────────────────────────────────────────────────────────────────────────────
+SESSION COMPLETION
+────────────────────────────────────────────────────────────────────────────────
+
+The session is COMPLETE when:
+✓ All phases (1-6) have been attempted
+✓ Pre-gathered resources have been reviewed and used
+✓ A BSM model has been specified, scanned, and compared against all relevant constraints
+✓ If any points survive: benchmark points and future-facility projections have been produced
+✓ If no points survive: a clean null-result analysis has been produced
+✓ REPORT.md has been created documenting actual results
+✓ README.md has been created with overview
+✓ Code is organized with comments
+✓ Results are saved to results/ directory
+✓ Model card produced (if the model survived)
+
+If you reach this point, your research session is finished.

@@ -167,8 +167,8 @@ INSTRUCTIONS:
    \usepackage{float}
 
    % Custom commands
-   \newcommand{\sym}[1]{^{#1}}
-   \newcolumntype{d}[1]{D{.}{.}{#1}}
+   {% raw %}\newcommand{\sym}[1]{^{#1}}
+   \newcolumntype{d}[1]{D{.}{.}{#1}}{% endraw %}
 
    % Import command files
    \InputIfFileExists{commands/math}{}{}

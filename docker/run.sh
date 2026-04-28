@@ -230,12 +230,22 @@ get_cli_credential_mounts() {
     fi
 
     # Codex credentials (~/.codex/)
+    # Mount READ-ONLY at .codex-host so the entrypoint can copy auth.json into
+    # a container-private CODEX_HOME (~/.codex-container). This avoids two
+    # problems with the previous RW mount:
+    #   1. Codex (≥0.122) chmods config.toml/sessions to 0600 and validates
+    #      ownership; with a UID-mismatched bind-mount this fails (EPERM).
+    #   2. Container writes through a RW mount clobbered host file ownership,
+    #      breaking the user's host-side `codex` until a manual chown.
+    # Login flows (cmd_login / setup_login_provider) intentionally do NOT use
+    # this helper — they keep an RW mount on ~/.codex so fresh credentials
+    # written during OAuth land back on the host.
     if [ -d "$HOME/.codex" ]; then
-        mounts="$mounts -v \"$HOME/.codex:/home/neurico/.codex\""
+        mounts="$mounts -v \"$HOME/.codex:/home/neurico/.codex-host:ro\""
         if [ "$(ls -A "$HOME/.codex" 2>/dev/null)" ]; then
-            echo -e "  ${GREEN}[OK]${NC} Mounting Codex credentials" >&2
+            echo -e "  ${GREEN}[OK]${NC} Mounting Codex credentials (read-only)" >&2
         else
-            echo -e "  ${DIM}[--]${NC} Mounting ~/.codex (empty)" >&2
+            echo -e "  ${DIM}[--]${NC} Mounting ~/.codex (empty, read-only)" >&2
         fi
         found_any=true
     fi

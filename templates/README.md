@@ -47,33 +47,56 @@ When a research idea specifies `domain: X`, the system loads templates in this o
 
 ## Context management
 
-Templates are augmented at runtime with current execution state, prior phase summary, top-k priorization rule, workspace directory.
+Templates are augmented at runtime with current execution state, prior phase summary, Top-K priorization rule, workspace directory.
 
 Sources:
-- 'STATE.md'
-- '.neurico/phase_summary.json
-- '.neurico/phase_summary_<stage>.json
+- `STATE.md`
+- `.neurico/phase_summary.json`
+- `.neurico/phase_summary_<stage>.json`
 
 This enables:
 - State continuity -> agents do not forget progress
 - Context compression -> summaries replace raw history
-- Controlled exploration -> top-k filtering limits scope
+- Controlled exploration -> Top-K filtering limits scope
 - Execution safety -> agents operate within workspace
 
 Key constraints:
 Agents must:
 - Operate within `workspaces/<run_id>`
-- Follow top-k priorities
+- Follow Top-K priorities
 - Rely on summarized context
 
 ## Adding a New Domain
 
-1. Create `templates/domains/<domain_name>/core.txt` with domain-specific methodology
-2. Register the domain in `config/domains.yaml` with `has_template: true`
-3. Add domain keywords to `src/cli/fetch_from_ideahub.py` (`_DOMAIN_KEYWORDS` dict)
-4. (Optional) Add agent override files in the same directory if the domain needs significantly different agent behavior (e.g., mathematics overrides the paper writer for AMS LaTeX format)
+No source code changes are needed. The runner, prompt generator, and IdeaHub
+fetcher all read from `config/domains.yaml` at runtime.
+
+1. Add an entry to `config/domains.yaml`:
+   ```yaml
+   my_domain:
+     name: "My Domain"
+     description: "Short description of what this domain covers"
+     has_template: true        # set to false to use the default template
+     paper_style: my_style     # optional; falls back to default_paper_style
+     keywords:                  # optional; used by IdeaHub auto-classification
+       - keyword1
+       - keyword2
+   ```
+
+2. (Optional) Create `templates/domains/<my_domain>/core.txt` with
+   domain-specific methodology. Required if `has_template: true`.
+
+3. (Optional) Add agent override files in the same directory if the domain
+   needs significantly different agent behavior. Available overrides:
+   - `templates/domains/<my_domain>/paper_writer.txt`
+   - `templates/domains/<my_domain>/resource_finder.txt`
+   - `templates/domains/<my_domain>/session_instructions.txt`
+
+   Each falls back to the universal version in `templates/agents/` if the
+   override file is absent.
+
+4. (Optional) If you specified a custom `paper_style`, create
+   `templates/paper_styles/<my_style>/` with `style_config.yaml` and an
+   `example_paper.tex`.
 
 See `domains/mathematics/` for an example with agent overrides, or `domains/battery/` for a simpler domain with only `core.txt`.
-
-
-

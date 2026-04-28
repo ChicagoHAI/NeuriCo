@@ -27,7 +27,15 @@ import shutil
 from datetime import datetime
 import sys
 import os
-import yaml
+
+
+# Force UTF-8 stdout/stderr on Windows where the default is cp1252.
+# Claude CLI output contains Unicode characters that cp1252 cannot represent,
+# causing a UnicodeEncodeError when print() tries to write them to the terminal.
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -125,7 +133,8 @@ class ResearchRunner:
                     paper_style: str = None,
                     paper_timeout: int = 3600,
                     no_hash: bool = False,
-                    private: bool = False) -> Dict[str, Any]:
+                    private: bool = False,
+                    force_fresh: bool = False) -> Dict[str, Any]:
         """
         Execute research for a given idea.
 
@@ -147,6 +156,8 @@ class ResearchRunner:
             paper_timeout: Timeout for paper writing in seconds
             no_hash: Skip random hash in repo name when creating new GitHub repo
             private: Create private GitHub repo if new repo is needed
+            force_fresh: Ignore existing local workspace and start a new run from scratch
+
 
         Returns:
             Dictionary with:
@@ -170,12 +181,11 @@ class ResearchRunner:
         idea_spec = idea.get('idea', {})
         title = idea_spec.get('title', 'Untitled Research')
 
-        # Resolve paper style: explicit user choice > domain config default > neurips
+        # Resolve paper style: explicit user choice > domain config default
+        # (get_domain_paper_style falls back to config's default_paper_style)
         if paper_style is None:
             domain = idea_spec.get('domain', 'general')
-            config_loader = ConfigLoader()
-            domain_style = config_loader.get_domain_paper_style(domain)
-            paper_style = domain_style if domain_style else 'neurips'
+            paper_style = ConfigLoader().get_domain_paper_style(domain)
 
         # Update status
         self.idea_manager.update_status(idea_id, 'in_progress')
@@ -223,7 +233,7 @@ class ResearchRunner:
                 from git import Repo as GitRepo
                 repo = GitRepo(work_dir)
                 github_url = list(repo.remote("origin").urls)[0].replace(".git", "")
-                if "https//" in github_url and "@" in github_url:
+                if "https://" in github_url and "@" in github_url:
                     github_url = github_url.split("@", 1)[1]
                     github_url = f"https://{github_url}"
             except Exception:
@@ -611,7 +621,6 @@ class ResearchRunner:
                     cmd += " --dangerously-skip-permissions"
                 elif provider == "gemini":
                     cmd += " --yolo"
-            
             if provider == "claude":
                 cmd += " --verbose --output-format stream-json"
             elif provider == "codex":
@@ -643,6 +652,7 @@ class ResearchRunner:
                     stderr=subprocess.STDOUT,
                     env=env,
                     text=True,
+                    encoding='utf-8',
                     bufsize=1,
                     cwd=str(work_dir),
                 )
@@ -855,6 +865,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     """CLI entry point for runner."""
+    # Load environment variables from .env.local or .env
+    try:
+        from dotenv import load_dotenv
+        project_root = Path(__file__).parent.parent.parent
+        env_local = project_root / ".env.local"
+        env_file = project_root / ".env"
+
+        if env_local.exists():
+            load_dotenv(env_local)
+            print("✓ Loaded environment from .env.local")
+        elif env_file.exists():
+            load_dotenv(env_file)
+            print("✓ Loaded environment from .env")
+    except ImportError:
+        # python-dotenv not installed, that's okay
+        pass
+
     parser = build_parser()
     args = parser.parse_args()
 
@@ -862,30 +889,37 @@ def main() -> None:
         use_github=not args.no_github,
         github_org=args.github_org,
     )
-    
-    result = runner.run_research(
-        idea_id=args.idea_id,
-        provider=args.provider,
-        timeout=args.timeout,
-        full_permissions=args.full_permissions,
-        multi_agent=not args.legacy_mode,
-        pause_after_resources=args.pause_after_resources,
-        skip_resource_finder=args.skip_resource_finder,
-        resource_finder_timeout=args.resource_finder_timeout,
-        use_scribe=args.use_scribe,
-        write_paper=args.write_paper,
-        paper_style=args.paper_style,
-        paper_timeout=args.paper_timeout,
-        no_hash=args.no_hash,
-        private=args.private
-    )
-    print()
-    print("=" * 80)
-    print("SUCCESS! Research execution completed." if result["success"] else "COMPLETED WITH ISSUES.")
-    print(f"Location: {result['work_dir']}")
-    if result.get('github_url'):
-        print(f"GitHub: {result['github_url']}")
-    print("=" * 80)
+
+    try:
+        result = runner.run_research(
+            idea_id=args.idea_id,
+            provider=args.provider,
+            timeout=args.timeout,
+            full_permissions=args.full_permissions,
+            multi_agent=not args.legacy_mode,
+            pause_after_resources=args.pause_after_resources,
+            skip_resource_finder=args.skip_resource_finder,
+            resource_finder_timeout=args.resource_finder_timeout,
+            use_scribe=args.use_scribe,
+            write_paper=args.write_paper,
+            paper_style=args.paper_style,
+            paper_timeout=args.paper_timeout,
+            no_hash=args.no_hash,
+            private=args.private,
+        )
+
+        print()
+        print("=" * 80)
+        print("SUCCESS! Research execution completed.")
+        print(f"Location: {result['work_dir']}")
+        if result.get('github_url'):
+            print(f"GitHub: {result['github_url']}")
+        print("=" * 80)
+
+    except Exception as e:
+        print(f"\n❌ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

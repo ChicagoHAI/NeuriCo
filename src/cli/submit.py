@@ -162,7 +162,7 @@ def main():
 
                     # Save updated metadata
                     idea_path = manager.ideas_dir / "submitted" / f"{idea_id}.yaml"
-                    with open(idea_path, 'w') as f:
+                    with open(idea_path, 'w', encoding='utf-8') as f:
                         yaml.dump(idea, f, default_flow_style=False, sort_keys=False)
 
                     print(f"✅ Repository created: {github_repo_url}")

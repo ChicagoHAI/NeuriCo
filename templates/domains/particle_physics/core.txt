@@ -1,0 +1,178 @@
+# Particle Physics Domain Guidance
+
+This template provides specialized guidance for **Beyond-the-Standard-Model (BSM) research oriented toward near-future experimental testability**. The core intent is to propose BSM extensions that (a) address an open problem of the Standard Model, (b) survive all existing experimental and cosmological constraints, and (c) make falsifiable predictions for facilities that exist or will exist within the next decade or two.
+
+## Domain Overview
+
+This domain is for:
+- BSM model building: extending the SM with new particles, symmetries, or portals to address concrete unresolved physics problems
+- Phenomenological analysis: computing cross-sections, decay widths, relic abundances, scattering rates
+- Recasting existing experimental limits onto a new model
+- Projecting discovery/exclusion reach at near-future facilities
+- Literature-anchored "delta" proposals that identify a specific gap relative to existing BSM proposals
+
+This domain is **not** intended for:
+- Pure formal field theory without a testable connection to experiment
+- Detector engineering or hardware R&D
+- Lattice-QCD-only studies (use `scientific_computing` with explicit hpc/lattice framing)
+- Astrophysics without particle-physics content (use an astro-leaning domain)
+
+## How to Interpret Base Methodology for BSM Research
+
+The generic researcher workflow maps onto BSM phenomenology as follows:
+
+| Base Phase | BSM Research Equivalent |
+|---|---|
+| Planning | Identify the SM problem → choose BSM class → specify Lagrangian, particle content, symmetries → list constraints that must be checked |
+| Data Collection | Gather existing constraint data: PDG values, HEPData records, published exclusion curves, cosmological bounds, direct-detection limits |
+| Implementation | Encode model in FeynRules → export UFO → wire into MadGraph5_aMC@NLO / Pythia / Delphes / micrOMEGAs / SModelS pipelines |
+| Experimentation | Parameter-space scans, cross-section and decay-width computation, relic-density and detection-rate evaluation, LHC-recasting of current limits |
+| Analysis | Identify surviving allowed region; compute projected significance at target future facility; benchmark-point selection |
+| Documentation | Model card (Lagrangian + quantum numbers + parameter table), constraint summary table, allowed-region plots, benchmark-point table, reproducibility instructions |
+
+## Core Requirements for a Credible BSM Proposal
+
+Every BSM proposal produced in this domain must, at minimum:
+
+1. **Motivate an open SM problem explicitly.** Name the problem and explain why the SM fails to address it. Examples:
+   - Gauge hierarchy / naturalness of the Higgs mass
+   - Dark matter (particle identity, relic abundance, halo phenomenology)
+   - Neutrino masses and mixing (Dirac vs. Majorana, mass ordering)
+   - Strong CP problem (θ̄_QCD ≲ 10⁻¹⁰)
+   - Flavor puzzles: fermion mass hierarchy, CKM/PMNS structure, B-physics anomalies
+   - Muon g−2 discrepancy
+   - Baryon asymmetry of the universe (electroweak or leptogenesis mechanisms)
+   - Unification of gauge couplings
+   - Cosmological inflation with a particle-physics UV completion
+
+2. **Specify a concrete Lagrangian and particle content.** Give gauge group, representations, charges, global symmetries, portal/interaction terms. Ambiguity here is the most common failure mode — make every new field's SM(3)_C × SU(2)_L × U(1)_Y quantum numbers explicit, plus any BSM symmetry (Z_2, U(1)', discrete flavor, etc.).
+
+3. **Survive all relevant existing constraints.** For the proposed model, enumerate and check (as applicable):
+   - **Collider direct searches** — ATLAS and CMS Run 2 limits at 139 fb⁻¹, 13 TeV; LEP electroweak/Higgs limits; Tevatron where relevant
+   - **Flavor physics** — LHCb, Belle II, BaBar, Belle; R(D), R(D*), R(K), b→sγ, b→sℓℓ, B_s→μμ, K → πνν̄, μ→eγ, μ→e conversion, τ LFV
+   - **Electroweak precision observables (EWPO)** — S, T, U parameters; Z-pole observables; W mass (post-CDF discussion)
+   - **Lepton universality** — e/μ/τ universality in W, Z, π, K, B, τ decays
+   - **Cosmology** — Planck 2018 CMB (Ω_DM h² = 0.120 ± 0.001; N_eff = 2.99 ± 0.17); BBN constraints on relativistic dof and late decays
+   - **Direct dark-matter detection** — LZ, XENONnT, PandaX-4T; spin-independent and spin-dependent limits
+   - **Indirect dark-matter detection** — Fermi-LAT dwarf-spheroidal limits, HESS/CTA, AMS-02, IceCube
+   - **Electric dipole moments** — electron EDM (ACME, JILA), neutron EDM
+   - **Rare processes** — μ→eγ (MEG II), μ→e conversion (Mu2e, COMET), (g−2)_μ Fermilab/J-PARC
+
+   For each constraint, state either "satisfied (with margin)" or "tension"; never gloss over.
+
+4. **Make falsifiable predictions at a named near-future facility.** State, explicitly:
+   - The facility and its nominal integrated luminosity / exposure / year
+   - The observable (final state, kinematic region, process)
+   - The signal cross-section or rate, with PDF+scale uncertainty
+   - The dominant background
+   - The projected significance (Z) versus luminosity, with the significance formula used (e.g., asymptotic Asimov Z = √(2((s+b) ln(1+s/b) − s)), or simplified s/√b when appropriate)
+   - The projected 95% CL exclusion or 5σ discovery reach
+
+5. **Distinguish from existing BSM proposals.** Place the model in the context of prior art: MSSM, NMSSM, composite Higgs / pNGB Higgs, twin Higgs, U(1)' extensions, Z_2-stabilized scalar DM, WIMP variants, sterile-neutrino SM (νMSM), seesaw types I/II/III, inverse seesaw, linear seesaw, leptoquarks (S_1, S_3, U_1, etc.), axions and ALPs, dark photons and hidden-sector portals, relaxion, clockwork, extended scalar sectors (2HDM types I–IV, 2HDM+S, triplet Higgs). Explain what is new and why it matters.
+
+## Standard BSM Toolchain
+
+| Step | Tool(s) | Purpose |
+|---|---|---|
+| Model specification | FeynRules, SARAH | Lagrangian → Feynman rules, UFO export |
+| Event generation | MadGraph5_aMC@NLO, WHIZARD | LO/NLO cross-sections, parton-level events |
+| Parton shower & hadronization | Pythia8, Herwig7 | Shower, hadronize, decay |
+| Detector simulation | Delphes (fast), or full Geant4 (rare, expensive) | Detector response for collider phenomenology |
+| Analysis / recasting | MadAnalysis5, CheckMATE, SModelS | Recast ATLAS/CMS searches onto a new model |
+| Dark-matter observables | micrOMEGAs, MadDM | Relic density, direct/indirect detection rates |
+| Flavor observables | SuperIso, FlavBit, flavio | b→sγ, B→K(*)ℓℓ, B_s→μμ, lepton LFV |
+| Spectrum calculators (SUSY/multi-scale) | SPheno, SoftSUSY, FlexibleSUSY | Running, mass spectrum, mixing |
+| Global fits | GAMBIT, HEPfit | Combined likelihood across observables |
+| EFT / SMEFT | SMEFTsim, dim6top, SMEFTatNLO, flavio | EFT-based phenomenology and fits |
+
+Reach for **MadGraph + Pythia + Delphes + micrOMEGAs + SModelS** as the default collider-DM stack. Reach for **flavio / SuperIso** when flavor matters. Reach for **SMEFTsim** when the model reduces to SMEFT at collider energies.
+
+## Constraint Data Sources (Authoritative)
+
+- **PDG** (pdg.lbl.gov) — the Review of Particle Physics; current world-average values for all SM parameters, and standard exclusion compilations
+- **HEPData** (hepdata.net) — experimental result archive with digitized limits, likelihoods, and correlation matrices
+- **ATLAS & CMS public results pages** — full Run 2 (139 fb⁻¹) and ongoing Run 3 searches
+- **LHCb public results** — flavor observables and exotic searches
+- **Belle II public results** — B-physics and lepton-universality measurements
+- **Planck 2018 Cosmological Parameters** (arXiv:1807.06209) — Ω_DM h², N_eff, Y_p, σ_8, primordial abundances
+- **LZ, XENONnT, PandaX-4T, DarkSide-50** — direct-detection limits on WIMP–nucleon cross-section
+- **Fermi-LAT, HESS, CTA, AMS-02, IceCube** — indirect-detection / cosmic-ray limits
+- **Fermilab Muon g−2 (Run 3)**, E989 — anomalous magnetic moment
+- **MEG II, Mu2e, COMET** — charged-lepton flavor violation limits
+- **ACME, JILA electron EDM** — electron EDM
+- **SModelS database** — pre-digitized LHC exclusion topologies ready for recasting
+- **Snowmass 2021 reports, European Strategy Update, P5 Report (2023)** — community-endorsed priorities and projected sensitivities
+
+## Near-Future Facilities Cheat Sheet
+
+Use these luminosity / exposure benchmarks when projecting reach:
+
+| Facility | Timeline | Key observables | Benchmark exposure |
+|---|---|---|---|
+| HL-LHC (ATLAS/CMS) | 2029–2040 | High-energy direct searches, Higgs precision, diboson | 3000 fb⁻¹ per experiment, 14 TeV |
+| LHCb Upgrade II | 2030s | Flavor, rare B decays, CP violation | 300 fb⁻¹ |
+| Belle II | Ongoing → ~2032 | B, τ, D physics; dark photons; ALPs | 50 ab⁻¹ |
+| DUNE | First beams ~2029 | Long-baseline ν oscillation, mass ordering, δ_CP, proton decay, supernova ν | 1.2 MW beam, 40 kt LArTPC |
+| Hyper-Kamiokande | ~2027 start | Atmospheric + beam ν, proton decay, supernova ν | 258 kt fiducial |
+| JUNO | ~2025 start | Reactor ν mass ordering | 20 kt LS |
+| LZ / XLZD (next-gen) | 2025 / 2030s | Spin-independent WIMP DM | 15 t → 60 t active |
+| IceCube-Gen2 | ~2033 | High-energy astro ν, DM, sterile ν | 7.9 km³ |
+| CMB-S4 | Late 2020s | Dark radiation N_eff, inflation, light relics | Multi-telescope CMB survey |
+| FCC-ee | 2045+ (proposed) | Z/W/H/tt̄ precision | Z: 150 ab⁻¹; WW, HZ, tt̄ runs |
+| FCC-hh | 2070+ (proposed) | 100 TeV direct searches | 30 ab⁻¹, 100 TeV |
+| Muon Collider | 2040s+ (proposed) | 3–10 TeV lepton-collider searches | 1–10 ab⁻¹ |
+
+Prefer **HL-LHC, Belle II, DUNE, Hyper-K, LZ/XLZD, IceCube-Gen2, and CMB-S4** as the first-tier "near-future" facilities. FCC and muon collider are appropriate for models whose reach only opens at higher energy, but flag the longer timeline explicitly.
+
+## Reporting Standards
+
+For any BSM analysis produced in this domain, always report:
+
+- **Full Lagrangian** (or equivalent): gauge group, field content with quantum numbers, all new couplings and masses as free parameters
+- **Parameter ranges scanned**: lower/upper bounds, sampling strategy (grid, random, MCMC, Bayesian), number of points
+- **Benchmark points (BPs)**: numerical values of all free parameters for a handful of representative models; each BP should survive all constraints
+- **Cross-sections**: with PDF set specified (e.g., NNPDF3.1 NLO), renormalization/factorization scale choice, and scale-variation uncertainty
+- **Backgrounds**: dominant SM backgrounds, simulation chain used, cross-sections, and normalization choices
+- **Cuts / signal region definition**: explicit kinematic thresholds; if mirroring an existing ATLAS/CMS analysis, cite the INSPIRE ID or HEPData record
+- **Significance formula**: Asimov, CL_s, simplified s/√b — state which, and why
+- **Systematics**: detector-level systematics must at least be stated (e.g., "10% flat on background", or "Delphes default"); ignoring them entirely is a red flag
+- **Constraint checklist**: for every external constraint listed above, a line stating satisfied / marginal / violated / not-applicable, with the numerical value and the bound
+
+## Common Pitfalls to Avoid
+
+- Proposing a model already excluded by LHC Run 2 without acknowledging it
+- Ignoring flavor or EWPO constraints for models that couple to SM fermions or gauge bosons
+- Claiming discovery without background estimation or systematics
+- Using toy detector assumptions (e.g., perfect lepton ID, no pileup) when projecting HL-LHC reach
+- Quoting statistical-only significance as the discovery reach
+- Forgetting relic-density upper bound on thermal dark matter (over-closure)
+- Ignoring CMB N_eff bounds for new light, feebly-interacting states
+- Using Geant4 when Delphes suffices — or using Delphes when full simulation is required (rare)
+- Proposing a "portal" without checking cosmological decay lifetimes against BBN
+- Neglecting the unitarity cut-off scale of EFTs at collider energies
+- Reinventing a well-known model under a new name; always survey INSPIRE and arXiv hep-ph for prior proposals
+
+## Report Structure for BSM Research
+
+When documenting the outcome of a BSM analysis (REPORT.md / paper draft), structure it as:
+
+1. **Executive Summary** — the SM problem, the proposed model in one sentence, the key prediction, the target facility
+2. **Motivation and Prior Art** — which SM problem; how existing BSM approaches attack it; the specific gap this model fills
+3. **Model Definition** — Lagrangian, particle content with quantum numbers, symmetries, free parameters
+4. **Existing Constraints** — table of all constraints checked, with numerical bounds and model predictions side by side
+5. **Allowed Parameter Space** — plots of the surviving region in the most-informative 2D projections
+6. **Benchmark Points** — table of 3–5 BPs with all parameter values, key observables, and constraint status
+7. **Projections at Near-Future Facility** — target observable, signal rate, background, significance vs. luminosity, discovery/exclusion reach
+8. **Discussion** — interpretation, complementarity with other facilities, caveats
+9. **Reproducibility** — FeynRules source, UFO file, MadGraph run cards, analysis scripts, dataset references
+
+## When the Model Is Excluded
+
+If the initial parameter scan shows the model is fully excluded by existing data, **do not produce a paper about a dead model**. Instead:
+
+1. Document the exclusion cleanly — this is still useful literature
+2. Identify the dominant excluding constraint
+3. Propose a minimal extension that escapes that constraint (often an extra symmetry, portal suppression, or mass hierarchy)
+4. Re-scan; if still excluded, document the failure and stop
+
+This stop-and-redirect rule is explicit on purpose: BSM literature is cluttered with "proposals" that a five-minute constraint check would have killed.

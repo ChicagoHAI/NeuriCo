@@ -54,7 +54,10 @@ services:
       # CLI credentials (for cached logins)
       # Mounted to /tmp/ because entrypoint sets HOME=/tmp for non-root users
       - ~/.claude:/tmp/.claude:ro
-      - ~/.codex:/tmp/.codex:ro
+      # Codex: read-only mount at .codex-host; entrypoint copies auth.json
+      # into a container-private CODEX_HOME (~/.codex-container) to avoid
+      # UID-mismatch chmod errors with codex ≥0.122. Login flows use ./neurico login.
+      - ~/.codex:/home/neurico/.codex-host:ro
       - ~/.gemini:/tmp/.gemini:ro
       # Optional: SSH keys for private GitHub repos
       # - ~/.ssh:/home/researcher/.ssh:ro

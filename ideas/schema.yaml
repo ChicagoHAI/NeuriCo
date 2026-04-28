@@ -48,17 +48,11 @@ properties:
 
       domain:
         type: string
-        enum:
-          - machine_learning
-          - data_science
-          - systems
-          - theory
-          - scientific_computing
-          - nlp
-          - computer_vision
-          - reinforcement_learning
-          - artificial_intelligence
-        description: "Primary research domain"
+        description: |
+          Primary research domain. Valid values are defined in
+          config/domains.yaml — see that file for the current list.
+          Unknown domains are allowed by default and fall back to
+          the configured default_domain.
 
       hypothesis:
         type: string

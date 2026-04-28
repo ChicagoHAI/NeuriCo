@@ -141,6 +141,7 @@ class ResearchPipelineOrchestrator:
         if templates_dir is None:
             templates_dir = Path(__file__).parent.parent.parent / "templates"
         self.templates_dir = templates_dir
+
     def _initialize_runtime_state(self):
         """Initialize STATE.md and internal state artifacts if missing."""
         if self.state_manager.get_current() is None:
@@ -159,7 +160,7 @@ class ResearchPipelineOrchestrator:
                 current_stage="pipeline",
                 current_phase="resuming",
                 status="active",
-                what_is_done=["Pipeline resumed with existing state"],
+                append_done=["Pipeline resumed with existing state"],
                 cwd=str(self.work_dir),
                 event="pipeline_resume",
             )
@@ -599,7 +600,7 @@ class ResearchPipelineOrchestrator:
                 elif provider == "claude":
                     cmd += " --dangerously-skip-permissions"
                 elif provider == "gemini":
-                    cmd += " --yolo"
+                    cmd += " --yolo --skip-trust"
 
             # Add streaming JSON output flags for detailed logging
             # All providers now output streaming JSON for consistent transcript format
@@ -648,7 +649,8 @@ class ResearchPipelineOrchestrator:
                 event="experiment_runner_agent_launched",
             )
 
-            with open(log_file, 'w', encoding='utf-8') as log_f, open(transcript_file, 'w', encoding='utf-8') as transcript_f:
+            with open(log_file, 'w', encoding='utf-8') as log_f, \
+                open(transcript_file, 'w', encoding='utf-8') as transcript_f:
                 process = subprocess.Popen(
                     shlex.split(cmd),
                     stdin=subprocess.PIPE,
@@ -656,6 +658,7 @@ class ResearchPipelineOrchestrator:
                     stderr=subprocess.STDOUT,
                     env=env,
                     text=True,
+                    encoding='utf-8',
                     bufsize=1,
                     cwd=str(self.work_dir)
                 )
@@ -799,7 +802,7 @@ class ResearchPipelineOrchestrator:
             idea=idea,
             provider=provider,
             pause_after_resources=pause_after_resources,
-            skip_resource_finder=skip_resource_finder,
+            skip_resource_finder=resource_finder_done,
             full_permissions=full_permissions,
             use_scribe=use_scribe
         )
