@@ -451,7 +451,7 @@ class StateManager:
     
     @staticmethod
     def _dedupe_keep_order(items: List[str]) -> List[str]:
-        """Keep order."""
+        """Dedupe keep order."""
         seen = set()
         result = []
         for item in items:
