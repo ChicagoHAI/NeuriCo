@@ -109,7 +109,9 @@ def find_papers(query: str, mode: str = "fast", url: str = "http://localhost:800
             "url": doc.get('url', ''),
             "relevance": rel,
             "abstract": (doc.get('abstract') or ''),
-            "citations": doc.get('citation_count', 0) or 0
+            "citations": doc.get('citation_count', 0) or 0,
+            "venue": doc.get('venue', ''),
+            "influential_citations": doc.get('influential_citation_count', 0) or 0,
         })
 
     return results
