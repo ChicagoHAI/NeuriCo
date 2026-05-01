@@ -14,6 +14,7 @@ import sys
 import json
 import os
 import re
+import math
 import time
 import random
 import argparse
@@ -24,6 +25,38 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 MAX_ATTEMPTS = 5
 BASE_DELAY = 1.0
 MAX_DELAY = 60.0
+
+def score_paper(paper, current_year=None):
+    if current_year is None:
+        current_year = datetime.now().year
+    relevance = paper.get("relevance", 0)
+    citations = paper.get("influential_citations", 0)
+    year = paper.get("year")
+    score = float(relevance)
+    score += min(math.log1p(citations), 2.0)
+    if year:
+        age = current_year - year
+        score += 0.5 * math.exp(-age / 5.0)
+    return score
+
+
+def _dedup_key(paper):
+    if paper.get("doi"):
+        return paper["doi"]
+    if paper.get("url"):
+        return paper["url"]
+    return (paper.get("title", "").lower(), paper.get("year"))
+
+
+def _dedup_papers(papers):
+    seen = set()
+    deduped = []
+    for paper in papers:
+        key = _dedup_key(paper)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(paper)
+    return deduped
 
 
 def _backoff_delay(attempt):
@@ -113,6 +146,12 @@ def find_papers(query: str, mode: str = "fast", url: str = "http://localhost:800
             "venue": doc.get('venue', ''),
             "influential_citations": doc.get('influential_citation_count', 0) or 0,
         })
+
+    for paper in results["papers"]:
+        paper["score"] = score_paper(paper)
+    results["papers"].sort(key=lambda p: -p["score"])
+    results["papers"] = _dedup_papers(results["papers"])
+    results["total"] = len(results["papers"])
 
     return results
 
