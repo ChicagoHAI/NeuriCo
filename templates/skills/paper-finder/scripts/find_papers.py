@@ -14,8 +14,53 @@ import sys
 import json
 import os
 import re
+import time
+import random
 import argparse
 from datetime import datetime
+
+# Transient errors: rate-limit or server hiccups
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+MAX_ATTEMPTS = 5
+BASE_DELAY = 1.0
+MAX_DELAY = 60.0
+
+
+def _backoff_delay(attempt):
+    delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
+    return delay * random.uniform(0.5, 1.5)
+
+
+def _post_with_retry(client, url, payload):
+    """POST to url with exponential backoff and ±50% jitter.
+
+    Retries on:
+    - Response status codes in RETRYABLE_STATUS (429, 500, 502, 503, 504)
+    - httpx.RequestError (connection errors, timeouts, etc.)
+
+    Returns immediately without retrying on other 4xx responses (e.g. 404).
+    After MAX_ATTEMPTS, returns the final response for status-code errors;
+    re-raises the exception for httpx.RequestError.
+    """
+    import httpx  # Lazy import: find_papers() has verified availability
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = client.post(url, json=payload)
+            if response.status_code not in RETRYABLE_STATUS:
+                return response
+            if attempt == MAX_ATTEMPTS:
+                return response
+            reason = f"status {response.status_code}"
+        except httpx.RequestError as e:
+            if attempt == MAX_ATTEMPTS:
+                raise
+            reason = type(e).__name__
+        delay = _backoff_delay(attempt)
+        print(
+            f"Retry {attempt}/{MAX_ATTEMPTS - 1}: {reason}, retrying in {delay:.1f}s",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
 
 
 def find_papers(query: str, mode: str = "fast", url: str = "http://localhost:8000/api/2/rounds"):
@@ -27,7 +72,7 @@ def find_papers(query: str, mode: str = "fast", url: str = "http://localhost:800
 
     try:
         with httpx.Client(timeout=300.0) as client:
-            response = client.post(url, json={
+            response = _post_with_retry(client, url, {
                 "paper_description": query,
                 "operation_mode": mode,
                 "read_results_from_cache": True
