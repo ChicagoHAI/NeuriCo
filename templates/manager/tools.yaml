@@ -1,0 +1,119 @@
+# Tool definitions for the NeuriCo Interactive Manager
+# These are loaded into the system prompt for the manager LLM
+# and also used to generate API tool schemas when using API backends.
+
+tools:
+  - name: run_agent
+    description: |
+      Launch a research agent inside the Docker container. The agent runs
+      in the background and you can check its status later. Each invocation
+      gets a unique run_id for tracking.
+    parameters:
+      agent:
+        type: string
+        enum: [resource_finder, experiment_runner, paper_writer, comment_handler]
+        description: Which agent to run
+        required: true
+      provider:
+        type: string
+        enum: [claude, codex, gemini]
+        description: AI provider for the agent (default uses session provider)
+        required: false
+      paper_style:
+        type: string
+        enum: [neurips, icml, acl, ams]
+        description: Paper style template (only for paper_writer agent)
+        required: false
+      use_scribe:
+        type: boolean
+        description: Use Jupyter notebook integration (only for experiment_runner)
+        required: false
+    returns: |
+      A run_id string and immediate status. Use check_workspace or
+      read_agent_logs to monitor progress. The agent result will be
+      available at .neurico/runs/<run_id>/result.json when complete.
+
+  - name: check_workspace
+    description: |
+      Read files from the research workspace to understand current state.
+      Can list directory contents or read specific files.
+    parameters:
+      action:
+        type: string
+        enum: [list, read]
+        description: "list: show directory contents. read: show file content."
+        required: true
+      path:
+        type: string
+        description: |
+          Relative path within the workspace. Use "." for root.
+          Examples: ".", "literature_review.md", "results/", "logs/resource_finder_claude.log"
+        required: true
+      max_lines:
+        type: integer
+        description: Maximum lines to return when reading a file (default 200)
+        required: false
+    returns: Directory listing or file content as text.
+
+  - name: read_agent_logs
+    description: |
+      Read recent log output from a running or completed agent.
+      Useful for understanding what an agent is doing or why it failed.
+    parameters:
+      run_id:
+        type: string
+        description: The run_id of the agent invocation to check
+        required: true
+      tail_lines:
+        type: integer
+        description: Number of lines from the end of the log to return (default 100)
+        required: false
+    returns: |
+      Agent status (running/completed/failed) and recent log lines.
+      If the agent wrote a result.json or error.json, those are included too.
+
+  - name: ask_user
+    description: |
+      Present a message, question, or decision to the human researcher
+      and wait for their response. Use this for critical decision points,
+      not routine updates.
+    parameters:
+      message:
+        type: string
+        description: |
+          The message to show the user. Should be concise (2-4 paragraphs max).
+          Lead with findings, end with a question or options.
+        required: true
+      options:
+        type: array
+        items:
+          type: string
+        description: |
+          Optional list of specific options to present. If provided,
+          the user will be prompted to choose. If not, free-form input.
+        required: false
+    returns: The user's response as a string.
+
+  - name: update_session
+    description: |
+      Update the session state with key findings, open questions, or
+      other metadata. This persists across session restarts and helps
+      maintain context over long research sessions.
+    parameters:
+      key_findings:
+        type: array
+        items:
+          type: string
+        description: Key findings to add to the session (append, not replace)
+        required: false
+      open_questions:
+        type: array
+        items:
+          type: string
+        description: Open questions to track (replaces existing list)
+        required: false
+      phase:
+        type: string
+        description: Current research phase label (e.g., "exploring", "experimenting", "writing")
+        required: false
+    returns: Confirmation of the update.

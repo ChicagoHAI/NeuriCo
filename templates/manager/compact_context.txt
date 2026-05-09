@@ -1,0 +1,19 @@
+You are compacting the conversation history for a NeuriCo interactive research session.
+
+The conversation has grown too long and needs to be summarized. Create a concise summary that preserves:
+
+1. What agents have been run and their key results
+2. Important decisions made by the human researcher
+3. Current research state (what has been done, what remains)
+4. Key findings and open questions
+5. Any user preferences or instructions expressed during the conversation
+
+Do NOT include:
+- Raw log output or detailed tool results
+- Routine back-and-forth that doesn't affect the research direction
+- Technical details about Docker or execution mechanics
+
+Format as a structured summary with sections. Keep it under 500 words.
+
+## Conversation to summarize:
+{{ conversation }}
