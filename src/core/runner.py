@@ -300,6 +300,16 @@ class ResearchRunner:
         if use_scribe:
             (work_dir / "notebooks").mkdir(parents=True, exist_ok=True)
 
+        # Initialize STATE.md from template if not already present.
+        # The agent reads and updates this file; the pipeline owns creation so
+        # the template structure (italic description lines) is always correct.
+        state_md = work_dir / "STATE.md"
+        if not state_md.exists():
+            state_template = self.project_root / "templates" / "base" / "deliverables" / "state_template.md"
+            if state_template.exists():
+                state_md.write_text(state_template.read_text(encoding='utf-8'), encoding='utf-8')
+                print(f"   Initialized STATE.md")
+
         # Copy helper scripts to workspace
         self._copy_workspace_resources(work_dir)
 
