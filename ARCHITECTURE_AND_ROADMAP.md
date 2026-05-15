@@ -118,6 +118,11 @@ NeuriCo uses a **multi-stage pipeline architecture** that separates resource gat
 - **Pragmatic execution**: Agents create resources when they don't exist and always proceed rather than blocking
 - **Multi-provider support**: Works with Claude, Codex, and Gemini as agent backends
 - **Resumable**: Pipeline state is tracked and can resume from the last completed stage
+- **Stateful execution**: `STATE.md` tracks progress, `./neurico/state.json` stores structured state
+- **Validation-gated pipeline**: Each stage must produce required outputs before continuing
+- **Context compression**: Phase summaries replace raw history
+- **Top-K exploration control**: Agents operate on prioritized candidates instead of exploring everything
+- **Working directory enforcement**: Prevent execution drift outside workspace
 
 ---
 
@@ -138,6 +143,25 @@ Manages the multi-stage execution:
 - **State Persistence**: Saves progress to `.neurico/pipeline_state.json`
 - **Timeout Handling**: Configurable timeouts per stage (default: 45 min / 3 hours)
 - **Resume Capability**: Can restart from last completed stage
+- **Validation**: Validation before progression
+- **Context Management**: Context injection between stages 
+
+### State Manager (`src/core/state_manager.py`)
+
+Manages persistent execution state:
+- **State Management**: Track stage/phase, etc. via `.neurico/state.json`, `STATE.md`
+
+### Context Summarizer (`src/core/context_summarizer.py`)
+
+Summarize key findsing, decision rationale, etc. via `.neurico/phase_summary.json`, `.neurico/phase_summary_<stage>.json`
+
+### Validators (`src/core/validators.py`)
+
+Conduct validations to:
+- Ensure required outputs exist
+- Ensure structure is valid 
+- Ensure stage completition is trustworthy
+- Prevent invalid pipeline progression
 
 ### Resource Finder Agent (`src/agents/resource_finder.py`)
 
@@ -175,6 +199,7 @@ Composes research prompts from templates:
 - Loads domain-specific template (ML, AI, Data Science, etc.)
 - Renders Jinja2 templates with idea variables
 - Produces layered prompt: task section + base methodology + domain guidance
+- Inject current state, prior phase summary, Top-K constraints, workspace directory
 
 ### GitHub Manager (`src/core/github_manager.py`)
 
@@ -463,13 +488,21 @@ Based on our learnings, we've identified five key challenges to address.
 - Forgetting earlier instructions as context fills up
 - Incomplete outputs due to working memory limitations
 
-**Current State**: Solvable via careful instructions, but unclear how to generalize.
+**Current State**: Solvable via careful instructions, but unclear how to generalize. 
+- Updated STATE tracking 
+- Implemented phase summaries
+- Conducted validation to prevent incomplete execution
+- Checked cwd to prevent directory drift
+- Used Top-K to limit exploration
 
 **Directions**:
 - Better context curation strategies to prevent drift
 - Validation checks at stage boundaries to catch errors early
 - More structured output requirements (completion markers, required files)
 - Research: Can we categorize common failure modes and build targeted mitigations?
+- Semantic automatic drift detection via LLM judge
+- Adaptive Top-K selection
+- Confidence estimation and uncertainty tracking
 
 ### Challenge 4: Human Intervention & Feedback
 
@@ -491,6 +524,9 @@ Based on our learnings, we've identified five key challenges to address.
 - Don't know when results are inconclusive vs. definitive
 
 **Current State**: Agents can run experiments and report, but scientific rigor varies.
+- Updated validation enforcement
+- Enhanced structured summaries
+- Updated context management
 
 **Directions**:
 - Encourage exploration of multiple directions, not just one

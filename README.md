@@ -33,6 +33,10 @@
 | **Domain-Agnostic** | ML, data science, AI, systems, theory, and more |
 | **Smart Documentation** | Auto-generates reports, code, and results |
 | **GitHub Integration** | Auto-creates repos and pushes results |
+| **Stateful Execution** | Persistent `STATE.md` tracks progress |
+| **Context-Aware Agents** | Agents receive summaries of prior stages and injects them into prompts for next stage |
+| **Validation-Gated Woekflow** | Each stage must be validated before progression |
+| **Top-K Exploration Control** | Agents focus on the most promising directions |
 
 </details>
 
