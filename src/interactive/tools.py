@@ -318,6 +318,18 @@ class ToolExecutor:
         open_questions = args.get("open_questions")
         phase = args.get("phase")
 
+        # CLI backend LLM sometimes serializes arrays as JSON-encoded strings
+        if isinstance(key_findings, str):
+            try:
+                key_findings = json.loads(key_findings)
+            except (json.JSONDecodeError, ValueError):
+                key_findings = [key_findings]
+        if isinstance(open_questions, str):
+            try:
+                open_questions = json.loads(open_questions)
+            except (json.JSONDecodeError, ValueError):
+                open_questions = [open_questions]
+
         self.session.update_findings(
             key_findings=key_findings,
             open_questions=open_questions,
