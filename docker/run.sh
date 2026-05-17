@@ -1674,6 +1674,8 @@ cmd__run_agent() {
     echo -e "${BLUE}Running agent: $1${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
 
+    local quoted_args
+    quoted_args=$(printf ' %q' "$@")
     eval "docker run --rm \
         $gpu_flags \
         $user_flags \
@@ -1687,7 +1689,7 @@ cmd__run_agent() {
         $credential_mounts \
         -w /app \
         \"$IMAGE_NAME\" \
-        python /app/src/core/agent_runner.py $@"
+        python /app/src/core/agent_runner.py$quoted_args"
 }
 
 # -----------------------------------------------------------------------------
