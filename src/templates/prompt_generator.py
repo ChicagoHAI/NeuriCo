@@ -10,12 +10,13 @@ This module generates complete prompts for research agents by:
 from pathlib import Path
 from typing import Dict, Any, Optional
 import yaml
-from jinja2 import Environment, FileSystemLoader, Template
+from jinja2 import Environment, FileSystemLoader
 import sys
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.config_loader import ConfigLoader, normalize_domain
+from core.usage_tracker import format_budget_usd
 
 
 class PromptGenerator:
@@ -159,7 +160,7 @@ class PromptGenerator:
                 domain_template = self.load_template(default_template_path)
             except FileNotFoundError:
                 # Ultimate fallback: no domain-specific guidance
-                print(f"⚠️  No domain templates available, using base template only")
+                print("⚠️  No domain templates available, using base template only")
                 domain_template = ""
 
         # Prepare variables for template rendering
@@ -346,7 +347,7 @@ Location: {run_dir}
                         desc = repo.get('description', 'Code repository')
                         lines.append(f"- **{desc}**")
                         lines.append(f"  - URL: {repo_url}")
-                        lines.append(f"  - ACTION REQUIRED: Clone this repository and explore its capabilities")
+                        lines.append("  - ACTION REQUIRED: Clone this repository and explore its capabilities")
                     else:
                         lines.append(f"- {repo}")
                 lines.append("")
@@ -389,7 +390,8 @@ Location: {run_dir}
                 lines.append(f"- **Memory**: {constraints['memory']}")
 
             if 'budget' in constraints:
-                lines.append(f"- **Budget**: ${constraints['budget']:.2f}")
+                budget = format_budget_usd(constraints['budget'])
+                lines.append(f"- **Budget**: {budget or constraints['budget']}")
 
             if 'dependencies' in constraints and constraints['dependencies']:
                 lines.append(f"- **Dependencies**: {', '.join(constraints['dependencies'])}")
@@ -698,7 +700,7 @@ RESEARCH DOMAIN:
                         desc = repo.get('description', 'Code repository')
                         research_context += f"- {desc}\n"
                         research_context += f"  URL: {repo_url}\n"
-                        research_context += f"  → You MUST clone this repository to code/ directory\n"
+                        research_context += "  → You MUST clone this repository to code/ directory\n"
                     else:
                         research_context += f"- {repo}\n"
                 research_context += "\nThese are NOT optional - they are specified by the research author.\n"

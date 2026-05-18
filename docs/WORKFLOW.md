@@ -6,6 +6,11 @@ This guide explains the complete workflow for using NeuriCo, from idea submissio
 
 NeuriCo uses a **workspace-first** approach where GitHub repositories are created immediately upon idea submission, allowing you to add resources before the AI agent runs.
 
+Usage and budget tracking reads the structured transcripts emitted by the
+Claude, Codex, and Gemini CLI commands used during each agent stage. See
+[`USAGE_TRACKING_TRANSCRIPTS.md`](USAGE_TRACKING_TRANSCRIPTS.md) for the exact
+provider transcript fields parsed by NeuriCo.
+
 ## Complete Workflow
 
 ### Step 1: Setup (One-time)
@@ -50,7 +55,7 @@ idea:
 
   constraints:
     compute: cpu_only
-    budget: 50
+    budget: "$50"
     time_limit: 3600
 ```
 

@@ -684,6 +684,18 @@ cmd_run() {
 }
 
 # -----------------------------------------------------------------------------
+# Show cost and token usage history
+# -----------------------------------------------------------------------------
+cmd_usage() {
+    if command -v python3 &> /dev/null; then
+        (cd "$PROJECT_ROOT" && python3 src/cli/usage.py "$@")
+    else
+        echo -e "${RED}Error: python3 not found${NC}"
+        exit 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Update CLI tools (Claude, Codex, Gemini) to latest versions
 # -----------------------------------------------------------------------------
 cmd_update_tools() {
@@ -1679,6 +1691,7 @@ cmd_help() {
     echo "  fetch <url> [--submit]    Fetch idea from IdeaHub"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
+    echo "  usage [options]           Show token/cost usage history"
     echo "  update-tools              Update Claude/Codex/Gemini to latest versions"
     echo "  bump-version <version>    Bump version across all files (e.g., 0.3.0)"
     echo "  up                        Start container in background (compose)"
@@ -1706,7 +1719,7 @@ ACTION="${1:-help}"
 shift 2>/dev/null || true
 
 # Check Docker is available (skip for commands that don't need it)
-if [ "$ACTION" != "config" ] && [ "$ACTION" != "help" ] && [ "$ACTION" != "--help" ] && [ "$ACTION" != "-h" ]; then
+if [ "$ACTION" != "config" ] && [ "$ACTION" != "usage" ] && [ "$ACTION" != "help" ] && [ "$ACTION" != "--help" ] && [ "$ACTION" != "-h" ]; then
     check_docker
 fi
 
@@ -1737,6 +1750,9 @@ case "$ACTION" in
         ;;
     run)
         cmd_run "$@"
+        ;;
+    usage)
+        cmd_usage "$@"
         ;;
     update-tools)
         cmd_update_tools
