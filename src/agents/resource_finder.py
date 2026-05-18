@@ -16,12 +16,12 @@ import shlex
 import os
 import sys
 import time
-from datetime import datetime
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.security import sanitize_text
+from core.usage_tracker import budget_prompt_context
 
 
 # CLI commands for different providers
@@ -35,11 +35,11 @@ CLI_COMMANDS = {
 
 # CLI flags for verbose/structured transcript output
 # These enable capturing detailed conversation transcripts for logging
-# All providers now output streaming JSON for consistent transcript format
+# All providers output structured transcript data for consistent logging
 TRANSCRIPT_FLAGS = {
     'claude': '--verbose --output-format stream-json',  # Streaming JSON (requires -p and --verbose)
     'codex': '--json',  # Outputs newline-delimited JSON events (works with codex exec)
-    'gemini': '--output-format stream-json'  # Outputs JSONL stream
+    'gemini': '--output-format stream-json'  # Existing NeuriCo behavior
 }
 
 
@@ -101,7 +101,7 @@ def run_resource_finder(
     if templates_dir is None:
         templates_dir = Path(__file__).parent.parent.parent / "templates"
 
-    print(f"🔍 Starting Resource Finder Agent")
+    print("🔍 Starting Resource Finder Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
     print(f"   Timeout: {timeout}s ({timeout//60} minutes)")
@@ -110,6 +110,9 @@ def run_resource_finder(
     # Generate prompt
     print("📝 Generating resource finder prompt...")
     prompt = generate_resource_finder_prompt(idea, templates_dir)
+    budget_context = budget_prompt_context(work_dir, idea)
+    if budget_context:
+        prompt = f"{budget_context}\n\n{'=' * 80}\n\n{prompt}"
 
     # Save prompt for reference
     logs_dir = work_dir / "logs"
@@ -187,9 +190,7 @@ def run_resource_finder(
             process.stdin.write(prompt)
             process.stdin.close()
 
-            # Stream output to both log file and transcript file (sanitized for security)
-            # For Claude/Codex with JSON flags, the output IS the transcript
-            # For Gemini, the output is regular text but sessions are saved separately
+            # Stream structured provider output to both log and transcript files.
             for line in iter(process.stdout.readline, ''):
                 if line:
                     sanitized_line = sanitize_text(line)
@@ -291,7 +292,7 @@ def wait_for_completion(
     completion_marker = work_dir / ".resource_finder_complete"
     start_time = time.time()
 
-    print(f"⏳ Waiting for resource finder completion...")
+    print("⏳ Waiting for resource finder completion...")
     print(f"   Checking for: {completion_marker}")
     print(f"   Timeout: {timeout}s ({timeout//60} minutes)")
 

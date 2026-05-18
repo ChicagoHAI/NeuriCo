@@ -10,7 +10,7 @@ This module orchestrates the execution of research by:
 """
 
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 import subprocess
 import shlex
 import sys
@@ -31,6 +31,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.idea_manager import IdeaManager
 from core.config_loader import ConfigLoader
 from core.security import sanitize_text
+from core.usage_tracker import (
+    budget_prompt_context,
+    check_budget_before_stage,
+    format_usage_summary,
+    load_workspace_usage,
+    parse_transcript_usage,
+    update_workspace_usage,
+)
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -177,7 +185,6 @@ class ResearchRunner:
 
         # Setup working directory (GitHub repo or local runs/)
         github_url = None
-        github_repo = None
 
         if self.use_github and self.github_manager:
             # Check if workspace already exists from submission
@@ -186,7 +193,7 @@ class ResearchRunner:
             existing_workspace = self.github_manager.get_workspace_path(idea_id, repo_name)
 
             if existing_workspace:
-                print(f"\n✅ Using existing workspace from submission")
+                print("\n✅ Using existing workspace from submission")
                 print(f"   Local: {existing_workspace}")
 
                 # Pull latest changes (in case user added resources)
@@ -194,7 +201,7 @@ class ResearchRunner:
                     self.github_manager.pull_latest(existing_workspace)
                 except Exception as e:
                     print(f"   ⚠️  Could not pull latest changes: {e}")
-                    print(f"   Continuing with local version...")
+                    print("   Continuing with local version...")
 
                 work_dir = existing_workspace
                 is_resuming = (work_dir / ".neurico" / "pipeline_state.json").exists()
@@ -214,8 +221,8 @@ class ResearchRunner:
 
             else:
                 # Create new GitHub repository (backward compatibility)
-                print(f"\n⚠️  No existing workspace found. Creating new GitHub repository...")
-                print(f"   (Tip: Use submit.py to create workspace before running)\n")
+                print("\n⚠️  No existing workspace found. Creating new GitHub repository...")
+                print("   (Tip: Use submit.py to create workspace before running)\n")
 
                 try:
                     domain = idea_spec.get('domain', 'research')
@@ -230,8 +237,6 @@ class ResearchRunner:
                     )
 
                     github_url = repo_info['repo_url']
-                    github_repo = repo_info['repo_object']
-
                     # Store repo_name in idea metadata
                     idea['idea']['metadata'] = idea['idea'].get('metadata', {})
                     idea['idea']['metadata']['github_repo_name'] = repo_info['repo_name']
@@ -262,7 +267,7 @@ class ResearchRunner:
 
                     work_dir = repo_info['local_path']
                     is_resuming = False
-                    print(f"\n✅ Working in GitHub repository")
+                    print("\n✅ Working in GitHub repository")
                     print(f"   URL: {github_url}")
                     print(f"   Local: {work_dir}\n")
 
@@ -351,6 +356,17 @@ class ResearchRunner:
 
                 # Paper writing stage (optional)
                 if write_paper and success:
+                    guard = check_budget_before_stage(work_dir, idea, "paper_writer")
+                    if not guard["allowed"]:
+                        print(f"🛑 {guard['reason']}")
+                        success = False
+                        return {
+                            'work_dir': work_dir,
+                            'github_url': github_url,
+                            'success': success,
+                            'budget_status': 'exceeded'
+                        }
+
                     print()
                     print("=" * 80)
                     print("📝 STAGE 3: Paper Writing")
@@ -366,13 +382,31 @@ class ResearchRunner:
                         style=paper_style,
                         timeout=paper_timeout,
                         full_permissions=full_permissions,
-                        domain=domain
+                        domain=domain,
+                        budget_context=budget_prompt_context(work_dir, idea)
                     )
+
+                    transcript_file = paper_result.get('transcript_file')
+                    if transcript_file:
+                        usage = parse_transcript_usage(
+                            Path(transcript_file),
+                            stage="paper_writer",
+                            provider=provider,
+                        )
+                        usage_data = update_workspace_usage(
+                            work_dir,
+                            idea,
+                            provider,
+                            usage,
+                            project_root=self.project_root,
+                        )
+                        paper_result["usage"] = usage.to_dict()
+                        print(format_usage_summary(usage_data))
 
                     if paper_result.get('success'):
                         print(f"\n✅ Paper generated: {paper_result['draft_dir']}/main.tex")
                     else:
-                        print(f"\n⚠️  Paper generation failed (research still succeeded)")
+                        print("\n⚠️  Paper generation failed (research still succeeded)")
 
             except Exception as e:
                 print(f"\n❌ Pipeline error: {e}")
@@ -457,7 +491,8 @@ class ResearchRunner:
                 elif provider == "gemini":
                     cmd += " --yolo --skip-trust"
 
-            # Add streaming JSON output flags for detailed logging
+            # Add streaming JSON output flags for detailed logging.
+            # Preserve the provider invocation behavior used by the original runner.
             if provider == "claude":
                 cmd += " --verbose --output-format stream-json"  # Streaming JSON (requires -p and --verbose)
             elif provider == "codex":
@@ -546,7 +581,7 @@ https://github.com/ChicagoHAI/neurico
                         commit_msg
                     )
 
-                    print(f"\n🎉 Results published to GitHub!")
+                    print("\n🎉 Results published to GitHub!")
                     print(f"   {github_url}")
 
                 except Exception as e:
@@ -557,7 +592,7 @@ https://github.com/ChicagoHAI/neurico
             self.idea_manager.update_status(idea_id, 'completed')
 
             print()
-            print(f"✅ Research completed!")
+            print("✅ Research completed!")
             print(f"   Location: {work_dir}")
             if github_url:
                 print(f"   GitHub: {github_url}")
@@ -679,7 +714,7 @@ Generated by NeuriCo (comment mode)
 https://github.com/ChicagoHAI/neurico
 """
                 self.github_manager.commit_and_push(work_dir, commit_msg)
-                print(f"Changes published to GitHub!")
+                print("Changes published to GitHub!")
                 if github_url:
                     print(f"   {github_url}")
 
@@ -716,7 +751,7 @@ https://github.com/ChicagoHAI/neurico
                     if dst_skill_dir.exists():
                         shutil.rmtree(dst_skill_dir)
                     shutil.copytree(skill_dir, dst_skill_dir)
-            print(f"   Copied Claude Code skills to .claude/skills/")
+            print("   Copied Claude Code skills to .claude/skills/")
 
         # Copy skills to .gemini/skills/ for Gemini support
         gemini_skills_dst = work_dir / ".gemini" / "skills"
@@ -728,7 +763,7 @@ https://github.com/ChicagoHAI/neurico
                     if dst_skill_dir.exists():
                         shutil.rmtree(dst_skill_dir)
                     shutil.copytree(skill_dir, dst_skill_dir)
-            print(f"   Copied skills to .gemini/skills/")
+            print("   Copied skills to .gemini/skills/")
 
         # Copy skills to .codex/skills/ for Codex support
         codex_skills_dst = work_dir / ".codex" / "skills"
@@ -740,7 +775,7 @@ https://github.com/ChicagoHAI/neurico
                     if dst_skill_dir.exists():
                         shutil.rmtree(dst_skill_dir)
                     shutil.copytree(skill_dir, dst_skill_dir)
-            print(f"   Copied skills to .codex/skills/")
+            print("   Copied skills to .codex/skills/")
 
         # Add/merge .gitignore for research workspace
         self._setup_workspace_gitignore(work_dir)
@@ -784,12 +819,12 @@ https://github.com/ChicagoHAI/neurico
 
             merged_content = existing_content.rstrip('\n') + '\n\n' + '\n'.join(new_lines) + '\n'
             workspace_gitignore.write_text(merged_content, encoding='utf-8')
-            print(f"   Merged research .gitignore patterns into workspace")
+            print("   Merged research .gitignore patterns into workspace")
         else:
             # No existing .gitignore (e.g. local-only mode), copy template directly
             import shutil
             shutil.copy2(template_gitignore, workspace_gitignore)
-            print(f"   Copied .gitignore template to workspace")
+            print("   Copied .gitignore template to workspace")
 
     def _finalize_research(self, idea_id: str, work_dir: Path, github_url: Optional[str],
                           title: str, provider: str, success: bool):
@@ -828,7 +863,7 @@ https://github.com/ChicagoHAI/neurico
                     commit_msg
                 )
 
-                print(f"\n🎉 Results published to GitHub!")
+                print("\n🎉 Results published to GitHub!")
                 if github_url:
                     print(f"   {github_url}")
 
@@ -840,10 +875,15 @@ https://github.com/ChicagoHAI/neurico
         self.idea_manager.update_status(idea_id, 'completed')
 
         print()
-        print(f"✅ Research completed!")
+        print("✅ Research completed!")
         print(f"   Location: {work_dir}")
         if github_url:
             print(f"   GitHub: {github_url}")
+
+        usage_data = load_workspace_usage(work_dir)
+        if usage_data:
+            print()
+            print(format_usage_summary(usage_data))
 
 
 def main():

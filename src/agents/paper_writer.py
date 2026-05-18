@@ -13,6 +13,10 @@ import shlex
 import os
 import sys
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from core.security import sanitize_text
+
 # Force UTF-8 stdout on Windows so print() can handle Unicode from the Claude CLI.
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -112,7 +116,7 @@ def _copy_style_files(draft_dir: Path, style: str):
         print(f"   Copied {style} style files to {draft_dir}")
     else:
         print(f"   Warning: Style directory {style_dir} not found")
-        print(f"   Agent will need to create paper without template style files")
+        print("   Agent will need to create paper without template style files")
 
 
 def _copy_paper_writing_resources(draft_dir: Path):
@@ -199,7 +203,8 @@ def run_paper_writer(
     style: str = "neurips",
     timeout: int = 3600,
     full_permissions: bool = True,
-    domain: str = "general"
+    domain: str = "general",
+    budget_context: str = ""
 ) -> Dict[str, Any]:
     """
     Run paper writing agent.
@@ -222,7 +227,7 @@ def run_paper_writer(
     Returns:
         Result dictionary with success status and paths
     """
-    print(f"📝 Starting Paper Writer Agent")
+    print("📝 Starting Paper Writer Agent")
     print(f"   Style: {style}")
     print(f"   Provider: {provider}")
     print(f"   Workspace: {work_dir}")
@@ -241,6 +246,8 @@ def run_paper_writer(
 
     # Generate prompt
     prompt = generate_paper_writer_prompt(work_dir, style, provider=provider, domain=domain)
+    if budget_context:
+        prompt = f"{budget_context}\n\n{'=' * 80}\n\n{prompt}"
 
     # Save prompt for debugging
     logs_dir = work_dir / "logs"
@@ -270,9 +277,11 @@ def run_paper_writer(
     env['PYTHONUNBUFFERED'] = '1'
 
     log_file = logs_dir / f"paper_writer_{provider}.log"
+    transcript_file = logs_dir / f"paper_writer_{provider}_transcript.jsonl"
 
     try:
-        with open(log_file, 'w', encoding='utf-8') as log_f:
+        with open(log_file, 'w', encoding='utf-8') as log_f, \
+             open(transcript_file, 'w', encoding='utf-8') as transcript_f:
             process = subprocess.Popen(
                 shlex.split(cmd),
                 stdin=subprocess.PIPE,
@@ -289,14 +298,16 @@ def run_paper_writer(
 
             for line in iter(process.stdout.readline, ''):
                 if line:
-                    print(line, end='')
-                    log_f.write(line)
+                    sanitized_line = sanitize_text(line)
+                    print(sanitized_line, end='')
+                    log_f.write(sanitized_line)
+                    transcript_f.write(sanitized_line)
 
             return_code = process.wait(timeout=timeout)
 
         success = return_code == 0
         if success:
-            print(f"\n✅ Paper writer agent completed!")
+            print("\n✅ Paper writer agent completed!")
             print(f"   Output directory: {draft_dir}")
         else:
             print(f"\n❌ Paper generation failed with code {return_code}")
@@ -305,6 +316,7 @@ def run_paper_writer(
             'success': success,
             'draft_dir': str(draft_dir),
             'log_file': str(log_file),
+            'transcript_file': str(transcript_file),
             'return_code': return_code
         }
 
@@ -315,6 +327,7 @@ def run_paper_writer(
             'success': False,
             'draft_dir': str(draft_dir),
             'log_file': str(log_file),
+            'transcript_file': str(transcript_file),
             'error': 'timeout'
         }
     except Exception as e:
@@ -323,6 +336,7 @@ def run_paper_writer(
             'success': False,
             'draft_dir': str(draft_dir),
             'log_file': str(log_file),
+            'transcript_file': str(transcript_file),
             'error': str(e)
         }
 

@@ -15,9 +15,20 @@ from typing import Optional, Dict, Any
 import json
 from datetime import datetime
 import time
+import sys
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agents.resource_finder import run_resource_finder
 from templates.research_agent_instructions import generate_instructions
+from core.usage_tracker import (
+    budget_prompt_context,
+    check_budget_before_stage,
+    format_usage_summary,
+    load_workspace_usage,
+    parse_transcript_usage,
+    update_workspace_usage,
+)
 
 
 class PipelineState:
@@ -171,6 +182,12 @@ class ResearchPipelineOrchestrator:
         try:
             # STAGE 1: Resource Finder
             if not skip_resource_finder:
+                guard = check_budget_before_stage(self.work_dir, idea, "resource_finder")
+                if not guard["allowed"]:
+                    print(f"🛑 {guard['reason']}")
+                    results["budget_status"] = "exceeded"
+                    return results
+
                 results['stages']['resource_finder'] = self._run_resource_finder(
                     idea=idea,
                     provider=provider,
@@ -185,6 +202,12 @@ class ResearchPipelineOrchestrator:
                     print("   1. Review logs and fix issues")
                     print("   2. Re-run with --skip-resource-finder if resources are already gathered")
                     print("   3. Manually add resources to workspace and continue")
+                    return results
+
+                usage = load_workspace_usage(self.work_dir)
+                if usage.get("budget_status") == "exceeded":
+                    print("🛑 Budget exceeded after resource finder; stopping before experiment runner.")
+                    results["budget_status"] = "exceeded"
                     return results
             else:
                 print("⏭️  Skipping resource finder stage (resources assumed to be ready)")
@@ -201,6 +224,12 @@ class ResearchPipelineOrchestrator:
                     return results
 
             # STAGE 3: Experiment Runner
+            guard = check_budget_before_stage(self.work_dir, idea, "experiment_runner")
+            if not guard["allowed"]:
+                print(f"🛑 {guard['reason']}")
+                results["budget_status"] = "exceeded"
+                return results
+
             results['stages']['experiment_runner'] = self._run_experiment_runner(
                 idea=idea,
                 provider=provider,
@@ -261,7 +290,24 @@ class ResearchPipelineOrchestrator:
                 full_permissions=full_permissions
             )
 
-            self.state.complete_stage('resource_finder', result['success'], result.get('outputs'))
+            transcript_file = result.get('transcript_file')
+            if transcript_file:
+                usage = parse_transcript_usage(
+                    Path(transcript_file),
+                    stage="resource_finder",
+                    provider=provider,
+                )
+                usage_data = update_workspace_usage(
+                    self.work_dir,
+                    idea,
+                    provider,
+                    usage,
+                    project_root=self.templates_dir.parent,
+                )
+                result["usage"] = usage.to_dict()
+                print(format_usage_summary(usage_data))
+
+            self.state.complete_stage('resource_finder', result['success'], result)
 
             return result
 
@@ -338,6 +384,9 @@ class ResearchPipelineOrchestrator:
 
             prompt_generator = PromptGenerator(self.templates_dir)
             prompt = prompt_generator.generate_research_prompt(idea, root_dir=self.work_dir)
+            budget_context = budget_prompt_context(self.work_dir, idea)
+            if budget_context:
+                prompt = f"{budget_context}\n\n{'=' * 80}\n\n{prompt}"
 
             # Save prompt
             prompt_file = self.work_dir / "logs" / "research_prompt.txt"
@@ -379,7 +428,7 @@ class ResearchPipelineOrchestrator:
                     cmd += " --yolo --skip-trust"
 
             # Add streaming JSON output flags for detailed logging
-            # All providers now output streaming JSON for consistent transcript format
+            # Preserve the provider invocation behavior used by the original pipeline.
             if provider == "claude":
                 cmd += " --verbose --output-format stream-json"  # Streaming JSON (requires -p and --verbose)
             elif provider == "codex":
@@ -429,9 +478,7 @@ class ResearchPipelineOrchestrator:
                 process.stdin.write(session_instructions)
                 process.stdin.close()
 
-                # Stream output to both log file and transcript file (sanitized for security)
-                # For Claude/Codex with JSON flags, the output IS the transcript
-                # For Gemini, the output is regular text but sessions are saved separately
+                # Stream structured provider output to both log and transcript files.
                 for line in iter(process.stdout.readline, ''):
                     if line:
                         sanitized_line = sanitize_text(line)
@@ -463,6 +510,21 @@ class ResearchPipelineOrchestrator:
                 'transcript_file': str(transcript_file)
             }
 
+            usage = parse_transcript_usage(
+                transcript_file,
+                stage="experiment_runner",
+                provider=provider,
+            )
+            usage_data = update_workspace_usage(
+                self.work_dir,
+                idea,
+                provider,
+                usage,
+                project_root=self.templates_dir.parent,
+            )
+            result["usage"] = usage.to_dict()
+            print(format_usage_summary(usage_data))
+
             self.state.complete_stage('experiment_runner', success, result)
 
             return result
@@ -471,12 +533,44 @@ class ResearchPipelineOrchestrator:
             print(f"\n⏱️  Experiment runner timed out after {timeout} seconds")
             process.kill()
             result = {'success': False, 'error': 'timeout'}
+            if 'transcript_file' in locals():
+                result['transcript_file'] = str(transcript_file)
+                usage = parse_transcript_usage(
+                    transcript_file,
+                    stage="experiment_runner",
+                    provider=provider,
+                )
+                usage_data = update_workspace_usage(
+                    self.work_dir,
+                    idea,
+                    provider,
+                    usage,
+                    project_root=self.templates_dir.parent,
+                )
+                result["usage"] = usage.to_dict()
+                print(format_usage_summary(usage_data))
             self.state.complete_stage('experiment_runner', False, result)
             return result
 
         except Exception as e:
             print(f"❌ Experiment runner stage failed: {e}")
             result = {'success': False, 'error': str(e)}
+            if 'transcript_file' in locals():
+                result['transcript_file'] = str(transcript_file)
+                usage = parse_transcript_usage(
+                    transcript_file,
+                    stage="experiment_runner",
+                    provider=provider,
+                )
+                usage_data = update_workspace_usage(
+                    self.work_dir,
+                    idea,
+                    provider,
+                    usage,
+                    project_root=self.templates_dir.parent,
+                )
+                result["usage"] = usage.to_dict()
+                print(format_usage_summary(usage_data))
             self.state.complete_stage('experiment_runner', False, result)
             raise
 
