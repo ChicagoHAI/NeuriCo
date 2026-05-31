@@ -71,6 +71,15 @@ target-version = ['py310']
 line-length = 100
 target-version = "py310"
 
+[tool.pytest.ini_options]
+markers = [
+    "lean_binary: requires lean binary on PATH (Tier 1 integration tests)",
+    "lean_lake:   requires lean + lake on PATH (Tier 2 integration tests)",
+    "lean_mathlib: slow — downloads Mathlib cache; implies lean_lake (Tier 3)",
+    "slow:        long-running tests (>60 seconds)",
+    "lean_llm:    LLM smoke test — requires claude CLI + credentials (~10-15 min, ~$0.50)",
+]
+
 [tool.uv.workspace]
 members = [
     "workspace/llm-epistemic-belief-6a0d",
