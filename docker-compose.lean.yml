@@ -1,0 +1,81 @@
+# =============================================================================
+# neurico-lean Docker Compose Configuration
+#
+# STANDALONE mode: each run is a self-contained, ephemeral job.
+# The Lean toolchain is baked into the image. The Mathlib olean cache is
+# persisted in the `mathlib-cache` Docker volume — downloaded once on first
+# use via `lake exe cache get`, reused across all subsequent runs.
+#
+# Build:
+#   docker compose -f docker-compose.lean.yml build
+#
+# Run a single research pipeline:
+#   docker compose -f docker-compose.lean.yml run --rm neurico-lean \
+#       python /app/src/core/runner.py <idea_id> --provider claude
+#
+# Interactive shell:
+#   docker compose -f docker-compose.lean.yml run --rm neurico-lean bash
+# =============================================================================
+
+services:
+  neurico-lean:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.lean
+
+    image: chicagohai/neurico-lean:latest
+    container_name: neurico-lean
+
+    # GPU support (NVIDIA Container Toolkit required)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    env_file:
+      - .env
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NEURICO_WORKSPACE=/workspaces
+      - CLAUDE_CONFIG_DIR=/tmp/.claude
+      - ELAN_HOME=/home/neurico/.elan
+
+    volumes:
+      #  Research output (the only persistent state across runs)
+      # Each run writes its workspace here; the directory survives container exit.
+      - ./workspaces:/workspaces:rw
+
+      #Ideas and config (read-only inputs)
+      - ./ideas:/app/ideas:rw
+      - ./logs:/app/logs:rw
+      - ./config:/app/config:ro
+      - ./templates:/app/templates:ro
+
+      #CLI credentials (OAuth tokens, read-only)
+      - ~/.codex:/tmp/.codex:ro
+      - ~/.gemini:/tmp/.gemini:ro
+
+    # No restart policy — standalone runs exit when the pipeline finishes
+    # restart: "no"  (default, no need to set)
+
+    stdin_open: true
+    tty: true
+    working_dir: /workspaces
+
+    healthcheck:
+      test: ["CMD", "lean", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    networks:
+      - research-net
+
+networks:
+  research-net:
+    driver: bridge

@@ -1,0 +1,298 @@
+{{ session_start }}
+{{ priority_section }}
+CRITICAL: Environment Setup
+────────────────────────────────────────────────────────────────────────────────
+You MUST use an isolated Python environment AND set up a Lean 4 project.
+
+STEP A — Python environment (for conjecture exploration with SymPy/NumPy):
+
+1. Check for existing venv:
+   If .venv/ exists → skip to step 3.
+   If not → run: uv venv
+
+2. Create pyproject.toml if missing:
+   cat > pyproject.toml << 'EOF'
+   [project]
+   name = "research-workspace"
+   version = "0.1.0"
+   description = "Mathematics (Lean) research workspace"
+   requires-python = ">=3.10"
+   dependencies = []
+
+   [build-system]
+   requires = ["hatchling"]
+   build-backend = "hatchling.build"
+   EOF
+
+3. Activate: source .venv/bin/activate
+
+4. Install math tools: uv add sympy numpy matplotlib
+
+STEP B — Lean 4 project (the primary proof verification tool):
+
+Run the setup skill script FIRST. It installs elan, creates lean_proofs/ with
+Mathlib, and downloads the prebuilt cache so you don't wait hours for a source build:
+
+   bash .claude/skills/lean-prover/scripts/setup_lean_project.sh
+
+If the script is not present, set up manually:
+   curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+     | sh -s -- -y && source "$HOME/.elan/env"
+   mkdir lean_proofs && cd lean_proofs
+   lake +leanprover-community/mathlib4:stable init lean_proofs math
+   lake exe cache get
+   lake build
+   cd ..
+
+Read .claude/skills/lean-prover/SKILL.md for full Lean 4 guidance.
+
+NEVER use conda. NEVER install Lean packages via pip.
+
+════════════════════════════════════════════════════════════════════════════════
+
+GPU AND COMPUTATIONAL RESOURCES
+────────────────────────────────────────────────────────────────────────────────
+At the START of your session, check for GPU availability:
+
+   nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv 2>/dev/null || echo "NO_GPU"
+
+GPU is useful for large-scale numerical conjecture search (Monte Carlo, exhaustive
+case checking). Lean proof checking is CPU-bound and does not use GPU.
+
+════════════════════════════════════════════════════════════════════════════════
+
+CRITICAL: Resources Have Been Pre-Gathered
+────────────────────────────────────────────────────────────────────────────────
+A resource-finding agent has already gathered:
+- literature_review.md: Known theorems, definitions, and proof techniques
+- resources.md: Catalog of all papers, prior results, and tools
+- papers/: Downloaded research papers (PDFs)
+- code/: Computational tools and repositories (if applicable)
+
+READ THESE FIRST. They tell you what is already proved in the literature so you
+don't re-derive known results — and what Mathlib lemmas exist that you can cite.
+
+WHAT "FULLY-AUTOMATED" MEANS:
+✓ Complete ALL phases (1-6) in a SINGLE CONTINUOUS SESSION
+✓ Make reasonable decisions autonomously without waiting for user input
+✓ Move immediately from one phase to the next
+✓ Deliver REPORT.md with actual mathematical results and a passing Lean build
+
+YOU WILL NOT GET ADDITIONAL INSTRUCTIONS between phases.
+
+════════════════════════════════════════════════════════════════════════════════
+
+Execute the following research task:
+
+{{ prompt }}
+
+════════════════════════════════════════════════════════════════════════════════
+
+EXECUTION WORKFLOW (FOLLOW THIS SEQUENCE — DO NOT STOP BETWEEN PHASES)
+────────────────────────────────────────────────────────────────────────────────
+
+BEFORE YOU START: Review Pre-Gathered Resources (10-15 min)
+  ✓ READ literature_review.md — known results, definitions, proof techniques
+  ✓ READ resources.md — what tools and prior results are available
+  ✓ Note which theorems are already in Mathlib (check with #check in Lean)
+  ✓ Note which prerequisites you will need to prove yourself
+
+  → WHEN COMPLETE: Immediately proceed to Phase 1
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 1: Proof Strategy Planning (20-40 min)
+────────────────────────────────────────────────────────────────────────────────
+  ✓ Write "Motivation & Novelty Assessment" section in planning.md
+    - Why this mathematical question matters
+    - What prior results it extends (from literature_review.md)
+    - Why formal Lean verification adds value here
+  ✓ Decompose the conjecture into sub-lemmas
+  ✓ For each sub-lemma, decide:
+      - Is it already in Mathlib? (check with #check / naming conventions)
+      - Does it need to be proved from scratch?
+      - What proof technique: direct, induction, contradiction, etc.?
+  ✓ Plan the Lean file structure:
+      Definitions.lean → Lemmas.lean → MainTheorem.lean
+  ✓ List the Mathlib imports you will need
+  ✓ Document plan in planning.md (2-3 pages maximum)
+
+  → WHEN COMPLETE: Immediately proceed to Phase 2
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 2: Environment & Mathematical Setup (15-25 min)
+────────────────────────────────────────────────────────────────────────────────
+  ✓ Run environment setup (STEP A + STEP B above) if not already done
+  ✓ Confirm Lean setup: cd lean_proofs && lake build && cd ..
+  ✓ Write lean_proofs/LeanProofs/Definitions.lean:
+      - All types, structures, and notation for the research
+      - Use import Mathlib.Tactic at the top (not bare import Mathlib)
+      - Run lake build to confirm definitions compile
+  ✓ Write definitions.md with informal descriptions of each Lean definition
+  ✓ Verify prerequisite Mathlib lemmas exist: add #check statements and lake build
+
+  → WHEN COMPLETE: Immediately proceed to Phase 3
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 3: Formal Proof Construction (90-150 min)
+────────────────────────────────────────────────────────────────────────────────
+This is the MAIN PHASE. Proofs are only accepted when Lean accepts them.
+
+  {{ code_workflow }}
+
+  LEAN PROOF WORKFLOW — follow this for each lemma/theorem:
+
+  STEP 1 — Write the statement with `sorry`:
+    Open lean_proofs/LeanProofs/Lemmas.lean (or MainTheorem.lean)
+    Add the theorem with `sorry` as the proof body
+    Run: cd lean_proofs && lake build 2>&1 | tail -20; cd ..
+    ✓ Exit 0 → statement type-checks; proceed to proof
+    ✗ Non-zero → fix the statement type error first (read the error message)
+
+  STEP 2 — Attempt proof with automation first:
+    Try in order: ring → omega → linarith → norm_num → simp → decide
+    For each tactic attempt:
+      Edit the .lean file
+      Run: cd lean_proofs && lake build 2>&1 | tail -30; cd ..
+      ✓ Exit 0, no sorry warning → lemma proved ✓
+      ✗ Error → read the message, adjust the tactic or add intermediate steps
+
+  STEP 3 — Manual tactic proof if automation fails:
+    Break the proof into smaller steps using `have h : ... := by ...`
+    Use `intro`, `apply`, `rw`, `exact`, `cases`, `induction` as appropriate
+    After each meaningful edit, run lake build to check progress
+    Read Lean error messages carefully — they tell you exactly what's missing
+
+  STEP 4 — Verify no sorry remains in this file:
+    grep "sorry" lean_proofs/LeanProofs/Lemmas.lean
+
+  LEAN PROOF WRITING GUIDELINES:
+  - Add a doc comment /-- ... -/ before every theorem explaining what it says
+  - Write an informal proof sketch as a comment block before the tactic proof
+  - Name intermediate claims with `have h_name : ... := by ...`
+  - When citing a Mathlib lemma, add a comment: -- from Mathlib: Lemma.Name
+  - Build after every complete lemma (not just at the end)
+  - Save results/ with a proof_log.md tracking which lemmas are proved
+
+  PYTHON EXPLORATION (in parallel with proof construction):
+  {{ code_workflow }}
+  - Use Python/SymPy in src/ to:
+    - Verify statements numerically before formalizing
+    - Search for counterexamples to candidate lemmas
+    - Generate examples that guide the Lean proof strategy
+  - This is EXPLORATORY only — it does not constitute a proof
+
+  → WHEN COMPLETE: Immediately proceed to Phase 4
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 4: Proof Verification & Hardening (20-30 min)
+────────────────────────────────────────────────────────────────────────────────
+  ✓ Run full build from scratch to confirm everything compiles:
+      cd lean_proofs && lake clean && lake build 2>&1; cd ..
+  ✓ Confirm no sorry remains anywhere:
+      grep -r "sorry" lean_proofs/LeanProofs/ \
+        && echo "INCOMPLETE PROOFS REMAIN" \
+        || echo "All proofs formally complete ✓"
+  ✓ Verify all theorems in your plan are proved (check planning.md checklist)
+  ✓ Run Python exploration scripts to test boundary cases and sanity-check results
+  ✓ Document verification status in results/verification.md:
+      - lake build exit code
+      - grep sorry output
+      - Lean toolchain version (cat lean_proofs/lean-toolchain)
+      - Mathlib commit (cat lean_proofs/lake-manifest.json | grep -A2 mathlib)
+
+  → WHEN COMPLETE: Immediately proceed to Phase 5
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 5: Refinement and Strengthening (15-25 min)
+────────────────────────────────────────────────────────────────────────────────
+  ✓ Review proofs for unnecessary hypotheses (can any be weakened?)
+  ✓ Check: can the conclusion be strengthened?
+  ✓ Find tight counterexamples showing hypotheses are necessary (Python)
+  ✓ Look for natural Lean generalizations (e.g., replace ℕ with a general monoid)
+  ✓ Clean up Lean code: remove redundant `have`s, improve tactic style
+  ✓ Ensure all definitions are in Definitions.lean (no ad-hoc inline definitions)
+
+  → WHEN COMPLETE: Immediately proceed to Phase 6
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 6: Final Documentation (20-30 min) — MANDATORY BEFORE ENDING SESSION
+────────────────────────────────────────────────────────────────────────────────
+  ✓ Create REPORT.md with ACTUAL mathematical results (see structure below)
+  ✓ Create README.md with project overview
+  ✓ Ensure lean_proofs/ is organized with comments
+  ✓ Verify results/ contains verification.md with build status
+
+  → WHEN COMPLETE: Session is finished
+
+CRITICAL REMINDERS:
+- This is a SINGLE CONTINUOUS SESSION covering all 6 phases
+- `lake build` is your ground truth — informal argument is not enough
+- A proof with `sorry` is NOT a proof; grep for sorry before reporting completion
+- If a proof is too hard to formalize in time, mark it `sorry`, document the
+  informal argument clearly, and note it as future work in REPORT.md
+- REPORT.md is mandatory even if some proofs remain as `sorry`
+
+════════════════════════════════════════════════════════════════════════════════
+WORKSPACE DIRECTORY AND DIRECTORY SAFETY
+────────────────────────────────────────────────────────────────────────────────
+You are running in the project workspace directory: {{ work_dir }}
+
+MANDATORY VERIFICATION POINTS — Run `pwd` and verify location:
+✓ Before any mkdir, file write, or download
+✓ Before and after any cd command — ALWAYS cd back to workspace root
+✓ When starting each new phase
+
+SAFE PATTERN FOR LEAN BUILDS:
+  pwd                                         # verify you're in workspace root
+  cd lean_proofs && lake build 2>&1; cd -     # build and return
+  pwd                                         # confirm you're back
+
+⚠️  NEVER create Lean files outside lean_proofs/
+⚠️  NEVER run lake from the workspace root (always cd lean_proofs first)
+⚠️  NEVER run cd .. (parent directory is dangerous)
+
+Remember:
+- READ literature_review.md and resources.md first
+- Python scripts go in src/ (for exploration only)
+- Lean proofs go in lean_proofs/LeanProofs/
+{{ code_reminder }}
+- All your work stays within {{ work_dir }}
+
+════════════════════════════════════════════════════════════════════════════════
+PHASE 6 REQUIREMENTS — WHAT TO INCLUDE IN FINAL DOCUMENTATION
+════════════════════════════════════════════════════════════════════════════════
+
+1. REPORT.md — Mathematics (Lean) research report:
+   - Executive Summary (2-3 paragraphs; state verification status explicitly)
+   - Research Question (the conjecture or problem)
+   - Definitions and Notation (informal descriptions; Lean types in code blocks)
+   - Statement of Results (theorem statements in informal math + Lean type signatures)
+   - Proof Sketches (informal argument for each theorem; full proofs are in Lean files)
+   - Lean Formalization (file structure, key Mathlib lemmas used, build verification)
+   - Verification Status ("lake build exits 0, no sorry found" or list of open sorry)
+   - Discussion (implications, connections, what Mathlib lemmas were reused)
+   - Open Questions (results that remain conjectural or unformalized)
+   - Conclusions and Future Work
+   - References (papers + Lean/Mathlib version info)
+
+2. README.md — Quick overview:
+   - Brief description (2-3 sentences)
+   - Key results (bullet points: theorem names + informal statements)
+   - Verification: `cd lean_proofs && lake build` must succeed
+   - File structure overview
+   - Link to REPORT.md
+
+════════════════════════════════════════════════════════════════════════════════
+SESSION COMPLETION
+════════════════════════════════════════════════════════════════════════════════
+
+The session is COMPLETE when:
+✓ All phases (1-6) have been attempted
+✓ lean_proofs/ exists and `lake build` runs (exit 0 if proofs complete)
+✓ REPORT.md documents actual results and verification status
+✓ README.md is created
+✓ results/verification.md records the build output and grep-sorry output
+✓ src/ contains Python exploration scripts with comments
+
+If some proofs remain as `sorry`, the session is still complete — document
+what was proved, what remains, and the informal argument for each open item.

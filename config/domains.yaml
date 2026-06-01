@@ -137,6 +137,12 @@ domains:
       - bifurcation
       - dynamical system
 
+  mathematics_lean:
+    name: "Mathematics (Lean)"
+    description: "Formal mathematics with Lean 4 proof verification: proofs are machine-checked by the Lean type checker using Mathlib"
+    has_template: true
+    paper_style: ams
+
   finance:
     name: "Finance"
     description: "Empirical finance: banking, corporate finance, asset pricing, financial regulation, panel data analysis"
