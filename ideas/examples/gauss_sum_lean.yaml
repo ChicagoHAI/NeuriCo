@@ -1,0 +1,75 @@
+# Example Research Idea: Mathematics (Axiom AXLE — formal Lean verification)
+#
+# This example demonstrates the mathematics_lean domain, which verifies Lean 4 proofs
+# against Mathlib via the hosted Axiom AXLE API (no local Lean toolchain). It doubles as a
+# small smoke test: a deliberately easy theorem that exercises the full proof + verify loop.
+# Note: domain is "mathematics_lean" which activates the AXLE-specific agent templates.
+
+idea:
+  title: "Formal Proof of Gauss's Summation Formula (Axiom AXLE)"
+
+  domain: mathematics_lean
+
+  hypothesis: |
+    For all natural numbers n, the sum 0 + 1 + 2 + ... + n equals n * (n + 1) / 2.
+    This identity is formally verified in Lean 4 against Mathlib, checked via the hosted
+    Axiom AXLE API (no local Lean toolchain). To avoid natural-number division inside the
+    induction, we first prove the equivalent division-free doubling identity
+    2 * (sum of i over Finset.range (n+1)) = n * (n + 1), then finish with omega.
+
+  background:
+    description: |
+      Gauss's summation formula is the classic introductory induction proof. It is a
+      deliberately small target whose purpose here is a smoke test of the mathematics_lean
+      domain: confirm the workspace is provisioned with the axiom-lean-prover skill, that
+      AXLE_API_KEY reaches the agent, and that proofs are machine-checked by axle_check.py
+      (the cloud replacement for `lake build`). The doubling trick avoids natural-number
+      division during the induction.
+
+  methodology:
+    approach: "Formal inductive proof in Lean 4 + Mathlib, verified via the Axiom AXLE API"
+
+    steps:
+      - "Write proofs/Gauss.lean starting with the full `import Mathlib`"
+      - "Define the sum as the Finset form: sum of i over Finset.range (n+1)"
+      - "Prove the doubling lemma 2 * (sum) = n*(n+1) by induction (Finset.sum_range_succ, then ring)"
+      - "Derive the main theorem (sum = n*(n+1)/2) from the doubling lemma using omega"
+      - "Verify with axle_check.py --dir proofs/ (must report STATUS: COMPLETE, no sorry)"
+
+  constraints:
+    compute: cpu_only
+    time_limit: 1200  # 20 minutes
+    memory: "4GB"
+    dependencies:
+      - "sympy"
+
+  expected_outputs:
+    - type: proof
+      format: markdown
+      description: |
+        Complete Lean 4 proof with no sorry, verified by axle_check.py reporting
+        STATUS: COMPLETE. Should include the doubling lemma by induction and the
+        main theorem derived from it.
+
+  evaluation_criteria:
+    - "axle_check.py --dir proofs/ reports STATUS: COMPLETE (exit 0), no INCOMPLETE_SORRY"
+    - "Main theorem stated as sum of i over Finset.range (n+1) = n*(n+1)/2 over the naturals"
+    - "Doubling lemma 2 * (sum) = n*(n+1) proved by induction"
+    - "Every .lean file starts with the full `import Mathlib`"
+
+  metadata:
+    author: "neurico"
+    tags:
+      - "number-theory"
+      - "lean4"
+      - "mathlib"
+      - "axiom-axle"
+      - "induction"
+      - "smoke-test"
+    priority: medium
+    estimated_duration: "20 minutes"
+    paper_style: "ams"
+    notes: |
+      This is a proof-oriented project in the mathematics_lean domain. Proofs are
+      machine-checked remotely by the Axiom AXLE API rather than a local Lean toolchain,
+      so it runs on the default Neurico image. Requires AXLE_API_KEY in .env.

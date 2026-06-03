@@ -80,3 +80,11 @@ Thumbs.db
 # Paper-finder build artifacts
 services/paper-finder/.venv/
 services/paper-finder/**/__pycache__/
+
+# axle_check.py runtime scratch (normalized snippet sent to AXLE)
+.axle_last_check.lean
+
+# Reserved self-built local Lean toolchain (kept on local disk only, not tracked).
+# Superseded by the AXLE-backed mathematics_lean domain + axiom-lean-prover skill.
+templates/domains/mathematics_lean_local/
+templates/skills/lean-prover/

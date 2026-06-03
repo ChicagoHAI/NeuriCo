@@ -33,6 +33,8 @@ SENSITIVE_ENV_VARS: Set[str] = {
     # OpenRouter
     'OPENROUTER_KEY',
     'OPENROUTER_API_KEY',
+    # Axiom AXLE (Lean verification API for the mathematics_lean domain)
+    'AXLE_API_KEY',
     # AWS
     'AWS_ACCESS_KEY_ID',
     'AWS_SECRET_ACCESS_KEY',
@@ -54,6 +56,7 @@ API_KEY_PATTERNS = [
     # OpenAI keys (various formats)
     (r'sk-proj-[A-Za-z0-9_-]{20,}', '[REDACTED_OPENAI_PROJECT_KEY]'),
     (r'sk-or-v1-[A-Za-z0-9_-]{20,}', '[REDACTED_OPENROUTER_KEY]'),
+    (r'pk_[A-Za-z0-9_-]{20,}', '[REDACTED_AXLE_KEY]'),
     (r'sk-or-[A-Za-z0-9_-]{20,}', '[REDACTED_OPENAI_ORG_KEY]'),
     (r'sk-[A-Za-z0-9]{48,}', '[REDACTED_OPENAI_KEY]'),
 

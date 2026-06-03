@@ -5,7 +5,8 @@ Lean 4 / Mathlib formalizations relevant to the research question.
 Your goal is to thoroughly research a mathematical topic, find and download relevant
 papers, catalog prior theorems and techniques, identify which results are already
 formalized in Mathlib, and prepare all resources needed for formal proof construction
-in Lean 4. Complete all tasks and create a completion marker when finished.
+in Lean 4 (verified via the hosted Axiom AXLE API). Complete all tasks and create a
+completion marker when finished.
 
 CRITICAL: WORKSPACE SETUP AND DIRECTORY SAFETY
 ────────────────────────────────────────────────────────────────────────────────
@@ -57,7 +58,7 @@ REQUIRED STEPS (at the START of your session):
    [project]
    name = "research-workspace"
    version = "0.1.0"
-   description = "Mathematics (Lean) research workspace"
+   description = "Mathematics (Axiom AXLE) research workspace"
    requires-python = ">=3.10"
    dependencies = []
 
@@ -72,8 +73,9 @@ REQUIRED STEPS (at the START of your session):
 
 NEVER use conda or conda install!
 
-NOTE: Do NOT set up the Lean project here. The experiment runner phase handles
-Lean setup. Your job is literature review and Mathlib lemma cataloging only.
+NOTE: Do NOT construct proofs here — that is the experiment runner's job. You MAY,
+however, confirm that candidate Mathlib lemma names exist by sending `#check` snippets
+to the AXLE verifier (see Phase 3). No local Lean toolchain is needed or installed.
 
 ═══════════════════════════════════════════════════════════════════════════════
                     IMPORTANT: PDF READING WITH CHUNKER
@@ -192,9 +194,9 @@ STEP 3: Catalog Proof Techniques
 ═══════════════════════════════════════════════════════════════════════════════
 
 This phase is CRITICAL for the mathematics_lean domain. The experiment runner
-will use Lean 4 + Mathlib for proof verification. You must identify which
-prerequisite results are already formalized in Mathlib so the agent knows what
-it can cite vs. what it needs to prove.
+will use Lean 4 + Mathlib (checked via the AXLE API) for proof verification. You must
+identify which prerequisite results are already formalized in Mathlib so the agent
+knows what it can cite vs. what it needs to prove.
 
 STEP 1: Identify Candidate Mathlib Lemmas
 ─────────────────────────────────────────────────────────────────────────────
@@ -212,29 +214,27 @@ Examples:
   List.length_append  — length of appended lists
   Real.sqrt_sq        — √(x²) = |x|
 
-STEP 2: Verify Lemmas with #check
+STEP 2: Verify Lemma Names with #check via the AXLE API
 ─────────────────────────────────────────────────────────────────────────────
-Install elan if needed and run quick verification:
+No local Lean install is needed. Confirm the API key is present, then send a
+`#check` snippet to the verifier — full Mathlib is available remotely:
 
-   # Install elan if not present
-   elan --version 2>/dev/null || \
-     curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
-     | sh -s -- -y && source "$HOME/.elan/env"
+   echo "AXLE key: ${AXLE_API_KEY:0:6}..."   # should print pk_...
 
-   # Create a scratch file to verify lemma names
-   mkdir -p lean_scratch
-   cat > lean_scratch/Check.lean << 'EOF'
-   import Mathlib
-   -- Paste #check statements here and run:
-   -- lean lean_scratch/Check.lean
-   #check Nat.add_comm
-   #check Finset.card_union_add_card_inter
-   -- add more as needed
-   EOF
-   lean lean_scratch/Check.lean 2>&1 | head -40
+   python .claude/skills/axiom-lean-prover/scripts/axle_check.py --json --code '
+   #check @Nat.add_comm
+   #check @Finset.card_union_add_card_inter
+   -- add more candidate names here
+   '
 
-If lean is not available, rely on naming convention reasoning and web search
-of leanprover-community.github.io/mathlib4_docs — document uncertainty.
+Reading the result:
+- STATUS: COMPLETE → all the names exist; their types appear in lean_messages.infos (--json)
+- STATUS: ERROR with "unknown identifier 'X'" → name X does NOT exist (wrong guess)
+
+Batch many #check lines into ONE snippet to confirm many names per request (mind the
+~20 concurrent-request limit). If AXLE_API_KEY is missing, fall back to naming-convention
+reasoning plus web search of leanprover-community.github.io/mathlib4_docs — and document
+the uncertainty.
 
 STEP 3: Search for Existing Lean Formalizations
 ─────────────────────────────────────────────────────────────────────────────
@@ -246,14 +246,20 @@ Search for existing Lean formalizations of the research topic:
 
 Document any relevant formalizations found in resources.md.
 
+IMPORTANT — how the experiment runner can use what you find: only Mathlib is available
+remotely via AXLE; external Lean packages CANNOT be imported. So for any non-Mathlib lemma
+you surface here, note in resources.md whether it should be (a) inlined and proved from
+Mathlib by the runner, or (b) if its proof is deeply involved, assumed as a cited `axiom`
+(with the citation). Capture the precise citation now so the runner can attach it to the axiom.
+
 STEP 4: Create Mathlib Lemma Table
 ─────────────────────────────────────────────────────────────────────────────
 For each prerequisite, record in literature_review.md:
 
 | Informal Result | Mathlib Name | Status | Notes |
 |---|---|---|---|
-| n + m = m + n | Nat.add_comm | ✓ Verified | Direct cite |
-| Sum formula | Finset.sum_range_succ | ✓ Verified | |
+| n + m = m + n | Nat.add_comm | ✓ Verified (#check) | Direct cite |
+| Sum formula | Finset.sum_range_succ | ✓ Verified (#check) | |
 | Custom lemma | N/A | ✗ Not in Mathlib | Must prove |
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -261,7 +267,7 @@ For each prerequisite, record in literature_review.md:
 ═══════════════════════════════════════════════════════════════════════════════
 
 This phase sets up Python tools for conjecture exploration (NOT for proof
-verification — that is Lean's job).
+verification — that is Lean/AXLE's job).
 
 STEP 1: Assess Computational Needs
 - Symbolic computation (algebra, calculus): SymPy
@@ -356,7 +362,7 @@ FINAL CHECKLIST:
 ✓ papers/ directory with downloaded PDFs and README.md
 ✓ literature_review.md complete with Mathlib lemma catalog
 ✓ resources.md catalogs all resources
-✓ Mathlib lemma names verified with #check (or flagged as uncertain)
+✓ Mathlib lemma names verified with #check via AXLE (or flagged as uncertain)
 ✓ Existing Lean formalizations searched for and documented
 
 COMPLETION MARKER:
@@ -372,7 +378,7 @@ EOF
                            BEST PRACTICES
 ═══════════════════════════════════════════════════════════════════════════════
 
-✓ DO: Verify Mathlib lemma names with #check — wrong names waste hours
+✓ DO: Verify Mathlib lemma names with #check via AXLE — wrong names waste hours
 ✓ DO: Record theorem statements precisely (conditions matter!)
 ✓ DO: Document proof techniques, not just results
 ✓ DO: Note which prerequisites need proving vs. which are in Mathlib
@@ -380,12 +386,13 @@ EOF
 
 ✗ DON'T: Skip the Mathlib lemma catalog — it directly drives Phase 3
 ✗ DON'T: Paraphrase theorems loosely — precision matters in formal proofs
-✗ DON'T: Set up the Lean project here — that's the experiment runner's job
+✗ DON'T: Construct proofs here — that's the experiment runner's job
+✗ DON'T: Try to install Lean/elan/lake — verification is remote via AXLE
 ✗ DON'T: Forget the completion marker file
 
 ═══════════════════════════════════════════════════════════════════════════════
 
 Remember: You are preparing the foundation for formal Lean proof construction.
 The next agent will use your catalog of definitions, theorems, AND Mathlib lemma
-names to develop formally verified mathematical results. Precision and Mathlib
-coverage are the most important outputs of this phase.
+names to develop formally verified mathematical results (checked via AXLE). Precision
+and Mathlib coverage are the most important outputs of this phase.
