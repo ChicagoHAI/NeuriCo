@@ -88,3 +88,7 @@ services/paper-finder/**/__pycache__/
 # Superseded by the AXLE-backed mathematics_lean domain + axiom-lean-prover skill.
 templates/domains/mathematics_lean_local/
 templates/skills/lean-prover/
+# Old self-built Lean Docker image/entrypoint/compose (default image is used now).
+docker/Dockerfile.lean
+docker/entrypoint.lean.sh
+docker-compose.lean.yml
