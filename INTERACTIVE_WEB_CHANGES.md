@@ -1,8 +1,7 @@
 # Browser UI for Interactive Mode — Our Changes
 
-This document records **our changes only** — the work to add a browser-based
-interface to NeuriCo's interactive mode. Use it as raw material for the PR
-description.
+This documents the work to add a browser-based interface to NeuriCo's
+interactive mode — the changes in this PR, on top of #86 and #104.
 
 > **Baseline:** this work builds on **two** prior PRs and is not ours:
 > - **#86** — interactive mode itself (the LLM-driven manager that runs agents
@@ -242,8 +241,17 @@ The page is laid out for non-technical researchers:
 python visualizer/visualizer.py <workspace_name>
 ```
 
-## Cleanup before opening the PR
+## Notes for reviewers
 
-- [ ] Everything here is **uncommitted** working-tree changes — stage and commit.
-- [ ] `visualizer/` contains a `.DS_Store` and `__pycache__/*.pyc` that should
-      not be checked in (add to `.gitignore`).
+- **Stacked on #104.** This branch contains #104's commits because #104 isn't
+  merged yet; please review them together. Once #104 lands in
+  `feature/interactive-mode`, this PR's diff narrows to just the browser-UI work.
+- **`src/` mount is a dev-time convenience**, not a release fix. For end users the
+  Docker image must be rebuilt/republished so `agent_runner.py` is baked in (see
+  the `docker/run.sh` note above). The mount just lets local edits take effect
+  without a rebuild during development.
+- **Cost is exact-but-at-completion.** Claude reports `total_cost_usd` only in an
+  agent's final result event, so the dashboard cost jumps when an agent finishes
+  rather than ticking up live (documented in the Dashboard section).
+- **`assets/web/manager-avatar.png` is ~1.8 MB.** It works (scaled to an 18 px
+  avatar), but could be downsized to keep git history light — optional.
