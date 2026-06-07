@@ -146,7 +146,13 @@ class ToolExecutor:
         """Read files from the workspace."""
         action = args.get("action", "list")
         rel_path = args.get("path", ".")
-        max_lines = args.get("max_lines", 200)
+        # The CLI backend's tool-call shim hands numbers back as strings, so
+        # coerce to int before any comparison (else `len(lines) > max_lines`
+        # raises "'>' not supported between 'int' and 'str'").
+        try:
+            max_lines = int(args.get("max_lines", 200))
+        except (TypeError, ValueError):
+            max_lines = 200
 
         target = self.work_dir / rel_path
 
@@ -205,7 +211,11 @@ class ToolExecutor:
         if not run_id:
             return "Error: 'run_id' parameter is required"
 
-        tail_lines = args.get("tail_lines", 100)
+        # CLI backend may pass this as a string — coerce so slicing/compare work.
+        try:
+            tail_lines = int(args.get("tail_lines", 100))
+        except (TypeError, ValueError):
+            tail_lines = 100
         run_dir = self.work_dir / ".neurico" / "runs" / run_id
 
         if not run_dir.exists():

@@ -191,8 +191,10 @@ class WebChannel(UserChannel):
     def prompt(self, message: Optional[str] = None,
                options: Optional[List[str]] = None) -> Optional[str]:
         if message:
+            # Tag as a question so the UI renders it as a distinct "needs your
+            # reply" card rather than a normal informational bubble.
             self._emit({"event": "message", "role": "manager",
-                        "text": message, "meta": {}})
+                        "text": message, "meta": {"question": True}})
 
         self._waiting = True
         self._pending_prompt = {"message": message, "options": options or []}

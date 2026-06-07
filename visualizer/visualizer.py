@@ -307,6 +307,16 @@ def format_block(block: dict) -> dict | None:
     return None
 
 
+def _detail(raw: dict):
+    """Pretty-printed raw entry, used as the expandable body for system/rate-limit/
+    result rows so they're clickable like every other row (instead of dangling a
+    chevron that does nothing)."""
+    try:
+        return '<div class="inner">' + esc(json.dumps(raw, indent=2, ensure_ascii=False)) + '</div>'
+    except (TypeError, ValueError):
+        return None
+
+
 def format_entry(e: dict, last_ts: str) -> list[dict]:
     """
     Convert a raw log entry into a list of display dicts (one per visual block).
@@ -336,13 +346,13 @@ def format_entry(e: dict, last_ts: str) -> list[dict]:
         else:
             text = f"[{sub}]"
         return [{**base, "type_label": "system", "type_label_class": "tl-system",
-                 "headline": esc(text), "body": None, "body_class": "body-system"}]
+                 "headline": esc(text), "body": _detail(raw), "body_class": "body-system"}]
 
     if t == "rate_limit_event":
         info = raw.get("rate_limit_info", {})
         text = f"rate limit: {info.get('status')}  ({info.get('rateLimitType')})"
         return [{**base, "type_label": "rate limit", "type_label_class": "tl-system",
-                 "headline": esc(text), "body": None, "body_class": "body-system"}]
+                 "headline": esc(text), "body": _detail(raw), "body_class": "body-system"}]
 
     if t == "result":
         result   = raw.get("result", "")
@@ -352,7 +362,7 @@ def format_entry(e: dict, last_ts: str) -> list[dict]:
         if duration: parts.append(f"duration: {int(duration)/1000:.1f}s")
         if cost:     parts.append(f"cost: ${cost:.4f}")
         return [{**base, "type_label": "result", "type_label_class": "tl-system",
-                 "headline": esc("  ·  ".join(parts)), "body": None, "body_class": "body-system"}]
+                 "headline": esc("  ·  ".join(parts)), "body": _detail(raw), "body_class": "body-system"}]
 
     if t in ("assistant", "user"):
         msg    = raw.get("message", {})

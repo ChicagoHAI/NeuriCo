@@ -22,6 +22,7 @@ Or directly:
 import argparse
 import json
 import os
+import re
 import signal
 import sys
 import threading
@@ -39,6 +40,67 @@ from interactive.session_state import SessionState
 from interactive.llm_backend import LLMBackend, LLMResponse, create_backend
 from interactive.tools import ToolExecutor
 from interactive.channel import UserChannel, TerminalChannel
+
+
+# ---------------------------------------------------------------------------
+# Chat-display cleanup
+#
+# The model's raw text contains the <tool_call> XML it must emit to invoke
+# tools, plus occasional meta-chatter about the tool mechanism ("I should use
+# the <tool_call> block format…"). That's necessary protocol, but it's noise to
+# a human reader. These helpers strip it so the CHAT shows clean prose only.
+# (We clean only what is *displayed* — the full text is still stored in the
+# conversation history sent back to the model.)
+# ---------------------------------------------------------------------------
+
+# Real tool-call blocks always carry a name= attribute; requiring it avoids
+# eating inline backtick mentions like "`<tool_call>`" in meta-chatter.
+_TOOLCALL_BLOCK_RE = re.compile(r"<tool_call\b[^>]*\bname\s*=.*?</tool_call>",
+                                re.DOTALL | re.IGNORECASE)
+
+# A "sentence" (bounded by . ! ? or a newline) that is purely about the tool
+# mechanism — noise to a human. The leading [^.!?\n]* anchors the match to the
+# start of the enclosing sentence, so newlines/markdown around it are preserved.
+_META_SENTENCE_RE = re.compile(
+    r"(?i)[^.!?\n]*"
+    r"(?:`?<?tool[_ ]call>?`?\s*(?:block|format|protocol)"
+    r"|function[- ]calling interface"
+    r"|text-based\s+(?:protocol|format|interface|tool)"
+    r"|let me (?:retry|redo|correct|try that again))"
+    r"[^.!?\n]*[.!?]?"
+)
+
+
+def clean_chat_text(text: str) -> str:
+    """Strip tool-call XML and tool-mechanism meta-chatter from a manager
+    message so the chat reads as plain prose. Preserves real newlines/markdown.
+    Returns '' if nothing meaningful is left."""
+    if not text:
+        return ""
+    text = _TOOLCALL_BLOCK_RE.sub("", text)
+    text = _META_SENTENCE_RE.sub("", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def friendly_tool_echo(name: str, args: Dict[str, Any]) -> Optional[str]:
+    """A short, human-readable line describing a manager tool call — or None to
+    show nothing (e.g. ask_user, whose question is rendered on its own)."""
+    if name == "ask_user":
+        return None  # the question itself is shown via channel.prompt()
+    if name == "check_workspace":
+        act = args.get("action", "list")
+        path = args.get("path", ".")
+        verb = "Read" if act == "read" else "Looked at"
+        return f"🔍 {verb} the workspace ({path})"
+    if name == "read_agent_logs":
+        return f"📂 Checked progress of {args.get('run_id', 'the agent')}"
+    if name == "update_session":
+        return "📝 Updated session notes"
+    if name == "run_agent":
+        return f"🚀 Launched the {args.get('agent', 'agent')}"
+    return f"🔧 {name}"
 
 
 def load_config() -> Dict[str, Any]:
@@ -269,11 +331,14 @@ class InteractiveManager:
             self.messages.append(assistant_msg)
             self.session.append_message(assistant_msg)
 
-            if response.text:
-                self.channel.send(response.text, kind="manager")
+            clean = clean_chat_text(response.text)
+            if clean:
+                self.channel.send(clean, kind="manager")
 
             for tc in response.tool_calls:
-                self.channel.send(f"{tc.name}({json.dumps(tc.arguments)})", kind="tool")
+                echo = friendly_tool_echo(tc.name, tc.arguments)
+                if echo:
+                    self.channel.send(echo, kind="tool")
 
                 result = self.tools.execute(tc.name, tc.arguments)
 
@@ -291,15 +356,19 @@ class InteractiveManager:
                 self.session.append_message(tool_result_msg)
 
         else:
-            # No tool calls — display to user and wait for input
+            # No tool calls — the manager is yielding the floor to the human, so
+            # this turn IS effectively a question (the loop blocks on input next).
             assistant_msg = {"role": "assistant", "content": response.text}
             self.messages.append(assistant_msg)
             self.session.append_message(assistant_msg)
 
-            self.channel.send(response.text, kind="manager")
-
-            # Wait for user input (blocks; None means the channel closed)
-            user_input = self.channel.prompt()
+            clean = clean_chat_text(response.text)
+            # Route the text THROUGH prompt() (not a plain send) so it's tagged as
+            # a question — rendered as the highlighted "needs your reply" card with
+            # the input box highlighted — even when the manager asked in prose
+            # instead of calling the ask_user tool. (clean may be '' if the whole
+            # turn was tool-mechanism noise; fall back to the raw text.)
+            user_input = self.channel.prompt(message=(clean or response.text))
             if user_input is None:
                 self._shutdown = True
                 return
