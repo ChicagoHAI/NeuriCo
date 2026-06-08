@@ -63,6 +63,7 @@ class ToolExecutor:
             "update_session": self._update_session,
         }
 
+        tool_name = tool_name.removeprefix("mcp__neurico__")
         handler = handlers.get(tool_name)
         if not handler:
             return f"Error: Unknown tool '{tool_name}'. Available: {list(handlers.keys())}"
