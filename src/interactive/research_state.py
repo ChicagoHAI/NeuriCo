@@ -94,6 +94,27 @@ class ResearchState:
         }
 
     # ------------------------------------------------------------------ io
+    def reload(self) -> None:
+        """Re-read state from disk *in place* (mutates self.state, keeps the same
+        object). Needed in MCP mode: tools run in a separate subprocess that owns
+        its own ResearchState and writes research_state.json, so the manager calls
+        this each turn before building its digest — otherwise it reasons over a
+        stale, never-updated copy. In-place (not a fresh object) so the
+        ToolExecutor's reference to this instance stays valid. Cheap and a no-op
+        in practice for backends whose tools run in-process (disk == memory)."""
+        if not self.state_file.exists():
+            return
+        try:
+            with open(self.state_file, encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return  # torn/missing read — keep what we have
+        if not isinstance(loaded, dict):
+            return
+        for k, v in self._blank().items():
+            loaded.setdefault(k, v)
+        self.state = loaded
+
     def _save(self) -> None:
         self.state["updated_at"] = _now()
         tmp = self.state_file.with_suffix(".json.tmp")
@@ -221,10 +242,10 @@ class ResearchState:
         changed = False
         for e in self.state["experiments"]:
             if e["run_id"] == run_id:
-                if status:
+                if status and e.get("status") != status:
                     e["status"] = status
                     changed = True
-                if result:
+                if result and e.get("result") != result.strip():
                     e["result"] = result.strip()
                     changed = True
                 break

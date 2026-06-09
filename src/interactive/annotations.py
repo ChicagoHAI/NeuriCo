@@ -12,15 +12,17 @@ run. The records are the ground-truth substrate for evaluating the manager's
 judgement later (per-decision verdicts, failure taxonomy, prompt/model A/B).
 
 Stored append-only as JSONL at ``<workspace>/.neurico/annotations.jsonl`` — one
-line per click, last write wins per ``key``. Each record snapshots the subject's
-text so it is self-contained: assessment/decision keys join back to
-research_state.json by id, but chat-bubble seqs reset across resumed runs, so the
-snapshot is the durable identifier there.
+line per click, last write wins per ``key``. Each record also snapshots the
+subject's text so it is self-contained. Keys are durable across resumed sessions:
+assessment/decision keys (``assess:A3`` / ``dec:D2``) join back to
+research_state.json by id, and chat-bubble keys (``msg:<hash>``) are a content
+hash of the message text rather than a per-process sequence number.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
@@ -28,6 +30,11 @@ from typing import Dict
 VALID_KINDS = ("assessment", "decision", "message")
 # "none" clears a prior verdict (the user un-toggled the thumb).
 VALID_VERDICTS = ("up", "down", "none")
+
+# The web server is threaded, so two near-simultaneous thumb clicks could
+# interleave appends and corrupt a line (silently losing a verdict). Serialize
+# writes through a process-wide lock.
+_write_lock = threading.Lock()
 
 
 def _now() -> str:
@@ -58,8 +65,10 @@ def append_annotation(work_dir: Path, *, key: str, kind: str, verdict: str,
     }
     path = annotations_file(work_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+    with _write_lock:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line)
     return record
 
 

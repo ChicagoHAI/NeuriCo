@@ -1,9 +1,31 @@
-# Manager-as-Research-Expert: a Shared World Model + Whiteboard
+# Manager-as-Research-Expert: World Model, MCP Backend & Eval Annotations
 
-> **Status: implemented (core), this branch.** The load-bearing pieces below are
-> built and smoke-tested; the self-eval / annotation / multi-agent items at the
-> end are explicitly Planned/Stretch. Builds on the browser-UI work in
-> [INTERACTIVE_WEB_CHANGES.md](INTERACTIVE_WEB_CHANGES.md).
+> **Status: implemented, this branch.** All three parts below are built and
+> smoke-tested. Stacks on the browser-UI work (#109,
+> [INTERACTIVE_WEB_CHANGES.md](INTERACTIVE_WEB_CHANGES.md)) and embraces the MCP
+> backend from #110. The remaining self-eval / richer-annotation / multi-agent
+> items at the very end are explicitly Planned/Stretch.
+
+## TL;DR — what's in this PR
+
+Three commits that turn the interactive **manager** into a research *expert* and
+make its judgement gradeable:
+
+1. **Manager world model + research whiteboard** (§1–7) — the manager holds an
+   explicit `ResearchState` (hypotheses, crux, experiments, decisions,
+   assessments, incidents), reasons over it each turn, and surfaces it to the
+   human as a live "Research" whiteboard. New tools `update_research_state`,
+   `assess`, `design_panel`; critique-before-compute on `run_agent`.
+2. **MCP tool backend** (§8) — runs the manager's tools as a real MCP server so
+   `claude -p` calls them natively, removing the hallucinated-tool-result and
+   "identity collapse" failures *structurally*. Adapted from #110 and extended to
+   register the world-model tools as `mcp__neurico__*`.
+3. **Offline-eval annotation thumbs** (§9) — a reviewer 👍/👎 the manager's
+   decision points (assess cards, decisions, manager bubbles) so a session becomes
+   labeled evaluation data. Offline only — nothing feeds back into the live run.
+
+The throughline: §1–7 give the manager a *judgement* worth having, §8 makes that
+judgement reliable to execute, and §9 makes it *measurable*.
 
 This run reshapes the interactive **manager** from a tool-dispatch loop into a
 research *expert* — a PI / AI co-author that holds a model of the whole
@@ -244,6 +266,37 @@ later (per-decision verdicts, failure taxonomy, prompt/model A/B).
   The whiteboard is now PI-*shaped* (the manager designs its layout per run via
   `design_panel`, item 6) but still human-*read-only* — should the human be able
   to edit the state (steer by editing) or restructure the panel too?
+
+## Known issues fixed (post-review hardening)
+
+A review pass over the whole diff (including the embraced #110 backend) surfaced
+a cluster of bugs — all fixed on this branch. Most of the MCP ones are inherited
+from #110; the annotation ones are ours.
+
+**MCP backend (mostly inherited from #110):**
+- **Stale world model in MCP mode** — tools run in the MCP *subprocess*, so the
+  manager's per-turn digest never saw its own updates. The manager now
+  `reload()`s the state from disk each turn. *(This one was ours — the seam
+  between the in-process world model and #110's subprocess execution.)*
+- **Runaway autonomous loop** — the `had_tools` loop-back had no ceiling. Bounded
+  by `max_autonomous_steps` (default 25) with a forced human checkpoint.
+- **Wrong tool protocol in MCP** — the prompt told the model to emit `<tool_call>`
+  XML (a cli-shim artefact) even in MCP, where it's dropped. The prompt is now
+  backend-conditional (native tool-calling for mcp/api, XML only for cli).
+- **Experiment lifecycle** — `run_agent` records now finalize to done/failed from
+  disk (`status`/`result`/`error.json`), not from an in-process process map that
+  dies with the subprocess.
+- **ask_user IPC races** — requests carry a uuid and responses echo it (no
+  cross-question answers); writes are atomic (temp + `os.replace`).
+- **Backend selection** — `--backend mcp` is now selectable and a single
+  `resolve_backend()` is the source of truth for both `.mcp.json` provisioning
+  and the running backend.
+
+**Annotation layer (ours):**
+- Chat-bubble verdicts key on a **content hash** of the message (stable across
+  resumed sessions), not the per-process SSE `seq` which restarts at 0.
+- The `annotations.jsonl` append is **lock-guarded** against interleaved writes
+  from concurrent thumb clicks under the threaded server.
 
 ## Next (Planned / Stretch — not in this run)
 
