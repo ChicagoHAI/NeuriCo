@@ -1,0 +1,9 @@
+idea:
+  title: "Titanic Survival Prediction"
+
+  domain: machine_learning
+
+  hypothesis: |
+    Passenger demographic and ticket-related features such as sex, age,
+    passenger class, fare, and family size can predict Titanic survival
+    better than a simple majority-class baseline.

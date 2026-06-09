@@ -5,9 +5,17 @@
 
 manager:
   # LLM backend for manager reasoning
-  # Options: "cli" (uses claude -p, no extra keys), "anthropic_api", "openrouter"
-  # Can also be set via NEURICO_MANAGER_BACKEND env var
-  llm_backend: cli
+  # Default: auto-detected from default_provider — "mcp" when provider is "claude",
+  #          "cli" (XML tool definitions) otherwise (Codex, Gemini, …).
+  # Options:
+  #   "mcp"           — claude -p with MCP-registered tools (requires Claude Code CLI + pip install mcp)
+  #                     Recommended for Claude users: no hallucinated <tool_result> blocks.
+  #   "cli"           — claude -p with XML tool descriptions (requires Claude Code CLI)
+  #                     Older approach; prone to <tool_result> hallucination.
+  #   "anthropic_api" — Anthropic Python SDK with native tool schemas (requires ANTHROPIC_API_KEY)
+  #   "openrouter"    — OpenRouter API, supports Codex / Gemini / etc. (requires OPENROUTER_API_KEY)
+  # Override via NEURICO_MANAGER_BACKEND env var or uncomment below:
+  # llm_backend: mcp
 
   # Model to use for manager reasoning (null = default for backend)
   # For cli: uses whatever claude version is installed
