@@ -37,9 +37,11 @@ PROJECT_ROOT = Path(os.environ.get("NEURICO_PROJECT_ROOT", Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from interactive.session_state import SessionState
+from interactive.research_state import ResearchState
 from interactive.llm_backend import LLMBackend, LLMResponse, create_backend
 from interactive.tools import ToolExecutor
 from interactive.channel import UserChannel, TerminalChannel
+from interactive.mcp_config import write_mcp_config
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +59,11 @@ from interactive.channel import UserChannel, TerminalChannel
 # eating inline backtick mentions like "`<tool_call>`" in meta-chatter.
 _TOOLCALL_BLOCK_RE = re.compile(r"<tool_call\b[^>]*\bname\s*=.*?</tool_call>",
                                 re.DOTALL | re.IGNORECASE)
+
+# Hallucinated tool results produced by the cli backend before real results
+# are injected — strip these so they never reach the chat display.
+_TOOLRESULT_BLOCK_RE = re.compile(r"<tool_result\b.*?</tool_result>",
+                                   re.DOTALL | re.IGNORECASE)
 
 # A "sentence" (bounded by . ! ? or a newline) that is purely about the tool
 # mechanism — noise to a human. The leading [^.!?\n]* anchors the match to the
@@ -78,6 +85,7 @@ def clean_chat_text(text: str) -> str:
     if not text:
         return ""
     text = _TOOLCALL_BLOCK_RE.sub("", text)
+    text = _TOOLRESULT_BLOCK_RE.sub("", text)
     text = _META_SENTENCE_RE.sub("", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -98,6 +106,12 @@ def friendly_tool_echo(name: str, args: Dict[str, Any]) -> Optional[str]:
         return f"📂 Checked progress of {args.get('run_id', 'the agent')}"
     if name == "update_session":
         return "📝 Updated session notes"
+    if name == "update_research_state":
+        return None  # silent — the Research whiteboard reflects this live
+    if name == "assess":
+        return None  # silent — surfaced on the whiteboard, not as chat noise
+    if name == "design_panel":
+        return None  # silent — the whiteboard re-renders to reflect the layout
     if name == "run_agent":
         return f"🚀 Launched the {args.get('agent', 'agent')}"
     return f"🔧 {name}"
@@ -236,11 +250,50 @@ class InteractiveManager:
 
         # Initialize components
         self.session = SessionState(workspace, idea_id, idea_title, provider)
-        self.backend = create_backend(config)
+        # The manager's world model — what makes it reason like a PI rather than
+        # a tool dispatcher. Threaded into the executor so tools read/write it.
+        self.research = ResearchState(workspace)
+
+        # Resolve the backend up front so we can write the MCP config before
+        # the backend is created (the .mcp.json path must exist first). Mirrors
+        # the auto-detection in create_backend(): Claude → mcp, others → cli.
+        mcp_config_path = None
+        ipc_dir = None
+        backend_name = os.environ.get("NEURICO_MANAGER_BACKEND",
+                                      config.get("manager", {}).get("llm_backend")) or None
+        if backend_name is None:
+            _provider = os.environ.get("NEURICO_PROVIDER",
+                                       config.get("manager", {}).get("default_provider", "claude"))
+            backend_name = "mcp" if _provider == "claude" else "cli"
+        if backend_name == "mcp":
+            # File IPC dir so the out-of-process MCP server can route ask_user
+            # through the web channel instead of the terminal.
+            ipc_path = workspace / ".neurico" / "ipc"
+            ipc_path.mkdir(parents=True, exist_ok=True)
+            ipc_dir = str(ipc_path)
+
+            mcp_config_file = write_mcp_config(
+                work_dir=workspace,
+                idea_file=idea_file,
+                provider=provider,
+                idea_id=idea_id,
+                idea_title=idea_title,
+                project_root=PROJECT_ROOT,
+            )
+            mcp_config_path = str(mcp_config_file)
+            print(f"  MCP config: {mcp_config_file}")
+
+        self.backend = create_backend(config, mcp_config_path=mcp_config_path,
+                                      channel=self.channel, ipc_dir=ipc_dir)
         self.tools = ToolExecutor(workspace, self.session, idea_file, provider,
-                                  PROJECT_ROOT, channel=self.channel)
+                                  PROJECT_ROOT, channel=self.channel,
+                                  research=self.research)
         self.tool_definitions = load_tool_definitions()
+        # Base system prompt; the live research-state digest is appended fresh
+        # each turn (see _agent_step) so the manager always reasons over current
+        # state without polluting the persisted conversation history.
         self.system_prompt = load_system_prompt(idea, workspace, provider, config)
+        self.base_system_prompt = self.system_prompt
 
         # Conversation history (in-memory, backed by session)
         self.messages: List[Dict[str, Any]] = []
@@ -317,6 +370,14 @@ class InteractiveManager:
 
     def _agent_step(self):
         """Execute one step of the agent loop."""
+        # Refresh the system prompt with the current research-state digest so the
+        # manager reasons over its up-to-date world model every turn. messages[0]
+        # is always the system message (set in run()); we rewrite only its
+        # content and never persist this ephemeral digest to history.
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = (
+                self.base_system_prompt + self.research.digest_section())
+
         # Call LLM
         self.channel.status("Manager thinking…", thinking=True)
         response = self.backend.send(self.messages, self.tool_definitions)
@@ -356,19 +417,45 @@ class InteractiveManager:
                 self.session.append_message(tool_result_msg)
 
         else:
-            # No tool calls — the manager is yielding the floor to the human, so
-            # this turn IS effectively a question (the loop blocks on input next).
+            # No tool calls returned to the Python loop.
+            # In CLI mode this means the model finished — yield to user.
+            # In MCP mode the full tool loop ran inside claude -p, so we only
+            # yield to user when no mcp__neurico__* tools were called at all
+            # (i.e. the model produced a pure-text conclusion with no tool use).
+            # When tools were called, the session did real work — loop back so
+            # the manager continues autonomously. ask_user exchanges (if any)
+            # are added to the conversation so the next session has context.
             assistant_msg = {"role": "assistant", "content": response.text}
             self.messages.append(assistant_msg)
             self.session.append_message(assistant_msg)
 
             clean = clean_chat_text(response.text)
-            # Route the text THROUGH prompt() (not a plain send) so it's tagged as
-            # a question — rendered as the highlighted "needs your reply" card with
-            # the input box highlighted — even when the manager asked in prose
-            # instead of calling the ask_user tool. (clean may be '' if the whole
-            # turn was tool-mechanism noise; fall back to the raw text.)
-            user_input = self.channel.prompt(message=(clean or response.text))
+            if not response.streamed and clean:
+                self.channel.send(clean, kind="manager")
+
+            # Persist ask_user Q&A so the next MCP session sees what the user said.
+            # Add both sides: assistant asking the question and the user's reply,
+            # so the model has full context rather than an orphaned user message.
+            for exchange in response.ask_user_exchanges:
+                q_msg = {"role": "assistant",
+                         "content": f"[asked user]: {exchange['question']}"}
+                self.messages.append(q_msg)
+                self.session.append_message(q_msg)
+                exch_user_msg = {"role": "user", "content": exchange["answer"]}
+                self.messages.append(exch_user_msg)
+                self.session.append_message(exch_user_msg)
+
+            if response.had_tools:
+                # Manager did real work this session — loop back autonomously
+                return
+
+            # No tools called: the manager yielded the floor to the human. Route
+            # the text THROUGH prompt() (not a plain send) so it's tagged as a
+            # question — rendered as the highlighted "needs your reply" card —
+            # even when the manager asked in prose instead of calling ask_user.
+            # (clean may be '' if the whole turn was noise; fall back to raw.)
+            prompt_message = None if response.streamed else (clean or response.text)
+            user_input = self.channel.prompt(message=prompt_message)
             if user_input is None:
                 self._shutdown = True
                 return

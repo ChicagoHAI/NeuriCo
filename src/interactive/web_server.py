@@ -16,9 +16,11 @@ process and shares in-process queues with a WebChannel — no file polling for t
 conversation, no second process.
 
 Routes:
-  GET  /         -> the HTML page
-  GET  /stream   -> Server-Sent Events: conversation + agent-log + status + dashboard
-  POST /input    -> the browser submits the human's reply
+  GET  /            -> the HTML page
+  GET  /stream      -> Server-Sent Events: conversation + agent-log + status + dashboard
+  GET  /annotations -> {key: verdict} map of offline-eval thumbs (re-paint on load)
+  POST /input       -> the browser submits the human's reply
+  POST /annotate    -> record a 👍/👎 on an assessment / decision / manager bubble
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 from interactive.channel import WebChannel
+from interactive import annotations as _annotations
 
 # Reuse the standalone visualizer's transcript formatting so the agent-log feed
 # looks identical to the old viewer. Best-effort: if the import fails, the
@@ -264,6 +267,30 @@ def _emit_dashboard(workspace: Path, project_root: Path, channel: WebChannel,
         stop.wait(3.0)
 
 
+def _emit_research_state(workspace: Path, channel: WebChannel,
+                         stop: threading.Event) -> None:
+    """Push the manager's world model (the `research` event) to the browser when
+    it changes. The manager writes research_state.json via update_research_state
+    / assess; we poll it and fan a snapshot out to the Research whiteboard. Polled
+    (not in-process) so it works identically for fresh and resumed sessions and
+    stays decoupled from the manager loop."""
+    state_file = workspace / ".neurico" / "research_state.json"
+    last_stamp = None
+    while not stop.is_set():
+        try:
+            if state_file.exists():
+                with open(state_file, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                stamp = data.get("updated_at")
+                if stamp != last_stamp:
+                    last_stamp = stamp
+                    data["event"] = "research"
+                    channel.emit_raw(data)
+        except (OSError, json.JSONDecodeError):
+            pass
+        stop.wait(2.0)
+
+
 # ---------------------------------------------------------------------------
 # HTML page
 # ---------------------------------------------------------------------------
@@ -301,7 +328,7 @@ PAGE = r"""<!DOCTYPE html>
   .panehead{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;padding:8px 16px;border-bottom:1px solid #21262d;background:#10151c;flex-shrink:0}
   /* min-height:0 lets these flex children actually scroll instead of growing the page */
   #chat{flex:1;min-height:0;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
-  #log{flex:1;min-height:0;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+  /* #log visibility/layout is governed by .tabpane / .tabpane.active (see tab CSS) */
 
   /* ---- chat bubbles ---- */
   .msg{flex:0 0 auto;border-radius:8px;padding:8px 12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-width:92%}
@@ -349,6 +376,70 @@ PAGE = r"""<!DOCTYPE html>
   .tool-name{color:#ffa657;font-weight:bold}.tool-key{color:#79c0ff}.tool-val{color:#aff5b4}
   #logempty{color:#6e7681;font-size:12px;padding:8px;text-align:center}
 
+  /* ---- tabbed right column (Research whiteboard | Activity) ---- */
+  .tabhead{display:flex;gap:4px;padding:0 8px;align-items:flex-end}
+  .tab{background:none;border:none;border-bottom:2px solid transparent;color:#8b949e;font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:8px 10px;cursor:pointer;font-weight:600}
+  .tab:hover{color:#c9d1d9}
+  .tab.active{color:#e6edf3;border-bottom-color:#58a6ff}
+  .tabpane{display:none;flex:1;min-height:0;overflow-y:auto;padding:12px}
+  .tabpane.active{display:flex;flex-direction:column;gap:10px}
+  #log.tabpane.active{gap:6px}
+  #researchempty{color:#6e7681;font-size:12px;padding:8px;text-align:center}
+
+  /* the manager's world model, rendered as a shared whiteboard */
+  .r-crux{border:1px solid #e3b341;background:#26200d;border-radius:8px;padding:8px 12px;font-size:13px;color:#f0d990}
+  .r-crux b{color:#e3b341;display:block;font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px}
+  .r-card{background:#10261a;border:1px solid #1a3a2e;border-radius:8px;padding:8px 12px;font-size:13px;color:#aff5b4}
+  .r-card b{color:#56d364;display:block;font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px}
+  .r-narrative{font-size:13px;color:#c9d1d9;line-height:1.5;padding:2px 2px}
+  .r-assess{background:#11233b;border:1px solid #1f3c5e;border-radius:8px;padding:8px 12px;font-size:12px;color:#c9d1d9}
+  .r-assess b{color:#79c0ff;display:block;font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px}
+  .r-assess .eng{display:inline-block;margin-top:5px;font-size:11px;padding:1px 7px;border-radius:9px}
+  .r-assess .eng.yes{background:#26200d;color:#e3b341;border:1px solid #e3b341}
+  .r-assess .eng.no{background:#161b22;color:#6e7681;border:1px solid #30363d}
+  .r-sec .r-h{font-size:11px;font-weight:700;color:#adbac7;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+  .hyp{display:flex;gap:7px;align-items:baseline;padding:4px 0;border-bottom:1px solid #161b22;font-size:13px}
+  .hyp .st{flex-shrink:0;font-size:9px;font-weight:700;padding:1px 6px;border-radius:9px;text-transform:uppercase}
+  .st-alive{background:#1f3c5e;color:#79c0ff}.st-uncertain{background:#2a2a1e;color:#e3b341}
+  .st-supported{background:#1a3a2e;color:#56d364}.st-dead{background:#3a1e1e;color:#ff7b72}
+  .hyp .stmt{color:#c9d1d9}.hyp.st-row-dead .stmt{color:#8b949e;text-decoration:line-through}
+  .hyp .ev{color:#6e7681;font-size:11px}
+  .qitem{font-size:13px;color:#c9d1d9;padding:3px 0;padding-left:14px;position:relative}
+  .qitem::before{content:"?";position:absolute;left:0;color:#58a6ff;font-weight:700}
+  .decitem{font-size:12px;color:#c9d1d9;padding:4px 0;border-bottom:1px solid #161b22}
+  .decitem .ch{color:#56d364}.decitem .rat{color:#6e7681;font-size:11px}
+
+  /* ---- offline-eval thumbs (👍/👎 on assessments, decisions, manager bubbles) ---- */
+  .ann{display:inline-flex;gap:2px;margin-left:6px;vertical-align:middle}
+  .ann-btn{background:none;border:none;cursor:pointer;font-size:13px;line-height:1;padding:0 2px;
+           opacity:.3;filter:grayscale(1);transition:opacity .1s}
+  .ann-btn:hover{opacity:.65}
+  .ann-btn.on{opacity:1;filter:none}
+  .ann-foot{margin-top:5px;display:flex;align-items:center;gap:4px}
+  .ann-foot .ann-lbl{font-size:10px;color:#6e7681;text-transform:uppercase;letter-spacing:.05em}
+  .expitem{font-size:12px;color:#8b949e;padding:3px 0;font-family:monospace}
+  .expitem .est{font-size:9px;padding:0 5px;border-radius:8px;margin-right:5px}
+  .est-running{background:#1f3c5e;color:#79c0ff}.est-done{background:#1a3a2e;color:#56d364}.est-failed{background:#3a1e1e;color:#ff7b72}
+  /* consistency warnings (drift to fix) + incident log (what went wrong) */
+  .r-warn{border:1px solid #d29922;background:#2a1e0a;border-radius:8px;padding:8px 12px;font-size:12px;color:#f0c674}
+  .r-warn b{color:#e3b341;display:block;font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
+  .r-warn .warn-i{padding:2px 0}
+  .inc-i{font-size:12px;color:#c9d1d9;padding:3px 0;border-bottom:1px solid #161b22}
+  .inc-i .inc-k{display:inline-block;font-size:9px;font-weight:700;padding:1px 6px;border-radius:8px;background:#3a1e1e;color:#ff7b72;text-transform:uppercase;margin-right:5px}
+  .inc-i .inc-ts{color:#6e7681;font-family:monospace;font-size:10px}
+
+  /* ---- PI-defined custom blocks (design_panel) ---- */
+  .r-ul{margin:0;padding-left:18px}
+  .r-ul li{font-size:13px;color:#c9d1d9;padding:2px 0;line-height:1.45}
+  .r-kv{width:100%;border-collapse:collapse;font-size:13px}
+  .r-kv td{padding:3px 8px 3px 0;vertical-align:top;border-bottom:1px solid #161b22}
+  .r-kv td.k{color:#8b949e;white-space:nowrap;width:1%}
+  .r-kv td.v{color:#c9d1d9}
+  .r-table{width:100%;border-collapse:collapse;font-size:12px}
+  .r-table th{text-align:left;color:#8b949e;font-weight:600;padding:4px 8px;border-bottom:1px solid #30363d;text-transform:uppercase;font-size:10px;letter-spacing:.04em}
+  .r-table td{padding:4px 8px;border-bottom:1px solid #161b22;color:#c9d1d9;vertical-align:top}
+  .r-table tr:hover td{background:#11151c}
+
   /* ---- composer (bottom of chat column) ---- */
   #composer{border-top:1px solid #30363d;background:#161b22;padding:10px 16px;flex-shrink:0}
   #composer.awaiting{background:#26200d;border-top:2px solid #e3b341}
@@ -395,8 +486,17 @@ PAGE = r"""<!DOCTYPE html>
       </div>
     </div>
     <div id="logcol">
-      <div class="panehead">⚙️ Live activity — click any row to expand</div>
-      <div id="log"><div id="logempty">Waiting for the agent to start…</div></div>
+      <div class="panehead tabhead">
+        <button class="tab active" data-tab="research">🔬 Research</button>
+        <button class="tab" data-tab="activity">⚙️ Activity</button>
+      </div>
+      <div id="research" class="tabpane active">
+        <div id="researchempty">The manager hasn't recorded its research model yet…</div>
+        <!-- Rebuilt in panel_layout order by setResearch(); sections are a mix
+             of built-in renderers and PI-defined custom blocks. -->
+        <div id="researchbody" style="display:none"></div>
+      </div>
+      <div id="log" class="tabpane"><div id="logempty">Waiting for the agent to start…</div></div>
     </div>
   </div>
 
@@ -438,6 +538,13 @@ PAGE = r"""<!DOCTYPE html>
     }
     if(whoEl) el.appendChild(whoEl);
     const t=document.createElement('div');t.textContent=d.text;el.appendChild(t);
+    // Offline-eval thumbs on manager bubbles (keyed by the event's seq, which is
+    // stable across reconnects within a run; the POST also snapshots the text).
+    if(role==='manager'&&d.seq!=null){
+      const af=document.createElement('div');af.className='ann-foot';
+      af.innerHTML=annHTML('msg:'+d.seq,d.text);
+      el.appendChild(af);
+    }
     chat.appendChild(el);
     if(stick) chat.scrollTop=chat.scrollHeight;
   }
@@ -575,11 +682,179 @@ PAGE = r"""<!DOCTYPE html>
     if(d.label){connEl.textContent=d.label;}
   }
 
+  // --- research whiteboard (the manager's world model) ---
+  // Rebuilt in panel_layout order each update. Each section is either a built-in
+  // renderer (CORE) or a PI-defined custom block (design_panel). All text is
+  // escaped via esc() before insertion, so custom content can't inject markup.
+  function esc(s){const d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
+  function show(id,on){document.getElementById(id).style.display=on?'':'none';}
+  function el(tag,cls,html){const e=document.createElement(tag);if(cls)e.className=cls;if(html!=null)e.innerHTML=html;return e;}
+  function rsec(title,innerHTML){
+    if(!innerHTML||!innerHTML.trim()) return null;   // skip empty sections
+    return el('div','r-sec','<div class="r-h">'+esc(title)+'</div>'+innerHTML);
+  }
+  // The browser receives the raw state file, which stores `assessments` (a
+  // list); fall back to its last entry if a derived `latest_assessment` is absent.
+  function latestAssessment(d){
+    if(d.latest_assessment) return d.latest_assessment;
+    const a=d.assessments; return (Array.isArray(a)&&a.length)?a[a.length-1]:null;
+  }
+
+  // Built-in section renderers: id -> function(d) -> HTMLElement|null.
+  // ---- offline-eval annotations (👍/👎) ----
+  // ANN: key -> 'up'|'down' (current verdict, drives thumb highlight + survives
+  // the whiteboard's 2s re-render). SNIP: key -> text snapshot sent with the POST
+  // so the JSONL record is self-contained for offline eval. Keys are
+  // 'assess:<id>' | 'dec:<id>' | 'msg:<seq>'.
+  const ANN={}, SNIP={}, ANN_KIND={assess:'assessment',dec:'decision',msg:'message'};
+  function annHTML(key,snip){
+    if(snip!=null) SNIP[key]=String(snip);
+    const v=ANN[key]||'';
+    return '<span class="ann" data-key="'+esc(key)+'">'+
+      '<button class="ann-btn'+(v==='up'?' on':'')+'" data-v="up" title="Good call">👍</button>'+
+      '<button class="ann-btn'+(v==='down'?' on':'')+'" data-v="down" title="Bad call">👎</button></span>';
+  }
+  function applyAnn(){document.querySelectorAll('.ann').forEach(span=>{
+    const v=ANN[span.getAttribute('data-key')]||'';
+    span.querySelectorAll('.ann-btn').forEach(x=>x.classList.toggle('on',x.getAttribute('data-v')===v));
+  });}
+  document.addEventListener('click',e=>{
+    const b=e.target.closest&&e.target.closest('.ann-btn'); if(!b) return;
+    const span=b.closest('.ann'), key=span.getAttribute('data-key');
+    let v=b.getAttribute('data-v');
+    if(ANN[key]===v) v='none';                 // click the active thumb again → clear it
+    ANN[key]=(v==='none'?'':v);
+    span.querySelectorAll('.ann-btn').forEach(x=>x.classList.toggle('on',x.getAttribute('data-v')===ANN[key]));
+    fetch('/annotate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:key,kind:ANN_KIND[key.split(':')[0]]||'message',
+        verdict:v,snapshot:(SNIP[key]||'').slice(0,500)})}).catch(()=>{});
+  });
+  // Re-paint thumbs for anything already in the DOM (chat bubbles) once we know
+  // the saved verdicts. The whiteboard re-reads ANN on its next poll on its own.
+  fetch('/annotations').then(r=>r.json()).then(m=>{if(m&&typeof m==='object')Object.assign(ANN,m);applyAnn();}).catch(()=>{});
+
+  const CORE={
+    warnings:d=>{
+      const w=d.warnings||[]; if(!w.length) return null;
+      return el('div','r-warn','<b>⚠ Needs attention</b>'+w.map(x=>'<div class="warn-i">'+esc(x)+'</div>').join(''));
+    },
+    crux:d=>d.crux?el('div','r-crux','<b>⚡ Crux right now</b>'+esc(d.crux)):null,
+    current_best:d=>d.current_best?el('div','r-card','<b>Current best</b>'+esc(d.current_best)):null,
+    narrative:d=>{if(!d.narrative)return null;const e=el('div','r-narrative');e.textContent=d.narrative;return e;},
+    assessment:d=>{
+      const a=latestAssessment(d); if(!a) return null;
+      const eng=a.engage_user?'<span class="eng yes">would engage you</span>':'<span class="eng no">proceeding solo</span>';
+      return el('div','r-assess','<b>🧭 Manager\'s read</b>'+esc(a.situation||'')+
+        (a.uncertainty?'<br><span style="color:#8b949e">Unsure: </span>'+esc(a.uncertainty):'')+
+        (a.rationale?'<br><span style="color:#8b949e">Why: </span>'+esc(a.rationale):'')+'<br>'+eng+
+        '<div class="ann-foot"><span class="ann-lbl">rate this read</span>'+
+        annHTML('assess:'+(a.id||a.ts||''),a.situation||a.crux||'')+'</div>');
+    },
+    hypotheses:d=>{
+      const hyp=d.hypotheses||[]; if(!hyp.length) return null;
+      return rsec('Hypotheses',hyp.map(h=>{const st=esc(h.status||'alive');
+        return '<div class="hyp st-row-'+st+'"><span class="st st-'+st+'">'+st+'</span>'+
+          '<span class="stmt">'+esc(h.statement)+(h.evidence?' <span class="ev">— '+esc(h.evidence)+'</span>':'')+'</span></div>';
+      }).join(''));
+    },
+    open_questions:d=>{
+      const q=d.open_questions||[]; if(!q.length) return null;
+      return rsec('Open questions',q.map(x=>'<div class="qitem">'+esc(x)+'</div>').join(''));
+    },
+    decisions:d=>{
+      const dec=d.decisions||[]; if(!dec.length) return null;
+      return rsec('Decisions',dec.map(x=>'<div class="decitem">'+esc(x.question)+
+        (x.chosen?' <span class="ch">→ '+esc(x.chosen)+'</span>':'')+
+        annHTML('dec:'+(x.id||x.question||''),x.question)+
+        (x.rationale?'<br><span class="rat">'+esc(x.rationale)+'</span>':'')+'</div>').join(''));
+    },
+    experiments:d=>{
+      const exp=d.experiments||[]; if(!exp.length) return null;
+      return rsec('Experiments',exp.map(x=>'<div class="expitem">'+
+        '<span class="est est-'+esc(x.status||'running')+'">'+esc(x.status||'running')+'</span>'+
+        esc(x.run_id)+' '+esc(x.agent)+(x.rationale?' — <span style="color:#6e7681">'+esc(x.rationale)+'</span>':'')+
+        (x.result?'<br><span style="color:#8b949e">→ '+esc(x.result)+'</span>':'')+'</div>').join(''));
+    },
+    incidents:d=>{
+      const inc=d.incidents||[]; if(!inc.length) return null;
+      return rsec('⚠ Incidents',inc.map(x=>'<div class="inc-i">'+
+        '<span class="inc-k">'+esc(x.kind)+'</span> '+esc(x.detail)+
+        (x.ts?' <span class="inc-ts">'+esc(String(x.ts).slice(11,19))+'</span>':'')+'</div>').join(''));
+    },
+  };
+  const DEFAULT_ORDER=['warnings','crux','current_best','narrative','assessment','hypotheses','open_questions','decisions','experiments','incidents'];
+
+  // PI-defined custom block -> inner HTML. Every value goes through esc().
+  function customInner(sec){
+    const kind=sec.kind||'text', data=sec.data;
+    const cell=v=>esc(typeof v==='string'?v:(v==null?'':JSON.stringify(v)));
+    if(kind==='bullet_list'){
+      const arr=Array.isArray(data)?data:(data?[data]:[]);
+      return arr.length?'<ul class="r-ul">'+arr.map(x=>'<li>'+cell(x)+'</li>').join('')+'</ul>':'';
+    }
+    if(kind==='key_value'){
+      let rows=[];
+      if(Array.isArray(data)) rows=data.map(o=>[o&&o.key,o&&o.value]);
+      else if(data&&typeof data==='object') rows=Object.keys(data).map(k=>[k,data[k]]);
+      return rows.length?'<table class="r-kv">'+rows.map(r=>'<tr><td class="k">'+cell(r[0])+'</td><td class="v">'+cell(r[1])+'</td></tr>').join('')+'</table>':'';
+    }
+    if(kind==='table'){
+      const cols=(data&&data.columns)||[], body=(data&&data.rows)||[];
+      if(!cols.length&&!body.length) return '';
+      return '<table class="r-table"><thead><tr>'+cols.map(c=>'<th>'+cell(c)+'</th>').join('')+'</tr></thead><tbody>'+
+        body.map(r=>'<tr>'+(Array.isArray(r)?r:[r]).map(c=>'<td>'+cell(c)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
+    }
+    if(kind==='status_list'){
+      const arr=Array.isArray(data)?data:[];
+      return arr.map(it=>{const st=esc(it.status||'alive');const label=it.label||it.statement||'';const note=it.note||it.evidence;
+        return '<div class="hyp st-row-'+st+'"><span class="st st-'+st+'">'+st+'</span><span class="stmt">'+esc(label)+(note?' <span class="ev">— '+esc(note)+'</span>':'')+'</span></div>';}).join('');
+    }
+    return data?('<div class="r-narrative">'+cell(data)+'</div>'):'';   // text (default)
+  }
+
+  function setResearch(d){
+    const body=document.getElementById('researchbody');
+    const sections=d.sections||{};
+    let order=(Array.isArray(d.panel_layout)&&d.panel_layout.length)?d.panel_layout.slice():DEFAULT_ORDER.slice();
+    // Any custom section not explicitly placed in the layout is appended.
+    const placed=new Set(order);
+    Object.keys(sections).forEach(id=>{if(!placed.has(id))order.push(id);});
+    // Honesty sections are non-suppressible: a PI-designed layout (design_panel)
+    // may reorder them, but must not be able to HIDE warnings/incidents — that
+    // would let a drifting manager conceal its own failures. Force them in if a
+    // custom layout left them out (their renderers return null when empty, so
+    // this never adds empty boxes).
+    if(!order.includes('warnings')) order.unshift('warnings');
+    if(!order.includes('incidents')) order.push('incidents');
+
+    const frag=document.createDocumentFragment();
+    let any=false;
+    order.forEach(id=>{
+      let node=null;
+      if(CORE[id]) node=CORE[id](d);
+      else if(sections[id]) node=rsec(sections[id].title||id,customInner(sections[id]));
+      if(node){frag.appendChild(node);any=true;}
+    });
+    show('researchempty',!any);
+    show('researchbody',any);
+    body.innerHTML='';
+    body.appendChild(frag);
+  }
+
+  // tab switching (Research / Activity)
+  document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.tabpane').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById(t.dataset.tab==='research'?'research':'log').classList.add('active');
+  }));
+
   const es=new EventSource('/stream');
   es.onopen=()=>{connEl.textContent='connected';};
   es.addEventListener('message',e=>addMessage(JSON.parse(e.data)));
   es.addEventListener('agentlog',e=>addAgentLog(JSON.parse(e.data)));
   es.addEventListener('dashboard',e=>setDash(JSON.parse(e.data)));
+  es.addEventListener('research',e=>setResearch(JSON.parse(e.data)));
   es.addEventListener('prompt',e=>{
     const d=JSON.parse(e.data);
     setThinking(false);   // the manager finished thinking and is now asking
@@ -646,7 +921,7 @@ def _brand_file(project_root: Path, key: str) -> Optional[Path]:
 
 
 def _make_handler(channel: WebChannel, workspace_name: str, title: str,
-                  project_root: Path):
+                  project_root: Path, workspace_path: Path):
     page = PAGE.replace("{{WORKSPACE}}", workspace_name).replace("{{TITLE}}", title)
 
     class Handler(BaseHTTPRequestHandler):
@@ -710,6 +985,20 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str,
                 finally:
                     channel.unsubscribe(q)
 
+            elif self.path == "/annotations":
+                # Offline-eval thumbs, so the browser can re-paint thumb state on
+                # load / reconnect. {key: "up"|"down"}.
+                try:
+                    latest = _annotations.load_latest(workspace_path)
+                except Exception:
+                    latest = {}
+                body = json.dumps(latest).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -727,6 +1016,25 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str,
                     channel.submit_input(text)
                 self.send_response(204)
                 self.end_headers()
+
+            elif self.path == "/annotate":
+                # Record an offline-eval thumb. Never touches the live run.
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                    _annotations.append_annotation(
+                        workspace_path,
+                        key=payload.get("key", ""),
+                        kind=payload.get("kind", ""),
+                        verdict=payload.get("verdict", ""),
+                        snapshot=payload.get("snapshot", ""),
+                    )
+                    self.send_response(204)
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                    self.send_response(400)
+                self.end_headers()
+
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -751,6 +1059,7 @@ class InteractiveWebServer:
         self._server_thread: Optional[threading.Thread] = None
         self._tailer_thread: Optional[threading.Thread] = None
         self._dash_thread: Optional[threading.Thread] = None
+        self._research_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
 
     @property
@@ -759,7 +1068,7 @@ class InteractiveWebServer:
 
     def start(self) -> None:
         handler = _make_handler(self.channel, self.workspace.name, self.title,
-                                self.project_root)
+                                self.project_root, self.workspace)
         # Try the requested port, then a few above it if taken.
         last_err = None
         for port in range(self.port, self.port + 10):
@@ -788,6 +1097,12 @@ class InteractiveWebServer:
             args=(self.workspace, self.project_root, self.channel, self._stop),
             daemon=True)
         self._dash_thread.start()
+
+        self._research_thread = threading.Thread(
+            target=_emit_research_state,
+            args=(self.workspace, self.channel, self._stop),
+            daemon=True)
+        self._research_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
