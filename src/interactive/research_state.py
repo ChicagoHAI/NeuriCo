@@ -84,7 +84,7 @@ class ResearchState:
             "findings": [],         # {text, kind, ts}   kind: result | dead_end | note
             "open_questions": [],   # [str]
             "decisions": [],        # {id, question, options, chosen, rationale, by, ts}
-            "assessments": [],      # {ts, situation, uncertainty, crux, decision_pending, engage_user, rationale}
+            "assessments": [],      # {id, ts, situation, uncertainty, crux, decision_pending, engage_user, rationale}
             "incidents": [],        # {ts, kind, detail} — auto-logged tool errors + self-reported struggle
             # Level 2 — the PI-designed panel. `panel_layout` is an ordered list
             # of section ids (built-in or custom); empty → default order. Each
@@ -235,6 +235,9 @@ class ResearchState:
                        crux: str = "", decision_pending: str = "",
                        engage_user: bool = False, rationale: str = "") -> None:
         self.state["assessments"].append({
+            # Stable id so offline-eval annotations can key on a specific
+            # assessment (decisions already carry one; ts alone could collide).
+            "id": self._next_id("assessments", "A"),
             "ts": _now(), "situation": (situation or "").strip(),
             "uncertainty": (uncertainty or "").strip(), "crux": (crux or "").strip(),
             "decision_pending": (decision_pending or "").strip(),
