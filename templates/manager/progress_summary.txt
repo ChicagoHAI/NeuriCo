@@ -1,0 +1,7 @@
+Summarize the following agent log output for a human researcher. Be concise (2-3 sentences). Focus on what the agent is currently doing, any notable progress, and any issues.
+
+Agent: {{ agent_name }}
+Running for: {{ elapsed_time }}
+
+Recent log output:
+{{ log_tail }}

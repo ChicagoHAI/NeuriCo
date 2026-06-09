@@ -1,0 +1,32 @@
+# NeuriCo Interactive Manager Configuration
+#
+# These settings control the behavior of the interactive mode manager.
+# Override via environment variables (NEURICO_MANAGER_*) or .env file.
+
+manager:
+  # LLM backend for manager reasoning
+  # Options: "cli" (uses claude -p, no extra keys), "anthropic_api", "openrouter"
+  # Can also be set via NEURICO_MANAGER_BACKEND env var
+  llm_backend: cli
+
+  # Model to use for manager reasoning (null = default for backend)
+  # For cli: uses whatever claude version is installed
+  # For anthropic_api: e.g., "claude-sonnet-4-20250514"
+  # For openrouter: e.g., "anthropic/claude-sonnet-4"
+  # Can also be set via NEURICO_MANAGER_MODEL env var
+  llm_model: null
+
+  # Engagement level: how often the manager stops to ask the user
+  # "hands_off": only critical decisions (direction changes, failures)
+  # "balanced": stage transitions + significant choices (default)
+  # "hands_on": frequent check-ins, present options at every step
+  engagement: balanced
+
+  # How often to check agent status during long runs (seconds)
+  poll_interval: 60
+
+  # How often to proactively show progress summaries during long runs (seconds)
+  engagement_interval: 1800  # 30 minutes
+
+  # Default AI provider for research agents
+  default_provider: claude
