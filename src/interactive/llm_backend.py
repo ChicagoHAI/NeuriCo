@@ -135,6 +135,18 @@ class LLMBackend:
                           "ask_user", "update_session", "update_research_state",
                           "assess", "design_panel")
 
+    # Native Claude Code tools the manager must never use directly — any write
+    # among them deadlocks on an unanswerable permission prompt in headless
+    # print mode (see _send_mcp). Passed to `claude -p --disallowedTools` so the
+    # inner agent cannot even attempt them and is forced to delegate via
+    # run_agent. Read-only tools are included too so the manager can't "discover"
+    # it's a plain Claude Code session and break out of the manager persona.
+    _NATIVE_TOOLS_DISALLOWED = ",".join((
+        "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit",
+        "Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch",
+        "Task", "TodoWrite",
+    ))
+
     def _send_mcp(self, messages: List[Dict[str, Any]],
                   mcp_config_path: Optional[str] = None,
                   tools: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
@@ -153,6 +165,17 @@ class LLMBackend:
 
         cmd = "claude -p --verbose --output-format stream-json"
         cmd += f' --allowedTools "{allowed}"'
+        # CRITICAL: --allowedTools only PRE-APPROVES the NeuriCo MCP tools; it
+        # does NOT make them exclusive. The inner `claude -p` agent still SEES
+        # its native Claude Code tools (Bash/Edit/Write/…) and, under pressure,
+        # will try to edit workspace files directly. Those writes are not
+        # allow-listed, so each one blocks on a permission prompt — which, in
+        # headless print mode, can never surface to the user. The session then
+        # deadlocks ("I don't have permission to write") with no way out.
+        # Disallowing the native tools removes that escape hatch entirely: the
+        # ONLY way the manager can touch code is to delegate via run_agent (the
+        # CLI backend achieves the same thing structurally with `--tools ""`).
+        cmd += f' --disallowedTools "{self._NATIVE_TOOLS_DISALLOWED}"'
         if mcp_config_path:
             cmd += f' --mcp-config "{mcp_config_path}"'
         if self.model:

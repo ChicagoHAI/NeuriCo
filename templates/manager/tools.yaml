@@ -28,6 +28,17 @@ tools:
         type: boolean
         description: Use Jupyter notebook integration (only for experiment_runner)
         required: false
+      instructions:
+        type: string
+        description: |
+          For comment_handler ONLY, and REQUIRED there: the targeted change
+          request to apply to the existing workspace, in plain language (e.g.
+          "Add an Age-only baseline classifier to src/experiment.py and rerun").
+          This is how a targeted change reaches the agent in interactive mode —
+          you have no file-writing tools of your own, so any code change must go
+          through comment_handler (small, targeted) or experiment_runner (larger
+          re-runs). Never attempt to edit files directly.
+        required: false
       rationale:
         type: string
         description: |

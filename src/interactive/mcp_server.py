@@ -85,6 +85,17 @@ def create_server(work_dir: Path, idea_file: Path,
                             "type": "boolean",
                             "description": "Use Jupyter notebook integration (experiment_runner only)",
                         },
+                        "instructions": {
+                            "type": "string",
+                            "description": (
+                                "comment_handler only, REQUIRED there: the targeted "
+                                "change request to apply to the existing workspace, "
+                                "in plain language. This is how a code change reaches "
+                                "the agent — you have no file-writing tools, so never "
+                                "edit files yourself; delegate via comment_handler "
+                                "(small change) or experiment_runner (larger re-run)."
+                            ),
+                        },
                     },
                     "required": ["agent"],
                 },

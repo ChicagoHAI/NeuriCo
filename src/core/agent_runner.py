@@ -345,8 +345,18 @@ def run_paper_writer(idea: Dict[str, Any], work_dir: Path, provider: str,
 
 def run_comment_handler(idea: Dict[str, Any], work_dir: Path, provider: str,
                         tracker: RunTracker, full_permissions: bool = True,
-                        templates_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Run the comment handler agent for targeted improvements."""
+                        templates_dir: Optional[Path] = None,
+                        instructions: Optional[str] = None) -> Dict[str, Any]:
+    """Run the comment handler agent for targeted improvements.
+
+    The change request can come from two channels:
+    - `instructions`: a free-form request passed directly (used by the
+      interactive manager, whose requests arrive over chat — not GitHub).
+    - `idea.comments`: the GitHub/async flow, where a reviewer leaves a
+      `comments:` field on the idea YAML.
+    When `instructions` is provided it takes precedence and is injected as the
+    comment source, so the manager no longer dead-ends on "No comments found".
+    """
     from agents.comment_handler import generate_comment_prompt
 
     if templates_dir is None:
@@ -356,10 +366,24 @@ def run_comment_handler(idea: Dict[str, Any], work_dir: Path, provider: str,
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
 
+    # Direct instructions (interactive manager) override the idea's comments
+    # field (GitHub flow). Inject into the nested spec so generate_comment_prompt
+    # — which reads idea_spec['comments'] — picks them up unchanged.
+    if instructions:
+        idea = dict(idea)
+        spec = dict(idea.get('idea', idea))
+        spec['comments'] = instructions
+        if 'idea' in idea:
+            idea['idea'] = spec
+        else:
+            idea = spec
+        print(f"   Source: direct instructions ({len(instructions)} chars)")
+
     # Generate prompt from comments in the idea file
     comments = idea.get('idea', {}).get('comments', [])
     if not comments:
-        return {'success': False, 'error': 'No comments found in idea file'}
+        return {'success': False, 'error': 'No comments found in idea file '
+                '(and no --instructions passed)'}
 
     prompt = generate_comment_prompt(idea, work_dir, templates_dir)
 
@@ -481,6 +505,12 @@ def main():
         action="store_true",
         help="Use scribe for notebook integration (for experiment_runner agent)"
     )
+    parser.add_argument(
+        "--instructions",
+        default=None,
+        help="Free-form change request for comment_handler (interactive manager "
+             "flow; replaces the idea's 'comments:' field)"
+    )
 
     args = parser.parse_args()
 
@@ -504,6 +534,8 @@ def main():
         kwargs['paper_style'] = args.paper_style
     if args.agent == 'experiment_runner':
         kwargs['use_scribe'] = args.use_scribe
+    if args.agent == 'comment_handler' and args.instructions:
+        kwargs['instructions'] = args.instructions
 
     # Run the agent
     result = run_agent(

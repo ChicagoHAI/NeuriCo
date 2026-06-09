@@ -102,6 +102,18 @@ class ToolExecutor:
         if agent_name not in valid_agents:
             return f"Error: Unknown agent '{agent_name}'. Choose from: {valid_agents}"
 
+        # comment_handler applies one targeted change to the existing workspace.
+        # In interactive mode the request arrives over chat, not as a GitHub
+        # `comments:` field, so it MUST be passed explicitly as `instructions`.
+        # Without this the container agent dead-ends on "No comments found" and
+        # the manager is tempted to edit files itself — which it cannot do.
+        instructions = args.get("instructions") or args.get("request")
+        if agent_name == "comment_handler" and not instructions:
+            return ("Error: comment_handler needs an 'instructions' parameter "
+                    "describing the targeted change to make (the request text). "
+                    "Pass the change request there — do NOT try to edit files "
+                    "yourself; you have no file-writing tools.")
+
         provider = args.get("provider", self.provider)
         run_id = self.session.generate_run_id(agent_name)
 
@@ -138,6 +150,8 @@ class ToolExecutor:
             cmd_parts.extend(["--paper-style", args["paper_style"]])
         if agent_name == "experiment_runner" and args.get("use_scribe"):
             cmd_parts.append("--use-scribe")
+        if agent_name == "comment_handler" and instructions:
+            cmd_parts.extend(["--instructions", str(instructions)])
 
         # Record in session
         self.session.record_agent_start(agent_name, run_id)

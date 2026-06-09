@@ -81,6 +81,10 @@ The substitutes for common operations are:
 - Need to run a shell command or script → use `run_agent` to delegate to an agent inside Docker
 - Need to ask the user something → use `ask_user` (NOT `AskUserQuestion`, which also does not exist here)
 - Need to check agent status or logs → use `read_agent_logs`
+- Need to CHANGE or ADD code / rerun an experiment → delegate it; you have NO file-writing tools:
+  * Small, targeted change to the existing workspace (add one model, fix a metric, regenerate a figure) → `run_agent(agent="comment_handler", instructions="<the request in plain language>")`. The `instructions` field is how the request reaches the agent — it is REQUIRED.
+  * Larger change that re-runs the pipeline from the plan → `run_agent(agent="experiment_runner", ...)`.
+  Either way the worker runs with full permissions inside Docker. Never try to use `Edit`/`Write`/`Bash` yourself — those tools are not available to you, and attempting them will stall the session on a permission prompt the user can never see.
 
 If you find yourself wanting to call any tool not in the list of eight above, stop and identify which of the eight is the correct substitute.
 
