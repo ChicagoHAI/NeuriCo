@@ -27,12 +27,25 @@ class ToolExecutor:
     """
 
     def __init__(self, work_dir: Path, session: SessionState,
-                 idea_file: Path, provider: str, project_root: Path):
+                 idea_file: Path, provider: str, project_root: Path,
+                 channel=None, research=None):
         self.work_dir = Path(work_dir)
         self.session = session
         self.idea_file = idea_file
         self.provider = provider
         self.project_root = project_root
+        # UserChannel for human interaction (terminal or web). Falls back to a
+        # TerminalChannel so the executor works standalone.
+        if channel is None:
+            from interactive.channel import TerminalChannel
+            channel = TerminalChannel()
+        self.channel = channel
+        # Shared research state (the manager's world model). Created lazily so
+        # the executor still works standalone / in tests.
+        if research is None:
+            from interactive.research_state import ResearchState
+            research = ResearchState(work_dir)
+        self.research = research
 
         # Track running agent processes
         self._running_agents: Dict[str, subprocess.Popen] = {}
@@ -54,15 +67,29 @@ class ToolExecutor:
             "read_agent_logs": self._read_agent_logs,
             "ask_user": self._ask_user,
             "update_session": self._update_session,
+            "update_research_state": self._update_research_state,
+            "assess": self._assess,
+            "design_panel": self._design_panel,
         }
 
+        # The mcp backend delivers tool names namespaced as mcp__neurico__<name>;
+        # strip the prefix so both backends dispatch through the same handlers.
+        tool_name = tool_name.removeprefix("mcp__neurico__")
         handler = handlers.get(tool_name)
         if not handler:
+            # Auto-log the failure so the world model stays honest: an unknown-tool
+            # call (e.g. the manager reaching for Bash/Read/AskUserQuestion when it
+            # gets confused about its tool layer) leaves a visible trace instead of
+            # being silently smoothed over.
+            self.research.add_incident(
+                "unknown_tool",
+                f"Called '{tool_name}', which is not one of the available tools.")
             return f"Error: Unknown tool '{tool_name}'. Available: {list(handlers.keys())}"
 
         try:
             return handler(arguments)
         except Exception as e:
+            self.research.add_incident("tool_error", f"{tool_name}: {e}")
             return f"Error executing {tool_name}: {e}"
 
     def _run_agent(self, args: Dict[str, Any]) -> str:
@@ -129,6 +156,16 @@ class ToolExecutor:
 
         self._running_agents[run_id] = process
 
+        # Critique-before-compute (AutoScientists' idea): record WHY this agent
+        # is being launched into the world model — which hypothesis it tests and
+        # the manager's justification — so the spend is never silent and the
+        # decision is gradeable later.
+        self.research.add_experiment(
+            agent=agent_name, run_id=run_id,
+            rationale=str(args.get("rationale", "")),
+            hypothesis=str(args.get("hypothesis", "")),
+        )
+
         return (
             f"Agent '{agent_name}' started with run_id '{run_id}' (pid: {process.pid}).\n"
             f"Use read_agent_logs with run_id='{run_id}' to check progress.\n"
@@ -139,7 +176,13 @@ class ToolExecutor:
         """Read files from the workspace."""
         action = args.get("action", "list")
         rel_path = args.get("path", ".")
-        max_lines = args.get("max_lines", 200)
+        # The CLI backend's tool-call shim hands numbers back as strings, so
+        # coerce to int before any comparison (else `len(lines) > max_lines`
+        # raises "'>' not supported between 'int' and 'str'").
+        try:
+            max_lines = int(args.get("max_lines", 200))
+        except (TypeError, ValueError):
+            max_lines = 200
 
         target = self.work_dir / rel_path
 
@@ -198,7 +241,11 @@ class ToolExecutor:
         if not run_id:
             return "Error: 'run_id' parameter is required"
 
-        tail_lines = args.get("tail_lines", 100)
+        # CLI backend may pass this as a string — coerce so slicing/compare work.
+        try:
+            tail_lines = int(args.get("tail_lines", 100))
+        except (TypeError, ValueError):
+            tail_lines = 100
         run_dir = self.work_dir / ".neurico" / "runs" / run_id
 
         if not run_dir.exists():
@@ -272,44 +319,22 @@ class ToolExecutor:
         message = args.get("message", "")
         options = args.get("options", [])
 
-        # CLI backend LLM sometimes serializes arrays as JSON-encoded strings
+        # The CLI backend's XML tool-call shim can hand us `options` as a
+        # JSON-encoded string instead of a list. Coerce it back so the browser
+        # renders clickable buttons regardless of backend quirks.
         if isinstance(options, str):
             try:
-                options = json.loads(options)
+                parsed = json.loads(options)
+                options = parsed if isinstance(parsed, list) else [options]
             except (json.JSONDecodeError, ValueError):
-                options = [options]
+                options = [options] if options.strip() else []
+        if not isinstance(options, list):
+            options = []
+        options = [str(o) for o in options]
 
-        print()
-        print("=" * 70)
-        print(message)
-        print("=" * 70)
-
-        if options:
-            print()
-            for i, opt in enumerate(options, 1):
-                print(f"  [{i}] {opt}")
-            print()
-
-            while True:
-                response = input("Your choice (number or type your response): ").strip()
-
-                # Check if they entered a number
-                try:
-                    idx = int(response) - 1
-                    if 0 <= idx < len(options):
-                        response = options[idx]
-                        break
-                except ValueError:
-                    pass
-
-                # Accept free-form text too
-                if response:
-                    break
-                print("Please enter a response.")
-        else:
-            print()
-            response = input("Your response: ").strip()
-
+        response = self.channel.prompt(message=message, options=options or None)
+        if response is None:
+            return "[User ended the session without responding.]"
         return response
 
     def _update_session(self, args: Dict[str, Any]) -> str:
@@ -346,6 +371,201 @@ class ToolExecutor:
 
         return "Session updated: " + ", ".join(updates) if updates else "No changes"
 
+    @staticmethod
+    def _as_list(value) -> List:
+        """Coerce a value the CLI backend may have JSON-encoded as a string."""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else [value]
+            except (json.JSONDecodeError, ValueError):
+                return [value] if value.strip() else []
+        return [value]
+
+    def _update_research_state(self, args: Dict[str, Any]) -> str:
+        """Update the manager's world model: narrative, current best, crux,
+        hypotheses (upsert), findings, dead-ends, open questions, and decisions
+        made. This is how the manager *thinks like a PI* — keeping an explicit
+        picture of the investigation rather than re-deriving it each turn."""
+        r = self.research
+        updates = []
+
+        narrative = args.get("narrative")
+        current_best = args.get("current_best")
+        crux = args.get("crux")
+        if any(v is not None for v in (narrative, current_best, crux)):
+            r.set_fields(narrative=narrative, current_best=current_best, crux=crux)
+            if narrative is not None:
+                updates.append("narrative")
+            if current_best is not None:
+                updates.append("current best")
+            if crux is not None:
+                updates.append("crux")
+
+        # Hypotheses: list of {statement, status, evidence, id?} (status one of
+        # alive|uncertain|supported|dead). Also accept bare strings.
+        hyps = self._as_list(args.get("hypotheses"))
+        for h in hyps:
+            if isinstance(h, dict):
+                r.upsert_hypothesis(
+                    statement=str(h.get("statement", "")),
+                    status=str(h.get("status", "alive")),
+                    evidence=str(h.get("evidence", "")),
+                    hid=h.get("id"),
+                )
+            elif isinstance(h, str):
+                r.upsert_hypothesis(statement=h)
+        if hyps:
+            updates.append(f"{len(hyps)} hypothesis(es)")
+
+        for f in self._as_list(args.get("findings")):
+            r.add_finding(str(f), kind="result")
+        for d in self._as_list(args.get("dead_ends")):
+            r.add_finding(str(d), kind="dead_end")
+        n_find = len(self._as_list(args.get("findings"))) + len(self._as_list(args.get("dead_ends")))
+        if n_find:
+            updates.append(f"{n_find} finding(s)")
+
+        oq = args.get("open_questions")
+        if oq is not None:
+            r.set_open_questions([str(q) for q in self._as_list(oq)])
+            updates.append("open questions")
+
+        # Prune specific answered questions without re-listing the whole set —
+        # the common path that was being skipped, leaving stale questions.
+        resolved = self._as_list(args.get("resolved_questions"))
+        if resolved:
+            n = r.resolve_questions([str(q) for q in resolved])
+            if n:
+                updates.append(f"resolved {n} question(s)")
+
+        decision = args.get("decision")
+        if isinstance(decision, str):
+            try:
+                decision = json.loads(decision)
+            except (json.JSONDecodeError, ValueError):
+                decision = None
+        if isinstance(decision, dict) and decision.get("question"):
+            r.add_decision(
+                question=str(decision.get("question", "")),
+                chosen=str(decision.get("chosen", "")),
+                rationale=str(decision.get("rationale", "")),
+                options=[str(o) for o in self._as_list(decision.get("options"))],
+                by="manager",
+            )
+            updates.append("decision")
+
+        return "Research state updated: " + ", ".join(updates) if updates else \
+               "No changes (provide narrative/current_best/crux/hypotheses/findings/open_questions/decision)"
+
+    def _assess(self, args: Dict[str, Any]) -> str:
+        """Record the manager's read of the situation right now: what changed,
+        what's uncertain, the crux, any pending decision, and whether a human
+        expert would pull the user in (with rationale). This is reflection, not
+        action — if engage_user is true, you still call ask_user to actually ask."""
+        engage = args.get("engage_user", False)
+        if isinstance(engage, str):
+            engage = engage.strip().lower() in ("true", "yes", "1")
+        self.research.add_assessment(
+            situation=str(args.get("situation", "")),
+            uncertainty=str(args.get("uncertainty", "")),
+            crux=str(args.get("crux", "")),
+            decision_pending=str(args.get("decision_pending", "")),
+            engage_user=bool(engage),
+            rationale=str(args.get("rationale", "")),
+        )
+        # Honest self-report: if the manager hit confusion, an error, or recovered
+        # from a mistake, it logs an incident so the failure leaves a trace.
+        issue = str(args.get("issue", "")).strip()
+        if issue:
+            self.research.add_incident("self_reported", issue)
+        if engage:
+            return ("Assessment recorded. You judged the human should be engaged — "
+                    "now call ask_user with a concise, crux-focused question.")
+        return ("Assessment recorded. You judged no human input is needed now — "
+                "proceed autonomously.")
+
+    # Block kinds the manager may use for custom panel sections. Kept in sync
+    # with research_state.BLOCK_KINDS — these are the data shapes the whiteboard
+    # knows how to render safely (all text is HTML-escaped client side).
+    _PANEL_DATA_KINDS = ("bullet_list", "key_value", "table", "status_list")
+
+    def _design_panel(self, args: Dict[str, Any]) -> str:
+        """Let the PI shape the Research whiteboard for THIS run: choose the
+        order of sections and define custom sections from a fixed block
+        vocabulary (text, bullet_list, key_value, table, status_list). Decide the
+        layout once near the start; afterwards call this only to refresh a custom
+        section's `data`. Built-in sections (crux, current_best, narrative,
+        assessment, hypotheses, open_questions, decisions, experiments) keep
+        flowing from update_research_state/assess — list their ids in `layout`
+        to position them."""
+        r = self.research
+        updates = []
+
+        layout = args.get("layout")
+        if layout is not None:
+            r.set_panel_layout([str(s) for s in self._as_list(layout)])
+            updates.append("layout")
+
+        n_sec = 0
+        for sec in self._as_list(args.get("sections")):
+            # The CLI backend may hand each section back as a JSON string.
+            if isinstance(sec, str):
+                try:
+                    sec = json.loads(sec)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            if not isinstance(sec, dict) or not sec.get("id"):
+                continue
+            kind = sec.get("kind")
+            data = sec.get("data")
+            # Structured kinds may arrive JSON-encoded (CLI backend quirk).
+            if isinstance(data, str) and kind in self._PANEL_DATA_KINDS:
+                try:
+                    data = json.loads(data)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            r.upsert_section(str(sec["id"]), title=sec.get("title"),
+                             kind=kind, data=data)
+            n_sec += 1
+        if n_sec:
+            updates.append(f"{n_sec} section(s)")
+
+        if updates:
+            return "Panel updated: " + ", ".join(updates)
+        return ("No changes. Provide `layout` (ordered section ids) and/or "
+                "`sections`=[{id,title,kind,data}] where kind is one of "
+                "text|bullet_list|key_value|table|status_list.")
+
+    def _summarize_run_result(self, run_id: str) -> str:
+        """Pull a short outcome summary from a finished run's result.json /
+        error.json so the experiment record carries its result — not an empty
+        string. The data is on disk; reading it back is fully mechanical and
+        removes the 'result: ""' drift we saw in real runs."""
+        run_dir = self.work_dir / ".neurico" / "runs" / run_id
+        for name in ("result.json", "error.json"):
+            path = run_dir / name
+            if not path.exists():
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    obj = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if name == "error.json":
+                return f"error: {obj.get('error', 'unknown error')}"[:300]
+            # result.json: prefer a human-ish field, else compact the JSON.
+            for key in ("summary", "result", "message", "status"):
+                val = obj.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()[:300]
+            return json.dumps(obj, ensure_ascii=False)[:300]
+        return ""
+
     def check_running_agents(self) -> List[Dict[str, Any]]:
         """Check status of all running agents. Returns list of completed ones."""
         completed = []
@@ -353,6 +573,11 @@ class ToolExecutor:
             poll_result = process.poll()
             if poll_result is not None:
                 self.session.record_agent_complete(run_id, poll_result == 0, poll_result)
+                self.research.update_experiment(
+                    run_id,
+                    status="done" if poll_result == 0 else "failed",
+                    result=self._summarize_run_result(run_id) or None,
+                )
                 completed.append({
                     "run_id": run_id,
                     "exit_code": poll_result,

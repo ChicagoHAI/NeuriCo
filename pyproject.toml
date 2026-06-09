@@ -31,6 +31,7 @@ dependencies = [
     "openai>=1.0.0",
     "nbformat>=5.10.4",
     "fastmcp>=2.0",
+    "mcp>=1.0",
     "httpx>=0.25.0",
 ]
 

@@ -28,6 +28,19 @@ tools:
         type: boolean
         description: Use Jupyter notebook integration (only for experiment_runner)
         required: false
+      rationale:
+        type: string
+        description: |
+          Critique-before-compute: a one-sentence justification for spending
+          compute on this run NOW — which hypothesis it tests, why it is worth
+          it, and confirmation it is not a known dead-end retry. Always provide
+          this; it is recorded in the research state.
+        required: false
+      hypothesis:
+        type: string
+        description: |
+          The hypothesis (or its id, e.g. "H2") this run is meant to test, if any.
+        required: false
     returns: |
       A run_id string and immediate status. Use check_workspace or
       read_agent_logs to monitor progress. The agent result will be
@@ -117,3 +130,160 @@ tools:
         description: Current research phase label (e.g., "exploring", "experimenting", "writing")
         required: false
     returns: Confirmation of the update.
+
+  - name: update_research_state
+    description: |
+      Update your WORLD MODEL of the investigation — the structured picture you
+      reason over and that the human sees on the Research whiteboard. Use this
+      continuously, the way a PI keeps a running mental model: when you form or
+      revise a hypothesis, confirm or kill one, get a result, identify the crux,
+      or make a decision. This is more important than chat: the chat is
+      conversation, this is the shared state of the science.
+    parameters:
+      narrative:
+        type: string
+        description: One short paragraph on where the research stands right now.
+        required: false
+      current_best:
+        type: string
+        description: The current best result / champion approach, with its key number(s).
+        required: false
+      crux:
+        type: string
+        description: |
+          The single most decision-relevant open issue right now — the thing
+          that, if resolved, would most change what we do next.
+        required: false
+      hypotheses:
+        type: array
+        items:
+          type: object
+        description: |
+          Hypotheses to add or update (upsert by id or matching statement). Each:
+          {"statement": "...", "status": "alive|uncertain|supported|dead",
+           "evidence": "...", "id": "H2"(optional)}.
+        required: false
+      findings:
+        type: array
+        items:
+          type: string
+        description: Confirmed results/observations to record (append, deduped).
+        required: false
+      dead_ends:
+        type: array
+        items:
+          type: string
+        description: |
+          Directions found unproductive — recorded so they are not retried
+          (an AutoScientists-style dead-end registry).
+        required: false
+      open_questions:
+        type: array
+        items:
+          type: string
+        description: Open questions to track (replaces the list).
+        required: false
+      resolved_questions:
+        type: array
+        items:
+          type: string
+        description: |
+          Open questions that have now been ANSWERED — they are removed from the
+          list (matched case-insensitively). Use this to prune resolved questions
+          without re-listing the whole set, so the board doesn't show answered
+          questions as still open.
+        required: false
+      decision:
+        type: object
+        description: |
+          A decision just made, to log with its reasoning:
+          {"question": "...", "chosen": "...", "rationale": "...",
+           "options": ["...", "..."](optional)}.
+        required: false
+    returns: Confirmation of what was updated.
+
+  - name: assess
+    description: |
+      Record YOUR READ of the situation at this moment — the reflection a good
+      PI does before acting. Call this at meaningful junctures: after an agent
+      completes, before launching an expensive run, and before deciding whether
+      to involve the human. It is reflection, not action: if you conclude the
+      human should be engaged, you still call ask_user afterward. These
+      assessments are shown to the human and are how your judgement is reviewed.
+    parameters:
+      situation:
+        type: string
+        description: What is happening / what just changed.
+        required: true
+      uncertainty:
+        type: string
+        description: What you are unsure about right now.
+        required: false
+      crux:
+        type: string
+        description: The decisive factor — what most affects the next decision.
+        required: false
+      decision_pending:
+        type: string
+        description: The decision on the table, if any (else leave empty).
+        required: false
+      engage_user:
+        type: boolean
+        description: |
+          Whether a human expert in your seat would pull the user in right now.
+        required: true
+      rationale:
+        type: string
+        description: Why you would or would not engage the user.
+        required: false
+      issue:
+        type: string
+        description: |
+          If you hit a problem at this juncture — confusion, an error, a tool
+          that didn't work, or a mistake you recovered from — describe it
+          honestly. It is recorded as an incident on the whiteboard. Don't hide
+          struggle; a faithful record of what went wrong is the point.
+        required: false
+    returns: Confirmation, with a nudge to call ask_user if you chose to engage.
+
+  - name: design_panel
+    description: |
+      Shape the Research whiteboard for THIS run. You decide what form best fits
+      the investigation: choose the ORDER of sections and define CUSTOM sections
+      from a fixed block vocabulary. Do this ONCE near the start (after you
+      understand the idea); afterwards call it only to refresh a custom section's
+      data. The built-in sections (crux, current_best, narrative, assessment,
+      hypotheses, open_questions, decisions, experiments) still come from
+      update_research_state/assess — list their ids in `layout` to position them
+      among your custom ones. A molecule-screening run might add a "candidates"
+      table; an ML run a "leaderboard"; a proof a "lemmas" status_list. Supply
+      DATA, never markup — all text is escaped before display.
+    parameters:
+      layout:
+        type: array
+        items:
+          type: string
+        description: |
+          Ordered list of section ids to render, top to bottom. May mix built-in
+          ids (crux, current_best, narrative, assessment, hypotheses,
+          open_questions, decisions, experiments) and your custom section ids.
+          Omit or leave empty to keep the default order. Any custom section not
+          listed is appended at the end.
+        required: false
+      sections:
+        type: array
+        items:
+          type: object
+        description: |
+          Custom sections to create or update (upsert by id). Each:
+          {"id": "candidates", "title": "Candidate molecules", "kind": "table",
+           "data": ...}. `kind` is one of:
+            - text         data: a string (one paragraph)
+            - bullet_list  data: ["item", "item", ...]
+            - key_value    data: [{"key": "...", "value": "..."}] or an object
+            - table        data: {"columns": ["A","B"], "rows": [["1","2"], ...]}
+            - status_list  data: [{"status": "alive|uncertain|supported|dead|...",
+                                    "label": "...", "note": "..."}]
+          Re-send a section with new `data` to update it in place.
+        required: false
+    returns: Confirmation of what was updated (layout and/or section count).
