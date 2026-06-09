@@ -84,7 +84,7 @@ class ResearchState:
             "findings": [],         # {text, kind, ts}   kind: result | dead_end | note
             "open_questions": [],   # [str]
             "decisions": [],        # {id, question, options, chosen, rationale, by, ts}
-            "assessments": [],      # {ts, situation, uncertainty, crux, decision_pending, engage_user, rationale}
+            "assessments": [],      # {id, ts, situation, uncertainty, crux, decision_pending, engage_user, rationale}
             "incidents": [],        # {ts, kind, detail} — auto-logged tool errors + self-reported struggle
             # Level 2 — the PI-designed panel. `panel_layout` is an ordered list
             # of section ids (built-in or custom); empty → default order. Each
@@ -94,6 +94,27 @@ class ResearchState:
         }
 
     # ------------------------------------------------------------------ io
+    def reload(self) -> None:
+        """Re-read state from disk *in place* (mutates self.state, keeps the same
+        object). Needed in MCP mode: tools run in a separate subprocess that owns
+        its own ResearchState and writes research_state.json, so the manager calls
+        this each turn before building its digest — otherwise it reasons over a
+        stale, never-updated copy. In-place (not a fresh object) so the
+        ToolExecutor's reference to this instance stays valid. Cheap and a no-op
+        in practice for backends whose tools run in-process (disk == memory)."""
+        if not self.state_file.exists():
+            return
+        try:
+            with open(self.state_file, encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return  # torn/missing read — keep what we have
+        if not isinstance(loaded, dict):
+            return
+        for k, v in self._blank().items():
+            loaded.setdefault(k, v)
+        self.state = loaded
+
     def _save(self) -> None:
         self.state["updated_at"] = _now()
         tmp = self.state_file.with_suffix(".json.tmp")
@@ -221,10 +242,10 @@ class ResearchState:
         changed = False
         for e in self.state["experiments"]:
             if e["run_id"] == run_id:
-                if status:
+                if status and e.get("status") != status:
                     e["status"] = status
                     changed = True
-                if result:
+                if result and e.get("result") != result.strip():
                     e["result"] = result.strip()
                     changed = True
                 break
@@ -235,6 +256,9 @@ class ResearchState:
                        crux: str = "", decision_pending: str = "",
                        engage_user: bool = False, rationale: str = "") -> None:
         self.state["assessments"].append({
+            # Stable id so offline-eval annotations can key on a specific
+            # assessment (decisions already carry one; ts alone could collide).
+            "id": self._next_id("assessments", "A"),
             "ts": _now(), "situation": (situation or "").strip(),
             "uncertainty": (uncertainty or "").strip(), "crux": (crux or "").strip(),
             "decision_pending": (decision_pending or "").strip(),
