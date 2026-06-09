@@ -491,6 +491,11 @@ def main():
 
     work_dir = Path(args.workspace)
 
+    if not work_dir.exists():
+        print(f"Error: workspace path does not exist inside the container: {work_dir}")
+        print(f"Expected a path under /workspaces/, e.g. /workspaces/{work_dir.name}")
+        sys.exit(1)
+
     # Build kwargs based on agent type
     kwargs = {
         'full_permissions': args.full_permissions,
