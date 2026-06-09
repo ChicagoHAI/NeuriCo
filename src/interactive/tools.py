@@ -72,6 +72,9 @@ class ToolExecutor:
             "design_panel": self._design_panel,
         }
 
+        # The mcp backend delivers tool names namespaced as mcp__neurico__<name>;
+        # strip the prefix so both backends dispatch through the same handlers.
+        tool_name = tool_name.removeprefix("mcp__neurico__")
         handler = handlers.get(tool_name)
         if not handler:
             # Auto-log the failure so the world model stays honest: an unknown-tool
