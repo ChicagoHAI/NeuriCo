@@ -75,7 +75,7 @@ class LLMBackend:
         if self.backend == "cli":
             return self._send_cli(messages, tools)
         elif self.backend == "mcp":
-            return self._send_mcp(messages, self.mcp_config_path)
+            return self._send_mcp(messages, self.mcp_config_path, tools)
         elif self.backend == "anthropic_api":
             return self._send_anthropic_api(messages, tools)
         elif self.backend == "openrouter":
@@ -127,8 +127,17 @@ class LLMBackend:
 
         return self._parse_cli_response(stdout)
 
+    # Fallback allow-list if no tool definitions are passed (keeps behaviour if a
+    # caller invokes the mcp backend without tools). The live list is derived
+    # from the tool definitions below so adding a tool can't silently leave it
+    # uncallable.
+    _MCP_TOOL_FALLBACK = ("run_agent", "check_workspace", "read_agent_logs",
+                          "ask_user", "update_session", "update_research_state",
+                          "assess", "design_panel")
+
     def _send_mcp(self, messages: List[Dict[str, Any]],
-                  mcp_config_path: Optional[str] = None) -> LLMResponse:
+                  mcp_config_path: Optional[str] = None,
+                  tools: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
         """
         Send via claude -p with NeuriCo tools registered as an MCP server.
 
@@ -138,8 +147,12 @@ class LLMBackend:
         """
         prompt = self._messages_to_prompt(messages, tools=None)
 
+        names = [t.get("name") for t in tools if t.get("name")] if tools \
+            else list(self._MCP_TOOL_FALLBACK)
+        allowed = ",".join(f"mcp__neurico__{n}" for n in names)
+
         cmd = "claude -p --verbose --output-format stream-json"
-        cmd += ' --allowedTools "mcp__neurico__run_agent,mcp__neurico__check_workspace,mcp__neurico__read_agent_logs,mcp__neurico__ask_user,mcp__neurico__update_session,mcp__neurico__update_research_state,mcp__neurico__assess,mcp__neurico__design_panel"'
+        cmd += f' --allowedTools "{allowed}"'
         if mcp_config_path:
             cmd += f' --mcp-config "{mcp_config_path}"'
         if self.model:
@@ -167,10 +180,19 @@ class LLMBackend:
 
         # IPC watcher: intercepts ask_user calls from the MCP server subprocess
         # and routes them through the web channel instead of the terminal.
-        # Protocol: MCP server writes ask_user_request.json, we call channel.prompt(),
-        # write ask_user_response.json so the MCP server can return the answer.
+        # Protocol: MCP server writes ask_user_request.json with a unique "id",
+        # we call channel.prompt(), then write ask_user_response.json echoing that
+        # id. The id lets the server ignore a stale response from an earlier ask
+        # (e.g. one that timed out), so answers can't cross between questions.
+        # Writes are atomic (temp + os.replace) so the 0.3s poller never reads a
+        # half-written file.
         ask_user_exchanges: List[Dict[str, Any]] = []
         stop_ipc = threading.Event()
+
+        def _atomic_write_json(path: Path, obj: Any) -> None:
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(obj), encoding="utf-8")
+            os.replace(tmp, path)
 
         def _ipc_watcher():
             if not self.ipc_dir or not self.channel:
@@ -182,9 +204,11 @@ class LLMBackend:
                     answer = ""
                     question = ""
                     options = None
+                    req_id = ""
                     try:
                         data = json.loads(req_file.read_text(encoding="utf-8"))
                         req_file.unlink()
+                        req_id = data.get("id", "")
                         question = data.get("message", "")
                         options = data.get("options") or None
                         answer = self.channel.prompt(message=question, options=options)
@@ -199,9 +223,8 @@ class LLMBackend:
                         # Always write the response so the MCP server is never left
                         # polling forever — even if prompt() raised or channel closed.
                         try:
-                            resp_file.write_text(
-                                json.dumps({"response": answer}), encoding="utf-8"
-                            )
+                            _atomic_write_json(
+                                resp_file, {"id": req_id, "response": answer})
                         except Exception:
                             pass
                 time.sleep(0.3)
@@ -560,6 +583,24 @@ class LLMBackend:
         return LLMResponse(text=text, tool_calls=tool_calls, raw=data)
 
 
+def resolve_backend(config: Dict[str, Any]) -> str:
+    """Single source of truth for which manager backend runs.
+
+    Precedence: NEURICO_MANAGER_BACKEND env > config manager.llm_backend >
+    auto-detect from provider (claude → mcp for native tool calling via
+    claude -p; anything else → cli). Both manager.py (to decide whether to
+    provision .mcp.json / the IPC dir) and create_backend() call this, so the
+    two can never disagree about which backend is active.
+    """
+    configured = os.environ.get("NEURICO_MANAGER_BACKEND",
+                                config.get("manager", {}).get("llm_backend")) or None
+    if configured:
+        return configured
+    provider = os.environ.get("NEURICO_PROVIDER",
+                              config.get("manager", {}).get("default_provider", "claude"))
+    return "mcp" if provider == "claude" else "cli"
+
+
 def create_backend(config: Dict[str, Any],
                    mcp_config_path: Optional[str] = None,
                    channel=None,
@@ -576,28 +617,19 @@ def create_backend(config: Dict[str, Any],
     """
     import shutil
 
-    configured = os.environ.get("NEURICO_MANAGER_BACKEND",
-                                config.get("manager", {}).get("llm_backend")) or None
+    backend = resolve_backend(config)
     model = os.environ.get("NEURICO_MANAGER_MODEL",
                            config.get("manager", {}).get("llm_model")) or None
 
-    if configured:
-        backend = configured
-        if backend in ("mcp", "cli") and shutil.which("claude") is None:
-            raise RuntimeError(
-                f"llm_backend '{backend}' requires the Claude Code CLI ('claude' command) "
-                "but it was not found in PATH.\n"
-                "  • Install Claude Code: https://claude.ai/code\n"
-                "  • Or set a non-CLI backend in config/manager.yaml or NEURICO_MANAGER_BACKEND:\n"
-                "      anthropic_api   — requires ANTHROPIC_API_KEY\n"
-                "      openrouter      — requires OPENROUTER_API_KEY (supports Codex, Gemini, …)"
-            )
-    else:
-        # Auto-detect based on provider: Claude → mcp (native tool calling via claude -p),
-        # anything else (Codex, Gemini, …) → cli (XML tool definitions in prompt)
-        provider = os.environ.get("NEURICO_PROVIDER",
-                                  config.get("manager", {}).get("default_provider", "claude"))
-        backend = "mcp" if provider == "claude" else "cli"
+    if backend in ("mcp", "cli") and shutil.which("claude") is None:
+        raise RuntimeError(
+            f"llm_backend '{backend}' requires the Claude Code CLI ('claude' command) "
+            "but it was not found in PATH.\n"
+            "  • Install Claude Code: https://claude.ai/code\n"
+            "  • Or set a non-CLI backend in config/manager.yaml or NEURICO_MANAGER_BACKEND:\n"
+            "      anthropic_api   — requires ANTHROPIC_API_KEY\n"
+            "      openrouter      — requires OPENROUTER_API_KEY (supports Codex, Gemini, …)"
+        )
 
     return LLMBackend(backend=backend, model=model,
                       mcp_config_path=mcp_config_path, channel=channel,

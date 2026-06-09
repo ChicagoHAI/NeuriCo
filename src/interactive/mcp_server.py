@@ -344,17 +344,26 @@ def create_server(work_dir: Path, idea_file: Path,
     _ASK_USER_TIMEOUT = 3600  # 1 hour — failsafe if manager dies
 
     def _ask_user_via_ipc(arguments: dict) -> str:
-        """Route ask_user through file IPC so the manager can show it in the web UI."""
-        import time as _time
+        """Route ask_user through file IPC so the manager can show it in the web UI.
+
+        Each request carries a unique id; we only accept a response echoing that
+        id, so a stale response left by an earlier (e.g. timed-out) ask can't be
+        misread as the answer to this one. Writes are atomic (temp + os.replace)."""
+        import time as _time, uuid
         req_file = ipc_dir / "ask_user_request.json"
         resp_file = ipc_dir / "ask_user_response.json"
-        req_file.write_text(
-            json.dumps({
-                "message": arguments.get("message", ""),
-                "options": arguments.get("options", []),
-            }),
-            encoding="utf-8",
-        )
+        req_id = uuid.uuid4().hex
+
+        def _atomic_write_json(path: Path, obj: dict) -> None:
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(obj), encoding="utf-8")
+            os.replace(tmp, path)
+
+        _atomic_write_json(req_file, {
+            "id": req_id,
+            "message": arguments.get("message", ""),
+            "options": arguments.get("options", []),
+        })
         # Poll for the response the manager writes back.
         # Timeout after _ASK_USER_TIMEOUT seconds so a crashed/closed manager
         # does not leave claude -p hanging indefinitely.
@@ -363,8 +372,11 @@ def create_server(work_dir: Path, idea_file: Path,
             if resp_file.exists():
                 try:
                     data = json.loads(resp_file.read_text(encoding="utf-8"))
+                    if data.get("id") == req_id:
+                        resp_file.unlink()
+                        return data.get("response", "")
+                    # Stale response for a different (earlier) request — discard it.
                     resp_file.unlink()
-                    return data.get("response", "")
                 except Exception:
                     pass
             _time.sleep(0.3)

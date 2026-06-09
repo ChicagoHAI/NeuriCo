@@ -312,7 +312,42 @@ class ToolExecutor:
                 except Exception:
                     continue
 
+        # Finalize the experiment record from disk whenever a run is observed.
+        # In MCP mode run_agent fires in the MCP subprocess, whose in-memory
+        # _running_agents map dies with it, so the manager-side polling that
+        # normally flips experiments to done/failed never runs — this disk-driven
+        # path keeps the world model honest in every backend.
+        self._finalize_experiment_from_disk(run_id)
+
         return '\n'.join(parts)
+
+    def _finalize_experiment_from_disk(self, run_id: str) -> None:
+        """Flip the experiment record to done/failed by inspecting run artifacts
+        on disk (status.json / result.json / error.json). Idempotent —
+        update_experiment skips no-op writes — so it's safe to call on every
+        read_agent_logs."""
+        run_dir = self.work_dir / ".neurico" / "runs" / run_id
+        status = None
+        if (run_dir / "error.json").exists():
+            status = "failed"
+        elif (run_dir / "result.json").exists():
+            status = "done"
+        else:
+            status_file = run_dir / "status.json"
+            if status_file.exists():
+                try:
+                    with open(status_file) as f:
+                        st = str(json.load(f).get("status", "")).lower()
+                except (OSError, json.JSONDecodeError):
+                    st = ""
+                if st in ("done", "completed", "complete", "success", "succeeded"):
+                    status = "done"
+                elif st in ("failed", "error", "errored"):
+                    status = "failed"
+        if status:
+            self.research.update_experiment(
+                run_id, status=status,
+                result=self._summarize_run_result(run_id) or None)
 
     def _ask_user(self, args: Dict[str, Any]) -> str:
         """Present a message to the user and collect their response."""
