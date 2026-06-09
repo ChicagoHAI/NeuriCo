@@ -538,11 +538,12 @@ PAGE = r"""<!DOCTYPE html>
     }
     if(whoEl) el.appendChild(whoEl);
     const t=document.createElement('div');t.textContent=d.text;el.appendChild(t);
-    // Offline-eval thumbs on manager bubbles (keyed by the event's seq, which is
-    // stable across reconnects within a run; the POST also snapshots the text).
-    if(role==='manager'&&d.seq!=null){
+    // Offline-eval thumbs on manager bubbles, keyed by a content hash of the
+    // text so the verdict re-attaches to the same message across reconnects AND
+    // resumed sessions (the POST also snapshots the text).
+    if(role==='manager'&&d.text){
       const af=document.createElement('div');af.className='ann-foot';
-      af.innerHTML=annHTML('msg:'+d.seq,d.text);
+      af.innerHTML=annHTML('msg:'+hashStr(d.text),d.text);
       el.appendChild(af);
     }
     chat.appendChild(el);
@@ -707,6 +708,10 @@ PAGE = r"""<!DOCTYPE html>
   // so the JSONL record is self-contained for offline eval. Keys are
   // 'assess:<id>' | 'dec:<id>' | 'msg:<seq>'.
   const ANN={}, SNIP={}, ANN_KIND={assess:'assessment',dec:'decision',msg:'message'};
+  // Content hash so a chat-bubble annotation keys on the message TEXT, not the
+  // per-process SSE seq (which restarts at 0 on a resumed session and would
+  // collide / re-paint the wrong bubble). Same text → same key across runs.
+  function hashStr(s){let h=5381;s=String(s);for(let i=0;i<s.length;i++){h=((h*33)^s.charCodeAt(i))>>>0;}return h.toString(36);}
   function annHTML(key,snip){
     if(snip!=null) SNIP[key]=String(snip);
     const v=ANN[key]||'';

@@ -38,7 +38,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from interactive.session_state import SessionState
 from interactive.research_state import ResearchState
-from interactive.llm_backend import LLMBackend, LLMResponse, create_backend
+from interactive.llm_backend import LLMBackend, LLMResponse, create_backend, resolve_backend
 from interactive.tools import ToolExecutor
 from interactive.channel import UserChannel, TerminalChannel
 from interactive.mcp_config import write_mcp_config
@@ -139,8 +139,14 @@ def load_tool_definitions() -> List[Dict[str, Any]]:
 
 
 def load_system_prompt(idea: Dict[str, Any], workspace: Path,
-                       provider: str, config: Dict[str, Any]) -> str:
-    """Load and render the system prompt template."""
+                       provider: str, config: Dict[str, Any],
+                       backend: str = "cli") -> str:
+    """Load and render the system prompt template.
+
+    `backend` selects the tool-invocation protocol: the cli backend drives the
+    model through a text `<tool_call>` shim, but the mcp/api backends register
+    tools natively — so the same XML instructions would be actively wrong there
+    (the model would emit XML text that nobody parses, dropping the call)."""
     prompt_file = PROJECT_ROOT / "templates" / "manager" / "system_prompt.txt"
     if not prompt_file.exists():
         raise FileNotFoundError(f"System prompt not found: {prompt_file}")
@@ -177,11 +183,31 @@ def load_system_prompt(idea: Dict[str, Any], workspace: Path,
     rendered = rendered.replace("{{ provider }}", provider)
     rendered = rendered.replace("{{ engagement_instructions }}", engagement_instructions)
 
+    if backend == "cli":
+        tool_protocol = (
+            "To invoke a tool, write a `<tool_call name=\"tool_name\">"
+            "{\"arg\": \"value\"}</tool_call>` block in your response — this "
+            "text-based protocol is the ONLY way to act here. The generic Claude "
+            "Code tools (`Bash`, `Read`, `Write`, `Edit`, `Grep`, `Glob`, "
+            "`Agent`, `AskUserQuestion`, …) are disabled and will error every "
+            "single time; there is no workaround.")
+    else:
+        tool_protocol = (
+            "Invoke the eight tools natively — call them directly, the same way "
+            "you call any tool. Do NOT write `<tool_call>` XML blocks as text: in "
+            "this environment that text is ignored and your action is silently "
+            "lost. Do not use the generic Claude Code tools (`Bash`, `Read`, "
+            "`Write`, `Edit`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`); use "
+            "the eight NeuriCo tools above instead — e.g. `check_workspace` to "
+            "read or list files, `run_agent` to run code.")
+    rendered = rendered.replace("{{ tool_protocol }}", tool_protocol)
+
     return rendered
 
 
-def find_idea(idea_id: str) -> Optional[Dict[str, Any]]:
-    """Find an idea by ID across submitted/in_progress/completed folders."""
+def find_idea(idea_id: str) -> "tuple[Optional[Dict[str, Any]], Optional[Path]]":
+    """Find an idea by ID across submitted/in_progress/completed folders.
+    Returns (idea_dict, yaml_path), or (None, None) if not found."""
     ideas_dir = PROJECT_ROOT / "ideas"
     for folder in ["submitted", "in_progress", "completed"]:
         folder_path = ideas_dir / folder
@@ -259,12 +285,7 @@ class InteractiveManager:
         # the auto-detection in create_backend(): Claude → mcp, others → cli.
         mcp_config_path = None
         ipc_dir = None
-        backend_name = os.environ.get("NEURICO_MANAGER_BACKEND",
-                                      config.get("manager", {}).get("llm_backend")) or None
-        if backend_name is None:
-            _provider = os.environ.get("NEURICO_PROVIDER",
-                                       config.get("manager", {}).get("default_provider", "claude"))
-            backend_name = "mcp" if _provider == "claude" else "cli"
+        backend_name = resolve_backend(config)
         if backend_name == "mcp":
             # File IPC dir so the out-of-process MCP server can route ask_user
             # through the web channel instead of the terminal.
@@ -292,7 +313,8 @@ class InteractiveManager:
         # Base system prompt; the live research-state digest is appended fresh
         # each turn (see _agent_step) so the manager always reasons over current
         # state without polluting the persisted conversation history.
-        self.system_prompt = load_system_prompt(idea, workspace, provider, config)
+        self.system_prompt = load_system_prompt(idea, workspace, provider, config,
+                                                 backend=self.backend.backend)
         self.base_system_prompt = self.system_prompt
 
         # Conversation history (in-memory, backed by session)
@@ -302,6 +324,15 @@ class InteractiveManager:
         manager_config = config.get("manager", {})
         self.poll_interval = manager_config.get("poll_interval", 60)
         self.engagement_interval = manager_config.get("engagement_interval", 1800)
+
+        # Bound autonomous runaway: in MCP mode the manager loops back whenever a
+        # session did tool work without asking the human (see _agent_step). With
+        # no ceiling a model that always uses a tool but never calls ask_user
+        # would spawn `claude -p` forever, burning cost with no checkpoint. After
+        # this many consecutive tool-only loops we force a human checkpoint; the
+        # counter resets on any user input.
+        self.max_autonomous_steps = manager_config.get("max_autonomous_steps", 25)
+        self._autonomous_steps = 0
 
         self._shutdown = False
 
@@ -374,6 +405,10 @@ class InteractiveManager:
         # manager reasons over its up-to-date world model every turn. messages[0]
         # is always the system message (set in run()); we rewrite only its
         # content and never persist this ephemeral digest to history.
+        # reload() first: in MCP mode the tools mutate research_state.json from a
+        # separate subprocess, so without this the digest would be permanently
+        # stale (the in-process ResearchState never sees those writes).
+        self.research.reload()
         if self.messages and self.messages[0]["role"] == "system":
             self.messages[0]["content"] = (
                 self.base_system_prompt + self.research.digest_section())
@@ -425,17 +460,10 @@ class InteractiveManager:
             # When tools were called, the session did real work — loop back so
             # the manager continues autonomously. ask_user exchanges (if any)
             # are added to the conversation so the next session has context.
-            assistant_msg = {"role": "assistant", "content": response.text}
-            self.messages.append(assistant_msg)
-            self.session.append_message(assistant_msg)
-
-            clean = clean_chat_text(response.text)
-            if not response.streamed and clean:
-                self.channel.send(clean, kind="manager")
-
             # Persist ask_user Q&A so the next MCP session sees what the user said.
-            # Add both sides: assistant asking the question and the user's reply,
-            # so the model has full context rather than an orphaned user message.
+            # These happened *during* generation, so record them BEFORE the
+            # session's concluding text — both sides (assistant asking, user
+            # replying) so the model has full context, not an orphaned message.
             for exchange in response.ask_user_exchanges:
                 q_msg = {"role": "assistant",
                          "content": f"[asked user]: {exchange['question']}"}
@@ -445,20 +473,40 @@ class InteractiveManager:
                 self.messages.append(exch_user_msg)
                 self.session.append_message(exch_user_msg)
 
-            if response.had_tools:
-                # Manager did real work this session — loop back autonomously
-                return
+            assistant_msg = {"role": "assistant", "content": response.text}
+            self.messages.append(assistant_msg)
+            self.session.append_message(assistant_msg)
 
-            # No tools called: the manager yielded the floor to the human. Route
-            # the text THROUGH prompt() (not a plain send) so it's tagged as a
-            # question — rendered as the highlighted "needs your reply" card —
-            # even when the manager asked in prose instead of calling ask_user.
-            # (clean may be '' if the whole turn was noise; fall back to raw.)
+            clean = clean_chat_text(response.text)
+            if not response.streamed and clean:
+                self.channel.send(clean, kind="manager")
+
+            if response.had_tools:
+                # Manager did real work this session. Loop back autonomously —
+                # unless we've hit the autonomous-step ceiling, in which case fall
+                # through to a forced human checkpoint to bound cost/runaway.
+                self._autonomous_steps += 1
+                if self._autonomous_steps < self.max_autonomous_steps:
+                    return
+                self._autonomous_steps = 0
+                self.channel.send(
+                    f"(Checkpoint: I've run {self.max_autonomous_steps} autonomous "
+                    "steps without checking in. Reply to steer, or say 'continue'.)",
+                    kind="system")
+                # fall through to prompt() below
+
+            # No tools called (or checkpoint reached): yield the floor to the
+            # human. Route the text THROUGH prompt() (not a plain send) so it's
+            # tagged as a question — rendered as the highlighted "needs your
+            # reply" card — even when the manager asked in prose instead of
+            # calling ask_user. (clean may be '' if the whole turn was noise.)
             prompt_message = None if response.streamed else (clean or response.text)
             user_input = self.channel.prompt(message=prompt_message)
             if user_input is None:
                 self._shutdown = True
                 return
+            # Human steered — reset the autonomous budget.
+            self._autonomous_steps = 0
 
             user_input = user_input.strip()
             if not user_input:
@@ -565,8 +613,8 @@ def main():
     parser.add_argument(
         "--backend",
         default=None,
-        choices=["cli", "anthropic_api", "openrouter"],
-        help="LLM backend for manager reasoning (default: from config)"
+        choices=["mcp", "cli", "anthropic_api", "openrouter"],
+        help="LLM backend for manager reasoning (default: auto — mcp for claude, cli otherwise)"
     )
     parser.add_argument(
         "--cli",
