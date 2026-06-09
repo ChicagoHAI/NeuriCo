@@ -25,8 +25,8 @@ We turn the existing **terminal-based** interactive manager into a
    the I/O medium (terminal vs. web).
 2. An embedded web server gives a real-time **chat with the manager** plus a
    **live agent transcript** in one page.
-3. A standalone log **visualizer** that the web server reuses for transcript
-   formatting.
+3. An `agent_log` formatting module the web server uses to render the live
+   agent transcript.
 4. The manager's system prompt is tuned to interrupt the human far less often.
 
 Web is now the **default** interface; `--cli` falls back to the original
@@ -38,7 +38,7 @@ terminal behavior. Autonomous mode (`./neurico run`) is untouched.
 |---|---|
 | `src/interactive/channel.py` | `UserChannel` abstraction. The manager talks to the human via `send()` / `prompt()` / `poll_input()` instead of bare `print`/`input`. Two implementations: `TerminalChannel` (preserves the original behavior) and `WebChannel` (pub/sub queues + SSE fan-out, inbound queue fed by `POST /input`, history replay for reconnects). |
 | `src/interactive/web_server.py` | Embedded HTTP server (`InteractiveWebServer`) running in background threads inside the manager process. Serves a **3-pane** page (see "UI" below). Routes: `GET /`, `GET /stream` (Server-Sent Events: `message` / `agentlog` / `status` / `dashboard`), `POST /input`. Auto-retries ports if the requested one is taken. |
-| `visualizer/visualizer.py` | Standalone read-only log viewer for any workspace (`python visualizer/visualizer.py <workspace>`). The web server imports and reuses its `format_entry` / `TRANSCRIPT_FILES` so the agent feed looks identical in both. |
+| `src/interactive/agent_log.py` | Transcript formatting for the live agent-log feed: `TRANSCRIPT_FILES` (which per-agent logs to tail) and `format_entry` (renders one raw log entry into display blocks). Stdlib-only; imported by `web_server.py`. |
 | `ideas/examples/titanic_survival_prediction.yaml` | Small example idea for testing interactive mode. |
 | `assets/web/` (+ `neurico-logo.png`, `manager-avatar.png`) | Fixed, bundled branding images served read-only by the web server at `/brand/logo` and `/brand/manager` (the top-bar logo and the manager chat avatar). Not user-configurable; the UI falls back to the 🔬/🤖 emoji if a file is absent. |
 
@@ -145,7 +145,7 @@ The merged file keeps **both** sets of edits (they touch different sections):
                        ├─ GET /stream  SSE  ◄────┘ conversation + status
                        ├─ POST /input  human reply
                        └─ agent-log tailer ──► workspaces/<ws>/logs/*.jsonl
-                                                (formatted via visualizer.py)
+                                                (formatted via agent_log.py)
 ```
 
 - **Manager → human**: `WebChannel.send()` emits events to all SSE subscribers;
@@ -153,11 +153,10 @@ The merged file keeps **both** sets of edits (they touch different sections):
 - **Human → manager**: browser `POST /input` → `WebChannel.submit_input()` →
   inbound queue → unblocks `prompt()` / surfaces in `poll_input()`.
 - **Agent transcript**: a tailer thread incrementally reads the workspace
-  transcripts (per `visualizer.TRANSCRIPT_FILES` — including the paper-writer's
+  transcripts (per `agent_log.TRANSCRIPT_FILES` — including the paper-writer's
   plain `paper_writer_claude.log`, which is itself stream-JSON) and emits
   formatted `agentlog` events onto the same SSE stream. Hardened so a single
-  malformed entry can't kill the feed, and a failed visualizer import prints to
-  stderr instead of leaving the log pane mysteriously empty.
+  malformed entry can't kill the feed.
 - **Dashboard**: a second background thread (`_emit_dashboard`) computes a brief
   progress snapshot every ~3s and emits a `dashboard` event **only when it
   changes** (keeps SSE history small). Agent counts come from
@@ -171,7 +170,7 @@ The merged file keeps **both** sets of edits (they touch different sections):
     kept. This fixes the dashboard showing "exploring" while an experiment runs.
   - **Cost** = sum of each agent run's `total_cost_usd`/`cost_usd`. It takes the
     final (max) value per file and sums **one file per agent**, chosen via
-    `visualizer.TRANSCRIPT_FILES` (prefer the `.jsonl`, fall back to the `.log` —
+    `agent_log.TRANSCRIPT_FILES` (prefer the `.jsonl`, fall back to the `.log` —
     so the paper writer's `paper_writer_claude.log` is included, and the agents
     whose `.jsonl`/`.log` are identical copies aren't double-counted). Results are
     cached per file by mtime+size so multi-MB logs aren't re-parsed each tick.
@@ -216,7 +215,7 @@ The page is laid out for non-technical researchers:
    file", `WebSearch`→"Searching the web", etc.); thinking/noise stays collapsed.
    - **Every row is consistently expandable.** `system`, `rate_limit_event`, and
      `result` entries used to dangle a chevron that did nothing (no body). They now
-     expand to their raw detail (added `_detail()` in `visualizer.py`), and any row
+     expand to their raw detail (added `_detail()` in `agent_log.py`), and any row
      that genuinely has no body no longer shows a chevron at all.
    - **Ask-about-this (quote-to-chat).** Every row has a 💬 action (shown on
      hover). Clicking it drops a quoted reference — the row's stable `seq` handle
@@ -236,16 +235,13 @@ The page is laid out for non-technical researchers:
 
 # Original terminal interface
 ./neurico interactive <idea_id> --cli
-
-# Standalone read-only log viewer for any workspace
-python visualizer/visualizer.py <workspace_name>
 ```
 
 ## Notes for reviewers
 
-- **Stacked on #104.** This branch contains #104's commits because #104 isn't
-  merged yet; please review them together. Once #104 lands in
-  `feature/interactive-mode`, this PR's diff narrows to just the browser-UI work.
+- **Split out of #111.** This is the browser-UI slice of the original #111; the
+  interactive-mode base (#86) and its fixes (#104) are already on `main`, so this
+  PR's diff is just the web UI, channel abstraction, and `agent_log` formatting.
 - **`src/` mount is a dev-time convenience**, not a release fix. For end users the
   Docker image must be rebuilt/republished so `agent_runner.py` is baked in (see
   the `docker/run.sh` note above). The mount just lets local edits take effect

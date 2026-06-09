@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
-import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,26 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from interactive.channel import WebChannel
-
-# Reuse the standalone visualizer's transcript formatting so the agent-log feed
-# looks identical to the old viewer. Best-effort: if the import fails, the
-# conversation still works, just without the live agent transcript.
-_viz = None
-
-
-def _load_visualizer(project_root: Path):
-    global _viz
-    if _viz is not None:
-        return _viz
-    try:
-        viz_dir = str(project_root / "visualizer")
-        if viz_dir not in sys.path:
-            sys.path.insert(0, viz_dir)
-        import visualizer as viz  # type: ignore
-        _viz = viz
-    except Exception:
-        _viz = False  # sentinel: tried and failed
-    return _viz
+from interactive import agent_log
 
 
 # ---------------------------------------------------------------------------
@@ -64,18 +44,11 @@ def _tail_agent_logs(log_dir: Path, channel: WebChannel,
                      project_root: Path, stop: threading.Event) -> None:
     """Incrementally tail the workspace transcripts and emit formatted entries
     into the channel as `agentlog` events."""
-    viz = _load_visualizer(project_root)
-    if not viz:
-        # Don't fail silently — an empty log pane is otherwise unexplained.
-        print("[web] live log disabled: could not import visualizer/visualizer.py",
-              file=sys.stderr)
-        return
-
     offsets: dict = {}
     last_ts = ""
 
     while not stop.is_set():
-        for transcript, fallback, source_name in viz.TRANSCRIPT_FILES:
+        for transcript, fallback, source_name in agent_log.TRANSCRIPT_FILES:
             fname = transcript if (transcript and (log_dir / transcript).exists()) else fallback
             if not fname:
                 continue
@@ -109,7 +82,7 @@ def _tail_agent_logs(log_dir: Path, channel: WebChannel,
                         # whole live feed (which would freeze the log pane
                         # mid-session and look "empty").
                         try:
-                            items = viz.format_entry(entry, last_ts)
+                            items = agent_log.format_entry(entry, last_ts)
                         except Exception:
                             continue
                         for item in items:
@@ -133,17 +106,13 @@ def _cost_source_files(log_dir: Path, project_root: Path) -> list:
     `.jsonl` transcript, fall back to the agent's `.log` (e.g. the paper writer
     only writes `paper_writer_claude.log`). Using one file per agent avoids
     double-counting the agents whose `.jsonl` and `.log` are identical copies."""
-    viz = _load_visualizer(project_root)
-    if viz and getattr(viz, "TRANSCRIPT_FILES", None):
-        paths = []
-        for transcript, fallback, _ in viz.TRANSCRIPT_FILES:
-            if transcript and (log_dir / transcript).exists():
-                paths.append(log_dir / transcript)
-            elif fallback and (log_dir / fallback).exists():
-                paths.append(log_dir / fallback)
-        return paths
-    # Visualizer unavailable: fall back to jsonl only (still no double-count).
-    return list(log_dir.glob("*_transcript.jsonl"))
+    paths = []
+    for transcript, fallback, _ in agent_log.TRANSCRIPT_FILES:
+        if transcript and (log_dir / transcript).exists():
+            paths.append(log_dir / transcript)
+        elif fallback and (log_dir / fallback).exists():
+            paths.append(log_dir / fallback)
+    return paths
 
 
 def _sum_cost(log_dir: Path, project_root: Path) -> float:
