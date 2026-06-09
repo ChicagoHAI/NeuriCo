@@ -5,8 +5,15 @@ The main agent loop for interactive mode. Orchestrates research agents
 dynamically using LLM reasoning, engages the human at critical points,
 and maintains session state across interactions.
 
+The human interface is pluggable (see channel.py): by default the manager
+serves a browser UI (web_server.py) where the human reads the manager's
+messages, watches the live agent transcript, and replies in an input box.
+Pass --cli to fall back to the terminal.
+
 Usage:
     ./neurico interactive <idea_id> [--provider claude] [--engagement balanced]
+    ./neurico interactive <idea_id> --cli          # terminal instead of browser
+    ./neurico interactive <idea_id> --port 7890    # pick the web port
 
 Or directly:
     NEURICO_PROJECT_ROOT=/path/to/NeuriCo python src/interactive/manager.py <idea_id>
@@ -17,6 +24,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -30,6 +38,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from interactive.session_state import SessionState
 from interactive.llm_backend import LLMBackend, LLMResponse, create_backend
 from interactive.tools import ToolExecutor
+from interactive.channel import UserChannel, TerminalChannel
 
 
 def load_config() -> Dict[str, Any]:
@@ -150,12 +159,14 @@ class InteractiveManager:
     """
 
     def __init__(self, idea: Dict[str, Any], idea_file: Path,
-                 workspace: Path, provider: str, config: Dict[str, Any]):
+                 workspace: Path, provider: str, config: Dict[str, Any],
+                 channel: Optional[UserChannel] = None):
         self.idea = idea
         self.idea_file = idea_file
         self.workspace = workspace
         self.provider = provider
         self.config = config
+        self.channel = channel or TerminalChannel()
 
         idea_content = idea.get("idea", {})
         idea_id = idea_content.get("metadata", {}).get("idea_id", "unknown")
@@ -164,7 +175,8 @@ class InteractiveManager:
         # Initialize components
         self.session = SessionState(workspace, idea_id, idea_title, provider)
         self.backend = create_backend(config)
-        self.tools = ToolExecutor(workspace, self.session, idea_file, provider, PROJECT_ROOT)
+        self.tools = ToolExecutor(workspace, self.session, idea_file, provider,
+                                  PROJECT_ROOT, channel=self.channel)
         self.tool_definitions = load_tool_definitions()
         self.system_prompt = load_system_prompt(idea, workspace, provider, config)
 
@@ -196,6 +208,13 @@ class InteractiveManager:
             print(f"  Resuming previous session: {self.session.session_id}")
         print("=" * 70)
         print()
+
+        # Greet in whatever channel is active (e.g. the browser).
+        self.channel.status(phase=self.session.state.get("phase", "starting"))
+        self.channel.send(
+            f"Starting interactive research on: {idea_content.get('title', 'Unknown')}"
+            + ("  (resuming previous session)" if self.session.is_resuming else ""),
+            kind="system")
 
         # Build initial messages
         self.messages = [{"role": "system", "content": self.system_prompt}]
@@ -237,7 +256,7 @@ class InteractiveManager:
     def _agent_step(self):
         """Execute one step of the agent loop."""
         # Call LLM
-        print("\n[Manager thinking...]")
+        self.channel.status("Manager thinking…", thinking=True)
         response = self.backend.send(self.messages, self.tool_definitions)
 
         # Handle tool calls
@@ -251,10 +270,10 @@ class InteractiveManager:
             self.session.append_message(assistant_msg)
 
             if response.text:
-                print(f"\n{response.text}")
+                self.channel.send(response.text, kind="manager")
 
             for tc in response.tool_calls:
-                print(f"\n[Executing: {tc.name}({json.dumps(tc.arguments, indent=2)})]")
+                self.channel.send(f"{tc.name}({json.dumps(tc.arguments)})", kind="tool")
 
                 result = self.tools.execute(tc.name, tc.arguments)
 
@@ -277,16 +296,15 @@ class InteractiveManager:
             self.messages.append(assistant_msg)
             self.session.append_message(assistant_msg)
 
-            print(f"\n{response.text}")
+            self.channel.send(response.text, kind="manager")
 
-            # Wait for user input
-            print()
-            try:
-                user_input = input("[You] ").strip()
-            except EOFError:
+            # Wait for user input (blocks; None means the channel closed)
+            user_input = self.channel.prompt()
+            if user_input is None:
                 self._shutdown = True
                 return
 
+            user_input = user_input.strip()
             if not user_input:
                 return
 
@@ -300,21 +318,34 @@ class InteractiveManager:
 
     def _wait_for_agent_with_polling(self, initial_result: str, agent_name: str) -> str:
         """
-        Wait for a running agent to complete, polling periodically.
-        User can interrupt with Ctrl+C to interact.
+        Wait for a running agent to complete, polling periodically. The user can
+        interject at any time — by typing in the browser (web mode) or with
+        Ctrl+C (terminal mode) — to interact while the agent runs.
         """
-        print(f"\n[Agent '{agent_name}' running. Press Ctrl+C to interact while it runs.]")
+        self.channel.send(
+            f"Agent '{agent_name}' running. Type any time to interact while it runs.",
+            kind="system")
 
         last_engagement = time.time()
         final_result = initial_result
 
         while self.tools.has_running_agents and not self._shutdown:
             try:
-                time.sleep(self.poll_interval)
+                # Block up to poll_interval for user input. In web mode this
+                # returns the typed message; in terminal mode it just waits and
+                # Ctrl+C raises KeyboardInterrupt.
+                interjection = self.channel.poll_input(timeout=self.poll_interval)
             except KeyboardInterrupt:
-                # User wants to interact — return control to the agent loop
-                print("\n[Pausing to interact. The agent is still running in the background.]")
-                return initial_result + "\n[Agent still running. User requested interaction.]"
+                interjection = "__interrupt__"
+
+            if interjection:
+                self.channel.send(
+                    "Pausing to interact. The agent keeps running in the background.",
+                    kind="system")
+                note = "\n[Agent still running. User requested interaction.]"
+                if interjection != "__interrupt__":
+                    note += f"\n[User said: {interjection}]"
+                return initial_result + note
 
             # Check for completed agents
             completed = self.tools.check_running_agents()
@@ -329,7 +360,7 @@ class InteractiveManager:
             # Periodic engagement
             elapsed = time.time() - last_engagement
             if elapsed >= self.engagement_interval:
-                print(f"\n[Agent still running ({int(elapsed/60)} min)...]")
+                self.channel.send(f"Agent still running ({int(elapsed/60)} min)…", kind="system")
                 last_engagement = time.time()
 
         return final_result
@@ -346,10 +377,13 @@ class InteractiveManager:
     def _handle_exit(self):
         """Save session and exit."""
         self._shutdown = True
+        self.channel.send("Saving session and ending. You can resume with the "
+                          "same command.", kind="system")
         print("\n[Saving session state...]")
         # Session is auto-saved on each state change
         print(f"[Session saved to {self.session.session_file}]")
         print("[You can resume with: ./neurico interactive <idea_id>]")
+        self.channel.close()
 
 
 def main():
@@ -377,6 +411,22 @@ def main():
         default=None,
         choices=["cli", "anthropic_api", "openrouter"],
         help="LLM backend for manager reasoning (default: from config)"
+    )
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Use the terminal interface instead of the browser (web is default)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=7890,
+        help="Local port for the web interface (default: 7890)"
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Web mode: don't auto-open the browser"
     )
 
     args = parser.parse_args()
@@ -419,8 +469,37 @@ def main():
             im = IdeaManager(PROJECT_ROOT / "ideas")
             im.update_status(args.idea_id, "in_progress")
             print(f"[Idea moved to in_progress]")
+            # Note: this MOVES the file (submitted/ -> in_progress/), making the
+            # captured idea_file path stale. The agent dispatch in tools.py (#104)
+            # falls back to ideas/in_progress/<name> at launch time, so no
+            # re-resolve is needed here.
         except Exception as e:
             print(f"[Warning: Could not update idea status: {e}]")
+
+    # Build the user channel. Web is the primary interface; --cli falls back
+    # to the terminal.
+    web_server = None
+    if args.cli:
+        channel = TerminalChannel()
+    else:
+        import webbrowser
+        from interactive.channel import WebChannel
+        from interactive.web_server import InteractiveWebServer
+
+        channel = WebChannel()
+        idea_title = idea.get("idea", {}).get("title", "Unknown")
+        web_server = InteractiveWebServer(
+            channel=channel,
+            workspace=workspace,
+            project_root=PROJECT_ROOT,
+            title=idea_title,
+            port=args.port,
+        )
+        web_server.start()
+        print(f"\n  Web interface: {web_server.url}")
+        print("  (run with --cli to use the terminal instead)\n")
+        if not args.no_browser:
+            threading.Timer(0.8, lambda: webbrowser.open(web_server.url)).start()
 
     # Launch manager
     manager = InteractiveManager(
@@ -428,9 +507,14 @@ def main():
         idea_file=idea_file,
         workspace=workspace,
         provider=provider,
-        config=config
+        config=config,
+        channel=channel,
     )
-    manager.run()
+    try:
+        manager.run()
+    finally:
+        if web_server is not None:
+            web_server.stop()
 
 
 if __name__ == "__main__":

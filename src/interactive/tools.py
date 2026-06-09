@@ -27,12 +27,19 @@ class ToolExecutor:
     """
 
     def __init__(self, work_dir: Path, session: SessionState,
-                 idea_file: Path, provider: str, project_root: Path):
+                 idea_file: Path, provider: str, project_root: Path,
+                 channel=None):
         self.work_dir = Path(work_dir)
         self.session = session
         self.idea_file = idea_file
         self.provider = provider
         self.project_root = project_root
+        # UserChannel for human interaction (terminal or web). Falls back to a
+        # TerminalChannel so the executor works standalone.
+        if channel is None:
+            from interactive.channel import TerminalChannel
+            channel = TerminalChannel()
+        self.channel = channel
 
         # Track running agent processes
         self._running_agents: Dict[str, subprocess.Popen] = {}
@@ -272,44 +279,22 @@ class ToolExecutor:
         message = args.get("message", "")
         options = args.get("options", [])
 
-        # CLI backend LLM sometimes serializes arrays as JSON-encoded strings
+        # The CLI backend's XML tool-call shim can hand us `options` as a
+        # JSON-encoded string instead of a list. Coerce it back so the browser
+        # renders clickable buttons regardless of backend quirks.
         if isinstance(options, str):
             try:
-                options = json.loads(options)
+                parsed = json.loads(options)
+                options = parsed if isinstance(parsed, list) else [options]
             except (json.JSONDecodeError, ValueError):
-                options = [options]
+                options = [options] if options.strip() else []
+        if not isinstance(options, list):
+            options = []
+        options = [str(o) for o in options]
 
-        print()
-        print("=" * 70)
-        print(message)
-        print("=" * 70)
-
-        if options:
-            print()
-            for i, opt in enumerate(options, 1):
-                print(f"  [{i}] {opt}")
-            print()
-
-            while True:
-                response = input("Your choice (number or type your response): ").strip()
-
-                # Check if they entered a number
-                try:
-                    idx = int(response) - 1
-                    if 0 <= idx < len(options):
-                        response = options[idx]
-                        break
-                except ValueError:
-                    pass
-
-                # Accept free-form text too
-                if response:
-                    break
-                print("Please enter a response.")
-        else:
-            print()
-            response = input("Your response: ").strip()
-
+        response = self.channel.prompt(message=message, options=options or None)
+        if response is None:
+            return "[User ended the session without responding.]"
         return response
 
     def _update_session(self, args: Dict[str, Any]) -> str:
