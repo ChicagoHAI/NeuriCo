@@ -16,9 +16,11 @@ process and shares in-process queues with a WebChannel — no file polling for t
 conversation, no second process.
 
 Routes:
-  GET  /         -> the HTML page
-  GET  /stream   -> Server-Sent Events: conversation + agent-log + status + dashboard
-  POST /input    -> the browser submits the human's reply
+  GET  /            -> the HTML page
+  GET  /stream      -> Server-Sent Events: conversation + agent-log + status + dashboard
+  GET  /annotations -> {key: verdict} map of offline-eval thumbs (re-paint on load)
+  POST /input       -> the browser submits the human's reply
+  POST /annotate    -> record a 👍/👎 on an assessment / decision / manager bubble
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 from interactive.channel import WebChannel
+from interactive import annotations as _annotations
 
 # Reuse the standalone visualizer's transcript formatting so the agent-log feed
 # looks identical to the old viewer. Best-effort: if the import fails, the
@@ -405,6 +408,15 @@ PAGE = r"""<!DOCTYPE html>
   .qitem::before{content:"?";position:absolute;left:0;color:#58a6ff;font-weight:700}
   .decitem{font-size:12px;color:#c9d1d9;padding:4px 0;border-bottom:1px solid #161b22}
   .decitem .ch{color:#56d364}.decitem .rat{color:#6e7681;font-size:11px}
+
+  /* ---- offline-eval thumbs (👍/👎 on assessments, decisions, manager bubbles) ---- */
+  .ann{display:inline-flex;gap:2px;margin-left:6px;vertical-align:middle}
+  .ann-btn{background:none;border:none;cursor:pointer;font-size:13px;line-height:1;padding:0 2px;
+           opacity:.3;filter:grayscale(1);transition:opacity .1s}
+  .ann-btn:hover{opacity:.65}
+  .ann-btn.on{opacity:1;filter:none}
+  .ann-foot{margin-top:5px;display:flex;align-items:center;gap:4px}
+  .ann-foot .ann-lbl{font-size:10px;color:#6e7681;text-transform:uppercase;letter-spacing:.05em}
   .expitem{font-size:12px;color:#8b949e;padding:3px 0;font-family:monospace}
   .expitem .est{font-size:9px;padding:0 5px;border-radius:8px;margin-right:5px}
   .est-running{background:#1f3c5e;color:#79c0ff}.est-done{background:#1a3a2e;color:#56d364}.est-failed{background:#3a1e1e;color:#ff7b72}
@@ -526,6 +538,13 @@ PAGE = r"""<!DOCTYPE html>
     }
     if(whoEl) el.appendChild(whoEl);
     const t=document.createElement('div');t.textContent=d.text;el.appendChild(t);
+    // Offline-eval thumbs on manager bubbles (keyed by the event's seq, which is
+    // stable across reconnects within a run; the POST also snapshots the text).
+    if(role==='manager'&&d.seq!=null){
+      const af=document.createElement('div');af.className='ann-foot';
+      af.innerHTML=annHTML('msg:'+d.seq,d.text);
+      el.appendChild(af);
+    }
     chat.appendChild(el);
     if(stick) chat.scrollTop=chat.scrollHeight;
   }
@@ -682,6 +701,38 @@ PAGE = r"""<!DOCTYPE html>
   }
 
   // Built-in section renderers: id -> function(d) -> HTMLElement|null.
+  // ---- offline-eval annotations (👍/👎) ----
+  // ANN: key -> 'up'|'down' (current verdict, drives thumb highlight + survives
+  // the whiteboard's 2s re-render). SNIP: key -> text snapshot sent with the POST
+  // so the JSONL record is self-contained for offline eval. Keys are
+  // 'assess:<id>' | 'dec:<id>' | 'msg:<seq>'.
+  const ANN={}, SNIP={}, ANN_KIND={assess:'assessment',dec:'decision',msg:'message'};
+  function annHTML(key,snip){
+    if(snip!=null) SNIP[key]=String(snip);
+    const v=ANN[key]||'';
+    return '<span class="ann" data-key="'+esc(key)+'">'+
+      '<button class="ann-btn'+(v==='up'?' on':'')+'" data-v="up" title="Good call">👍</button>'+
+      '<button class="ann-btn'+(v==='down'?' on':'')+'" data-v="down" title="Bad call">👎</button></span>';
+  }
+  function applyAnn(){document.querySelectorAll('.ann').forEach(span=>{
+    const v=ANN[span.getAttribute('data-key')]||'';
+    span.querySelectorAll('.ann-btn').forEach(x=>x.classList.toggle('on',x.getAttribute('data-v')===v));
+  });}
+  document.addEventListener('click',e=>{
+    const b=e.target.closest&&e.target.closest('.ann-btn'); if(!b) return;
+    const span=b.closest('.ann'), key=span.getAttribute('data-key');
+    let v=b.getAttribute('data-v');
+    if(ANN[key]===v) v='none';                 // click the active thumb again → clear it
+    ANN[key]=(v==='none'?'':v);
+    span.querySelectorAll('.ann-btn').forEach(x=>x.classList.toggle('on',x.getAttribute('data-v')===ANN[key]));
+    fetch('/annotate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({key:key,kind:ANN_KIND[key.split(':')[0]]||'message',
+        verdict:v,snapshot:(SNIP[key]||'').slice(0,500)})}).catch(()=>{});
+  });
+  // Re-paint thumbs for anything already in the DOM (chat bubbles) once we know
+  // the saved verdicts. The whiteboard re-reads ANN on its next poll on its own.
+  fetch('/annotations').then(r=>r.json()).then(m=>{if(m&&typeof m==='object')Object.assign(ANN,m);applyAnn();}).catch(()=>{});
+
   const CORE={
     warnings:d=>{
       const w=d.warnings||[]; if(!w.length) return null;
@@ -695,7 +746,9 @@ PAGE = r"""<!DOCTYPE html>
       const eng=a.engage_user?'<span class="eng yes">would engage you</span>':'<span class="eng no">proceeding solo</span>';
       return el('div','r-assess','<b>🧭 Manager\'s read</b>'+esc(a.situation||'')+
         (a.uncertainty?'<br><span style="color:#8b949e">Unsure: </span>'+esc(a.uncertainty):'')+
-        (a.rationale?'<br><span style="color:#8b949e">Why: </span>'+esc(a.rationale):'')+'<br>'+eng);
+        (a.rationale?'<br><span style="color:#8b949e">Why: </span>'+esc(a.rationale):'')+'<br>'+eng+
+        '<div class="ann-foot"><span class="ann-lbl">rate this read</span>'+
+        annHTML('assess:'+(a.id||a.ts||''),a.situation||a.crux||'')+'</div>');
     },
     hypotheses:d=>{
       const hyp=d.hypotheses||[]; if(!hyp.length) return null;
@@ -712,6 +765,7 @@ PAGE = r"""<!DOCTYPE html>
       const dec=d.decisions||[]; if(!dec.length) return null;
       return rsec('Decisions',dec.map(x=>'<div class="decitem">'+esc(x.question)+
         (x.chosen?' <span class="ch">→ '+esc(x.chosen)+'</span>':'')+
+        annHTML('dec:'+(x.id||x.question||''),x.question)+
         (x.rationale?'<br><span class="rat">'+esc(x.rationale)+'</span>':'')+'</div>').join(''));
     },
     experiments:d=>{
@@ -867,7 +921,7 @@ def _brand_file(project_root: Path, key: str) -> Optional[Path]:
 
 
 def _make_handler(channel: WebChannel, workspace_name: str, title: str,
-                  project_root: Path):
+                  project_root: Path, workspace_path: Path):
     page = PAGE.replace("{{WORKSPACE}}", workspace_name).replace("{{TITLE}}", title)
 
     class Handler(BaseHTTPRequestHandler):
@@ -931,6 +985,20 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str,
                 finally:
                     channel.unsubscribe(q)
 
+            elif self.path == "/annotations":
+                # Offline-eval thumbs, so the browser can re-paint thumb state on
+                # load / reconnect. {key: "up"|"down"}.
+                try:
+                    latest = _annotations.load_latest(workspace_path)
+                except Exception:
+                    latest = {}
+                body = json.dumps(latest).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -948,6 +1016,25 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str,
                     channel.submit_input(text)
                 self.send_response(204)
                 self.end_headers()
+
+            elif self.path == "/annotate":
+                # Record an offline-eval thumb. Never touches the live run.
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                    _annotations.append_annotation(
+                        workspace_path,
+                        key=payload.get("key", ""),
+                        kind=payload.get("kind", ""),
+                        verdict=payload.get("verdict", ""),
+                        snapshot=payload.get("snapshot", ""),
+                    )
+                    self.send_response(204)
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                    self.send_response(400)
+                self.end_headers()
+
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -981,7 +1068,7 @@ class InteractiveWebServer:
 
     def start(self) -> None:
         handler = _make_handler(self.channel, self.workspace.name, self.title,
-                                self.project_root)
+                                self.project_root, self.workspace)
         # Try the requested port, then a few above it if taken.
         last_err = None
         for port in range(self.port, self.port + 10):
