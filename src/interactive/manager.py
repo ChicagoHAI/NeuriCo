@@ -5,8 +5,15 @@ The main agent loop for interactive mode. Orchestrates research agents
 dynamically using LLM reasoning, engages the human at critical points,
 and maintains session state across interactions.
 
+The human interface is pluggable (see channel.py): by default the manager
+serves a browser UI (web_server.py) where the human reads the manager's
+messages, watches the live agent transcript, and replies in an input box.
+Pass --cli to fall back to the terminal.
+
 Usage:
     ./neurico interactive <idea_id> [--provider claude] [--engagement balanced]
+    ./neurico interactive <idea_id> --cli          # terminal instead of browser
+    ./neurico interactive <idea_id> --port 7890    # pick the web port
 
 Or directly:
     NEURICO_PROJECT_ROOT=/path/to/NeuriCo python src/interactive/manager.py <idea_id>
@@ -15,8 +22,10 @@ Or directly:
 import argparse
 import json
 import os
+import re
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -30,6 +39,75 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from interactive.session_state import SessionState
 from interactive.llm_backend import LLMBackend, LLMResponse, create_backend
 from interactive.tools import ToolExecutor
+from interactive.channel import UserChannel, TerminalChannel
+from interactive.mcp_config import write_mcp_config
+
+
+# ---------------------------------------------------------------------------
+# Chat-display cleanup
+#
+# The model's raw text contains the <tool_call> XML it must emit to invoke
+# tools, plus occasional meta-chatter about the tool mechanism ("I should use
+# the <tool_call> block format…"). That's necessary protocol, but it's noise to
+# a human reader. These helpers strip it so the CHAT shows clean prose only.
+# (We clean only what is *displayed* — the full text is still stored in the
+# conversation history sent back to the model.)
+# ---------------------------------------------------------------------------
+
+# Real tool-call blocks always carry a name= attribute; requiring it avoids
+# eating inline backtick mentions like "`<tool_call>`" in meta-chatter.
+_TOOLCALL_BLOCK_RE = re.compile(r"<tool_call\b[^>]*\bname\s*=.*?</tool_call>",
+                                re.DOTALL | re.IGNORECASE)
+
+# Hallucinated tool results produced by the cli backend before real results
+# are injected — strip these so they never reach the chat display.
+_TOOLRESULT_BLOCK_RE = re.compile(r"<tool_result\b.*?</tool_result>",
+                                   re.DOTALL | re.IGNORECASE)
+
+# A "sentence" (bounded by . ! ? or a newline) that is purely about the tool
+# mechanism — noise to a human. The leading [^.!?\n]* anchors the match to the
+# start of the enclosing sentence, so newlines/markdown around it are preserved.
+_META_SENTENCE_RE = re.compile(
+    r"(?i)[^.!?\n]*"
+    r"(?:`?<?tool[_ ]call>?`?\s*(?:block|format|protocol)"
+    r"|function[- ]calling interface"
+    r"|text-based\s+(?:protocol|format|interface|tool)"
+    r"|let me (?:retry|redo|correct|try that again))"
+    r"[^.!?\n]*[.!?]?"
+)
+
+
+def clean_chat_text(text: str) -> str:
+    """Strip tool-call XML and tool-mechanism meta-chatter from a manager
+    message so the chat reads as plain prose. Preserves real newlines/markdown.
+    Returns '' if nothing meaningful is left."""
+    if not text:
+        return ""
+    text = _TOOLCALL_BLOCK_RE.sub("", text)
+    text = _TOOLRESULT_BLOCK_RE.sub("", text)
+    text = _META_SENTENCE_RE.sub("", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def friendly_tool_echo(name: str, args: Dict[str, Any]) -> Optional[str]:
+    """A short, human-readable line describing a manager tool call — or None to
+    show nothing (e.g. ask_user, whose question is rendered on its own)."""
+    if name == "ask_user":
+        return None  # the question itself is shown via channel.prompt()
+    if name == "check_workspace":
+        act = args.get("action", "list")
+        path = args.get("path", ".")
+        verb = "Read" if act == "read" else "Looked at"
+        return f"🔍 {verb} the workspace ({path})"
+    if name == "read_agent_logs":
+        return f"📂 Checked progress of {args.get('run_id', 'the agent')}"
+    if name == "update_session":
+        return "📝 Updated session notes"
+    if name == "run_agent":
+        return f"🚀 Launched the {args.get('agent', 'agent')}"
+    return f"🔧 {name}"
 
 
 def load_config() -> Dict[str, Any]:
@@ -150,12 +228,14 @@ class InteractiveManager:
     """
 
     def __init__(self, idea: Dict[str, Any], idea_file: Path,
-                 workspace: Path, provider: str, config: Dict[str, Any]):
+                 workspace: Path, provider: str, config: Dict[str, Any],
+                 channel: Optional[UserChannel] = None):
         self.idea = idea
         self.idea_file = idea_file
         self.workspace = workspace
         self.provider = provider
         self.config = config
+        self.channel = channel or TerminalChannel()
 
         idea_content = idea.get("idea", {})
         idea_id = idea_content.get("metadata", {}).get("idea_id", "unknown")
@@ -163,8 +243,39 @@ class InteractiveManager:
 
         # Initialize components
         self.session = SessionState(workspace, idea_id, idea_title, provider)
-        self.backend = create_backend(config)
-        self.tools = ToolExecutor(workspace, self.session, idea_file, provider, PROJECT_ROOT)
+
+        # Write MCP config before creating backend so the path is available
+        mcp_config_path = None
+        ipc_dir = None
+        backend_name = os.environ.get("NEURICO_MANAGER_BACKEND",
+                                      config.get("manager", {}).get("llm_backend")) or None
+        if backend_name is None:
+            # Mirror the same auto-detection as create_backend()
+            _provider = os.environ.get("NEURICO_PROVIDER",
+                                       config.get("manager", {}).get("default_provider", "claude"))
+            backend_name = "mcp" if _provider == "claude" else "cli"
+        if backend_name == "mcp":
+            # Create IPC dir so the MCP server uses file IPC for ask_user
+            # (routes ask_user through the web channel instead of the terminal)
+            ipc_path = workspace / ".neurico" / "ipc"
+            ipc_path.mkdir(parents=True, exist_ok=True)
+            ipc_dir = str(ipc_path)
+
+            mcp_config_file = write_mcp_config(
+                work_dir=workspace,
+                idea_file=idea_file,
+                provider=provider,
+                idea_id=idea_id,
+                idea_title=idea_title,
+                project_root=PROJECT_ROOT,
+            )
+            mcp_config_path = str(mcp_config_file)
+            print(f"  MCP config: {mcp_config_file}")
+
+        self.backend = create_backend(config, mcp_config_path=mcp_config_path,
+                                      channel=self.channel, ipc_dir=ipc_dir)
+        self.tools = ToolExecutor(workspace, self.session, idea_file, provider,
+                                  PROJECT_ROOT, channel=self.channel)
         self.tool_definitions = load_tool_definitions()
         self.system_prompt = load_system_prompt(idea, workspace, provider, config)
 
@@ -196,6 +307,13 @@ class InteractiveManager:
             print(f"  Resuming previous session: {self.session.session_id}")
         print("=" * 70)
         print()
+
+        # Greet in whatever channel is active (e.g. the browser).
+        self.channel.status(phase=self.session.state.get("phase", "starting"))
+        self.channel.send(
+            f"Starting interactive research on: {idea_content.get('title', 'Unknown')}"
+            + ("  (resuming previous session)" if self.session.is_resuming else ""),
+            kind="system")
 
         # Build initial messages
         self.messages = [{"role": "system", "content": self.system_prompt}]
@@ -237,7 +355,7 @@ class InteractiveManager:
     def _agent_step(self):
         """Execute one step of the agent loop."""
         # Call LLM
-        print("\n[Manager thinking...]")
+        self.channel.status("Manager thinking…", thinking=True)
         response = self.backend.send(self.messages, self.tool_definitions)
 
         # Handle tool calls
@@ -250,11 +368,14 @@ class InteractiveManager:
             self.messages.append(assistant_msg)
             self.session.append_message(assistant_msg)
 
-            if response.text:
-                print(f"\n{response.text}")
+            clean = clean_chat_text(response.text)
+            if clean:
+                self.channel.send(clean, kind="manager")
 
             for tc in response.tool_calls:
-                print(f"\n[Executing: {tc.name}({json.dumps(tc.arguments, indent=2)})]")
+                echo = friendly_tool_echo(tc.name, tc.arguments)
+                if echo:
+                    self.channel.send(echo, kind="tool")
 
                 result = self.tools.execute(tc.name, tc.arguments)
 
@@ -272,21 +393,46 @@ class InteractiveManager:
                 self.session.append_message(tool_result_msg)
 
         else:
-            # No tool calls — display to user and wait for input
+            # No tool calls returned to the Python loop.
+            # In CLI mode this means the model finished — yield to user.
+            # In MCP mode the full tool loop ran inside claude -p, so we only
+            # yield to user when no mcp__neurico__* tools were called at all
+            # (i.e. the model produced a pure-text conclusion with no tool use).
+            # When tools were called, the session did real work — loop back so
+            # the manager continues autonomously. ask_user exchanges (if any)
+            # are added to the conversation so the next session has context.
             assistant_msg = {"role": "assistant", "content": response.text}
             self.messages.append(assistant_msg)
             self.session.append_message(assistant_msg)
 
-            print(f"\n{response.text}")
+            clean = clean_chat_text(response.text)
+            if not response.streamed and clean:
+                self.channel.send(clean, kind="manager")
 
-            # Wait for user input
-            print()
-            try:
-                user_input = input("[You] ").strip()
-            except EOFError:
+            # Persist ask_user Q&A so the next MCP session sees what the user said.
+            # Add both sides: assistant asking the question and the user's reply,
+            # so the model has full context rather than an orphaned user message.
+            for exchange in response.ask_user_exchanges:
+                q_msg = {"role": "assistant",
+                         "content": f"[asked user]: {exchange['question']}"}
+                self.messages.append(q_msg)
+                self.session.append_message(q_msg)
+                user_msg = {"role": "user", "content": exchange["answer"]}
+                self.messages.append(user_msg)
+                self.session.append_message(user_msg)
+
+            if response.had_tools:
+                # Manager did real work this session — loop back autonomously
+                return
+
+            # No tools called: manager yielded the floor to the human
+            prompt_message = None if response.streamed else (clean or response.text)
+            user_input = self.channel.prompt(message=prompt_message)
+            if user_input is None:
                 self._shutdown = True
                 return
 
+            user_input = user_input.strip()
             if not user_input:
                 return
 
@@ -300,21 +446,34 @@ class InteractiveManager:
 
     def _wait_for_agent_with_polling(self, initial_result: str, agent_name: str) -> str:
         """
-        Wait for a running agent to complete, polling periodically.
-        User can interrupt with Ctrl+C to interact.
+        Wait for a running agent to complete, polling periodically. The user can
+        interject at any time — by typing in the browser (web mode) or with
+        Ctrl+C (terminal mode) — to interact while the agent runs.
         """
-        print(f"\n[Agent '{agent_name}' running. Press Ctrl+C to interact while it runs.]")
+        self.channel.send(
+            f"Agent '{agent_name}' running. Type any time to interact while it runs.",
+            kind="system")
 
         last_engagement = time.time()
         final_result = initial_result
 
         while self.tools.has_running_agents and not self._shutdown:
             try:
-                time.sleep(self.poll_interval)
+                # Block up to poll_interval for user input. In web mode this
+                # returns the typed message; in terminal mode it just waits and
+                # Ctrl+C raises KeyboardInterrupt.
+                interjection = self.channel.poll_input(timeout=self.poll_interval)
             except KeyboardInterrupt:
-                # User wants to interact — return control to the agent loop
-                print("\n[Pausing to interact. The agent is still running in the background.]")
-                return initial_result + "\n[Agent still running. User requested interaction.]"
+                interjection = "__interrupt__"
+
+            if interjection:
+                self.channel.send(
+                    "Pausing to interact. The agent keeps running in the background.",
+                    kind="system")
+                note = "\n[Agent still running. User requested interaction.]"
+                if interjection != "__interrupt__":
+                    note += f"\n[User said: {interjection}]"
+                return initial_result + note
 
             # Check for completed agents
             completed = self.tools.check_running_agents()
@@ -329,7 +488,7 @@ class InteractiveManager:
             # Periodic engagement
             elapsed = time.time() - last_engagement
             if elapsed >= self.engagement_interval:
-                print(f"\n[Agent still running ({int(elapsed/60)} min)...]")
+                self.channel.send(f"Agent still running ({int(elapsed/60)} min)…", kind="system")
                 last_engagement = time.time()
 
         return final_result
@@ -346,10 +505,13 @@ class InteractiveManager:
     def _handle_exit(self):
         """Save session and exit."""
         self._shutdown = True
+        self.channel.send("Saving session and ending. You can resume with the "
+                          "same command.", kind="system")
         print("\n[Saving session state...]")
         # Session is auto-saved on each state change
         print(f"[Session saved to {self.session.session_file}]")
         print("[You can resume with: ./neurico interactive <idea_id>]")
+        self.channel.close()
 
 
 def main():
@@ -377,6 +539,22 @@ def main():
         default=None,
         choices=["cli", "anthropic_api", "openrouter"],
         help="LLM backend for manager reasoning (default: from config)"
+    )
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Use the terminal interface instead of the browser (web is default)"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=7890,
+        help="Local port for the web interface (default: 7890)"
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Web mode: don't auto-open the browser"
     )
 
     args = parser.parse_args()
@@ -419,8 +597,37 @@ def main():
             im = IdeaManager(PROJECT_ROOT / "ideas")
             im.update_status(args.idea_id, "in_progress")
             print(f"[Idea moved to in_progress]")
+            # Note: this MOVES the file (submitted/ -> in_progress/), making the
+            # captured idea_file path stale. The agent dispatch in tools.py (#104)
+            # falls back to ideas/in_progress/<name> at launch time, so no
+            # re-resolve is needed here.
         except Exception as e:
             print(f"[Warning: Could not update idea status: {e}]")
+
+    # Build the user channel. Web is the primary interface; --cli falls back
+    # to the terminal.
+    web_server = None
+    if args.cli:
+        channel = TerminalChannel()
+    else:
+        import webbrowser
+        from interactive.channel import WebChannel
+        from interactive.web_server import InteractiveWebServer
+
+        channel = WebChannel()
+        idea_title = idea.get("idea", {}).get("title", "Unknown")
+        web_server = InteractiveWebServer(
+            channel=channel,
+            workspace=workspace,
+            project_root=PROJECT_ROOT,
+            title=idea_title,
+            port=args.port,
+        )
+        web_server.start()
+        print(f"\n  Web interface: {web_server.url}")
+        print("  (run with --cli to use the terminal instead)\n")
+        if not args.no_browser:
+            threading.Timer(0.8, lambda: webbrowser.open(web_server.url)).start()
 
     # Launch manager
     manager = InteractiveManager(
@@ -428,9 +635,14 @@ def main():
         idea_file=idea_file,
         workspace=workspace,
         provider=provider,
-        config=config
+        config=config,
+        channel=channel,
     )
-    manager.run()
+    try:
+        manager.run()
+    finally:
+        if web_server is not None:
+            web_server.stop()
 
 
 if __name__ == "__main__":
