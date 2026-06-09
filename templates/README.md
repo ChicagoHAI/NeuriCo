@@ -2,6 +2,8 @@
 
 This directory contains all prompt templates that guide NeuriCo's research agents.
 
+Templates are dynamically composed at runtime using execution context (state, summaries, constraints), rather than being static instructions. They ensure agents can stay aligned with goals, retain important context, produce consistent and structured outputs.
+
 ## Directory Structure
 
 ```
@@ -43,10 +45,31 @@ When a research idea specifies `domain: X`, the system loads templates in this o
    - Check `domains/X/{agent_template}.txt` — domain-specific override
    - Fall back to `agents/{agent_template}.txt` — universal default
 
+## Context management
+
+Templates are augmented at runtime with current execution state, prior phase summary, Top-K priorization rule, workspace directory.
+
+Sources:
+- `STATE.md`
+- `.neurico/phase_summary.json`
+- `.neurico/phase_summary_<stage>.json`
+
+This enables:
+- State continuity -> agents do not forget progress
+- Context compression -> summaries replace raw history
+- Controlled exploration -> Top-K filtering limits scope
+- Execution safety -> agents operate within workspace
+
+Key constraints:
+Agents must:
+- Operate within `workspaces/<run_id>`
+- Follow Top-K priorities
+- Rely on summarized context
+
 ## Adding a New Domain
 
-`config/domains.yaml` is the single source of truth — adding a new domain
-is a config edit, not a code change.
+No source code changes are needed. The runner, prompt generator, and IdeaHub
+fetcher all read from `config/domains.yaml` at runtime.
 
 1. Add an entry to `config/domains.yaml`:
    ```yaml
@@ -76,8 +99,4 @@ is a config edit, not a code change.
    `templates/paper_styles/<my_style>/` with `style_config.yaml` and an
    `example_paper.tex`.
 
-No source code changes are needed. The runner, prompt generator, and IdeaHub
-fetcher all read from `config/domains.yaml` at runtime.
-
-See `domains/mathematics/` for an example with full agent overrides, or
-`domains/battery/` for a simpler domain with only `core.txt`.
+See `domains/mathematics/` for an example with agent overrides, or `domains/battery/` for a simpler domain with only `core.txt`.

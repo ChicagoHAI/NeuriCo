@@ -4,6 +4,11 @@
 
 Both the Resource Finder and Experiment Runner agents are configured to run in the workspace directory with consistent `cwd` settings and clear instructions.
 
+Workspace consistency is enforced through:
+- STATE tracking (`STATE.md`)
+- explicit working directory checks
+- stage-level validation before progression
+
 ## Process Execution Configuration
 
 All three agent execution paths use `cwd=str(work_dir)` to start processes in the workspace:
@@ -52,6 +57,35 @@ process = subprocess.Popen(
     cwd=str(work_dir)  # ✅ Runs in workspace
 )
 ```
+## Runtime Enforcement
+
+Workspace consistency is actively enforced at runtime.
+
+### 1. Working Directory Check
+
+Before each stage:
+
+```python
+check_working_directory(expected_dir, actual_dir)
+
+If mismatch: state is marked as failure, execution is halted or flagged as recoverable.
+```
+
+### 2. State Integration
+
+All directory-related issues are recorded in:
+- workspaces/<run_id>/STATE.md
+- .neurico/state.json
+
+### 3. Stage Validation Dependency
+
+Each stage must:
+- produce outputs in the workspace
+- pass validation checks
+
+Otherwise:
+- pipeline does NOT proceed
+- prevents downstream failures caused by wrong directories
 
 ## Agent Instructions
 
@@ -114,8 +148,13 @@ After both agents complete, the workspace should contain:
 
 ```
 workspace/
+├── STATE.md
 ├── .neurico/
-│   ├── pipeline_state.json           # Orchestrator state
+│   ├── state.json                    # Phase state
+│   └── state_history.json            # Record state
+│   └── phase_summary.json            # Phase summary
+│   └── phase_summary_<stage>.json    # Stage summary
+│   └── pipeline_state.json           # Orchestrator state
 │   └── pipeline_results.json         # Final results
 ├── .resource_finder_complete         # Completion marker
 ├── papers/
@@ -172,6 +211,12 @@ workspace/
 - Both agents use same directory structure ✓
 - Both agents save files in workspace ✓
 - No absolute paths in instructions ✓
+
+✅ **Runtime Guarantees**
+- Working directory is validated before each stage ✓
+- Failures are recorded in STATE.md ✓
+- Stage outputs must exist in workspace to pass validation ✓
+- No stage proceeds with inconsistent directory ✓
 
 ## Common Pitfalls Avoided
 
@@ -280,6 +325,7 @@ ls papers  # Lists files in workspace/papers
 4. **Clean Organization**: Everything in one place
 5. **No Symlinks/Copying**: Direct access to resources
 6. **Debuggability**: All logs and outputs in one location
+7. **Execution Safety**: Prevent sileng failure from wrong directories
 
 ## Testing Verification
 
@@ -308,5 +354,7 @@ assert work_dir == experiment_runner_work_dir
 ✅ **All prompts explicitly instruct agents about the workspace**
 ✅ **All file paths are relative to the workspace**
 ✅ **No directory changes or absolute paths in instructions**
+✅ **Runtime checks prevent directory drift**
+✅ **Validation ensures outputs are produced in the correct location**
 
 The workspace directory design is fully consistent across both agents and all execution modes.
