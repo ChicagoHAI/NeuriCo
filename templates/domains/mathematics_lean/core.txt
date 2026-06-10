@@ -1,0 +1,260 @@
+# Mathematics (Axiom AXLE) Research Domain Guidance
+
+This template extends the mathematics domain with **formal proof verification using Lean 4
+and Mathlib, checked by the hosted Axiom AXLE API** (https://axle.axiommath.ai). Every
+theorem stated in this research mode must be machine-checked: a proof is only considered
+valid when `axle_check.py` reports `STATUS: COMPLETE` (exit 0) — i.e. the code compiles
+against Mathlib with no errors and no `sorry` remaining.
+
+There is **no local Lean toolchain, no `lake`, and no Mathlib cache**. This domain runs on
+the default Neurico image. `.lean` files are verified by sending them to AXLE, which checks
+them remotely against a preloaded full Mathlib. This is the default Lean-enabled mathematics
+domain; the reserved `mathematics_lean_local` domain is the self-built local-toolchain
+counterpart, where only the verification mechanism differs.
+
+## Domain Overview
+
+Mathematical research in this context focuses on:
+- Pure mathematics: algebra, analysis, topology, number theory, combinatorics, geometry
+- Applied mathematics: optimization, dynamical systems, probability, mathematical modeling
+- **All proofs formally verified by the Lean 4 type checker via Mathlib, checked through AXLE**
+- Computational exploration still uses Python (SymPy/NumPy) for conjecture generation;
+  formal proofs live in Lean
+
+## How to Interpret Base Methodology for Mathematics (Axiom AXLE)
+
+| Base Phase | Mathematical Equivalent | AXLE-Specific Meaning |
+|---|---|---|
+| Planning | Proof Strategy | Decompose conjecture; plan Lean file structure |
+| Data Collection | Definitions & Prerequisites | Write `Definitions.lean`; search Mathlib for prerequisite lemmas |
+| Implementation | Proof Construction | Write `.lean` files; `axle_check.py` validates each lemma |
+| Experimentation | Conjecture Exploration | Python/SymPy for generating examples and searching for patterns |
+| Analysis | Proof Verification | `axle_check.py` must report `COMPLETE` (no errors, no `sorry`) |
+| Documentation | Write-up | REPORT.md + AMS LaTeX paper; cite Lean files as artefacts |
+
+## Lean 4 Proof Workflow (verified via AXLE)
+
+### The Feedback Loop
+
+Unlike informal proofs (where correctness is subjective), Lean gives binary, definitive feedback:
+
+```
+Write theorem statement
+        │
+        ▼
+  Use `sorry` as placeholder
+  Run: axle_check.py proofs/MyFile.lean --statement-check
+        │
+        ├── exit 0 → statement type-checks, proceed to proof
+        └── exit 1 → fix the statement first (read the error message)
+                │
+                ▼
+        Replace sorry with tactics
+        Run: axle_check.py proofs/MyFile.lean
+                │
+                ├── exit 0, STATUS: COMPLETE → PROOF COMPLETE ✓
+                ├── exit 2, STATUS: INCOMPLETE_SORRY → still incomplete
+                └── exit 1, STATUS: ERROR → fix the tactic error
+```
+
+The verifier (replaces `lake build`):
+
+```bash
+python .claude/skills/axiom-lean-prover/scripts/axle_check.py proofs/MainTheorem.lean
+python .claude/skills/axiom-lean-prover/scripts/axle_check.py --dir proofs/   # whole project
+```
+
+Read `.claude/skills/axiom-lean-prover/SKILL.md` for the full verifier reference, exit
+codes, and Mathlib search guidance.
+
+### Project Setup
+
+No toolchain install is needed. Just create a directory for proofs:
+
+```bash
+mkdir -p proofs
+```
+
+By convention, organize into three source files:
+- `proofs/Definitions.lean` — types, structures, notation
+- `proofs/Lemmas.lean` — supporting lemmas
+- `proofs/MainTheorem.lean` — main results
+
+`axle_check.py --dir proofs/` checks them together in dependency order.
+
+### Proof Development Strategy
+
+1. **State first, prove later**: Write all theorem statements with `sorry`, run
+   `axle_check.py ... --statement-check` to confirm they type-check. Fix any type errors
+   before attempting proofs.
+
+2. **Prove lemmas bottom-up**: Prove the deepest dependencies first. A theorem that relies
+   on an unproved lemma inherits its `sorry` status.
+
+3. **Use automation first**: Try `ring`, `omega`, `linarith`, `norm_num`, `simp`, `decide`,
+   `aesop` before writing manual tactic proofs. These close many routine goals instantly.
+
+4. **Leverage Mathlib**: Most foundational results are already in Mathlib. Search by naming
+   convention (`Nat.add_comm`, `List.length_map`) or confirm a name with a `#check` snippet
+   (`axle_check.py --code '#check @Nat.add_comm'`).
+
+5. **Document the proof idea**: Add a `/-! ## Proof idea -/` block before each theorem
+   explaining the informal argument. This is invaluable for the paper write-up.
+
+### Imports — use full `import Mathlib`
+
+Start every `.lean` file with:
+
+```lean
+import Mathlib
+```
+
+The AXLE environment has all of Mathlib preloaded, so the full import is free (checked
+remotely, no local cache). The verifier normalizes imports automatically, so submodule or
+local cross-file imports never break a check. **This is the opposite of the reserved
+`mathematics_lean_local` domain's bare-import ban**, which exists only to limit local cache size —
+irrelevant here.
+
+### Using lemmas that are NOT in Mathlib
+
+Only Mathlib is available remotely — you **cannot import an external Lean package**. When the
+resource finder surfaces a lemma outside Mathlib (a paper's companion formalization, a Lean
+GitHub project, or an informal literature result), choose one of two honest options:
+
+1. **Inline and prove it (preferred).** Copy the lemma's statement and Lean proof into
+   `proofs/` and let AXLE verify it against Mathlib. Re-prove informal/paper lemmas the same way.
+2. **Cite it as a named `axiom` (escape hatch).** If proving a prerequisite would itself drag
+   in a long chain of further non-Mathlib lemmas (too costly for the session), you may *assume*
+   it rather than re-prove it — but use a named `axiom` with a citation, **never `sorry`**:
+
+   ```lean
+   /-- Assumed without proof; established in [Smith 2020, Theorem 3]. -/
+   axiom key_prerequisite (G : Type*) [Group G] : SomeProperty G
+   ```
+
+   Downstream proofs then verify as `COMPLETE (CONDITIONAL on N assumed axiom(s))` — correct
+   *modulo* the citation. `axle_check.py` lists every declared axiom so conditional results are
+   never mistaken for fully-closed ones.
+
+`axiom` (deliberately assumed, cited) and `sorry` (unfinished placeholder) mean different
+things — never substitute `sorry` for a citation. Audit dependence with
+`#print axioms <theorem>` (via `axle_check.py --code`); `propext`, `Classical.choice`,
+`Quot.sound` are Mathlib's standard trusted axioms (ignore them), but any of your own axiom
+names that appear are cited assumptions that must be reported.
+
+## Proof Strategies and Their Lean Encodings
+
+### Direct Proof
+```lean
+theorem direct (h1 : P) (h2 : P → Q) : Q := h2 h1
+```
+
+### Proof by Contradiction
+```lean
+theorem by_contra_example (h : ¬¬P) : P := by
+  by_contra hn
+  exact h hn
+```
+
+### Mathematical Induction
+```lean
+theorem induction_example (n : ℕ) : 0 + n = n := by
+  induction n with
+  | zero => rfl
+  | succ n ih => simp [Nat.add_succ, ih]
+```
+
+### Proof by Contrapositive
+```lean
+theorem contrapositive (h : ¬Q → ¬P) : P → Q := by
+  intro hp
+  by_contra hq
+  exact h hq hp
+```
+
+### Constructive Existence Proof
+```lean
+theorem exists_even : ∃ n : ℕ, n % 2 = 0 := ⟨2, by norm_num⟩
+```
+
+## Mathlib Search Strategies
+
+Since `exact?` / `apply?` need an editor, use these through the API:
+
+### Confirm a name exists with a `#check` snippet
+```bash
+python .claude/skills/axiom-lean-prover/scripts/axle_check.py --code '#check @Nat.add_comm' --json
+# COMPLETE → exists (type shown in lean_messages.infos); ERROR "unknown identifier" → wrong name
+```
+
+### Naming convention patterns
+```lean
+#check @Nat.add_comm       -- n + m = m + n
+#check @Finset.card_union_add_card_inter
+#check @List.length_append
+```
+
+### `simp` with named lemmas
+When `simp` alone fails, specify the lemmas: `simp [Nat.add_comm, Nat.mul_zero, my_lemma]`
+
+## Mathematical Writing Standards (same as mathematics domain)
+
+See the base `mathematics` domain core.txt for:
+- Definition-Theorem-Proof structure
+- Precise notation standards
+- Logical structure requirements
+- Mathematical exposition conventions
+
+## REPORT.md Structure for Mathematics (Axiom AXLE)
+
+1. **Executive Summary**: Brief overview; note that results are formally verified in Lean 4
+   via the Axiom AXLE engine
+2. **Research Question**: Conjecture or problem investigated
+3. **Definitions and Notation**: All definitions (informal + Lean encoding)
+4. **Statement of Results**: Theorem statements (informal + Lean type signatures)
+5. **Proofs**: Informal proof sketches (the Lean files contain the formal proofs)
+6. **Lean Formalization**: Location of `proofs/`, description of file structure,
+   note on Mathlib lemmas used
+7. **Verification Status**: Confirm `axle_check.py --dir proofs/` reports `COMPLETE`
+   (no errors, no `sorry`); record the AXLE environment used (e.g. `lean-4.29.0`).
+   **If any results are conditional on cited `axiom`s**, list each assumed axiom and its
+   citation here, and report the result as "verified modulo {assumptions}" — use
+   `#print axioms <theorem>` to confirm exactly what each main result depends on.
+8. **Discussion**: Implications, connections to other areas, what Mathlib lemmas were needed
+9. **Open Questions**: Results that remain unformalized or conjectured
+10. **References**: Mathematical references + Lean/Mathlib + Axiom AXLE environment version
+
+## Quality Checklist
+
+Before finalizing your work, verify:
+
+- [ ] `python .claude/skills/axiom-lean-prover/scripts/axle_check.py --dir proofs/` reports **STATUS: COMPLETE** (exit 0)
+- [ ] No `INCOMPLETE_SORRY` status anywhere (no `sorry` remains)
+- [ ] Any non-Mathlib lemma is either inlined+proved, or declared as a cited `axiom` (never `sorry`)
+- [ ] Every assumed `axiom` is listed with its citation in REPORT.md's Verification Status (`#print axioms` audited)
+- [ ] Every theorem in REPORT.md has a corresponding `theorem` in the Lean files
+- [ ] A `#check` snippet confirms all Mathlib lemmas cited actually exist
+- [ ] All Lean definitions are in `Definitions.lean` (consistent namespace)
+- [ ] Informal proof sketches in REPORT.md match the Lean tactic proofs
+- [ ] The AXLE environment used is recorded (for reproducibility — it pins Lean & Mathlib)
+
+## Common Pitfalls in Lean Formalization (AXLE)
+
+1. **`sorry` returns `okay:true`**: AXLE *compiles* a `sorry`'d proof — it is NOT proven.
+   `axle_check.py` flags this as `INCOMPLETE_SORRY`; never report it as complete.
+2. **Imports mismatch**: Always write `import Mathlib` (full). The verifier normalizes
+   imports; do not fight it with submodule imports.
+2b. **External (non-Mathlib) lemma**: you cannot `import` it remotely — inline its source and
+   prove it, or assume it as a cited `axiom`. Trying to import an external package yields
+   `unknown identifier`.
+3. **Unclosed namespace across files**: when checking `--dir`, an unclosed `namespace`
+   nests into the next file. Close every `namespace ... end`, or keep one file.
+4. **`DecidableEq` missing**: add `[DecidableEq α]` to the signature.
+5. **Timeout on `decide`**: `decide` can time out on large finite cases; use `native_decide`.
+6. **`simp` looping**: if `simp` hangs, use `simp only [specific_lemma]` instead.
+7. **Wrong Mathlib name**: confirm names with a `#check` snippet before relying on them —
+   guessing wastes round-trips.
+8. **Rate limits**: AXLE allows ~20 concurrent requests per key. Check meaningful units
+   (a full file), not every keystroke.
+9. **Metavariable not synthesized**: usually a type hole — add explicit type annotations.
+10. **`norm_num` vs `ring`**: `ring` proves structural equalities; `norm_num` evaluates numerics.

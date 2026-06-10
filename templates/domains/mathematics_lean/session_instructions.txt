@@ -1,0 +1,303 @@
+{{ session_start }}
+{{ priority_section }}
+CRITICAL: Environment Setup
+────────────────────────────────────────────────────────────────────────────────
+You MUST use an isolated Python environment. Lean proofs are verified through the
+hosted Axiom AXLE API — there is NO local Lean toolchain to install.
+
+STEP A — Python environment (for conjecture exploration with SymPy/NumPy):
+
+1. Check for existing venv:
+   If .venv/ exists → skip to step 3.
+   If not → run: uv venv
+
+2. Create pyproject.toml if missing:
+   cat > pyproject.toml << 'EOF'
+   [project]
+   name = "research-workspace"
+   version = "0.1.0"
+   description = "Mathematics (Axiom AXLE) research workspace"
+   requires-python = ">=3.10"
+   dependencies = []
+
+   [build-system]
+   requires = ["hatchling"]
+   build-backend = "hatchling.build"
+   EOF
+
+3. Activate: source .venv/bin/activate
+
+4. Install math tools: uv add sympy numpy matplotlib
+
+STEP B — Lean verification (the primary proof tool, via AXLE):
+
+NO install needed — no elan, no lake, no Mathlib cache. Confirm the API key is present
+and create a directory for your proof files:
+
+   echo "AXLE key: ${AXLE_API_KEY:0:6}..."   # should print pk_...
+   mkdir -p proofs
+
+The verifier is .claude/skills/axiom-lean-prover/scripts/axle_check.py. It replaces
+`lake build`. Read .claude/skills/axiom-lean-prover/SKILL.md for full guidance.
+
+If AXLE_API_KEY is empty, STOP and report it — formal verification cannot proceed
+without it (add it to the project .env).
+
+NEVER use conda. NEVER try to install Lean, elan, or lake — proofs are checked remotely.
+
+════════════════════════════════════════════════════════════════════════════════
+
+GPU AND COMPUTATIONAL RESOURCES
+────────────────────────────────────────────────────────────────────────────────
+At the START of your session, check for GPU availability:
+
+   nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv 2>/dev/null || echo "NO_GPU"
+
+GPU is useful for large-scale numerical conjecture search (Monte Carlo, exhaustive
+case checking). Lean proof checking runs remotely on AXLE and does not use local GPU.
+
+════════════════════════════════════════════════════════════════════════════════
+
+CRITICAL: Resources Have Been Pre-Gathered
+────────────────────────────────────────────────────────────────────────────────
+A resource-finding agent has already gathered:
+- literature_review.md: Known theorems, definitions, and proof techniques
+- resources.md: Catalog of all papers, prior results, and tools
+- papers/: Downloaded research papers (PDFs)
+- code/: Computational tools and repositories (if applicable)
+
+READ THESE FIRST. They tell you what is already proved in the literature so you
+don't re-derive known results — and what Mathlib lemmas exist that you can cite.
+
+WHAT "FULLY-AUTOMATED" MEANS:
+✓ Complete ALL phases (1-6) in a SINGLE CONTINUOUS SESSION
+✓ Make reasonable decisions autonomously without waiting for user input
+✓ Move immediately from one phase to the next
+✓ Deliver REPORT.md with actual mathematical results and a passing AXLE verification
+
+YOU WILL NOT GET ADDITIONAL INSTRUCTIONS between phases.
+
+════════════════════════════════════════════════════════════════════════════════
+
+Execute the following research task:
+
+{{ prompt }}
+
+════════════════════════════════════════════════════════════════════════════════
+
+EXECUTION WORKFLOW (FOLLOW THIS SEQUENCE — DO NOT STOP BETWEEN PHASES)
+────────────────────────────────────────────────────────────────────────────────
+
+BEFORE YOU START: Review Pre-Gathered Resources (10-15 min)
+  ✓ READ literature_review.md — known results, definitions, proof techniques
+  ✓ READ resources.md — what tools and prior results are available
+  ✓ Note which theorems are already in Mathlib (confirm with #check snippets)
+  ✓ Note which prerequisites you will need to prove yourself
+
+  → WHEN COMPLETE: Immediately proceed to Phase 1
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 1: Proof Strategy Planning (20-40 min)
+────────────────────────────────────────────────────────────────────────────────
+  ✓ Write "Motivation & Novelty Assessment" section in planning.md
+    - Why this mathematical question matters
+    - What prior results it extends (from literature_review.md)
+    - Why formal Lean verification adds value here
+  ✓ Decompose the conjecture into sub-lemmas
+  ✓ For each sub-lemma, decide:
+      - Is it already in Mathlib? (confirm with a #check snippet via axle_check.py)
+      - Does it need to be proved from scratch?
+      - What proof technique: direct, induction, contradiction, etc.?
+  ✓ Plan the Lean file structure:
+      proofs/Definitions.lean → proofs/Lemmas.lean → proofs/MainTheorem.lean
+  ✓ Document plan in planning.md (2-3 pages maximum)
+
+  → WHEN COMPLETE: Immediately proceed to Phase 2
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 2: Environment & Mathematical Setup (10-20 min)
+────────────────────────────────────────────────────────────────────────────────
+  ✓ Run environment setup (STEP A + STEP B above) if not already done
+  ✓ Confirm verification works end-to-end with a trivial check:
+      python .claude/skills/axiom-lean-prover/scripts/axle_check.py \
+        --code 'theorem sanity : 1 + 1 = 2 := by norm_num'
+      (Expect STATUS: COMPLETE, exit 0)
+  ✓ Write proofs/Definitions.lean:
+      - All types, structures, and notation for the research
+      - Start the file with `import Mathlib` (full import — see SKILL.md)
+      - Verify it compiles: axle_check.py proofs/Definitions.lean
+  ✓ Write definitions.md with informal descriptions of each Lean definition
+  ✓ Verify prerequisite Mathlib lemmas exist: #check snippets via axle_check.py --code
+
+  → WHEN COMPLETE: Immediately proceed to Phase 3
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 3: Formal Proof Construction (90-150 min)
+────────────────────────────────────────────────────────────────────────────────
+This is the MAIN PHASE. Proofs are only accepted when AXLE accepts them.
+
+  {{ code_workflow }}
+
+  LEAN PROOF WORKFLOW — follow this for each lemma/theorem:
+
+  STEP 1 — Write the statement with `sorry`:
+    Open proofs/Lemmas.lean (or MainTheorem.lean)
+    Add the theorem with `sorry` as the proof body
+    Run: python .claude/skills/axiom-lean-prover/scripts/axle_check.py proofs/Lemmas.lean --statement-check
+    ✓ exit 0 → statement type-checks; proceed to proof
+    ✗ exit 1 → fix the statement type error first (read the error message)
+
+  STEP 2 — Attempt proof with automation first:
+    Try in order: ring → omega → linarith → norm_num → simp → decide → aesop
+    For each tactic attempt:
+      Edit the .lean file
+      Run: python .claude/skills/axiom-lean-prover/scripts/axle_check.py proofs/Lemmas.lean
+      ✓ STATUS: COMPLETE → lemma proved ✓
+      ✗ STATUS: ERROR → read the message, adjust the tactic or add intermediate steps
+
+  STEP 3 — Manual tactic proof if automation fails:
+    Break the proof into smaller steps using `have h : ... := by ...`
+    Use `intro`, `apply`, `rw`, `exact`, `cases`, `induction` as appropriate
+    After each meaningful edit, re-run axle_check.py to check progress
+    Read AXLE error messages carefully — positions (`-:L:C`) refer to .axle_last_check.lean
+
+  STEP 4 — Confirm no sorry remains in this file:
+    python .claude/skills/axiom-lean-prover/scripts/axle_check.py proofs/Lemmas.lean
+    (STATUS must be COMPLETE, not INCOMPLETE_SORRY)
+
+  LEAN PROOF WRITING GUIDELINES:
+  - Start every file with `import Mathlib` (full import)
+  - Add a doc comment /-- ... -/ before every theorem explaining what it says
+  - Write an informal proof sketch as a comment block before the tactic proof
+  - Name intermediate claims with `have h_name : ... := by ...`
+  - When citing a Mathlib lemma, add a comment: -- from Mathlib: Lemma.Name
+  - Re-check after every complete lemma (not just at the end)
+  - Save results/ with a proof_log.md tracking which lemmas are proved
+
+  PYTHON EXPLORATION (in parallel with proof construction):
+  {{ code_workflow }}
+  - Use Python/SymPy in src/ to:
+    - Verify statements numerically before formalizing
+    - Search for counterexamples to candidate lemmas
+    - Generate examples that guide the Lean proof strategy
+  - This is EXPLORATORY only — it does not constitute a proof
+
+  → WHEN COMPLETE: Immediately proceed to Phase 4
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 4: Proof Verification & Hardening (15-25 min)
+────────────────────────────────────────────────────────────────────────────────
+  ✓ Run a full verification of the whole project:
+      python .claude/skills/axiom-lean-prover/scripts/axle_check.py --dir proofs/
+  ✓ Confirm STATUS: COMPLETE (exit 0) with no INCOMPLETE_SORRY:
+      python .claude/skills/axiom-lean-prover/scripts/axle_check.py --dir proofs/ \
+        && echo "All proofs formally complete ✓" \
+        || echo "INCOMPLETE OR FAILING PROOFS REMAIN"
+  ✓ Verify all theorems in your plan are proved (check planning.md checklist)
+  ✓ Run Python exploration scripts to test boundary cases and sanity-check results
+  ✓ For any non-Mathlib lemma: confirm it was inlined+proved, or assumed as a cited `axiom`
+      (never left as `sorry`). Audit each main result with:
+        python .claude/skills/axiom-lean-prover/scripts/axle_check.py --code '#print axioms <thm>' --json
+  ✓ Document verification status in results/verification.md:
+      - axle_check.py STATUS and exit code
+      - AXLE environment used (e.g. lean-4.29.0) — pins Lean & Mathlib versions
+      - list of any remaining `sorry` (should be none)
+      - list of any assumed `axiom`s with their citations (results are "verified modulo" these)
+
+  → WHEN COMPLETE: Immediately proceed to Phase 5
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 5: Refinement and Strengthening (15-25 min)
+────────────────────────────────────────────────────────────────────────────────
+  ✓ Review proofs for unnecessary hypotheses (can any be weakened?)
+  ✓ Check: can the conclusion be strengthened?
+  ✓ Find tight counterexamples showing hypotheses are necessary (Python)
+  ✓ Look for natural Lean generalizations (e.g., replace ℕ with a general monoid)
+  ✓ Clean up Lean code: remove redundant `have`s, improve tactic style
+  ✓ Ensure all definitions are in Definitions.lean (no ad-hoc inline definitions)
+  ✓ Re-run axle_check.py --dir proofs/ after refactoring (must stay COMPLETE)
+
+  → WHEN COMPLETE: Immediately proceed to Phase 6
+
+────────────────────────────────────────────────────────────────────────────────
+Phase 6: Final Documentation (20-30 min) — MANDATORY BEFORE ENDING SESSION
+────────────────────────────────────────────────────────────────────────────────
+  ✓ Create REPORT.md with ACTUAL mathematical results (see structure below)
+  ✓ Create README.md with project overview
+  ✓ Ensure proofs/ is organized with comments
+  ✓ Verify results/ contains verification.md with AXLE status
+
+  → WHEN COMPLETE: Session is finished
+
+CRITICAL REMINDERS:
+- This is a SINGLE CONTINUOUS SESSION covering all 6 phases
+- `axle_check.py` is your ground truth — informal argument is not enough
+- A proof with `sorry` is NOT a proof (AXLE reports it COMPLETE-with-warning =
+  INCOMPLETE_SORRY); resolve every sorry before reporting completion
+- If a proof is too hard to formalize in time, mark it `sorry`, document the
+  informal argument clearly, and note it as future work in REPORT.md
+- REPORT.md is mandatory even if some proofs remain as `sorry`
+
+════════════════════════════════════════════════════════════════════════════════
+WORKSPACE DIRECTORY AND DIRECTORY SAFETY
+────────────────────────────────────────────────────────────────────────────────
+You are running in the project workspace directory: {{ work_dir }}
+
+MANDATORY VERIFICATION POINTS — Run `pwd` and verify location:
+✓ Before any mkdir, file write, or download
+✓ Before and after any cd command — ALWAYS cd back to workspace root
+✓ When starting each new phase
+
+SAFE PATTERN (no cd needed for verification — axle_check.py runs from workspace root):
+  pwd                                                                        # verify location
+  python .claude/skills/axiom-lean-prover/scripts/axle_check.py --dir proofs/  # verify proofs
+
+⚠️  Keep all Lean files under proofs/
+⚠️  NEVER run cd .. (parent directory is dangerous)
+
+Remember:
+- READ literature_review.md and resources.md first
+- Python scripts go in src/ (for exploration only)
+- Lean proofs go in proofs/
+{{ code_reminder }}
+- All your work stays within {{ work_dir }}
+
+════════════════════════════════════════════════════════════════════════════════
+PHASE 6 REQUIREMENTS — WHAT TO INCLUDE IN FINAL DOCUMENTATION
+════════════════════════════════════════════════════════════════════════════════
+
+1. REPORT.md — Mathematics (Axiom AXLE) research report:
+   - Executive Summary (2-3 paragraphs; state verification status explicitly)
+   - Research Question (the conjecture or problem)
+   - Definitions and Notation (informal descriptions; Lean types in code blocks)
+   - Statement of Results (theorem statements in informal math + Lean type signatures)
+   - Proof Sketches (informal argument for each theorem; full proofs are in Lean files)
+   - Lean Formalization (file structure, key Mathlib lemmas used, AXLE verification)
+   - Verification Status ("axle_check.py reports COMPLETE, no sorry" or list of open sorry,
+     plus the AXLE environment used)
+   - Discussion (implications, connections, what Mathlib lemmas were reused)
+   - Open Questions (results that remain conjectural or unformalized)
+   - Conclusions and Future Work
+   - References (papers + Lean/Mathlib + Axiom AXLE environment version info)
+
+2. README.md — Quick overview:
+   - Brief description (2-3 sentences)
+   - Key results (bullet points: theorem names + informal statements)
+   - Verification: `axle_check.py --dir proofs/` must report COMPLETE
+   - File structure overview
+   - Link to REPORT.md
+
+════════════════════════════════════════════════════════════════════════════════
+SESSION COMPLETION
+════════════════════════════════════════════════════════════════════════════════
+
+The session is COMPLETE when:
+✓ All phases (1-6) have been attempted
+✓ proofs/ exists and `axle_check.py --dir proofs/` runs (COMPLETE if proofs done)
+✓ REPORT.md documents actual results and verification status
+✓ README.md is created
+✓ results/verification.md records the AXLE status and environment
+✓ src/ contains Python exploration scripts with comments
+
+If some proofs remain as `sorry`, the session is still complete — document
+what was proved, what remains, and the informal argument for each open item.

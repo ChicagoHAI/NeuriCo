@@ -137,6 +137,27 @@ domains:
       - bifurcation
       - dynamical system
 
+  # Default Lean-enabled mathematics domain. Every theorem is machine-checked by Lean 4 + Mathlib via the hosted Axiom AXLE API
+  mathematics_lean:
+    name: "Mathematics (Lean)"
+    description: "Formal mathematics with Lean 4 proof verification: every theorem is machine-checked against Mathlib via the hosted Axiom AXLE API (no local Lean toolchain; runs on the default Neurico image). Choose this over plain 'mathematics' when the idea calls for machine-checked / formally-verified proofs, a proof assistant, Lean, or Mathlib."
+    has_template: true
+    paper_style: ams
+    keywords:
+      - lean
+      - lean 4
+      - lean4
+      - mathlib
+      - formal proof
+      - formally verified
+      - formal verification
+      - machine-checked
+      - machine checked
+      - proof assistant
+      - type checker
+      - axle
+      - axiom axle
+
   finance:
     name: "Finance"
     description: "Empirical finance: banking, corporate finance, asset pricing, financial regulation, panel data analysis"
