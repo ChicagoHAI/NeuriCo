@@ -110,7 +110,8 @@ class PromptGenerator:
         return template.render(**variables)
 
     def generate_research_prompt(self, idea: Dict[str, Any],
-                                 root_dir: Optional[Path] = None) -> str:
+                                 root_dir: Optional[Path] = None,
+                                 scoring_enabled: bool = False) -> str:
         """
         Generate the main research prompt from an idea specification.
 
@@ -118,10 +119,14 @@ class PromptGenerator:
         1. Base researcher template
         2. Domain-specific template
         3. Idea-specific content (hypothesis, constraints, etc.)
+        4. (scoring mode) Scoring protocol / output-adherence addendum
 
         Args:
             idea: Idea specification (parsed from YAML)
             root_dir: Root directory for the research project (for paths)
+            scoring_enabled: If True, append base/researcher_scoring_addendum.txt
+                             as an extra banner-delimited section. Default False
+                             preserves bit-identical behavior to the legacy mode.
 
         Returns:
             Complete research prompt string
@@ -190,6 +195,26 @@ class PromptGenerator:
                 domain_template,
                 ""
             ])
+
+        # Scoring-mode addendum: when the rule_maker has written a per-run
+        # artifact protocol under scoring/, append the corresponding
+        # instructions so the runner reads interface.md and conforms to it.
+        # In default (non-scoring) mode this block is skipped and the prompt
+        # is bit-identical to the legacy version.
+        if scoring_enabled:
+            try:
+                addendum = self.load_template('base/researcher_scoring_addendum.txt')
+            except FileNotFoundError:
+                print("⚠️  scoring_enabled=True but "
+                      "templates/base/researcher_scoring_addendum.txt not found; "
+                      "continuing without scoring addendum")
+                addendum = ""
+            if addendum:
+                prompt_parts.extend([
+                    "=" * 80,
+                    addendum,
+                    ""
+                ])
 
         # Join all parts
         full_prompt = "\n".join(prompt_parts)
