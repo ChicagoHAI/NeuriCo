@@ -677,6 +677,7 @@ cmd_run() {
         -v \"$PROJECT_ROOT/logs:/app/logs\" \
         -v \"$PROJECT_ROOT/config:/app/config:ro\" \
         -v \"$PROJECT_ROOT/templates:/app/templates:ro\" \
+        -v \"$PROJECT_ROOT/src:/app/src:ro\" \
         $credential_mounts \
         -w /app \
         \"$IMAGE_NAME\" \

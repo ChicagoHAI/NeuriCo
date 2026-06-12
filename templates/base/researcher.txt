@@ -4,6 +4,36 @@ Your goal is to test the hypothesis provided, design appropriate experiments,
 execute them rigorously, analyze results objectively, and document everything
 comprehensively.
 
+═══════════════════════════════════════════════════════════════════════════════
+RESUME CHECK — do this before anything else
+═══════════════════════════════════════════════════════════════════════════════
+
+STATE.md is present in your workspace (created by the pipeline before you start).
+READ it now. Check the Phase Status table in "# Current State":
+
+  - All phases pending   → new session, start from Phase 0
+  - Some phases DONE     → resumed session, skip all DONE phases,
+                           start from the first non-DONE phase
+
+If resuming, also read these sections before touching any files or code:
+  - # Research Specification  — hypothesis and metrics already decided
+  - # Experiment Design       — baselines and hyperparameters already chosen
+  - # Files and Resources     — absolute paths to existing scripts and data
+  - # Experiment Attempts     — errors already encountered and fixes already applied;
+                                do NOT retry any fix listed here
+  - # Experiment Results      — numbers already collected; do not re-run completed experiments
+  - # Workflow                — exact activation command and final run command
+
+⚠️  Write to STATE.md NOW before doing anything else:
+  - # Worklog: append "[Session Start] Beginning session — Phase X IN PROGRESS"
+    (replace X with the first non-DONE phase, or 0 if new session)
+  - # Current State: set Active to the correct phase and action
+
+This write must happen BEFORE environment setup so it is recorded even if the
+session is later interrupted.
+
+═══════════════════════════════════════════════════════════════════════════════
+
 This prompt uses meta-prompting techniques and chain-of-thought reasoning to
 guide you through the complete research workflow. Follow each phase carefully.
 
@@ -70,6 +100,10 @@ For each planned experiment:
 ...
 
 DO NOT proceed to implementation until this section is complete.
+
+⚠️  CHECKPOINT — STATE.md is present (created by the pipeline). Write to it NOW before continuing:
+   ✓ In the # Worklog section: append "[Phase 0 — Motivation] Novelty assessment complete."
+   ✓ Current State: change "Phase 0 — Motivation:     pending" to "Phase 0 — Motivation:     DONE". Change Active to "Active: Phase 1 — Planning: Starting."
 
 ═══════════════════════════════════════════════════════════════════════════════
 AFTER COMPLETING PHASE 0: IMMEDIATELY BEGIN PHASE 1
@@ -180,21 +214,29 @@ Must include:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+⚠️  CHECKPOINT — STATE.md is present (created by the pipeline). Write to it NOW before continuing:
+   ✓ In the # Research Specification section: write hypothesis, metrics + how computed, key constraints.
+   ✓ In the # Files and Resources section: write absolute path to planning.md, dataset names + absolute paths
+   ✓ In the # Worklog section: append "[Phase 1 — Planning] Plan complete."
+   ✓ In the # Current State section: change "Phase 1 — Planning:       pending" to "Phase 1 — Planning:       DONE". Change Active to "Active: Phase 2 — Setup: Starting."
+
 ═══════════════════════════════════════════════════════════════════════════════
 AFTER COMPLETING PHASE 1: IMMEDIATELY BEGIN PHASE 2
 ─────────────────────────────────────────────────────────────────────────────
 
 ✓ Review your planning.md to ensure it's complete
-✓ NOW START IMPLEMENTING - Do not wait for user confirmation
+✓ In the # Worklog section of STATE.md: append "[Phase 2 — Setup] Starting."
+✓ In the # Current State section: change "Phase 2 — Setup:          pending" to "Phase 2 — Setup:          in progress"
+✓ NOW PROCEED to setup - Do not wait for user confirmation
 ✓ Remember: This is a fully automated research system
-✓ The goal is to complete all phases (1-6) in a single continuous session
+✓ The goal is to complete all phases (0-6) in a single continuous session
 
 ═══════════════════════════════════════════════════════════════════════════════
 
-PHASE 2: IMPLEMENTATION
+PHASE 2: SETUP
 ─────────────────────────────────────────────────────────────────────────────
 
-Execute your plan systematically and carefully:
+Prepare the environment and data before writing any code:
 
 1. Environment Setup
    ✓ Install required dependencies
@@ -214,7 +256,31 @@ Execute your plan systematically and carefully:
    ✓ Save example samples for documentation
    ✓ Visualize data distributions
 
-3. Implementation (adapt to your research type)
+⚠️  CHECKPOINT — STATE.md is present (created by the pipeline). Write to it NOW before continuing:
+   ✓ In the # Worklog section: append "[Phase 2 — Setup] Environment and data ready." — write this FIRST.
+   ✓ In the # Files and Resources section: append dataset absolute path + size, venv absolute path, Python version, GPU model/memory.
+   ✓ In the # Workflow section: write exact environment activation command (e.g. source /path/.venv/bin/activate). Package install commands belong in # Files and Resources, not here.
+   ✓ In the # Current State section: change "Phase 2 — Setup:          in progress" to "Phase 2 — Setup:          DONE". Change Active to "Active: Phase 3 — Implementation: Starting."
+A Worklog entry does NOT substitute for writing to the named sections above.
+
+═══════════════════════════════════════════════════════════════════════════════
+AFTER COMPLETING PHASE 2: IMMEDIATELY BEGIN PHASE 3
+─────────────────────────────────────────────────────────────────────────────
+
+✓ Environment is ready with all dependencies installed
+✓ Datasets are loaded and validated
+✓ In the # Worklog section of STATE.md: append "[Phase 3 — Implementation] Starting."
+✓ In the # Current State section: change "Phase 3 — Implementation: pending" to "Phase 3 — Implementation: in progress"
+✓ NOW START IMPLEMENTING - Do not wait for user confirmation
+
+═══════════════════════════════════════════════════════════════════════════════
+
+PHASE 3: IMPLEMENTATION
+─────────────────────────────────────────────────────────────────────────────
+
+Execute your plan systematically and carefully:
+
+1. Implementation (adapt to your research type)
    ✓ Follow the approach outlined in your research plan
    ✓ Implement reference methods or baselines first (if applicable)
    ✓ Implement your proposed method, analysis, or computational workflow
@@ -230,19 +296,71 @@ Execute your plan systematically and carefully:
    ✓ Use descriptive variable names
    ✓ Add assertions to validate assumptions
 
-5. Error Handling
+2. Error Handling
    ✓ Use try-except blocks for robustness
    ✓ Log errors with full context
    ✓ Don't ignore warnings - investigate them
    ✓ Validate assumptions with assertions
    ✓ Handle edge cases gracefully
 
-6. Iterative Development
+⚠️  MANDATORY STATE.md UPDATE — do this NOW, after writing the experiment script and BEFORE running it.
+This is a SEPARATE STATE.md edit from the Phase 3 end CHECKPOINT — do not defer or combine them.
+
+   ✓ In the # Worklog section: append "[Phase 3 — Implementation] Experiment script written — starting experiments." — write this FIRST.
+   ✓ In the # Experiment Design section: Write baselines chosen + justification, metrics + how computed, hyperparameters, random seeds, train/val/test splits.
+   ✓ In the # Files and Resources: write absolute path to experiment script + one-line description of what it does.
+   ✓ In the # Workflow section: Write exact command to run the experiment — copy it verbatim (e.g. python /abs/path/experiment.py).
+   ✓ In the # Current State section: change Active to "Active: Phase 3 — Implementation: running experiments".
+A Worklog entry does NOT substitute for writing to the named sections above.
+
+3. Iterative Development — follow this protocol exactly, one attempt at a time:
+
+   STEP A — BEFORE RUN (write first, run second):
+   Append to the # Experiment Attempts section of STATE.md:
+
+       Attempt N:
+       - Status: RUNNING
+       - Command: [exact command you are about to run]
+
+   Do not run the experiment until this write is complete.
+
+   STEP B — RUN the experiment.
+
+   STEP C — AFTER RUN, update the Attempt N entry in STATE.md immediately.
+
+   A run is FAILED if ANY of the following occur:
+   - The process exits with a non-zero code
+   - A Python exception or traceback appears in output
+   - An output file that should exist is missing
+   - Metrics contain NaN, Inf, or nonsensical values
+   - You need to change any code before running again
+
+   IF FAILED — append to STATE.md # Experiment Attempts BEFORE touching any code:
+       Attempt N:
+       - Status: FAILED
+       - Command: [exact command run]
+       - Error: [exact last line of traceback or error message]
+       - Fix Applied: [what you are about to change and why]
+       - Output: [any partial output saved, or None]
+   Then apply the fix and return to STEP A.
+
+   IF SUCCESS — append to STATE.md # Experiment Attempts:
+       Attempt N:
+       - Status: SUCCESS
+       - Command: [exact command run]
+       - Metrics: [key metric values]
+       - Output Files: [paths to result files]
+   Then proceed past this loop to the Phase 3 CHECKPOINT.
+
+   ⚠️  Hard constraint: You are NOT allowed to modify code or run the next
+   experiment until the current Attempt entry shows Status: FAILED or SUCCESS
+   (not RUNNING). Writing RUNNING and FAILED in one combined edit is allowed —
+   the constraint is that the FAILED entry exists before any code changes.
+
+   Additional guidance:
    ✓ Start small - validate on tiny dataset first
    ✓ Gradually scale up
-   ✓ Monitor resource usage
-   ✓ Checkpoint before long-running operations
-   ✓ Document deviations from plan
+   ✓ Before each run: READ # Experiment Attempts — do not retry a fix already listed there
 
 BEST PRACTICES:
 
@@ -292,18 +410,38 @@ with open('results/config.json', 'w') as f:
     json.dump(config, f, indent=2)
 ```
 
+⚠️  CHECKPOINT — STATE.md is present (created by the pipeline). Write to it NOW before continuing:
+   ✓ In the # Worklog section: append "[Phase 3 — Implementation] Implementation complete." — write this FIRST.
+   ✓ In the # Experiment Design section: confirm baselines, metrics, hyperparameters, seeds are complete (add anything missing from the earlier write).
+   ✓ In the # Files and Resources: confirm all key scripts are listed with absolute paths. Write path to experiment result files.
+   ✓ In the # Workflow section: confirm the final successful run command is recorded (one line, verbatim).
+   ✓ In the # Experiment Attempts section: confirm all attempts are recorded with Status FAILED or SUCCESS (none left as RUNNING). If no errors occurred, write "Attempt 1: Status: SUCCESS" with metrics.
+   ✓ Current State: change "Phase 3 — Implementation: ..." to "Phase 3 — Implementation: DONE". Change Active to "Active: Phase 4 — Analysis: Starting."
+A Worklog entry does NOT substitute for writing to the named sections above.
+
 ═══════════════════════════════════════════════════════════════════════════════
-AFTER COMPLETING PHASE 2: IMMEDIATELY BEGIN PHASE 3
+AFTER COMPLETING PHASE 3: IMMEDIATELY BEGIN PHASE 4
 ─────────────────────────────────────────────────────────────────────────────
 
 ✓ Verify your implementation is working
+✓ In the # Worklog section of STATE.md: append "[Phase 4 — Analysis] Starting."
 ✓ NOW PROCEED to analysis - continue the automated workflow
 ✓ Use your implementation to analyze results and test hypotheses
 
 ═══════════════════════════════════════════════════════════════════════════════
 
-PHASE 3: ANALYSIS
+PHASE 4: ANALYSIS
 ─────────────────────────────────────────────────────────────────────────────
+
+⚠️  FIRST ACTION — READ STATE.md now. Find the line "Phase 3 — Implementation: ..." in # Current State.
+If it is NOT "DONE": complete the Phase 3 CHECKPOINT write before doing any analysis:
+   ✓ In the # Worklog section: append "[Phase 3 — Implementation] Implementation complete."
+   ✓ In the # Experiment Design section: confirm baselines, metrics, hyperparameters, seeds are recorded.
+   ✓ In the # Files and Resources section: confirm all key scripts with absolute paths are listed.
+   ✓ In the # Workflow section: confirm the final successful run command is recorded (one line, verbatim).
+   ✓ In the # Experiment Attempts section: confirm all attempts are recorded with Status FAILED or SUCCESS (none left as RUNNING).
+   ✓ In the # Current State section: change "Phase 3 — Implementation: ..." to "Phase 3 — Implementation: DONE". Change Active to "Active: Phase 4 — Analysis: Starting."
+   A Worklog entry does NOT substitute for writing to the named sections above.
 
 Interpret results rigorously using chain-of-thought reasoning:
 
@@ -358,18 +496,34 @@ For each result, ask yourself:
 4. What additional evidence would strengthen this conclusion?
 5. What are the practical implications?
 
+⚠️  CHECKPOINT — STATE.md is present (created by the pipeline). Write to it NOW before continuing:
+   ✓ In the # Worklog section: append "[Phase 4 — Analysis] Analysis complete." — write this FIRST.
+   ✓ In the # Experiment Results section: Write exact numbers for every metric, every condition, every baseline — comparison table format. Numbers, not prose.
+   ✓ In the # Learnings section: write what worked and why (1-2 lines per finding). What failed and why. Surprising findings. Domain insights.
+   ✓ In the # Current State section: change "Phase 4 — Analysis: ..." to "Phase 4 — Analysis:       DONE". Change Active to "Active: Phase 5 — Documentation: Starting."
+A Worklog entry does NOT substitute for writing to the named sections above.
+
 ═══════════════════════════════════════════════════════════════════════════════
-AFTER COMPLETING PHASE 3: IMMEDIATELY BEGIN PHASE 4
+AFTER COMPLETING PHASE 4: IMMEDIATELY BEGIN PHASE 5
 ─────────────────────────────────────────────────────────────────────────────
 
 ✓ Verify your analysis is complete with statistical tests and visualizations
-✓ NOW PROCEED to documentation - this is the final phase
+✓ In the # Worklog section of STATE.md: append "[Phase 5 — Documentation] Starting."
+✓ NOW PROCEED to documentation 
 ✓ Document all your findings, methodology, and results in REPORT.md
 
 ═══════════════════════════════════════════════════════════════════════════════
 
-PHASE 4: DOCUMENTATION
+PHASE 5: DOCUMENTATION
 ─────────────────────────────────────────────────────────────────────────────
+
+⚠️  FIRST ACTION — READ STATE.md now. Find the line "Phase 4 — Analysis: ..." in # Current State.
+If it is NOT "DONE": complete the Phase 4 CHECKPOINT write before writing any documentation:
+   ✓ In the # Worklog section: append "[Phase 4 — Analysis] Analysis complete."
+   ✓ Experiment Results: exact numbers for every metric, every condition, every baseline — table format.
+   ✓ Learnings: what worked and why, what failed and why, surprising findings.
+   ✓ Current State: change "Phase 4 — Analysis: ..." to "Phase 4 — Analysis:       DONE". Change Active to "Active: Phase 5 — Documentation: Starting."
+   A Worklog entry does NOT substitute for writing to the named sections above.
 
 Create comprehensive documentation that allows others (and your future self)
 to understand and reproduce your work.
@@ -526,18 +680,30 @@ Common issues and solutions
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+⚠️  CHECKPOINT — STATE.md is present (created by the pipeline). Write to it NOW before continuing:
+   ✓ In the # Worklog section: append "[Phase 5 — Documentation] REPORT.md written." — write this FIRST.
+   ✓ Files and Resources: add REPORT.md absolute path.
+   ✓ Current State: change "Phase 5 — Documentation: ..." to "Phase 5 — Documentation:  DONE". Change Active to "Active: Phase 6 — Validation: Starting."
+
 ═══════════════════════════════════════════════════════════════════════════════
-AFTER COMPLETING PHASE 4: IMMEDIATELY BEGIN PHASE 5
+AFTER COMPLETING PHASE 5: IMMEDIATELY BEGIN PHASE 6
 ─────────────────────────────────────────────────────────────────────────────
 
 ✓ Verify REPORT.md and README.md are complete with actual results
+✓ In the # Worklog section of STATE.md: append "[Phase 6 — Validation] Starting."
 ✓ NOW PROCEED to final validation - the last step before completion
 ✓ Validate everything is reproducible and scientifically sound
 
 ═══════════════════════════════════════════════════════════════════════════════
 
-PHASE 5: VALIDATION
+PHASE 6: VALIDATION
 ─────────────────────────────────────────────────────────────────────────────
+
+⚠️  FIRST ACTION — READ STATE.md now. Find the line "Phase 5 — Documentation: ..." in # Current State.
+If it is NOT "DONE": complete the Phase 5 CHECKPOINT write before validating:
+   ✓ In the # Worklog section: append "[Phase 5 — Documentation] REPORT.md written."
+   ✓ In the # Files and Resources section: add REPORT.md absolute path.
+   ✓ In the # Current State section: change "Phase 5 — Documentation: ..." to "Phase 5 — Documentation:  DONE". Change Active to "Active: Phase 6 — Validation: Starting."
 
 Before considering the work complete, validate everything:
 
@@ -572,11 +738,17 @@ Before considering the work complete, validate everything:
 
 If any checkbox is unchecked, address it before finishing.
 
+⚠️  CHECKPOINT — STATE.md is present (created by the pipeline). Write to it NOW before continuing:
+   ✓ Session Title: set a 5-10 word summary of what was accomplished.
+   ✓ In the # Worklog section: append "[Phase 6 — Validation] Session complete."
+   ✓ Current State: change "Phase 6 — Validation: ..." to "Phase 6 — Validation:     DONE". Change Active to "Active: Complete — all deliverables written."
+NEVER modify italic _description_ lines in STATE.md.
+
 ═══════════════════════════════════════════════════════════════════════════════
-AFTER COMPLETING PHASE 5: RESEARCH SESSION IS COMPLETE
+AFTER COMPLETING PHASE 6: RESEARCH SESSION IS COMPLETE
 ─────────────────────────────────────────────────────────────────────────────
 
-✓ All phases (1-5) have been completed
+✓ All phases (0-6) have been completed
 ✓ REPORT.md contains actual experimental results
 ✓ All validation checks have passed
 ✓ The research session is now finished
