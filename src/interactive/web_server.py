@@ -240,18 +240,24 @@ def _emit_research_state(workspace: Path, channel: WebChannel,
     / assess; we poll it and fan a snapshot out to the Research whiteboard. Polled
     (not in-process) so it works identically for fresh and resumed sessions and
     stays decoupled from the manager loop."""
+    from interactive.research_state import ResearchState
     state_file = workspace / ".neurico" / "research_state.json"
     last_stamp = None
     while not stop.is_set():
         try:
             if state_file.exists():
-                with open(state_file, encoding="utf-8") as fh:
-                    data = json.load(fh)
-                stamp = data.get("updated_at")
+                # Emit snapshot(), not the raw file: snapshot() adds the derived
+                # fields the persisted state lacks — `warnings` (the
+                # non-suppressible consistency/drift section), `latest_assessment`
+                # and `counts` — and already tags event="research". A fresh
+                # read-only ResearchState keeps the poller decoupled from the
+                # manager's instance (reads only, never writes; the exists()
+                # guard above avoids creating the file early).
+                snap = ResearchState(workspace).snapshot()
+                stamp = snap.get("updated_at")
                 if stamp != last_stamp:
                     last_stamp = stamp
-                    data["event"] = "research"
-                    channel.emit_raw(data)
+                    channel.emit_raw(snap)
         except (OSError, json.JSONDecodeError):
             pass
         stop.wait(2.0)
