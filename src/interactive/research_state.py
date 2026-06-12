@@ -106,7 +106,13 @@ class ResearchState:
 
     # -------------------------------------------------------------- mutate
     def _next_id(self, key: str, prefix: str) -> str:
-        return f"{prefix}{len(self.state.get(key, [])) + 1}"
+        # Derive from the max existing id rather than the list length: the lists
+        # are append-only today (so max+1 == len+1), but length-based ids would
+        # collide the moment any list gains a delete/prune path.
+        nums = [int(x["id"][len(prefix):]) for x in self.state.get(key, [])
+                if str(x.get("id", "")).startswith(prefix)
+                and x["id"][len(prefix):].isdigit()]
+        return f"{prefix}{(max(nums) + 1) if nums else 1}"
 
     def upsert_hypothesis(self, statement: str, status: str = "alive",
                           evidence: str = "", hid: Optional[str] = None) -> str:
@@ -223,6 +229,10 @@ class ResearchState:
             if e["run_id"] == run_id:
                 if status:
                     e["status"] = status
+                    # Stamp when the run reaches a terminal state so the drift
+                    # check can compare against completion, not creation (`ts`).
+                    if status in ("done", "failed") and not e.get("completed_at"):
+                        e["completed_at"] = _now()
                     changed = True
                 if result:
                     e["result"] = result.strip()
@@ -304,8 +314,9 @@ class ResearchState:
                 continue
             # Drift: tested by a finished run, but status never moved off
             # alive/uncertain and the hypothesis hasn't been touched since the run.
+            done_ts = e.get("completed_at") or e.get("ts", "")
             if h["status"] in ("alive", "uncertain") and \
-                    h.get("updated_at", "") <= e.get("ts", ""):
+                    h.get("updated_at", "") <= done_ts:
                 warns.append(
                     f"Hypothesis {h['id']} was tested by {e['run_id']} "
                     f"({e['status']}) but is still '{h['status']}' — set it to "

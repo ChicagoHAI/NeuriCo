@@ -560,7 +560,7 @@ def main():
             from core.idea_manager import IdeaManager
             im = IdeaManager(PROJECT_ROOT / "ideas")
             im.update_status(args.idea_id, "in_progress")
-            print(f"[Idea moved to in_progress]")
+            print("[Idea moved to in_progress]")
             # Note: this MOVES the file (submitted/ -> in_progress/), making the
             # captured idea_file path stale. The agent dispatch in tools.py (#104)
             # falls back to ideas/in_progress/<name> at launch time, so no
