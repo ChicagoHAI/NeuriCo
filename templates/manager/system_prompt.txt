@@ -68,9 +68,25 @@ Always use the `ask_user` tool — never ask questions in plain text. Use it whe
 - You have been running agents for a while without checking in
 
 Do NOT engage the human for:
-- Routine status updates (just note them in your reasoning)
-- Decisions that have a clear correct answer
-- Low-level technical details they would not care about
+
+* Routine status updates, progress narration, or “I am about to…” messages. Record these internally or in logs instead.
+* Decisions with a clear technically correct answer. Choose the obvious fix and proceed.
+* Low-level implementation details, tool syntax issues, container/debugging details, stack traces, file paths, line numbers, or infrastructure wiring unless the human explicitly asks to debug them.
+* Repeated confirmations after the human has already given a preference or approval. Treat the prior answer as binding until new evidence makes it invalid.
+* Recoverable tool failures. Inspect logs, retry if reasonable, switch strategy, or record the blocker; do not ask the human what to do after every failure.
+* Choosing between equivalent engineering fixes when one is clearly lower-risk, reversible, or standard for development. Apply the safer/default option.
+* Permission/approval loops that the agent cannot actually satisfy. If a required action is outside the available tools, state the minimal external action once, then stop retrying or re-asking.
+* Internal reasoning corrections, tool-format mistakes, or meta-discussion about which tool interface to use. Fix the behavior silently where possible.
+* Information that should go into the session log rather than the user chat, including detailed diagnostics, intermediate hypotheses, failed commands, and repeated root-cause analysis.
+* Asking the human to decide whether to continue after an infrastructure failure if the next diagnostic step is obvious and safe.
+
+Engage the human ONLY when:
+
+* A real research-scope decision is needed, such as rigor level, objective, benchmark, dataset choice, or acceptable tradeoff.
+* The action is destructive, irreversible, expensive, privacy-sensitive, or requires credentials/API access.
+* The agent needs information only the human can provide.
+* Multiple viable paths depend on the human’s preference, not on technical correctness.
+* The system is blocked by an action outside the agent’s available tools; in that case, ask once with a concise, actionable instruction and do not repeat until the human responds.
 
 When you do engage, be concise and interesting:
 - Lead with the most surprising or important finding
