@@ -21,15 +21,15 @@ and tracks pipeline state.
 """
 
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 import json
-import shutil
 from datetime import datetime
 import time
 
 from agents.resource_finder import run_resource_finder
 from agents.rule_maker import run_rule_maker
 from core.scorer import run_scorer
+from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
 from templates.research_agent_instructions import generate_instructions
 
 
@@ -43,86 +43,77 @@ class PipelineState:
 
         # Initialize or load state
         if self.state_file.exists():
-            with open(self.state_file, 'r', encoding='utf-8') as f:
+            with open(self.state_file, "r", encoding="utf-8") as f:
                 self.state = json.load(f)
         else:
             self.state = {
-                'created_at': datetime.now().isoformat(),
-                'stages': {},
-                'current_stage': None,
-                'completed': False
+                "created_at": datetime.now().isoformat(),
+                "stages": {},
+                "current_stage": None,
+                "completed": False,
             }
             self._save()
 
     def _save(self):
         """Save state to disk."""
-        with open(self.state_file, 'w', encoding='utf-8') as f:
+        with open(self.state_file, "w", encoding="utf-8") as f:
             json.dump(self.state, f, indent=2)
 
     def start_stage(self, stage_name: str):
         """Mark a stage as started."""
-        self.state['current_stage'] = stage_name
-        self.state['stages'][stage_name] = {
-            'status': 'in_progress',
-            'started_at': datetime.now().isoformat(),
-            'completed_at': None,
-            'success': None,
-            'outputs': {}
+        self.state["current_stage"] = stage_name
+        self.state["stages"][stage_name] = {
+            "status": "in_progress",
+            "started_at": datetime.now().isoformat(),
+            "completed_at": None,
+            "success": None,
+            "outputs": {},
         }
         self._save()
 
     def complete_stage(self, stage_name: str, success: bool, outputs: Optional[Dict] = None):
         """Mark a stage as completed."""
-        if stage_name not in self.state['stages']:
-            self.state['stages'][stage_name] = {}
+        if stage_name not in self.state["stages"]:
+            self.state["stages"][stage_name] = {}
 
-        self.state['stages'][stage_name].update({
-            'status': 'completed' if success else 'failed',
-            'completed_at': datetime.now().isoformat(),
-            'success': success,
-            'outputs': outputs or {}
-        })
-        self.state['current_stage'] = None
+        self.state["stages"][stage_name].update(
+            {
+                "status": "completed" if success else "failed",
+                "completed_at": datetime.now().isoformat(),
+                "success": success,
+                "outputs": outputs or {},
+            }
+        )
+        self.state["current_stage"] = None
         self._save()
 
     def mark_completed(self):
         """Mark entire pipeline as completed."""
-        self.state['completed'] = True
-        self.state['completed_at'] = datetime.now().isoformat()
+        self.state["completed"] = True
+        self.state["completed_at"] = datetime.now().isoformat()
         self._save()
 
     def get_stage_status(self, stage_name: str) -> Optional[str]:
         """Get status of a stage (in_progress, completed, failed, or None)."""
-        return self.state['stages'].get(stage_name, {}).get('status')
+        return self.state["stages"].get(stage_name, {}).get("status")
 
     def is_stage_completed(self, stage_name: str) -> bool:
         """Check if a stage completed successfully."""
-        stage = self.state['stages'].get(stage_name, {})
-        return stage.get('status') == 'completed' and stage.get('success', False)
+        stage = self.state["stages"].get(stage_name, {})
+        return stage.get("status") == "completed" and stage.get("success", False)
 
 
 # CLI commands for different providers (same as resource_finder.py)
 # Note: For claude, we use '-p' (print mode) to enable streaming JSON output
 CLI_COMMANDS = {
-    'claude': 'claude -p',  # Print mode enables streaming JSON output with stdin
-    'codex': 'codex exec',  # Non-interactive mode: read from stdin
-    'gemini': 'gemini'
+    "claude": "claude -p",  # Print mode enables streaming JSON output with stdin
+    "codex": "codex exec",  # Non-interactive mode: read from stdin
+    "gemini": "gemini",
 }
 
 # Stage names tracked in PipelineState when scoring_enabled=True
-RULE_MAKER_STAGE = 'rule_maker'
-SCORER_STAGE = 'scorer'
-
-# Files moved out of the workspace during the experiment_runner stage so the
-# runner cannot read them. Restored before the scorer runs.
-#   - eval.py:           the scoring code itself
-#   - targets.json:      numeric targets + success rule
-#   - rule_maker_log.md: rationale, which references the targets in plain text
-SEALED_FILES: List[str] = [
-    "scoring/eval.py",
-    "scoring/targets.json",
-    "scoring/rule_maker_log.md",
-]
+RULE_MAKER_STAGE = "rule_maker"
+SCORER_STAGE = "scorer"
 
 
 class ResearchPipelineOrchestrator:
@@ -163,7 +154,7 @@ class ResearchPipelineOrchestrator:
         use_scribe: bool = False,
         scoring_enabled: bool = False,
         rule_maker_timeout: int = 1800,  # 30 min
-        scorer_timeout: int = 600  # 10 min
+        scorer_timeout: int = 600,  # 10 min
     ) -> Dict[str, Any]:
         """
         Execute complete research pipeline.
@@ -204,42 +195,42 @@ class ResearchPipelineOrchestrator:
         print("=" * 80)
         print()
 
-        results = {
-            'success': False,
-            'stages': {},
-            'work_dir': str(self.work_dir)
-        }
+        results = {"success": False, "stages": {}, "work_dir": str(self.work_dir)}
         if scoring_enabled:
-            results['mode'] = 'scored'
+            results["mode"] = "scored"
 
         try:
             # STAGE 1: Resource Finder
             if not skip_resource_finder:
-                results['stages']['resource_finder'] = self._run_resource_finder(
+                results["stages"]["resource_finder"] = self._run_resource_finder(
                     idea=idea,
                     provider=provider,
                     timeout=resource_finder_timeout,
-                    full_permissions=full_permissions
+                    full_permissions=full_permissions,
                 )
 
-                if not results['stages']['resource_finder']['success']:
+                if not results["stages"]["resource_finder"]["success"]:
                     print()
                     print("⚠️  Resource finder stage failed!")
                     print("   You can:")
                     print("   1. Review logs and fix issues")
-                    print("   2. Re-run with --skip-resource-finder if resources are already gathered")
+                    print(
+                        "   2. Re-run with --skip-resource-finder if resources are already gathered"
+                    )
                     print("   3. Manually add resources to workspace and continue")
                     return results
             else:
                 print("⏭️  Skipping resource finder stage (resources assumed to be ready)")
-                self.state.complete_stage('resource_finder', success=True, outputs={'skipped': True})
-                results['stages']['resource_finder'] = {'success': True, 'skipped': True}
+                self.state.complete_stage(
+                    "resource_finder", success=True, outputs={"skipped": True}
+                )
+                results["stages"]["resource_finder"] = {"success": True, "skipped": True}
 
             # STAGE 2: Human Review (Optional)
             if pause_after_resources:
-                results['stages']['human_review'] = self._wait_for_human_approval()
+                results["stages"]["human_review"] = self._wait_for_human_approval()
 
-                if not results['stages']['human_review']['approved']:
+                if not results["stages"]["human_review"]["approved"]:
                     print()
                     print("🛑 Pipeline paused. Human did not approve continuation.")
                     return results
@@ -248,13 +239,13 @@ class ResearchPipelineOrchestrator:
             # Writes scoring/interface.md, scoring/eval.py, scoring/targets.json,
             # scoring/rule_maker_log.md before the runner sees the workspace.
             if scoring_enabled:
-                results['stages'][RULE_MAKER_STAGE] = self._run_rule_maker(
+                results["stages"][RULE_MAKER_STAGE] = self._run_rule_maker(
                     idea=idea,
                     provider=provider,
                     timeout=rule_maker_timeout,
-                    full_permissions=full_permissions
+                    full_permissions=full_permissions,
                 )
-                if not results['stages'][RULE_MAKER_STAGE]['success']:
+                if not results["stages"][RULE_MAKER_STAGE]["success"]:
                     print()
                     print("⚠️  Rule maker stage failed -- aborting.")
                     return results
@@ -266,13 +257,13 @@ class ResearchPipelineOrchestrator:
             # can run.
             sealed_dir = self._seal_runner_inputs() if scoring_enabled else None
             try:
-                results['stages']['experiment_runner'] = self._run_experiment_runner(
+                results["stages"]["experiment_runner"] = self._run_experiment_runner(
                     idea=idea,
                     provider=provider,
                     timeout=experiment_runner_timeout,
                     full_permissions=full_permissions,
                     use_scribe=use_scribe,
-                    scoring_enabled=scoring_enabled
+                    scoring_enabled=scoring_enabled,
                 )
             finally:
                 if scoring_enabled:
@@ -281,23 +272,20 @@ class ResearchPipelineOrchestrator:
             # STAGE 4 (scoring mode only): Scorer
             # Executes scoring/eval.py and captures results.json.
             if scoring_enabled:
-                results['stages'][SCORER_STAGE] = self._run_scorer(
-                    timeout=scorer_timeout
-                )
+                results["stages"][SCORER_STAGE] = self._run_scorer(timeout=scorer_timeout)
 
-            runner_ok = results['stages']['experiment_runner']['success']
+            runner_ok = results["stages"]["experiment_runner"]["success"]
 
             if scoring_enabled:
-                scorer_ok = results['stages'][SCORER_STAGE]['success']
+                scorer_ok = results["stages"][SCORER_STAGE]["success"]
                 if runner_ok and scorer_ok:
                     print()
                     print("🎉 PIPELINE COMPLETED SUCCESSFULLY!")
                     self.state.mark_completed()
-                    results['success'] = True
+                    results["success"] = True
                 elif runner_ok and not scorer_ok:
                     print()
-                    print("⚠️  Runner finished but scorer failed -- artifact "
-                          "may be unmeasured.")
+                    print("⚠️  Runner finished but scorer failed -- artifact may be unmeasured.")
                 else:
                     print()
                     print("⚠️  Pipeline finished with issues.")
@@ -306,7 +294,7 @@ class ResearchPipelineOrchestrator:
                     print()
                     print("🎉 PIPELINE COMPLETED SUCCESSFULLY!")
                     self.state.mark_completed()
-                    results['success'] = True
+                    results["success"] = True
                 else:
                     print()
                     print("⚠️  Experiment runner stage completed with issues.")
@@ -314,14 +302,14 @@ class ResearchPipelineOrchestrator:
         except Exception as e:
             print()
             print(f"❌ Pipeline error: {e}")
-            results['error'] = str(e)
+            results["error"] = str(e)
             raise
 
         finally:
             # Save final results
             results_file = self.work_dir / ".neurico" / "pipeline_results.json"
             results_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(results_file, 'w', encoding='utf-8') as f:
+            with open(results_file, "w", encoding="utf-8") as f:
                 json.dump(results, f, indent=2)
 
             print()
@@ -330,11 +318,7 @@ class ResearchPipelineOrchestrator:
         return results
 
     def _run_resource_finder(
-        self,
-        idea: Dict[str, Any],
-        provider: str,
-        timeout: int,
-        full_permissions: bool
+        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
     ) -> Dict[str, Any]:
         """Run resource finder stage."""
         print()
@@ -343,7 +327,7 @@ class ResearchPipelineOrchestrator:
         print("─" * 80)
         print()
 
-        self.state.start_stage('resource_finder')
+        self.state.start_stage("resource_finder")
 
         try:
             result = run_resource_finder(
@@ -352,16 +336,16 @@ class ResearchPipelineOrchestrator:
                 provider=provider,
                 templates_dir=self.templates_dir,
                 timeout=timeout,
-                full_permissions=full_permissions
+                full_permissions=full_permissions,
             )
 
-            self.state.complete_stage('resource_finder', result['success'], result.get('outputs'))
+            self.state.complete_stage("resource_finder", result["success"], result.get("outputs"))
 
             return result
 
         except Exception as e:
             print(f"❌ Resource finder stage failed: {e}")
-            self.state.complete_stage('resource_finder', False)
+            self.state.complete_stage("resource_finder", False)
             raise
 
     def _wait_for_human_approval(self) -> Dict[str, Any]:
@@ -372,7 +356,7 @@ class ResearchPipelineOrchestrator:
         print("─" * 80)
         print()
 
-        self.state.start_stage('human_review')
+        self.state.start_stage("human_review")
 
         print("🛑 Pipeline paused for human review.")
         print()
@@ -387,14 +371,11 @@ class ResearchPipelineOrchestrator:
 
         response = input("Continue with experiment runner? (yes/no): ").strip().lower()
 
-        approved = response in ['yes', 'y']
+        approved = response in ["yes", "y"]
 
-        result = {
-            'approved': approved,
-            'timestamp': datetime.now().isoformat()
-        }
+        result = {"approved": approved, "timestamp": datetime.now().isoformat()}
 
-        self.state.complete_stage('human_review', approved, result)
+        self.state.complete_stage("human_review", approved, result)
 
         if approved:
             print("✅ Proceeding to experiment runner stage...")
@@ -410,7 +391,7 @@ class ResearchPipelineOrchestrator:
         timeout: int,
         full_permissions: bool,
         use_scribe: bool = False,
-        scoring_enabled: bool = False
+        scoring_enabled: bool = False,
     ) -> Dict[str, Any]:
         """Run experiment runner stage (raw CLI by default, scribe optional)."""
         print()
@@ -422,7 +403,7 @@ class ResearchPipelineOrchestrator:
         print("─" * 80)
         print()
 
-        self.state.start_stage('experiment_runner')
+        self.state.start_stage("experiment_runner")
 
         # Import here to avoid circular dependency
         import subprocess
@@ -436,15 +417,13 @@ class ResearchPipelineOrchestrator:
 
             prompt_generator = PromptGenerator(self.templates_dir)
             prompt = prompt_generator.generate_research_prompt(
-                idea,
-                root_dir=self.work_dir,
-                scoring_enabled=scoring_enabled
+                idea, root_dir=self.work_dir, scoring_enabled=scoring_enabled
             )
 
             # Save prompt
             prompt_file = self.work_dir / "logs" / "research_prompt.txt"
             prompt_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(prompt_file, 'w', encoding='utf-8') as f:
+            with open(prompt_file, "w", encoding="utf-8") as f:
                 f.write(prompt)
 
             print(f"📝 Research prompt generated ({len(prompt)} chars)")
@@ -452,17 +431,14 @@ class ResearchPipelineOrchestrator:
             print()
 
             # Generate session instructions (resource-aware version)
-            domain = idea.get('idea', {}).get('domain', 'general')
+            domain = idea.get("idea", {}).get("domain", "general")
             session_instructions = generate_instructions(
-                prompt=prompt,
-                work_dir=str(self.work_dir),
-                use_scribe=use_scribe,
-                domain=domain
+                prompt=prompt, work_dir=str(self.work_dir), use_scribe=use_scribe, domain=domain
             )
 
             # Save session instructions
             session_file = self.work_dir / "logs" / "session_instructions.txt"
-            with open(session_file, 'w', encoding='utf-8') as f:
+            with open(session_file, "w", encoding="utf-8") as f:
                 f.write(session_instructions)
 
             # Prepare command - raw CLI by default, scribe if requested
@@ -505,16 +481,18 @@ class ResearchPipelineOrchestrator:
 
             # Set environment
             env = os.environ.copy()
-            env['PYTHONUNBUFFERED'] = '1'
+            env["PYTHONUNBUFFERED"] = "1"
             if use_scribe:
-                env['SCRIBE_RUN_DIR'] = str(self.work_dir)
+                env["SCRIBE_RUN_DIR"] = str(self.work_dir)
 
             # Execute agent
             success = False
             start_time = time.time()
 
-            with open(log_file, 'w', encoding='utf-8') as log_f, \
-                 open(transcript_file, 'w', encoding='utf-8') as transcript_f:
+            with (
+                open(log_file, "w", encoding="utf-8") as log_f,
+                open(transcript_file, "w", encoding="utf-8") as transcript_f,
+            ):
                 process = subprocess.Popen(
                     shlex.split(cmd),
                     stdin=subprocess.PIPE,
@@ -522,9 +500,9 @@ class ResearchPipelineOrchestrator:
                     stderr=subprocess.STDOUT,
                     env=env,
                     text=True,
-                    encoding='utf-8',
+                    encoding="utf-8",
                     bufsize=1,
-                    cwd=str(self.work_dir)
+                    cwd=str(self.work_dir),
                 )
 
                 # Send session instructions
@@ -534,10 +512,10 @@ class ResearchPipelineOrchestrator:
                 # Stream output to both log file and transcript file (sanitized for security)
                 # For Claude/Codex with JSON flags, the output IS the transcript
                 # For Gemini, the output is regular text but sessions are saved separately
-                for line in iter(process.stdout.readline, ''):
+                for line in iter(process.stdout.readline, ""):
                     if line:
                         sanitized_line = sanitize_text(line)
-                        print(sanitized_line, end='')
+                        print(sanitized_line, end="")
                         log_f.write(sanitized_line)
                         transcript_f.write(sanitized_line)
 
@@ -548,7 +526,7 @@ class ResearchPipelineOrchestrator:
             print("=" * 80)
 
             elapsed = time.time() - start_time
-            print(f"⏱️  Experiment runner completed in {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
+            print(f"⏱️  Experiment runner completed in {elapsed:.1f}s ({elapsed / 60:.1f} minutes)")
 
             if return_code == 0:
                 print("✅ Experiment execution completed successfully!")
@@ -558,28 +536,28 @@ class ResearchPipelineOrchestrator:
                 success = False
 
             result = {
-                'success': success,
-                'return_code': return_code,
-                'elapsed_time': elapsed,
-                'log_file': str(log_file),
-                'transcript_file': str(transcript_file)
+                "success": success,
+                "return_code": return_code,
+                "elapsed_time": elapsed,
+                "log_file": str(log_file),
+                "transcript_file": str(transcript_file),
             }
 
-            self.state.complete_stage('experiment_runner', success, result)
+            self.state.complete_stage("experiment_runner", success, result)
 
             return result
 
         except subprocess.TimeoutExpired:
             print(f"\n⏱️  Experiment runner timed out after {timeout} seconds")
             process.kill()
-            result = {'success': False, 'error': 'timeout'}
-            self.state.complete_stage('experiment_runner', False, result)
+            result = {"success": False, "error": "timeout"}
+            self.state.complete_stage("experiment_runner", False, result)
             return result
 
         except Exception as e:
             print(f"❌ Experiment runner stage failed: {e}")
-            result = {'success': False, 'error': str(e)}
-            self.state.complete_stage('experiment_runner', False, result)
+            result = {"success": False, "error": str(e)}
+            self.state.complete_stage("experiment_runner", False, result)
             raise
 
     # ---- Scoring-mode helpers (rule_maker / scorer / seal) ---------------
@@ -588,11 +566,7 @@ class ResearchPipelineOrchestrator:
     # legacy two-stage flow.
 
     def _run_rule_maker(
-        self,
-        idea: Dict[str, Any],
-        provider: str,
-        timeout: int,
-        full_permissions: bool
+        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
     ) -> Dict[str, Any]:
         """Run the rule_maker stage (scoring mode only)."""
         print()
@@ -609,13 +583,9 @@ class ResearchPipelineOrchestrator:
                 provider=provider,
                 templates_dir=self.templates_dir,
                 timeout=timeout,
-                full_permissions=full_permissions
+                full_permissions=full_permissions,
             )
-            self.state.complete_stage(
-                RULE_MAKER_STAGE,
-                result['success'],
-                result.get('outputs')
-            )
+            self.state.complete_stage(RULE_MAKER_STAGE, result["success"], result.get("outputs"))
             return result
         except Exception as e:
             print(f"❌ Rule maker stage failed: {e}")
@@ -635,15 +605,8 @@ class ResearchPipelineOrchestrator:
 
         self.state.start_stage(SCORER_STAGE)
         try:
-            result = run_scorer(
-                work_dir=self.work_dir,
-                timeout=timeout
-            )
-            self.state.complete_stage(
-                SCORER_STAGE,
-                result['success'],
-                result
-            )
+            result = run_scorer(work_dir=self.work_dir, timeout=timeout)
+            self.state.complete_stage(SCORER_STAGE, result["success"], result)
             return result
         except Exception as e:
             print(f"❌ Scorer stage failed: {e}")
@@ -659,11 +622,11 @@ class ResearchPipelineOrchestrator:
         <workspaces>/.scoring_sealed/<name>/. Sealed files keep their
         relative path inside that directory (e.g. scoring/eval.py).
         """
-        return self.work_dir.parent / ".scoring_sealed" / self.work_dir.name
+        return sealed_dir_for(self.work_dir)
 
     def _seal_runner_inputs(self) -> Optional[Path]:
         """
-        Move SEALED_FILES out of the workspace BEFORE the runner stage.
+        Move hidden scoring files out of the workspace BEFORE the runner stage.
 
         Returns the sealed directory path so it can be passed to
         _unseal_runner_inputs(). Returns None if nothing was sealed (e.g.,
@@ -676,37 +639,7 @@ class ResearchPipelineOrchestrator:
         Full hardening against adversarial runners requires sandboxing
         (deferred to v1.0).
         """
-        sealed_dir = self._sealed_dir_for()
-        sealed_dir.mkdir(parents=True, exist_ok=True)
-
-        moved = []
-        for rel in SEALED_FILES:
-            src = self.work_dir / rel
-            if not src.exists():
-                continue
-            dst = sealed_dir / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
-            moved.append(rel)
-
-        if not moved:
-            # Nothing to seal; remove the empty sealed dir we created.
-            try:
-                sealed_dir.rmdir()
-                sealed_dir.parent.rmdir()  # remove .scoring_sealed if now empty
-            except OSError:
-                pass
-            print("🔒 Nothing to seal (rule_maker outputs not found).")
-            return None
-
-        print(f"🔒 Sealed {len(moved)} scoring files to {sealed_dir}:")
-        for r in moved:
-            print(f"     - {r}")
-        print(
-            f"   (manual recovery if orchestrator crashes: "
-            f"mv {sealed_dir}/scoring/* {self.work_dir}/scoring/)"
-        )
-        return sealed_dir
+        return seal_scoring_files(self.work_dir)
 
     def _unseal_runner_inputs(self, sealed_dir: Optional[Path]) -> None:
         """
@@ -716,68 +649,15 @@ class ResearchPipelineOrchestrator:
         let an unseal error mask an experiment_runner failure -- this is
         always called in a finally block.
         """
-        if sealed_dir is None:
-            return
-
-        if not sealed_dir.exists():
-            print(f"⚠️  Sealed dir disappeared: {sealed_dir}")
-            return
-
-        restored = []
-        errors = []
-        for rel in SEALED_FILES:
-            src = sealed_dir / rel
-            if not src.exists():
-                continue
-            dst = self.work_dir / rel
-            try:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(dst))
-                restored.append(rel)
-            except OSError as e:
-                errors.append(f"{rel}: {e}")
-
-        if restored:
-            print(f"🔓 Restored {len(restored)} scoring files from {sealed_dir}")
-
-        if errors:
-            print(f"⚠️  Unseal errors -- sealed dir kept at {sealed_dir} for "
-                  "manual recovery:")
-            for e in errors:
-                print(f"     - {e}")
-            return
-
-        # Best-effort cleanup. All expected files restored cleanly, so the
-        # sealed dir should contain at most empty subdirs (e.g. scoring/ we
-        # created during seal). If a stray FILE shows up, keep the dir for
-        # the user to inspect.
-        try:
-            has_files = any(
-                p.is_file() for p in sealed_dir.rglob("*")
-            ) if sealed_dir.exists() else False
-            if sealed_dir.exists() and not has_files:
-                shutil.rmtree(sealed_dir)
-                # Remove .scoring_sealed/ parent if also empty
-                parent = sealed_dir.parent
-                try:
-                    parent.rmdir()
-                except OSError:
-                    pass
-            elif has_files:
-                print(
-                    f"ℹ️  Unexpected files remain in {sealed_dir}; "
-                    "leaving the directory for inspection."
-                )
-        except OSError as e:
-            print(f"⚠️  Could not clean up {sealed_dir}: {e}")
+        unseal_scoring_files(self.work_dir, sealed_dir)
 
     def get_pipeline_status(self) -> Dict[str, Any]:
         """Get current pipeline execution status."""
         return {
-            'current_stage': self.state.state.get('current_stage'),
-            'completed': self.state.state.get('completed', False),
-            'stages': self.state.state.get('stages', {}),
-            'state_file': str(self.state.state_file)
+            "current_stage": self.state.state.get("current_stage"),
+            "completed": self.state.state.get("completed", False),
+            "stages": self.state.state.get("stages", {}),
+            "state_file": str(self.state.state_file),
         }
 
     def resume_pipeline(
@@ -786,7 +666,7 @@ class ResearchPipelineOrchestrator:
         provider: str = "claude",
         pause_after_resources: bool = False,
         full_permissions: bool = True,
-        use_scribe: bool = False
+        use_scribe: bool = False,
     ) -> Dict[str, Any]:
         """
         Resume pipeline from last completed stage.
@@ -808,22 +688,22 @@ class ResearchPipelineOrchestrator:
         print()
 
         # Check what stages are already completed
-        resource_finder_done = self.state.is_stage_completed('resource_finder')
-        experiment_runner_done = self.state.is_stage_completed('experiment_runner')
+        resource_finder_done = self.state.is_stage_completed("resource_finder")
+        experiment_runner_done = self.state.is_stage_completed("experiment_runner")
 
         skip_resource_finder = resource_finder_done
 
-        print(f"   Resource Finder: {'✅ Completed' if resource_finder_done else '❌ Not completed'}")
-        print(f"   Experiment Runner: {'✅ Completed' if experiment_runner_done else '❌ Not completed'}")
+        print(
+            f"   Resource Finder: {'✅ Completed' if resource_finder_done else '❌ Not completed'}"
+        )
+        print(
+            f"   Experiment Runner: {'✅ Completed' if experiment_runner_done else '❌ Not completed'}"
+        )
         print()
 
         if resource_finder_done and experiment_runner_done:
             print("✅ All stages already completed!")
-            return {
-                'success': True,
-                'resumed': False,
-                'message': 'Pipeline already complete'
-            }
+            return {"success": True, "resumed": False, "message": "Pipeline already complete"}
 
         # Resume from last incomplete stage
         return self.run_pipeline(
@@ -832,5 +712,5 @@ class ResearchPipelineOrchestrator:
             pause_after_resources=pause_after_resources,
             skip_resource_finder=skip_resource_finder,
             full_permissions=full_permissions,
-            use_scribe=use_scribe
+            use_scribe=use_scribe,
         )
