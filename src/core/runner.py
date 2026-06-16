@@ -125,7 +125,9 @@ class ResearchRunner:
                     force_fresh: bool = False,
                     scoring_enabled: bool = False,
                     rule_maker_timeout: int = 1800,
-                    scorer_timeout: int = 600) -> Dict[str, Any]:
+                    scorer_timeout: int = 600,
+                    bootstrap_mode: bool = False,
+                    manifest_trimmer_timeout: int = 300) -> Dict[str, Any]:
         """
         Execute research for a given idea.
 
@@ -309,7 +311,12 @@ class ResearchRunner:
         # Choose execution mode: multi-agent pipeline or legacy monolithic
         if multi_agent:
             print()
-            if scoring_enabled:
+            if bootstrap_mode:
+                print("🔀 Using MULTI-AGENT pipeline (BOOTSTRAP MODE)")
+                print("   Stage B1: Workspace Manifest (mechanical scan + trimmer agent)")
+                print("   Stage B2: Bootstrap Rule Maker (writes scoring/ artifact protocol)")
+                print("   Stage B3: Scorer (executes scoring/eval.py)")
+            elif scoring_enabled:
                 print("🔀 Using MULTI-AGENT pipeline (SCORING MODE)")
                 print("   Stage 1: Resource Finder (literature review, datasets, code)")
                 print("   Stage 2: Rule Maker (writes scoring/ artifact protocol)")
@@ -357,7 +364,9 @@ class ResearchRunner:
                     use_scribe=use_scribe,
                     scoring_enabled=scoring_enabled,
                     rule_maker_timeout=rule_maker_timeout,
-                    scorer_timeout=scorer_timeout
+                    scorer_timeout=scorer_timeout,
+                    bootstrap_mode=bootstrap_mode,
+                    manifest_trimmer_timeout=manifest_trimmer_timeout,
                 )
 
                 success = pipeline_result.get('success', False)
@@ -998,6 +1007,22 @@ def main():
         default=600,
         help="Timeout for scorer stage in seconds (default: 600 = 10 min, scoring mode only)"
     )
+    parser.add_argument(
+        "--bootstrap-rule-maker",
+        action="store_true",
+        help="Bootstrap mode: design a scoring protocol for an existing workspace whose "
+             "experiment_runner has already produced its outputs. Skips resource_finder, "
+             "forward rule_maker, and experiment_runner stages. Inserts the workspace_manifest "
+             "two-pass curation (mechanical + trimmer agent) and the bootstrap rule_maker, "
+             "then runs the scorer."
+    )
+    parser.add_argument(
+        "--manifest-trimmer-timeout",
+        type=int,
+        default=300,
+        help="Timeout for each manifest_trimmer agent call in seconds (default: 300 = 5 min, "
+             "bootstrap mode only)"
+    )
 
     args = parser.parse_args()
 
@@ -1029,6 +1054,12 @@ def main():
             print(f"\n Error: {e}", file=sys.stderr)
             sys.exit(1)
 
+    # --bootstrap-rule-maker implies --enable-scoring (the bootstrap path always
+    # ends with the scorer stage), and skips the resource_finder stage since the
+    # workspace was already produced by an earlier session.
+    scoring_enabled = args.enable_scoring or args.bootstrap_rule_maker
+    skip_resource_finder = args.skip_resource_finder or args.bootstrap_rule_maker
+
     try:
         result = runner.run_research(
             idea_id=args.idea_id,
@@ -1037,7 +1068,7 @@ def main():
             full_permissions=args.full_permissions,
             multi_agent=not args.legacy_mode,
             pause_after_resources=args.pause_after_resources,
-            skip_resource_finder=args.skip_resource_finder,
+            skip_resource_finder=skip_resource_finder,
             resource_finder_timeout=args.resource_finder_timeout,
             use_scribe=args.use_scribe,
             write_paper=args.write_paper,
@@ -1046,9 +1077,11 @@ def main():
             no_hash=args.no_hash,
             private=args.private,
             force_fresh=args.force_fresh,
-            scoring_enabled=args.enable_scoring,
+            scoring_enabled=scoring_enabled,
             rule_maker_timeout=args.rule_maker_timeout,
-            scorer_timeout=args.scorer_timeout
+            scorer_timeout=args.scorer_timeout,
+            bootstrap_mode=args.bootstrap_rule_maker,
+            manifest_trimmer_timeout=args.manifest_trimmer_timeout,
         )
 
         print()
