@@ -6,17 +6,30 @@ This module orchestrates the multi-agent research pipeline:
 2. (Optional) Human review checkpoint
 3. Experiment Runner Agent (CLI-based by default, Scribe optional): Implementation, experimentation, analysis
 
+When scoring_enabled=True is passed to run_pipeline(), two extra stages are
+woven into the flow:
+    - rule_maker (between resource_finder and experiment_runner): writes a
+      per-run artifact protocol (scoring/interface.md, scoring/eval.py,
+      scoring/targets.json, scoring/rule_maker_log.md).
+    - scorer (after experiment_runner): executes scoring/eval.py and writes
+      scoring/results.json.
+Plus a seal/unseal step that moves the scorer-side files out of the workspace
+during the runner stage so the runner cannot read them.
+
 The orchestrator manages agent execution flow, monitors completion, handles errors,
 and tracks pipeline state.
 """
 
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, List, Dict, Any
 import json
+import shutil
 from datetime import datetime
 import time
 
 from agents.resource_finder import run_resource_finder
+from agents.rule_maker import run_rule_maker
+from core.scorer import run_scorer
 from templates.research_agent_instructions import generate_instructions
 
 
@@ -96,6 +109,21 @@ CLI_COMMANDS = {
     'gemini': 'gemini'
 }
 
+# Stage names tracked in PipelineState when scoring_enabled=True
+RULE_MAKER_STAGE = 'rule_maker'
+SCORER_STAGE = 'scorer'
+
+# Files moved out of the workspace during the experiment_runner stage so the
+# runner cannot read them. Restored before the scorer runs.
+#   - eval.py:           the scoring code itself
+#   - targets.json:      numeric targets + success rule
+#   - rule_maker_log.md: rationale, which references the targets in plain text
+SEALED_FILES: List[str] = [
+    "scoring/eval.py",
+    "scoring/targets.json",
+    "scoring/rule_maker_log.md",
+]
+
 
 class ResearchPipelineOrchestrator:
     """
@@ -132,7 +160,10 @@ class ResearchPipelineOrchestrator:
         resource_finder_timeout: int = 2700,  # 45 min
         experiment_runner_timeout: int = 10800,  # 3 hours
         full_permissions: bool = True,
-        use_scribe: bool = False
+        use_scribe: bool = False,
+        scoring_enabled: bool = False,
+        rule_maker_timeout: int = 1800,  # 30 min
+        scorer_timeout: int = 600  # 10 min
     ) -> Dict[str, Any]:
         """
         Execute complete research pipeline.
@@ -146,19 +177,30 @@ class ResearchPipelineOrchestrator:
             experiment_runner_timeout: Timeout for experiment runner in seconds
             full_permissions: Allow full permissions to agents
             use_scribe: If True, use scribe for notebook integration (default: False, raw CLI)
+            scoring_enabled: If True, run in rule_maker (scored) mode. Adds two stages
+                             (rule_maker between resource_finder and experiment_runner,
+                             scorer after experiment_runner) and seals scoring/ inputs
+                             from the runner. Default False = legacy two-stage flow.
+            rule_maker_timeout: Timeout for rule_maker stage in seconds (scoring mode only)
+            scorer_timeout: Timeout for scorer stage in seconds (scoring mode only)
 
         Returns:
             Dictionary with pipeline execution results
         """
         print()
         print("=" * 80)
-        print("MULTI-AGENT RESEARCH PIPELINE")
+        if scoring_enabled:
+            print("MULTI-AGENT RESEARCH PIPELINE  (SCORING MODE)")
+        else:
+            print("MULTI-AGENT RESEARCH PIPELINE")
         print("=" * 80)
         print(f"Work directory: {self.work_dir}")
         print(f"Provider: {provider}")
         print(f"Use scribe (notebooks): {use_scribe}")
         print(f"Pause after resources: {pause_after_resources}")
         print(f"Skip resource finder: {skip_resource_finder}")
+        if scoring_enabled:
+            print(f"Scoring enabled: True (rule_maker + scorer stages)")
         print("=" * 80)
         print()
 
@@ -167,6 +209,8 @@ class ResearchPipelineOrchestrator:
             'stages': {},
             'work_dir': str(self.work_dir)
         }
+        if scoring_enabled:
+            results['mode'] = 'scored'
 
         try:
             # STAGE 1: Resource Finder
@@ -200,23 +244,72 @@ class ResearchPipelineOrchestrator:
                     print("🛑 Pipeline paused. Human did not approve continuation.")
                     return results
 
-            # STAGE 3: Experiment Runner
-            results['stages']['experiment_runner'] = self._run_experiment_runner(
-                idea=idea,
-                provider=provider,
-                timeout=experiment_runner_timeout,
-                full_permissions=full_permissions,
-                use_scribe=use_scribe
-            )
+            # STAGE 2.5 (scoring mode only): Rule Maker
+            # Writes scoring/interface.md, scoring/eval.py, scoring/targets.json,
+            # scoring/rule_maker_log.md before the runner sees the workspace.
+            if scoring_enabled:
+                results['stages'][RULE_MAKER_STAGE] = self._run_rule_maker(
+                    idea=idea,
+                    provider=provider,
+                    timeout=rule_maker_timeout,
+                    full_permissions=full_permissions
+                )
+                if not results['stages'][RULE_MAKER_STAGE]['success']:
+                    print()
+                    print("⚠️  Rule maker stage failed -- aborting.")
+                    return results
 
-            if results['stages']['experiment_runner']['success']:
-                print()
-                print("🎉 PIPELINE COMPLETED SUCCESSFULLY!")
-                self.state.mark_completed()
-                results['success'] = True
+            # STAGE 3: Experiment Runner
+            # In scoring mode, seal eval.py / targets.json / rule_maker_log.md
+            # out of the workspace for the duration of the runner stage. Always
+            # unseal in the finally block (even on runner failure) so the scorer
+            # can run.
+            sealed_dir = self._seal_runner_inputs() if scoring_enabled else None
+            try:
+                results['stages']['experiment_runner'] = self._run_experiment_runner(
+                    idea=idea,
+                    provider=provider,
+                    timeout=experiment_runner_timeout,
+                    full_permissions=full_permissions,
+                    use_scribe=use_scribe,
+                    scoring_enabled=scoring_enabled
+                )
+            finally:
+                if scoring_enabled:
+                    self._unseal_runner_inputs(sealed_dir)
+
+            # STAGE 4 (scoring mode only): Scorer
+            # Executes scoring/eval.py and captures results.json.
+            if scoring_enabled:
+                results['stages'][SCORER_STAGE] = self._run_scorer(
+                    timeout=scorer_timeout
+                )
+
+            runner_ok = results['stages']['experiment_runner']['success']
+
+            if scoring_enabled:
+                scorer_ok = results['stages'][SCORER_STAGE]['success']
+                if runner_ok and scorer_ok:
+                    print()
+                    print("🎉 PIPELINE COMPLETED SUCCESSFULLY!")
+                    self.state.mark_completed()
+                    results['success'] = True
+                elif runner_ok and not scorer_ok:
+                    print()
+                    print("⚠️  Runner finished but scorer failed -- artifact "
+                          "may be unmeasured.")
+                else:
+                    print()
+                    print("⚠️  Pipeline finished with issues.")
             else:
-                print()
-                print("⚠️  Experiment runner stage completed with issues.")
+                if runner_ok:
+                    print()
+                    print("🎉 PIPELINE COMPLETED SUCCESSFULLY!")
+                    self.state.mark_completed()
+                    results['success'] = True
+                else:
+                    print()
+                    print("⚠️  Experiment runner stage completed with issues.")
 
         except Exception as e:
             print()
@@ -227,6 +320,7 @@ class ResearchPipelineOrchestrator:
         finally:
             # Save final results
             results_file = self.work_dir / ".neurico" / "pipeline_results.json"
+            results_file.parent.mkdir(parents=True, exist_ok=True)
             with open(results_file, 'w', encoding='utf-8') as f:
                 json.dump(results, f, indent=2)
 
@@ -315,12 +409,16 @@ class ResearchPipelineOrchestrator:
         provider: str,
         timeout: int,
         full_permissions: bool,
-        use_scribe: bool = False
+        use_scribe: bool = False,
+        scoring_enabled: bool = False
     ) -> Dict[str, Any]:
         """Run experiment runner stage (raw CLI by default, scribe optional)."""
         print()
         print("─" * 80)
-        print("STAGE 3: EXPERIMENT RUNNER")
+        if scoring_enabled:
+            print("STAGE 3: EXPERIMENT RUNNER  (scored prompt)")
+        else:
+            print("STAGE 3: EXPERIMENT RUNNER")
         print("─" * 80)
         print()
 
@@ -337,7 +435,11 @@ class ResearchPipelineOrchestrator:
             from templates.prompt_generator import PromptGenerator
 
             prompt_generator = PromptGenerator(self.templates_dir)
-            prompt = prompt_generator.generate_research_prompt(idea, root_dir=self.work_dir)
+            prompt = prompt_generator.generate_research_prompt(
+                idea,
+                root_dir=self.work_dir,
+                scoring_enabled=scoring_enabled
+            )
 
             # Save prompt
             prompt_file = self.work_dir / "logs" / "research_prompt.txt"
@@ -479,6 +581,195 @@ class ResearchPipelineOrchestrator:
             result = {'success': False, 'error': str(e)}
             self.state.complete_stage('experiment_runner', False, result)
             raise
+
+    # ---- Scoring-mode helpers (rule_maker / scorer / seal) ---------------
+    # These methods are only invoked when run_pipeline(scoring_enabled=True).
+    # In default mode they are not called; their presence does not affect the
+    # legacy two-stage flow.
+
+    def _run_rule_maker(
+        self,
+        idea: Dict[str, Any],
+        provider: str,
+        timeout: int,
+        full_permissions: bool
+    ) -> Dict[str, Any]:
+        """Run the rule_maker stage (scoring mode only)."""
+        print()
+        print("─" * 80)
+        print("STAGE: RULE MAKER")
+        print("─" * 80)
+        print()
+
+        self.state.start_stage(RULE_MAKER_STAGE)
+        try:
+            result = run_rule_maker(
+                idea=idea,
+                work_dir=self.work_dir,
+                provider=provider,
+                templates_dir=self.templates_dir,
+                timeout=timeout,
+                full_permissions=full_permissions
+            )
+            self.state.complete_stage(
+                RULE_MAKER_STAGE,
+                result['success'],
+                result.get('outputs')
+            )
+            return result
+        except Exception as e:
+            print(f"❌ Rule maker stage failed: {e}")
+            self.state.complete_stage(RULE_MAKER_STAGE, False)
+            raise
+
+    def _run_scorer(self, timeout: int) -> Dict[str, Any]:
+        """
+        Run the scorer stage (scoring mode only). Executes scoring/eval.py
+        and captures the structured results into scoring/results.json.
+        """
+        print()
+        print("─" * 80)
+        print("STAGE: SCORER")
+        print("─" * 80)
+        print()
+
+        self.state.start_stage(SCORER_STAGE)
+        try:
+            result = run_scorer(
+                work_dir=self.work_dir,
+                timeout=timeout
+            )
+            self.state.complete_stage(
+                SCORER_STAGE,
+                result['success'],
+                result
+            )
+            return result
+        except Exception as e:
+            print(f"❌ Scorer stage failed: {e}")
+            self.state.complete_stage(SCORER_STAGE, False)
+            raise
+
+    def _sealed_dir_for(self) -> Path:
+        """
+        Return the sibling directory where sealed scoring files live during
+        the experiment_runner stage.
+
+        For a workspace at <workspaces>/<name>/, the sealed directory is at
+        <workspaces>/.scoring_sealed/<name>/. Sealed files keep their
+        relative path inside that directory (e.g. scoring/eval.py).
+        """
+        return self.work_dir.parent / ".scoring_sealed" / self.work_dir.name
+
+    def _seal_runner_inputs(self) -> Optional[Path]:
+        """
+        Move SEALED_FILES out of the workspace BEFORE the runner stage.
+
+        Returns the sealed directory path so it can be passed to
+        _unseal_runner_inputs(). Returns None if nothing was sealed (e.g.,
+        the rule_maker output files did not exist).
+
+        Defense level: against an aligned-but-undisciplined runner, this is
+        a hard guarantee -- the files are not in the workspace at all. Against
+        an actively adversarial runner with full filesystem access, it is a
+        speed bump (the runner could traverse `..` and find the sealed dir).
+        Full hardening against adversarial runners requires sandboxing
+        (deferred to v1.0).
+        """
+        sealed_dir = self._sealed_dir_for()
+        sealed_dir.mkdir(parents=True, exist_ok=True)
+
+        moved = []
+        for rel in SEALED_FILES:
+            src = self.work_dir / rel
+            if not src.exists():
+                continue
+            dst = sealed_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            moved.append(rel)
+
+        if not moved:
+            # Nothing to seal; remove the empty sealed dir we created.
+            try:
+                sealed_dir.rmdir()
+                sealed_dir.parent.rmdir()  # remove .scoring_sealed if now empty
+            except OSError:
+                pass
+            print("🔒 Nothing to seal (rule_maker outputs not found).")
+            return None
+
+        print(f"🔒 Sealed {len(moved)} scoring files to {sealed_dir}:")
+        for r in moved:
+            print(f"     - {r}")
+        print(
+            f"   (manual recovery if orchestrator crashes: "
+            f"mv {sealed_dir}/scoring/* {self.work_dir}/scoring/)"
+        )
+        return sealed_dir
+
+    def _unseal_runner_inputs(self, sealed_dir: Optional[Path]) -> None:
+        """
+        Move sealed files back to the workspace AFTER the runner stage.
+
+        Best-effort: logs failures but does not raise. The caller must not
+        let an unseal error mask an experiment_runner failure -- this is
+        always called in a finally block.
+        """
+        if sealed_dir is None:
+            return
+
+        if not sealed_dir.exists():
+            print(f"⚠️  Sealed dir disappeared: {sealed_dir}")
+            return
+
+        restored = []
+        errors = []
+        for rel in SEALED_FILES:
+            src = sealed_dir / rel
+            if not src.exists():
+                continue
+            dst = self.work_dir / rel
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                restored.append(rel)
+            except OSError as e:
+                errors.append(f"{rel}: {e}")
+
+        if restored:
+            print(f"🔓 Restored {len(restored)} scoring files from {sealed_dir}")
+
+        if errors:
+            print(f"⚠️  Unseal errors -- sealed dir kept at {sealed_dir} for "
+                  "manual recovery:")
+            for e in errors:
+                print(f"     - {e}")
+            return
+
+        # Best-effort cleanup. All expected files restored cleanly, so the
+        # sealed dir should contain at most empty subdirs (e.g. scoring/ we
+        # created during seal). If a stray FILE shows up, keep the dir for
+        # the user to inspect.
+        try:
+            has_files = any(
+                p.is_file() for p in sealed_dir.rglob("*")
+            ) if sealed_dir.exists() else False
+            if sealed_dir.exists() and not has_files:
+                shutil.rmtree(sealed_dir)
+                # Remove .scoring_sealed/ parent if also empty
+                parent = sealed_dir.parent
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
+            elif has_files:
+                print(
+                    f"ℹ️  Unexpected files remain in {sealed_dir}; "
+                    "leaving the directory for inspection."
+                )
+        except OSError as e:
+            print(f"⚠️  Could not clean up {sealed_dir}: {e}")
 
     def get_pipeline_status(self) -> Dict[str, Any]:
         """Get current pipeline execution status."""

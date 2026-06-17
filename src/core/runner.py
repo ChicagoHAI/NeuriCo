@@ -122,7 +122,10 @@ class ResearchRunner:
                     paper_timeout: int = 3600,
                     no_hash: bool = False,
                     private: bool = False,
-                    force_fresh: bool = False) -> Dict[str, Any]:
+                    force_fresh: bool = False,
+                    scoring_enabled: bool = False,
+                    rule_maker_timeout: int = 1800,
+                    scorer_timeout: int = 600) -> Dict[str, Any]:
         """
         Execute research for a given idea.
 
@@ -306,9 +309,16 @@ class ResearchRunner:
         # Choose execution mode: multi-agent pipeline or legacy monolithic
         if multi_agent:
             print()
-            print("🔀 Using MULTI-AGENT pipeline")
-            print("   Stage 1: Resource Finder (literature review, datasets, code)")
-            print("   Stage 2: Experiment Runner (implementation, experiments, analysis)")
+            if scoring_enabled:
+                print("🔀 Using MULTI-AGENT pipeline (SCORING MODE)")
+                print("   Stage 1: Resource Finder (literature review, datasets, code)")
+                print("   Stage 2: Rule Maker (writes scoring/ artifact protocol)")
+                print("   Stage 3: Experiment Runner (with sealed scoring/ inputs)")
+                print("   Stage 4: Scorer (executes scoring/eval.py)")
+            else:
+                print("🔀 Using MULTI-AGENT pipeline")
+                print("   Stage 1: Resource Finder (literature review, datasets, code)")
+                print("   Stage 2: Experiment Runner (implementation, experiments, analysis)")
             print()
 
             # Use pipeline orchestrator
@@ -344,7 +354,10 @@ class ResearchRunner:
                     resource_finder_timeout=resource_finder_timeout,
                     experiment_runner_timeout=timeout,
                     full_permissions=full_permissions,
-                    use_scribe=use_scribe
+                    use_scribe=use_scribe,
+                    scoring_enabled=scoring_enabled,
+                    rule_maker_timeout=rule_maker_timeout,
+                    scorer_timeout=scorer_timeout
                 )
 
                 success = pipeline_result.get('success', False)
@@ -966,6 +979,25 @@ def main():
         action="store_true",
         help="Run in comment mode: make targeted improvements based on comments in the idea file"
     )
+    parser.add_argument(
+        "--enable-scoring",
+        action="store_true",
+        help="Run in scoring mode: insert rule_maker stage before the runner, "
+             "seal scoring/ inputs from the runner, and run scorer after. "
+             "Requires rule_maker agent + scoring/eval.py protocol."
+    )
+    parser.add_argument(
+        "--rule-maker-timeout",
+        type=int,
+        default=1800,
+        help="Timeout for rule_maker stage in seconds (default: 1800 = 30 min, scoring mode only)"
+    )
+    parser.add_argument(
+        "--scorer-timeout",
+        type=int,
+        default=600,
+        help="Timeout for scorer stage in seconds (default: 600 = 10 min, scoring mode only)"
+    )
 
     args = parser.parse_args()
 
@@ -1013,7 +1045,10 @@ def main():
             paper_timeout=args.paper_timeout,
             no_hash=args.no_hash,
             private=args.private,
-            force_fresh=args.force_fresh
+            force_fresh=args.force_fresh,
+            scoring_enabled=args.enable_scoring,
+            rule_maker_timeout=args.rule_maker_timeout,
+            scorer_timeout=args.scorer_timeout
         )
 
         print()
