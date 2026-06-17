@@ -72,6 +72,9 @@ class ToolExecutor:
             "design_panel": self._design_panel,
         }
 
+        # The mcp backend delivers tool names namespaced as mcp__neurico__<name>;
+        # strip the prefix so both backends dispatch through the same handlers.
+        tool_name = tool_name.removeprefix("mcp__neurico__")
         handler = handlers.get(tool_name)
         if not handler:
             # Auto-log the failure so the world model stays honest: an unknown-tool
@@ -98,6 +101,18 @@ class ToolExecutor:
         valid_agents = ["resource_finder", "experiment_runner", "paper_writer", "comment_handler"]
         if agent_name not in valid_agents:
             return f"Error: Unknown agent '{agent_name}'. Choose from: {valid_agents}"
+
+        # comment_handler applies one targeted change to the existing workspace.
+        # In interactive mode the request arrives over chat, not as a GitHub
+        # `comments:` field, so it MUST be passed explicitly as `instructions`.
+        # Without this the container agent dead-ends on "No comments found" and
+        # the manager is tempted to edit files itself — which it cannot do.
+        instructions = args.get("instructions") or args.get("request")
+        if agent_name == "comment_handler" and not instructions:
+            return ("Error: comment_handler needs an 'instructions' parameter "
+                    "describing the targeted change to make (the request text). "
+                    "Pass the change request there — do NOT try to edit files "
+                    "yourself; you have no file-writing tools.")
 
         provider = args.get("provider", self.provider)
         run_id = self.session.generate_run_id(agent_name)
@@ -135,6 +150,8 @@ class ToolExecutor:
             cmd_parts.extend(["--paper-style", args["paper_style"]])
         if agent_name == "experiment_runner" and args.get("use_scribe"):
             cmd_parts.append("--use-scribe")
+        if agent_name == "comment_handler" and instructions:
+            cmd_parts.extend(["--instructions", str(instructions)])
 
         # Record in session
         self.session.record_agent_start(agent_name, run_id)
@@ -309,7 +326,42 @@ class ToolExecutor:
                 except Exception:
                     continue
 
+        # Finalize the experiment record from disk whenever a run is observed.
+        # In MCP mode run_agent fires in the MCP subprocess, whose in-memory
+        # _running_agents map dies with it, so the manager-side polling that
+        # normally flips experiments to done/failed never runs — this disk-driven
+        # path keeps the world model honest in every backend.
+        self._finalize_experiment_from_disk(run_id)
+
         return '\n'.join(parts)
+
+    def _finalize_experiment_from_disk(self, run_id: str) -> None:
+        """Flip the experiment record to done/failed by inspecting run artifacts
+        on disk (status.json / result.json / error.json). Idempotent —
+        update_experiment skips no-op writes — so it's safe to call on every
+        read_agent_logs."""
+        run_dir = self.work_dir / ".neurico" / "runs" / run_id
+        status = None
+        if (run_dir / "error.json").exists():
+            status = "failed"
+        elif (run_dir / "result.json").exists():
+            status = "done"
+        else:
+            status_file = run_dir / "status.json"
+            if status_file.exists():
+                try:
+                    with open(status_file) as f:
+                        st = str(json.load(f).get("status", "")).lower()
+                except (OSError, json.JSONDecodeError):
+                    st = ""
+                if st in ("done", "completed", "complete", "success", "succeeded"):
+                    status = "done"
+                elif st in ("failed", "error", "errored"):
+                    status = "failed"
+        if status:
+            self.research.update_experiment(
+                run_id, status=status,
+                result=self._summarize_run_result(run_id) or None)
 
     def _ask_user(self, args: Dict[str, Any]) -> str:
         """Present a message to the user and collect their response."""

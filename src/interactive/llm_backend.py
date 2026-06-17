@@ -13,6 +13,8 @@ import json
 import os
 import shlex
 import subprocess
+import threading
+import time
 
 
 @dataclass
@@ -29,6 +31,9 @@ class LLMResponse:
     text: str
     tool_calls: List[ToolCall] = field(default_factory=list)
     raw: Any = None
+    streamed: bool = False  # True if text was already sent to channel during generation
+    had_tools: bool = False  # True if any mcp__neurico__* tools were called this session
+    ask_user_exchanges: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class LLMBackend:
@@ -37,14 +42,22 @@ class LLMBackend:
     parsed responses with tool calls.
     """
 
-    def __init__(self, backend: str = "cli", model: Optional[str] = None):
+    def __init__(self, backend: str = "cli", model: Optional[str] = None,
+                 mcp_config_path: Optional[str] = None, channel=None,
+                 ipc_dir: Optional[str] = None):
         """
         Args:
-            backend: "cli", "anthropic_api", or "openrouter"
+            backend: "cli", "mcp", "anthropic_api", or "openrouter"
             model: Model name override (None = default for backend)
+            mcp_config_path: Path to .mcp.json (required when backend="mcp")
+            channel: UserChannel for real-time UI updates during MCP sessions
+            ipc_dir: Directory for ask_user IPC with the MCP server subprocess
         """
         self.backend = backend
         self.model = model
+        self.mcp_config_path = mcp_config_path
+        self.channel = channel
+        self.ipc_dir = Path(ipc_dir) if ipc_dir else None
 
     def send(self, messages: List[Dict[str, Any]],
              tools: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
@@ -61,6 +74,8 @@ class LLMBackend:
         """
         if self.backend == "cli":
             return self._send_cli(messages, tools)
+        elif self.backend == "mcp":
+            return self._send_mcp(messages, self.mcp_config_path, tools)
         elif self.backend == "anthropic_api":
             return self._send_anthropic_api(messages, tools)
         elif self.backend == "openrouter":
@@ -81,6 +96,18 @@ class LLMBackend:
         cmd = "claude -p --verbose --output-format stream-json"
         if self.model:
             cmd += f" --model {self.model}"
+        # CRITICAL: the manager is itself driven by `claude -p` — a full Claude
+        # Code agent that has its OWN native tools (Bash/Read/…). If those are
+        # available, the inner agent tries to invoke the manager's tools through
+        # the native mechanism (the harness rejects them as "No such tool") or
+        # uses Bash/Read to "discover" it's a plain Claude Code session and
+        # breaks out of the manager persona entirely. Disabling all native tools
+        # removes that escape hatch: the ONLY way it can act is to emit the
+        # <tool_call> text blocks our shim parses (see _parse_cli_response).
+        # This is the root-cause fix for the manager "identity collapse" on the
+        # cli backend. (The mcp backend solves the same problem structurally via
+        # native MCP tool registration — see _send_mcp.)
+        cmd += ' --tools ""'
 
         process = subprocess.Popen(
             shlex.split(cmd),
@@ -99,6 +126,216 @@ class LLMBackend:
             raise RuntimeError(f"CLI backend error: {error_msg}")
 
         return self._parse_cli_response(stdout)
+
+    # Fallback allow-list if no tool definitions are passed (keeps behaviour if a
+    # caller invokes the mcp backend without tools). The live list is derived
+    # from the tool definitions below so adding a tool can't silently leave it
+    # uncallable.
+    _MCP_TOOL_FALLBACK = ("run_agent", "check_workspace", "read_agent_logs",
+                          "ask_user", "update_session", "update_research_state",
+                          "assess", "design_panel")
+
+    # Native Claude Code tools the manager must never use directly — any write
+    # among them deadlocks on an unanswerable permission prompt in headless
+    # print mode (see _send_mcp). Passed to `claude -p --disallowedTools` so the
+    # inner agent cannot even attempt them and is forced to delegate via
+    # run_agent. Read-only tools are included too so the manager can't "discover"
+    # it's a plain Claude Code session and break out of the manager persona.
+    _NATIVE_TOOLS_DISALLOWED = ",".join((
+        "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit",
+        "Read", "Glob", "Grep", "LS", "WebFetch", "WebSearch",
+        "Task", "TodoWrite",
+    ))
+
+    def _send_mcp(self, messages: List[Dict[str, Any]],
+                  mcp_config_path: Optional[str] = None,
+                  tools: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
+        """
+        Send via claude -p with NeuriCo tools registered as an MCP server.
+
+        Reads stdout line-by-line so tool call events can be forwarded to
+        the UI channel in real time instead of blocking until the session ends.
+        stderr is drained in a background thread to prevent deadlock.
+        """
+        prompt = self._messages_to_prompt(messages, tools=None)
+
+        names = [t.get("name") for t in tools if t.get("name")] if tools \
+            else list(self._MCP_TOOL_FALLBACK)
+        allowed = ",".join(f"mcp__neurico__{n}" for n in names)
+
+        cmd = "claude -p --verbose --output-format stream-json"
+        cmd += f' --allowedTools "{allowed}"'
+        # CRITICAL: --allowedTools only PRE-APPROVES the NeuriCo MCP tools; it
+        # does NOT make them exclusive. The inner `claude -p` agent still SEES
+        # its native Claude Code tools (Bash/Edit/Write/…) and, under pressure,
+        # will try to edit workspace files directly. Those writes are not
+        # allow-listed, so each one blocks on a permission prompt — which, in
+        # headless print mode, can never surface to the user. The session then
+        # deadlocks ("I don't have permission to write") with no way out.
+        # Disallowing the native tools removes that escape hatch entirely: the
+        # ONLY way the manager can touch code is to delegate via run_agent (the
+        # CLI backend achieves the same thing structurally with `--tools ""`).
+        cmd += f' --disallowedTools "{self._NATIVE_TOOLS_DISALLOWED}"'
+        if mcp_config_path:
+            cmd += f' --mcp-config "{mcp_config_path}"'
+        if self.model:
+            cmd += f" --model {self.model}"
+
+        process = subprocess.Popen(
+            shlex.split(cmd),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+
+        # Write prompt and close stdin immediately so claude -p starts processing
+        process.stdin.write(prompt)
+        process.stdin.close()
+
+        # Drain stderr in background to prevent pipe deadlock
+        stderr_lines: List[str] = []
+        def _drain_stderr():
+            for line in iter(process.stderr.readline, ''):
+                stderr_lines.append(line)
+        threading.Thread(target=_drain_stderr, daemon=True).start()
+
+        # IPC watcher: intercepts ask_user calls from the MCP server subprocess
+        # and routes them through the web channel instead of the terminal.
+        # Protocol: MCP server writes ask_user_request.json with a unique "id",
+        # we call channel.prompt(), then write ask_user_response.json echoing that
+        # id. The id lets the server ignore a stale response from an earlier ask
+        # (e.g. one that timed out), so answers can't cross between questions.
+        # Writes are atomic (temp + os.replace) so the 0.3s poller never reads a
+        # half-written file.
+        ask_user_exchanges: List[Dict[str, Any]] = []
+        stop_ipc = threading.Event()
+
+        def _atomic_write_json(path: Path, obj: Any) -> None:
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(obj), encoding="utf-8")
+            os.replace(tmp, path)
+
+        def _ipc_watcher():
+            if not self.ipc_dir or not self.channel:
+                return
+            req_file = self.ipc_dir / "ask_user_request.json"
+            resp_file = self.ipc_dir / "ask_user_response.json"
+            while not stop_ipc.is_set():
+                if req_file.exists():
+                    answer = ""
+                    question = ""
+                    options = None
+                    req_id = ""
+                    try:
+                        data = json.loads(req_file.read_text(encoding="utf-8"))
+                        req_file.unlink()
+                        req_id = data.get("id", "")
+                        question = data.get("message", "")
+                        options = data.get("options") or None
+                        answer = self.channel.prompt(message=question, options=options)
+                        if answer is None:
+                            answer = ""
+                        ask_user_exchanges.append(
+                            {"question": question, "options": options, "answer": answer}
+                        )
+                    except Exception:
+                        pass
+                    finally:
+                        # Always write the response so the MCP server is never left
+                        # polling forever — even if prompt() raised or channel closed.
+                        try:
+                            _atomic_write_json(
+                                resp_file, {"id": req_id, "response": answer})
+                        except Exception:
+                            pass
+                time.sleep(0.3)
+
+        if self.ipc_dir and self.channel:
+            # Clean up any stale files from a previous session
+            for fname in ("ask_user_request.json", "ask_user_response.json"):
+                stale = self.ipc_dir / fname
+                if stale.exists():
+                    stale.unlink()
+            threading.Thread(target=_ipc_watcher, daemon=True).start()
+
+        # Read stdout line by line — forward events to channel in real time
+        last_text = ""
+        raw_events = []
+        text_streamed = False
+        had_tools = False
+
+        for line in iter(process.stdout.readline, ''):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                raw_events.append(event)
+            except json.JSONDecodeError:
+                continue
+
+            etype = event.get("type", "")
+
+            if etype == "assistant" and "message" in event:
+                content_blocks = event["message"].get("content", [])
+                has_tool_use = any(b.get("type") == "tool_use" for b in content_blocks)
+                for block in content_blocks:
+                    if block.get("type") == "text":
+                        text = block["text"].strip()
+                        if text:
+                            last_text = block["text"]
+                            # Stream to channel only on final-answer turns
+                            # (turns with tool_use are intermediate reasoning rounds)
+                            if not has_tool_use and self.channel:
+                                self.channel.send(text, kind="manager")
+                                text_streamed = True
+                    elif block.get("type") == "tool_use":
+                        raw_name = block.get("name", "")
+                        if not raw_name.startswith("mcp__neurico__"):
+                            continue  # native Claude Code tool — skip
+                        had_tools = True
+                        if self.channel:
+                            name = raw_name.removeprefix("mcp__neurico__")
+                            echo = self._tool_echo(name, block.get("input", {}))
+                            if echo:
+                                self.channel.send(echo, kind="tool")
+
+            elif etype == "result":
+                result_text = event.get("result", "")
+                if result_text:
+                    last_text = result_text
+
+        stop_ipc.set()
+        process.wait()
+
+        if process.returncode != 0:
+            error_msg = "".join(stderr_lines).strip() or f"claude -p exited with code {process.returncode}"
+            raise RuntimeError(f"MCP backend error: {error_msg}")
+
+        return LLMResponse(text=last_text, tool_calls=[], raw=raw_events,
+                           streamed=text_streamed, had_tools=had_tools,
+                           ask_user_exchanges=ask_user_exchanges)
+
+    def _tool_echo(self, name: str, args: Dict[str, Any]) -> Optional[str]:
+        """Human-readable label for an MCP tool call, for the UI channel."""
+        if name == "ask_user":
+            return None
+        if name == "check_workspace":
+            verb = "Read" if args.get("action") == "read" else "Looked at"
+            return f"🔍 {verb} workspace ({args.get('path', '.')})"
+        if name == "read_agent_logs":
+            return f"📂 Checked agent logs ({args.get('run_id', '')})"
+        if name == "update_session":
+            return "📝 Updated session notes"
+        if name == "run_agent":
+            return f"🚀 Launched {args.get('agent', 'agent')}"
+        # World-model tools are silent in chat — they surface live on the
+        # Research whiteboard instead of adding noise to the conversation.
+        if name in ("update_research_state", "assess", "design_panel"):
+            return None
+        return f"🔧 {name}"
 
     def _messages_to_prompt(self, messages: List[Dict[str, Any]],
                             tools: Optional[List[Dict[str, Any]]] = None) -> str:
@@ -369,16 +606,54 @@ class LLMBackend:
         return LLMResponse(text=text, tool_calls=tool_calls, raw=data)
 
 
-def create_backend(config: Dict[str, Any]) -> LLMBackend:
+def resolve_backend(config: Dict[str, Any]) -> str:
+    """Single source of truth for which manager backend runs.
+
+    Precedence: NEURICO_MANAGER_BACKEND env > config manager.llm_backend >
+    auto-detect from provider (claude → mcp for native tool calling via
+    claude -p; anything else → cli). Both manager.py (to decide whether to
+    provision .mcp.json / the IPC dir) and create_backend() call this, so the
+    two can never disagree about which backend is active.
+    """
+    configured = os.environ.get("NEURICO_MANAGER_BACKEND",
+                                config.get("manager", {}).get("llm_backend")) or None
+    if configured:
+        return configured
+    provider = os.environ.get("NEURICO_PROVIDER",
+                              config.get("manager", {}).get("default_provider", "claude"))
+    return "mcp" if provider == "claude" else "cli"
+
+
+def create_backend(config: Dict[str, Any],
+                   mcp_config_path: Optional[str] = None,
+                   channel=None,
+                   ipc_dir: Optional[str] = None) -> LLMBackend:
     """
     Create an LLM backend from configuration.
 
     Config can come from config/manager.yaml or environment variables.
     Environment variables take precedence.
+
+    mcp_config_path: path to .mcp.json, required when backend="mcp".
+    channel: UserChannel forwarded to LLMBackend for real-time tool echoes.
+    ipc_dir: directory for ask_user IPC with the MCP server subprocess.
     """
-    backend = os.environ.get("NEURICO_MANAGER_BACKEND",
-                             config.get("manager", {}).get("llm_backend", "cli"))
+    import shutil
+
+    backend = resolve_backend(config)
     model = os.environ.get("NEURICO_MANAGER_MODEL",
                            config.get("manager", {}).get("llm_model")) or None
 
-    return LLMBackend(backend=backend, model=model)
+    if backend in ("mcp", "cli") and shutil.which("claude") is None:
+        raise RuntimeError(
+            f"llm_backend '{backend}' requires the Claude Code CLI ('claude' command) "
+            "but it was not found in PATH.\n"
+            "  • Install Claude Code: https://claude.ai/code\n"
+            "  • Or set a non-CLI backend in config/manager.yaml or NEURICO_MANAGER_BACKEND:\n"
+            "      anthropic_api   — requires ANTHROPIC_API_KEY\n"
+            "      openrouter      — requires OPENROUTER_API_KEY (supports Codex, Gemini, …)"
+        )
+
+    return LLMBackend(backend=backend, model=model,
+                      mcp_config_path=mcp_config_path, channel=channel,
+                      ipc_dir=ipc_dir)
