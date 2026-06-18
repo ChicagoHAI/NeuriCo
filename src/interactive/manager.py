@@ -37,6 +37,7 @@ PROJECT_ROOT = Path(os.environ.get("NEURICO_PROJECT_ROOT", Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from interactive.session_state import SessionState
+from interactive.research_state import ResearchState
 from interactive.llm_backend import LLMBackend, LLMResponse, create_backend
 from interactive.tools import ToolExecutor
 from interactive.channel import UserChannel, TerminalChannel
@@ -98,6 +99,12 @@ def friendly_tool_echo(name: str, args: Dict[str, Any]) -> Optional[str]:
         return f"📂 Checked progress of {args.get('run_id', 'the agent')}"
     if name == "update_session":
         return "📝 Updated session notes"
+    if name == "update_research_state":
+        return None  # silent — the Research whiteboard reflects this live
+    if name == "assess":
+        return None  # silent — surfaced on the whiteboard, not as chat noise
+    if name == "design_panel":
+        return None  # silent — the whiteboard re-renders to reflect the layout
     if name == "run_agent":
         return f"🚀 Launched the {args.get('agent', 'agent')}"
     return f"🔧 {name}"
@@ -236,11 +243,19 @@ class InteractiveManager:
 
         # Initialize components
         self.session = SessionState(workspace, idea_id, idea_title, provider)
+        # The manager's world model — what makes it reason like a PI rather than
+        # a tool dispatcher. Threaded into the executor so tools read/write it.
+        self.research = ResearchState(workspace)
         self.backend = create_backend(config)
         self.tools = ToolExecutor(workspace, self.session, idea_file, provider,
-                                  PROJECT_ROOT, channel=self.channel)
+                                  PROJECT_ROOT, channel=self.channel,
+                                  research=self.research)
         self.tool_definitions = load_tool_definitions()
+        # Base system prompt; the live research-state digest is appended fresh
+        # each turn (see _agent_step) so the manager always reasons over current
+        # state without polluting the persisted conversation history.
         self.system_prompt = load_system_prompt(idea, workspace, provider, config)
+        self.base_system_prompt = self.system_prompt
 
         # Conversation history (in-memory, backed by session)
         self.messages: List[Dict[str, Any]] = []
@@ -317,6 +332,14 @@ class InteractiveManager:
 
     def _agent_step(self):
         """Execute one step of the agent loop."""
+        # Refresh the system prompt with the current research-state digest so the
+        # manager reasons over its up-to-date world model every turn. messages[0]
+        # is always the system message (set in run()); we rewrite only its
+        # content and never persist this ephemeral digest to history.
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = (
+                self.base_system_prompt + self.research.digest_section())
+
         # Call LLM
         self.channel.status("Manager thinking…", thinking=True)
         response = self.backend.send(self.messages, self.tool_definitions)
@@ -537,7 +560,7 @@ def main():
             from core.idea_manager import IdeaManager
             im = IdeaManager(PROJECT_ROOT / "ideas")
             im.update_status(args.idea_id, "in_progress")
-            print(f"[Idea moved to in_progress]")
+            print("[Idea moved to in_progress]")
             # Note: this MOVES the file (submitted/ -> in_progress/), making the
             # captured idea_file path stale. The agent dispatch in tools.py (#104)
             # falls back to ideas/in_progress/<name> at launch time, so no
