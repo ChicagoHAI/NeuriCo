@@ -21,15 +21,19 @@ and tracks pipeline state.
 """
 
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, List, Dict, Any
 import json
+import shutil
 from datetime import datetime
 import time
 
 from agents.resource_finder import run_resource_finder
 from agents.rule_maker import run_rule_maker
+from agents.rule_maker_bootstrap import run_bootstrap_rule_maker
+from agents.manifest_trimmer import make_trimmer_callable
 from core.scorer import run_scorer
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
+from core.workspace_manifest import build_manifest, curate_manifest
 from templates.research_agent_instructions import generate_instructions
 
 
@@ -115,6 +119,24 @@ CLI_COMMANDS = {
 RULE_MAKER_STAGE = "rule_maker"
 SCORER_STAGE = "scorer"
 
+# Stage names tracked in PipelineState when bootstrap_mode=True
+BOOTSTRAP_MANIFEST_STAGE = "bootstrap_manifest"
+BOOTSTRAP_RULE_MAKER_STAGE = "bootstrap_rule_maker"
+
+# Runtime artifacts moved out of the workspace during the bootstrap rule_maker
+# stage so the agent cannot see values that would bias target choice. Restored
+# before the scorer runs. Mirrors the forward-mode scoring_seal seal/unseal
+# pattern but for an existing-workspace's outputs rather than scoring inputs.
+BOOTSTRAP_SEALED_PATHS: List[str] = [
+    "results",
+    "experiments",
+    "logs",
+    "paper_draft",
+    "paper",
+    "REPORT.md",
+    "planning.md",
+]
+
 
 class ResearchPipelineOrchestrator:
     """
@@ -155,6 +177,8 @@ class ResearchPipelineOrchestrator:
         scoring_enabled: bool = False,
         rule_maker_timeout: int = 1800,  # 30 min
         scorer_timeout: int = 600,  # 10 min
+        bootstrap_mode: bool = False,
+        manifest_trimmer_timeout: int = 300,  # 5 min
     ) -> Dict[str, Any]:
         """
         Execute complete research pipeline.
@@ -174,10 +198,28 @@ class ResearchPipelineOrchestrator:
                              from the runner. Default False = legacy two-stage flow.
             rule_maker_timeout: Timeout for rule_maker stage in seconds (scoring mode only)
             scorer_timeout: Timeout for scorer stage in seconds (scoring mode only)
+            bootstrap_mode: If True, design scoring for an existing workspace whose
+                             experiment_runner has already produced its outputs. Skips
+                             resource_finder, forward rule_maker, and experiment_runner.
+                             Inserts the workspace_manifest two-pass curation and the
+                             bootstrap rule_maker, then runs the scorer. Implies
+                             scoring_enabled=True.
+            manifest_trimmer_timeout: Timeout for the manifest_trimmer agent per call
+                             (bootstrap mode only).
 
         Returns:
             Dictionary with pipeline execution results
         """
+        if bootstrap_mode:
+            return self._run_bootstrap_pipeline(
+                idea=idea,
+                provider=provider,
+                full_permissions=full_permissions,
+                manifest_trimmer_timeout=manifest_trimmer_timeout,
+                rule_maker_timeout=rule_maker_timeout,
+                scorer_timeout=scorer_timeout,
+            )
+
         print()
         print("=" * 80)
         if scoring_enabled:
@@ -650,6 +692,321 @@ class ResearchPipelineOrchestrator:
         always called in a finally block.
         """
         unseal_scoring_files(self.work_dir, sealed_dir)
+
+    # === Bootstrap mode ====================================================
+    # When bootstrap_mode=True, the workspace was produced by an earlier
+    # experiment_runner whose outputs we want to retrofit a scoring protocol
+    # around. The bootstrap path runs:
+    #   1. workspace_manifest.build_manifest  (mechanical Pass 1)
+    #   2. workspace_manifest.curate_manifest (manifest_trimmer agent, Pass 2)
+    #   3. seal runtime artifacts             (results/, REPORT.md, etc.)
+    #   4. rule_maker_bootstrap               (writes scoring/{interface,eval,targets,log})
+    #   5. unseal runtime artifacts
+    #   6. scorer                             (executes scoring/eval.py)
+    # The forward-mode resource_finder, rule_maker, and experiment_runner are
+    # skipped — they already ran in the original session that produced this
+    # workspace.
+
+    def _run_bootstrap_pipeline(
+        self,
+        idea: Dict[str, Any],
+        provider: str,
+        full_permissions: bool,
+        manifest_trimmer_timeout: int,
+        rule_maker_timeout: int,
+        scorer_timeout: int,
+    ) -> Dict[str, Any]:
+        """Top-level driver for bootstrap_mode pipelines."""
+        print()
+        print("=" * 80)
+        print("MULTI-AGENT RESEARCH PIPELINE  (BOOTSTRAP MODE)")
+        print("=" * 80)
+        print(f"Work directory: {self.work_dir}")
+        print(f"Provider: {provider}")
+        print(f"Manifest trimmer timeout: {manifest_trimmer_timeout}s")
+        print(f"Rule maker timeout: {rule_maker_timeout}s")
+        print(f"Scorer timeout: {scorer_timeout}s")
+        print("=" * 80)
+
+        results: Dict[str, Any] = {
+            'work_dir': str(self.work_dir),
+            'provider': provider,
+            'stages': {},
+            'success': False,
+        }
+
+        # STAGE B1: Workspace manifest (Pass 1 mechanical + Pass 2 trimmer agent).
+        manifest_result = self._run_bootstrap_manifest(
+            provider=provider,
+            full_permissions=full_permissions,
+            manifest_trimmer_timeout=manifest_trimmer_timeout,
+        )
+        results['stages'][BOOTSTRAP_MANIFEST_STAGE] = manifest_result
+        if not manifest_result.get('success'):
+            print()
+            print("⚠️  Bootstrap manifest stage failed -- aborting.")
+            return results
+
+        curated_manifest = manifest_result['curated_manifest']
+
+        # STAGE B2: Seal runtime artifacts so the bootstrap rule_maker cannot
+        # peek at values that would bias target choice. The finally block
+        # restores them even if the rule_maker crashes, so the scorer can run.
+        sealed_dir = self._seal_bootstrap_inputs()
+        try:
+            results['stages'][BOOTSTRAP_RULE_MAKER_STAGE] = self._run_bootstrap_rule_maker(
+                curated_manifest=curated_manifest,
+                provider=provider,
+                timeout=rule_maker_timeout,
+                full_permissions=full_permissions,
+            )
+        finally:
+            self._unseal_bootstrap_inputs(sealed_dir)
+
+        if not results['stages'][BOOTSTRAP_RULE_MAKER_STAGE].get('success'):
+            print()
+            print("⚠️  Bootstrap rule_maker stage failed -- aborting before scorer.")
+            return results
+
+        # STAGE B3: Scorer (executes scoring/eval.py against the existing artifacts).
+        results['stages'][SCORER_STAGE] = self._run_scorer(timeout=scorer_timeout)
+
+        scorer_ok = results['stages'][SCORER_STAGE].get('success', False)
+        if scorer_ok:
+            print()
+            print("🎉 BOOTSTRAP PIPELINE COMPLETED SUCCESSFULLY!")
+            self.state.mark_completed()
+            results['success'] = True
+        else:
+            print()
+            print("⚠️  Scorer stage failed.")
+        return results
+
+    def _run_bootstrap_manifest(
+        self,
+        provider: str,
+        full_permissions: bool,
+        manifest_trimmer_timeout: int,
+    ) -> Dict[str, Any]:
+        """
+        Run Pass 1 (mechanical) + Pass 2 (manifest_trimmer agent) and persist
+        the curated manifest to .neurico/bootstrap_curated_manifest.json.
+
+        Returns a dict with success, curated_manifest (the in-memory result),
+        and curated_path (the on-disk artifact for reproducibility).
+        """
+        print()
+        print("=" * 80)
+        print(f"STAGE: {BOOTSTRAP_MANIFEST_STAGE}")
+        print("=" * 80)
+        self.state.start_stage(BOOTSTRAP_MANIFEST_STAGE)
+
+        try:
+            raw_manifest = build_manifest(self.work_dir)
+            print(f"📐 Pass 1 (mechanical): {len(raw_manifest['files'])} files indexed, "
+                  f"{len(raw_manifest['python_signatures'])} python signatures, "
+                  f"{len(raw_manifest['json_schemas'])} JSON schemas")
+
+            trimmer = make_trimmer_callable(
+                provider=provider,
+                templates_dir=self.templates_dir,
+                timeout=manifest_trimmer_timeout,
+                full_permissions=full_permissions,
+            )
+            curated = curate_manifest(
+                raw_manifest, self.work_dir, trimmer,
+                max_retries=3, verbose=True,
+            )
+            print(f"📐 Pass 2 (agent curation): {curated.get('curation')}")
+
+            curated_path = self.work_dir / ".neurico" / "bootstrap_curated_manifest.json"
+            curated_path.parent.mkdir(parents=True, exist_ok=True)
+            curated_path.write_text(
+                json.dumps(curated, indent=2), encoding="utf-8",
+            )
+
+            # Both 'trimmer_agent' and 'mechanical_fallback' are acceptable
+            # outcomes -- the fallback path exists precisely so a flaky trimmer
+            # agent does not crash the bootstrap pipeline. The rule_maker can
+            # operate on the raw mechanical manifest in degraded mode.
+            curation_mode = curated.get('curation')
+            success = curation_mode in ('trimmer_agent', 'mechanical_fallback')
+            if curation_mode == 'mechanical_fallback':
+                fb_reason = curated.get('curation_fallback_reason')
+                print(
+                    "⚠️  Trimmer agent exhausted retries -- proceeding on the "
+                    "raw mechanical manifest. The rule_maker may see broader "
+                    "workspace structure than usual."
+                )
+                if fb_reason:
+                    print(f"    Last error: {fb_reason}")
+            outputs = {
+                'curated_path': str(curated_path),
+                'curation': curation_mode,
+                'curation_fallback_reason': curated.get('curation_fallback_reason'),
+                'task_shape': curated.get('task_shape'),
+                'intent_summary': curated.get('intent_summary'),
+                'output_description': curated.get('output_description'),
+            }
+            self.state.complete_stage(BOOTSTRAP_MANIFEST_STAGE, success=success, outputs=outputs)
+            return {
+                'success': success,
+                'curated_manifest': curated,
+                **outputs,
+            }
+        except Exception as e:
+            print(f"❌ Bootstrap manifest stage error: {e}")
+            self.state.complete_stage(BOOTSTRAP_MANIFEST_STAGE, success=False,
+                                      outputs={'error': str(e)})
+            return {'success': False, 'error': str(e)}
+
+    def _run_bootstrap_rule_maker(
+        self,
+        curated_manifest: Dict[str, Any],
+        provider: str,
+        timeout: int,
+        full_permissions: bool,
+    ) -> Dict[str, Any]:
+        """Launch the bootstrap rule_maker agent."""
+        print()
+        print("=" * 80)
+        print(f"STAGE: {BOOTSTRAP_RULE_MAKER_STAGE}")
+        print("=" * 80)
+        self.state.start_stage(BOOTSTRAP_RULE_MAKER_STAGE)
+
+        try:
+            result = run_bootstrap_rule_maker(
+                curated_manifest=curated_manifest,
+                work_dir=self.work_dir,
+                provider=provider,
+                templates_dir=self.templates_dir,
+                timeout=timeout,
+                full_permissions=full_permissions,
+                log_dir=self.work_dir / ".neurico" / "bootstrap_logs",
+            )
+            self.state.complete_stage(
+                BOOTSTRAP_RULE_MAKER_STAGE,
+                success=result.get('success', False),
+                outputs={
+                    'return_code': result.get('return_code'),
+                    'outputs_exist': result.get('outputs_exist'),
+                    'validation': result.get('validation'),
+                    'transcript_file': result.get('transcript_file'),
+                },
+            )
+            return result
+        except Exception as e:
+            print(f"❌ Bootstrap rule_maker stage error: {e}")
+            self.state.complete_stage(BOOTSTRAP_RULE_MAKER_STAGE, success=False,
+                                      outputs={'error': str(e)})
+            return {'success': False, 'error': str(e)}
+
+    def _bootstrap_sealed_dir_for(self) -> Path:
+        """Sibling sealed dir for bootstrap mode."""
+        return self.work_dir.parent / ".bootstrap_sealed" / self.work_dir.name
+
+    def _seal_bootstrap_inputs(self) -> Optional[Path]:
+        """
+        Move runtime artifacts out of the workspace BEFORE the bootstrap
+        rule_maker stage. Mirrors _seal_runner_inputs but with the inverted
+        artifact set: forward mode hides scoring/* from the runner, bootstrap
+        mode hides results/, REPORT.md, etc. from the rule_maker.
+        """
+        sealed_dir = self._bootstrap_sealed_dir_for()
+        sealed_dir.mkdir(parents=True, exist_ok=True)
+
+        moved: List[str] = []
+        for rel in BOOTSTRAP_SEALED_PATHS:
+            src = self.work_dir / rel
+            if not src.exists():
+                continue
+            dst = sealed_dir / rel
+            if dst.exists():
+                if dst.is_dir():
+                    shutil.rmtree(dst)
+                else:
+                    dst.unlink()
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            moved.append(rel)
+
+        if not moved:
+            try:
+                sealed_dir.rmdir()
+                sealed_dir.parent.rmdir()
+            except OSError:
+                pass
+            print("🔒 Nothing to seal (no runtime artifacts present).")
+            return None
+
+        print(f"🔒 Sealed {len(moved)} runtime artifacts to {sealed_dir}:")
+        for rel in moved:
+            print(f"     - {rel}")
+        print(
+            f"   (manual recovery if orchestrator crashes: "
+            f"mv {sealed_dir}/* {self.work_dir}/)"
+        )
+        return sealed_dir
+
+    def _unseal_bootstrap_inputs(self, sealed_dir: Optional[Path]) -> None:
+        """
+        Restore runtime artifacts AFTER the bootstrap rule_maker stage.
+
+        Best-effort: logs failures but does not raise so an unseal error does
+        not mask a rule_maker failure. Always called from a finally block.
+        """
+        if sealed_dir is None:
+            return
+        if not sealed_dir.exists():
+            print(f"⚠️  Bootstrap sealed dir disappeared: {sealed_dir}")
+            return
+
+        restored: List[str] = []
+        errors: List[str] = []
+        for rel in BOOTSTRAP_SEALED_PATHS:
+            src = sealed_dir / rel
+            if not src.exists():
+                continue
+            dst = self.work_dir / rel
+            try:
+                if dst.exists():
+                    if dst.is_dir():
+                        shutil.rmtree(dst)
+                    else:
+                        dst.unlink()
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                restored.append(rel)
+            except OSError as e:
+                errors.append(f"{rel}: {e}")
+
+        if restored:
+            print(f"🔓 Restored {len(restored)} runtime artifacts from {sealed_dir}")
+        if errors:
+            print(f"⚠️  Unseal errors -- sealed dir kept at {sealed_dir} for "
+                  "manual recovery:")
+            for e in errors:
+                print(f"     - {e}")
+            return
+
+        try:
+            has_files = any(
+                p.is_file() for p in sealed_dir.rglob("*")
+            ) if sealed_dir.exists() else False
+            if sealed_dir.exists() and not has_files:
+                shutil.rmtree(sealed_dir)
+                parent = sealed_dir.parent
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
+            elif has_files:
+                print(
+                    f"ℹ️  Unexpected files remain in {sealed_dir}; "
+                    "leaving the directory for inspection."
+                )
+        except OSError as e:
+            print(f"⚠️  Could not clean up {sealed_dir}: {e}")
 
     def get_pipeline_status(self) -> Dict[str, Any]:
         """Get current pipeline execution status."""
