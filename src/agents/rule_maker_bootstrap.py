@@ -249,15 +249,47 @@ def run_bootstrap_rule_maker(
         for key, fname in BOOTSTRAP_OUTPUT_FILES.items()
     }
     all_outputs_present = all(outputs_exist.values())
-    success = (return_code == 0) and all_outputs_present and (error is None)
+
+    # Hard structural gate: a return_code=0 with all four files written can still
+    # produce malformed scoring artifacts (eval.py SyntaxError, targets.json with
+    # invalid directions). Gate success on the validator so downstream scorer
+    # crashes turn into bootstrap-stage failures, not silent passes.
+    validation: Dict[str, Any] = {}
+    hard_checks_ok = False
+    if all_outputs_present and return_code == 0 and error is None:
+        validation = validate_bootstrap_outputs(work_dir)
+        checks = validation.get("checks", {})
+        hard_checks_ok = (
+            checks.get("eval_parses_as_python") is True
+            and checks.get("targets_parses_as_json") is True
+            and checks.get("targets_has_properties") is True
+            and checks.get("targets_all_directions_valid") is True
+        )
+
+    success = (
+        return_code == 0
+        and all_outputs_present
+        and (error is None)
+        and hard_checks_ok
+    )
 
     if success:
         print(f"✅ Bootstrap rule_maker completed in {elapsed:.1f}s")
     else:
         missing = [k for k, present in outputs_exist.items() if not present]
+        failed_hard_checks = [
+            k for k in (
+                "eval_parses_as_python",
+                "targets_parses_as_json",
+                "targets_has_properties",
+                "targets_all_directions_valid",
+            )
+            if validation.get("checks", {}).get(k) is False
+        ]
         print(
             f"⚠️  Bootstrap rule_maker finished with issues "
-            f"(return_code={return_code}, missing={missing}, error={error})"
+            f"(return_code={return_code}, missing={missing}, "
+            f"failed_checks={failed_hard_checks}, error={error})"
         )
 
     return {
@@ -265,6 +297,7 @@ def run_bootstrap_rule_maker(
         "return_code": return_code,
         "elapsed_time": elapsed,
         "outputs_exist": outputs_exist,
+        "validation": validation,
         "transcript_file": str(transcript_path) if transcript_path else None,
         "prompt_file": str(log_dir / "bootstrap_rule_maker_prompt.txt") if log_dir else None,
         "error": error,

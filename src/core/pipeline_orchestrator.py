@@ -944,10 +944,25 @@ class ResearchPipelineOrchestrator:
                 json.dumps(curated, indent=2), encoding="utf-8",
             )
 
-            success = curated.get('curation') == 'trimmer_agent'
+            # Both 'trimmer_agent' and 'mechanical_fallback' are acceptable
+            # outcomes -- the fallback path exists precisely so a flaky trimmer
+            # agent does not crash the bootstrap pipeline. The rule_maker can
+            # operate on the raw mechanical manifest in degraded mode.
+            curation_mode = curated.get('curation')
+            success = curation_mode in ('trimmer_agent', 'mechanical_fallback')
+            if curation_mode == 'mechanical_fallback':
+                fb_reason = curated.get('curation_fallback_reason')
+                print(
+                    "⚠️  Trimmer agent exhausted retries -- proceeding on the "
+                    "raw mechanical manifest. The rule_maker may see broader "
+                    "workspace structure than usual."
+                )
+                if fb_reason:
+                    print(f"    Last error: {fb_reason}")
             outputs = {
                 'curated_path': str(curated_path),
-                'curation': curated.get('curation'),
+                'curation': curation_mode,
+                'curation_fallback_reason': curated.get('curation_fallback_reason'),
                 'task_shape': curated.get('task_shape'),
                 'intent_summary': curated.get('intent_summary'),
                 'output_description': curated.get('output_description'),
@@ -986,7 +1001,7 @@ class ResearchPipelineOrchestrator:
                 templates_dir=self.templates_dir,
                 timeout=timeout,
                 full_permissions=full_permissions,
-                log_dir=self.work_dir / "logs",
+                log_dir=self.work_dir / ".neurico" / "bootstrap_logs",
             )
             self.state.complete_stage(
                 BOOTSTRAP_RULE_MAKER_STAGE,
@@ -994,6 +1009,7 @@ class ResearchPipelineOrchestrator:
                 outputs={
                     'return_code': result.get('return_code'),
                     'outputs_exist': result.get('outputs_exist'),
+                    'validation': result.get('validation'),
                     'transcript_file': result.get('transcript_file'),
                 },
             )
