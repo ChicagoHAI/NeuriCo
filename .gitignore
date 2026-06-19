@@ -83,3 +83,8 @@ services/paper-finder/**/__pycache__/
 
 # axle_check.py runtime scratch (normalized snippet sent to AXLE)
 .axle_last_check.lean
+*.db
+*.sqlite
+*.sqlite3
+hypogenic-ai-repos/
+data/
