@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 import json
 import shutil
+import subprocess
+import sys
 from datetime import datetime
 import time
 
@@ -348,6 +350,11 @@ class ResearchPipelineOrchestrator:
             raise
 
         finally:
+            # Sweep any Modal-side resources before the workspace is closed out.
+            # Gated on .neurico/modal_resources.json — non-Modal runs are a
+            # filesystem stat and return immediately.
+            self._modal_sweep_if_used()
+
             # Save final results
             results_file = self.work_dir / ".neurico" / "pipeline_results.json"
             results_file.parent.mkdir(parents=True, exist_ok=True)
@@ -358,6 +365,46 @@ class ResearchPipelineOrchestrator:
             print(f"📄 Pipeline results saved to: {results_file}")
 
         return results
+
+    def _modal_sweep_if_used(self) -> None:
+        """
+        Tear down any per-experiment Modal environment registered by the run.
+
+        The modal-training / modal-vllm skills' lifecycle.register() writes
+        .neurico/modal_resources.json on first use. If the file is absent,
+        this method is a no-op (~50µs). If present, it invokes the skill's
+        modal_sweep.py script, which deletes the Modal environment
+        (cascading to volumes, apps, and secrets it owns).
+        """
+        sentinel = self.work_dir / ".neurico" / "modal_resources.json"
+        if not sentinel.exists():
+            return
+
+        sweep_script = (
+            self.work_dir / ".claude" / "skills" / "modal-training"
+            / "scripts" / "modal_sweep.py"
+        )
+        if not sweep_script.exists():
+            # Skill not present in this workspace (older neurico template);
+            # log so the user can clean up manually.
+            print()
+            print(f"⚠️  Modal sentinel present at {sentinel} but sweep script "
+                  f"missing; clean up manually with `modal environment list`.")
+            return
+
+        print()
+        print(f"🧹 Modal sweep: tearing down per-experiment environment")
+        try:
+            subprocess.run(
+                [sys.executable, str(sweep_script),
+                 "--workspace", str(self.work_dir)],
+                timeout=180,
+                check=False,
+            )
+        except Exception as exc:
+            # Never raise from finally — the workspace still needs its results
+            # file written. The sweep script's own error output is enough.
+            print(f"⚠️  Modal sweep encountered an error: {exc}")
 
     def _run_resource_finder(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
