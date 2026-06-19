@@ -1,4 +1,3 @@
-PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS ingestion_runs (
     ingestion_id TEXT PRIMARY KEY,
     started_at TEXT NOT NULL,
@@ -7,10 +6,10 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
     parser_version TEXT NOT NULL,
     status TEXT NOT NULL CHECK (
         status IN (
-            "running",
-            "completed",
-            "completed_with_errors",
-            "failed"
+            'running',
+            'completed',
+            'completed_with_errors',
+            'failed'
         )
     ),
     summary_json TEXT NOT NULL DEFAULT '{}'
@@ -22,8 +21,8 @@ CREATE TABLE IF NOT EXISTS runs (
     repository_path TEXT NOT NULL,
     ingestion_mode TEXT NOT NULL CHECK (
         ingestion_mode IN (
-            "static_backfill",
-            "live"
+            'static_backfill',
+            'live'
         )
     ),
     first_seen_at TEXT NOT NULL,
@@ -53,9 +52,11 @@ CREATE TABLE IF NOT EXISTS source_files (
     parser_version TEXT,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
+
     FOREIGN KEY (run_id)
         REFERENCES runs(run_id)
         ON DELETE CASCADE,
+
     UNIQUE (
         run_id,
         relative_path,
@@ -75,13 +76,16 @@ CREATE TABLE IF NOT EXISTS raw_records (
     payload_json TEXT,
     raw_text TEXT,
     created_at TEXT NOT NULL,
+
     FOREIGN KEY (file_id)
         REFERENCES source_files(file_id)
         ON DELETE CASCADE,
+
     UNIQUE (
         file_id,
         record_index
     ),
+
     CHECK (
         payload_json IS NOT NULL
         OR raw_text IS NOT NULL
@@ -98,11 +102,11 @@ CREATE TABLE IF NOT EXISTS parse_errors (
     error_message TEXT NOT NULL,
     raw_excerpt TEXT,
     created_at TEXT NOT NULL,
+
     FOREIGN KEY (file_id)
         REFERENCES source_files(file_id)
         ON DELETE CASCADE
 );
-
 
 CREATE INDEX IF NOT EXISTS idx_source_files_run_id
     ON source_files(run_id);
@@ -127,5 +131,3 @@ CREATE INDEX IF NOT EXISTS idx_raw_records_source_line
 
 CREATE INDEX IF NOT EXISTS idx_parse_errors_file_id
     ON parse_errors(file_id);
-
-
