@@ -178,6 +178,7 @@ RUN git config --global user.email "noreply@neurico.dev" \
     && git config --global user.name "NeuriCo" \
     && git config --global init.defaultBranch main \
     && mkdir -p ~/.claude ~/.codex ~/.codex-container ~/.codex-host ~/.gemini ~/.cache/uv \
+                ~/.neurico/memories/live ~/.neurico/memories/drafts ~/.neurico/memories/archived \
     && echo 'PS1="neurico:\w\$ "' >> ~/.bashrc
 
 # Bypass Gemini CLI's trusted-folders check in headless container runs

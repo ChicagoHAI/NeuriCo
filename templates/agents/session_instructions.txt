@@ -205,6 +205,24 @@ BEFORE YOU START: Review Pre-Gathered Resources (5-10 min)
   ✓ Check datasets/ directory to see what data is ready
   ✓ Explore code/ directory for baseline implementations
 
+  ✓ IF MEMORIES_FROM_PAST_RUNS.md EXISTS in the workspace, READ IT NOW.
+    These are insights surfaced by previous runs on similar problems.
+    Most will not apply. Treat each as a HYPOTHESIS to evaluate against
+    THIS idea, not a directive to follow.
+
+    For EACH memory in MEMORIES_FROM_PAST_RUNS.md, write one entry into
+    MEMORY_FEEDBACK.md before you move to Phase 1:
+
+        - memory_id: <id from the memory>
+          decision: applied              # or: not_applicable
+          reason: <one specific sentence — why it does or doesn't fit>
+
+    "Didn't seem relevant" is NOT an acceptable reason. Say specifically
+    what differs between the memory's problem class and this idea.
+    If a memory clearly applies, prefer to apply it and adapt your plan
+    accordingly. The pipeline tracks how often memories help future runs;
+    your honest feedback is the signal that improves what gets surfaced.
+
   → WHEN COMPLETE: Immediately proceed to Phase 1 (Planning)
 
 Phase 1: Motivation & Planning (20-40 min)
@@ -258,6 +276,135 @@ Phase 5: Analysis (30-45 min)
   ✓ Create comprehensive visualizations
   ✓ Document findings incrementally
 
+  → WHEN COMPLETE: Immediately proceed to Phase 5.5 (Reflection)
+
+Phase 5.5: Reflection & Memory Extraction (5-10 min, OPTIONAL — WRITING ZERO IS THE NORMAL OUTCOME)
+
+  THE POINT OF THIS PHASE. Before you write the final report, while the
+  trajectory of this run is still fresh, look back honestly and ask: did
+  anything surface that would meaningfully help a FUTURE run on a SIMILAR
+  problem — something I would NOT have thought of going in, and that a
+  textbook in this domain does NOT already cover? If yes, write it down
+  as a memory draft. If not — and this is the usual answer — write nothing
+  and proceed to Phase 6.
+
+  THE FOUR FILTERS. A candidate insight is worth writing as a memory ONLY IF
+  all four are true:
+
+    1. CLASS, NOT INSTANCE. The insight describes a CLASS of problems, not
+       just this experiment. You can state the problem class without
+       mentioning the specific dataset / model / library you used.
+
+    2. NOT FIRST-THOUGHT. You did NOT have this insight when you read the
+       idea. It emerged from a mid-run correction — a wrong first attempt,
+       a misleading result, a metric that turned out to mean something
+       different than you assumed.
+
+    3. NOT TEXTBOOK. A standard textbook in this domain would NOT make this
+       point. "Use cross-validation", "watch for overfitting", "tune your
+       learning rate" — these are textbook and do NOT belong here.
+
+    4. NOT DUPLICATE. If your insight is essentially the same as one of the
+       memories you applied from MEMORIES_FROM_PAST_RUNS.md, do NOT write a
+       new draft — that pattern is already captured.
+
+  If you cannot honestly say YES to all four, write nothing.
+
+  PRESSURE TO PRODUCE IS THE FAILURE MODE. You are not being graded on the
+  count of memories you write. You are being graded on whether the memories
+  you DO write actually help future runs. Empty draft directories are the
+  most common outcome and the safest answer.
+
+  FILE FORMAT. If — and only if — a candidate passes all four filters,
+  write a draft to:
+
+      ~/.neurico/memories/drafts/run_$(basename {{ work_dir }})/A/d_<short_slug>.md
+
+  Use this exact markdown structure (JSON in the frontmatter — parser is
+  strict about commas, braces, and matching quotes; copy the example
+  carefully):
+
+      ---
+      {
+        "id": "d_<lower_snake_slug_of_the_insight>",
+        "created_at": "<ISO 8601 UTC timestamp>",
+        "extraction_approach": "runner_self",
+        "problem_class": {
+          "what": "<one sentence: the CLASS of problems this applies to>",
+          "shape": [
+            {"<aspect>": "<abstract precondition>"},
+            {"<aspect>": "<abstract precondition>"}
+          ],
+          "signal_to_recognize": [
+            "<concrete thing a future agent can check>",
+            "<concrete thing a future agent can check>"
+          ]
+        },
+        "insight": "<one or two sentences: the abstract takeaway and the fix>",
+        "origin": {
+          "source_run": "<basename of your workspace>",
+          "source_domain": "<your domain>",
+          "source_idea_one_liner": "<this run's idea title>",
+          "what_first_attempt_was": "<a specific action you tried first that failed>",
+          "what_actually_worked": "<the correction that fixed it>"
+        },
+        "domain_tags": ["<domain>", "<sub-area>"],
+        "phase_tags": ["<phase like eval-design or data-prep>"],
+        "confidence": "low" | "medium" | "high",
+        "votes": {"used": 0, "helpful": 0, "irrelevant": 0}
+      }
+      ---
+
+      <optional 1-paragraph body — only if it adds evidence the insight doesn't>
+
+  Hard requirements enforced by the loader (a malformed draft is silently
+  dropped — verify yours):
+    - id MUST start with `d_` and use lower_snake.
+    - extraction_approach MUST be the string `runner_self`.
+    - what_first_attempt_was MUST be a specific failed action — not "I
+      struggled with X" or "it was hard". If you can't name an action,
+      the insight isn't memory-worthy: write NOTHING.
+    - domain_tags MUST include the value you put in origin.source_domain.
+
+  AN EXAMPLE THAT PASSES ALL FILTERS.
+
+      Suppose during eval you noticed that your "97% accurate" classifier
+      was actually below the majority-class baseline because the test set
+      was 88% one class. You tried hyperparameter tuning first chasing
+      accuracy; it didn't change the underlying problem. You corrected by
+      reporting balanced accuracy + majority-class baseline. The draft:
+
+      ---
+      {
+        "id": "d_majority_class_baseline_first",
+        "created_at": "2026-06-20T22:00:00+00:00",
+        "extraction_approach": "runner_self",
+        "problem_class": {
+          "what": "classification eval over imbalanced labels",
+          "shape": [
+            {"data": "labels with non-uniform distribution"},
+            {"metric": "unweighted aggregate"}
+          ],
+          "signal_to_recognize": [
+            "majority-class fraction > 60%",
+            "no majority-class baseline reported alongside accuracy"
+          ]
+        },
+        "insight": "Unweighted aggregates over imbalanced labels reward majority-class bias. Always report a majority baseline as the floor and prefer balanced-accuracy or macro-F1 as the headline.",
+        "origin": {
+          "source_run": "<your workspace basename>",
+          "source_domain": "machine_learning",
+          "source_idea_one_liner": "<the idea title from this run>",
+          "what_first_attempt_was": "Reported plain accuracy as the headline; tuned hyperparameters for two iterations chasing accuracy delta.",
+          "what_actually_worked": "Switched to balanced accuracy + per-class F1; majority baseline exposed that the 'good' model was barely above trivial."
+        },
+        "domain_tags": ["machine_learning", "classification"],
+        "phase_tags": ["eval-design"],
+        "confidence": "high",
+        "votes": {"used": 0, "helpful": 0, "irrelevant": 0}
+      }
+      ---
+
   → WHEN COMPLETE: Immediately proceed to Phase 6 (Documentation)
 
 Phase 6: Final Documentation (20-30 min) - MANDATORY BEFORE ENDING SESSION
@@ -270,7 +417,8 @@ Phase 6: Final Documentation (20-30 min) - MANDATORY BEFORE ENDING SESSION
   → WHEN COMPLETE: Session is finished
 
 CRITICAL REMINDERS:
-- This is a SINGLE CONTINUOUS SESSION covering all 6 phases
+- This is a SINGLE CONTINUOUS SESSION covering all phases (1-6, plus the
+  optional Phase 5.5 reflection step between Analysis and Documentation)
 - Resources have been PRE-GATHERED for you - use them!
 - Never stop between phases waiting for user input
 - If you encounter issues, document them and continue
