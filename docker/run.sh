@@ -144,6 +144,19 @@ show_status() {
         echo -e "    Gemini credentials .. ${YELLOW}[EMPTY]${NC} ~/.gemini exists but empty"
     fi
 
+    # Experience-memory store (~/.neurico/memories/) — extracted reflections
+    # from past runs that get injected into future runs. See
+    # docs/memory_schema.md.
+    if [ -d "$HOME/.neurico/memories/live" ]; then
+        local _live_count
+        _live_count=$(find "$HOME/.neurico/memories/live" -maxdepth 1 -name 'm_*.md' 2>/dev/null | wc -l | tr -d ' ')
+        echo -e "    Memory store ........ ${GREEN}[OK]${NC} ${_live_count} live memor$([ "$_live_count" = "1" ] && echo y || echo ies)"
+    elif [ -d "$HOME/.neurico/memories" ]; then
+        echo -e "    Memory store ........ ${DIM}[--]${NC} ~/.neurico/memories exists but no live memories"
+    else
+        echo -e "    Memory store ........ ${DIM}[--]${NC} ~/.neurico/memories will be created on first run"
+    fi
+
     echo ""
 }
 
@@ -261,6 +274,22 @@ get_cli_credential_mounts() {
         found_any=true
     fi
 
+    # Experience-memory store (~/.neurico/memories/) — READ-WRITE because the
+    # post-experiment reflection step writes new draft memories back from the
+    # container. Created on host (with the right ownership for UID 1000) so
+    # the first run doesn't need to bootstrap an empty layout from inside.
+    mkdir -p "$HOME/.neurico/memories/live" \
+             "$HOME/.neurico/memories/drafts" \
+             "$HOME/.neurico/memories/archived" 2>/dev/null || true
+    mounts="$mounts -v \"$HOME/.neurico/memories:/home/neurico/.neurico/memories\""
+    local _live_count
+    _live_count=$(find "$HOME/.neurico/memories/live" -maxdepth 1 -name 'm_*.md' 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$_live_count" -gt 0 ]; then
+        echo -e "  ${GREEN}[OK]${NC} Mounting memory store (${_live_count} live)" >&2
+    else
+        echo -e "  ${DIM}[--]${NC} Mounting memory store (empty — fills up as runs reflect)" >&2
+    fi
+
     if [ "$found_any" = false ]; then
         echo -e "  ${YELLOW}[WARN]${NC} No CLI credentials found." >&2
         echo -e "         Run 'claude', 'codex', or 'gemini' on host to login first." >&2
@@ -324,6 +353,9 @@ ensure_directories() {
     # container cannot read existing credentials or write new ones during login.
     # These contain OAuth tokens (not raw API keys), so the risk is lower than .env.
     chmod -R a+rwX "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini" 2>/dev/null || true
+    # Memory store is read-write from inside the container so reflection drafts
+    # can be persisted back. No secrets in here — chmod is just about UID match.
+    chmod -R a+rwX "$HOME/.neurico/memories" 2>/dev/null || true
     # Restrict .env to owner-only since it contains raw API keys (important on shared servers)
     chmod 600 "$PROJECT_ROOT/.env" 2>/dev/null || true
 }
@@ -667,12 +699,17 @@ cmd_run() {
     echo -e "${BLUE}Running research exploration...${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
 
+    # Mount the host src/ over the image's baked-in copy so we don't need
+    # to rebuild the image to pick up local changes (same pattern as cmd in
+    # PR #104). Specifically needed for the experience-memory feature whose
+    # modules live in src/core/memory_*.
     eval "docker run $tty_flag --rm \
         $gpu_flags \
         $user_flags \
         --env-file \"$PROJECT_ROOT/.env\" \
         -e NEURICO_WORKSPACE=/workspaces \
         -v \"$workspace_dir:/workspaces\" \
+        -v \"$PROJECT_ROOT/src:/app/src:ro\" \
         -v \"$PROJECT_ROOT/ideas:/app/ideas\" \
         -v \"$PROJECT_ROOT/logs:/app/logs\" \
         -v \"$PROJECT_ROOT/config:/app/config:ro\" \

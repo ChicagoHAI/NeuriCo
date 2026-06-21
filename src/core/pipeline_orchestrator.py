@@ -31,6 +31,15 @@ from agents.resource_finder import run_resource_finder
 from agents.rule_maker import run_rule_maker
 from agents.rule_maker_bootstrap import run_bootstrap_rule_maker
 from agents.manifest_trimmer import make_trimmer_callable
+from core.memory_retrieval import (
+    apply_feedback as _apply_memory_feedback,
+    collect_drafts as _collect_memory_drafts,
+    render_drafts_summary,
+    render_feedback_summary,
+    render_retrieval_summary,
+    retrieve_for_idea as _retrieve_memories,
+)
+from core.memory_store import MemoryStore
 from core.scorer import run_scorer
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
 from core.workspace_manifest import build_manifest, curate_manifest
@@ -292,6 +301,14 @@ class ResearchPipelineOrchestrator:
                     print("⚠️  Rule maker stage failed -- aborting.")
                     return results
 
+            # STAGE 2.75: Memory Retrieval (always; cheap on empty store)
+            # Filter live memories by idea domain, render them into the
+            # workspace as MEMORIES_FROM_PAST_RUNS.md. The runner reads this
+            # before planning and writes acknowledgments to MEMORY_FEEDBACK.md.
+            # Failures here MUST NOT abort the pipeline — a memory bug is
+            # less important than the experiment.
+            results["stages"]["memory_retrieval"] = self._retrieve_past_memories(idea)
+
             # STAGE 3: Experiment Runner
             # In scoring mode, seal eval.py / targets.json / rule_maker_log.md
             # out of the workspace for the duration of the runner stage. Always
@@ -310,6 +327,21 @@ class ResearchPipelineOrchestrator:
             finally:
                 if scoring_enabled:
                     self._unseal_runner_inputs(sealed_dir)
+
+            # STAGE 3.5a: Memory Drafts (Approach A — runner self-reflection)
+            # The runner's PHASE 5.5 may have written zero or more draft
+            # memories under ~/.neurico/memories/drafts/run_<EXP_ID>/A/.
+            # Validate them against the schema; record counts and errors.
+            # Drafts never auto-promote — that's a manual step via the
+            # `python -m cli.memory promote` command.
+            results["stages"]["memory_drafts"] = self._collect_runner_drafts()
+
+            # STAGE 3.5b: Memory Feedback
+            # Parse MEMORY_FEEDBACK.md (if the runner wrote one) and bump
+            # helpful/irrelevant vote counters on the corresponding live
+            # memories. Same fail-safe contract as retrieval — never raises
+            # past this method.
+            results["stages"]["memory_feedback"] = self._apply_memory_feedback()
 
             # STAGE 4 (scoring mode only): Scorer
             # Executes scoring/eval.py and captures results.json.
@@ -425,6 +457,84 @@ class ResearchPipelineOrchestrator:
             print("🛑 Pipeline stopped by user.")
 
         return result
+
+    def _retrieve_past_memories(self, idea: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Inject relevant past-experience memories into the workspace.
+
+        Reads live memories from ``~/.neurico/memories/``, filters by the
+        idea's domain, writes ``MEMORIES_FROM_PAST_RUNS.md`` into the work
+        directory, and bumps each surfaced memory's ``used`` counter so the
+        post-run feedback step can compute hit-rate. Returns a result dict
+        suitable for ``results["stages"]["memory_retrieval"]``.
+
+        Any failure here is logged and swallowed — a memory bug must never
+        abort an experiment run.
+        """
+        print()
+        print("─" * 80)
+        print("STAGE 2.75: MEMORY RETRIEVAL")
+        print("─" * 80)
+        try:
+            store = MemoryStore()
+            store.ensure_layout()
+            result = _retrieve_memories(idea, store, self.work_dir)
+            print(render_retrieval_summary(result))
+            result["success"] = True
+            return result
+        except Exception as exc:
+            print(f"⚠️  Memory retrieval failed (non-fatal): {exc}")
+            return {"success": False, "injected": 0, "error": str(exc)}
+
+    def _collect_runner_drafts(self) -> Dict[str, Any]:
+        """
+        Walk the Approach A drafts directory and report what the runner
+        wrote during PHASE 5.5 (Reflection).
+
+        Drafts are validated against the schema but never auto-promoted —
+        promotion is a manual step via ``python -m cli.memory promote``
+        until Phase 5 introduces an auto-promotion policy. Validation errors
+        are surfaced for inspection but never block the pipeline.
+        """
+        print()
+        print("─" * 80)
+        print("STAGE 3.5a: MEMORY DRAFTS (approach A — runner self-reflection)")
+        print("─" * 80)
+        try:
+            store = MemoryStore()
+            result = _collect_memory_drafts(self.work_dir, store, approach="A")
+            print(render_drafts_summary(result))
+            for entry in result["invalid"]:
+                print(f"   ⚠️  invalid draft: {entry['path']}")
+                for err in entry["errors"]:
+                    print(f"      - {err}")
+            result["success"] = True
+            return result
+        except Exception as exc:
+            print(f"⚠️  Memory draft collection failed (non-fatal): {exc}")
+            return {"success": False, "scanned": 0, "valid": 0,
+                    "invalid": [], "error": str(exc)}
+
+    def _apply_memory_feedback(self) -> Dict[str, Any]:
+        """
+        Read the runner's ``MEMORY_FEEDBACK.md`` (if any) and bump vote
+        counters on the corresponding live memories. Mirror error-handling
+        contract of ``_retrieve_past_memories``: never raises past this
+        method.
+        """
+        print()
+        print("─" * 80)
+        print("STAGE 3.5: MEMORY FEEDBACK")
+        print("─" * 80)
+        try:
+            store = MemoryStore()
+            result = _apply_memory_feedback(self.work_dir, store)
+            print(render_feedback_summary(result))
+            result["success"] = True
+            return result
+        except Exception as exc:
+            print(f"⚠️  Memory feedback failed (non-fatal): {exc}")
+            return {"success": False, "error": str(exc)}
 
     def _run_experiment_runner(
         self,
