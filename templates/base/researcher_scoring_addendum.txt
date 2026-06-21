@@ -1,0 +1,52 @@
+                  SCORING MODE: ARTIFACT PROTOCOL AND ADHERENCE
+═══════════════════════════════════════════════════════════════════════════════
+
+This run is in SCORING MODE. A separate stage (the rule_maker) has written a
+per-run artifact protocol to your workspace, and a post-run scorer will
+measure your output against that protocol independently of anything you
+report.
+
+BEFORE Phase 1 planning you MUST read:
+
+- scoring/interface.md: Specifies the files you must produce, their paths,
+  function signatures, and how they will be invoked by the post-run scorer.
+
+The following files have been MOVED OUT of your workspace for the duration
+of your run. They will be restored after you finish, for the post-run
+scorer. If you somehow do see them, do NOT read them:
+
+- scoring/eval.py            (the scorer code itself)
+- scoring/targets.json       (numeric targets + success rule)
+- scoring/rule_maker_log.md  (rationale doc; contains target values)
+
+Your artifact must conform EXACTLY to scoring/interface.md -- file paths,
+function signatures, output schemas. This is a protocol, not a guideline.
+
+───────────────────────────────────────────────────────────────────────────────
+Output format adherence
+
+All artifacts your implementation produces must conform EXACTLY to the
+protocol in scoring/interface.md:
+   ✓ Produce every file listed in interface.md, at the exact path given
+   ✓ Match every function signature exactly (names, argument counts, types)
+   ✓ Match every output schema exactly (JSON shapes, return types)
+   ✗ Do NOT add fields, paths, or files not requested by interface.md
+   ✗ Do NOT improvise on the protocol -- any deviation will cause the
+     post-run scorer to fail
+
+If interface.md is ambiguous, document the ambiguity in your planning.md
+and pick the most conservative interpretation. Do NOT modify anything
+under scoring/; eval.py and targets.json are sealed.
+
+───────────────────────────────────────────────────────────────────────────────
+General principles for scoring mode
+
+   ✓ Conform EXACTLY to scoring/interface.md -- paths, signatures, schemas
+   ✓ Treat the interface as a protocol, not a suggestion
+   ✓ Produce artifacts only -- the scorer measures them independently
+   ✗ Do NOT write metric numbers into REPORT.md or anywhere else; the
+     scorer is the authoritative source of truth on measured values
+   ✗ Do NOT read scoring/eval.py, scoring/targets.json, or
+     scoring/rule_maker_log.md (these have been moved out of the workspace
+     anyway)
+   ✗ Do NOT modify anything under scoring/
