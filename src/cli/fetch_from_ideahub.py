@@ -503,7 +503,7 @@ def main():
     )
     parser.add_argument(
         "--provider",
-        choices=["claude", "gemini", "codex"],
+        choices=["claude", "gemini", "codex", "agy"],
         default=None,
         help="AI provider for repo naming and --run execution"
     )

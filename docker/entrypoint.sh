@@ -90,6 +90,7 @@ validate_env() {
     # OPENAI_API_KEY: Required for IdeaHub integration and paper-finder
     # GITHUB_TOKEN: Required for GitHub repo creation
     # Note: Claude/Codex/Gemini CLIs use OAuth credentials from ~/.claude, ~/.codex, ~/.gemini
+    # (Antigravity/agy reuses ~/.gemini/oauth_creds.json)
 
     if [ -n "$OPENAI_API_KEY" ]; then
         echo -e "  ${GREEN}[OK]${NC} OPENAI_API_KEY configured (IdeaHub, paper-finder)"
@@ -222,7 +223,7 @@ show_help() {
     echo -e "    ${GREEN}python /app/src/core/runner.py <idea_id> [options]${NC}"
     echo ""
     echo "  Options for runner.py:"
-    echo "    --provider {claude|codex|gemini}  AI provider (default: claude)"
+    echo "    --provider {claude|codex|gemini|agy}  AI provider (default: claude)"
     echo "    --full-permissions                Skip permission prompts"
     echo "    --no-github                       Run locally without GitHub"
     echo "    --timeout SECONDS                 Execution timeout (default: 3600)"

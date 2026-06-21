@@ -69,6 +69,11 @@ RUN uv python install 3.12
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && cp /root/.local/bin/claude /usr/local/bin/claude
 
+# Install Google Antigravity (agy) via native installer (installs to ~/.local/bin).
+# agy reuses Gemini's OAuth credentials (~/.gemini/oauth_creds.json), so no extra cred dir.
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash \
+    && cp /root/.local/bin/agy /usr/local/bin/agy
+
 # Install Codex and Gemini via npm (no native Linux installer available)
 RUN npm install -g @openai/codex \
     && npm install -g @google/gemini-cli

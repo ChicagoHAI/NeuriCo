@@ -46,7 +46,8 @@ except ImportError:
 CLI_COMMANDS = {
     'claude': 'claude -p',  # Print mode enables streaming JSON output with stdin
     'codex': 'codex exec',  # Non-interactive mode: read from stdin
-    'gemini': 'gemini'
+    'gemini': 'gemini',
+    'agy': 'agy -p'  # Google Antigravity CLI, print mode reads prompt from stdin
 }
 
 
@@ -456,6 +457,8 @@ class ResearchRunner:
                     cmd += " --dangerously-skip-permissions"
                 elif provider == "gemini":
                     cmd += " --yolo --skip-trust"
+                elif provider == "agy":
+                    cmd += " --dangerously-skip-permissions"
 
             # Add streaming JSON output flags for detailed logging
             if provider == "claude":
@@ -877,7 +880,7 @@ def main():
     parser.add_argument(
         "--provider",
         default="claude",
-        choices=["claude", "gemini", "codex"],
+        choices=["claude", "gemini", "codex", "agy"],
         help="AI provider to use (default: claude)"
     )
     parser.add_argument(

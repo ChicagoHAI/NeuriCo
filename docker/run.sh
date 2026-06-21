@@ -261,9 +261,12 @@ get_cli_credential_mounts() {
         found_any=true
     fi
 
+    # Note: Antigravity (agy) shares Gemini's credential dir (~/.gemini/oauth_creds.json),
+    # so it is already covered by the ~/.gemini mount above.
+
     if [ "$found_any" = false ]; then
         echo -e "  ${YELLOW}[WARN]${NC} No CLI credentials found." >&2
-        echo -e "         Run 'claude', 'codex', or 'gemini' on host to login first." >&2
+        echo -e "         Run 'claude', 'codex', 'gemini', or 'agy' on host to login first." >&2
     fi
 
     echo ""  >&2
@@ -649,7 +652,7 @@ cmd_submit() {
 # -----------------------------------------------------------------------------
 cmd_run() {
     if [ -z "$1" ]; then
-        echo -e "${RED}Usage: $0 run <idea_id> [--provider claude|codex|gemini] [options]${NC}"
+        echo -e "${RED}Usage: $0 run <idea_id> [--provider claude|codex|gemini|agy] [options]${NC}"
         exit 1
     fi
 
@@ -759,6 +762,7 @@ cmd_login() {
     echo "  claude   # Login to Claude Code"
     echo "  codex    # Login to Codex"
     echo "  gemini   # Login to Gemini CLI"
+    echo "  agy      # Login to Antigravity CLI"
     echo ""
     echo "After logging in, exit the shell. Your credentials will be saved."
     echo ""
@@ -1319,7 +1323,7 @@ _setup_full() {
     echo -e "    ${DIM}You can set up multiple providers now, or add more later with: ./neurico login${NC}"
     echo ""
     # Detect existing credentials
-    local claude_status="" codex_status="" gemini_status=""
+    local claude_status="" codex_status="" gemini_status="" agy_status=""
     if [ -d "$HOME/.claude" ] && [ "$(ls -A "$HOME/.claude" 2>/dev/null)" ]; then
         claude_status=" ${GREEN}[already configured]${NC}"
     fi
@@ -1329,12 +1333,17 @@ _setup_full() {
     if [ -d "$HOME/.gemini" ] && [ "$(ls -A "$HOME/.gemini" 2>/dev/null)" ]; then
         gemini_status=" ${GREEN}[already configured]${NC}"
     fi
+    # agy shares Gemini's credential dir; check the specific OAuth file it writes
+    if [ -s "$HOME/.gemini/oauth_creds.json" ]; then
+        agy_status=" ${GREEN}[already configured]${NC}"
+    fi
 
     echo -e "    ${BOLD}Which providers do you want to log in to?${NC}"
     echo -e "      [1] Claude (recommended)${claude_status}"
     echo -e "      [2] Codex${codex_status}"
     echo -e "      [3] Gemini${gemini_status}"
-    echo "      [4] Skip for now"
+    echo -e "      [4] Antigravity (agy)${agy_status}"
+    echo "      [5] Skip for now"
     echo -e "    ${DIM}Enter one or more numbers, e.g. 1 2 or 1,2,3${NC}"
     echo -ne "    > "
     local login_input=""
@@ -1361,6 +1370,10 @@ _setup_full() {
                 setup_login_provider "Gemini" "gemini" "$HOME/.gemini" "/tmp/.gemini"
                 ;;
             4)
+                [ -z "$provider_choice" ] && provider_choice="4"
+                setup_login_provider "Antigravity" "agy" "$HOME/.gemini" "/tmp/.gemini"
+                ;;
+            5)
                 echo -e "    ${DIM}[SKIP]${NC} You can login later with: ./neurico login"
                 ;;
         esac
@@ -1386,6 +1399,7 @@ _setup_full() {
     case "$provider_choice" in
         2) provider_flag="codex" ;;
         3) provider_flag="gemini" ;;
+        4) provider_flag="agy" ;;
     esac
 
     # Build the run command based on user's choice
@@ -1421,7 +1435,7 @@ _setup_full() {
     echo -e "  ${BOLD}Config files:${NC}"
     echo -e "  ${DIM}  API keys & credentials .... .env${NC}"
     echo -e "  ${DIM}  Workspace config .......... config/workspace.yaml${NC}"
-    echo -e "  ${DIM}  CLI credentials ........... ~/.claude/  ~/.codex/  ~/.gemini/${NC}"
+    echo -e "  ${DIM}  CLI credentials ........... ~/.claude/  ~/.codex/  ~/.gemini/ (agy shares ~/.gemini)${NC}"
     echo ""
     echo -e "  ${DIM}To change configuration later, run: ./neurico config${NC}"
     echo ""
@@ -1757,7 +1771,7 @@ cmd_help() {
     echo "  config                    Configure API keys and settings"
     echo "  update                    Pull the latest Docker image from registry"
     echo "  build                     Build the container image locally"
-    echo "  login [provider]          Login to CLI tools (claude/codex/gemini)"
+    echo "  login [provider]          Login to CLI tools (claude/codex/gemini/agy)"
     echo "  shell                     Start an interactive shell"
     echo "  fetch <url> [--submit]    Fetch idea from IdeaHub"
     echo "  submit <idea.yaml>        Submit a research idea"

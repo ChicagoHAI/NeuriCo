@@ -42,7 +42,8 @@ from core.security import sanitize_text
 CLI_COMMANDS = {
     'claude': 'claude -p',
     'codex': 'codex exec',
-    'gemini': 'gemini'
+    'gemini': 'gemini',
+    'agy': 'agy -p'  # Google Antigravity CLI, print mode reads prompt from stdin
 }
 
 # CLI flags for verbose/structured transcript output
@@ -50,6 +51,7 @@ TRANSCRIPT_FLAGS = {
     'claude': '--verbose --output-format stream-json',
     'codex': '--json',
     'gemini': '--output-format stream-json'
+    # 'agy' has no streaming-JSON/transcript flag
 }
 
 
@@ -143,6 +145,8 @@ def _build_agent_command(provider: str, full_permissions: bool = True,
             cmd += " --dangerously-skip-permissions"
         elif provider == "gemini":
             cmd += " --yolo"
+        elif provider == "agy":
+            cmd += " --dangerously-skip-permissions"
 
     # Add transcript/JSON output flags
     transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
@@ -451,7 +455,7 @@ def main():
     parser.add_argument(
         "--provider",
         default="claude",
-        choices=["claude", "codex", "gemini"],
+        choices=["claude", "codex", "gemini", "agy"],
         help="AI provider (default: claude)"
     )
     parser.add_argument(

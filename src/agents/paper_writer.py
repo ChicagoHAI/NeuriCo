@@ -22,7 +22,8 @@ if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
 CLI_COMMANDS = {
     'claude': 'claude -p',
     'codex': 'codex exec',
-    'gemini': 'gemini'
+    'gemini': 'gemini',
+    'agy': 'agy -p'  # Google Antigravity CLI, print mode reads prompt from stdin
 }
 
 
@@ -256,6 +257,8 @@ def run_paper_writer(
             cmd += " --dangerously-skip-permissions"
         elif provider == "gemini":
             cmd += " --yolo --skip-trust"
+        elif provider == "agy":
+            cmd += " --dangerously-skip-permissions"
 
     # Add streaming JSON output flags for detailed logging
     if provider == "claude":
@@ -337,7 +340,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Generate academic paper from experiment results")
     parser.add_argument("work_dir", type=Path, help="Workspace directory with experiment results")
-    parser.add_argument("--provider", default="claude", choices=["claude", "codex", "gemini"])
+    parser.add_argument("--provider", default="claude", choices=["claude", "codex", "gemini", "agy"])
     parser.add_argument("--style", default=default_style, help="Paper style (must match a directory in templates/paper_styles/)")
     parser.add_argument("--timeout", type=int, default=3600)
     parser.add_argument("--no-permissions", action="store_true", help="Require permission prompts")

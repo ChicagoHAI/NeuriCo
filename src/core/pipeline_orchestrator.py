@@ -93,7 +93,8 @@ class PipelineState:
 CLI_COMMANDS = {
     'claude': 'claude -p',  # Print mode enables streaming JSON output with stdin
     'codex': 'codex exec',  # Non-interactive mode: read from stdin
-    'gemini': 'gemini'
+    'gemini': 'gemini',
+    'agy': 'agy -p'  # Google Antigravity CLI, print mode reads prompt from stdin
 }
 
 
@@ -377,6 +378,8 @@ class ResearchPipelineOrchestrator:
                     cmd += " --dangerously-skip-permissions"
                 elif provider == "gemini":
                     cmd += " --yolo --skip-trust"
+                elif provider == "agy":
+                    cmd += " --dangerously-skip-permissions"
 
             # Add streaming JSON output flags for detailed logging
             # All providers now output streaming JSON for consistent transcript format

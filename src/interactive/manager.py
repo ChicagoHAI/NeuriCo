@@ -466,7 +466,7 @@ def main():
     parser.add_argument(
         "--provider",
         default=None,
-        choices=["claude", "codex", "gemini"],
+        choices=["claude", "codex", "gemini", "agy"],
         help="AI provider for research agents (default: from config)"
     )
     parser.add_argument(

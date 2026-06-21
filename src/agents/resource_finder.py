@@ -30,7 +30,8 @@ from core.security import sanitize_text
 CLI_COMMANDS = {
     'claude': 'claude -p',  # Print mode enables streaming JSON output with stdin
     'codex': 'codex exec',  # Non-interactive mode: read from stdin
-    'gemini': 'gemini'
+    'gemini': 'gemini',
+    'agy': 'agy -p'  # Google Antigravity CLI, print mode reads prompt from stdin
 }
 
 # CLI flags for verbose/structured transcript output
@@ -40,6 +41,7 @@ TRANSCRIPT_FLAGS = {
     'claude': '--verbose --output-format stream-json',  # Streaming JSON (requires -p and --verbose)
     'codex': '--json',  # Outputs newline-delimited JSON events (works with codex exec)
     'gemini': '--output-format stream-json'  # Outputs JSONL stream
+    # 'agy' has no streaming-JSON/transcript flag
 }
 
 
@@ -134,6 +136,8 @@ def run_resource_finder(
             cmd += " --dangerously-skip-permissions"
         elif provider == "gemini":
             cmd += " --yolo --skip-trust"
+        elif provider == "agy":
+            cmd += " --dangerously-skip-permissions"
 
     # Add transcript/JSON output flags for structured logging
     transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
