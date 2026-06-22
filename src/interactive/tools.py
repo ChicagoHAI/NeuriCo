@@ -68,7 +68,6 @@ class ToolExecutor:
             "ask_user": self._ask_user,
             "update_session": self._update_session,
             "update_research_state": self._update_research_state,
-            "assess": self._assess,
             "design_panel": self._design_panel,
         }
 
@@ -419,8 +418,15 @@ class ToolExecutor:
         if hyps:
             updates.append(f"{len(hyps)} hypothesis(es)")
 
+        # Findings are the spine: accept rich objects {text, insight, kind} or bare
+        # strings. dead_ends remain a convenience shorthand for kind="dead_end".
         for f in self._as_list(args.get("findings")):
-            r.add_finding(str(f), kind="result")
+            if isinstance(f, dict):
+                r.add_finding(str(f.get("text", "")),
+                              kind=str(f.get("kind", "result")),
+                              insight=str(f.get("insight", "")))
+            else:
+                r.add_finding(str(f), kind="result")
         for d in self._as_list(args.get("dead_ends")):
             r.add_finding(str(d), kind="dead_end")
         n_find = len(self._as_list(args.get("findings"))) + len(self._as_list(args.get("dead_ends")))
@@ -452,39 +458,21 @@ class ToolExecutor:
                 chosen=str(decision.get("chosen", "")),
                 rationale=str(decision.get("rationale", "")),
                 options=[str(o) for o in self._as_list(decision.get("options"))],
+                finding=str(decision.get("finding", "global") or "global"),
+                layer=decision.get("layer"),
                 by="manager",
             )
             updates.append("decision")
 
+        # Honest self-report of struggle (formerly carried by assess(issue=...)).
+        # Tool/unknown-tool errors are still auto-logged in execute().
+        incident = args.get("incident")
+        if incident is not None and str(incident).strip():
+            r.add_incident("self_reported", str(incident))
+            updates.append("incident")
+
         return "Research state updated: " + ", ".join(updates) if updates else \
                "No changes (provide narrative/current_best/crux/hypotheses/findings/open_questions/decision)"
-
-    def _assess(self, args: Dict[str, Any]) -> str:
-        """Record the manager's read of the situation right now: what changed,
-        what's uncertain, the crux, any pending decision, and whether a human
-        expert would pull the user in (with rationale). This is reflection, not
-        action — if engage_user is true, you still call ask_user to actually ask."""
-        engage = args.get("engage_user", False)
-        if isinstance(engage, str):
-            engage = engage.strip().lower() in ("true", "yes", "1")
-        self.research.add_assessment(
-            situation=str(args.get("situation", "")),
-            uncertainty=str(args.get("uncertainty", "")),
-            crux=str(args.get("crux", "")),
-            decision_pending=str(args.get("decision_pending", "")),
-            engage_user=bool(engage),
-            rationale=str(args.get("rationale", "")),
-        )
-        # Honest self-report: if the manager hit confusion, an error, or recovered
-        # from a mistake, it logs an incident so the failure leaves a trace.
-        issue = str(args.get("issue", "")).strip()
-        if issue:
-            self.research.add_incident("self_reported", issue)
-        if engage:
-            return ("Assessment recorded. You judged the human should be engaged — "
-                    "now call ask_user with a concise, crux-focused question.")
-        return ("Assessment recorded. You judged no human input is needed now — "
-                "proceed autonomously.")
 
     # Block kinds the manager may use for custom panel sections. Kept in sync
     # with research_state.BLOCK_KINDS — these are the data shapes the whiteboard
@@ -497,8 +485,8 @@ class ToolExecutor:
         vocabulary (text, bullet_list, key_value, table, status_list). Decide the
         layout once near the start; afterwards call this only to refresh a custom
         section's `data`. Built-in sections (crux, current_best, narrative,
-        assessment, hypotheses, open_questions, decisions, experiments) keep
-        flowing from update_research_state/assess — list their ids in `layout`
+        findings, hypotheses, open_questions, decisions, experiments) keep
+        flowing from update_research_state — list their ids in `layout`
         to position them."""
         r = self.research
         updates = []

@@ -145,7 +145,10 @@ def test_incident_records_author_and_dedups(tmp_path):
 def test_blank_state_has_v3_shape(tmp_path):
     r = _fresh(tmp_path)
     assert r.state["schema_version"] == SCHEMA_VERSION
-    assert "assessments" in r.state  # retained (removed with the tool in a later PR)
+    # assessments node removed in PR 2 (engage signal moved onto decisions).
+    assert "assessments" not in r.state
+    assert not hasattr(r, "add_assessment")
+    assert not hasattr(r, "latest_assessment")
 
 
 def test_forward_migration_from_pre_v3_state(tmp_path):
@@ -223,3 +226,58 @@ def test_snapshot_and_digest_include_findings(tmp_path):
 def test_empty_digest_message(tmp_path):
     r = _fresh(tmp_path)
     assert "empty" in r.digest_section()
+
+
+# ------------------------------------------- manager authoring (PR 2 wiring)
+
+def _executor(tmp_path):
+    """A standalone ToolExecutor backed by a fresh ResearchState — enough to
+    exercise the update_research_state authoring path without a live session."""
+    from interactive.tools import ToolExecutor
+    from interactive.channel import TerminalChannel
+    return ToolExecutor(
+        work_dir=tmp_path, session=None, idea_file=tmp_path,
+        provider="claude", project_root=tmp_path,
+        channel=TerminalChannel(), research=ResearchState(tmp_path))
+
+
+def test_update_research_state_writes_rich_findings_and_decisions(tmp_path):
+    ex = _executor(tmp_path)
+    out = ex._update_research_state({
+        "findings": [
+            {"text": "CoT lifts GSM8K +12pts", "insight": "prompting matters",
+             "kind": "result"},
+            "a bare-string finding",
+        ],
+        "decision": {
+            "question": "Which benchmark?", "chosen": "GSM8K",
+            "rationale": "most standard", "options": ["GSM8K", "MATH"],
+            "finding": "F1", "layer": "experiment_design",
+        },
+        "incident": "hit a transient docker error, retried",
+    })
+    assert "finding" in out and "decision" in out and "incident" in out
+    r = ex.research
+    f = r.state["findings"][0]
+    assert f["id"] == "F1" and f["insight"] == "prompting matters"
+    d = r.state["decisions"][0]
+    assert d["finding"] == "F1" and d["layer"] == "experiment_design"
+    assert {o["text"]: o["status"] for o in d["options"]}["GSM8K"] == "chosen"
+    assert r.state["incidents"][0]["kind"] == "self_reported"
+
+
+def test_update_research_state_decision_defaults_to_global(tmp_path):
+    ex = _executor(tmp_path)
+    ex._update_research_state({"decision": {"question": "dispatch which agent?",
+                                            "chosen": "experiment_runner"}})
+    d = ex.research.state["decisions"][0]
+    assert d["finding"] == "global" and d["layer"] is None
+
+
+def test_assess_tool_is_gone(tmp_path):
+    ex = _executor(tmp_path)
+    assert not hasattr(ex, "_assess")
+    # Unknown tool is auto-logged as an incident rather than dispatched.
+    out = ex.execute("assess", {"situation": "x", "engage_user": True})
+    assert "Unknown tool" in out
+    assert any(i["kind"] == "unknown_tool" for i in ex.research.state["incidents"])

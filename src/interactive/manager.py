@@ -101,8 +101,6 @@ def friendly_tool_echo(name: str, args: Dict[str, Any]) -> Optional[str]:
         return "📝 Updated session notes"
     if name == "update_research_state":
         return None  # silent — the Research whiteboard reflects this live
-    if name == "assess":
-        return None  # silent — surfaced on the whiteboard, not as chat noise
     if name == "design_panel":
         return None  # silent — the whiteboard re-renders to reflect the layout
     if name == "run_agent":
