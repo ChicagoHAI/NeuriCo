@@ -236,8 +236,8 @@ def _emit_dashboard(workspace: Path, project_root: Path, channel: WebChannel,
 def _emit_research_state(workspace: Path, channel: WebChannel,
                          stop: threading.Event) -> None:
     """Push the manager's world model (the `research` event) to the browser when
-    it changes. The manager writes research_state.json via update_research_state
-    / assess; we poll it and fan a snapshot out to the Research whiteboard. Polled
+    it changes. The manager writes research_state.json via update_research_state;
+    we poll it and fan a snapshot out to the Research whiteboard. Polled
     (not in-process) so it works identically for fresh and resumed sessions and
     stays decoupled from the manager loop."""
     from interactive.research_state import ResearchState
@@ -248,8 +248,8 @@ def _emit_research_state(workspace: Path, channel: WebChannel,
             if state_file.exists():
                 # Emit snapshot(), not the raw file: snapshot() adds the derived
                 # fields the persisted state lacks — `warnings` (the
-                # non-suppressible consistency/drift section), `latest_assessment`
-                # and `counts` — and already tags event="research". A fresh
+                # non-suppressible consistency/drift section) and `counts` — and
+                # already tags event="research". A fresh
                 # read-only ResearchState keeps the poller decoupled from the
                 # manager's instance (reads only, never writes; the exists()
                 # guard above avoids creating the file early).
@@ -364,16 +364,23 @@ PAGE = r"""<!DOCTYPE html>
   .r-card{background:#10261a;border:1px solid #1a3a2e;border-radius:8px;padding:8px 12px;font-size:13px;color:#aff5b4}
   .r-card b{color:#56d364;display:block;font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px}
   .r-narrative{font-size:13px;color:#c9d1d9;line-height:1.5;padding:2px 2px}
-  .r-assess{background:#11233b;border:1px solid #1f3c5e;border-radius:8px;padding:8px 12px;font-size:12px;color:#c9d1d9}
-  .r-assess b{color:#79c0ff;display:block;font-size:10px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px}
-  .r-assess .eng{display:inline-block;margin-top:5px;font-size:11px;padding:1px 7px;border-radius:9px}
-  .r-assess .eng.yes{background:#26200d;color:#e3b341;border:1px solid #e3b341}
-  .r-assess .eng.no{background:#161b22;color:#6e7681;border:1px solid #30363d}
+  .finditem{font-size:13px;color:#c9d1d9;padding:4px 0;border-bottom:1px solid #161b22}
+  .finditem.fk-dead_end{color:#8b949e}
+  .finditem .fk{display:inline-block;font-size:9px;font-weight:700;padding:1px 6px;border-radius:8px;text-transform:uppercase;margin-right:5px}
+  .fk-result .fk{background:#1a3a2e;color:#56d364}.fk-dead_end .fk{background:#3a1e1e;color:#ff7b72}.fk-note .fk{background:#2a2a1e;color:#e3b341}
+  .finditem .fid{color:#8b949e;font-family:monospace;font-size:11px;margin-right:4px}
+  .finditem .fins{color:#8b949e;font-size:11px}
+  .dgroup{margin-bottom:8px}
+  .dgroup .dgh{font-size:10px;font-weight:700;color:#8b949e;font-family:monospace;margin:5px 0 2px;text-transform:uppercase;letter-spacing:.04em}
+  .dlayer{display:inline-block;font-size:8px;font-weight:700;padding:1px 5px;border-radius:7px;text-transform:uppercase;margin-right:5px;letter-spacing:.03em}
+  .dl-hypothesis{background:#1f3c5e;color:#79c0ff}.dl-method{background:#2a2a1e;color:#e3b341}
+  .dl-experiment_design{background:#2d2440;color:#bc8cff}.dl-interpretation{background:#10261a;color:#56d364}
   .r-sec .r-h{font-size:11px;font-weight:700;color:#adbac7;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
   .hyp{display:flex;gap:7px;align-items:baseline;padding:4px 0;border-bottom:1px solid #161b22;font-size:13px}
   .hyp .st{flex-shrink:0;font-size:9px;font-weight:700;padding:1px 6px;border-radius:9px;text-transform:uppercase}
   .st-alive{background:#1f3c5e;color:#79c0ff}.st-uncertain{background:#2a2a1e;color:#e3b341}
   .st-supported{background:#1a3a2e;color:#56d364}.st-dead{background:#3a1e1e;color:#ff7b72}
+  .st-refuted{background:#3a2a1e;color:#ffa657}
   .hyp .stmt{color:#c9d1d9}.hyp.st-row-dead .stmt{color:#8b949e;text-decoration:line-through}
   .hyp .ev{color:#6e7681;font-size:11px}
   .qitem{font-size:13px;color:#c9d1d9;padding:3px 0;padding-left:14px;position:relative}
@@ -649,13 +656,6 @@ PAGE = r"""<!DOCTYPE html>
     if(!innerHTML||!innerHTML.trim()) return null;   // skip empty sections
     return el('div','r-sec','<div class="r-h">'+esc(title)+'</div>'+innerHTML);
   }
-  // The browser receives the raw state file, which stores `assessments` (a
-  // list); fall back to its last entry if a derived `latest_assessment` is absent.
-  function latestAssessment(d){
-    if(d.latest_assessment) return d.latest_assessment;
-    const a=d.assessments; return (Array.isArray(a)&&a.length)?a[a.length-1]:null;
-  }
-
   // Built-in section renderers: id -> function(d) -> HTMLElement|null.
   const CORE={
     warnings:d=>{
@@ -665,35 +665,52 @@ PAGE = r"""<!DOCTYPE html>
     crux:d=>d.crux?el('div','r-crux','<b>⚡ Crux right now</b>'+esc(d.crux)):null,
     current_best:d=>d.current_best?el('div','r-card','<b>Current best</b>'+esc(d.current_best)):null,
     narrative:d=>{if(!d.narrative)return null;const e=el('div','r-narrative');e.textContent=d.narrative;return e;},
-    assessment:d=>{
-      const a=latestAssessment(d); if(!a) return null;
-      const eng=a.engage_user?'<span class="eng yes">would engage you</span>':'<span class="eng no">proceeding solo</span>';
-      return el('div','r-assess','<b>🧭 Manager\'s read</b>'+esc(a.situation||'')+
-        (a.uncertainty?'<br><span style="color:#8b949e">Unsure: </span>'+esc(a.uncertainty):'')+
-        (a.rationale?'<br><span style="color:#8b949e">Why: </span>'+esc(a.rationale):'')+'<br>'+eng);
+    // Findings are the spine — the units of insight decisions hang off.
+    findings:d=>{
+      const fs=d.findings||[]; if(!fs.length) return null;
+      return rsec('Findings',fs.map(f=>{const k=esc(f.kind||'result');
+        return '<div class="finditem fk-'+k+'"><span class="fk">'+k.replace('_',' ')+'</span>'+
+          (f.id?'<span class="fid">'+esc(f.id)+'</span>':'')+esc(f.text)+
+          (f.insight?'<br><span class="fins">→ '+esc(f.insight)+'</span>':'')+'</div>';
+      }).join(''));
     },
     hypotheses:d=>{
       const hyp=d.hypotheses||[]; if(!hyp.length) return null;
       return rsec('Hypotheses',hyp.map(h=>{const st=esc(h.status||'alive');
         return '<div class="hyp st-row-'+st+'"><span class="st st-'+st+'">'+st+'</span>'+
-          '<span class="stmt">'+esc(h.statement)+(h.evidence?' <span class="ev">— '+esc(h.evidence)+'</span>':'')+'</span></div>';
+          '<span class="stmt">'+(h.id?'<span class="fid">'+esc(h.id)+'</span>':'')+esc(h.statement)+
+          (h.evidence?' <span class="ev">— '+esc(h.evidence)+'</span>':'')+'</span></div>';
       }).join(''));
     },
     open_questions:d=>{
       const q=d.open_questions||[]; if(!q.length) return null;
       return rsec('Open questions',q.map(x=>'<div class="qitem">'+esc(x)+'</div>').join(''));
     },
+    // Everything is a decision: grouped by the finding it serves (global last),
+    // ordered hypothesis -> method -> experiment_design -> interpretation within.
     decisions:d=>{
       const dec=d.decisions||[]; if(!dec.length) return null;
-      return rsec('Decisions',dec.map(x=>'<div class="decitem">'+esc(x.question)+
-        (x.chosen?' <span class="ch">→ '+esc(x.chosen)+'</span>':'')+
-        (x.rationale?'<br><span class="rat">'+esc(x.rationale)+'</span>':'')+'</div>').join(''));
+      const LAYERS=['hypothesis','method','experiment_design','interpretation'];
+      const rank=l=>{const i=LAYERS.indexOf(l);return i<0?LAYERS.length:i;};
+      const fTitle={}; (d.findings||[]).forEach(f=>{if(f.id)fTitle[f.id]=f.text;});
+      const groups={}, gOrder=[];
+      dec.forEach(x=>{const f=x.finding||'global';if(!(f in groups)){groups[f]=[];gOrder.push(f);}groups[f].push(x);});
+      gOrder.sort((a,b)=>a===b?0:(a==='global'?1:(b==='global'?-1:0)));  // global last, else stable
+      const html=gOrder.map(f=>{
+        const items=groups[f].slice().sort((a,b)=>rank(a.layer)-rank(b.layer));
+        const head=f==='global'?'Project-wide':(esc(f)+(fTitle[f]?' · '+esc(fTitle[f]):''));
+        return '<div class="dgroup"><div class="dgh">'+head+'</div>'+items.map(x=>'<div class="decitem">'+
+          (x.layer?'<span class="dlayer dl-'+esc(x.layer)+'">'+esc(String(x.layer).replace('_',' '))+'</span>':'')+
+          esc(x.question)+(x.chosen?' <span class="ch">→ '+esc(x.chosen)+'</span>':'')+
+          (x.rationale?'<br><span class="rat">'+esc(x.rationale)+'</span>':'')+'</div>').join('')+'</div>';
+      }).join('');
+      return rsec('Decisions',html);
     },
     experiments:d=>{
       const exp=d.experiments||[]; if(!exp.length) return null;
       return rsec('Experiments',exp.map(x=>'<div class="expitem">'+
         '<span class="est est-'+esc(x.status||'running')+'">'+esc(x.status||'running')+'</span>'+
-        esc(x.run_id)+' '+esc(x.agent)+(x.rationale?' — <span style="color:#6e7681">'+esc(x.rationale)+'</span>':'')+
+        esc(x.run_id)+' '+esc(x.name||x.agent)+(x.rationale?' — <span style="color:#6e7681">'+esc(x.rationale)+'</span>':'')+
         (x.result?'<br><span style="color:#8b949e">→ '+esc(x.result)+'</span>':'')+'</div>').join(''));
     },
     incidents:d=>{
@@ -703,7 +720,7 @@ PAGE = r"""<!DOCTYPE html>
         (x.ts?' <span class="inc-ts">'+esc(String(x.ts).slice(11,19))+'</span>':'')+'</div>').join(''));
     },
   };
-  const DEFAULT_ORDER=['warnings','crux','current_best','narrative','assessment','hypotheses','open_questions','decisions','experiments','incidents'];
+  const DEFAULT_ORDER=['warnings','crux','current_best','narrative','findings','hypotheses','open_questions','decisions','experiments','incidents'];
 
   // PI-defined custom block -> inner HTML. Every value goes through esc().
   function customInner(sec){
