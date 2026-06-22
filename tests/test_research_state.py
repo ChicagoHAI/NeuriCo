@@ -10,6 +10,7 @@ Run: python -m pytest tests/test_research_state.py
 
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -281,3 +282,68 @@ def test_assess_tool_is_gone(tmp_path):
     out = ex.execute("assess", {"situation": "x", "engage_user": True})
     assert "Unknown tool" in out
     assert any(i["kind"] == "unknown_tool" for i in ex.research.state["incidents"])
+
+
+# ---------------------------------------- concurrency / merge-on-save (PR 4)
+
+def test_save_merges_instead_of_clobbering_other_writer(tmp_path):
+    """Two instances load the same (empty) state; each writes a different record.
+    The second save must FOLD IN the first's record, not overwrite it."""
+    a = ResearchState(tmp_path)
+    b = ResearchState(tmp_path)  # loaded before A writes — stale view
+    a.add_finding("finding from A")           # A saves -> disk has F1
+    b.add_incident("tool_error", "from B")    # B (stale) saves -> must keep F1
+    fresh = ResearchState(tmp_path)
+    assert [f["text"] for f in fresh.state["findings"]] == ["finding from A"]
+    assert any(i["detail"] == "from B" for i in fresh.state["incidents"])
+
+
+def test_untouched_scalar_not_clobbered_by_stale_writer(tmp_path):
+    a = ResearchState(tmp_path)
+    b = ResearchState(tmp_path)  # stale: crux still ""
+    a.set_fields(crux="the real crux")        # A sets crux
+    b.add_finding("unrelated")                # B never touched crux
+    fresh = ResearchState(tmp_path)
+    assert fresh.state["crux"] == "the real crux"      # not clobbered by B's ""
+    assert any(f["text"] == "unrelated" for f in fresh.state["findings"])
+
+
+def test_dirty_scalar_overwrites_last_writer_wins(tmp_path):
+    a = ResearchState(tmp_path)
+    b = ResearchState(tmp_path)
+    a.set_fields(narrative="A's story")
+    b.set_fields(narrative="B's story")       # B explicitly set it -> B wins
+    assert ResearchState(tmp_path).state["narrative"] == "B's story"
+
+
+def test_ids_mint_against_disk_no_collision_across_instances(tmp_path):
+    a = ResearchState(tmp_path)
+    fid_a = a.add_finding("alpha")            # F1
+    b = ResearchState(tmp_path)               # loads, sees F1
+    fid_b = b.add_finding("beta")             # must mint F2, not F1
+    assert fid_a == "F1" and fid_b == "F2"
+    fresh = ResearchState(tmp_path)
+    assert [f["id"] for f in fresh.state["findings"]] == ["F1", "F2"]
+
+
+def test_concurrent_threads_all_incidents_survive(tmp_path):
+    """N threads, each its own ResearchState, append a unique incident at once.
+    The flock + merge must preserve every one (incidents union by kind/detail)."""
+    ResearchState(tmp_path)  # initialize the file
+    n = 8
+    barrier = threading.Barrier(n)
+
+    def worker(i):
+        r = ResearchState(tmp_path)
+        barrier.wait()  # maximize overlap
+        r.add_incident("worker", f"incident-{i}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    fresh = ResearchState(tmp_path)
+    details = {i["detail"] for i in fresh.state["incidents"]}
+    assert {f"incident-{i}" for i in range(n)} <= details

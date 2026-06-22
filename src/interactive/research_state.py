@@ -37,9 +37,15 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+try:  # POSIX advisory file locks; absent on some platforms (e.g. Windows).
+    import fcntl
+except ImportError:  # pragma: no cover - platform dependent
+    fcntl = None
 
 SCHEMA_VERSION = 3
 
@@ -91,6 +97,105 @@ def _set_defaults(d: Dict[str, Any], defaults: Dict[str, Any]) -> bool:
     return changed
 
 
+# ----------------------------------------------------------- merge / locking
+#
+# The world model is shared memory: the manager and (in future) research
+# sub-agents all read and write it. A naive read-modify-write `_save` is
+# last-writer-wins and would clobber a concurrent writer's record. Instead we
+# MERGE on save (CRDT-lite): id-keyed entity lists union by id (newest wins),
+# and manager-owned scalars are re-asserted only for the fields THIS instance
+# touched since it last saved. An advisory flock serializes the read-merge-write
+# so the merge sees the latest on-disk state.
+#
+# Residual, documented limitation: id minting is best-effort unique (it reads the
+# on-disk ids when minting), but two writers that mint the same id from stale
+# views before either saves can still collide. A globally-unique id scheme
+# (author-scoped or uuid) is the next step, decided with whoever builds the
+# sub-agent writers — see the PR. Until then the realistic case (writers touching
+# different records / minting against the latest file) is collision-free.
+
+# id-keyed lists and the timestamp field that breaks ties (newest wins).
+_ID_LISTS = {"hypotheses": "updated_at", "experiments": "ts",
+             "findings": "ts", "decisions": "ts"}
+
+# Manager-owned fields re-asserted on save only when this instance changed them
+# (else the latest on-disk value is kept, so we never clobber another writer).
+_DIRTY_SCALARS = ("narrative", "current_best", "crux", "open_questions",
+                  "panel_layout")
+
+
+@contextmanager
+def _file_lock(path: Path):
+    """Best-effort exclusive advisory lock around a critical section. No-ops if
+    fcntl is unavailable (the merge still helps; only the race window widens)."""
+    if fcntl is None:
+        yield
+        return
+    lock_path = str(path) + ".lock"
+    f = open(lock_path, "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        finally:
+            f.close()
+
+
+def _ts_of(item: Dict[str, Any], tskey: str) -> str:
+    return item.get(tskey) or item.get("updated_at") or item.get("ts") or ""
+
+
+def _union_by_id(base: Optional[List[Dict[str, Any]]],
+                 ours: Optional[List[Dict[str, Any]]],
+                 tskey: str) -> List[Dict[str, Any]]:
+    """Union two id-keyed lists. Same id: newest by `tskey` wins (tie → ours, the
+    freshest intent). New ids from `ours` are appended after the base order."""
+    out: List[Dict[str, Any]] = []
+    index: Dict[Any, int] = {}
+    for it in (base or []):
+        iid = it.get("id")
+        if iid is not None:
+            index[iid] = len(out)
+        out.append(dict(it))
+    for it in (ours or []):
+        iid = it.get("id")
+        if iid is not None and iid in index:
+            j = index[iid]
+            if _ts_of(it, tskey) >= _ts_of(out[j], tskey):
+                out[j] = dict(it)
+        else:
+            if iid is not None:
+                index[iid] = len(out)
+            out.append(dict(it))
+    return out
+
+
+def _union_incidents(base: Optional[List[Dict[str, Any]]],
+                     ours: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Incidents have no id; union by (kind, detail), preserving order, bounded."""
+    out = [dict(x) for x in (base or [])]
+    seen = {(x.get("kind"), x.get("detail")) for x in out}
+    for x in (ours or []):
+        key = (x.get("kind"), x.get("detail"))
+        if key not in seen:
+            seen.add(key)
+            out.append(dict(x))
+    return out[-50:]
+
+
+def _merge_sections(base: Optional[Dict[str, Any]],
+                    ours: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Custom panel sections keyed by id; newest by updated_at wins per id."""
+    out = dict(base or {})
+    for sid, sec in (ours or {}).items():
+        b = out.get(sid)
+        if b is None or _ts_of(sec, "updated_at") >= _ts_of(b, "updated_at"):
+            out[sid] = sec
+    return out
+
+
 class ResearchState:
     """Structured, persistent model of the research-in-progress (v3)."""
 
@@ -99,6 +204,9 @@ class ResearchState:
         self.neurico_dir = self.work_dir / ".neurico"
         self.neurico_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.neurico_dir / "research_state.json"
+        # Manager-owned scalar fields this instance has changed since its last
+        # save; only these are re-asserted on merge (see _DIRTY_SCALARS / _save).
+        self._dirty: set = set()
 
         if self.state_file.exists():
             try:
@@ -174,27 +282,76 @@ class ResearchState:
         for h in self.state.get("hypotheses", []):
             changed |= _set_defaults(h, {"links": [], "author": ""})
         if changed:
-            self._save()
+            # Plain overwrite: we just loaded and migrated this very file, so the
+            # on-disk copy is our own pre-migration source — merging against it
+            # would re-introduce the un-migrated records (e.g. an id-less finding)
+            # as duplicates. Merge-on-save is for concurrent *external* writers.
+            self._save(merge=False)
 
     # ------------------------------------------------------------------ io
-    def _save(self) -> None:
-        self.state["updated_at"] = _now()
-        tmp = self.state_file.with_suffix(".json.tmp")
+    def _read_disk(self) -> Optional[Dict[str, Any]]:
+        if not self.state_file.exists():
+            return None
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, self.state_file)
-        except OSError:
-            pass
+            with open(self.state_file, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _merge_onto(self, disk: Dict[str, Any]) -> Dict[str, Any]:
+        """Fold this instance's state onto the latest on-disk state: union the
+        id-keyed lists, merge incidents/sections, and re-assert only the
+        manager-owned scalars we changed this session. Keeps another writer's
+        concurrent records instead of clobbering them."""
+        merged = dict(disk)
+        for k, v in self._blank().items():
+            merged.setdefault(k, v)
+        for key, tskey in _ID_LISTS.items():
+            merged[key] = _union_by_id(disk.get(key), self.state.get(key), tskey)
+        merged["incidents"] = _union_incidents(disk.get("incidents"),
+                                               self.state.get("incidents"))
+        merged["sections"] = _merge_sections(disk.get("sections"),
+                                             self.state.get("sections"))
+        for k in self._dirty:
+            merged[k] = self.state.get(k)
+        merged["schema_version"] = max(int(disk.get("schema_version", 0) or 0),
+                                       SCHEMA_VERSION)
+        return merged
+
+    def _save(self, merge: bool = True) -> None:
+        # Read-merge-write under an advisory lock so concurrent writers fold into
+        # each other rather than overwrite. Single-writer behaviour is unchanged
+        # (the merge against our own last write is a no-op). merge=False is a plain
+        # overwrite, used only when self.state already subsumes the on-disk copy.
+        with _file_lock(self.state_file):
+            disk = self._read_disk() if merge else None
+            merged = self._merge_onto(disk) if disk else self.state
+            merged["updated_at"] = _now()
+            merged.setdefault("schema_version", SCHEMA_VERSION)
+            tmp = self.state_file.with_suffix(".json.tmp")
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(merged, f, indent=2, ensure_ascii=False)
+                os.replace(tmp, self.state_file)
+            except OSError:
+                pass
+        self.state = merged
+        self._dirty = set()
 
     # -------------------------------------------------------------- mutate
     def _next_id(self, key: str, prefix: str) -> str:
         # Derive from the max existing id rather than the list length: the lists
         # are append-only today (so max+1 == len+1), but length-based ids would
-        # collide the moment any list gains a delete/prune path.
-        nums = [int(x["id"][len(prefix):]) for x in self.state.get(key, [])
+        # collide the moment any list gains a delete/prune path. Also fold in the
+        # on-disk ids so an id minted now doesn't collide with another writer's
+        # record we haven't merged yet (best-effort; see the merge notes above).
+        items = list(self.state.get(key, []))
+        disk = self._read_disk()
+        if disk:
+            items += list(disk.get(key, []))
+        nums = [int(str(x["id"])[len(prefix):]) for x in items
                 if str(x.get("id", "")).startswith(prefix)
-                and x["id"][len(prefix):].isdigit()]
+                and str(x["id"])[len(prefix):].isdigit()]
         return f"{prefix}{(max(nums) + 1) if nums else 1}"
 
     @staticmethod
@@ -296,14 +453,18 @@ class ResearchState:
                    crux: Optional[str] = None) -> None:
         if narrative is not None and narrative.strip():
             self.state["narrative"] = narrative.strip()
+            self._dirty.add("narrative")
         if current_best is not None and current_best.strip():
             self.state["current_best"] = current_best.strip()
+            self._dirty.add("current_best")
         if crux is not None and crux.strip():
             self.state["crux"] = crux.strip()
+            self._dirty.add("crux")
         self._save()
 
     def set_open_questions(self, questions: List[str]) -> None:
         self.state["open_questions"] = [q.strip() for q in questions if q and q.strip()]
+        self._dirty.add("open_questions")
         self._save()
 
     def resolve_questions(self, texts: List[str]) -> int:
@@ -323,6 +484,7 @@ class ResearchState:
         self.state["open_questions"] = kept
         removed = before - len(kept)
         if removed:
+            self._dirty.add("open_questions")
             self._save()
         return removed
 
@@ -434,6 +596,7 @@ class ResearchState:
         list restores the default order."""
         self.state["panel_layout"] = [str(s).strip() for s in (layout or [])
                                       if str(s).strip()]
+        self._dirty.add("panel_layout")
         self._save()
 
     def upsert_section(self, sid: str, title: Optional[str] = None,
