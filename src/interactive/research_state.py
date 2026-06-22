@@ -1,25 +1,36 @@
 """
-Shared Research State — the manager's world model.
+Shared Research State — the world model.
 
-This is the load-bearing primitive for treating the manager as a research
-*expert* (a PI / co-author) rather than a tool dispatcher. Instead of reasoning
-only over its last tool call, the manager reads and writes a structured picture
-of the whole investigation: the hypotheses in play (alive / uncertain /
-supported / dead), the experiments run and their results, the current best
-result, the decisive open question (the *crux*), open questions, decisions made
-(with rationale), and an append-only log of the manager's own per-cycle
-*assessments* (what's happening, what's uncertain, whether the human should be
-pulled in — and why).
+This is the load-bearing primitive for treating the research as a structured,
+inspectable object rather than a transcript. Originally the *manager's* private
+view (a PI / co-author that reasons over the whole investigation), it is evolving
+into **shared memory for multi-agent cooperation**: a single world model that the
+manager and the research sub-agents read for context and write their findings,
+decisions, experiments, and incidents into.
 
-Borrowed in spirit from AutoScientists' shared state `S` (champion, experiment
-log, dead-end registry, research insights), but here it serves a *human-in-the-
-loop* manager: it is what makes the manager legibly omniscient, what the
-dashboard renders as a shared whiteboard, and what an annotator (or the model
-itself) grades to find failures in the manager's judgement.
+The data model follows the log-visualizer's **v3** design:
+
+  * **findings are the spine.** A finding is the unit of insight the run produced
+    (or failed to produce) — and is itself gradeable.
+  * **everything is a decision.** Every consequential choice is a decision tagged
+    with the ``finding`` it serves (an ``F-id``, or ``"global"`` for a project-wide
+    fork tied to no single finding) and the ``layer`` of that finding's lifecycle
+    it sits in (hypothesis / method / experiment_design / interpretation).
+
+Several v3 fields are *review-time* or *interaction-time* and are intentionally
+left empty by the live write path — they are filled later by separate agents:
+
+  * ``importance`` / ``sequence`` — a review subagent (needs the full decision set;
+    unreliable to self-assign live).
+  * ``should_engage`` / ``should_engage_reason`` — a human-interactor subagent.
+  * ``author`` — set by whichever agent wrote the node (wiring is owned elsewhere);
+    the field exists now so provenance is available once multiple agents write.
 
 Persisted to ``<workspace>/.neurico/research_state.json``. The web server polls
 that file to render the live "Research" pane, so writes are atomic (temp file +
-os.replace) to avoid torn reads.
+os.replace) to avoid torn reads. NOTE: the current ``_save`` is last-writer-wins —
+safe for a single writer (the manager) but not for concurrent multi-agent writes;
+concurrency-safe merging is a separate, later change, gated on sub-agents writing.
 """
 
 from __future__ import annotations
@@ -30,7 +41,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-HYP_STATUSES = ("alive", "uncertain", "supported", "dead")
+SCHEMA_VERSION = 3
+
+# v3 adds `refuted` (a hypothesis the evidence argues against) as distinct from
+# `dead` (abandoned / no longer pursued).
+HYP_STATUSES = ("alive", "uncertain", "supported", "refuted", "dead")
+
+# Where in a finding's lifecycle a decision's fork sits.
+DECISION_LAYERS = ("hypothesis", "method", "experiment_design", "interpretation")
+
+FINDING_KINDS = ("result", "dead_end", "note")
+
+# How an investigation gathered evidence — the domain discriminator for an
+# experiment node (kept domain-general, not tied to a NeuriCo pipeline stage).
+EXPERIMENT_MODES = ("empirical_experiment", "computational_analysis",
+                    "formal_derivation", "literature_synthesis",
+                    "qualitative_analysis", "simulation", "observation", "other")
+
+# Reasons a good PI would pause to involve the human at a decision. Left unset by
+# the live writer; a future human-interactor subagent assigns it.
+SHOULD_ENGAGE_REASONS = ("scope_choice", "validity_risk", "cost_risk",
+                         "human_preference", "irreversible_action", "routine_no")
 
 # Level 2 "PI designs the panel": the manager may declare custom whiteboard
 # sections per run, each rendered from a small, safe block vocabulary. Keeping
@@ -42,15 +73,26 @@ BLOCK_KINDS = ("text", "bullet_list", "key_value", "table", "status_list")
 # of these renders the corresponding core section; any other id is looked up in
 # the custom `sections` map.
 BUILTIN_SECTIONS = ("crux", "current_best", "narrative", "assessment",
-                    "hypotheses", "open_questions", "decisions", "experiments")
+                    "hypotheses", "open_questions", "decisions", "experiments",
+                    "findings")
 
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _set_defaults(d: Dict[str, Any], defaults: Dict[str, Any]) -> bool:
+    """setdefault every key in `defaults`; return True if any was added."""
+    changed = False
+    for k, v in defaults.items():
+        if k not in d:
+            d[k] = v
+            changed = True
+    return changed
+
+
 class ResearchState:
-    """Structured, persistent model of the research-in-progress."""
+    """Structured, persistent model of the research-in-progress (v3)."""
 
     def __init__(self, work_dir: Path):
         self.work_dir = Path(work_dir)
@@ -68,6 +110,9 @@ class ResearchState:
             # Level 2 panel fields) so callers can assume every key is present.
             for k, v in self._blank().items():
                 self.state.setdefault(k, v)
+            # Backfill v3 per-item shape on pre-v3 nodes (flat findings, decisions
+            # with no finding/layer, [str] options, etc.).
+            self._migrate()
         else:
             self.state = self._blank()
             self._save()
@@ -75,23 +120,62 @@ class ResearchState:
     @staticmethod
     def _blank() -> Dict[str, Any]:
         return {
+            "schema_version": SCHEMA_VERSION,
             "updated_at": _now(),
             "narrative": "",        # short rolling summary of where things stand
             "current_best": "",     # champion / best result so far
             "crux": "",             # the single most decision-relevant open issue
-            "hypotheses": [],       # {id, statement, status, evidence, updated_at}
-            "experiments": [],      # {id, agent, run_id, rationale, hypothesis, status, result, ts}
-            "findings": [],         # {text, kind, ts}   kind: result | dead_end | note
+            "hypotheses": [],       # {id, statement, status, evidence, links, author, updated_at}
+            "experiments": [],      # {id, name, mode, design, agent, ranBy, run_id, rationale, hypothesis, status, result, ts}
+            "findings": [],         # {id, text, insight, kind, evidence, links, author, ts}  — the SPINE
             "open_questions": [],   # [str]
-            "decisions": [],        # {id, question, options, chosen, rationale, by, ts}
-            "assessments": [],      # {ts, situation, uncertainty, crux, decision_pending, engage_user, rationale}
-            "incidents": [],        # {ts, kind, detail} — auto-logged tool errors + self-reported struggle
+            # Every decision belongs to a finding (an F-id) or to "global"; `layer`
+            # is one of DECISION_LAYERS. Review/interaction fields (importance,
+            # should_engage*) are left empty for later agents.
+            "decisions": [],        # {id, finding, layer, question, options[{text,status}], chosen, rationale, by, author, evidence, links, importance, should_engage, should_engage_reason, sequence, ts}
+            "assessments": [],      # DEPRECATED (removed with the `assess` tool in a later PR) — {ts, situation, uncertainty, crux, decision_pending, engage_user, rationale}
+            "incidents": [],        # {ts, kind, detail, author} — auto-logged tool errors + self-reported struggle
             # Level 2 — the PI-designed panel. `panel_layout` is an ordered list
             # of section ids (built-in or custom); empty → default order. Each
             # custom section in `sections` is {title, kind, data, updated_at}.
             "panel_layout": [],     # [section_id, ...]
             "sections": {},         # {id: {title, kind, data, updated_at}}
         }
+
+    # ----------------------------------------------------------- migration
+    def _migrate(self) -> None:
+        """Backfill the v3 per-item shape on nodes written by an older version so
+        every caller can assume the keys are present. Idempotent."""
+        changed = False
+        for f in self.state.get("findings", []):
+            if not str(f.get("id", "")).startswith("F"):
+                f["id"] = self._next_id("findings", "F")
+                changed = True
+            changed |= _set_defaults(
+                f, {"insight": "", "kind": "result", "evidence": [],
+                    "links": [], "author": "", "ts": _now()})
+        for d in self.state.get("decisions", []):
+            if not d.get("finding"):
+                d["finding"] = "global"
+                changed = True
+            opts = d.get("options")
+            if isinstance(opts, list) and opts and isinstance(opts[0], str):
+                d["options"] = self._normalize_options(opts, d.get("chosen", ""))
+                changed = True
+            changed |= _set_defaults(
+                d, {"layer": None, "options": [], "evidence": [], "links": [],
+                    "author": "", "importance": "", "should_engage": None,
+                    "should_engage_reason": "", "sequence": None})
+        for e in self.state.get("experiments", []):
+            changed |= _set_defaults(
+                e, {"name": "", "mode": "", "design": "",
+                    "ranBy": e.get("agent", "")})
+        for inc in self.state.get("incidents", []):
+            changed |= _set_defaults(inc, {"author": ""})
+        for h in self.state.get("hypotheses", []):
+            changed |= _set_defaults(h, {"links": [], "author": ""})
+        if changed:
+            self._save()
 
     # ------------------------------------------------------------------ io
     def _save(self) -> None:
@@ -114,8 +198,44 @@ class ResearchState:
                 and x["id"][len(prefix):].isdigit()]
         return f"{prefix}{(max(nums) + 1) if nums else 1}"
 
+    @staticmethod
+    def _normalize_options(options: Optional[List[Any]],
+                           chosen: str = "") -> List[Dict[str, str]]:
+        """Coerce options to the v3 shape ``[{text, status}]``. Accepts a list of
+        bare strings (legacy / convenience) or a list of dicts. Each option's
+        ``status`` is ``chosen`` or ``alternative``; the one matching ``chosen``
+        (case-insensitive) is marked chosen when none is explicitly flagged."""
+        norm: List[Dict[str, str]] = []
+        for o in options or []:
+            if isinstance(o, dict):
+                text = str(o.get("text", "")).strip()
+                status = o.get("status")
+                status = status if status in ("chosen", "alternative") else None
+            else:
+                text = str(o).strip()
+                status = None
+            if not text:
+                continue
+            norm.append({"text": text, "status": status})
+
+        ch = (chosen or "").strip().lower()
+        saw_chosen = any(o["status"] == "chosen" for o in norm)
+        for o in norm:
+            if o["status"] is None:
+                if ch and o["text"].lower() == ch and not saw_chosen:
+                    o["status"] = "chosen"
+                    saw_chosen = True
+                else:
+                    o["status"] = "alternative"
+        # If the chosen path wasn't among the listed options, add it so the
+        # decision is self-contained (you can always see what was picked).
+        if ch and not saw_chosen and (chosen or "").strip():
+            norm.append({"text": (chosen or "").strip(), "status": "chosen"})
+        return norm
+
     def upsert_hypothesis(self, statement: str, status: str = "alive",
-                          evidence: str = "", hid: Optional[str] = None) -> str:
+                          evidence: str = "", hid: Optional[str] = None,
+                          links: Optional[List[Dict[str, Any]]] = None) -> str:
         statement = (statement or "").strip()
         if not statement:
             return ""
@@ -126,27 +246,51 @@ class ResearchState:
                 h["status"] = status
                 if evidence:
                     h["evidence"] = evidence
+                if links:
+                    h["links"] = links
                 h["updated_at"] = _now()
                 self._save()
                 return h["id"]
         new_id = hid or self._next_id("hypotheses", "H")
         self.state["hypotheses"].append({
             "id": new_id, "statement": statement, "status": status,
-            "evidence": evidence, "updated_at": _now(),
+            "evidence": evidence, "links": links or [], "author": "",
+            "updated_at": _now(),
         })
         self._save()
         return new_id
 
-    def add_finding(self, text: str, kind: str = "result") -> None:
+    def add_finding(self, text: str, kind: str = "result",
+                    insight: str = "", evidence: Optional[List[Any]] = None,
+                    links: Optional[List[Dict[str, Any]]] = None,
+                    author: str = "") -> str:
+        """Add (or dedup) a finding — the spine node decisions hang off. Returns
+        the finding's ``F-id`` (existing id when it dedups by text), so the caller
+        can tag decisions with ``finding=<that id>``."""
         text = (text or "").strip()
         if not text:
-            return
-        if kind not in ("result", "dead_end", "note"):
+            return ""
+        if kind not in FINDING_KINDS:
             kind = "note"
-        if any(f["text"].lower() == text.lower() for f in self.state["findings"]):
-            return
-        self.state["findings"].append({"text": text, "kind": kind, "ts": _now()})
+        for f in self.state["findings"]:
+            if f["text"].lower() == text.lower():
+                # Enrich an existing finding rather than duplicating it.
+                if insight and not f.get("insight"):
+                    f["insight"] = insight.strip()
+                if evidence:
+                    f["evidence"] = evidence
+                if links:
+                    f["links"] = links
+                self._save()
+                return f["id"]
+        new_id = self._next_id("findings", "F")
+        self.state["findings"].append({
+            "id": new_id, "text": text, "insight": (insight or "").strip(),
+            "kind": kind, "evidence": evidence or [], "links": links or [],
+            "author": author, "ts": _now(),
+        })
         self._save()
+        return new_id
 
     def set_fields(self, narrative: Optional[str] = None,
                    current_best: Optional[str] = None,
@@ -183,10 +327,12 @@ class ResearchState:
             self._save()
         return removed
 
-    def add_incident(self, kind: str, detail: str) -> None:
+    def add_incident(self, kind: str, detail: str, author: str = "") -> None:
         """Record something that went wrong — an auto-detected tool error/unknown-
         tool call, or a self-reported struggle. This is what keeps the world model
-        honest: failures leave a trace instead of being silently smoothed over."""
+        honest: failures leave a trace instead of being silently smoothed over. As
+        shared multi-agent memory it doubles as coordination state (a peer can see
+        what already failed and not blindly retry it)."""
         detail = (detail or "").strip()
         if not detail:
             return
@@ -194,33 +340,74 @@ class ResearchState:
         # Skip consecutive duplicates (a confused loop shouldn't spam the board).
         if inc and inc[-1].get("kind") == kind and inc[-1].get("detail") == detail:
             return
-        inc.append({"ts": _now(), "kind": kind, "detail": detail})
+        inc.append({"ts": _now(), "kind": kind, "detail": detail, "author": author})
         # Bound growth — keep the most recent 50.
         if len(inc) > 50:
             self.state["incidents"] = inc[-50:]
         self._save()
 
     def add_decision(self, question: str, chosen: str = "", rationale: str = "",
-                     options: Optional[List[str]] = None, by: str = "manager") -> None:
+                     options: Optional[List[Any]] = None, by: str = "manager",
+                     finding: str = "global", layer: Optional[str] = None,
+                     evidence: Optional[List[Any]] = None,
+                     links: Optional[List[Dict[str, Any]]] = None,
+                     author: str = "") -> str:
+        """Record a decision (a fork the run faced). ``finding`` is the F-id it
+        serves, or ``"global"`` for a project-wide fork (e.g. orchestration: which
+        agent to dispatch, when to stop) tied to no single finding. ``layer`` is
+        one of DECISION_LAYERS. Review/interaction fields are left empty for later
+        agents. Returns the new ``D-id``."""
         question = (question or "").strip()
         if not question:
-            return
+            return ""
+        layer = layer if layer in DECISION_LAYERS else None
+        finding = (finding or "global").strip() or "global"
+        new_id = self._next_id("decisions", "D")
         self.state["decisions"].append({
-            "id": self._next_id("decisions", "D"), "question": question,
-            "options": options or [], "chosen": (chosen or "").strip(),
-            "rationale": (rationale or "").strip(), "by": by, "ts": _now(),
+            "id": new_id, "finding": finding, "layer": layer,
+            "question": question,
+            "options": self._normalize_options(options, chosen),
+            "chosen": (chosen or "").strip(),
+            "rationale": (rationale or "").strip(), "by": by, "author": author,
+            "evidence": evidence or [], "links": links or [],
+            # Review-time / interaction-time — filled by later agents, not live.
+            "importance": "", "should_engage": None, "should_engage_reason": "",
+            "sequence": None, "ts": _now(),
         })
         self._save()
+        return new_id
+
+    def reparent_decision(self, decision_id: str, finding: str) -> bool:
+        """Move a decision from ``global`` (or any finding) onto ``finding`` — used
+        when a decision was recorded before the finding it serves existed. Returns
+        True if a decision was updated."""
+        finding = (finding or "").strip()
+        if not finding:
+            return False
+        for d in self.state["decisions"]:
+            if d["id"] == decision_id:
+                d["finding"] = finding
+                self._save()
+                return True
+        return False
 
     def add_experiment(self, agent: str, run_id: str, rationale: str = "",
-                       hypothesis: str = "") -> None:
+                       hypothesis: str = "", name: str = "", mode: str = "",
+                       design: str = "") -> str:
+        """Record an investigation. ``name``/``mode``/``design`` describe what it IS
+        (domain-general); ``agent`` is the NeuriCo pipeline stage that ran it, kept
+        as provenance under ``ranBy`` (``agent`` retained for back-compat)."""
+        mode = mode if mode in EXPERIMENT_MODES else ""
+        new_id = self._next_id("experiments", "E")
         self.state["experiments"].append({
-            "id": self._next_id("experiments", "E"), "agent": agent,
+            "id": new_id, "name": (name or "").strip(), "mode": mode,
+            "design": (design or "").strip(), "agent": agent, "ranBy": agent,
             "run_id": run_id, "rationale": (rationale or "").strip(),
             "hypothesis": (hypothesis or "").strip(), "status": "running",
             "result": "", "ts": _now(),
         })
         self._save()
+        return new_id
 
     def update_experiment(self, run_id: str, status: Optional[str] = None,
                           result: Optional[str] = None) -> None:
@@ -244,6 +431,10 @@ class ResearchState:
     def add_assessment(self, situation: str = "", uncertainty: str = "",
                        crux: str = "", decision_pending: str = "",
                        engage_user: bool = False, rationale: str = "") -> None:
+        """DEPRECATED. The manager's per-cycle metacognition log — kept working so
+        the existing `assess` tool doesn't break, but slated for removal: with the
+        world model now multi-agent shared memory, the engage signal moves onto
+        each decision (``should_engage``), owned by a human-interactor subagent."""
         self.state["assessments"].append({
             "ts": _now(), "situation": (situation or "").strip(),
             "uncertainty": (uncertainty or "").strip(), "crux": (crux or "").strip(),
@@ -293,6 +484,13 @@ class ResearchState:
     def latest_assessment(self) -> Optional[Dict[str, Any]]:
         return self.state["assessments"][-1] if self.state["assessments"] else None
 
+    def decisions_for(self, finding_id: str) -> List[Dict[str, Any]]:
+        """All decisions tagged with `finding_id` (use 'global' for project-wide),
+        in layer order so a reader sees a finding's forks hypothesis→interpretation."""
+        order = {l: i for i, l in enumerate(DECISION_LAYERS)}
+        ds = [d for d in self.state["decisions"] if d.get("finding") == finding_id]
+        return sorted(ds, key=lambda d: order.get(d.get("layer"), len(order)))
+
     def consistency_warnings(self) -> List[str]:
         """Detect drift between the world model and reality — the failures we saw
         in real runs (a hypothesis left 'alive' after its experiment finished;
@@ -320,7 +518,7 @@ class ResearchState:
                 warns.append(
                     f"Hypothesis {h['id']} was tested by {e['run_id']} "
                     f"({e['status']}) but is still '{h['status']}' — set it to "
-                    f"supported/dead (with evidence) based on the result.")
+                    f"supported/refuted/dead (with evidence) based on the result.")
         # Resolved-but-stale open questions: if work has clearly progressed
         # (a result/decision exists) yet questions are still listed, nudge a prune.
         if self.state["open_questions"] and (self.state["current_best"]
@@ -337,6 +535,7 @@ class ResearchState:
         alive = sum(1 for h in s["hypotheses"] if h["status"] in ("alive", "uncertain"))
         return {
             "event": "research",
+            "schema_version": s.get("schema_version", SCHEMA_VERSION),
             "updated_at": s["updated_at"],
             "narrative": s["narrative"],
             "current_best": s["current_best"],
@@ -345,7 +544,7 @@ class ResearchState:
             "experiments": s["experiments"][-12:],
             "findings": s["findings"][-12:],
             "open_questions": s["open_questions"],
-            "decisions": s["decisions"][-8:],
+            "decisions": s["decisions"][-12:],
             "latest_assessment": self.latest_assessment,
             "incidents": s.get("incidents", [])[-10:],
             "warnings": self.consistency_warnings(),
@@ -354,6 +553,7 @@ class ResearchState:
             "counts": {
                 "hypotheses_alive": alive,
                 "hypotheses_total": len(s["hypotheses"]),
+                "findings": len(s["findings"]),
                 "experiments": len(s["experiments"]),
                 "decisions": len(s["decisions"]),
             },
@@ -369,7 +569,7 @@ class ResearchState:
         s = self.state
         if not any([s["narrative"], s["current_best"], s["crux"], s["hypotheses"],
                     s["open_questions"], s["decisions"], s["experiments"],
-                    s.get("sections")]):
+                    s["findings"], s.get("sections")]):
             return ("\n\n## Current Research State\n"
                     "(empty — you have not recorded any state yet. As you learn "
                     "things, call update_research_state to populate this.)")
@@ -389,11 +589,18 @@ class ResearchState:
                 ev = f" — {h['evidence']}" if h.get("evidence") else ""
                 lines.append(f"  [{h['status']}] {h['id']}: {h['statement']}{ev}")
 
+        if s["findings"]:
+            lines.append("Findings (the spine — decisions hang off these):")
+            for f in s["findings"][-max_items:]:
+                ins = f" — {f['insight']}" if f.get("insight") else ""
+                lines.append(f"  [{f['kind']}] {f.get('id', '?')}: {f['text']}{ins}")
+
         if s["experiments"]:
             lines.append("Experiments:")
             for e in s["experiments"][-max_items:]:
                 why = f" ({e['rationale']})" if e.get("rationale") else ""
-                lines.append(f"  {e['run_id']} {e['agent']} [{e['status']}]{why}")
+                label = e.get("name") or e.get("agent", "")
+                lines.append(f"  {e['run_id']} {label} [{e['status']}]{why}")
 
         if s["open_questions"]:
             lines.append("Open questions:")
@@ -401,10 +608,11 @@ class ResearchState:
                 lines.append(f"  - {q}")
 
         if s["decisions"]:
-            lines.append("Decisions made:")
+            lines.append("Decisions made (finding/layer):")
             for d in s["decisions"][-max_items:]:
                 ch = f" → {d['chosen']}" if d.get("chosen") else ""
-                lines.append(f"  - {d['question']}{ch}")
+                tag = f" [{d.get('finding', 'global')}/{d.get('layer') or '-'}]"
+                lines.append(f"  - {d['question']}{ch}{tag}")
 
         la = self.latest_assessment
         if la:
