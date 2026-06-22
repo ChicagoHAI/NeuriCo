@@ -32,6 +32,7 @@ dependencies = [
     "nbformat>=5.10.4",
     "fastmcp>=2.0",
     "httpx>=0.25.0",
+    "pydantic>=2.0,<3",
 ]
 
 [project.optional-dependencies]
