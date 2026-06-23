@@ -28,15 +28,16 @@ left empty by the live write path — they are filled later by separate agents:
 
 Persisted to ``<workspace>/.neurico/research_state.json``. The web server polls
 that file to render the live "Research" pane, so writes are atomic (temp file +
-os.replace) to avoid torn reads. NOTE: the current ``_save`` is last-writer-wins —
-safe for a single writer (the manager) but not for concurrent multi-agent writes;
-concurrency-safe merging is a separate, later change, gated on sub-agents writing.
+os.replace) to avoid torn reads. ``_save`` MERGES under an advisory lock rather
+than last-writer-wins, so concurrent multi-agent writes fold into each other
+instead of clobbering; see the merge/locking section below.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -107,12 +108,14 @@ def _set_defaults(d: Dict[str, Any], defaults: Dict[str, Any]) -> bool:
 # touched since it last saved. An advisory flock serializes the read-merge-write
 # so the merge sees the latest on-disk state.
 #
-# Residual, documented limitation: id minting is best-effort unique (it reads the
-# on-disk ids when minting), but two writers that mint the same id from stale
-# views before either saves can still collide. A globally-unique id scheme
-# (author-scoped or uuid) is the next step, decided with whoever builds the
-# sub-agent writers — see the PR. Until then the realistic case (writers touching
-# different records / minting against the latest file) is collision-free.
+# Ids are globally unique by construction: every instance mints under its own
+# random writer token (`F-<writer>-<n>`, n monotonic per writer), so two writers
+# racing from a freshly-empty store mint *different* ids — the union keeps both
+# instead of collapsing N records onto a single `F1`. No cross-writer id
+# coordination is needed; uniqueness comes from the per-instance token, and the
+# numeric suffix is only a per-writer counter (order is carried by `ts`/`sequence`,
+# not by the id). The on-disk ids are still folded in when minting so a single
+# writer's sequence stays gap-free across reloads.
 
 # id-keyed lists and the timestamp field that breaks ties (newest wins).
 _ID_LISTS = {"hypotheses": "updated_at", "experiments": "ts",
@@ -204,6 +207,11 @@ class ResearchState:
         self.neurico_dir = self.work_dir / ".neurico"
         self.neurico_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.neurico_dir / "research_state.json"
+        # Per-instance writer token that namespaces minted ids (`F-<writer>-<n>`)
+        # so concurrent writers never collide on an id — even racing from an empty
+        # store. Random (uniqueness, not identity, is what we need); provenance is
+        # carried separately by each record's `author` field.
+        self._writer = uuid.uuid4().hex[:8]
         # Manager-owned scalar fields this instance has changed since its last
         # save; only these are re-asserted on merge (see _DIRTY_SCALARS / _save).
         self._dirty: set = set()
@@ -340,19 +348,21 @@ class ResearchState:
 
     # -------------------------------------------------------------- mutate
     def _next_id(self, key: str, prefix: str) -> str:
-        # Derive from the max existing id rather than the list length: the lists
-        # are append-only today (so max+1 == len+1), but length-based ids would
-        # collide the moment any list gains a delete/prune path. Also fold in the
-        # on-disk ids so an id minted now doesn't collide with another writer's
-        # record we haven't merged yet (best-effort; see the merge notes above).
+        # Ids are `<prefix>-<writer>-<n>`: the writer token namespaces this
+        # instance so two writers minting concurrently from a stale (or empty)
+        # view produce different ids — the union keeps both rather than collapsing
+        # them. `n` is a per-writer counter derived from the max of OUR existing
+        # ids (across our in-memory state and the on-disk copy, so a reload keeps
+        # the sequence gap-free), not list length — robust to future deletes.
+        mine = f"{prefix}-{self._writer}-"
         items = list(self.state.get(key, []))
         disk = self._read_disk()
         if disk:
             items += list(disk.get(key, []))
-        nums = [int(str(x["id"])[len(prefix):]) for x in items
-                if str(x.get("id", "")).startswith(prefix)
-                and str(x["id"])[len(prefix):].isdigit()]
-        return f"{prefix}{(max(nums) + 1) if nums else 1}"
+        nums = [int(str(x["id"])[len(mine):]) for x in items
+                if str(x.get("id", "")).startswith(mine)
+                and str(x["id"])[len(mine):].isdigit()]
+        return f"{mine}{(max(nums) + 1) if nums else 1}"
 
     @staticmethod
     def _normalize_options(options: Optional[List[Any]],
