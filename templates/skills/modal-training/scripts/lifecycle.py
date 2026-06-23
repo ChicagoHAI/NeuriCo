@@ -206,6 +206,21 @@ def volume_get(env_name: str, volume: str, remote: str,
     ], timeout=600)
 
 
+def volume_put(env_name: str, volume: str, src: Path,
+               remote: str) -> subprocess.CompletedProcess:
+    """
+    Run `modal volume put --force <vol> <local> <remote>` scoped to an env.
+
+    `src` is a workspace-side file path; `remote` is its destination inside
+    the volume (absolute). --force lets a re-run overwrite a residual entry
+    from a previous attempt (the same reasoning as volume_get).
+    """
+    return _run([
+        "modal", "volume", "put", f"--env={env_name}", "--force",
+        volume, str(src), remote,
+    ], timeout=600)
+
+
 def app_stop(env_name: str, app_name: str) -> None:
     """
     Stop a deployed Modal app. Tolerates "not found" / "already stopped"
@@ -416,6 +431,56 @@ def pull_all(
         )
 
     return {"pulled": pulled, "workspace": str(workspace_dir)}
+
+
+def upload_to_volume(
+    exp_id: str,
+    volume: str,
+    src_workspace_rel: str,
+    dest_volume_path: str,
+    workspace: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Push a workspace-side file into a per-experiment Modal volume.
+
+    Used by multi-stage chains where an earlier stage (e.g. data prep) tore
+    its env down, but a later stage (e.g. training) needs the artifact back
+    on the volume. The workspace `data/` directory is the source of truth
+    between stages — this helper re-materializes it on the volume the new
+    env's Modal app expects to read from.
+
+    `src_workspace_rel` is relative to the workspace root (e.g.
+    "data/train.jsonl"); `dest_volume_path` is the absolute path inside
+    `volume` (e.g. "/data/train.jsonl"). The volume must already be in the
+    sentinel's `volumes` list — register() is what claims it for this env.
+
+    Returns a dict with src/dest for logging. Raises RuntimeError on
+    missing source, unregistered volume, or a failed CLI call.
+    """
+    sentinel = load_sentinel(workspace)
+    if sentinel is None:
+        raise RuntimeError("no sentinel found; was register() called?")
+    if volume not in sentinel["volumes"]:
+        raise RuntimeError(
+            f"cannot upload to unregistered volume {volume!r}; "
+            f"sentinel volumes = {sentinel['volumes']!r}"
+        )
+
+    workspace_dir = workspace_root(workspace)
+    src = (workspace_dir / src_workspace_rel).resolve()
+    if not src.exists():
+        raise RuntimeError(
+            f"upload source missing: {src} (no chained stage produced it?)"
+        )
+
+    env = sentinel["environment"]
+    r = volume_put(env, volume, src, dest_volume_path)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"failed to upload {src} -> {volume}{dest_volume_path}: "
+            f"{(r.stderr or r.stdout).strip()[:240]}"
+        )
+    return {"src": str(src), "volume": volume, "remote": dest_volume_path}
 
 
 def teardown(

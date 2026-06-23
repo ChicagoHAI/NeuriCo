@@ -311,6 +311,22 @@ def train(
 @app.local_entrypoint()
 def main():
     """Run training, then pull artifacts + teardown the env."""
+    # Re-upload prep artifacts from the workspace. Data prep ran in its own
+    # env that was torn down on completion (data volume cascade-deleted), so
+    # this LoRA run starts against a fresh, empty data volume even when both
+    # stages share the same EXP_ID. The workspace `data/` directory is the
+    # source of truth between stages — push the local copies back onto the
+    # volume the @app.function above expects to read from.
+    for local_rel, remote_path in [
+        ("data/train.jsonl", "/data/train.jsonl"),
+        ("data/val.jsonl",   "/data/val.jsonl"),
+    ]:
+        if (Path(".") / local_rel).exists():
+            uploaded = lifecycle.upload_to_volume(
+                EXP_ID, DATA_VOLUME, local_rel, remote_path,
+            )
+            print(f"uploaded {uploaded['src']} -> {uploaded['volume']}{uploaded['remote']}")
+
     try:
         result = train.remote()
         print()

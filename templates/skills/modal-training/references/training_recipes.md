@@ -65,6 +65,23 @@ def prep():
 
 Bake your local `prepare_data.py` into the image with `.add_local_file()` — same script runs locally and on Modal.
 
+### Chain ownership: prep → train under the same EXP_ID
+
+Data prep tears its env down on completion (the data volume is part of the env and cascade-deletes with it). When a training run starts later under the same EXP_ID, `modal.Volume.from_name(..., create_if_missing=True)` materializes a *fresh, empty* volume — not the one prep wrote to.
+
+**The workspace `data/` directory is the source of truth between stages.** Prep pulls `/data/train.jsonl` and `/data/val.jsonl` back to `data/train.jsonl` and `data/val.jsonl` in the workspace before teardown. The LoRA template's `main()` re-uploads those local copies onto the data volume before calling `train.remote()`:
+
+```python
+for local_rel, remote_path in [
+    ("data/train.jsonl", "/data/train.jsonl"),
+    ("data/val.jsonl",   "/data/val.jsonl"),
+]:
+    if (Path(".") / local_rel).exists():
+        lifecycle.upload_to_volume(EXP_ID, DATA_VOLUME, local_rel, remote_path)
+```
+
+If you write a new chained stage, use `lifecycle.upload_to_volume(exp_id, volume, src_workspace_rel, dest_volume_path)` the same way. The helper validates the volume against the sentinel and raises with a clear error if the local source is missing — so a broken chain fails loudly rather than silently training on an empty dataset.
+
 ## Eval
 
 Two flavors:
