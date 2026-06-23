@@ -147,6 +147,9 @@ def main() -> int:
     print(f"  # then capture the endpoint (URL + proxy tokens):")
     print(f"  python {out} capture-endpoint")
     print(f"  # ... use it from experiment code ...")
+    print(f"  # pull artifacts (redacts endpoint JSON, marks pull_complete):")
+    print(f"  python .claude/skills/modal-vllm/scripts/lifecycle.py pull "
+          f"--exp-id {args.exp_id}")
     print(f"  python .claude/skills/modal-vllm/scripts/lifecycle.py teardown "
           f"--exp-id {args.exp_id}")
     return 0

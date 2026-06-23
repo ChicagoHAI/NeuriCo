@@ -180,12 +180,35 @@ def teardown(
     """
     Stop every registered app, delete the env, and clear the live
     endpoint JSON. The redacted copy under artifacts/ stays as provenance.
+
+    Self-heal: if the user followed the documented deploy -> capture flow
+    but skipped the explicit pull step, the sentinel has
+    endpoint_captured=True and pull_complete=False, and base.teardown()
+    would refuse — leaving the deployed app running and billing. We treat
+    that exact shape as "the user meant to pull" and run pull_all() first.
+    If the auto-pull itself fails, surface a precise error and leave the
+    env alive so the user can recover.
     """
     sentinel = base.load_sentinel(workspace)
     if sentinel is None:
         return {"skipped": True, "reason": "no sentinel"}
 
+    auto_pulled = False
+    if (not force
+            and sentinel.get("endpoint_captured")
+            and not sentinel.get("pull_complete")):
+        try:
+            pull_all(exp_id, workspace=workspace)
+            auto_pulled = True
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"vllm teardown: endpoint captured but pull_all() failed "
+                f"during self-heal; env preserved. Original error: {exc}"
+            )
+
     result = base.teardown(exp_id, force=force, workspace=workspace)
+    if auto_pulled:
+        result["auto_pulled"] = True
 
     # Clear the live endpoint JSON (the redacted copy in artifacts/ stays).
     ws = base.workspace_root(workspace)

@@ -117,13 +117,19 @@ ep = json.loads(open(".neurico/modal_endpoint.json").read())
 # Use as OpenAI-compatible base URL with proxy-auth headers
 ```
 
-### 4. Stop + sweep when done
+### 4. Pull artifacts + stop + sweep when done
 
 ```bash
+# 1. Snapshot endpoint provenance (writes redacted artifacts/vllm_endpoint.json,
+#    marks pull_complete=True in the sentinel — required before teardown).
+python .claude/skills/modal-vllm/scripts/lifecycle.py pull     --exp-id <EXP_ID>
+
+# 2. Tear the env down (modal app stop -> modal environment delete -y ->
+#    clears the live .neurico/modal_endpoint.json).
 python .claude/skills/modal-vllm/scripts/lifecycle.py teardown --exp-id <EXP_ID>
 ```
 
-This: `modal app stop` → `modal environment delete -y` → clears `.neurico/modal_endpoint.json` (keeps a redacted copy at `artifacts/vllm_endpoint.json` for provenance).
+If you forget the `pull` step, `teardown` self-heals: it notices the endpoint was captured but pull_complete is still false and runs `pull_all()` for you before deleting the env. The redacted copy at `artifacts/vllm_endpoint.json` is kept for provenance regardless.
 
 ## Decision tree
 

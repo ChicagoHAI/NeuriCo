@@ -11,10 +11,22 @@ modal deploy ...    → app goes live; capture endpoint URL + proxy tokens
                       into .neurico/modal_endpoint.json
 ... use ...
 pull_all()          → snapshot endpoint config to artifacts/vllm_endpoint.json
+                      and mark pull_complete=True
 teardown()          → modal app stop  →  modal environment delete -y
                       →  clear .neurico/modal_endpoint.json (kept redacted
                          under artifacts/)
 ```
+
+`pull_all()` is what flips `pull_complete=True` in the sentinel, and
+`teardown()` refuses to delete the env without that flag (to preserve
+reproducibility on failed pulls). If you call `teardown()` without
+explicitly calling `pull_all()` first, the vllm lifecycle self-heals: it
+notices `endpoint_captured=True && pull_complete=False` and runs
+`pull_all()` for you. The self-heal exists so a deployed app — which
+keeps billing — doesn't get stranded if the user follows the printed
+flow but skips the pull step. If the auto-pull itself fails, teardown
+raises and the env stays alive so you can recover with
+`lifecycle.py pull --exp-id <id>`.
 
 ## Sentinel additions (compared to modal-training)
 
