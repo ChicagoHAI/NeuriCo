@@ -34,18 +34,22 @@ try:
 except ImportError:
     lifecycle = None  # type: ignore[assignment]
 
+SHARE_HF_CACHE = ${SHARE_HF_CACHE}
+
 if lifecycle is not None:
     PULL_MANIFEST = [
+        {"from_volume": CKPT_VOLUME, "from": "/eval_config.json",
+         "to": "artifacts/eval_config.json", "required": True},
         {"from_volume": CKPT_VOLUME, "from": "/eval_results.json",
          "to": "artifacts/eval_results.json", "required": True},
     ]
     lifecycle.register(
         EXP_ID,
-        volumes=[DATA_VOLUME, CKPT_VOLUME, HF_VOLUME],
+        volumes=[DATA_VOLUME, CKPT_VOLUME] + ([] if SHARE_HF_CACHE else [HF_VOLUME]),
         apps=[],
         required_secrets=${REQUIRED_SECRETS},
         pull_manifest=PULL_MANIFEST,
-        share_hf_cache=${SHARE_HF_CACHE},
+        share_hf_cache=SHARE_HF_CACHE,
     )
 
 MODEL_NAME     = "${BASE_MODEL}"
@@ -97,6 +101,22 @@ def eval_fn(
     from peft import PeftModel
 
     started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    Path("/ckpts").mkdir(parents=True, exist_ok=True)
+    eval_config = {
+        "exp_id": "${EXP_ID}",
+        "stage": "eval",
+        "base_model": MODEL_NAME,
+        "base_model_revision": MODEL_REVISION,
+        "adapter_dir": adapter_dir,
+        "eval_file": eval_file,
+        "n_examples": n_examples,
+        "max_new_tokens": max_new_tokens,
+        "started_at": started_at,
+    }
+    with open("/ckpts/eval_config.json", "w", encoding="utf-8") as fh:
+        json.dump(eval_config, fh, indent=2)
+    ckpt_vol.commit()
 
     tok = AutoTokenizer.from_pretrained(MODEL_NAME, use_fast=True)
     if tok.pad_token is None:
@@ -154,6 +174,25 @@ def eval_fn(
 @app.local_entrypoint()
 def main():
     try:
+        # Re-upload eval data from the workspace. Same rationale as the lora
+        # template: each stage runs in a fresh per-experiment env whose data
+        # volume was cascade-deleted by the previous stage's teardown.
+        # `remote_path` is a volume-root path; the volume mounts at /data
+        # inside eval_fn, so volume-root /val.jsonl reads as /data/val.jsonl.
+        #
+        # NOTE: the adapter under artifacts/final/ also needs re-uploading
+        # here once `lifecycle.upload_to_volume` supports directory sources;
+        # without it eval will silently fall back to the base model. Tracked
+        # in the lifecycle follow-up.
+        for local_rel, remote_path in [
+            ("data/val.jsonl", "/val.jsonl"),
+        ]:
+            if (Path(".") / local_rel).exists():
+                uploaded = lifecycle.upload_to_volume(
+                    EXP_ID, DATA_VOLUME, local_rel, remote_path,
+                )
+                print(f"uploaded {uploaded['src']} -> {uploaded['volume']}{uploaded['remote']}")
+
         summary = eval_fn.remote()
         print(json.dumps(summary, indent=2))
         print()

@@ -41,7 +41,13 @@ try:
 except ImportError:
     lifecycle = None  # type: ignore[assignment]
 
-if lifecycle is not None:
+# Both `modal deploy <file>` and `python <file> capture-endpoint` import this
+# module. Only the deploy path should (re-)mint the per-experiment env; the
+# capture-endpoint path runs AFTER deploy to write the redacted endpoint JSON
+# and must not flip the sentinel's pull_complete back to False mid-recovery.
+_IS_CAPTURE_ENDPOINT = len(sys.argv) > 1 and sys.argv[1] == "capture-endpoint"
+
+if lifecycle is not None and not _IS_CAPTURE_ENDPOINT:
     # vLLM's reproducibility artifact is the redacted endpoint JSON, which
     # the vllm lifecycle's pull_all() handles directly from a workspace-local
     # file (.neurico/modal_endpoint.json). No volume-side manifest entries
