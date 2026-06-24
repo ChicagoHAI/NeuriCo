@@ -15,12 +15,12 @@ CLI:
 from __future__ import annotations
 
 import argparse
-import json
+import importlib.util as _ilu
 import re
 import sys
 from pathlib import Path
 from string import Template
-from typing import Dict, List, Tuple
+from typing import Dict
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES_DIR = HERE / "templates"
@@ -35,40 +35,35 @@ def slug_ok(s: str) -> bool:
     return bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", s))
 
 
-# Shared with modal-training scaffolder. Duplicated here so this skill stays
-# self-contained when copied into a workspace independently.
-def resolve_secrets(
-    secret_args: List[str],
-    include_hf_default: bool,
-) -> Tuple[str, str]:
-    """
-    Resolve --secret flags into (SECRETS_LIST, REQUIRED_SECRETS) literals.
+def _find_sibling_skill_script(skill_name: str, script_name: str) -> Path:
+    """Walk upward from __file__ to locate a sibling skill's script."""
+    for ancestor in [HERE, *HERE.parents]:
+        candidate = ancestor / skill_name / "scripts" / script_name
+        if candidate.exists():
+            return candidate
+        candidate = ancestor / "skills" / skill_name / "scripts" / script_name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"could not locate {skill_name}/scripts/{script_name} relative to "
+        f"{HERE}; install modal-training alongside modal-vllm."
+    )
 
-    See modal-training/scripts/new_modal_app.py:resolve_secrets for the full
-    contract and rationale.
-    """
-    resolved: Dict[str, List[str]] = {}
-    if include_hf_default:
-        resolved["huggingface-secret"] = ["HF_TOKEN"]
-    for spec in secret_args:
-        if "=" not in spec:
-            raise ValueError(
-                f"--secret {spec!r}: expected NAME=ENV_VAR[,ENV_VAR2]"
-            )
-        name, _, vars_csv = spec.partition("=")
-        name = name.strip()
-        env_vars = [v.strip() for v in vars_csv.split(",") if v.strip()]
-        if not name or not env_vars:
-            raise ValueError(
-                f"--secret {spec!r}: name and at least one env var required"
-            )
-        resolved[name] = env_vars
-    if not resolved:
-        return "[]", "{}"
-    secrets_list = "[" + ", ".join(
-        f'modal.Secret.from_name("{name}")' for name in resolved
-    ) + "]"
-    return secrets_list, json.dumps(resolved)
+
+# Import resolve_secrets from the modal-training scaffolder so the two skills
+# share one definition. Previously this function was duplicated verbatim here,
+# with a comment claiming "self-contained when copied independently" — but
+# this module already hard-imports modal-training/lifecycle.py, so the
+# self-containment justification was always false. Load by file path with a
+# unique module name to avoid the cached-vllm-module issue.
+_training_scaffolder_path = _find_sibling_skill_script("modal-training", "new_modal_app.py")
+_spec = _ilu.spec_from_file_location("_modal_training_scaffolder",
+                                     str(_training_scaffolder_path))
+_training_scaffolder = _ilu.module_from_spec(_spec)
+sys.modules["_modal_training_scaffolder"] = _training_scaffolder
+_spec.loader.exec_module(_training_scaffolder)  # type: ignore[union-attr]
+
+resolve_secrets = _training_scaffolder.resolve_secrets
 
 
 def render(kind: str, subs: Dict[str, str]) -> str:
@@ -101,6 +96,8 @@ def main() -> int:
                    help="add a Modal secret to provision per-experiment "
                         "(repeatable); see modal-training scaffolder for the "
                         "full contract")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite the destination file if it already exists")
     args = p.parse_args()
 
     if not slug_ok(args.exp_id):
@@ -138,6 +135,12 @@ def main() -> int:
 
     rendered = render(args.kind, subs)
     out = Path(args.out)
+    if out.exists() and not args.force:
+        print(
+            f"error: {out} already exists; pass --force to overwrite",
+            file=sys.stderr,
+        )
+        return 2
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(rendered, encoding="utf-8")
     print(f"wrote {out}")

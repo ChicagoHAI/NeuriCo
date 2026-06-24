@@ -133,6 +133,8 @@ def main() -> int:
                         "wandb-secret=WANDB_API_KEY. The lifecycle reads the "
                         "named local env vars and mints the secret into "
                         "neurico-<EXP_ID> at register() time.")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite the destination file if it already exists")
     args = p.parse_args()
 
     if not slug_ok(args.exp_id):
@@ -183,6 +185,12 @@ def main() -> int:
 
     rendered = render(args.kind, subs)
     out = Path(args.out)
+    if out.exists() and not args.force:
+        print(
+            f"error: {out} already exists; pass --force to overwrite",
+            file=sys.stderr,
+        )
+        return 2
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(rendered, encoding="utf-8")
     print(f"wrote {out}")

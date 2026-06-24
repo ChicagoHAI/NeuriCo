@@ -21,9 +21,25 @@ import json
 import sys
 from pathlib import Path
 
+
+def _find_sibling_skill_scripts(skill_name: str) -> Path:
+    """Walk upward from __file__ to locate a sibling skill's scripts dir."""
+    here = Path(__file__).resolve().parent
+    for ancestor in [here, *here.parents]:
+        candidate = ancestor / skill_name / "scripts"
+        if (candidate / "_doctor_checks.py").exists():
+            return candidate
+        candidate = ancestor / "skills" / skill_name / "scripts"
+        if (candidate / "_doctor_checks.py").exists():
+            return candidate
+    raise FileNotFoundError(
+        f"could not locate {skill_name}/scripts relative to "
+        f"{Path(__file__).resolve()}; install modal-training alongside modal-vllm."
+    )
+
+
 # Reuse the training skill's checks. The two skills are always shipped together.
-TRAINING_SCRIPTS = Path(".claude/skills/modal-training/scripts")
-sys.path.insert(0, str(TRAINING_SCRIPTS))
+sys.path.insert(0, str(_find_sibling_skill_scripts("modal-training")))
 import _doctor_checks as checks  # noqa: E402
 
 
@@ -32,7 +48,10 @@ def main() -> int:
     p.add_argument("--probe", action="store_true")
     p.add_argument("--json", action="store_true")
     p.add_argument("--workspace", default=".")
-    p.add_argument("--require-hf-secret", action="store_true", default=True)
+    # Default OFF for vllm — most public-model serves (Qwen, Llama-public, etc.)
+    # don't need HF_TOKEN. Pass --require-hf-secret if you're serving a gated
+    # model that DOES need it.
+    p.add_argument("--require-hf-secret", action="store_true", default=False)
     p.add_argument("--no-require-hf-secret", dest="require_hf_secret",
                    action="store_false")
     args = p.parse_args()

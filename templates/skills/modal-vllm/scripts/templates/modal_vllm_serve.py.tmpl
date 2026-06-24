@@ -124,7 +124,7 @@ def serve():
             "--max-lora-rank", "${MAX_LORA_RANK}",
             "--lora-modules", f"{LORA_NAME}={LORA_REPO}",
         ]
-    subprocess.Popen(" ".join(cmd), shell=True)
+    subprocess.Popen(cmd)
 
 
 # --------------------------------------------------------------------------- #
@@ -132,13 +132,47 @@ def serve():
 # --------------------------------------------------------------------------- #
 
 def _derive_url() -> str:
-    """Compose the deployed web URL from `modal profile current` + APP_NAME."""
-    r = subprocess.run(["modal", "profile", "current"],
-                       capture_output=True, text=True, timeout=10)
-    workspace = r.stdout.strip().split("\n")[0].strip()
+    """
+    Look up the deployed app's actual web URL via `modal app list --json`.
+
+    The previous implementation synthesized the URL from the workspace name
+    and APP_NAME using a fixed pattern (`https://{ws}--{APP_NAME}-serve.modal.run`).
+    That pattern is correct for apps in the workspace's default env, but
+    env-scoped apps (which every neurico run uses) live under a different
+    routing prefix on newer Modal CLI releases. Querying the CLI for the
+    actual URL avoids drift.
+    """
+    env = f"neurico-{EXP_ID}"
+    r = subprocess.run(
+        ["modal", "app", "list", f"--env={env}", "--json"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if r.returncode == 0:
+        try:
+            apps = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            apps = []
+        for app in apps if isinstance(apps, list) else []:
+            if app.get("name") != APP_NAME:
+                continue
+            url = (app.get("web_url")
+                   or app.get("url")
+                   or app.get("endpoint"))
+            if url:
+                return url
+    # Fallback: synthesize from `modal profile current`. Wrong for some
+    # env-scoped routings but better than no URL at all when --json schema
+    # changes; the user can always cat .neurico/modal_endpoint.json and
+    # correct it.
+    pr = subprocess.run(["modal", "profile", "current"],
+                        capture_output=True, text=True, timeout=10)
+    workspace = pr.stdout.strip().split("\n")[0].strip()
     if not workspace:
-        raise RuntimeError("could not derive workspace from `modal profile current`")
-    # Modal's web URL pattern; the env is part of the routing.
+        raise RuntimeError(
+            "could not derive workspace from `modal profile current`; "
+            "and `modal app list --json` returned no matching app for "
+            f"{APP_NAME!r} in env {env!r}"
+        )
     return f"https://{workspace}--{APP_NAME}-serve.modal.run"
 
 
