@@ -118,16 +118,19 @@ exceeds the local Docker container's GPU (or there is no local GPU), check
 
 DISCOVERY (do not hard-code a specific backend):
 
-1. List skills: `ls .claude/skills/`
-2. For each skill, read its SKILL.md frontmatter. Skills tagged
-   `compute-backend` describe ways to run workloads off-machine.
-3. Pick the backend whose description matches your need:
+1. List candidate skills in one shot:
+       grep -l "compute-backend" .claude/skills/*/SKILL.md
+   That returns every SKILL.md whose frontmatter declares the
+   `compute-backend` tag. Don't read every SKILL.md linearly.
+2. For each match, read the frontmatter section only (top of file, between
+   the `---` fences) to learn which sub-tag it carries:
    - Tag `training` → fine-tuning, LoRA SFT, full SFT, data prep, GPU eval
    - Tag `serving` → deploying a model as an HTTPS endpoint for queries
-4. Read the chosen skill's SKILL.md end-to-end before writing any code that
-   uses it. The skill describes a setup doctor, a scaffolder, and a
-   leave-no-trace lifecycle that you MUST follow — your scaffolded script will
-   call lifecycle.register() / pull_all() / teardown() automatically.
+3. Pick the backend that matches your need; read its SKILL.md end-to-end
+   before writing any code that uses it. The skill describes a setup doctor,
+   a scaffolder, and a leave-no-trace lifecycle that you MUST follow — your
+   scaffolded script will call lifecycle.register() / pull_all() /
+   teardown() automatically.
 
 REQUIREMENTS WHEN A COMPUTE BACKEND IS USED:
 

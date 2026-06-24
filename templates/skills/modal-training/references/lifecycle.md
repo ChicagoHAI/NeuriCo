@@ -50,10 +50,22 @@ Each manifest entry has these fields:
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `from_volume` | str | required | volume name (must also be in the `volumes` list passed to register) |
-| `from`        | str | required | remote path inside the volume (absolute) |
+| `from`        | str | required | remote path inside the volume (absolute, **volume-root** — see below) |
 | `to`          | str | required | destination relative to workspace root |
 | `is_dir`      | bool | false | whether `from` is a directory (see directory pull rules below) |
 | `required`    | bool | false | if true, missing-or-failed = `pull_complete=False` → teardown blocked |
+
+### Volume-root vs container-mount paths
+
+`from` is a path inside the **volume**, relative to the volume root — NOT
+the path inside the running container. The two differ by exactly the mount
+point passed to `@app.function(volumes={...})`. Concretely: if the function
+mounts the volume at `/data` and writes `/data/train.jsonl` inside the
+container, the manifest entry to pull it back is `"from": "/train.jsonl"`,
+not `"/data/train.jsonl"`. The same rule applies to `upload_to_volume()`:
+its `dest_volume_path` is volume-root. Writing `/data/train.jsonl` as the
+upload destination lands the file at `/data/data/train.jsonl` inside the
+container and the dataloader silently misses it.
 
 ### Default manifests (provided by the scaffolder)
 
@@ -122,4 +134,4 @@ Volumes are not deleted explicitly — they cascade from environment delete.
 
 ## When in doubt
 
-Run `python .claude/skills/modal-training/scripts/lifecycle.py status --exp-id <id>` — prints the sentinel and Modal-side state of the env, volumes, and apps.
+Run `python .claude/skills/modal-training/scripts/lifecycle.py status` — prints the workspace's sentinel JSON (which experiment the workspace owns, what's been pulled, whether teardown ran). It reads `.neurico/modal_resources.json` directly, so no `--exp-id` argument is required.
