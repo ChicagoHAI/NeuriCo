@@ -10,6 +10,7 @@ Run: python -m pytest tests/test_research_state.py
 
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -25,18 +26,25 @@ def _fresh(tmp_path) -> ResearchState:
     return ResearchState(tmp_path)
 
 
+def _is_id(value: str, prefix: str) -> bool:
+    """Ids are `<prefix>-<writer>-<n>` (writer token namespaces each instance so
+    concurrent writers never collide). Assert the shape, not an exact string."""
+    return (value.startswith(f"{prefix}-")
+            and value.rsplit("-", 1)[-1].isdigit())
+
+
 # ---------------------------------------------------------------- findings
 
 def test_add_finding_returns_f_id_and_dedups(tmp_path):
     r = _fresh(tmp_path)
     f1 = r.add_finding("CoT lifts GSM8K by 12pts", kind="result", insight="prompting matters")
-    assert f1 == "F1"
+    assert _is_id(f1, "F")
     # Same text dedups to the same id; insight backfills.
     f1b = r.add_finding("cot lifts gsm8k by 12pts")
-    assert f1b == "F1"
+    assert f1b == f1
     assert len(r.state["findings"]) == 1
     f2 = r.add_finding("baseline overfits", kind="dead_end")
-    assert f2 == "F2"
+    assert _is_id(f2, "F") and f2 != f1
     fnode = r.state["findings"][0]
     assert fnode["kind"] == "result"
     assert fnode["insight"] == "prompting matters"
@@ -47,7 +55,7 @@ def test_add_finding_bad_kind_falls_back_to_note(tmp_path):
     r = _fresh(tmp_path)
     fid = r.add_finding("something", kind="bogus")
     assert r.state["findings"][0]["kind"] == "note"
-    assert fid == "F1"
+    assert _is_id(fid, "F")
 
 
 # --------------------------------------------------------------- decisions
@@ -57,7 +65,7 @@ def test_decision_defaults_to_global_and_normalizes_options(tmp_path):
     did = r.add_decision(
         question="Which benchmark?", chosen="GSM8K",
         options=["GSM8K", "MATH", "SVAMP"], layer="experiment_design")
-    assert did == "D1"
+    assert _is_id(did, "D")
     d = r.state["decisions"][0]
     assert d["finding"] == "global"
     assert d["layer"] == "experiment_design"
@@ -124,7 +132,7 @@ def test_experiment_carries_domain_general_fields(tmp_path):
                            name="GSM8K eval", mode="empirical_experiment",
                            design="vary prompt across 200 items")
     e = r.state["experiments"][0]
-    assert eid == "E1"
+    assert _is_id(eid, "E")
     assert e["name"] == "GSM8K eval" and e["mode"] == "empirical_experiment"
     assert e["ranBy"] == "experiment_runner"  # provenance mirrors agent
     # bad mode is dropped to ""
@@ -204,7 +212,8 @@ def test_migration_is_idempotent_no_duplicate_ids(tmp_path):
     r.add_finding("two")
     ids = [f["id"] for f in r.state["findings"]]
     r2 = ResearchState(tmp_path)
-    assert [f["id"] for f in r2.state["findings"]] == ids == ["F1", "F2"]
+    assert [f["id"] for f in r2.state["findings"]] == ids
+    assert len(set(ids)) == 2  # stable across reload, no duplicate/colliding ids
 
 
 # --------------------------------------------------------- read / render
@@ -259,8 +268,9 @@ def test_update_research_state_writes_rich_findings_and_decisions(tmp_path):
     assert "finding" in out and "decision" in out and "incident" in out
     r = ex.research
     f = r.state["findings"][0]
-    assert f["id"] == "F1" and f["insight"] == "prompting matters"
+    assert _is_id(f["id"], "F") and f["insight"] == "prompting matters"
     d = r.state["decisions"][0]
+    # the decision's finding ref is stored verbatim (here a literal from the input)
     assert d["finding"] == "F1" and d["layer"] == "experiment_design"
     assert {o["text"]: o["status"] for o in d["options"]}["GSM8K"] == "chosen"
     assert r.state["incidents"][0]["kind"] == "self_reported"
@@ -281,3 +291,94 @@ def test_assess_tool_is_gone(tmp_path):
     out = ex.execute("assess", {"situation": "x", "engage_user": True})
     assert "Unknown tool" in out
     assert any(i["kind"] == "unknown_tool" for i in ex.research.state["incidents"])
+
+
+# ---------------------------------------- concurrency / merge-on-save (PR 4)
+
+def test_save_merges_instead_of_clobbering_other_writer(tmp_path):
+    """Two instances load the same (empty) state; each writes a different record.
+    The second save must FOLD IN the first's record, not overwrite it."""
+    a = ResearchState(tmp_path)
+    b = ResearchState(tmp_path)  # loaded before A writes — stale view
+    a.add_finding("finding from A")           # A saves -> disk has F1
+    b.add_incident("tool_error", "from B")    # B (stale) saves -> must keep F1
+    fresh = ResearchState(tmp_path)
+    assert [f["text"] for f in fresh.state["findings"]] == ["finding from A"]
+    assert any(i["detail"] == "from B" for i in fresh.state["incidents"])
+
+
+def test_untouched_scalar_not_clobbered_by_stale_writer(tmp_path):
+    a = ResearchState(tmp_path)
+    b = ResearchState(tmp_path)  # stale: crux still ""
+    a.set_fields(crux="the real crux")        # A sets crux
+    b.add_finding("unrelated")                # B never touched crux
+    fresh = ResearchState(tmp_path)
+    assert fresh.state["crux"] == "the real crux"      # not clobbered by B's ""
+    assert any(f["text"] == "unrelated" for f in fresh.state["findings"])
+
+
+def test_dirty_scalar_overwrites_last_writer_wins(tmp_path):
+    a = ResearchState(tmp_path)
+    b = ResearchState(tmp_path)
+    a.set_fields(narrative="A's story")
+    b.set_fields(narrative="B's story")       # B explicitly set it -> B wins
+    assert ResearchState(tmp_path).state["narrative"] == "B's story"
+
+
+def test_ids_unique_across_instances_no_collision(tmp_path):
+    a = ResearchState(tmp_path)
+    fid_a = a.add_finding("alpha")
+    b = ResearchState(tmp_path)               # separate instance, own writer token
+    fid_b = b.add_finding("beta")
+    assert fid_a != fid_b                      # distinct ids, no collision
+    fresh = ResearchState(tmp_path)
+    assert {f["id"] for f in fresh.state["findings"]} == {fid_a, fid_b}  # both survived
+
+
+def test_concurrent_threads_all_findings_survive_from_empty(tmp_path):
+    """The id-collision repro: N writers race to add a finding from a freshly-empty
+    store. With length/disk-derived ids every thread mints the same `F1` and the
+    id-union collapses them to ONE survivor. Per-writer id tokens make each mint
+    unique, so all N findings must survive."""
+    ResearchState(tmp_path)  # create the file
+    n = 8
+    barrier = threading.Barrier(n)
+
+    def worker(i):
+        r = ResearchState(tmp_path)
+        barrier.wait()  # all start from the same empty view -> maximal id race
+        r.add_finding(f"finding-{i}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    fresh = ResearchState(tmp_path)
+    assert {f["text"] for f in fresh.state["findings"]} == {f"finding-{i}" for i in range(n)}
+    ids = [f["id"] for f in fresh.state["findings"]]
+    assert len(ids) == len(set(ids)) == n  # unique ids, none lost to a collision
+
+
+def test_concurrent_threads_all_incidents_survive(tmp_path):
+    """N threads, each its own ResearchState, append a unique incident at once.
+    The flock + merge must preserve every one (incidents union by kind/detail)."""
+    ResearchState(tmp_path)  # initialize the file
+    n = 8
+    barrier = threading.Barrier(n)
+
+    def worker(i):
+        r = ResearchState(tmp_path)
+        barrier.wait()  # maximize overlap
+        r.add_incident("worker", f"incident-{i}")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    fresh = ResearchState(tmp_path)
+    details = {i["detail"] for i in fresh.state["incidents"]}
+    assert {f"incident-{i}" for i in range(n)} <= details
