@@ -357,21 +357,6 @@ def _ensure_secret(env_name: str, secret_name: str,
         )
 
 
-def _merge_manifests(
-    existing: List[ManifestEntry],
-    new: List[ManifestEntry],
-) -> List[ManifestEntry]:
-    """
-    Combine two pull manifests, deduping by (from_volume, from). Later
-    entries override earlier ones so a re-register can correct an entry's
-    destination or required flag.
-    """
-    by_key: Dict[tuple, ManifestEntry] = {}
-    for entry in existing + new:
-        by_key[(entry["from_volume"], entry["from"])] = entry
-    return list(by_key.values())
-
-
 def register(
     exp_id: str,
     volumes: Optional[List[str]] = None,
@@ -395,9 +380,13 @@ def register(
 
     `pull_manifest` is a list of dicts declaring which volume paths to
     pull where (see ManifestEntry docstring). The template owns this —
-    lifecycle just persists and replays it at pull_all() time. Entries
-    are merged across multiple register() calls so a data-prep step and a
-    training step in the same workspace contribute their own entries.
+    lifecycle just persists and replays it at pull_all() time. Each
+    register() call REPLACES the persisted manifest with the caller's:
+    in the chained-stage pattern (prep teardown, then lora register, then
+    lora teardown, then eval register, ...), the prior stage's volumes
+    are already cascade-deleted, so re-pulling their entries from the
+    freshly-recreated empty volumes would fail. The workspace already has
+    the prior stage's artifacts from its own pull_all().
 
     Idempotent: calling twice with the same args produces no extra side
     effects. The pull_complete and torn_down flags are reset on each call,
@@ -432,9 +421,8 @@ def register(
             "volumes": sorted(set(existing.get("volumes", []) + (volumes or []))),
             "apps": sorted(set(existing.get("apps", []) + (apps or []))),
             "secrets": sorted(set(existing.get("secrets", []))),
-            "pull_manifest": _merge_manifests(
-                existing.get("pull_manifest", []), pull_manifest or [],
-            ),
+            # Replace rather than merge — see the docstring rationale.
+            "pull_manifest": list(pull_manifest or []),
             "share_hf_cache": share_hf_cache,
             "first_registered_at":
                 existing.get("first_registered_at") or now_iso(),
