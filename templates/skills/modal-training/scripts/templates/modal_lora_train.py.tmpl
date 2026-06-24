@@ -55,11 +55,14 @@ if lifecycle is not None:
          "to": "artifacts/training_logs/trainer_state.json",
                                                   "required": True},
         {"from_volume": CKPT_VOLUME, "from": "/final",
-         "to": "artifacts/final", "is_dir": True, "required": True},
+         "to": "artifacts/final/", "is_dir": True, "required": True},
     ]
+    # When SHARE_HF_CACHE is True, the HF cache volume is expected to outlive
+    # this run (other experiments reuse it). Excluding it from the registered
+    # volume list keeps it out of the teardown cascade.
     lifecycle.register(
         EXP_ID,
-        volumes=[DATA_VOLUME, CKPT_VOLUME, HF_VOLUME],
+        volumes=[DATA_VOLUME, CKPT_VOLUME] + ([] if SHARE_HF_CACHE else [HF_VOLUME]),
         apps=[],
         required_secrets=${REQUIRED_SECRETS},
         pull_manifest=PULL_MANIFEST,
@@ -311,29 +314,28 @@ def train(
 @app.local_entrypoint()
 def main():
     """Run training, then pull artifacts + teardown the env."""
-    # Re-upload prep artifacts from the workspace. Data prep ran in its own
-    # env that was torn down on completion (data volume cascade-deleted), so
-    # this LoRA run starts against a fresh, empty data volume even when both
-    # stages share the same EXP_ID. The workspace `data/` directory is the
-    # source of truth between stages — push the local copies back onto the
-    # volume the @app.function above expects to read from.
-    #
-    # Note: `remote_path` is a volume-root path, not a container path. The
-    # volume is mounted at /data inside the container, so volume-root
-    # /train.jsonl reads as /data/train.jsonl from train(). Writing to
-    # /data/train.jsonl on the volume would land at /data/data/train.jsonl
-    # in the container and miss the dataloader.
-    for local_rel, remote_path in [
-        ("data/train.jsonl", "/train.jsonl"),
-        ("data/val.jsonl",   "/val.jsonl"),
-    ]:
-        if (Path(".") / local_rel).exists():
-            uploaded = lifecycle.upload_to_volume(
-                EXP_ID, DATA_VOLUME, local_rel, remote_path,
-            )
-            print(f"uploaded {uploaded['src']} -> {uploaded['volume']}{uploaded['remote']}")
-
     try:
+        # Re-upload prep artifacts from the workspace. Data prep ran in its
+        # own env that was torn down on completion (data volume cascade-
+        # deleted), so this LoRA run starts against a fresh, empty data
+        # volume even when both stages share the same EXP_ID. The workspace
+        # `data/` directory is the source of truth between stages.
+        #
+        # Note: `remote_path` is a volume-root path, not a container path.
+        # The volume is mounted at /data inside the container, so volume-
+        # root /train.jsonl reads as /data/train.jsonl from train(). Writing
+        # to /data/train.jsonl on the volume would land at /data/data/
+        # train.jsonl in the container and miss the dataloader.
+        for local_rel, remote_path in [
+            ("data/train.jsonl", "/train.jsonl"),
+            ("data/val.jsonl",   "/val.jsonl"),
+        ]:
+            if (Path(".") / local_rel).exists():
+                uploaded = lifecycle.upload_to_volume(
+                    EXP_ID, DATA_VOLUME, local_rel, remote_path,
+                )
+                print(f"uploaded {uploaded['src']} -> {uploaded['volume']}{uploaded['remote']}")
+
         result = train.remote()
         print()
         print(f"train result: {result}")

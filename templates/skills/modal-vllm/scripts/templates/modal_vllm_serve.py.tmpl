@@ -41,7 +41,13 @@ try:
 except ImportError:
     lifecycle = None  # type: ignore[assignment]
 
-if lifecycle is not None:
+# Both `modal deploy <file>` and `python <file> capture-endpoint` import this
+# module. Only the deploy path should (re-)mint the per-experiment env; the
+# capture-endpoint path runs AFTER deploy to write the redacted endpoint JSON
+# and must not flip the sentinel's pull_complete back to False mid-recovery.
+_IS_CAPTURE_ENDPOINT = len(sys.argv) > 1 and sys.argv[1] == "capture-endpoint"
+
+if lifecycle is not None and not _IS_CAPTURE_ENDPOINT:
     # vLLM's reproducibility artifact is the redacted endpoint JSON, which
     # the vllm lifecycle's pull_all() handles directly from a workspace-local
     # file (.neurico/modal_endpoint.json). No volume-side manifest entries
@@ -118,7 +124,7 @@ def serve():
             "--max-lora-rank", "${MAX_LORA_RANK}",
             "--lora-modules", f"{LORA_NAME}={LORA_REPO}",
         ]
-    subprocess.Popen(" ".join(cmd), shell=True)
+    subprocess.Popen(cmd)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,13 +132,49 @@ def serve():
 # --------------------------------------------------------------------------- #
 
 def _derive_url() -> str:
-    """Compose the deployed web URL from `modal profile current` + APP_NAME."""
-    r = subprocess.run(["modal", "profile", "current"],
-                       capture_output=True, text=True, timeout=10)
-    workspace = r.stdout.strip().split("\n")[0].strip()
+    """
+    Look up the deployed function's actual web URL via the Modal Python SDK.
+
+    `modal app list --json` doesn't include URLs and the `app describe` /
+    `app show` commands don't exist on Modal CLI >=1.4. Synthesizing the URL
+    from a fixed pattern (`https://{ws}--{APP_NAME}-serve.modal.run`) gets it
+    wrong for env-scoped apps, which carry a hash suffix Modal assigns at
+    deploy time. The SDK's Function.hydrate() / get_web_url() returns the
+    real URL the deploy printed.
+
+    Honors MODAL_ENDPOINT_URL as an override for offline/scripted use where
+    the SDK lookup can't reach Modal's API.
+    """
+    override = os.environ.get("MODAL_ENDPOINT_URL", "").strip()
+    if override:
+        return override
+
+    env = f"neurico-{EXP_ID}"
+    try:
+        fn = modal.Function.from_name(
+            APP_NAME, "serve", environment_name=env,
+        )
+        fn.hydrate()
+        url = fn.get_web_url()
+        if url:
+            return url
+    except Exception as exc:
+        # Fall through to synthesis with a clear note for the user.
+        print(
+            f"warn: SDK lookup of {APP_NAME!r}/serve in {env!r} failed: "
+            f"{type(exc).__name__}: {exc}; falling back to URL synthesis",
+            file=sys.stderr,
+        )
+
+    pr = subprocess.run(["modal", "profile", "current"],
+                        capture_output=True, text=True, timeout=10)
+    workspace = pr.stdout.strip().split("\n")[0].strip()
     if not workspace:
-        raise RuntimeError("could not derive workspace from `modal profile current`")
-    # Modal's web URL pattern; the env is part of the routing.
+        raise RuntimeError(
+            "could not derive workspace from `modal profile current` and "
+            f"SDK lookup of {APP_NAME!r}/serve in {env!r} returned no URL. "
+            f"Pass MODAL_ENDPOINT_URL=<url> from the deploy output."
+        )
     return f"https://{workspace}--{APP_NAME}-serve.modal.run"
 
 

@@ -38,8 +38,36 @@ from typing import Any, Dict, List, Optional
 # lives at sys.modules["_modal_training_lifecycle"], unambiguously.
 import importlib.util as _ilu  # noqa: E402
 
-TRAINING_SCRIPTS = Path(".claude/skills/modal-training/scripts")
-_base_path = TRAINING_SCRIPTS / "lifecycle.py"
+
+def _find_sibling_skill(skill_name: str, script_name: str) -> Path:
+    """
+    Walk upward from this file looking for a sibling skill's script.
+
+    The previous implementation hard-coded `.claude/skills/...` resolved
+    against the CWD. That broke under any non-cwd invocation (Modal
+    container shells, agent subprocess started in a subdir, codex/gemini
+    provider workspaces that use a different skills root). Walking up from
+    __file__ instead means the lookup is invariant to the caller's CWD and
+    to the provider directory naming.
+    """
+    here = Path(__file__).resolve().parent
+    for ancestor in [here, *here.parents]:
+        # ancestor/<skill_name>/scripts/<script_name>
+        candidate = ancestor / skill_name / "scripts" / script_name
+        if candidate.exists():
+            return candidate
+        # ancestor/skills/<skill_name>/scripts/<script_name>
+        candidate = ancestor / "skills" / skill_name / "scripts" / script_name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"could not locate {skill_name}/scripts/{script_name} relative to "
+        f"{Path(__file__).resolve()}; install the modal-training skill "
+        f"alongside modal-vllm under the same skills root."
+    )
+
+
+_base_path = _find_sibling_skill("modal-training", "lifecycle.py")
 _spec = _ilu.spec_from_file_location(
     "_modal_training_lifecycle", str(_base_path),
 )
@@ -125,13 +153,28 @@ def capture_endpoint(
     return live
 
 
+_REDACTED_KEYS = {"key", "secret", "token", "password", "api_key"}
+
+
+def _redact_payload(obj: Any) -> Any:
+    """Recursively strip secret-bearing keys from a payload."""
+    if isinstance(obj, dict):
+        return {
+            k: _redact_payload(v)
+            for k, v in obj.items()
+            if k.lower() not in _REDACTED_KEYS
+        }
+    if isinstance(obj, list):
+        return [_redact_payload(x) for x in obj]
+    return obj
+
+
 def _redact_endpoint(live: Path, dest: Path) -> None:
-    """Strip key/secret from the live endpoint JSON and write to dest."""
+    """Recursively strip secret-bearing keys from endpoint JSON, write to dest."""
     if not live.exists():
         return
     data = json.loads(live.read_text(encoding="utf-8"))
-    data.pop("key", None)
-    data.pop("secret", None)
+    data = _redact_payload(data)
     data["redacted"] = True
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
