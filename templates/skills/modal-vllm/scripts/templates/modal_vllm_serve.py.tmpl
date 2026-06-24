@@ -133,45 +133,47 @@ def serve():
 
 def _derive_url() -> str:
     """
-    Look up the deployed app's actual web URL via `modal app list --json`.
+    Look up the deployed function's actual web URL via the Modal Python SDK.
 
-    The previous implementation synthesized the URL from the workspace name
-    and APP_NAME using a fixed pattern (`https://{ws}--{APP_NAME}-serve.modal.run`).
-    That pattern is correct for apps in the workspace's default env, but
-    env-scoped apps (which every neurico run uses) live under a different
-    routing prefix on newer Modal CLI releases. Querying the CLI for the
-    actual URL avoids drift.
+    `modal app list --json` doesn't include URLs and the `app describe` /
+    `app show` commands don't exist on Modal CLI >=1.4. Synthesizing the URL
+    from a fixed pattern (`https://{ws}--{APP_NAME}-serve.modal.run`) gets it
+    wrong for env-scoped apps, which carry a hash suffix Modal assigns at
+    deploy time. The SDK's Function.hydrate() / get_web_url() returns the
+    real URL the deploy printed.
+
+    Honors MODAL_ENDPOINT_URL as an override for offline/scripted use where
+    the SDK lookup can't reach Modal's API.
     """
+    override = os.environ.get("MODAL_ENDPOINT_URL", "").strip()
+    if override:
+        return override
+
     env = f"neurico-{EXP_ID}"
-    r = subprocess.run(
-        ["modal", "app", "list", f"--env={env}", "--json"],
-        capture_output=True, text=True, timeout=15,
-    )
-    if r.returncode == 0:
-        try:
-            apps = json.loads(r.stdout)
-        except json.JSONDecodeError:
-            apps = []
-        for app in apps if isinstance(apps, list) else []:
-            if app.get("name") != APP_NAME:
-                continue
-            url = (app.get("web_url")
-                   or app.get("url")
-                   or app.get("endpoint"))
-            if url:
-                return url
-    # Fallback: synthesize from `modal profile current`. Wrong for some
-    # env-scoped routings but better than no URL at all when --json schema
-    # changes; the user can always cat .neurico/modal_endpoint.json and
-    # correct it.
+    try:
+        fn = modal.Function.from_name(
+            APP_NAME, "serve", environment_name=env,
+        )
+        fn.hydrate()
+        url = fn.get_web_url()
+        if url:
+            return url
+    except Exception as exc:
+        # Fall through to synthesis with a clear note for the user.
+        print(
+            f"warn: SDK lookup of {APP_NAME!r}/serve in {env!r} failed: "
+            f"{type(exc).__name__}: {exc}; falling back to URL synthesis",
+            file=sys.stderr,
+        )
+
     pr = subprocess.run(["modal", "profile", "current"],
                         capture_output=True, text=True, timeout=10)
     workspace = pr.stdout.strip().split("\n")[0].strip()
     if not workspace:
         raise RuntimeError(
-            "could not derive workspace from `modal profile current`; "
-            "and `modal app list --json` returned no matching app for "
-            f"{APP_NAME!r} in env {env!r}"
+            "could not derive workspace from `modal profile current` and "
+            f"SDK lookup of {APP_NAME!r}/serve in {env!r} returned no URL. "
+            f"Pass MODAL_ENDPOINT_URL=<url> from the deploy output."
         )
     return f"https://{workspace}--{APP_NAME}-serve.modal.run"
 
