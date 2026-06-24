@@ -174,22 +174,21 @@ def eval_fn(
 @app.local_entrypoint()
 def main():
     try:
-        # Re-upload eval data from the workspace. Same rationale as the lora
-        # template: each stage runs in a fresh per-experiment env whose data
-        # volume was cascade-deleted by the previous stage's teardown.
-        # `remote_path` is a volume-root path; the volume mounts at /data
-        # inside eval_fn, so volume-root /val.jsonl reads as /data/val.jsonl.
-        #
-        # NOTE: the adapter under artifacts/final/ also needs re-uploading
-        # here once `lifecycle.upload_to_volume` supports directory sources;
-        # without it eval will silently fall back to the base model. Tracked
-        # in the lifecycle follow-up.
-        for local_rel, remote_path in [
-            ("data/val.jsonl", "/val.jsonl"),
+        # Re-upload eval inputs from the workspace. Each stage runs in a fresh
+        # per-experiment env whose volumes were cascade-deleted by the
+        # previous stage's teardown. `remote_path` is a volume-root path; the
+        # ckpt volume mounts at /ckpts and the data volume mounts at /data,
+        # so volume-root /final is /ckpts/final at read time and volume-root
+        # /val.jsonl is /data/val.jsonl. Without the adapter re-upload,
+        # eval_fn() silently falls back to the base model (Path check at
+        # /ckpts/final misses).
+        for vol, local_rel, remote_path in [
+            (DATA_VOLUME, "data/val.jsonl",   "/val.jsonl"),
+            (CKPT_VOLUME, "artifacts/final",  "/final"),
         ]:
             if (Path(".") / local_rel).exists():
                 uploaded = lifecycle.upload_to_volume(
-                    EXP_ID, DATA_VOLUME, local_rel, remote_path,
+                    EXP_ID, vol, local_rel, remote_path,
                 )
                 print(f"uploaded {uploaded['src']} -> {uploaded['volume']}{uploaded['remote']}")
 

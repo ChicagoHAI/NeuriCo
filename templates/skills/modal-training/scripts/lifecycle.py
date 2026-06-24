@@ -30,6 +30,8 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import shutil
@@ -37,9 +39,14 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 SENTINEL_REL = Path(".neurico") / "modal_resources.json"
+SENTINEL_LOCK_REL = Path(".neurico") / "modal_resources.lock"
+
+# Large multi-GB artifact pulls (e.g. a full SFT checkpoint dir) can exceed
+# the 600s default. Override via env var when you know the artifact is big.
+_PULL_TIMEOUT = int(os.environ.get("NEURICO_MODAL_PULL_TIMEOUT", "600"))
 
 # Manifest entries declared by each template's register() call. Lifecycle has
 # no knowledge of what artifacts a run produces — that's the template's
@@ -87,11 +94,65 @@ def load_sentinel(workspace: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _lock_path(workspace: Optional[Path] = None) -> Path:
+    return workspace_root(workspace) / SENTINEL_LOCK_REL
+
+
+@contextlib.contextmanager
+def _sentinel_lock(workspace: Optional[Path] = None) -> Iterator[None]:
+    """
+    Cross-process exclusive lock around sentinel read-modify-write blocks.
+
+    Two concurrent template runs under the same EXP_ID (e.g. prep + train
+    started in parallel) could otherwise interleave load → mutate → write
+    and lose one stage's pull_complete=False, leading to a false-clean
+    teardown. The lock serializes those critical sections.
+    """
+    lock_path = _lock_path(workspace)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w", encoding="utf-8") as lock_f:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+
+def _save_atomic(path: Path, data: Dict[str, Any]) -> None:
+    """Write JSON via tmp-file + os.replace so readers never see a torn file."""
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
 def save_sentinel(data: Dict[str, Any], workspace: Optional[Path] = None) -> None:
-    """Write the sentinel JSON, creating .neurico/ if needed."""
+    """Write the sentinel JSON, creating .neurico/ if needed. Atomic + locked."""
     path = sentinel_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    with _sentinel_lock(workspace):
+        _save_atomic(path, data)
+
+
+def update_sentinel(
+    workspace: Optional[Path],
+    mutate: Callable[[Dict[str, Any]], Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Load, mutate, save the sentinel under a single lock.
+
+    Use this for any read-modify-write block that another process or thread
+    could race against — register() and pull_all() both need it because they
+    merge with prior state.
+    """
+    path = sentinel_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _sentinel_lock(workspace):
+        existing = {}
+        if path.exists():
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        new = mutate(existing)
+        _save_atomic(path, new)
+    return new
 
 
 def now_iso() -> str:
@@ -191,19 +252,35 @@ def volume_get(env_name: str, volume: str, remote: str,
             )
         parent = dest.parent
         parent.mkdir(parents=True, exist_ok=True)
-        # Modal won't overwrite an existing target directory even with --force;
-        # clear any residue from a previous attempt.
+        # Modal won't overwrite an existing target directory even with --force.
+        # Stage the prior copy to <dest>.prev so a failed pull can restore it
+        # instead of leaving the user with an empty hole where their artifact
+        # used to be.
+        prev = dest.with_name(dest.name + ".prev")
+        staged = False
         if dest.exists():
-            shutil.rmtree(dest)
-        return _run([
+            if prev.exists():
+                shutil.rmtree(prev)
+            os.replace(dest, prev)
+            staged = True
+        r = _run([
             "modal", "volume", "get", f"--env={env_name}", "--force",
             volume, remote, str(parent) + "/",
-        ], timeout=600)
+        ], timeout=_PULL_TIMEOUT)
+        if r.returncode == 0:
+            if staged and prev.exists():
+                shutil.rmtree(prev)
+        else:
+            if staged:
+                if dest.exists():
+                    shutil.rmtree(dest)
+                os.replace(prev, dest)
+        return r
     dest.parent.mkdir(parents=True, exist_ok=True)
     return _run([
         "modal", "volume", "get", f"--env={env_name}", "--force",
         volume, remote, str(dest),
-    ], timeout=600)
+    ], timeout=_PULL_TIMEOUT)
 
 
 def volume_put(env_name: str, volume: str, src: Path,
@@ -218,7 +295,7 @@ def volume_put(env_name: str, volume: str, src: Path,
     return _run([
         "modal", "volume", "put", f"--env={env_name}", "--force",
         volume, str(src), remote,
-    ], timeout=600)
+    ], timeout=_PULL_TIMEOUT)
 
 
 def app_stop(env_name: str, app_name: str) -> None:
@@ -325,32 +402,61 @@ def register(
     Idempotent: calling twice with the same args produces no extra side
     effects. The pull_complete and torn_down flags are reset on each call,
     since a re-register implies the start of a new run.
+
+    Refuses to re-key to a new exp_id if the workspace already has an
+    in-flight (non-torn-down) experiment recorded under a different exp_id.
+    Overwriting that sentinel would orphan the prior env in Modal with no
+    local record — teardown the old experiment first.
     """
+    existing_pre = load_sentinel(workspace) or {}
+    prior_exp = existing_pre.get("exp_id")
+    if prior_exp and prior_exp != exp_id and not existing_pre.get("torn_down"):
+        raise RuntimeError(
+            f"workspace already has an in-flight experiment {prior_exp!r}; "
+            f"refusing to re-key to {exp_id!r} (the previous Modal env "
+            f"would be orphaned). Teardown first with: "
+            f"python lifecycle.py teardown --exp-id {prior_exp}"
+        )
+
     env = env_name_for(exp_id)
     ensure_environment(env)
 
-    for secret_name, env_var_names in (required_secrets or {}).items():
-        _ensure_secret(env, secret_name, env_var_names)
+    # Write the sentinel BEFORE minting secrets so a partial failure leaves a
+    # local record of the env. Without this, a secret-mint failure on the 2nd
+    # of N secrets would leave Modal-side state (env + first secret) that no
+    # local file knows about — no way to recover via lifecycle.py teardown.
+    def _base(existing: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "exp_id": exp_id,
+            "environment": env,
+            "volumes": sorted(set(existing.get("volumes", []) + (volumes or []))),
+            "apps": sorted(set(existing.get("apps", []) + (apps or []))),
+            "secrets": sorted(set(existing.get("secrets", []))),
+            "pull_manifest": _merge_manifests(
+                existing.get("pull_manifest", []), pull_manifest or [],
+            ),
+            "share_hf_cache": share_hf_cache,
+            "first_registered_at":
+                existing.get("first_registered_at") or now_iso(),
+            "last_registered_at": now_iso(),
+            "pull_complete": False,
+            "torn_down": False,
+        }
+    sentinel = update_sentinel(workspace, _base)
 
-    existing = load_sentinel(workspace) or {}
-    sentinel = {
-        "exp_id": exp_id,
-        "environment": env,
-        "volumes": sorted(set(existing.get("volumes", []) + (volumes or []))),
-        "apps": sorted(set(existing.get("apps", []) + (apps or []))),
-        "secrets": sorted(set(
-            existing.get("secrets", []) + list((required_secrets or {}).keys())
-        )),
-        "pull_manifest": _merge_manifests(
-            existing.get("pull_manifest", []), pull_manifest or [],
-        ),
-        "share_hf_cache": share_hf_cache,
-        "first_registered_at": existing.get("first_registered_at") or now_iso(),
-        "last_registered_at": now_iso(),
-        "pull_complete": False,
-        "torn_down": False,
-    }
-    save_sentinel(sentinel, workspace)
+    minted: List[str] = []
+    try:
+        for secret_name, env_var_names in (required_secrets or {}).items():
+            _ensure_secret(env, secret_name, env_var_names)
+            minted.append(secret_name)
+    finally:
+        def _merge_secrets(existing: Dict[str, Any]) -> Dict[str, Any]:
+            existing["secrets"] = sorted(
+                set(existing.get("secrets", [])) | set(minted)
+            )
+            return existing
+        sentinel = update_sentinel(workspace, _merge_secrets)
+
     return sentinel
 
 
@@ -391,7 +497,13 @@ def pull_all(
         required = bool(entry.get("required", False))
 
         if volume not in sentinel["volumes"]:
-            continue  # volume wasn't registered; skip silently
+            # A manifest entry naming a volume that register() never claimed is
+            # almost always a typo. Silently skipping let a 'required' entry
+            # appear complete and triggered teardown with the artifact never
+            # copied off. Surface the typo instead.
+            if required:
+                missing_required.append(f"{volume}{remote} (unregistered volume)")
+            continue
 
         r = volume_get(env, volume, remote, dest, is_dir=is_dir)
         if r.returncode == 0:
@@ -417,11 +529,14 @@ def pull_all(
 
     pull_complete = not errors and not missing_required
 
-    sentinel["pull_complete"] = pull_complete
-    sentinel["pull_errors"] = errors
-    sentinel["pull_missing"] = missing_required
-    sentinel["last_pulled_at"] = now_iso()
-    save_sentinel(sentinel, workspace)
+    # Merge under the sentinel lock so a parallel stage's update isn't lost.
+    def _record(existing: Dict[str, Any]) -> Dict[str, Any]:
+        existing["pull_complete"] = pull_complete
+        existing["pull_errors"] = errors
+        existing["pull_missing"] = missing_required
+        existing["last_pulled_at"] = now_iso()
+        return existing
+    update_sentinel(workspace, _record)
 
     if not pull_complete:
         raise RuntimeError(
@@ -464,6 +579,13 @@ def upload_to_volume(
     sentinel = load_sentinel(workspace)
     if sentinel is None:
         raise RuntimeError("no sentinel found; was register() called?")
+    if sentinel.get("torn_down"):
+        raise RuntimeError(
+            f"environment {sentinel['environment']!r} already torn down; "
+            f"re-register before uploading. "
+            f"Run: python lifecycle.py status to inspect, or rerun the "
+            f"template's register() call."
+        )
     if volume not in sentinel["volumes"]:
         raise RuntimeError(
             f"cannot upload to unregistered volume {volume!r}; "
@@ -511,7 +633,10 @@ def teardown(
     if not force and not sentinel.get("pull_complete"):
         raise RuntimeError(
             f"pull_complete=False; refusing to teardown. "
-            f"Run pull_all() first, or pass force=True."
+            f"Recover artifacts with: python lifecycle.py pull --exp-id {exp_id} "
+            f"then re-run teardown. To force teardown anyway (loses any "
+            f"un-pulled artifacts): python lifecycle.py teardown "
+            f"--exp-id {exp_id} --force"
         )
 
     env = sentinel["environment"]
