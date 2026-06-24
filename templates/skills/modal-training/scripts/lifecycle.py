@@ -451,8 +451,12 @@ def upload_to_volume(
 
     `src_workspace_rel` is relative to the workspace root (e.g.
     "data/train.jsonl"); `dest_volume_path` is the absolute path inside
-    `volume` (e.g. "/data/train.jsonl"). The volume must already be in the
-    sentinel's `volumes` list — register() is what claims it for this env.
+    `volume` from the volume root (e.g. "/train.jsonl"). Note this is the
+    volume-root path, NOT the container mount path: if the remote function
+    mounts the volume at /data and reads /data/train.jsonl, the upload
+    destination is "/train.jsonl" — passing "/data/train.jsonl" would land
+    the file at /data/data/train.jsonl inside the container. The volume
+    must already be in the sentinel's `volumes` list — register() claims it.
 
     Returns a dict with src/dest for logging. Raises RuntimeError on
     missing source, unregistered volume, or a failed CLI call.

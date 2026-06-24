@@ -317,9 +317,15 @@ def main():
     # stages share the same EXP_ID. The workspace `data/` directory is the
     # source of truth between stages — push the local copies back onto the
     # volume the @app.function above expects to read from.
+    #
+    # Note: `remote_path` is a volume-root path, not a container path. The
+    # volume is mounted at /data inside the container, so volume-root
+    # /train.jsonl reads as /data/train.jsonl from train(). Writing to
+    # /data/train.jsonl on the volume would land at /data/data/train.jsonl
+    # in the container and miss the dataloader.
     for local_rel, remote_path in [
-        ("data/train.jsonl", "/data/train.jsonl"),
-        ("data/val.jsonl",   "/data/val.jsonl"),
+        ("data/train.jsonl", "/train.jsonl"),
+        ("data/val.jsonl",   "/val.jsonl"),
     ]:
         if (Path(".") / local_rel).exists():
             uploaded = lifecycle.upload_to_volume(

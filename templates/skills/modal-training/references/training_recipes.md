@@ -69,16 +69,18 @@ Bake your local `prepare_data.py` into the image with `.add_local_file()` — sa
 
 Data prep tears its env down on completion (the data volume is part of the env and cascade-deletes with it). When a training run starts later under the same EXP_ID, `modal.Volume.from_name(..., create_if_missing=True)` materializes a *fresh, empty* volume — not the one prep wrote to.
 
-**The workspace `data/` directory is the source of truth between stages.** Prep pulls `/data/train.jsonl` and `/data/val.jsonl` back to `data/train.jsonl` and `data/val.jsonl` in the workspace before teardown. The LoRA template's `main()` re-uploads those local copies onto the data volume before calling `train.remote()`:
+**The workspace `data/` directory is the source of truth between stages.** Prep pulls `/train.jsonl` and `/val.jsonl` (volume-root paths) back to `data/train.jsonl` and `data/val.jsonl` in the workspace before teardown. The LoRA template's `main()` re-uploads those local copies onto the data volume before calling `train.remote()`:
 
 ```python
 for local_rel, remote_path in [
-    ("data/train.jsonl", "/data/train.jsonl"),
-    ("data/val.jsonl",   "/data/val.jsonl"),
+    ("data/train.jsonl", "/train.jsonl"),
+    ("data/val.jsonl",   "/val.jsonl"),
 ]:
     if (Path(".") / local_rel).exists():
         lifecycle.upload_to_volume(EXP_ID, DATA_VOLUME, local_rel, remote_path)
 ```
+
+`remote_path` is a **volume-root path, not a container path** — `modal volume put` writes relative to the volume root, and the volume is then mounted at `/data` inside the container. So volume-root `/train.jsonl` becomes container-path `/data/train.jsonl` at read time. Passing `/data/train.jsonl` as the upload destination would land the file at `/data/data/train.jsonl` in the container.
 
 If you write a new chained stage, use `lifecycle.upload_to_volume(exp_id, volume, src_workspace_rel, dest_volume_path)` the same way. The helper validates the volume against the sentinel and raises with a clear error if the local source is missing — so a broken chain fails loudly rather than silently training on an empty dataset.
 
