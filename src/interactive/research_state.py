@@ -72,7 +72,7 @@ BLOCK_KINDS = ("text", "bullet_list", "key_value", "table", "status_list")
 # Reserved ids for the built-in sections. A panel_layout entry that matches one
 # of these renders the corresponding core section; any other id is looked up in
 # the custom `sections` map.
-BUILTIN_SECTIONS = ("crux", "current_best", "narrative", "assessment",
+BUILTIN_SECTIONS = ("crux", "current_best", "narrative",
                     "hypotheses", "open_questions", "decisions", "experiments",
                     "findings")
 
@@ -133,7 +133,6 @@ class ResearchState:
             # is one of DECISION_LAYERS. Review/interaction fields (importance,
             # should_engage*) are left empty for later agents.
             "decisions": [],        # {id, finding, layer, question, options[{text,status}], chosen, rationale, by, author, evidence, links, importance, should_engage, should_engage_reason, sequence, ts}
-            "assessments": [],      # DEPRECATED (removed with the `assess` tool in a later PR) — {ts, situation, uncertainty, crux, decision_pending, engage_user, rationale}
             "incidents": [],        # {ts, kind, detail, author} — auto-logged tool errors + self-reported struggle
             # Level 2 — the PI-designed panel. `panel_layout` is an ordered list
             # of section ids (built-in or custom); empty → default order. Each
@@ -428,24 +427,6 @@ class ResearchState:
         if changed:
             self._save()
 
-    def add_assessment(self, situation: str = "", uncertainty: str = "",
-                       crux: str = "", decision_pending: str = "",
-                       engage_user: bool = False, rationale: str = "") -> None:
-        """DEPRECATED. The manager's per-cycle metacognition log — kept working so
-        the existing `assess` tool doesn't break, but slated for removal: with the
-        world model now multi-agent shared memory, the engage signal moves onto
-        each decision (``should_engage``), owned by a human-interactor subagent."""
-        self.state["assessments"].append({
-            "ts": _now(), "situation": (situation or "").strip(),
-            "uncertainty": (uncertainty or "").strip(), "crux": (crux or "").strip(),
-            "decision_pending": (decision_pending or "").strip(),
-            "engage_user": bool(engage_user), "rationale": (rationale or "").strip(),
-        })
-        # The crux from the latest assessment is the live crux.
-        if crux and crux.strip():
-            self.state["crux"] = crux.strip()
-        self._save()
-
     # --------------------------------------------------------- panel (L2)
     def set_panel_layout(self, layout: List[str]) -> None:
         """Set the ordered list of section ids the whiteboard renders. Entries
@@ -480,10 +461,6 @@ class ResearchState:
         return sid
 
     # ------------------------------------------------------- read / render
-    @property
-    def latest_assessment(self) -> Optional[Dict[str, Any]]:
-        return self.state["assessments"][-1] if self.state["assessments"] else None
-
     def decisions_for(self, finding_id: str) -> List[Dict[str, Any]]:
         """All decisions tagged with `finding_id` (use 'global' for project-wide),
         in layer order so a reader sees a finding's forks hypothesis→interpretation."""
@@ -545,7 +522,6 @@ class ResearchState:
             "findings": s["findings"][-12:],
             "open_questions": s["open_questions"],
             "decisions": s["decisions"][-12:],
-            "latest_assessment": self.latest_assessment,
             "incidents": s.get("incidents", [])[-10:],
             "warnings": self.consistency_warnings(),
             "panel_layout": s.get("panel_layout", []),
@@ -613,13 +589,6 @@ class ResearchState:
                 ch = f" → {d['chosen']}" if d.get("chosen") else ""
                 tag = f" [{d.get('finding', 'global')}/{d.get('layer') or '-'}]"
                 lines.append(f"  - {d['question']}{ch}{tag}")
-
-        la = self.latest_assessment
-        if la:
-            lines.append(
-                f"Your last assessment: {la.get('situation', '')} "
-                f"| uncertainty: {la.get('uncertainty', '')} "
-                f"| engage_user={la.get('engage_user')}")
 
         recent_incidents = self.state.get("incidents", [])[-3:]
         if recent_incidents:

@@ -166,8 +166,13 @@ tools:
       findings:
         type: array
         items:
-          type: string
-        description: Confirmed results/observations to record (append, deduped).
+          type: object
+        description: |
+          The SPINE of the world model: each finding is a unit of insight the run
+          produced. Append, deduped by text. An item may be a bare string or an
+          object: {"text": "...", "insight": "the so-what / implication"(optional),
+          "kind": "result|dead_end|note"(optional, default result)}. Record a
+          finding, then attach the decisions that produced it via decision.finding.
         required: false
       dead_ends:
         type: array
@@ -196,55 +201,27 @@ tools:
       decision:
         type: object
         description: |
-          A decision just made, to log with its reasoning:
+          A decision just made, to log with its reasoning. Every decision belongs
+          to the finding it helped produce, or to "global" for a project-wide fork
+          (e.g. orchestration: which agent to run, how to scope, when to stop):
           {"question": "...", "chosen": "...", "rationale": "...",
-           "options": ["...", "..."](optional)}.
+           "options": ["...", "..."](optional),
+           "finding": "F2 | global"(the finding id this fork serves; default global),
+           "layer": "hypothesis|method|experiment_design|interpretation"(optional)}.
+          Layers: hypothesis = what to test; method = the way (library, metric,
+          threshold, prompt); experiment_design = dataset/baseline/scope/seed;
+          interpretation = what the result means / whether it counts as a finding.
+          A decision made before its finding exists may use "global" for now.
+        required: false
+      incident:
+        type: string
+        description: |
+          Self-reported struggle — if you got confused, hit an error, called a
+          tool that doesn't exist, or recovered from a mistake, describe it here.
+          Recorded on the whiteboard as a self_reported incident. Tool errors are
+          also auto-logged; don't paper over what went wrong.
         required: false
     returns: Confirmation of what was updated.
-
-  - name: assess
-    description: |
-      Record YOUR READ of the situation at this moment — the reflection a good
-      PI does before acting. Call this at meaningful junctures: after an agent
-      completes, before launching an expensive run, and before deciding whether
-      to involve the human. It is reflection, not action: if you conclude the
-      human should be engaged, you still call ask_user afterward. These
-      assessments are shown to the human and are how your judgement is reviewed.
-    parameters:
-      situation:
-        type: string
-        description: What is happening / what just changed.
-        required: true
-      uncertainty:
-        type: string
-        description: What you are unsure about right now.
-        required: false
-      crux:
-        type: string
-        description: The decisive factor — what most affects the next decision.
-        required: false
-      decision_pending:
-        type: string
-        description: The decision on the table, if any (else leave empty).
-        required: false
-      engage_user:
-        type: boolean
-        description: |
-          Whether a human expert in your seat would pull the user in right now.
-        required: true
-      rationale:
-        type: string
-        description: Why you would or would not engage the user.
-        required: false
-      issue:
-        type: string
-        description: |
-          If you hit a problem at this juncture — confusion, an error, a tool
-          that didn't work, or a mistake you recovered from — describe it
-          honestly. It is recorded as an incident on the whiteboard. Don't hide
-          struggle; a faithful record of what went wrong is the point.
-        required: false
-    returns: Confirmation, with a nudge to call ask_user if you chose to engage.
 
   - name: design_panel
     description: |
@@ -252,9 +229,9 @@ tools:
       the investigation: choose the ORDER of sections and define CUSTOM sections
       from a fixed block vocabulary. Do this ONCE near the start (after you
       understand the idea); afterwards call it only to refresh a custom section's
-      data. The built-in sections (crux, current_best, narrative, assessment,
+      data. The built-in sections (crux, current_best, narrative, findings,
       hypotheses, open_questions, decisions, experiments) still come from
-      update_research_state/assess — list their ids in `layout` to position them
+      update_research_state — list their ids in `layout` to position them
       among your custom ones. A molecule-screening run might add a "candidates"
       table; an ML run a "leaderboard"; a proof a "lemmas" status_list. Supply
       DATA, never markup — all text is escaped before display.
@@ -265,7 +242,7 @@ tools:
           type: string
         description: |
           Ordered list of section ids to render, top to bottom. May mix built-in
-          ids (crux, current_best, narrative, assessment, hypotheses,
+          ids (crux, current_best, narrative, findings, hypotheses,
           open_questions, decisions, experiments) and your custom section ids.
           Omit or leave empty to keep the default order. Any custom section not
           listed is appended at the end.
