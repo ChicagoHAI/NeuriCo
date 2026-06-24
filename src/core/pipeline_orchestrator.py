@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 import json
 import shutil
+import subprocess
+import sys
 from datetime import datetime
 import time
 
@@ -348,6 +350,11 @@ class ResearchPipelineOrchestrator:
             raise
 
         finally:
+            # Sweep any Modal-side resources before the workspace is closed out.
+            # Gated on .neurico/modal_resources.json — non-Modal runs are a
+            # filesystem stat and return immediately.
+            self._modal_sweep_if_used(provider)
+
             # Save final results
             results_file = self.work_dir / ".neurico" / "pipeline_results.json"
             results_file.parent.mkdir(parents=True, exist_ok=True)
@@ -358,6 +365,76 @@ class ResearchPipelineOrchestrator:
             print(f"📄 Pipeline results saved to: {results_file}")
 
         return results
+
+    # Provider → top-level skills directory inside the workspace. runner.py
+    # copies templates/skills/* to every provider's directory so skills work
+    # regardless of which CLI the agent invokes — but the orchestrator's
+    # cleanup must not assume any one of them is populated.
+    _PROVIDER_SKILL_DIRS = {
+        "claude": ".claude",
+        "codex":  ".codex",
+        "gemini": ".gemini",
+    }
+
+    def _modal_sweep_if_used(self, provider: str) -> None:
+        """
+        Tear down any per-experiment Modal environment registered by the run.
+
+        The modal-training / modal-vllm skills' lifecycle.register() writes
+        .neurico/modal_resources.json on first use. If the file is absent,
+        this method is a no-op (~50µs). If present, it invokes the skill's
+        modal_sweep.py script, which deletes the Modal environment
+        (cascading to volumes, apps, and secrets it owns).
+
+        Skills are copied into per-provider directories (.claude/.codex/
+        .gemini); we try the running provider's directory first and fall
+        back across the others so cleanup works on any provider. If no
+        directory has the script, log a warning and let the user clean up
+        manually.
+        """
+        sentinel = self.work_dir / ".neurico" / "modal_resources.json"
+        if not sentinel.exists():
+            return
+
+        preferred = self._PROVIDER_SKILL_DIRS.get(
+            provider, next(iter(self._PROVIDER_SKILL_DIRS.values()))
+        )
+        search_order = [preferred] + [
+            d for d in self._PROVIDER_SKILL_DIRS.values() if d != preferred
+        ]
+        sweep_script = None
+        for skill_root in search_order:
+            candidate = (
+                self.work_dir / skill_root / "skills" / "modal-training"
+                / "scripts" / "modal_sweep.py"
+            )
+            if candidate.exists():
+                sweep_script = candidate
+                break
+        if sweep_script is None:
+            # Skill not present under any provider directory (older neurico
+            # template, or all three got dropped); log so the user can
+            # clean up manually.
+            print()
+            print(f"⚠️  Modal sentinel present at {sentinel} but sweep script "
+                  f"missing under any of "
+                  f"{list(self._PROVIDER_SKILL_DIRS.values())}; "
+                  f"clean up manually with `modal environment list`.")
+            return
+
+        print()
+        print(f"🧹 Modal sweep: tearing down per-experiment environment")
+        try:
+            subprocess.run(
+                [sys.executable, str(sweep_script),
+                 "--workspace", str(self.work_dir)],
+                timeout=180,
+                check=False,
+            )
+        except Exception as exc:
+            # Never raise from finally — the workspace still needs its results
+            # file written. The sweep script's own error output is enough.
+            print(f"⚠️  Modal sweep encountered an error: {exc}")
 
     def _run_resource_finder(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool

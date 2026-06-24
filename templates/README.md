@@ -81,3 +81,29 @@ fetcher all read from `config/domains.yaml` at runtime.
 
 See `domains/mathematics/` for an example with full agent overrides, or
 `domains/battery/` for a simpler domain with only `core.txt`.
+
+## Adding a Compute Backend Skill
+
+Skills under `templates/skills/` whose frontmatter `tags` include
+`compute-backend` describe ways to run heavy workloads (training, fine-tuning,
+serving) off the local container. The experiment-runner agent discovers them
+by tag, not by name — so adding a new backend is purely a skill drop-in.
+
+Conventions for any new compute-backend skill:
+
+1. Frontmatter `tags` must include `compute-backend` plus at least one of
+   `training` or `serving`. Optional further tags identify the provider
+   (e.g. `modal`, `slurm`, `lambda-labs`).
+2. The skill must ship a setup doctor (`check_modal_setup.py` or similar)
+   that exits 0 when ready, 1 on user-fixable issues, 2 on structural fail.
+3. The skill must implement a leave-no-trace lifecycle: per-experiment
+   isolation, mandatory artifact pull-back, and complete teardown of cloud
+   state at the end of the run. The pipeline orchestrator's
+   `_modal_sweep_if_used` hook (in `src/core/pipeline_orchestrator.py`) is
+   gated on the lifecycle sentinel and will invoke teardown defensively at
+   workspace end.
+4. The skill must NOT require the agent to hard-code resource names. Provide
+   a scaffolder that injects the experiment ID and resource names so the
+   sweep can find them deterministically.
+
+See `templates/skills/modal-training/` for the reference implementation.

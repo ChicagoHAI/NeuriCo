@@ -32,6 +32,11 @@ dependencies = [
     "nbformat>=5.10.4",
     "fastmcp>=2.0",
     "httpx>=0.25.0",
+    # Modal cloud SDK + CLI. Used by the modal-training and modal-vllm skills
+    # for off-machine GPU training and LLM serving. The `modal` CLI script is
+    # installed alongside the Python library; both end up on PATH via the
+    # neurico venv (/app/.venv/bin in Docker).
+    "modal>=1.4",
 ]
 
 [project.optional-dependencies]

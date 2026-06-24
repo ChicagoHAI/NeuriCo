@@ -34,6 +34,25 @@ Your proposal should tell comment mode what targeted experiment-stage change to
 try next.
 
 ═══════════════════════════════════════════════════════════════════════════════
+                              COMPUTE BUDGET
+═══════════════════════════════════════════════════════════════════════════════
+
+If your proposal would require GPU model training, fine-tuning, or LLM serving
+that exceeds the local container, the workspace may have a compute-backend
+skill available. Do not propose a backend by name. Instead, scope your proposal
+so that:
+
+1. If a compute backend is available, you state the proposal's compute needs
+   (model size, GPU memory, expected wall time) and note that an off-machine
+   backend may be required — the experiment_runner agent will discover and
+   pick the appropriate skill.
+2. If no compute backend is available, propose only changes that fit on the
+   local container (smaller models, fewer steps, eval-only paths).
+
+Treat compute-backend availability as a constraint to scope around, not as a
+licence to propose unbounded training jobs.
+
+═══════════════════════════════════════════════════════════════════════════════
                               PUBLIC CONTEXT
 ═══════════════════════════════════════════════════════════════════════════════
 

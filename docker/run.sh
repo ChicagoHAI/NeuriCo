@@ -144,6 +144,14 @@ show_status() {
         echo -e "    Gemini credentials .. ${YELLOW}[EMPTY]${NC} ~/.gemini exists but empty"
     fi
 
+    # Modal credentials (only relevant when modal-training / modal-vllm skills
+    # are used; if absent the skills' doctor will surface the right fix).
+    if [ -s "$HOME/.modal.toml" ]; then
+        echo -e "    Modal credentials ... ${GREEN}[OK]${NC} ~/.modal.toml found"
+    else
+        echo -e "    Modal credentials ... ${DIM}[--]${NC} not configured — run on host: modal token new"
+    fi
+
     echo ""
 }
 
@@ -261,9 +269,23 @@ get_cli_credential_mounts() {
         found_any=true
     fi
 
+    # Modal credentials (~/.modal.toml, single file from `modal token new`).
+    # Only mount if present — neurico runs that don't use the modal-training /
+    # modal-vllm skills must not require this. Read-only because we never want
+    # the container to clobber the host's auth.
+    if [ -f "$HOME/.modal.toml" ]; then
+        mounts="$mounts -v \"$HOME/.modal.toml:/home/neurico/.modal.toml:ro\""
+        if [ -s "$HOME/.modal.toml" ]; then
+            echo -e "  ${GREEN}[OK]${NC} Mounting Modal credentials (read-only)" >&2
+        else
+            echo -e "  ${DIM}[--]${NC} Mounting ~/.modal.toml (empty, read-only)" >&2
+        fi
+        found_any=true
+    fi
+
     if [ "$found_any" = false ]; then
         echo -e "  ${YELLOW}[WARN]${NC} No CLI credentials found." >&2
-        echo -e "         Run 'claude', 'codex', or 'gemini' on host to login first." >&2
+        echo -e "         Run 'claude', 'codex', 'gemini', or 'modal token new' on host to login first." >&2
     fi
 
     echo ""  >&2
@@ -324,6 +346,10 @@ ensure_directories() {
     # container cannot read existing credentials or write new ones during login.
     # These contain OAuth tokens (not raw API keys), so the risk is lower than .env.
     chmod -R a+rwX "$HOME/.claude" "$HOME/.codex" "$HOME/.gemini" 2>/dev/null || true
+    # Modal credential is a single file (~/.modal.toml); make readable, NOT
+    # writable (we mount it read-only and never want the container to clobber
+    # it). Failing chmod is fine — file may not exist if user doesn't use Modal.
+    chmod a+r "$HOME/.modal.toml" 2>/dev/null || true
     # Restrict .env to owner-only since it contains raw API keys (important on shared servers)
     chmod 600 "$PROJECT_ROOT/.env" 2>/dev/null || true
 }
