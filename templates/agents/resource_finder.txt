@@ -162,6 +162,160 @@ STEP 4: USE APIs FOR ABSTRACTS WHEN AVAILABLE
 - Use these for initial screening before deciding which papers need deep reading
 
 ═══════════════════════════════════════════════════════════════════════════════
+              CRITICAL: DECISION LOGGING (CROSS-CUTTING)
+═══════════════════════════════════════════════════════════════════════════════
+
+You will use the decision-log skill THROUGHOUT this session — log a decision
+the MOMENT you commit to it, not as an afterthought at the end. The point is
+to capture your actual reasoning trail as it unfolds: ideas you committed to,
+ideas you considered then revoked, and the lineage between them. A clean
+"recommendations at the end" log loses everything that makes this useful.
+
+READ THE SKILL ONCE NOW (saves you from re-learning the API later):
+  cat .claude/skills/decision-log/SKILL.md
+
+It covers the contract (active / suspect / revoked states, cascade behavior
+on revoke). About 5 minutes of reading.
+
+SETUP — run at session start, right after env activation:
+─────────────────────────────────────────────────────────────────────────────
+
+```python
+import sys
+sys.path.insert(0, ".claude/skills/decision-log/scripts")
+from decision_log import DecisionLog
+
+log = DecisionLog(path=".neurico/decisions.json")
+```
+
+The path persists across turns; reopening it later loads what you wrote.
+
+WHEN TO LOG (the moment you commit to one of these):
+─────────────────────────────────────────────────────────────────────────────
+
+DECISION categories — use with `log.add(...)`:
+
+| Category | In-flight examples from this agent |
+|---|---|
+| `dataset` | "I'll use MIMIC-IV over i2b2"; "primary corpus = HuggingFace dataset X" |
+| `method`  | "Use BERT-base as baseline"; "adopt ICRefine from code_references"; "skip baseline Y because no code released" |
+| `eval`    | "primary metric = balanced accuracy"; "report F1@k as secondary" |
+| `search`  | "paper-finder diligent mode, focus on 2023-2025 clinical-NLP"; "prefer HuggingFace over Kaggle as dataset source"; "narrow keywords to 5 phrases" |
+| `reading` | "deep-read these 3 papers, skim the rest"; "README-only for repo X"; "re-read methodology section of Paper Y" |
+| `risk`    | "Dataset has annotation drift between splits — confounds any gain"; "Hypothesis may be falsified: baseline near ceiling per BatchCal Table 2"; "License restricts redistribution — exp runner cannot share derived data" |
+| `other`   | anything that affects downstream agents but doesn't fit the above (use sparingly) |
+
+OBSERVATION categories — use with `log.observe(...)`:
+
+| Category | In-flight examples from this agent |
+|---|---|
+| `paper_finding`     | "Lu et al. Table 2: std=4.0pp across orderings for 2.7B model"; "Zhao 2021 used unbalanced demos which itself causes the bias they correct" |
+| `data_property`     | "AG News label indexing: 1-4 in raw .csv but 0-3 in HF datasets API"; "MIMIC train and test were collected 6 months apart" |
+| `env_fact`          | "paper-finder service at localhost:8000 returns 404"; "HF datasets v2 deprecated; need v3 fancyzhx/ag_news namespace" |
+| `experiment_result` | "First inference on Qwen-1.5B gave 47% acc — sanity-check failed"; "Tokenizer warns on >2048 tokens, mean prompt is 1800" |
+| `code_artifact`     | "Zhao reference repo uses raw transformers.generate; no built-in retry"; "ColBERT scripts expect Lucene 9.x" |
+| `other`             | anything else worth observing that doesn't fit above |
+
+**Categories are disjoint by type.** `log.add(category="paper_finding")` will fail; `log.observe(category="dataset")` will fail. Pick the node type first (decision vs observation), then the category follows.
+
+DO NOT log:
+  ✗ Mechanical actions (wget, mkdir, git clone, pip install)
+  ✗ Observations ("dataset has 10K rows") — that's a *premise* for a future
+    decision, not a decision itself
+  ✗ Reading a file to inform a future decision
+
+If a choice has no consequence for the experiment runner or for the next
+agent reading the log, it's not worth a node.
+
+ONE CALL PER DECISION OR OBSERVATION:
+─────────────────────────────────────────────────────────────────────────────
+
+Two kinds of nodes: DECISIONS (what you chose) and OBSERVATIONS (what you
+noticed). Decisions use `log.add(...)`. Observations use `log.observe(...)`.
+
+```python
+# A DECISION
+ds = log.add(
+    question="Primary evaluation dataset?",
+    choice="MIMIC-IV-Note clinical-NLP subset",
+    category="dataset",
+    rationale="largest annotated clinical-NLP corpus with permissive license",
+    alternatives=["i2b2 2010", "PhysioNet 2019"],
+)
+
+# An OBSERVATION about that dataset (a finding that may inform later choices)
+obs = log.observe(
+    observation="MIMIC-IV-Note has 4:1 negative:positive imbalance after de-dup",
+    category="data_property",             # observation-only category
+    about=[ds],                           # what this observation pertains to
+    source="hand-inspected first 1k rows of train.csv",
+)
+
+# A DOWNSTREAM DECISION premised on the observation, not just the dataset
+log.add(
+    question="Primary metric?",
+    choice="balanced accuracy",
+    category="eval",
+    premises=[obs],                       # ← chains through the observation
+    rationale="addresses the imbalance observed above",
+)
+```
+
+WHEN TO LOG AN OBSERVATION (vs folding into a decision's rationale):
+─────────────────────────────────────────────────────────────────────────────
+
+Log an observation as its own node when:
+  - Multiple decisions will reference the same finding (e.g., "class
+    imbalance" informs both metric AND demonstration sampling)
+  - It came from somewhere CITEABLE (paper:table, run id, command)
+  - Re-reading it could lead to a future revoke (you'd want it as its own
+    node so the cascade fires correctly)
+  - It's a falsification signal — something that could undermine the
+    hypothesis if confirmed by later work
+
+Fold into a rationale (NOT its own node) when:
+  - It's only relevant to ONE decision and never referenced again
+  - It's a quick mental note ("seems fine")
+  - It's the agent's hand-wavy intuition without a citeable source
+
+PREMISES = the lineage. If decision B was made BECAUSE of an earlier
+decision A (different choice for A would change B), pass `premises=[A_id]`.
+If B is independent, omit `premises`. Don't list "context" as a premise —
+only actual upstream decisions.
+
+CHANGED YOUR MIND? REVOKE, NEVER DELETE:
+─────────────────────────────────────────────────────────────────────────────
+
+If a deeper read of a paper reveals your earlier choice was wrong:
+
+```python
+suspects = log.revoke(ds, reason="MIMIC license too restrictive for our use")
+# suspects → list of downstream nodes that built on `ds`; they're now "suspect"
+for sid in log.triage_order():
+    # Decide for each: reconfirm under a new premise, or revoke too.
+    ...
+```
+
+`revoke()` keeps the node on disk (status="revoked") so the reasoning trail
+shows what you tried. There is no delete — the point is to preserve the
+"considered then rejected" history that explains your final choices.
+
+INSPECT AT ANY TIME:
+─────────────────────────────────────────────────────────────────────────────
+
+```python
+log.find()                          # all active nodes (both kinds)
+log.decisions()                     # only decisions
+log.observations()                  # only observations
+log.find(query="dataset")           # text search across both
+log.find(node_type="observation",   # filtered combinations
+         category="reading")
+log.suspects()                      # anything that needs triage after a revoke
+print(log.export("md"))             # markdown — distinguishes decisions vs obs
+print(log.export("dot"))            # graphviz — boxes vs ellipses
+```
+
+═══════════════════════════════════════════════════════════════════════════════
                      RESOURCE FINDER METHODOLOGY
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -183,6 +337,11 @@ OUTPUT DELIVERABLES (all saved in current workspace):
 ═══════════════════════════════════════════════════════════════════════════════
                         PHASE 1: LITERATURE SEARCH
 ═══════════════════════════════════════════════════════════════════════════════
+
+DECISIONS TO LOG IN THIS PHASE (use log.add as you commit to each one):
+search keyword strategy, which papers to deep-read vs skim, which sources to
+prioritize, which papers to skip entirely. See the cross-cutting DECISION
+LOGGING section above for the call shape.
 
 PAPER FINDER (Primary Method - Use First)
 ─────────────────────────────────────────────────────────────────────────────
@@ -334,6 +493,12 @@ For papers you discover through search (not explicitly mentioned):
 ═══════════════════════════════════════════════════════════════════════════════
                          PHASE 2: DATASET SEARCH
 ═══════════════════════════════════════════════════════════════════════════════
+
+DECISIONS TO LOG IN THIS PHASE (use log.add as you commit to each one):
+dataset-type requirements, which source to prioritize (HuggingFace vs Kaggle
+vs UCI), specific dataset picks, datasets considered then rejected (log + revoke
+with reason: license / size / quality). If a dataset choice depends on a paper's
+methodology, list that paper-derived decision as a premise.
 
 STEP 1: Identify Dataset Requirements
 ─────────────────────────────────────────────────────────────────────────────
@@ -530,6 +695,11 @@ Full analysis happens in the experiment runner phase.
 ═══════════════════════════════════════════════════════════════════════════════
                       PHASE 3: CODE REPOSITORY SEARCH
 ═══════════════════════════════════════════════════════════════════════════════
+
+DECISIONS TO LOG IN THIS PHASE (use log.add as you commit to each one):
+which user-specified repos to actually use vs reject (with reason), which
+baseline implementations to adopt, which libraries to depend on. If you reject
+a user-specified resource, log + revoke; the audit trail is important here.
 
 ═══════════════════════════════════════════════════════════════════════════════
                 PRIORITY: USER-SPECIFIED RESOURCES
@@ -806,6 +976,8 @@ Before marking completion, verify:
 ✓ code/README.md documents all repos (if applicable)
 ✓ literature_review.md is complete and comprehensive
 ✓ resources.md catalogs all resources
+✓ .neurico/decisions.json reflects every non-trivial choice you made during
+  the run (logged AS YOU WENT, not all at the end — see cross-cutting section)
 ✓ All downloads completed successfully (no partial/corrupted files)
 ✓ Large datasets are locally available but excluded from git
 
