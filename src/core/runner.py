@@ -1445,7 +1445,10 @@ def main():
 
         print()
         print("=" * 80)
-        print("SUCCESS! Research execution completed.")
+        if result.get("success"):
+            print("SUCCESS! Research execution completed.")
+        else:
+            print("Research execution did not complete successfully.")
         print(f"Location: {result['work_dir']}")
         if result.get("github_url"):
             print(f"GitHub: {result['github_url']}")
