@@ -494,69 +494,73 @@ class ResearchPipelineOrchestrator:
         runtime = HitlRuntime(self.work_dir, "resource_finder")
 
         try:
-            plan_marker = self.work_dir / ".resource_finder_plan_complete"
-            if plan_marker.exists():
-                plan_marker.unlink()
+            plan_approved = runtime.plan_has_human_approval()
+            if runtime.load_checkpoint() is not None:
+                plan_approved = True
 
-            plan_result = run_resource_finder(
-                idea=idea,
-                work_dir=self.work_dir,
-                provider=provider,
-                templates_dir=self.templates_dir,
-                timeout=timeout,
-                full_permissions=full_permissions,
-                prompt_prefix=runtime.plan_prompt_block(),
-                completion_marker_name=".resource_finder_plan_complete",
-                log_prefix="resource_finder_hitl_plan",
-                include_hitl_outputs=True,
-            )
-            if not plan_result.get("success"):
-                self.state.complete_stage("resource_finder", False, plan_result)
-                return {
-                    "success": False,
-                    "hitl": True,
-                    "phase": "plan",
-                    "plan_result": plan_result,
-                }
-
-            plan_approved = False
-            for plan_round in range(5):
-                approval = runtime.approve_plan_loop()
-                if approval.get("approved"):
-                    plan_approved = True
-                    break
-
-                feedback = str(approval.get("feedback", "")).strip()
-                if not feedback:
-                    feedback = (
-                        "Revise the living resource_finder plan so it is concrete, "
-                        "reviewable, and ready for execution."
-                    )
+            if not plan_approved:
                 plan_marker = self.work_dir / ".resource_finder_plan_complete"
                 if plan_marker.exists():
                     plan_marker.unlink()
-                revision_result = run_resource_finder(
+
+                plan_result = run_resource_finder(
                     idea=idea,
                     work_dir=self.work_dir,
                     provider=provider,
                     templates_dir=self.templates_dir,
-                    timeout=min(timeout, 1800),
+                    timeout=timeout,
                     full_permissions=full_permissions,
-                    prompt_prefix=runtime.plan_revision_prompt_block(feedback),
+                    prompt_prefix=runtime.plan_prompt_block(),
                     completion_marker_name=".resource_finder_plan_complete",
-                    log_prefix=f"resource_finder_hitl_plan_revision_{plan_round + 1}",
+                    log_prefix="resource_finder_hitl_plan",
                     include_hitl_outputs=True,
                 )
-                if not revision_result.get("success"):
-                    self.state.complete_stage("resource_finder", False, revision_result)
+                if not plan_result.get("success"):
+                    self.state.complete_stage("resource_finder", False, plan_result)
                     return {
                         "success": False,
                         "hitl": True,
-                        "phase": "plan_revision",
-                        "plan_result": revision_result,
+                        "phase": "plan",
+                        "plan_result": plan_result,
                     }
-            if not plan_approved:
-                raise RuntimeError("HITL plan approval did not converge within max rounds.")
+
+                for plan_round in range(5):
+                    approval = runtime.approve_plan_loop()
+                    if approval.get("approved"):
+                        plan_approved = True
+                        break
+
+                    feedback = str(approval.get("feedback", "")).strip()
+                    if not feedback:
+                        feedback = (
+                            "Revise the living resource_finder plan so it is concrete, "
+                            "reviewable, and ready for execution."
+                        )
+                    plan_marker = self.work_dir / ".resource_finder_plan_complete"
+                    if plan_marker.exists():
+                        plan_marker.unlink()
+                    revision_result = run_resource_finder(
+                        idea=idea,
+                        work_dir=self.work_dir,
+                        provider=provider,
+                        templates_dir=self.templates_dir,
+                        timeout=min(timeout, 1800),
+                        full_permissions=full_permissions,
+                        prompt_prefix=runtime.plan_revision_prompt_block(feedback),
+                        completion_marker_name=".resource_finder_plan_complete",
+                        log_prefix=f"resource_finder_hitl_plan_revision_{plan_round + 1}",
+                        include_hitl_outputs=True,
+                    )
+                    if not revision_result.get("success"):
+                        self.state.complete_stage("resource_finder", False, revision_result)
+                        return {
+                            "success": False,
+                            "hitl": True,
+                            "phase": "plan_revision",
+                            "plan_result": revision_result,
+                        }
+                if not plan_approved:
+                    raise RuntimeError("HITL plan approval did not converge within max rounds.")
 
             mode = "execute"
             pending_feedback = ""

@@ -137,10 +137,20 @@ def _option_texts(options: List[Dict[str, str]]) -> List[str]:
 
 def _resolve_option_decision(response: str, options: List[Dict[str, str]]) -> Dict[str, str]:
     raw = response.strip()
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(options):
+            option = options[idx]
+            return {"decision": option["option_id"], "feedback": option["text"]}
     for option in options:
         if raw == option["option_id"] or raw == option["text"]:
             return {"decision": option["option_id"], "feedback": option["text"]}
     return {"decision": "CUSTOM", "feedback": raw}
+
+
+def _is_feedback_placeholder(response: str) -> bool:
+    normalized = response.strip().lower().rstrip(".")
+    return normalized in {"", "provide feedback", "feedback"}
 
 
 def _resolve_manager_option(response: str, options: List[Dict[str, str]]) -> Dict[str, str]:
@@ -204,6 +214,11 @@ class HitlIdeaLog:
                 if line.strip():
                     count += 1
         return f"I{count + 1}"
+
+    def records(self) -> List[Dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        return read_jsonl(self.path)
 
     @staticmethod
     def validate(record: Dict[str, Any]) -> None:
@@ -333,7 +348,10 @@ Required plan content:
 - intended artifacts to create or update
 - step-by-step execution plan
 - decision/evidence criteria for ideas that can be handled autonomously
-- escalation criteria for ideas that require manager or human feedback
+- escalation criteria for ideas that require manager or human feedback,
+  especially choices about research scope, resource strategy, dataset suitability,
+  benchmark/source tradeoffs, licensing ambiguity, or evidence quality that could
+  change downstream experiments
 - known risks, gaps, and stop conditions
 - current progress section, initially marking planning as complete
 
@@ -372,6 +390,15 @@ Idea protocol:
 - Decision idea: a choice/action under a specific context.
 - C-level autonomous ideas may be recorded in the plan without blocking.
 - Raised ideas must block execution until manager/human feedback is resolved.
+- Prefer raising a checkpoint when a resource decision would materially affect
+  downstream experiment design, evaluation meaning, reproducibility, scope, or
+  user-facing research direction. Do not silently choose among plausible dataset,
+  benchmark, paper-source, licensing, or evidence-quality alternatives when the
+  choice depends on project intent rather than simple technical availability.
+- For SciFact-style resource finding, dataset/source selection, train/dev/test
+  availability, label mapping, claim/evidence pairing strategy, and whether to
+  prioritize canonical releases versus alternate mirrors are all legitimate
+  raised decision candidates when there is meaningful ambiguity.
 
 If an idea must be raised, you MUST do all of this before stopping:
 1. Update `{rel_plan}` with current progress, the raised idea, why it matters,
@@ -529,6 +556,20 @@ stage artifacts. If another raised idea appears, write a checkpoint and stop.
             approved = decision == "O1"
             manager_feedback = ""
             if not approved:
+                if decision == "O2":
+                    feedback_response = self.channel.prompt(
+                        message=(
+                            "Please provide concrete feedback for revising "
+                            f"`{self.paths.plan_path.relative_to(self.work_dir)}`."
+                        )
+                    )
+                    if feedback_response is None:
+                        raise RuntimeError("HITL plan feedback ended without a response.")
+                    human_feedback = feedback_response.strip()
+                if _is_feedback_placeholder(human_feedback):
+                    raise RuntimeError(
+                        "HITL plan feedback must contain concrete revision instructions."
+                    )
                 manager_feedback = self.manager.feedback_from_human(
                     pipeline_stage=self.pipeline_stage,
                     hitl_stage="plan",
@@ -563,6 +604,21 @@ stage artifacts. If another raised idea appears, write a checkpoint and stop.
                 "feedback": manager_feedback or human_feedback,
             }
         raise RuntimeError("HITL plan approval did not converge within max rounds.")
+
+    def plan_has_human_approval(self) -> bool:
+        if not self.paths.plan_path.exists():
+            return False
+        for record in reversed(self.log.records()):
+            if (
+                record.get("pipeline_stage") == self.pipeline_stage
+                and record.get("hitl_stage") == "plan"
+                and record.get("idea_type") == "decision"
+                and record.get("level") == "A"
+                and record.get("actor") == "human"
+                and record.get("decision") == "O1"
+            ):
+                return True
+        return False
 
     def resolve_checkpoint(self) -> Optional[Dict[str, Any]]:
         checkpoint = self.load_checkpoint()
@@ -966,6 +1022,10 @@ match one returned option exactly. For evidence ideas, do not return options.
 
 Escalate to human only when the issue depends on author intent, research scope,
 preference, risk tolerance, or another judgment the manager should not decide.
+When the worker raises a resource strategy, dataset suitability, benchmark
+choice, source priority, or evidence-quality tradeoff with more than one
+reasonable option, treat it as human-scoped unless the living plan already
+settles that preference clearly.
 If resolving as manager, manager_feedback must tell the worker how to update the
 living plan and continue without losing progress.
 

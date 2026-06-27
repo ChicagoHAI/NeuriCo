@@ -23,6 +23,21 @@ class FakeChannel:
         pass
 
 
+class FakeSequenceChannel:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.prompts = []
+
+    def prompt(self, message=None, options=None):
+        self.prompts.append({"message": message, "options": options})
+        if not self.responses:
+            return None
+        return self.responses.pop(0)
+
+    def send(self, text, kind="manager", meta=None):
+        pass
+
+
 class FakeManager:
     def review_checkpoint(self, **kwargs):
         return {
@@ -84,6 +99,21 @@ class FakeManagerWithCustomDecision:
         }
 
 
+class FakePlanReadyManager:
+    def __init__(self):
+        self.feedback_calls = []
+
+    def review_plan(self, **kwargs):
+        return {
+            "status": "ready",
+            "context": "Manager found the plan ready for human approval.",
+        }
+
+    def feedback_from_human(self, **kwargs):
+        self.feedback_calls.append(kwargs)
+        return "This should not be called for approval."
+
+
 def test_idea_log_accepts_raised_evidence_without_options(tmp_path):
     log = HitlIdeaLog(tmp_path)
 
@@ -103,6 +133,98 @@ def test_idea_log_accepts_raised_evidence_without_options(tmp_path):
 
     assert record["idea_id"] == "I1"
     assert read_jsonl(log.path)[0]["evidence"] == "The benchmark dataset license is compatible."
+
+
+def test_numeric_plan_approval_is_treated_as_option_id(tmp_path):
+    manager = FakePlanReadyManager()
+    runtime = HitlRuntime(
+        tmp_path,
+        "resource_finder",
+        channel=FakeChannel(response="1"),
+        manager=manager,
+    )
+    runtime.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.paths.plan_path.write_text("# Resource finder plan\n", encoding="utf-8")
+
+    approval = runtime.approve_plan_loop()
+    records = read_jsonl(runtime.log.path)
+
+    assert approval == {"approved": True, "level": "A", "actor": "human"}
+    assert manager.feedback_calls == []
+    assert records[0]["decision"] == "O1"
+    assert records[0]["human_feedback"] == "Approve plan."
+
+
+def test_plan_feedback_option_prompts_for_concrete_feedback(tmp_path):
+    manager = FakePlanReadyManager()
+    runtime = HitlRuntime(
+        tmp_path,
+        "resource_finder",
+        channel=FakeSequenceChannel(["Provide feedback.", "Add resume checks."]),
+        manager=manager,
+    )
+    runtime.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.paths.plan_path.write_text("# Resource finder plan\n", encoding="utf-8")
+
+    approval = runtime.approve_plan_loop()
+    records = read_jsonl(runtime.log.path)
+
+    assert approval == {
+        "approved": False,
+        "level": "A",
+        "actor": "human",
+        "feedback": "This should not be called for approval.",
+    }
+    assert len(runtime.channel.prompts) == 2
+    assert runtime.channel.prompts[1]["options"] is None
+    assert manager.feedback_calls[0]["human_response"] == "Add resume checks."
+    assert records[0]["decision"] == "O2"
+    assert records[0]["human_feedback"] == "Add resume checks."
+
+
+def test_plan_feedback_placeholder_is_rejected(tmp_path):
+    manager = FakePlanReadyManager()
+    runtime = HitlRuntime(
+        tmp_path,
+        "resource_finder",
+        channel=FakeSequenceChannel(["Provide feedback.", "Provide feedback."]),
+        manager=manager,
+    )
+    runtime.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.paths.plan_path.write_text("# Resource finder plan\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="concrete revision instructions"):
+        runtime.approve_plan_loop()
+
+    assert manager.feedback_calls == []
+    assert read_jsonl(runtime.log.path) == []
+
+
+def test_runtime_detects_prior_human_plan_approval(tmp_path):
+    runtime = HitlRuntime(tmp_path, "resource_finder")
+    runtime.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.paths.plan_path.write_text("# Approved resource finder plan\n", encoding="utf-8")
+
+    assert not runtime.plan_has_human_approval()
+
+    runtime.log.append(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+            "level": "A",
+            "actor": "human",
+            "idea_type": "decision",
+            "context": "Human approved the materialized plan.",
+            "basis": "The human made this plan approval decision.",
+            "options": ["Approve plan.", "Provide feedback."],
+            "decision": "O1",
+            "human_feedback": "Approve plan.",
+            "raised": True,
+            "related_artifacts": [{"path": "plans/resource_finder_plan.md", "description": "Plan."}],
+        }
+    )
+
+    assert runtime.plan_has_human_approval()
 
 
 def test_idea_log_writes_canonical_field_order(tmp_path):
@@ -552,6 +674,9 @@ def test_orchestrator_reruns_resource_finder_for_plan_feedback(tmp_path, monkeyp
         def plan_prompt_block(self):
             return "PLAN MODE"
 
+        def plan_has_human_approval(self):
+            return False
+
         def approve_plan_loop(self):
             return self.approvals.pop(0)
 
@@ -621,6 +746,9 @@ def test_orchestrator_reruns_resource_finder_after_checkpoint_feedback(tmp_path,
         def plan_prompt_block(self):
             return "PLAN MODE"
 
+        def plan_has_human_approval(self):
+            return False
+
         def approve_plan_loop(self):
             return {"approved": True}
 
@@ -680,6 +808,9 @@ def test_orchestrator_resolves_pending_checkpoint_before_worker_run(tmp_path, mo
         def plan_prompt_block(self):
             return "PLAN MODE"
 
+        def plan_has_human_approval(self):
+            return False
+
         def approve_plan_loop(self):
             return {"approved": True}
 
@@ -721,7 +852,6 @@ def test_orchestrator_resolves_pending_checkpoint_before_worker_run(tmp_path, mo
 
     assert result["success"] is True
     assert calls == [
-        "PLAN MODE",
         "FEEDBACK CONTINUATION: Resume from existing checkpoint.",
     ]
 

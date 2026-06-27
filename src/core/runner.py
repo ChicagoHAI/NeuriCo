@@ -402,6 +402,7 @@ class ResearchRunner:
             orchestrator = ResearchPipelineOrchestrator(
                 work_dir=work_dir, templates_dir=self.project_root / "templates"
             )
+            success = False
 
             # If resuming into an existing workspace, check which stages already completed
             # and skip them — read pipeline_state.json directly rather than relying on
@@ -641,11 +642,15 @@ https://github.com/ChicagoHAI/neurico
                     print(f"\n⚠️  Failed to push to GitHub: {e}")
                     print("   Results are available locally")
 
-            # Update idea status
-            self.idea_manager.update_status(idea_id, "completed")
+            # Update idea status. Leave unsuccessful/interrupted runs in progress
+            # so they can be inspected and resumed instead of falsely archived.
+            self.idea_manager.update_status(idea_id, "completed" if success else "in_progress")
 
             print()
-            print(f"✅ Research completed!")
+            if success:
+                print("✅ Research completed!")
+            else:
+                print("⚠️  Research did not complete successfully.")
             print(f"   Location: {work_dir}")
             if github_url:
                 print(f"   GitHub: {github_url}")
@@ -1184,10 +1189,13 @@ https://github.com/ChicagoHAI/neurico
                 print("   Results are available locally")
 
         # Update idea status
-        self.idea_manager.update_status(idea_id, "completed")
+        self.idea_manager.update_status(idea_id, "completed" if success else "in_progress")
 
         print()
-        print(f"✅ Research completed!")
+        if success:
+            print("✅ Research completed!")
+        else:
+            print("⚠️  Research did not complete successfully.")
         print(f"   Location: {work_dir}")
         if github_url:
             print(f"   GitHub: {github_url}")
