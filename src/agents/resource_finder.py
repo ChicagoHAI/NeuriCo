@@ -70,7 +70,11 @@ def run_resource_finder(
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
     timeout: int = 2700,  # 45 minutes default
-    full_permissions: bool = True
+    full_permissions: bool = True,
+    prompt_prefix: str = "",
+    completion_marker_name: str = ".resource_finder_complete",
+    log_prefix: str = "resource_finder",
+    include_hitl_outputs: bool = False,
 ) -> Dict[str, Any]:
     """
     Launch resource finder agent to gather research resources.
@@ -82,6 +86,15 @@ def run_resource_finder(
         templates_dir: Path to templates directory (auto-detected if None)
         timeout: Maximum execution time in seconds (default: 45 min)
         full_permissions: Allow full permissions to CLI agents (default: True)
+        prompt_prefix: Optional instructions prepended to the generated prompt.
+            HITL uses this to put the agent in plan/execute/continue mode.
+        completion_marker_name: Marker expected for this invocation. Normal
+            resource finding uses .resource_finder_complete; HITL planning uses
+            .resource_finder_plan_complete.
+        log_prefix: Prefix for prompt/log/transcript files. HITL uses unique
+            prefixes because resource_finder can run multiple times in one stage.
+        include_hitl_outputs: Include HITL plan/checkpoint files in output
+            reporting. Normal non-HITL resource finding leaves this false.
 
     Returns:
         Dictionary with:
@@ -110,12 +123,14 @@ def run_resource_finder(
     # Generate prompt
     print("📝 Generating resource finder prompt...")
     prompt = generate_resource_finder_prompt(idea, templates_dir)
+    if prompt_prefix:
+        prompt = prompt_prefix.strip() + "\n\n" + prompt
 
     # Save prompt for reference
     logs_dir = work_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    prompt_file = logs_dir / "resource_finder_prompt.txt"
+    prompt_file = logs_dir / f"{log_prefix}_prompt.txt"
     with open(prompt_file, 'w', encoding='utf-8') as f:
         f.write(prompt)
 
@@ -140,8 +155,8 @@ def run_resource_finder(
     if transcript_flag:
         cmd += f" {transcript_flag}"
 
-    log_file = logs_dir / f"resource_finder_{provider}.log"
-    transcript_file = logs_dir / f"resource_finder_{provider}_transcript.jsonl"
+    log_file = logs_dir / f"{log_prefix}_{provider}.log"
+    transcript_file = logs_dir / f"{log_prefix}_{provider}_transcript.jsonl"
 
     print(f"▶️  Launching {provider} CLI agent...")
     print(f"   Command: {cmd}")
@@ -164,7 +179,7 @@ def run_resource_finder(
 
     # Execute agent
     success = False
-    completion_marker = work_dir / ".resource_finder_complete"
+    completion_marker = work_dir / completion_marker_name
     start_time = time.time()
 
     try:
@@ -239,8 +254,15 @@ def run_resource_finder(
         'resources_catalog': work_dir / "resources.md",
         'papers_dir': work_dir / "papers",
         'datasets_dir': work_dir / "datasets",
-        'code_dir': work_dir / "code"
+        'code_dir': work_dir / "code",
     }
+    if include_hitl_outputs:
+        outputs.update(
+            {
+                'hitl_checkpoint': work_dir / ".neurico" / "hitl" / "checkpoints" / "resource_finder_current.json",
+                'hitl_plan': work_dir / "plans" / "resource_finder_plan.md",
+            }
+        )
 
     found_outputs = {}
     for name, path in outputs.items():

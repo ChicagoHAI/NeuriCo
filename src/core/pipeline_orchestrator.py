@@ -36,6 +36,7 @@ from agents.manifest_trimmer import make_trimmer_callable
 from core.scorer import run_scorer
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
 from core.workspace_manifest import build_manifest, curate_manifest
+from core.hitl import HitlRuntime
 from templates.research_agent_instructions import generate_instructions
 
 
@@ -181,6 +182,7 @@ class ResearchPipelineOrchestrator:
         scorer_timeout: int = 600,  # 10 min
         bootstrap_mode: bool = False,
         manifest_trimmer_timeout: int = 300,  # 5 min
+        hitl_enabled: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute complete research pipeline.
@@ -208,6 +210,8 @@ class ResearchPipelineOrchestrator:
                              scoring_enabled=True.
             manifest_trimmer_timeout: Timeout for the manifest_trimmer agent per call
                              (bootstrap mode only).
+            hitl_enabled: If True, run resource_finder through the plan-centered
+                             HITL workflow. Other stages remain unchanged in v1.
 
         Returns:
             Dictionary with pipeline execution results
@@ -234,6 +238,7 @@ class ResearchPipelineOrchestrator:
         print(f"Use scribe (notebooks): {use_scribe}")
         print(f"Pause after resources: {pause_after_resources}")
         print(f"Skip resource finder: {skip_resource_finder}")
+        print(f"HITL enabled: {hitl_enabled}")
         if scoring_enabled:
             print(f"Scoring enabled: True (rule_maker + scorer stages)")
         print("=" * 80)
@@ -246,12 +251,20 @@ class ResearchPipelineOrchestrator:
         try:
             # STAGE 1: Resource Finder
             if not skip_resource_finder:
-                results["stages"]["resource_finder"] = self._run_resource_finder(
-                    idea=idea,
-                    provider=provider,
-                    timeout=resource_finder_timeout,
-                    full_permissions=full_permissions,
-                )
+                if hitl_enabled:
+                    results["stages"]["resource_finder"] = self._run_resource_finder_hitl(
+                        idea=idea,
+                        provider=provider,
+                        timeout=resource_finder_timeout,
+                        full_permissions=full_permissions,
+                    )
+                else:
+                    results["stages"]["resource_finder"] = self._run_resource_finder(
+                        idea=idea,
+                        provider=provider,
+                        timeout=resource_finder_timeout,
+                        full_permissions=full_permissions,
+                    )
 
                 if not results["stages"]["resource_finder"]["success"]:
                     print()
@@ -465,6 +478,178 @@ class ResearchPipelineOrchestrator:
         except Exception as e:
             print(f"❌ Resource finder stage failed: {e}")
             self.state.complete_stage("resource_finder", False)
+            raise
+
+    def _run_resource_finder_hitl(
+        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
+    ) -> Dict[str, Any]:
+        """Run resource_finder through the plan-centered HITL workflow."""
+        print()
+        print("─" * 80)
+        print("STAGE 1: RESOURCE FINDER  (HITL)")
+        print("─" * 80)
+        print()
+
+        self.state.start_stage("resource_finder")
+        runtime = HitlRuntime(self.work_dir, "resource_finder")
+
+        try:
+            plan_marker = self.work_dir / ".resource_finder_plan_complete"
+            if plan_marker.exists():
+                plan_marker.unlink()
+
+            plan_result = run_resource_finder(
+                idea=idea,
+                work_dir=self.work_dir,
+                provider=provider,
+                templates_dir=self.templates_dir,
+                timeout=timeout,
+                full_permissions=full_permissions,
+                prompt_prefix=runtime.plan_prompt_block(),
+                completion_marker_name=".resource_finder_plan_complete",
+                log_prefix="resource_finder_hitl_plan",
+                include_hitl_outputs=True,
+            )
+            if not plan_result.get("success"):
+                self.state.complete_stage("resource_finder", False, plan_result)
+                return {
+                    "success": False,
+                    "hitl": True,
+                    "phase": "plan",
+                    "plan_result": plan_result,
+                }
+
+            plan_approved = False
+            for plan_round in range(5):
+                approval = runtime.approve_plan_loop()
+                if approval.get("approved"):
+                    plan_approved = True
+                    break
+
+                feedback = str(approval.get("feedback", "")).strip()
+                if not feedback:
+                    feedback = (
+                        "Revise the living resource_finder plan so it is concrete, "
+                        "reviewable, and ready for execution."
+                    )
+                plan_marker = self.work_dir / ".resource_finder_plan_complete"
+                if plan_marker.exists():
+                    plan_marker.unlink()
+                revision_result = run_resource_finder(
+                    idea=idea,
+                    work_dir=self.work_dir,
+                    provider=provider,
+                    templates_dir=self.templates_dir,
+                    timeout=min(timeout, 1800),
+                    full_permissions=full_permissions,
+                    prompt_prefix=runtime.plan_revision_prompt_block(feedback),
+                    completion_marker_name=".resource_finder_plan_complete",
+                    log_prefix=f"resource_finder_hitl_plan_revision_{plan_round + 1}",
+                    include_hitl_outputs=True,
+                )
+                if not revision_result.get("success"):
+                    self.state.complete_stage("resource_finder", False, revision_result)
+                    return {
+                        "success": False,
+                        "hitl": True,
+                        "phase": "plan_revision",
+                        "plan_result": revision_result,
+                    }
+            if not plan_approved:
+                raise RuntimeError("HITL plan approval did not converge within max rounds.")
+
+            mode = "execute"
+            pending_feedback = ""
+            last_result: Dict[str, Any] = {}
+            for round_idx in range(8):
+                completion_marker = self.work_dir / ".resource_finder_complete"
+                if completion_marker.exists():
+                    completion_marker.unlink()
+
+                if runtime.load_checkpoint() is not None:
+                    logged = runtime.resolve_checkpoint()
+                    pending_feedback = str(
+                        (logged or {}).get("manager_feedback")
+                        or (logged or {}).get("human_feedback")
+                        or (logged or {}).get("decision")
+                        or ""
+                    ).strip()
+                    mode = "continue"
+
+                if pending_feedback:
+                    prompt_prefix = runtime.feedback_continuation_prompt_block(pending_feedback)
+                    log_prefix = f"resource_finder_hitl_feedback_continue_{round_idx + 1}"
+                    pending_feedback = ""
+                else:
+                    prompt_prefix = (
+                        runtime.review_prompt_block()
+                        if mode == "revise"
+                        else runtime.execution_prompt_block(mode=mode)
+                    )
+                    log_prefix = f"resource_finder_hitl_{mode}_{round_idx + 1}"
+
+                result = run_resource_finder(
+                    idea=idea,
+                    work_dir=self.work_dir,
+                    provider=provider,
+                    templates_dir=self.templates_dir,
+                    timeout=timeout,
+                    full_permissions=full_permissions,
+                    prompt_prefix=prompt_prefix,
+                    completion_marker_name=".resource_finder_complete",
+                    log_prefix=log_prefix,
+                    include_hitl_outputs=True,
+                )
+                last_result = result
+
+                if runtime.load_checkpoint() is not None:
+                    logged = runtime.resolve_checkpoint()
+                    if logged is None:
+                        pending_feedback = ""
+                    else:
+                        pending_feedback = str(
+                            logged.get("manager_feedback")
+                            or logged.get("human_feedback")
+                            or logged.get("decision")
+                            or ""
+                        ).strip()
+                    mode = "continue"
+                    continue
+
+                if not result.get("success"):
+                    self.state.complete_stage("resource_finder", False, result)
+                    return {**result, "hitl": True, "phase": mode}
+
+                review = runtime.review_stage()
+                if review.get("status") == "aligned":
+                    runtime.log_stage_approval(str(review.get("context", "")))
+                    self.state.complete_stage(
+                        "resource_finder", True, result.get("outputs")
+                    )
+                    return {**result, "hitl": True, "phase": "complete"}
+
+                feedback = str(review.get("manager_feedback", "")).strip()
+                if not feedback:
+                    feedback = (
+                        "Revise the living plan to close gaps between current "
+                        "artifacts and the approved resource_finder plan."
+                    )
+                runtime.log_review_feedback(feedback)
+                pending_feedback = feedback
+                mode = "revise"
+
+            failed = {
+                **last_result,
+                "success": False,
+                "hitl": True,
+                "error": "HITL resource_finder exceeded continuation rounds",
+            }
+            self.state.complete_stage("resource_finder", False, failed)
+            return failed
+
+        except Exception as e:
+            print(f"❌ HITL resource finder stage failed: {e}")
+            self.state.complete_stage("resource_finder", False, {"error": str(e)})
             raise
 
     def _wait_for_human_approval(self) -> Dict[str, Any]:

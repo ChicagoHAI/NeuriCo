@@ -140,6 +140,7 @@ class ResearchRunner:
         autoresearch_iterations: int = 1,
         autoresearch_history_dir: Optional[Path] = None,
         continue_autoresearch: bool = False,
+        hitl: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -161,6 +162,8 @@ class ResearchRunner:
             paper_style: Paper template style (neurips, icml, acl, ams). None = auto-detect from domain
             paper_timeout: Timeout for paper writing in seconds
             force_fresh: Ignore existing local workspace and start a new run from scratch
+            hitl: Enable plan-centered human-in-the-loop workflow for supported
+                stages. V1 supports resource_finder.
 
         Returns:
             Dictionary with:
@@ -174,6 +177,8 @@ class ResearchRunner:
         print(f"🚀 Starting research: {idea_id}")
         print(f"   Provider: {provider}")
         print(f"   GitHub: {'Enabled' if self.use_github else 'Disabled'}")
+        if hitl:
+            print("   HITL: enabled (resource_finder v1)")
         if autoresearch and continue_autoresearch:
             raise ValueError(
                 "Use either --autoresearch for a full pipeline run or "
@@ -430,6 +435,7 @@ class ResearchRunner:
                     scorer_timeout=scorer_timeout,
                     bootstrap_mode=bootstrap_mode,
                     manifest_trimmer_timeout=manifest_trimmer_timeout,
+                    hitl_enabled=hitl,
                 )
 
                 success = pipeline_result.get("success", False)
@@ -1356,6 +1362,11 @@ def main():
         help="Timeout for each manifest_trimmer agent call in seconds (default: 300 = 5 min, "
              "bootstrap mode only)"
     )
+    parser.add_argument(
+        "--hitl",
+        action="store_true",
+        help="Enable plan-centered human-in-the-loop workflow (v1 supports resource_finder)",
+    )
 
     args = parser.parse_args()
     if args.autoresearch and args.continue_autoresearch:
@@ -1421,6 +1432,7 @@ def main():
             autoresearch_iterations=args.autoresearch_iterations,
             autoresearch_history_dir=args.autoresearch_history_dir,
             continue_autoresearch=args.continue_autoresearch,
+            hitl=args.hitl,
         )
 
         print()
