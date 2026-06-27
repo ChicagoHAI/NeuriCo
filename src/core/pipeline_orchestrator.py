@@ -530,7 +530,18 @@ class ResearchPipelineOrchestrator:
         import os
         from core.security import sanitize_text
 
+        dsi_remote_info = None
         try:
+            from core.dsi_slurm_remote import (
+                create_remote_workspace,
+                is_dsi_slurm_backend,
+                remove_remote_workspace,
+            )
+
+            if is_dsi_slurm_backend(idea):
+                dsi_remote_info = create_remote_workspace(self.work_dir)
+                print(f"DSI remote workspace: {dsi_remote_info['remote_root']}")
+
             # Generate prompt (without Phase 0, resource-aware)
             from templates.prompt_generator import PromptGenerator
 
@@ -552,7 +563,12 @@ class ResearchPipelineOrchestrator:
             # Generate session instructions (resource-aware version)
             domain = idea.get("idea", {}).get("domain", "general")
             session_instructions = generate_instructions(
-                prompt=prompt, work_dir=str(self.work_dir), use_scribe=use_scribe, domain=domain
+                prompt=prompt,
+                work_dir=str(self.work_dir),
+                use_scribe=use_scribe,
+                domain=domain,
+                idea_spec=idea.get("idea", {}),
+                provider=provider,
             )
 
             # Save session instructions
@@ -601,6 +617,9 @@ class ResearchPipelineOrchestrator:
             # Set environment
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            if dsi_remote_info is not None:
+                env["NEURICO_DSI_REMOTE_ROOT"] = dsi_remote_info["remote_root"]
+                env["NEURICO_DSI_RSYNC_REMOTE_ROOT"] = dsi_remote_info["rsync_remote_root"]
             if use_scribe:
                 env["SCRIBE_RUN_DIR"] = str(self.work_dir)
 
@@ -661,6 +680,12 @@ class ResearchPipelineOrchestrator:
                 "log_file": str(log_file),
                 "transcript_file": str(transcript_file),
             }
+            if success and dsi_remote_info is not None:
+                from core.dsi_slurm_artifacts import archive_dsi_slurm_artifacts
+
+                archived_dsi_artifacts = archive_dsi_slurm_artifacts(self.work_dir)
+                if archived_dsi_artifacts is not None:
+                    result["dsi_slurm_artifacts"] = str(archived_dsi_artifacts)
 
             self.state.complete_stage("experiment_runner", success, result)
 
@@ -678,6 +703,15 @@ class ResearchPipelineOrchestrator:
             result = {"success": False, "error": str(e)}
             self.state.complete_stage("experiment_runner", False, result)
             raise
+        finally:
+            if dsi_remote_info is not None:
+                try:
+                    remove_remote_workspace(self.work_dir)
+                except Exception as cleanup_error:
+                    print(
+                        "⚠️  Failed to remove dsi-cluster remote workspace: "
+                        f"{cleanup_error}"
+                    )
 
     # ---- Scoring-mode helpers (rule_maker / scorer / seal) ---------------
     # These methods are only invoked when run_pipeline(scoring_enabled=True).

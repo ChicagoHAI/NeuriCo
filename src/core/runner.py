@@ -35,6 +35,11 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from core.idea_manager import IdeaManager
 from core.config_loader import ConfigLoader
 from core.security import sanitize_text
+from core.compute_backend import (
+    attach_runtime_compute_backend,
+    normalize_compute_backend,
+    without_runtime_compute_backend,
+)
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -140,6 +145,7 @@ class ResearchRunner:
         continue_autoresearch: bool = False,
         bootstrap_autoresearch_baseline: bool = False,
         proposer_timeout: int = 900,
+        compute_backend: str = "local",
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -174,6 +180,8 @@ class ResearchRunner:
         print(f"🚀 Starting research: {idea_id}")
         print(f"   Provider: {provider}")
         print(f"   GitHub: {'Enabled' if self.use_github else 'Disabled'}")
+        compute_backend = normalize_compute_backend(compute_backend)
+        print(f"   Compute backend: {compute_backend}")
         autoresearch_modes = [
             name
             for name, enabled in (
@@ -200,6 +208,7 @@ class ResearchRunner:
         idea = self.idea_manager.get_idea(idea_id)
         if idea is None:
             raise ValueError(f"Idea not found: {idea_id}")
+        attach_runtime_compute_backend(idea, compute_backend)
 
         idea_spec = idea.get("idea", {})
         title = idea_spec.get("title", "Untitled Research")
@@ -279,7 +288,12 @@ class ResearchRunner:
                     # Save updated metadata
                     idea_path = self.idea_manager.ideas_dir / "submitted" / f"{idea_id}.yaml"
                     with open(idea_path, "w", encoding="utf-8") as f:
-                        yaml.dump(idea, f, default_flow_style=False, sort_keys=False)
+                        yaml.dump(
+                            without_runtime_compute_backend(idea),
+                            f,
+                            default_flow_style=False,
+                            sort_keys=False,
+                        )
 
                     # Clone repository
                     repo = self.github_manager.clone_repo(
@@ -287,7 +301,10 @@ class ResearchRunner:
                     )
 
                     # Add research metadata
-                    self.github_manager.add_research_metadata(repo_info["local_path"], idea)
+                    self.github_manager.add_research_metadata(
+                        repo_info["local_path"],
+                        without_runtime_compute_backend(idea),
+                    )
 
                     # Commit metadata
                     self.github_manager.commit_and_push(
@@ -324,7 +341,12 @@ class ResearchRunner:
                 )
                 idea_path = self.idea_manager.get_idea_path(idea_id)
                 with open(idea_path, "w", encoding="utf-8") as f:
-                    yaml.dump(idea, f, default_flow_style=False, sort_keys=False)
+                    yaml.dump(
+                        without_runtime_compute_backend(idea),
+                        f,
+                        default_flow_style=False,
+                        sort_keys=False,
+                    )
 
                 print(f"📁 Working directory: {work_dir}\n")
 
@@ -335,6 +357,9 @@ class ResearchRunner:
         # Only create notebooks/ when using scribe
         if use_scribe:
             (work_dir / "notebooks").mkdir(parents=True, exist_ok=True)
+
+        # Copy helper scripts and backend-selected skills to workspace.
+        self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
 
         if continue_autoresearch:
             success = False
@@ -396,7 +421,10 @@ class ResearchRunner:
                     scorer_timeout=scorer_timeout,
                     manifest_trimmer_timeout=manifest_trimmer_timeout,
                     autoresearch_history_dir=autoresearch_history_dir,
-                    prepare_workspace=self._copy_workspace_resources,
+                    prepare_workspace=lambda bootstrap_work_dir: self._copy_workspace_resources(
+                        bootstrap_work_dir,
+                        compute_backend=compute_backend,
+                    ),
                 )
                 success = baseline_result.get("success", False)
             except Exception as e:
@@ -411,9 +439,6 @@ class ResearchRunner:
                 "success": success,
                 "bootstrap_autoresearch_baseline": baseline_result,
             }
-
-        # Copy helper scripts to workspace
-        self._copy_workspace_resources(work_dir)
 
         # Choose execution mode: multi-agent pipeline or legacy monolithic
         if multi_agent:
@@ -593,7 +618,12 @@ class ResearchRunner:
         # Prepare session instructions using the new template
         domain = idea.get("idea", {}).get("domain", "general")
         session_instructions = generate_instructions(
-            prompt=prompt, work_dir=str(work_dir), use_scribe=use_scribe, domain=domain
+            prompt=prompt,
+            work_dir=str(work_dir),
+            use_scribe=use_scribe,
+            domain=domain,
+            idea_spec=idea.get("idea", {}),
+            provider=provider,
         )
 
         # Save session instructions
@@ -745,6 +775,7 @@ https://github.com/ChicagoHAI/neurico
         provider: str = "claude",
         timeout: int = 1800,
         full_permissions: bool = True,
+        compute_backend: str = "local",
     ) -> Dict[str, Any]:
         """
         Run comment mode: make targeted improvements based on user comments.
@@ -775,6 +806,8 @@ https://github.com/ChicagoHAI/neurico
 
         if not idea:
             raise ValueError(f"Idea not found: {idea_id}")
+        compute_backend = normalize_compute_backend(compute_backend)
+        attach_runtime_compute_backend(idea, compute_backend)
 
         idea_spec = idea.get("idea", idea)
         title = idea_spec.get("title", idea_id)
@@ -788,6 +821,7 @@ https://github.com/ChicagoHAI/neurico
             )
 
         print(f"   Title: {title}")
+        print(f"   Compute backend: {compute_backend}")
         print()
 
         # Resolve workspace
@@ -808,6 +842,7 @@ https://github.com/ChicagoHAI/neurico
 
         print(f"   Work dir: {work_dir}")
         print()
+        self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
 
         # Get GitHub URL if available
         github_url = None
@@ -893,7 +928,7 @@ https://github.com/ChicagoHAI/neurico
             print(f"\n⚠️  Paper generation failed (research still succeeded)")
         return paper_result
 
-    def _copy_workspace_resources(self, work_dir: Path):
+    def _copy_workspace_resources(self, work_dir: Path, compute_backend: str = "local"):
         """
         Copy helper scripts and resources to workspace.
 
@@ -902,45 +937,37 @@ https://github.com/ChicagoHAI/neurico
         """
         import shutil
 
-        # Copy Claude Code skills to .claude/skills/
-        # Scripts (like find_papers.py, pdf_chunker.py) live inside skills
-        # and get copied automatically as part of the skill directory
         skills_src = self.project_root / "templates" / "skills"
-        skills_dst = work_dir / ".claude" / "skills"
+        provider_skill_roots = [".claude", ".gemini", ".codex"]
+        compute_skill_names = {"modal-training", "modal-vllm", "dsi-slurm"}
+        backend_skill_names = {
+            "local": set(),
+            "modal": {"modal-training", "modal-vllm"},
+            "dsi-slurm": {"dsi-slurm"},
+        }
+        selected_compute_skills = backend_skill_names[compute_backend]
 
         if skills_src.exists():
-            skills_dst.mkdir(parents=True, exist_ok=True)
-            for skill_dir in skills_src.iterdir():
-                if skill_dir.is_dir():
+            for provider_root in provider_skill_roots:
+                skills_dst = work_dir / provider_root / "skills"
+                skills_dst.mkdir(parents=True, exist_ok=True)
+                copied = 0
+                for skill_dir in skills_src.iterdir():
+                    if not skill_dir.is_dir():
+                        continue
+                    is_compute_skill = skill_dir.name in compute_skill_names
+                    if is_compute_skill and skill_dir.name not in selected_compute_skills:
+                        stale_skill_dir = skills_dst / skill_dir.name
+                        if stale_skill_dir.exists():
+                            shutil.rmtree(stale_skill_dir)
+                        continue
+
                     dst_skill_dir = skills_dst / skill_dir.name
                     if dst_skill_dir.exists():
                         shutil.rmtree(dst_skill_dir)
                     shutil.copytree(skill_dir, dst_skill_dir)
-            print(f"   Copied Claude Code skills to .claude/skills/")
-
-        # Copy skills to .gemini/skills/ for Gemini support
-        gemini_skills_dst = work_dir / ".gemini" / "skills"
-        if skills_src.exists():
-            gemini_skills_dst.mkdir(parents=True, exist_ok=True)
-            for skill_dir in skills_src.iterdir():
-                if skill_dir.is_dir():
-                    dst_skill_dir = gemini_skills_dst / skill_dir.name
-                    if dst_skill_dir.exists():
-                        shutil.rmtree(dst_skill_dir)
-                    shutil.copytree(skill_dir, dst_skill_dir)
-            print(f"   Copied skills to .gemini/skills/")
-
-        # Copy skills to .codex/skills/ for Codex support
-        codex_skills_dst = work_dir / ".codex" / "skills"
-        if skills_src.exists():
-            codex_skills_dst.mkdir(parents=True, exist_ok=True)
-            for skill_dir in skills_src.iterdir():
-                if skill_dir.is_dir():
-                    dst_skill_dir = codex_skills_dst / skill_dir.name
-                    if dst_skill_dir.exists():
-                        shutil.rmtree(dst_skill_dir)
-                    shutil.copytree(skill_dir, dst_skill_dir)
-            print(f"   Copied skills to .codex/skills/")
+                    copied += 1
+                print(f"   Copied {copied} skills to {provider_root}/skills/")
 
         # Add/merge .gitignore for research workspace
         self._setup_workspace_gitignore(work_dir)
@@ -1083,6 +1110,12 @@ def main():
         default="claude",
         choices=["claude", "gemini", "codex"],
         help="AI provider to use (default: claude)",
+    )
+    parser.add_argument(
+        "--compute-backend",
+        default="local",
+        choices=["local", "dsi-slurm", "modal"],
+        help="Compute backend for experiment/comment execution (default: local)",
     )
     parser.add_argument(
         "--no-hash",
@@ -1259,6 +1292,7 @@ def main():
                 provider=args.provider,
                 timeout=args.timeout,
                 full_permissions=args.full_permissions,
+                compute_backend=args.compute_backend,
             )
 
             print()
@@ -1308,6 +1342,7 @@ def main():
             continue_autoresearch=args.continue_autoresearch,
             bootstrap_autoresearch_baseline=args.bootstrap_autoresearch_baseline,
             proposer_timeout=args.proposer_timeout,
+            compute_backend=args.compute_backend,
         )
 
         print()

@@ -21,6 +21,7 @@ from datetime import datetime
 
 from core.scorer import load_scoring_results
 from core.scoring_seal import seal_scoring_files, unseal_scoring_files
+from core.dsi_slurm_artifacts import DSI_SLURM_ARTIFACTS_DIR, move_dsi_slurm_artifacts
 
 try:
     from git import Repo, InvalidGitRepositoryError, NoSuchPathError
@@ -1599,6 +1600,7 @@ class AutoResearchController:
             unseal_scoring_files(self.work_dir, sealed_dir)
 
         if pre_scoring_error is not None:
+            self._move_dsi_slurm_artifacts_to_attempt(attempt_dir)
             candidate_summary = ScoreSummary(
                 valid=False,
                 source="candidate",
@@ -1685,6 +1687,7 @@ class AutoResearchController:
             stage="candidate",
             scorer_result=scorer_result,
         )
+        self._move_dsi_slurm_artifacts_to_attempt(attempt_dir)
 
         candidate_checkpoint: Optional[Checkpoint] = None
         child_sha: Optional[str] = None
@@ -1805,6 +1808,12 @@ class AutoResearchController:
         results_path = self.work_dir / "scoring" / "results.json"
         if results_path.exists():
             results_path.unlink()
+
+    def _move_dsi_slurm_artifacts_to_attempt(self, attempt_dir: Path) -> None:
+        move_dsi_slurm_artifacts(
+            self.work_dir,
+            Path(attempt_dir) / DSI_SLURM_ARTIFACTS_DIR,
+        )
 
     def _record_failed_before_checkpoint(
         self,
