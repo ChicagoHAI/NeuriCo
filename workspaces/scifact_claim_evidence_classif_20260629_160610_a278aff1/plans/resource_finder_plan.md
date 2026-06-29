@@ -1,8 +1,10 @@
 # Resource Finder Plan — SciFact Claim/Evidence Classification
 
-**Stage:** `resource_finder` (planning mode)
+**Stage:** `resource_finder` (execution complete)
 **Date:** 2026-06-29
-**Status:** Planning complete — awaiting manager/human review before execution
+**Status:** COMPLETE — 4-idea HITL sequence resolved (2 evidence + 2 decision);
+papers, `literature_review.md`, `resources.md`, and dataset artifacts delivered;
+`.resource_finder_complete` marker written.
 
 ---
 
@@ -310,11 +312,23 @@ Escalate (pause and request feedback) if any of:
   "Resolved execution decision ideas" incremented **1/2 → 2/2**. The forced-test
   gate (≥2 evidence + ≥2 decision ideas) is now **satisfied**. The 4-idea sequence
   is complete.
-- [ ] Execution remaining (4-idea sequence complete): paper acquisition
-  (Wadden et al. 2020 + related), `literature_review.md`, `resources.md` (including
-  the 3-class baseline recommendation AND the 2-class future-path note), then the
-  `.resource_finder_complete` marker. *(samples + dataset docs written alongside the
-  slot-2/slot-3 resolutions.)*
+- [x] **Execution complete (2026-06-29).** 4-idea sequence done; remaining steps
+  finished:
+  - **Papers** acquired to `papers/` (budget-0, open-access): user-specified
+    **Wadden et al. 2020 SciFact** (ACL Anthology `2020.emnlp-main.609`, deep-read —
+    3-class `{SUPPORTS,REFUTES,NOINFO}` task, VeriSci TF-IDF→BERT pipeline, claim-only
+    label acc 44.5, micro-F1 / 3-way-accuracy metrics) + **FEVER** (Thorne 2018) +
+    **fastText** (Joulin 2016) as lightweight-baseline context. `papers/README.md`
+    written. (`paper-finder` service was down → direct open-access download;
+    `export.arxiv.org` API blocked → used `arxiv.org/pdf/<id>` directly. PDFs are
+    git-ignored at repo root; documented via tracked `papers/README.md`.)
+  - **`literature_review.md`** written — synthesis + recommendation: TF-IDF
+    (word 1–2g + char 3–5g) over `claim [SEP] evidence` → LogReg(balanced), macro-F1
+    primary, majority/claim-only controls; 2-class cut documented as future-only.
+  - **`resources.md`** written — full catalog (3 papers, 1 dataset, 0 repos with
+    justification) + experiment-design recommendations incl. the 3-class baseline
+    AND the 2-class future-analysis note.
+  - **`.resource_finder_complete`** marker created.
 
 ### Forced-test idea checklist (NEURICO_HITL_TEST_FORCE_IDEA_MIX)
 
