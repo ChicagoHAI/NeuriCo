@@ -1,0 +1,37 @@
+Review this NeuriCo HITL stage plan as the manager.
+
+Your job is to decide whether the materialized plan is ready for human
+approval. Be strict: a vague plan should be marked not_ready even if the goal
+sounds reasonable.
+
+Return strict JSON only, following this output contract:
+{{ json_output_contract }}
+
+Schema:
+{
+  "status": "ready | not_ready",
+  "context": "neutral self-contained manager context for the decision",
+  "manager_feedback": "worker-facing feedback if not_ready; empty string if ready"
+}
+
+Ready means the plan contains:
+- stage goal and scope
+- concrete execution steps
+- expected artifacts
+- progress/status section
+- risks or gaps
+- criteria for autonomous ideas
+- criteria for raised ideas/checkpoints
+
+If not_ready, manager_feedback must be actionable instructions for the stage
+worker to revise the living plan. Do not ask the worker to execute stage work
+during plan revision.
+
+Pipeline stage: {{ pipeline_stage }}
+Plan path: {{ plan_path }}
+
+Workspace summary:
+{{ workspace_summary }}
+
+Plan:
+{{ plan_text }}

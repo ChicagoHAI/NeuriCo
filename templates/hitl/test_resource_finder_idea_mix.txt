@@ -1,24 +1,28 @@
 TEST-ONLY HITL IDEA EXERCISE MODE:
 - This mode is enabled only because `NEURICO_HITL_TEST_FORCE_IDEA_MIX` is set.
 - During this run, intentionally exercise the checkpoint loop by raising
-  multiple ideas while doing real `{pipeline_stage}` work.
+  multiple ideas while doing real `{{ pipeline_stage }}` work.
+- This is a current-run smoke-test contract. Prior memories, old workspace
+  commits, old checkpoint logs, and old resolved HITL examples may guide your
+  expectations, but they do not count toward this run's required ideas and must
+  not be cited as current progress.
 - Across the whole resource_finder process, raise at least two evidence ideas
   and at least two decision ideas before completing the stage.
 - This is a hard test requirement, not a preference. In this forced mode,
-  `.resource_finder_complete` must not be created until `{plan_path}` shows at
+  `.resource_finder_complete` must not be created until `{{ plan_path }}` shows at
   least four resolved raised ideas from execution: two `evidence` ideas and two
   `decision` ideas.
 - Use this required execution sequence unless a previous resolved idea in
-  `{plan_path}` already satisfies that slot:
+  `{{ plan_path }}` from this current run already satisfies that slot:
   1. Raise one evidence idea.
   2. After feedback, resume from progress and raise one decision idea.
   3. After feedback, resume from progress and raise a second evidence idea.
   4. After feedback, resume from progress and raise a second decision idea.
 - Only one unresolved checkpoint may exist at a time. When a raised idea is
-  due for this sequence, write `{checkpoint_path}` and stop. After runtime
-  resolves it and resumes you, update `{plan_path}` with the resolution,
+  due for this sequence, write `{{ checkpoint_path }}` and stop. After runtime
+  resolves it and resumes you, update `{{ plan_path }}` with the resolution,
   preserve progress, and continue from the next incomplete slot in the sequence.
-- The checkpoint filename must be exactly `{checkpoint_path}`. Do not add a
+- The checkpoint filename must be exactly `{{ checkpoint_path }}`. Do not add a
   timestamp, suffix, run id, or any alternate filename; runtime consumes this
   single current-checkpoint path.
 - Evidence ideas must use `idea_type: "evidence"` and include an `evidence`
@@ -42,7 +46,10 @@ TEST-ONLY HITL IDEA EXERCISE MODE:
   examples include evidence quality, dataset suitability, licensing ambiguity,
   benchmark/source tradeoffs, label/task framing, paper-source reliability, or
   train/dev/test availability.
-- Track raised/resolved ideas explicitly in `{plan_path}` so the manager can see
+- Track raised/resolved ideas explicitly in `{{ plan_path }}` so the manager can see
   what has been handled and what remains. Maintain a short forced-test checklist
   in the plan with counts for resolved execution evidence ideas and resolved
   execution decision ideas.
+- When the plan or artifacts mention a resolved idea, include enough current-run
+  context that the manager can audit it without relying on memory from an old
+  run.

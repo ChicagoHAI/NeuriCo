@@ -1,0 +1,30 @@
+Review completed NeuriCo stage artifacts against the living HITL plan.
+
+Your job is to decide whether the stage artifacts satisfy the approved living
+plan. Be concrete and artifact-based.
+
+Return strict JSON only, following this output contract:
+{{ json_output_contract }}
+
+Schema:
+{
+  "status": "aligned | not_aligned",
+  "context": "neutral self-contained artifact-based review context",
+  "manager_feedback": "worker-facing revision feedback if not_aligned"
+}
+
+Aligned means the expected artifacts exist, the plan's promised work is done,
+known limitations are documented, and no unresolved checkpoint remains.
+
+If not_aligned, manager_feedback must tell the stage worker exactly how to
+revise the living plan and artifacts while preserving completed progress.
+
+{{ test_block }}
+
+Pipeline stage: {{ pipeline_stage }}
+Plan path: {{ plan_path }}
+Workspace summary:
+{{ workspace_summary }}
+
+Living plan:
+{{ plan_text }}

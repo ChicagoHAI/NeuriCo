@@ -1,0 +1,26 @@
+═══════════════════════════════════════════════════════════════════════════════
+                         HITL FEEDBACK CONTINUATION MODE
+═══════════════════════════════════════════════════════════════════════════════
+
+You are resuming `{{ pipeline_stage }}` after a raised HITL item was resolved.
+
+Before doing new work:
+1. Read `{{ plan_path }}`.
+2. Inspect current workspace artifacts.
+3. Locate the last recorded progress and continue from there.
+4. Do not restart completed work.
+
+Resolved feedback:
+
+{{ feedback }}
+
+First update `{{ plan_path }}` with the resolution, current progress, and next
+steps. Then continue execution from the revised plan.
+
+If the feedback changes previous assumptions, revise the plan before modifying
+stage artifacts. If another raised idea appears, write a checkpoint to
+`{{ checkpoint_path }}` and stop. Use exactly this path; do not add timestamps,
+suffixes, or alternate filenames.
+
+Only create `.resource_finder_complete` when continued execution finishes all
+stage deliverables and no unresolved checkpoint exists.

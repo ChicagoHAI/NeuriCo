@@ -1,0 +1,45 @@
+Resolve or escalate this NeuriCo HITL checkpoint as manager.
+
+The worker has stopped. It cannot proceed until this checkpoint is resolved.
+You must either resolve the idea at B level as manager, or escalate it to the
+human at A level when the decision/evidence depends on human research intent.
+
+Return strict JSON only, following this output contract:
+{{ json_output_contract }}
+
+Schema:
+{
+  "requires_human": true,
+  "context": "neutral self-contained manager context",
+  "basis": "evidence, reason, or provenance supporting the manager-resolved idea; empty string if human must decide",
+  "options": ["optional manager-refined substantive workflow choices for decision ideas; omit for evidence ideas"],
+  "manager_escalation_reason": "why human input is needed, if true",
+  "decision": "selected option_id or selected option text if resolving without human",
+  "manager_feedback": "worker-facing feedback to put into the plan"
+}
+
+For decision ideas, preserve the worker's substantive options unless they need
+neutral wording or clearer boundaries. Do not create routing options such as
+"ask human" or "ask manager". If resolving without human, the decision must
+match one returned option exactly. For evidence ideas, do not return options.
+
+Escalate to human only when the issue depends on author intent, research scope,
+preference, risk tolerance, or another judgment the manager should not decide.
+When the worker raises a resource strategy, dataset suitability, benchmark
+choice, source priority, or evidence-quality tradeoff with more than one
+reasonable option, treat it as human-scoped unless the living plan already
+settles that preference clearly.
+If resolving as manager, manager_feedback must tell the worker how to update the
+living plan and continue without losing progress.
+
+{{ test_block }}
+
+Pipeline stage: {{ pipeline_stage }}
+Workspace summary:
+{{ workspace_summary }}
+
+Living plan:
+{{ plan_text }}
+
+Checkpoint:
+{{ checkpoint_json }}

@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from jinja2 import Environment, FileSystemLoader
+
 
 PIPELINE_STAGES = {
     "resource_finder",
@@ -56,6 +58,7 @@ IDEA_RECORD_FIELD_ORDER = [
     "worker_escalation_reason",
     "manager_escalation_reason",
 ]
+_HITL_TEMPLATE_ENV: Optional[Environment] = None
 
 
 def _now() -> str:
@@ -209,9 +212,15 @@ def _hitl_template_dir() -> Path:
 
 
 def _load_hitl_template(name: str, **kwargs: Any) -> str:
-    template_path = _hitl_template_dir() / name
-    text = template_path.read_text(encoding="utf-8")
-    return text.format(**kwargs)
+    global _HITL_TEMPLATE_ENV
+    if _HITL_TEMPLATE_ENV is None:
+        _HITL_TEMPLATE_ENV = Environment(
+            loader=FileSystemLoader(str(_hitl_template_dir())),
+            autoescape=False,
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
+    return _HITL_TEMPLATE_ENV.get_template(name).render(**kwargs)
 
 
 def _resolve_manager_option(response: str, options: List[Dict[str, str]]) -> Dict[str, str]:
@@ -394,40 +403,11 @@ class HitlRuntime:
 
     def plan_prompt_block(self) -> str:
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
-        return f"""
-═══════════════════════════════════════════════════════════════════════════════
-                         HITL PLAN MODE
-═══════════════════════════════════════════════════════════════════════════════
-
-You are the stage worker for `{self.pipeline_stage}`. This invocation is only
-for planning. The output is a living control artifact, not a final report.
-
-Write or update `{rel_plan}`. The plan must be concrete enough that a manager
-can decide whether execution should begin.
-
-Required plan content:
-- goal and scope for this stage
-- current workspace state and assumptions
-- intended artifacts to create or update
-- step-by-step execution plan
-- decision/evidence criteria for ideas that can be handled autonomously
-- escalation criteria for ideas that require manager or human feedback,
-  especially choices about research scope, resource strategy, dataset suitability,
-  benchmark/source tradeoffs, licensing ambiguity, or evidence quality that could
-  change downstream experiments
-- known risks, gaps, and stop conditions
-- current progress section, initially marking planning as complete
-
-Hard constraints:
-- Do not gather resources, download papers, clone repositories, or write stage
-  deliverables in planning mode.
-- Do not create `.resource_finder_complete`.
-- Create `.resource_finder_plan_complete` only after `{rel_plan}` is ready for
-  manager review.
-
-The manager will review this plan. If it is good enough, the human will approve
-or provide feedback before execution starts.
-"""
+        return _load_hitl_template(
+            "worker_plan.txt",
+            pipeline_stage=self.pipeline_stage,
+            plan_path=rel_plan,
+        )
 
     def execution_prompt_block(self, mode: str = "execute") -> str:
         self.current_hitl_stage = "execution"
@@ -441,194 +421,46 @@ or provide feedback before execution starts.
                 plan_path=rel_plan,
                 checkpoint_path=rel_checkpoint,
             )
-        return f"""
-═══════════════════════════════════════════════════════════════════════════════
-                         HITL EXECUTION MODE
-═══════════════════════════════════════════════════════════════════════════════
-
-You are the stage worker for `{self.pipeline_stage}` in HITL `{mode}` mode.
-
-Before doing new work:
-1. Read `{rel_plan}`.
-2. Inspect the current workspace state.
-3. Continue from recorded progress. Do not restart completed work.
-
-Use `{rel_plan}` as the living control artifact. Keep its progress section
-current as you work.
-
-Idea protocol:
-- An idea is either `evidence` or `decision`.
-- Evidence idea: important information discovered during the stage.
-- Decision idea: a choice/action under a specific context.
-- C-level autonomous ideas may be recorded in the plan without blocking.
-- Raised ideas must block execution until manager/human feedback is resolved.
-- Prefer raising a checkpoint when a resource decision would materially affect
-  downstream experiment design, evaluation meaning, reproducibility, scope, or
-  user-facing research direction. Do not silently choose among plausible dataset,
-  benchmark, paper-source, licensing, or evidence-quality alternatives when the
-  choice depends on project intent rather than simple technical availability.
-- For SciFact-style resource finding, dataset/source selection, train/dev/test
-  availability, label mapping, claim/evidence pairing strategy, and whether to
-  prioritize canonical releases versus alternate mirrors are all legitimate
-  raised decision candidates when there is meaningful ambiguity.
-
-If an idea must be raised, you MUST do all of this before stopping:
-1. Update `{rel_plan}` with current progress, the raised idea, why it matters,
-   related artifacts, pending next steps, and substantive options if it is a
-   decision.
-2. Write exactly one unresolved checkpoint packet to `{rel_checkpoint}`.
-   Use exactly this path. Do not add timestamps, suffixes, or alternate
-   filenames; runtime consumes this canonical current-checkpoint file.
-3. Stop immediately without creating `.resource_finder_complete`.
-
-Checkpoint packet schema for raised ideas:
-{{
-  "idea_type": "decision | evidence",
-  "context": "REQUIRED. Worker-provided self-contained context. Use this exact key.",
-  "basis": "evidence, reason, or provenance supporting this idea",
-  "decision_needed": "required for decision ideas",
-  "evidence": "required for evidence ideas",
-  "options": ["required substantive workflow choices for raised decision ideas; omit for evidence ideas"],
-  "reason_for_escalation": "why manager/human feedback is needed",
-  "related_artifacts": [
-    {{"path": "relative/path", "description": "why it matters"}}
-  ]
-}}
-
-Runtime-owned fields:
-- Do not write `pipeline_stage` or `hitl_stage` in the checkpoint packet.
-- Runtime records `pipeline_stage` as `{self.pipeline_stage}` and `hitl_stage`
-  as `execution` when it consumes `{rel_checkpoint}`.
-
-Schema split:
-- If `idea_type` is `"decision"`, the checkpoint MUST include
-  `decision_needed` and `options`. Put supporting facts/provenance in `basis`.
-  Do NOT use top-level `evidence` as a substitute for `decision_needed`.
-- If `idea_type` is `"evidence"`, the checkpoint MUST include `evidence` and
-  MUST omit `decision_needed` and `options`.
-
-Minimal decision checkpoint example:
-{{
-  "idea_type": "decision",
-  "context": "Current progress and why this decision is blocking.",
-  "basis": "Facts/provenance supporting the decision.",
-  "decision_needed": "Which dataset framing should be primary?",
-  "options": [
-    "Use the 3-class SciFact framing.",
-    "Use the 2-class SUPPORT-vs-CONTRADICT framing."
-  ],
-  "reason_for_escalation": "The choice changes downstream evaluation.",
-  "related_artifacts": [
-    {{"path": "datasets/build_pairs.py", "description": "Current rebuild script."}}
-  ]
-}}
-
-Use these exact JSON keys. Do not write alias keys such as `raised_decision`,
-`options_considered`, `explicit_signoff_question`, `blocks`, or `recommendation`
-instead of the schema keys above. Runtime validation requires `context`,
-`basis`, and `reason_for_escalation`; decision checkpoints additionally require
-`decision_needed` and `options`. A decision checkpoint without `decision_needed`
-is invalid and will stop the run.
-
-Only create `.resource_finder_complete` when all stage deliverables are complete
-and no unresolved checkpoint exists.
-{test_block}
-"""
+        return _load_hitl_template(
+            "worker_execution.txt",
+            pipeline_stage=self.pipeline_stage,
+            mode=mode,
+            plan_path=rel_plan,
+            checkpoint_path=rel_checkpoint,
+            test_block=test_block,
+        )
 
     def review_prompt_block(self) -> str:
         self.current_hitl_stage = "review"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
-        return f"""
-═══════════════════════════════════════════════════════════════════════════════
-                         HITL REVIEW REVISION MODE
-═══════════════════════════════════════════════════════════════════════════════
-
-You are revising `{self.pipeline_stage}` artifacts after manager review.
-
-Read `{rel_plan}` and the current workspace state. Continue from recorded
-progress; do not redo completed work unless the plan explicitly requires it.
-
-Implement only the revisions required by the living plan. Keep `{rel_plan}`
-updated with progress and remaining gaps.
-
-The orchestrator removes `.resource_finder_complete` before review revision
-starts. When the review revision is fully applied and there is no unresolved
-checkpoint, recreate `.resource_finder_complete`; this marker is the signal that
-the revised stage is complete and ready for another manager review.
-
-If another idea requires manager/human feedback, update `{rel_plan}`, write a
-checkpoint packet to `{rel_checkpoint}`, and stop without creating
-`.resource_finder_complete`. Use exactly this path; do not add timestamps,
-suffixes, or alternate filenames.
-
-Do not write `pipeline_stage` or `hitl_stage` in the checkpoint packet. Runtime
-records `pipeline_stage` as `{self.pipeline_stage}` and `hitl_stage` as
-`review` when it consumes `{rel_checkpoint}`.
-"""
+        return _load_hitl_template(
+            "worker_review_revision.txt",
+            pipeline_stage=self.pipeline_stage,
+            plan_path=rel_plan,
+            checkpoint_path=rel_checkpoint,
+        )
 
     def plan_revision_prompt_block(self, feedback: str) -> str:
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
-        return f"""
-═══════════════════════════════════════════════════════════════════════════════
-                         HITL PLAN REVISION MODE
-═══════════════════════════════════════════════════════════════════════════════
-
-You are revising your own `{self.pipeline_stage}` living plan at `{rel_plan}`.
-
-This is plan revision only. Do not perform stage work.
-
-Required behavior:
-1. Read the existing plan and current workspace state.
-2. Preserve useful completed reasoning and progress.
-3. Apply only the manager/human feedback below.
-4. Make the plan concrete enough for another manager review.
-5. Update the progress section to explain what changed.
-
-Manager/human feedback to apply:
-
-{feedback}
-
-Hard constraints:
-- Do not gather resources or modify stage output artifacts.
-- Do not create `.resource_finder_complete`.
-- The orchestrator removes `.resource_finder_plan_complete` before plan revision
-  starts. Recreate `.resource_finder_plan_complete` only after `{rel_plan}` is
-  revised, reviewable, and no unresolved checkpoint exists.
-"""
+        return _load_hitl_template(
+            "worker_plan_revision.txt",
+            pipeline_stage=self.pipeline_stage,
+            plan_path=rel_plan,
+            feedback=feedback,
+        )
 
     def feedback_continuation_prompt_block(self, feedback: str) -> str:
         self.current_hitl_stage = "execution"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
-        return f"""
-═══════════════════════════════════════════════════════════════════════════════
-                         HITL FEEDBACK CONTINUATION MODE
-═══════════════════════════════════════════════════════════════════════════════
-
-You are resuming `{self.pipeline_stage}` after a raised HITL item was resolved.
-
-Before doing new work:
-1. Read `{rel_plan}`.
-2. Inspect current workspace artifacts.
-3. Locate the last recorded progress and continue from there.
-4. Do not restart completed work.
-
-Resolved feedback:
-
-{feedback}
-
-First update `{rel_plan}` with the resolution, current progress, and next
-steps. Then continue execution from the revised plan.
-
-If the feedback changes previous assumptions, revise the plan before modifying
-stage artifacts. If another raised idea appears, write a checkpoint to
-`{rel_checkpoint}` and stop. Use exactly this path; do not add timestamps,
-suffixes, or alternate filenames.
-
-Only create `.resource_finder_complete` when continued execution finishes all
-stage deliverables and no unresolved checkpoint exists.
-"""
+        return _load_hitl_template(
+            "worker_feedback_continuation.txt",
+            pipeline_stage=self.pipeline_stage,
+            plan_path=rel_plan,
+            checkpoint_path=rel_checkpoint,
+            feedback=feedback,
+        )
 
     def approve_plan_loop(
         self,
@@ -1146,16 +978,14 @@ stage deliverables and no unresolved checkpoint exists.
 class LLMHitlManager:
     """One-shot manager adapter using NeuriCo's existing manager LLM backend."""
 
-    JSON_OUTPUT_CONTRACT = """Output contract:
-- Return exactly one JSON object.
-- Do not wrap it in Markdown fences.
-- Do not include prose before or after it.
-- Do not repeat, summarize, or echo the JSON a second time."""
-
     def __init__(self, config: Dict[str, Any]):
         from interactive.llm_backend import create_backend
 
         self.backend = create_backend(config)
+
+    @staticmethod
+    def _json_output_contract() -> str:
+        return _load_hitl_template("json_output_contract.txt")
 
     def review_plan(
         self,
@@ -1165,44 +995,14 @@ class LLMHitlManager:
         plan_text: str,
         workspace_summary: str,
     ) -> Dict[str, Any]:
-        prompt = f"""Review this NeuriCo HITL stage plan as the manager.
-
-Your job is to decide whether the materialized plan is ready for human
-approval. Be strict: a vague plan should be marked not_ready even if the goal
-sounds reasonable.
-
-Return strict JSON only, following this output contract:
-{self.JSON_OUTPUT_CONTRACT}
-
-Schema:
-{{
-  "status": "ready | not_ready",
-  "context": "neutral self-contained manager context for the decision",
-  "manager_feedback": "worker-facing feedback if not_ready; empty string if ready"
-}}
-
-Ready means the plan contains:
-- stage goal and scope
-- concrete execution steps
-- expected artifacts
-- progress/status section
-- risks or gaps
-- criteria for autonomous ideas
-- criteria for raised ideas/checkpoints
-
-If not_ready, manager_feedback must be actionable instructions for the stage
-worker to revise the living plan. Do not ask the worker to execute stage work
-during plan revision.
-
-Pipeline stage: {pipeline_stage}
-Plan path: {plan_path}
-
-Workspace summary:
-{workspace_summary}
-
-Plan:
-{plan_text}
-"""
+        prompt = _load_hitl_template(
+            "manager_review_plan.txt",
+            json_output_contract=self._json_output_contract(),
+            pipeline_stage=pipeline_stage,
+            plan_path=plan_path,
+            workspace_summary=workspace_summary,
+            plan_text=plan_text,
+        )
         data = self._json_call(prompt)
         status = data.get("status")
         if status not in {"ready", "not_ready"}:
@@ -1217,52 +1017,15 @@ Plan:
         plan_text: str,
         workspace_summary: str,
     ) -> Dict[str, Any]:
-        prompt = f"""Resolve or escalate this NeuriCo HITL checkpoint as manager.
-
-The worker has stopped. It cannot proceed until this checkpoint is resolved.
-You must either resolve the idea at B level as manager, or escalate it to the
-human at A level when the decision/evidence depends on human research intent.
-
-Return strict JSON only, following this output contract:
-{self.JSON_OUTPUT_CONTRACT}
-
-Schema:
-{{
-  "requires_human": true,
-  "context": "neutral self-contained manager context",
-  "basis": "evidence, reason, or provenance supporting the manager-resolved idea; empty string if human must decide",
-  "options": ["optional manager-refined substantive workflow choices for decision ideas; omit for evidence ideas"],
-  "manager_escalation_reason": "why human input is needed, if true",
-  "decision": "selected option_id or selected option text if resolving without human",
-  "manager_feedback": "worker-facing feedback to put into the plan"
-}}
-
-For decision ideas, preserve the worker's substantive options unless they need
-neutral wording or clearer boundaries. Do not create routing options such as
-"ask human" or "ask manager". If resolving without human, the decision must
-match one returned option exactly. For evidence ideas, do not return options.
-
-Escalate to human only when the issue depends on author intent, research scope,
-preference, risk tolerance, or another judgment the manager should not decide.
-When the worker raises a resource strategy, dataset suitability, benchmark
-choice, source priority, or evidence-quality tradeoff with more than one
-reasonable option, treat it as human-scoped unless the living plan already
-settles that preference clearly.
-If resolving as manager, manager_feedback must tell the worker how to update the
-living plan and continue without losing progress.
-
-{self._checkpoint_test_prompt_block()}
-
-Pipeline stage: {pipeline_stage}
-Workspace summary:
-{workspace_summary}
-
-Living plan:
-{plan_text}
-
-Checkpoint:
-{json.dumps(checkpoint, indent=2, ensure_ascii=False)}
-"""
+        prompt = _load_hitl_template(
+            "manager_review_checkpoint.txt",
+            json_output_contract=self._json_output_contract(),
+            test_block=self._checkpoint_test_prompt_block(),
+            pipeline_stage=pipeline_stage,
+            workspace_summary=workspace_summary,
+            plan_text=plan_text,
+            checkpoint_json=json.dumps(checkpoint, indent=2, ensure_ascii=False),
+        )
         data = self._json_call(prompt)
         data["requires_human"] = bool(data.get("requires_human"))
         return data
@@ -1281,35 +1044,15 @@ Checkpoint:
         context: str,
         plan_text: str,
     ) -> str:
-        prompt = f"""Convert human HITL feedback into worker-facing plan-edit instructions.
-
-The human response is authoritative. Preserve its intent. Your task is only to
-translate it into precise instructions the stage worker can apply to the living
-plan and current workspace state.
-
-Return strict JSON only, following this output contract:
-{self.JSON_OUTPUT_CONTRACT}
-
-Schema:
-{{"manager_feedback": "concise instruction for updating the living plan"}}
-
-The instruction must:
-- state what to change in the living plan
-- state what the worker should do next
-- preserve completed progress unless the human explicitly changes direction
-- avoid adding new decisions not present in the human response
-
-Pipeline stage: {pipeline_stage}
-HITL stage: {hitl_stage}
-Context shown to human:
-{context}
-
-Human response:
-{human_response}
-
-Current living plan:
-{plan_text}
-"""
+        prompt = _load_hitl_template(
+            "manager_feedback_from_human.txt",
+            json_output_contract=self._json_output_contract(),
+            pipeline_stage=pipeline_stage,
+            hitl_stage=hitl_stage,
+            context=context,
+            human_response=human_response,
+            plan_text=plan_text,
+        )
         data = self._json_call(prompt)
         return str(data.get("manager_feedback", human_response)).strip()
 
@@ -1321,37 +1064,15 @@ Current living plan:
         plan_text: str,
         workspace_summary: str,
     ) -> Dict[str, Any]:
-        prompt = f"""Review completed NeuriCo stage artifacts against the living HITL plan.
-
-Your job is to decide whether the stage artifacts satisfy the approved living
-plan. Be concrete and artifact-based.
-
-Return strict JSON only, following this output contract:
-{self.JSON_OUTPUT_CONTRACT}
-
-Schema:
-{{
-  "status": "aligned | not_aligned",
-  "context": "neutral self-contained artifact-based review context",
-  "manager_feedback": "worker-facing revision feedback if not_aligned"
-}}
-
-Aligned means the expected artifacts exist, the plan's promised work is done,
-known limitations are documented, and no unresolved checkpoint remains.
-
-If not_aligned, manager_feedback must tell the stage worker exactly how to
-revise the living plan and artifacts while preserving completed progress.
-
-{self._review_test_prompt_block()}
-
-Pipeline stage: {pipeline_stage}
-Plan path: {plan_path}
-Workspace summary:
-{workspace_summary}
-
-Living plan:
-{plan_text}
-"""
+        prompt = _load_hitl_template(
+            "manager_review_stage.txt",
+            json_output_contract=self._json_output_contract(),
+            test_block=self._review_test_prompt_block(),
+            pipeline_stage=pipeline_stage,
+            plan_path=plan_path,
+            workspace_summary=workspace_summary,
+            plan_text=plan_text,
+        )
         data = self._json_call(prompt)
         if data.get("status") not in {"aligned", "not_aligned"}:
             data["status"] = "not_aligned"
@@ -1367,10 +1088,7 @@ Living plan:
             [
                 {
                     "role": "system",
-                    "content": (
-                        "You are NeuriCo's HITL manager. Return exactly one "
-                        "strict JSON object and no other text."
-                    ),
+                    "content": _load_hitl_template("manager_system.txt"),
                 },
                 {"role": "user", "content": prompt},
             ]
