@@ -27,10 +27,6 @@ Hard constraints:
 - Do not create `.resource_finder_complete`.
 - Create `.resource_finder_plan_complete` only after `{{ plan_path }}` is ready for
   manager review.
-- If you use prior memory or earlier run notes, label them as background only.
-  Do not cite old commits, old workspace artifacts, or old resolved HITL items
-  as if they belong to this current run. The plan must be grounded in this
-  workspace's actual current state.
 
 The manager will review this plan. If it is good enough, the human will approve
 or provide feedback before execution starts.
