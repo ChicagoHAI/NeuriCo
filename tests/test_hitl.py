@@ -1209,6 +1209,17 @@ def test_worker_prompts_encode_hitl_control_protocol(tmp_path):
     assert "Locate the last recorded progress and continue from there." in continuation_prompt
     assert "First update `plans/resource_finder_plan.md` with the resolution" in continuation_prompt
     assert ".neurico/hitl/checkpoints/pending_idea.json" in continuation_prompt
+    assert "Only create `.resource_finder_complete` when continued execution finishes" in continuation_prompt
+
+    plan_revision_prompt = runtime.plan_revision_prompt_block("Clarify checkpoints.")
+    assert "removes `.resource_finder_plan_complete`" in plan_revision_prompt
+    assert "Recreate `.resource_finder_plan_complete` only after" in plan_revision_prompt
+    assert "no unresolved checkpoint exists" in plan_revision_prompt
+
+    review_prompt = runtime.review_prompt_block()
+    assert "removes `.resource_finder_complete`" in review_prompt
+    assert "recreate `.resource_finder_complete`" in review_prompt
+    assert "ready for another manager review" in review_prompt
 
 
 def test_worker_test_mode_prompt_comes_from_template(tmp_path, monkeypatch):

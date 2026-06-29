@@ -552,6 +552,11 @@ progress; do not redo completed work unless the plan explicitly requires it.
 Implement only the revisions required by the living plan. Keep `{rel_plan}`
 updated with progress and remaining gaps.
 
+The orchestrator removes `.resource_finder_complete` before review revision
+starts. When the review revision is fully applied and there is no unresolved
+checkpoint, recreate `.resource_finder_complete`; this marker is the signal that
+the revised stage is complete and ready for another manager review.
+
 If another idea requires manager/human feedback, update `{rel_plan}`, write a
 checkpoint packet to `{rel_checkpoint}`, and stop without creating
 `.resource_finder_complete`. Use exactly this path; do not add timestamps,
@@ -587,7 +592,9 @@ Manager/human feedback to apply:
 Hard constraints:
 - Do not gather resources or modify stage output artifacts.
 - Do not create `.resource_finder_complete`.
-- Create `.resource_finder_plan_complete` only after `{rel_plan}` is revised.
+- The orchestrator removes `.resource_finder_plan_complete` before plan revision
+  starts. Recreate `.resource_finder_plan_complete` only after `{rel_plan}` is
+  revised, reviewable, and no unresolved checkpoint exists.
 """
 
     def feedback_continuation_prompt_block(self, feedback: str) -> str:
@@ -618,6 +625,9 @@ If the feedback changes previous assumptions, revise the plan before modifying
 stage artifacts. If another raised idea appears, write a checkpoint to
 `{rel_checkpoint}` and stop. Use exactly this path; do not add timestamps,
 suffixes, or alternate filenames.
+
+Only create `.resource_finder_complete` when continued execution finishes all
+stage deliverables and no unresolved checkpoint exists.
 """
 
     def approve_plan_loop(
