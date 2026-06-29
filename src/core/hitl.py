@@ -1146,6 +1146,12 @@ stage deliverables and no unresolved checkpoint exists.
 class LLMHitlManager:
     """One-shot manager adapter using NeuriCo's existing manager LLM backend."""
 
+    JSON_OUTPUT_CONTRACT = """Output contract:
+- Return exactly one JSON object.
+- Do not wrap it in Markdown fences.
+- Do not include prose before or after it.
+- Do not repeat, summarize, or echo the JSON a second time."""
+
     def __init__(self, config: Dict[str, Any]):
         from interactive.llm_backend import create_backend
 
@@ -1165,7 +1171,10 @@ Your job is to decide whether the materialized plan is ready for human
 approval. Be strict: a vague plan should be marked not_ready even if the goal
 sounds reasonable.
 
-Return strict JSON only:
+Return strict JSON only, following this output contract:
+{self.JSON_OUTPUT_CONTRACT}
+
+Schema:
 {{
   "status": "ready | not_ready",
   "context": "neutral self-contained manager context for the decision",
@@ -1214,7 +1223,10 @@ The worker has stopped. It cannot proceed until this checkpoint is resolved.
 You must either resolve the idea at B level as manager, or escalate it to the
 human at A level when the decision/evidence depends on human research intent.
 
-Return strict JSON only:
+Return strict JSON only, following this output contract:
+{self.JSON_OUTPUT_CONTRACT}
+
+Schema:
 {{
   "requires_human": true,
   "context": "neutral self-contained manager context",
@@ -1275,7 +1287,10 @@ The human response is authoritative. Preserve its intent. Your task is only to
 translate it into precise instructions the stage worker can apply to the living
 plan and current workspace state.
 
-Return strict JSON only:
+Return strict JSON only, following this output contract:
+{self.JSON_OUTPUT_CONTRACT}
+
+Schema:
 {{"manager_feedback": "concise instruction for updating the living plan"}}
 
 The instruction must:
@@ -1311,7 +1326,10 @@ Current living plan:
 Your job is to decide whether the stage artifacts satisfy the approved living
 plan. Be concrete and artifact-based.
 
-Return strict JSON only:
+Return strict JSON only, following this output contract:
+{self.JSON_OUTPUT_CONTRACT}
+
+Schema:
 {{
   "status": "aligned | not_aligned",
   "context": "neutral self-contained artifact-based review context",
@@ -1349,7 +1367,10 @@ Living plan:
             [
                 {
                     "role": "system",
-                    "content": "You are NeuriCo's HITL manager. Return strict JSON only.",
+                    "content": (
+                        "You are NeuriCo's HITL manager. Return exactly one "
+                        "strict JSON object and no other text."
+                    ),
                 },
                 {"role": "user", "content": prompt},
             ]
@@ -1359,9 +1380,10 @@ Living plan:
             return json.loads(text)
         except json.JSONDecodeError:
             start = text.find("{")
-            end = text.rfind("}")
-            if start >= 0 and end > start:
-                return json.loads(text[start : end + 1])
+            if start >= 0:
+                data, _ = json.JSONDecoder().raw_decode(text[start:])
+                if isinstance(data, dict):
+                    return data
             raise
 
 

@@ -1278,6 +1278,8 @@ def test_manager_prompts_encode_review_criteria(monkeypatch):
 
     assert "Be strict" in captured[-1]
     assert "criteria for raised ideas/checkpoints" in captured[-1]
+    assert "Return exactly one JSON object" in captured[-1]
+    assert "Do not repeat, summarize, or echo the JSON a second time" in captured[-1]
 
     captured.clear()
 
@@ -1304,6 +1306,7 @@ def test_manager_prompts_encode_review_criteria(monkeypatch):
 
     assert "artifact-based" in captured[-1]
     assert "no unresolved checkpoint remains" in captured[-1]
+    assert "Return exactly one JSON object" in captured[-1]
 
 
 def test_manager_test_mode_prompts_come_from_templates(monkeypatch):
@@ -1350,6 +1353,7 @@ def test_manager_test_mode_prompts_come_from_templates(monkeypatch):
     assert "TEST-ONLY MANAGER SPLIT MODE" in captured[-1]
     assert "Resolve about half" in captured[-1]
     assert "at least one evidence idea and at least one decision idea" in captured[-1]
+    assert "Return exactly one JSON object" in captured[-1]
 
     captured.clear()
 
@@ -1383,3 +1387,32 @@ def test_manager_test_mode_prompts_come_from_templates(monkeypatch):
     assert "TEST-ONLY REVIEW REVISION MODE" in captured[-1]
     assert "first review round" in normalized_prompt
     assert "preserve current progress" in normalized_prompt
+    assert "Return exactly one JSON object" in captured[-1]
+
+
+def test_manager_json_parser_accepts_duplicated_cli_json(monkeypatch):
+    class Backend:
+        def send(self, messages):
+            class Response:
+                text = (
+                    '{"status":"ready","context":"ok","manager_feedback":""}\n'
+                    '{"status":"ready","context":"duplicate","manager_feedback":""}'
+                )
+
+            return Response()
+
+    monkeypatch.setattr(
+        "interactive.llm_backend.create_backend",
+        lambda config: Backend(),
+    )
+
+    manager = HitlRuntime._default_manager({})
+    review = manager.review_plan(
+        pipeline_stage="resource_finder",
+        plan_path=Path("plans/resource_finder_plan.md"),
+        plan_text="# Plan",
+        workspace_summary="Workspace",
+    )
+
+    assert review["status"] == "ready"
+    assert review["context"] == "ok"
