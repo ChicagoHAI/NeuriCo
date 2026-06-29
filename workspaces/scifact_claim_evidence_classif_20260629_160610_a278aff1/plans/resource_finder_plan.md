@@ -96,12 +96,20 @@ Will reconsider if the rebuild needs the official evidence-linking logic.
    **FORCED SMOKE-TEST CHECKLIST (gate — do NOT proceed past acquisition/rebuild
    until every box is checked and logged).** Run these in order during execution
    and check each off in Section 8 with the observed value:
-   - [ ] Env builds: `uv venv` + `pyproject.toml` (`package = false`) +
+   - [x] Env builds: `uv venv` + `pyproject.toml` (`package = false`) +
      `uv add pandas scikit-learn requests` complete without error.
-   - [ ] Dataset downloads: AllenAI S3 tarball fetched; log byte size (~3 MB).
-   - [ ] Dataset extracts: tarball unpacks into `datasets/scifact_raw/`; log the
+     *(Observed: CPython 3.12.13 venv; 14 packages incl. pandas 3.0.3,
+     scikit-learn 1.9.0, requests 2.34.2 — no error.)*
+   - [x] Dataset downloads: AllenAI S3 tarball fetched; log byte size (~3 MB).
+     *(Observed: `data.tar.gz` = 3,115,079 bytes ≈ 3.0 MB from
+     `https://scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz`.)*
+   - [x] Dataset extracts: tarball unpacks into `datasets/scifact_raw/`; log the
      extracted file list (`corpus.jsonl`, `claims_train/dev/test.jsonl`, `cross_validation/`).
-   - [ ] Row counts verified: claims_train = 809, claims_dev = 300, corpus ~5k docs.
+     *(Observed: `data/{corpus,claims_train,claims_dev,claims_test}.jsonl` +
+     `data/cross_validation/fold_{1..5}/claims_{train,dev}_N.jsonl` — layout as assumed.)*
+   - [x] Row counts verified: claims_train = 809, claims_dev = 300, corpus ~5k docs.
+     *(Observed: claims_train = 809, claims_dev = 300, claims_test = 300,
+     corpus = 5183 — exact match to plan assumptions.)*
    - [ ] Pair rebuild asserts: `build_pairs.py` emits ~919 train / ~340 dev rows,
      all three labels (`SUPPORT`, `CONTRADICT`, `NOINFO`) present; log the label histogram.
    - [ ] Sample written: `datasets/samples.json` (first ~10 rows) saved.
@@ -226,10 +234,36 @@ Escalate (pause and request feedback) if any of:
   fields** and must **NOT** set `pipeline_stage`/`hitl_stage` (runtime-owned).
   Sections 1–8, the smoke-test gate, and the progress-preservation rule are
   otherwise unchanged — no technical, dataset, or scope decisions altered.
-- [ ] Execution (blocked on approval): env, dataset, pairs, papers, docs, marker.
-  On resume, run the Section 4 smoke-test checklist first and check each box here.
+- [x] **Execution started (approved).** Env built, dataset acquired/extracted,
+  row counts verified (see Section 4 checklist — first four boxes checked).
+- [x] **Acquisition-provenance evidence idea resolved (B level, 2026-06-29).**
+  Recorded in *Resolved Ideas* below (tarball 3,115,079 bytes; layout + counts an
+  exact match). Acquisition gate passed. Pre-rebuild gate item — not counted toward
+  the 2/2 execution evidence-idea requirement.
+- [ ] Execution remaining: pair rebuild (`build_pairs.py`) — raise the label-
+  histogram evidence idea and the sole-source-vs-fallback decision idea here —
+  then samples, dataset docs, papers, `literature_review.md`, `resources.md`,
+  completion marker.
 
-_No resources gathered, no downloads, no deliverables written in planning mode._
+### Forced-test idea checklist (NEURICO_HITL_TEST_FORCE_IDEA_MIX)
+
+Required before `.resource_finder_complete`: ≥2 resolved execution **evidence**
+ideas and ≥2 resolved execution **decision** ideas.
+
+- Resolved execution evidence ideas: **0 / 2** _(unchanged — see note below)_
+- Resolved execution decision ideas: **0 / 2**
+- Resolved (pre-rebuild gate, NOT one of the 2/2 evidence ideas): **Evidence
+  idea #1** — dataset acquisition provenance (tarball size, file layout, row
+  counts). Resolved at B level (autonomous match). This is the acquisition-
+  provenance gate item, distinct from the two required pair-rebuild/execution
+  evidence ideas; deliberately NOT counted toward "Resolved execution evidence
+  ideas (0/2)". Sequence slot 1 of 4 complete.
+- Currently raised (unresolved): **none** — next up is the `build_pairs.py`
+  label-histogram evidence idea (slot 2) and the AllenAI-sole-source-vs-fallback
+  decision idea, to be raised at the pair-rebuild step per Section 4.
+
+_Resources so far: SciFact AllenAI release downloaded + extracted to
+`datasets/scifact_raw/data/` (git-ignored target); no pairs/papers/docs yet._
 
 ### Resolved Ideas
 
@@ -245,4 +279,18 @@ runtime owns and populates those. Format:
   **Resolution:** <what was investigated and found>
   **Decision:** <the resulting decision and its effect on the plan>
 
-_None yet — populated during execution._
+- **Idea:** Dataset acquisition provenance — does the AllenAI S3 release download,
+  extract, and match the assumed layout/counts cleanly enough to proceed to pair
+  rebuild without escalation? _(evidence-type)_
+  **Resolution:** Tarball `data.tar.gz` = **3,115,079 bytes** fetched from
+  `https://scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz`.
+  Extracts to `datasets/scifact_raw/data/` with layout **`corpus.jsonl` +
+  `claims_{train,dev,test}.jsonl` + `cross_validation/fold_{1..5}/`** — exactly the
+  assumed schema. Row counts: **train 809 / dev 300 / test 300 claims, corpus 5183
+  docs** (±0 vs. plan). Claim schema fields: `id`, `claim`, `evidence`,
+  `cited_doc_ids`.
+  **Decision:** Resolved at **B level** (autonomous — clean deterministic match to
+  Section 5 criteria). Acquisition gate passed; proceed to step 3 (pair rebuild).
+  This is the pre-rebuild provenance gate, distinct from the two required
+  pair-rebuild/execution evidence ideas, so the "Resolved execution evidence ideas
+  (0/2)" counter is intentionally left unincremented.
