@@ -495,7 +495,7 @@ class ResearchPipelineOrchestrator:
 
         try:
             plan_approved = runtime.plan_has_human_approval()
-            if runtime.load_checkpoint() is not None:
+            if runtime.has_pending_checkpoint_payload(hitl_stage="execution"):
                 plan_approved = True
 
             if not plan_approved:
@@ -503,6 +503,7 @@ class ResearchPipelineOrchestrator:
                 if plan_marker.exists():
                     plan_marker.unlink()
 
+                runtime.prepare_checkpoint_target()
                 plan_result = run_resource_finder(
                     idea=idea,
                     work_dir=self.work_dir,
@@ -515,6 +516,14 @@ class ResearchPipelineOrchestrator:
                     log_prefix="resource_finder_hitl_plan",
                     include_hitl_outputs=True,
                 )
+                if plan_result.get("success") and runtime.has_pending_checkpoint_payload(
+                    hitl_stage="plan"
+                ):
+                    raise RuntimeError(
+                        "resource_finder plan phase completed but also wrote a pending HITL idea"
+                    )
+                if plan_result.get("success"):
+                    runtime.prepare_checkpoint_target()
                 if not plan_result.get("success"):
                     self.state.complete_stage("resource_finder", False, plan_result)
                     return {
@@ -539,6 +548,7 @@ class ResearchPipelineOrchestrator:
                     plan_marker = self.work_dir / ".resource_finder_plan_complete"
                     if plan_marker.exists():
                         plan_marker.unlink()
+                    runtime.prepare_checkpoint_target()
                     revision_result = run_resource_finder(
                         idea=idea,
                         work_dir=self.work_dir,
@@ -551,6 +561,14 @@ class ResearchPipelineOrchestrator:
                         log_prefix=f"resource_finder_hitl_plan_revision_{plan_round + 1}",
                         include_hitl_outputs=True,
                     )
+                    if revision_result.get("success") and runtime.has_pending_checkpoint_payload(
+                        hitl_stage="plan"
+                    ):
+                        raise RuntimeError(
+                            "resource_finder plan revision completed but also wrote a pending HITL idea"
+                        )
+                    if revision_result.get("success"):
+                        runtime.prepare_checkpoint_target()
                     if not revision_result.get("success"):
                         self.state.complete_stage("resource_finder", False, revision_result)
                         return {
@@ -565,26 +583,34 @@ class ResearchPipelineOrchestrator:
             mode = "execute"
             pending_feedback = ""
             last_result: Dict[str, Any] = {}
+
+            def resolved_feedback(record: Optional[Dict[str, Any]]) -> str:
+                if not record:
+                    return ""
+                return str(
+                    record.get("manager_feedback")
+                    or record.get("human_feedback")
+                    or record.get("decision")
+                    or ""
+                ).strip()
+
             for round_idx in range(8):
                 completion_marker = self.work_dir / ".resource_finder_complete"
                 if completion_marker.exists():
                     completion_marker.unlink()
 
-                if runtime.load_checkpoint() is not None:
-                    logged = runtime.resolve_checkpoint()
-                    pending_feedback = str(
-                        (logged or {}).get("manager_feedback")
-                        or (logged or {}).get("human_feedback")
-                        or (logged or {}).get("decision")
-                        or ""
-                    ).strip()
+                logged = runtime.resolve_checkpoint(hitl_stage="execution")
+                if logged is not None:
+                    pending_feedback = resolved_feedback(logged)
                     mode = "continue"
 
                 if pending_feedback:
+                    run_hitl_stage = "execution"
                     prompt_prefix = runtime.feedback_continuation_prompt_block(pending_feedback)
                     log_prefix = f"resource_finder_hitl_feedback_continue_{round_idx + 1}"
                     pending_feedback = ""
                 else:
+                    run_hitl_stage = "review" if mode == "revise" else "execution"
                     prompt_prefix = (
                         runtime.review_prompt_block()
                         if mode == "revise"
@@ -592,6 +618,7 @@ class ResearchPipelineOrchestrator:
                     )
                     log_prefix = f"resource_finder_hitl_{mode}_{round_idx + 1}"
 
+                runtime.prepare_checkpoint_target()
                 result = run_resource_finder(
                     idea=idea,
                     work_dir=self.work_dir,
@@ -606,23 +633,40 @@ class ResearchPipelineOrchestrator:
                 )
                 last_result = result
 
-                if runtime.load_checkpoint() is not None:
-                    logged = runtime.resolve_checkpoint()
-                    if logged is None:
-                        pending_feedback = ""
-                    else:
-                        pending_feedback = str(
-                            logged.get("manager_feedback")
-                            or logged.get("human_feedback")
-                            or logged.get("decision")
-                            or ""
-                        ).strip()
+                if not result.get("success"):
+                    try:
+                        logged = runtime.resolve_checkpoint(
+                            hitl_stage=run_hitl_stage,
+                            require_pending=True,
+                        )
+                    except Exception as exc:
+                        failed = {
+                            **result,
+                            "success": False,
+                            "hitl": True,
+                            "phase": mode,
+                            "error": str(exc),
+                        }
+                        self.state.complete_stage("resource_finder", False, failed)
+                        return failed
+                    pending_feedback = resolved_feedback(logged)
                     mode = "continue"
                     continue
 
-                if not result.get("success"):
-                    self.state.complete_stage("resource_finder", False, result)
-                    return {**result, "hitl": True, "phase": mode}
+                if runtime.has_pending_checkpoint_payload(hitl_stage=run_hitl_stage):
+                    failed = {
+                        **result,
+                        "success": False,
+                        "hitl": True,
+                        "phase": mode,
+                        "error": (
+                            "resource_finder completed with completion marker "
+                            "but also wrote a pending HITL idea"
+                        ),
+                    }
+                    self.state.complete_stage("resource_finder", False, failed)
+                    return failed
+                runtime.prepare_checkpoint_target()
 
                 review = runtime.review_stage()
                 if review.get("status") == "aligned":

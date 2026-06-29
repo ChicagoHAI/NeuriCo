@@ -12,6 +12,18 @@
 reproducible, CPU-bounded baseline for classifying SciFact claim/evidence pairs
 as supporting or contradicting a scientific claim.
 
+**Committed target framing (human-confirmed, slot-4 resolution, 2026-06-29):**
+The PRIMARY target for this run is the **3-class SciFact label-prediction setup
+{SUPPORT, CONTRADICT, NOINFO}**. This matches the rebuilt 919/340 pair CSVs and
+the official label-prediction setup, and is the scope the downstream runner
+commits to. The hypothesis phrasing "supporting or contradicting" maps to the
+**2-class SUPPORT-vs-CONTRADICT cut**, which is recorded as a **SECONDARY,
+future-analysis path only** — `resource_finder` does **NOT** implement the 2-class
+task in this run unless a later scoring contract requires it. No change to the
+dataset, schema, or counts results from this reconciliation; the 2-class cut is a
+documented future recommendation (see `resources.md` / `literature_review.md`),
+not built artifacts.
+
 **Scope of this stage:** Gather and document all resources the downstream
 experiment runner needs:
 - The SciFact dataset, acquired and rebuilt into supervised claim/evidence pairs.
@@ -193,7 +205,11 @@ Escalate (pause and request feedback) if any of:
 - **Scope creep signal:** if review of the literature suggests the hypothesis
   should target the harder 2-class SUPPORT-vs-CONTRADICT task (known weak for
   bag-of-words) rather than 3-class — a research-scope decision the manager should
-  confirm before the runner commits.
+  confirm before the runner commits. **RESOLVED (human-confirmed, slot-4,
+  2026-06-29): 3-class {SUPPORT, CONTRADICT, NOINFO} is the committed PRIMARY
+  target; the 2-class SUPPORT-vs-CONTRADICT cut is a documented SECONDARY
+  future-analysis path only and is NOT built in this run.** No longer an open
+  escalation trigger.
 - **A `scoring/interface.md` appears** before/while executing with a contract that
   conflicts with the planned pair schema — surface it rather than silently
   reshaping data.
@@ -284,12 +300,21 @@ Escalate (pause and request feedback) if any of:
   (evidence-type) and in `datasets/README.md`; "Resolved execution evidence ideas"
   incremented **1/2 → 2/2** (decision ideas remain 1/2). Section 4 slot-3 checklist
   item marked complete.
-- [ ] **Decision idea (slot 4) raised and checkpointed** — the second decision
-  idea (3-class as-built vs. 2-class SUPPORT-vs-CONTRADICT scope); stopping for
-  runtime resolution.
-- [ ] Execution remaining (after the 4-idea sequence resolves): papers,
-  `literature_review.md`, `resources.md`, completion marker. *(samples + dataset
-  docs written alongside the slot-2/slot-3 resolutions.)*
+- [x] **Decision idea (slot 4) resolved (human feedback, 2026-06-29).** The second
+  decision idea (3-class as-built vs. 2-class SUPPORT-vs-CONTRADICT scope). Human
+  committed the **3-class {SUPPORT, CONTRADICT, NOINFO}** framing as the PRIMARY
+  target (matches the 919/340 CSVs and the official label-prediction setup) and
+  designated the **2-class SUPPORT-vs-CONTRADICT cut a SECONDARY future-analysis
+  path only — not built in this run.** Section 1 hypothesis wording reconciled,
+  Section 6 scope-creep signal marked resolved, *Resolved Ideas* entry added;
+  "Resolved execution decision ideas" incremented **1/2 → 2/2**. The forced-test
+  gate (≥2 evidence + ≥2 decision ideas) is now **satisfied**. The 4-idea sequence
+  is complete.
+- [ ] Execution remaining (4-idea sequence complete): paper acquisition
+  (Wadden et al. 2020 + related), `literature_review.md`, `resources.md` (including
+  the 3-class baseline recommendation AND the 2-class future-path note), then the
+  `.resource_finder_complete` marker. *(samples + dataset docs written alongside the
+  slot-2/slot-3 resolutions.)*
 
 ### Forced-test idea checklist (NEURICO_HITL_TEST_FORCE_IDEA_MIX)
 
@@ -299,24 +324,29 @@ ideas and ≥2 resolved execution **decision** ideas.
 - Resolved execution evidence ideas: **2 / 2** _(slot 1 = pair-rebuild label
   histogram, resolved B level 2026-06-29; slot 3 = data-quality / well-formedness
   of rebuilt pairs, resolved approved 2026-06-29 — both in Resolved Ideas)_
-- Resolved execution decision ideas: **1 / 2** _(slot 2 = AllenAI-S3-sole-source
-  vs documented fallback; resolved by human 2026-06-29 — S3 primary + GitHub
-  raw-JSONL fallback in README; see Resolved Ideas)_
+- Resolved execution decision ideas: **2 / 2** _(slot 2 = AllenAI-S3-sole-source
+  vs documented fallback, resolved by human 2026-06-29 — S3 primary + GitHub
+  raw-JSONL fallback in README; slot 4 = 3-class-vs-2-class scope, resolved by
+  human 2026-06-29 — 3-class committed PRIMARY, 2-class documented future-only;
+  see Resolved Ideas)_ — **forced-test gate (≥2 evidence + ≥2 decision) now
+  SATISFIED.**
 - Resolved (pre-rebuild gate, NOT one of the 2/2 evidence ideas): **Evidence
   idea #1** — dataset acquisition provenance (tarball size, file layout, row
   counts). Resolved at B level (autonomous match). This is the acquisition-
   provenance gate item, distinct from the two required pair-rebuild/execution
   evidence ideas; deliberately NOT counted toward "Resolved execution evidence
   ideas (0/2)". Sequence slot 1 of 4 complete.
-- Currently raised (unresolved): **Decision idea (sequence slot 4 of 4)** —
-  whether the baseline should target the **3-class** formulation as built
-  (`SUPPORT` / `CONTRADICT` / `NOINFO`), or the **2-class** SUPPORT-vs-CONTRADICT
-  task the hypothesis wording ("supporting or contradicting") literally implies.
-  This is the Section 6 *scope-creep signal* — a research-scope decision the
-  manager/human should confirm before the runner commits, since bag-of-words is
-  known to be weak on the harder 2-class cut. Checkpoint written to
-  `.neurico/hitl/checkpoints/pending_idea.json`; stopping for runtime resolution.
-  Second of the two required execution **decision** ideas.
+- Resolved: **Decision idea (sequence slot 4 of 4)** — whether the baseline should
+  target the **3-class** formulation as built (`SUPPORT` / `CONTRADICT` / `NOINFO`),
+  or the **2-class** SUPPORT-vs-CONTRADICT task the hypothesis wording ("supporting
+  or contradicting") literally implies. This was the Section 6 *scope-creep signal*.
+  **Resolved by human 2026-06-29:** commit the **3-class** framing as the PRIMARY
+  target (it matches the rebuilt 919/340 CSVs and the official label-prediction
+  setup); document the **2-class** SUPPORT-vs-CONTRADICT cut as a **SECONDARY,
+  future-analysis path only** — NOT implemented in this run unless a later scoring
+  contract requires it. Section 1 reconciled, Section 6 signal marked resolved.
+  Second of the two required execution **decision** ideas → "Resolved execution
+  decision ideas" 1/2 → 2/2. The 4-idea sequence is complete.
 - Resolved: **Evidence idea (sequence slot 3 of 4)** — data-quality / well-
   formedness evidence of the rebuilt `scifact_pairs/{train,dev}.csv`. **Resolved
   approved 2026-06-29:** train 919 rows / dev 340 rows; **0** empty `claim` and
@@ -344,7 +374,10 @@ ideas and ≥2 resolved execution **decision** ideas.
   execution evidence ideas.
 
 _Resources so far: SciFact AllenAI release downloaded + extracted to
-`datasets/scifact_raw/data/` (git-ignored target); no pairs/papers/docs yet._
+`datasets/scifact_raw/data/` (git-ignored target); rebuilt 3-class pairs at
+`datasets/scifact_pairs/{train,dev}.csv` (919/340) + `samples.json`;
+`datasets/README.md`, `datasets/build_pairs.py`, `datasets/.gitignore` written.
+Remaining: papers, `literature_review.md`, `resources.md`, completion marker._
 
 ### Resolved Ideas
 
@@ -435,3 +468,31 @@ runtime owns and populates those. Format:
   table + conclusion). Second of the two required execution **evidence** ideas →
   "Resolved execution evidence ideas" incremented **1/2 → 2/2** (decision ideas
   remain 1/2). Proceed to slot 4 (the second decision idea).
+
+- **Idea:** 3-class as-built vs. 2-class SUPPORT-vs-CONTRADICT scope (sequence slot
+  4 of 4) — should the baseline target the **3-class** formulation as built
+  (`SUPPORT` / `CONTRADICT` / `NOINFO`, the official label-prediction setup matching
+  the 919/340 CSVs), or the **2-class** SUPPORT-vs-CONTRADICT task that the
+  hypothesis phrasing ("supporting or contradicting") literally implies? This is the
+  Section 6 *scope-creep signal* — bag-of-words is known to be weak on the harder
+  2-class cut, so it is a research-scope decision needing human confirmation before
+  the runner commits. _(decision-type)_
+  **Resolution:** Escalated to the human via a `pending_idea.json` checkpoint
+  (agent-owned fields only; `pipeline_stage`/`hitl_stage` left for the runtime). The
+  human gave an authoritative choice: **commit the 3-class framing {SUPPORT,
+  CONTRADICT, NOINFO} as the PRIMARY target** for this run (it matches the rebuilt
+  919/340 pair CSVs and the official SciFact label-prediction setup), and **document
+  the 2-class SUPPORT-vs-CONTRADICT cut as a SECONDARY, future-analysis path only**
+  — `resource_finder` must NOT implement the 2-class task now unless a later scoring
+  contract requires it.
+  **Decision:** Adopt **3-class primary, 2-class documented-future-only.** Plan
+  effects: Section 1 hypothesis wording reconciled (3-class is the committed scope;
+  the "supporting or contradicting" phrasing maps to the documented 2-class future
+  path, not the current target — no change to dataset, schema, or counts); Section 6
+  scope-creep signal marked **resolved**; the 2-class cut is to be written up as a
+  **future-analysis recommendation in `resources.md` / `literature_review.md`, not
+  built**. Second of the two required execution **decision** ideas → "Resolved
+  execution decision ideas" incremented **1/2 → 2/2**; the forced-test gate (≥2
+  evidence + ≥2 decision ideas) is now satisfied. The 4-idea sequence is complete;
+  proceed to the remaining execution steps (papers, `literature_review.md`,
+  `resources.md`, completion marker).

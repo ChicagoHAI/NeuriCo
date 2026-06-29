@@ -259,7 +259,7 @@ def run_resource_finder(
     if include_hitl_outputs:
         outputs.update(
             {
-                'hitl_checkpoint': work_dir / ".neurico" / "hitl" / "checkpoints" / "resource_finder_current.json",
+                'hitl_checkpoint': work_dir / ".neurico" / "hitl" / "checkpoints" / "pending_idea.json",
                 'hitl_plan': work_dir / "plans" / "resource_finder_plan.md",
             }
         )

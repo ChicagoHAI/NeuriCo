@@ -6,7 +6,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from core.hitl import HitlIdeaLog, HitlRuntime, HitlValidationError, read_jsonl  # noqa: E402
+from core.hitl import (  # noqa: E402
+    HitlIdeaLog,
+    HitlRuntime,
+    HitlValidationError,
+    _normalize_options,
+    read_jsonl,
+)
 from core.pipeline_orchestrator import ResearchPipelineOrchestrator  # noqa: E402
 
 
@@ -132,6 +138,7 @@ def test_idea_log_accepts_raised_evidence_without_options(tmp_path):
     )
 
     assert record["idea_id"] == "I1"
+    assert log.path == tmp_path / "logs" / "hitl" / "idea.jsonl"
     assert read_jsonl(log.path)[0]["evidence"] == "The benchmark dataset license is compatible."
 
 
@@ -462,6 +469,179 @@ def test_checkpoint_rejects_routing_options(tmp_path):
         )
 
 
+def test_checkpoint_loader_canonicalizes_worker_alias_keys(tmp_path):
+    runtime = HitlRuntime(tmp_path, "resource_finder")
+    runtime.paths.current_checkpoint.write_text(
+        json.dumps(
+            {
+                "idea_type": "decision",
+                "title": "Label space decision.",
+                "raised_decision": "Which label space should be used?",
+                "options_considered": [
+                    {
+                        "option": "(a) 2-class strict binary",
+                        "description": "Use only SUPPORT/CONTRADICT evidence-bearing pairs.",
+                    },
+                    {
+                        "option": "(b) 3-class with synthetic NOINFO",
+                        "description": "Add synthetic NOINFO from non-evidence sentences.",
+                    },
+                ],
+                "evidence_backed_recommendation": {
+                    "recommended_option": "(b) 3-class with synthetic NOINFO",
+                    "evidence": "Canonical SciFact label prediction is 3-class.",
+                },
+                "explicit_signoff_question": "Pick 2-class or 3-class.",
+                "blocks": "Pair construction is paused until the label space is resolved.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    checkpoint = runtime.load_checkpoint()
+
+    assert checkpoint is not None
+    assert checkpoint["pipeline_stage"] == "resource_finder"
+    assert checkpoint["hitl_stage"] == "execution"
+    assert checkpoint["context"] == "Which label space should be used?"
+    assert checkpoint["decision_needed"] == "Which label space should be used?"
+    assert checkpoint["reason_for_escalation"] == (
+        "Pair construction is paused until the label space is resolved."
+    )
+    assert checkpoint["basis"] == (
+        "(b) 3-class with synthetic NOINFO Canonical SciFact label prediction is 3-class."
+    )
+    assert _normalize_options(checkpoint["options"]) == [
+        {
+            "option_id": "O1",
+            "text": "(a) 2-class strict binary: Use only SUPPORT/CONTRADICT evidence-bearing pairs.",
+        },
+        {
+            "option_id": "O2",
+            "text": "(b) 3-class with synthetic NOINFO: Add synthetic NOINFO from non-evidence sentences.",
+        },
+    ]
+
+
+def test_checkpoint_loader_owns_runtime_stage_metadata(tmp_path):
+    runtime = HitlRuntime(tmp_path, "resource_finder")
+    runtime.paths.current_checkpoint.write_text(
+        json.dumps(
+            {
+                "pipeline_stage": "paper_writer",
+                "hitl_stage": "plan",
+                "idea_type": "evidence",
+                "context": "Worker found a licensing fact while revising artifacts.",
+                "basis": "The dataset page says redistribution is prohibited.",
+                "evidence": "Dataset files should be referenced through official download links only.",
+                "reason_for_escalation": "License handling affects the resource artifact.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    checkpoint = runtime.load_checkpoint(hitl_stage="review")
+
+    assert checkpoint is not None
+    assert checkpoint["pipeline_stage"] == "resource_finder"
+    assert checkpoint["hitl_stage"] == "review"
+
+
+def test_checkpoint_loader_treats_empty_canonical_as_no_pending(tmp_path):
+    runtime = HitlRuntime(tmp_path, "resource_finder")
+
+    runtime.prepare_checkpoint_target()
+
+    assert runtime.paths.current_checkpoint.exists()
+    assert runtime.load_checkpoint() is None
+
+
+def test_checkpoint_loader_recovers_single_wrong_name_json(tmp_path):
+    runtime = HitlRuntime(tmp_path, "resource_finder")
+    runtime.prepare_checkpoint_target()
+    wrong_name = runtime.paths.checkpoints_dir / "resource_finder_execution_current.json"
+    wrong_name.write_text(
+        json.dumps(
+            {
+                "idea_type": "evidence",
+                "context": "Worker wrote the pending idea under the wrong filename.",
+                "basis": "The recovered file is the only non-empty checkpoint JSON.",
+                "evidence": "Dataset source metadata should be checked before continuing.",
+                "reason_for_escalation": "Source metadata affects resource reliability.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    checkpoint = runtime.load_checkpoint(hitl_stage="execution", require_pending=True)
+
+    assert checkpoint["pipeline_stage"] == "resource_finder"
+    assert checkpoint["hitl_stage"] == "execution"
+    assert checkpoint["evidence"] == "Dataset source metadata should be checked before continuing."
+
+
+def test_checkpoint_loader_rejects_ambiguous_wrong_name_jsons(tmp_path):
+    runtime = HitlRuntime(tmp_path, "resource_finder")
+    runtime.prepare_checkpoint_target()
+    for name in ["one.json", "two.json"]:
+        (runtime.paths.checkpoints_dir / name).write_text(
+            json.dumps(
+                {
+                    "idea_type": "evidence",
+                    "context": f"Ambiguous checkpoint {name}.",
+                    "basis": "Multiple checkpoint files exist.",
+                    "evidence": "Runtime cannot infer which idea is pending.",
+                    "reason_for_escalation": "Ambiguous checkpoint state.",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    with pytest.raises(HitlValidationError, match="Ambiguous HITL checkpoint files"):
+        runtime.load_checkpoint(hitl_stage="execution", require_pending=True)
+
+
+def test_resolve_wrong_name_checkpoint_archives_and_restores_empty_canonical(tmp_path):
+    runtime = HitlRuntime(
+        tmp_path,
+        "resource_finder",
+        channel=FakeChannel(),
+        manager=FakeManager(),
+    )
+    runtime.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.paths.plan_path.write_text("# Resource finder plan\n", encoding="utf-8")
+    runtime.prepare_checkpoint_target()
+    wrong_name = runtime.paths.checkpoints_dir / "resource_finder_execution_current.json"
+    wrong_name.write_text(
+        json.dumps(
+            {
+                "idea_type": "evidence",
+                "context": "Worker found a source reliability fact.",
+                "basis": "The dataset mirror lacks provenance metadata.",
+                "evidence": "Prefer the canonical source over the mirror.",
+                "reason_for_escalation": "Source choice affects resource reliability.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    logged = runtime.resolve_checkpoint(hitl_stage="execution", require_pending=True)
+
+    archive_path = (
+        tmp_path
+        / "logs"
+        / "hitl"
+        / "resolve_checkpoint"
+        / "resource_finder"
+        / "execution"
+        / f"{logged['idea_id']}.json"
+    )
+    assert archive_path.exists()
+    assert not wrong_name.exists()
+    assert runtime.paths.current_checkpoint.exists()
+    assert runtime.paths.current_checkpoint.read_text(encoding="utf-8") == ""
+
+
 def test_resolve_checkpoint_logs_b_level_decision_and_archives(tmp_path):
     runtime = HitlRuntime(
         tmp_path,
@@ -502,7 +682,8 @@ def test_resolve_checkpoint_logs_b_level_decision_and_archives(tmp_path):
     ]
     assert logged["worker_context"] == "Worker found two viable datasets."
     assert logged["manager_feedback"] == "Update the plan to use dataset A and continue."
-    assert not runtime.paths.current_checkpoint.exists()
+    assert runtime.paths.current_checkpoint.exists()
+    assert runtime.paths.current_checkpoint.read_text(encoding="utf-8") == ""
 
 
 def test_manager_resolved_decision_must_match_option(tmp_path):
@@ -608,7 +789,16 @@ def test_resolve_checkpoint_logs_a_level_decision_custom_feedback(tmp_path):
     assert logged["decision"] == "CUSTOM"
     assert logged["human_feedback"] == custom_feedback
     assert logged["manager_feedback"] == f"Translate human choice into plan update: {custom_feedback}"
-    assert list((runtime.paths.checkpoints_dir / "resolved").glob("resource_finder_current_*.json"))
+    archive_path = (
+        tmp_path
+        / "logs"
+        / "hitl"
+        / "resolve_checkpoint"
+        / "resource_finder"
+        / "execution"
+        / f"{logged['idea_id']}.json"
+    )
+    assert archive_path.exists()
 
 
 def test_resolve_checkpoint_logs_a_level_evidence_with_raw_human_feedback(tmp_path):
@@ -658,7 +848,8 @@ def test_resolve_checkpoint_logs_a_level_evidence_with_raw_human_feedback(tmp_pa
     assert logged["manager_escalation_reason"] == \
         "Dataset relevance depends on human scope preference."
     assert logged["manager_feedback"].startswith("Update the plan to include Dataset A")
-    assert not runtime.paths.current_checkpoint.exists()
+    assert runtime.paths.current_checkpoint.exists()
+    assert runtime.paths.current_checkpoint.read_text(encoding="utf-8") == ""
 
 
 def test_orchestrator_reruns_resource_finder_for_plan_feedback(tmp_path, monkeypatch):
@@ -686,7 +877,16 @@ def test_orchestrator_reruns_resource_finder_for_plan_feedback(tmp_path, monkeyp
         def execution_prompt_block(self, mode="execute"):
             return f"EXECUTION: {mode}"
 
-        def load_checkpoint(self):
+        def prepare_checkpoint_target(self):
+            pass
+
+        def has_pending_checkpoint_payload(self, hitl_stage=None):
+            return False
+
+        def load_checkpoint(self, hitl_stage=None):
+            return None
+
+        def resolve_checkpoint(self, hitl_stage=None, require_pending=False):
             return None
 
         def review_stage(self):
@@ -758,12 +958,20 @@ def test_orchestrator_reruns_resource_finder_after_checkpoint_feedback(tmp_path,
         def feedback_continuation_prompt_block(self, feedback):
             return f"FEEDBACK CONTINUATION: {feedback}"
 
-        def load_checkpoint(self):
+        def prepare_checkpoint_target(self):
+            self.checkpoint_pending = False
+
+        def has_pending_checkpoint_payload(self, hitl_stage=None):
+            return self.checkpoint_pending
+
+        def load_checkpoint(self, hitl_stage=None):
             if self.checkpoint_pending:
                 return {"pending": True}
             return None
 
-        def resolve_checkpoint(self):
+        def resolve_checkpoint(self, hitl_stage=None, require_pending=False):
+            if not self.checkpoint_pending:
+                return None
             self.checkpoint_pending = False
             return {"manager_feedback": "Use Dataset A and continue."}
 
@@ -777,6 +985,7 @@ def test_orchestrator_reruns_resource_finder_after_checkpoint_feedback(tmp_path,
         calls.append(kwargs["prompt_prefix"])
         if kwargs["prompt_prefix"] == "EXECUTION: execute":
             runtime_holder["runtime"].checkpoint_pending = True
+            return {"success": False, "outputs": {}}
         return {"success": True, "outputs": {}}
 
     monkeypatch.setattr("core.pipeline_orchestrator.HitlRuntime", FakeRuntime)
@@ -820,12 +1029,18 @@ def test_orchestrator_resolves_pending_checkpoint_before_worker_run(tmp_path, mo
         def feedback_continuation_prompt_block(self, feedback):
             return f"FEEDBACK CONTINUATION: {feedback}"
 
-        def load_checkpoint(self):
+        def prepare_checkpoint_target(self):
+            self.checkpoint_pending = False
+
+        def has_pending_checkpoint_payload(self, hitl_stage=None):
+            return self.checkpoint_pending
+
+        def load_checkpoint(self, hitl_stage=None):
             if self.checkpoint_pending:
                 return {"pending": True}
             return None
 
-        def resolve_checkpoint(self):
+        def resolve_checkpoint(self, hitl_stage=None, require_pending=False):
             self.checkpoint_pending = False
             return {"manager_feedback": "Resume from existing checkpoint."}
 
@@ -856,6 +1071,112 @@ def test_orchestrator_resolves_pending_checkpoint_before_worker_run(tmp_path, mo
     ]
 
 
+def test_orchestrator_fails_when_worker_stops_without_checkpoint(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeRuntime:
+        def __init__(self, work_dir, pipeline_stage):
+            pass
+
+        def plan_has_human_approval(self):
+            return True
+
+        def load_checkpoint(self, hitl_stage=None):
+            return None
+
+        def execution_prompt_block(self, mode="execute"):
+            return f"EXECUTION: {mode}"
+
+        def prepare_checkpoint_target(self):
+            pass
+
+        def has_pending_checkpoint_payload(self, hitl_stage=None):
+            return False
+
+        def resolve_checkpoint(self, hitl_stage=None, require_pending=False):
+            if not require_pending:
+                return None
+            raise RuntimeError(
+                "resource_finder stopped without completion marker and without a pending HITL idea"
+            )
+
+        def review_stage(self):
+            raise AssertionError("review should not run after protocol failure")
+
+    def fake_run_resource_finder(**kwargs):
+        calls.append(kwargs["prompt_prefix"])
+        return {"success": False, "outputs": {}}
+
+    monkeypatch.setattr("core.pipeline_orchestrator.HitlRuntime", FakeRuntime)
+    monkeypatch.setattr("core.pipeline_orchestrator.run_resource_finder", fake_run_resource_finder)
+
+    orchestrator = ResearchPipelineOrchestrator(tmp_path)
+    result = orchestrator._run_resource_finder_hitl(
+        idea={"idea": {"title": "Test"}},
+        provider="claude",
+        timeout=1,
+        full_permissions=False,
+    )
+
+    assert result["success"] is False
+    assert result["phase"] == "execute"
+    assert "without a pending HITL idea" in result["error"]
+    assert calls == ["EXECUTION: execute"]
+
+
+def test_orchestrator_rejects_complete_worker_with_pending_checkpoint(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeRuntime:
+        def __init__(self, work_dir, pipeline_stage):
+            self.pending_payload = False
+
+        def plan_has_human_approval(self):
+            return True
+
+        def resolve_checkpoint(self, hitl_stage=None, require_pending=False):
+            return None
+
+        def execution_prompt_block(self, mode="execute"):
+            return f"EXECUTION: {mode}"
+
+        def prepare_checkpoint_target(self):
+            self.pending_payload = False
+
+        def has_pending_checkpoint_payload(self, hitl_stage=None):
+            return self.pending_payload
+
+        def review_stage(self):
+            raise AssertionError("review should not run after conflicting worker state")
+
+    runtime_holder = {}
+
+    def fake_runtime(work_dir, pipeline_stage):
+        runtime = FakeRuntime(work_dir, pipeline_stage)
+        runtime_holder["runtime"] = runtime
+        return runtime
+
+    def fake_run_resource_finder(**kwargs):
+        calls.append(kwargs["prompt_prefix"])
+        runtime_holder["runtime"].pending_payload = True
+        return {"success": True, "outputs": {}}
+
+    monkeypatch.setattr("core.pipeline_orchestrator.HitlRuntime", fake_runtime)
+    monkeypatch.setattr("core.pipeline_orchestrator.run_resource_finder", fake_run_resource_finder)
+
+    orchestrator = ResearchPipelineOrchestrator(tmp_path)
+    result = orchestrator._run_resource_finder_hitl(
+        idea={"idea": {"title": "Test"}},
+        provider="claude",
+        timeout=1,
+        full_permissions=False,
+    )
+
+    assert result["success"] is False
+    assert "completion marker but also wrote a pending HITL idea" in result["error"]
+    assert calls == ["EXECUTION: execute"]
+
+
 def test_worker_prompts_encode_hitl_control_protocol(tmp_path):
     runtime = HitlRuntime(
         tmp_path,
@@ -873,11 +1194,21 @@ def test_worker_prompts_encode_hitl_control_protocol(tmp_path):
     assert "Continue from recorded progress. Do not restart completed work." in execution_prompt
     assert "Raised ideas must block execution" in execution_prompt
     assert "Stop immediately without creating `.resource_finder_complete`" in execution_prompt
+    assert "Do not add timestamps, suffixes, or alternate" in execution_prompt
+    assert "Do NOT use top-level `evidence` as a substitute" in execution_prompt
+    assert "Do not write `pipeline_stage` or `hitl_stage`" in execution_prompt
+    assert '"pipeline_stage":' not in execution_prompt
+    assert '"hitl_stage":' not in execution_prompt
+    normalized_execution_prompt = " ".join(execution_prompt.split())
+    assert (
+        "A decision checkpoint without `decision_needed` is invalid"
+        in normalized_execution_prompt
+    )
 
     continuation_prompt = runtime.feedback_continuation_prompt_block("Use Dataset A.")
     assert "Locate the last recorded progress and continue from there." in continuation_prompt
     assert "First update `plans/resource_finder_plan.md` with the resolution" in continuation_prompt
-    assert "write a checkpoint and stop" in continuation_prompt
+    assert ".neurico/hitl/checkpoints/pending_idea.json" in continuation_prompt
 
 
 def test_worker_test_mode_prompt_comes_from_template(tmp_path, monkeypatch):
@@ -896,8 +1227,17 @@ def test_worker_test_mode_prompt_comes_from_template(tmp_path, monkeypatch):
     assert "TEST-ONLY HITL IDEA EXERCISE MODE" in execution_prompt
     assert "at least two evidence ideas" in execution_prompt
     assert "at least two decision ideas" in execution_prompt
+    assert "This is a hard test requirement" in execution_prompt
+    assert ".resource_finder_complete` must not be created" in execution_prompt
+    assert "resolved execution evidence ideas" in execution_prompt
+    normalized_execution_prompt = " ".join(execution_prompt.split())
+    assert "Do not add a timestamp, suffix, run id" in normalized_execution_prompt
+    assert (
+        "top-level `decision_needed` is absent, fix the packet"
+        in normalized_execution_prompt
+    )
     assert "plans/resource_finder_plan.md" in execution_prompt
-    assert ".neurico/hitl/checkpoints/resource_finder_current.json" in execution_prompt
+    assert ".neurico/hitl/checkpoints/pending_idea.json" in execution_prompt
 
 
 def test_manager_prompts_encode_review_criteria(monkeypatch):

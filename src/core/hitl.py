@@ -124,11 +124,58 @@ def _normalize_options(value: Any) -> List[Dict[str, str]]:
     for idx, item in enumerate(value, start=1):
         if isinstance(item, dict):
             text = str(item.get("text", item.get("label", item.get("value", "")))).strip()
+            if not text:
+                label = str(item.get("option", "")).strip()
+                description = str(item.get("description", "")).strip()
+                text = f"{label}: {description}".strip(": ")
         else:
             text = str(item).strip()
         if text:
             options.append({"option_id": f"O{idx}", "text": text})
     return options
+
+
+def _checkpoint_text(value: Any) -> str:
+    if isinstance(value, dict):
+        parts = []
+        for key in ("recommended_option", "recommendation", "evidence", "basis", "text"):
+            text = str(value.get(key, "")).strip()
+            if text:
+                parts.append(text)
+        return " ".join(parts)
+    return str(value or "").strip()
+
+
+def _canonicalize_checkpoint(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
+    canonical = dict(checkpoint)
+    if not str(canonical.get("context", "")).strip():
+        for key in ("worker_context", "raised_decision", "explicit_signoff_question", "title"):
+            value = _checkpoint_text(canonical.get(key))
+            if value:
+                canonical["context"] = value
+                break
+    if not str(canonical.get("basis", "")).strip():
+        for key in ("basis", "evidence_backed_recommendation", "recommendation"):
+            value = _checkpoint_text(canonical.get(key))
+            if value:
+                canonical["basis"] = value
+                break
+    if not str(canonical.get("reason_for_escalation", "")).strip():
+        for key in ("reason_for_escalation", "blocks", "explicit_signoff_question"):
+            value = _checkpoint_text(canonical.get(key))
+            if value:
+                canonical["reason_for_escalation"] = value
+                break
+    if canonical.get("idea_type") == "decision":
+        if not str(canonical.get("decision_needed", "")).strip():
+            for key in ("decision_needed", "raised_decision", "explicit_signoff_question"):
+                value = _checkpoint_text(canonical.get(key))
+                if value:
+                    canonical["decision_needed"] = value
+                    break
+        if "options" not in canonical and "options_considered" in canonical:
+            canonical["options"] = canonical["options_considered"]
+    return canonical
 
 
 def _option_texts(options: List[Dict[str, str]]) -> List[str]:
@@ -199,11 +246,11 @@ class HitlValidationError(ValueError):
 
 
 class HitlIdeaLog:
-    """Runtime-owned append-only idea log stored at .neurico/hitl/idea.jsonl."""
+    """Append-only finalized HITL idea log stored at logs/hitl/idea.jsonl."""
 
     def __init__(self, work_dir: Path):
         self.work_dir = Path(work_dir)
-        self.hitl_dir = self.work_dir / ".neurico" / "hitl"
+        self.hitl_dir = self.work_dir / "logs" / "hitl"
         self.hitl_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.hitl_dir / "idea.jsonl"
 
@@ -307,7 +354,7 @@ class HitlPaths:
 
     @property
     def current_checkpoint(self) -> Path:
-        return self.checkpoints_dir / f"{self.pipeline_stage}_current.json"
+        return self.checkpoints_dir / "pending_idea.json"
 
 
 class HitlRuntime:
@@ -332,6 +379,8 @@ class HitlRuntime:
         self.log = HitlIdeaLog(self.work_dir)
         self.channel = channel or self._default_channel()
         self.manager = manager or self._default_manager(config or {})
+        self.current_hitl_stage = "execution"
+        self._loaded_checkpoint_path: Optional[Path] = None
 
     @staticmethod
     def _default_channel() -> Any:
@@ -381,6 +430,7 @@ or provide feedback before execution starts.
 """
 
     def execution_prompt_block(self, mode: str = "execute") -> str:
+        self.current_hitl_stage = "execution"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
         test_block = ""
@@ -427,17 +477,17 @@ If an idea must be raised, you MUST do all of this before stopping:
    related artifacts, pending next steps, and substantive options if it is a
    decision.
 2. Write exactly one unresolved checkpoint packet to `{rel_checkpoint}`.
+   Use exactly this path. Do not add timestamps, suffixes, or alternate
+   filenames; runtime consumes this canonical current-checkpoint file.
 3. Stop immediately without creating `.resource_finder_complete`.
 
 Checkpoint packet schema for raised ideas:
 {{
-  "pipeline_stage": "{self.pipeline_stage}",
-  "hitl_stage": "execution",
   "idea_type": "decision | evidence",
+  "context": "REQUIRED. Worker-provided self-contained context. Use this exact key.",
   "basis": "evidence, reason, or provenance supporting this idea",
   "decision_needed": "required for decision ideas",
   "evidence": "required for evidence ideas",
-  "context": "worker-provided context; write this first and make it self-contained",
   "options": ["required substantive workflow choices for raised decision ideas; omit for evidence ideas"],
   "reason_for_escalation": "why manager/human feedback is needed",
   "related_artifacts": [
@@ -445,13 +495,50 @@ Checkpoint packet schema for raised ideas:
   ]
 }}
 
+Runtime-owned fields:
+- Do not write `pipeline_stage` or `hitl_stage` in the checkpoint packet.
+- Runtime records `pipeline_stage` as `{self.pipeline_stage}` and `hitl_stage`
+  as `execution` when it consumes `{rel_checkpoint}`.
+
+Schema split:
+- If `idea_type` is `"decision"`, the checkpoint MUST include
+  `decision_needed` and `options`. Put supporting facts/provenance in `basis`.
+  Do NOT use top-level `evidence` as a substitute for `decision_needed`.
+- If `idea_type` is `"evidence"`, the checkpoint MUST include `evidence` and
+  MUST omit `decision_needed` and `options`.
+
+Minimal decision checkpoint example:
+{{
+  "idea_type": "decision",
+  "context": "Current progress and why this decision is blocking.",
+  "basis": "Facts/provenance supporting the decision.",
+  "decision_needed": "Which dataset framing should be primary?",
+  "options": [
+    "Use the 3-class SciFact framing.",
+    "Use the 2-class SUPPORT-vs-CONTRADICT framing."
+  ],
+  "reason_for_escalation": "The choice changes downstream evaluation.",
+  "related_artifacts": [
+    {{"path": "datasets/build_pairs.py", "description": "Current rebuild script."}}
+  ]
+}}
+
+Use these exact JSON keys. Do not write alias keys such as `raised_decision`,
+`options_considered`, `explicit_signoff_question`, `blocks`, or `recommendation`
+instead of the schema keys above. Runtime validation requires `context`,
+`basis`, and `reason_for_escalation`; decision checkpoints additionally require
+`decision_needed` and `options`. A decision checkpoint without `decision_needed`
+is invalid and will stop the run.
+
 Only create `.resource_finder_complete` when all stage deliverables are complete
 and no unresolved checkpoint exists.
 {test_block}
 """
 
     def review_prompt_block(self) -> str:
+        self.current_hitl_stage = "review"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
+        rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
         return f"""
 ═══════════════════════════════════════════════════════════════════════════════
                          HITL REVIEW REVISION MODE
@@ -466,7 +553,13 @@ Implement only the revisions required by the living plan. Keep `{rel_plan}`
 updated with progress and remaining gaps.
 
 If another idea requires manager/human feedback, update `{rel_plan}`, write a
-checkpoint packet, and stop without creating `.resource_finder_complete`.
+checkpoint packet to `{rel_checkpoint}`, and stop without creating
+`.resource_finder_complete`. Use exactly this path; do not add timestamps,
+suffixes, or alternate filenames.
+
+Do not write `pipeline_stage` or `hitl_stage` in the checkpoint packet. Runtime
+records `pipeline_stage` as `{self.pipeline_stage}` and `hitl_stage` as
+`review` when it consumes `{rel_checkpoint}`.
 """
 
     def plan_revision_prompt_block(self, feedback: str) -> str:
@@ -498,7 +591,9 @@ Hard constraints:
 """
 
     def feedback_continuation_prompt_block(self, feedback: str) -> str:
+        self.current_hitl_stage = "execution"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
+        rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
         return f"""
 ═══════════════════════════════════════════════════════════════════════════════
                          HITL FEEDBACK CONTINUATION MODE
@@ -520,7 +615,9 @@ First update `{rel_plan}` with the resolution, current progress, and next
 steps. Then continue execution from the revised plan.
 
 If the feedback changes previous assumptions, revise the plan before modifying
-stage artifacts. If another raised idea appears, write a checkpoint and stop.
+stage artifacts. If another raised idea appears, write a checkpoint to
+`{rel_checkpoint}` and stop. Use exactly this path; do not add timestamps,
+suffixes, or alternate filenames.
 """
 
     def approve_plan_loop(
@@ -643,8 +740,13 @@ stage artifacts. If another raised idea appears, write a checkpoint and stop.
                 return True
         return False
 
-    def resolve_checkpoint(self) -> Optional[Dict[str, Any]]:
-        checkpoint = self.load_checkpoint()
+    def resolve_checkpoint(
+        self,
+        hitl_stage: Optional[str] = None,
+        *,
+        require_pending: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        checkpoint = self.load_checkpoint(hitl_stage=hitl_stage, require_pending=require_pending)
         if checkpoint is None:
             return None
         review = self.manager.review_checkpoint(
@@ -709,7 +811,7 @@ stage artifacts. If another raised idea appears, write a checkpoint and stop.
             extra=extra,
         )
         logged = self.log.append(record)
-        self.archive_checkpoint()
+        self.archive_checkpoint(logged)
         return logged
 
     def log_review_feedback(self, feedback: str) -> None:
@@ -758,26 +860,95 @@ stage artifacts. If another raised idea appears, write a checkpoint and stop.
             }
         )
 
-    def load_checkpoint(self) -> Optional[Dict[str, Any]]:
-        path = self.paths.current_checkpoint
-        if not path.exists():
+    def prepare_checkpoint_target(self) -> None:
+        self._clear_checkpoint_dir()
+        self.paths.current_checkpoint.write_text("", encoding="utf-8")
+        self._loaded_checkpoint_path = None
+
+    def has_pending_checkpoint_payload(self, hitl_stage: Optional[str] = None) -> bool:
+        return self.load_checkpoint(hitl_stage=hitl_stage, require_pending=False) is not None
+
+    def load_checkpoint(
+        self,
+        hitl_stage: Optional[str] = None,
+        *,
+        require_pending: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        path = self._pending_checkpoint_path(require_pending=require_pending)
+        if path is None:
             return None
         with open(path, encoding="utf-8") as f:
-            checkpoint = json.load(f)
+            try:
+                checkpoint = _canonicalize_checkpoint(json.load(f))
+            except json.JSONDecodeError as exc:
+                raise HitlValidationError(
+                    f"Invalid HITL checkpoint JSON in {path.relative_to(self.work_dir)}: {exc}"
+                ) from exc
+        effective_hitl_stage = hitl_stage or self.current_hitl_stage
+        self.current_hitl_stage = effective_hitl_stage
+        checkpoint["pipeline_stage"] = self.pipeline_stage
+        checkpoint["hitl_stage"] = effective_hitl_stage
         self.validate_checkpoint(checkpoint)
+        self._loaded_checkpoint_path = path
         return checkpoint
 
-    def archive_checkpoint(self) -> None:
-        path = self.paths.current_checkpoint
-        if not path.exists():
+    def archive_checkpoint(self, record: Dict[str, Any]) -> None:
+        path = self._loaded_checkpoint_path or self._pending_checkpoint_path()
+        if path is None:
             return
-        archive_dir = path.parent / "resolved"
+        hitl_stage = str(record.get("hitl_stage", "execution"))
+        idea_id = str(record.get("idea_id", "")).strip()
+        if not idea_id:
+            raise HitlValidationError("Cannot archive resolved checkpoint without idea_id")
+        archive_dir = (
+            self.work_dir
+            / "logs"
+            / "hitl"
+            / "resolve_checkpoint"
+            / self.pipeline_stage
+            / hitl_stage
+        )
         archive_dir.mkdir(parents=True, exist_ok=True)
-        dst = archive_dir / f"{path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        dst = archive_dir / f"{idea_id}.json"
         os.replace(path, dst)
+        self.prepare_checkpoint_target()
+
+    def _pending_checkpoint_path(self, *, require_pending: bool = False) -> Optional[Path]:
+        exact = self.paths.current_checkpoint
+        if exact.exists() and exact.stat().st_size > 0:
+            return exact
+
+        candidates = sorted(
+            p
+            for p in self.paths.checkpoints_dir.glob("*.json")
+            if p.is_file() and p.name != exact.name and p.stat().st_size > 0
+        )
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            rels = ", ".join(str(p.relative_to(self.work_dir)) for p in candidates)
+            raise HitlValidationError(
+                "Ambiguous HITL checkpoint files. Expected non-empty "
+                f"{exact.relative_to(self.work_dir)} or exactly one recoverable JSON file. "
+                f"Found: {rels}"
+            )
+        if require_pending:
+            raise HitlValidationError(
+                "HITL worker stopped without completion marker, but no pending idea was found. "
+                f"Expected non-empty {exact.relative_to(self.work_dir)} or exactly one "
+                f"recoverable JSON file in {self.paths.checkpoints_dir.relative_to(self.work_dir)}."
+            )
+        return None
+
+    def _clear_checkpoint_dir(self) -> None:
+        self.paths.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        for path in self.paths.checkpoints_dir.iterdir():
+            if path.is_file():
+                path.unlink()
 
     @staticmethod
     def validate_checkpoint(checkpoint: Dict[str, Any]) -> None:
+        checkpoint = _canonicalize_checkpoint(checkpoint)
         for field in [
             "pipeline_stage",
             "hitl_stage",
@@ -790,6 +961,12 @@ stage artifacts. If another raised idea appears, write a checkpoint and stop.
                 raise HitlValidationError(f"Checkpoint missing required field: {field}")
         if checkpoint["idea_type"] not in IDEA_TYPES:
             raise HitlValidationError(f"Invalid checkpoint idea_type: {checkpoint['idea_type']}")
+        if checkpoint["hitl_stage"] not in HITL_STAGES:
+            raise HitlValidationError(f"Invalid checkpoint hitl_stage: {checkpoint['hitl_stage']}")
+        if checkpoint["pipeline_stage"] not in PIPELINE_STAGES:
+            raise HitlValidationError(
+                f"Invalid checkpoint pipeline_stage: {checkpoint['pipeline_stage']}"
+            )
         if checkpoint["idea_type"] == "decision":
             if not str(checkpoint.get("decision_needed", "")).strip():
                 raise HitlValidationError("Raised decision checkpoint needs decision_needed")
@@ -1193,4 +1370,5 @@ def find_pending_checkpoints(work_dir: Path) -> Iterable[Path]:
     checkpoint_dir = Path(work_dir) / ".neurico" / "hitl" / "checkpoints"
     if not checkpoint_dir.exists():
         return []
-    return sorted(p for p in checkpoint_dir.glob("*_current.json") if p.is_file())
+    path = checkpoint_dir / "pending_idea.json"
+    return [path] if path.is_file() else []

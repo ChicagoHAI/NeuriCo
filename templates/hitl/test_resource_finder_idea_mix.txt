@@ -4,19 +4,45 @@ TEST-ONLY HITL IDEA EXERCISE MODE:
   multiple ideas while doing real `{pipeline_stage}` work.
 - Across the whole resource_finder process, raise at least two evidence ideas
   and at least two decision ideas before completing the stage.
+- This is a hard test requirement, not a preference. In this forced mode,
+  `.resource_finder_complete` must not be created until `{plan_path}` shows at
+  least four resolved raised ideas from execution: two `evidence` ideas and two
+  `decision` ideas.
+- Use this required execution sequence unless a previous resolved idea in
+  `{plan_path}` already satisfies that slot:
+  1. Raise one evidence idea.
+  2. After feedback, resume from progress and raise one decision idea.
+  3. After feedback, resume from progress and raise a second evidence idea.
+  4. After feedback, resume from progress and raise a second decision idea.
 - Only one unresolved checkpoint may exist at a time. When a raised idea is
-  appropriate, write `{checkpoint_path}` and stop. After runtime resolves it and
-  resumes you, update `{plan_path}` with the resolution, preserve progress, and
-  continue until another natural raised idea appears.
+  due for this sequence, write `{checkpoint_path}` and stop. After runtime
+  resolves it and resumes you, update `{plan_path}` with the resolution,
+  preserve progress, and continue from the next incomplete slot in the sequence.
+- The checkpoint filename must be exactly `{checkpoint_path}`. Do not add a
+  timestamp, suffix, run id, or any alternate filename; runtime consumes this
+  single current-checkpoint path.
 - Evidence ideas must use `idea_type: "evidence"` and include an `evidence`
   field, self-contained context, basis, escalation reason, and related artifacts.
-  Do not include decision options for evidence ideas.
+  Do not include `decision_needed` or decision options for evidence ideas.
 - Decision ideas must use `idea_type: "decision"` and include `decision_needed`,
   substantive options, self-contained context, basis, escalation reason, and
-  related artifacts.
+  related artifacts. Put supporting facts in `basis`; do not use a top-level
+  `evidence` field as a substitute for `decision_needed`.
+- Use the exact checkpoint schema keys from the HITL execution prompt. In
+  particular, decision checkpoints must write top-level `context`,
+  `decision_needed`, `options`, `basis`, and `reason_for_escalation`. Do not
+  substitute alias keys such as `raised_decision`, `options_considered`,
+  `explicit_signoff_question`, `blocks`, or `recommendation`.
+- Do not write `pipeline_stage` or `hitl_stage` in the checkpoint packet;
+  runtime owns those fields.
+- Before stopping on a decision checkpoint, inspect the JSON you wrote. If
+  `idea_type` is `"decision"` and top-level `decision_needed` is absent, fix the
+  packet before stopping; runtime will reject it.
 - Keep the ideas research-like and grounded in actual resource-finder work:
   examples include evidence quality, dataset suitability, licensing ambiguity,
   benchmark/source tradeoffs, label/task framing, paper-source reliability, or
   train/dev/test availability.
 - Track raised/resolved ideas explicitly in `{plan_path}` so the manager can see
-  what has been handled and what remains.
+  what has been handled and what remains. Maintain a short forced-test checklist
+  in the plan with counts for resolved execution evidence ideas and resolved
+  execution decision ideas.
