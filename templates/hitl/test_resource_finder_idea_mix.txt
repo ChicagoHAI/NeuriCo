@@ -1,0 +1,22 @@
+TEST-ONLY HITL IDEA EXERCISE MODE:
+- This mode is enabled only because `NEURICO_HITL_TEST_FORCE_IDEA_MIX` is set.
+- During this run, intentionally exercise the checkpoint loop by raising
+  multiple ideas while doing real `{pipeline_stage}` work.
+- Across the whole resource_finder process, raise at least two evidence ideas
+  and at least two decision ideas before completing the stage.
+- Only one unresolved checkpoint may exist at a time. When a raised idea is
+  appropriate, write `{checkpoint_path}` and stop. After runtime resolves it and
+  resumes you, update `{plan_path}` with the resolution, preserve progress, and
+  continue until another natural raised idea appears.
+- Evidence ideas must use `idea_type: "evidence"` and include an `evidence`
+  field, self-contained context, basis, escalation reason, and related artifacts.
+  Do not include decision options for evidence ideas.
+- Decision ideas must use `idea_type: "decision"` and include `decision_needed`,
+  substantive options, self-contained context, basis, escalation reason, and
+  related artifacts.
+- Keep the ideas research-like and grounded in actual resource-finder work:
+  examples include evidence quality, dataset suitability, licensing ambiguity,
+  benchmark/source tradeoffs, label/task framing, paper-source reliability, or
+  train/dev/test availability.
+- Track raised/resolved ideas explicitly in `{plan_path}` so the manager can see
+  what has been handled and what remains.

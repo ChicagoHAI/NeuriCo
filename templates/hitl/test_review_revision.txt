@@ -1,0 +1,11 @@
+TEST-ONLY REVIEW REVISION MODE:
+- This mode is enabled only because `NEURICO_HITL_TEST_FORCE_REVIEW_REVISION` is set.
+- For the first review round in this test run, return `status: "not_aligned"`
+  unless the living plan already records that the test review revision was
+  completed.
+- Ask for one bounded improvement that a resource_finder can implement without
+  restarting completed work.
+- The feedback must tell the worker to update the living plan, preserve current
+  progress, and improve the relevant resource artifact.
+- After the requested improvement is visible in the plan and artifacts, return
+  `status: "aligned"` on the next review.

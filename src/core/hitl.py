@@ -153,6 +153,20 @@ def _is_feedback_placeholder(response: str) -> bool:
     return normalized in {"", "provide feedback", "feedback"}
 
 
+def _env_enabled(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _hitl_template_dir() -> Path:
+    return Path(__file__).resolve().parents[2] / "templates" / "hitl"
+
+
+def _load_hitl_template(name: str, **kwargs: Any) -> str:
+    template_path = _hitl_template_dir() / name
+    text = template_path.read_text(encoding="utf-8")
+    return text.format(**kwargs)
+
+
 def _resolve_manager_option(response: str, options: List[Dict[str, str]]) -> Dict[str, str]:
     resolved = _resolve_option_decision(response, options)
     if resolved["decision"] == "CUSTOM":
@@ -369,6 +383,14 @@ or provide feedback before execution starts.
     def execution_prompt_block(self, mode: str = "execute") -> str:
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
+        test_block = ""
+        if _env_enabled("NEURICO_HITL_TEST_FORCE_IDEA_MIX"):
+            test_block = _load_hitl_template(
+                "test_resource_finder_idea_mix.txt",
+                pipeline_stage=self.pipeline_stage,
+                plan_path=rel_plan,
+                checkpoint_path=rel_checkpoint,
+            )
         return f"""
 ═══════════════════════════════════════════════════════════════════════════════
                          HITL EXECUTION MODE
@@ -425,6 +447,7 @@ Checkpoint packet schema for raised ideas:
 
 Only create `.resource_finder_complete` when all stage deliverables are complete
 and no unresolved checkpoint exists.
+{test_block}
 """
 
     def review_prompt_block(self) -> str:
@@ -1029,6 +1052,8 @@ settles that preference clearly.
 If resolving as manager, manager_feedback must tell the worker how to update the
 living plan and continue without losing progress.
 
+{self._checkpoint_test_prompt_block()}
+
 Pipeline stage: {pipeline_stage}
 Workspace summary:
 {workspace_summary}
@@ -1042,6 +1067,11 @@ Checkpoint:
         data = self._json_call(prompt)
         data["requires_human"] = bool(data.get("requires_human"))
         return data
+
+    def _checkpoint_test_prompt_block(self) -> str:
+        if not _env_enabled("NEURICO_HITL_TEST_FORCE_MANAGER_SPLIT"):
+            return ""
+        return _load_hitl_template("test_manager_split.txt")
 
     def feedback_from_human(
         self,
@@ -1107,6 +1137,8 @@ known limitations are documented, and no unresolved checkpoint remains.
 If not_aligned, manager_feedback must tell the stage worker exactly how to
 revise the living plan and artifacts while preserving completed progress.
 
+{self._review_test_prompt_block()}
+
 Pipeline stage: {pipeline_stage}
 Plan path: {plan_path}
 Workspace summary:
@@ -1119,6 +1151,11 @@ Living plan:
         if data.get("status") not in {"aligned", "not_aligned"}:
             data["status"] = "not_aligned"
         return data
+
+    def _review_test_prompt_block(self) -> str:
+        if not _env_enabled("NEURICO_HITL_TEST_FORCE_REVIEW_REVISION"):
+            return ""
+        return _load_hitl_template("test_review_revision.txt")
 
     def _json_call(self, prompt: str) -> Dict[str, Any]:
         response = self.backend.send(

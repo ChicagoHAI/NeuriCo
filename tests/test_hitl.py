@@ -880,6 +880,26 @@ def test_worker_prompts_encode_hitl_control_protocol(tmp_path):
     assert "write a checkpoint and stop" in continuation_prompt
 
 
+def test_worker_test_mode_prompt_comes_from_template(tmp_path, monkeypatch):
+    runtime = HitlRuntime(
+        tmp_path,
+        "resource_finder",
+        channel=FakeChannel(),
+        manager=FakeManager(),
+    )
+
+    assert "TEST-ONLY HITL IDEA EXERCISE MODE" not in runtime.execution_prompt_block()
+
+    monkeypatch.setenv("NEURICO_HITL_TEST_FORCE_IDEA_MIX", "1")
+    execution_prompt = runtime.execution_prompt_block()
+
+    assert "TEST-ONLY HITL IDEA EXERCISE MODE" in execution_prompt
+    assert "at least two evidence ideas" in execution_prompt
+    assert "at least two decision ideas" in execution_prompt
+    assert "plans/resource_finder_plan.md" in execution_prompt
+    assert ".neurico/hitl/checkpoints/resource_finder_current.json" in execution_prompt
+
+
 def test_manager_prompts_encode_review_criteria(monkeypatch):
     captured = []
 
@@ -933,3 +953,82 @@ def test_manager_prompts_encode_review_criteria(monkeypatch):
 
     assert "artifact-based" in captured[-1]
     assert "no unresolved checkpoint remains" in captured[-1]
+
+
+def test_manager_test_mode_prompts_come_from_templates(monkeypatch):
+    captured = []
+
+    class CheckpointBackend:
+        def send(self, messages):
+            captured.append(messages[-1]["content"])
+
+            class Response:
+                text = (
+                    '{"requires_human":false,"context":"ok","basis":"manager basis",'
+                    '"options":["Use Dataset A.","Use Dataset B."],'
+                    '"decision":"Use Dataset A.",'
+                    '"manager_feedback":"Update the plan and continue."}'
+                )
+
+            return Response()
+
+    monkeypatch.setenv("NEURICO_HITL_TEST_FORCE_MANAGER_SPLIT", "1")
+    monkeypatch.setattr(
+        "interactive.llm_backend.create_backend",
+        lambda config: CheckpointBackend(),
+    )
+
+    manager = HitlRuntime._default_manager({})
+    manager.review_checkpoint(
+        pipeline_stage="resource_finder",
+        checkpoint={
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "execution",
+            "idea_type": "decision",
+            "basis": "Worker basis.",
+            "decision_needed": "Which dataset should be primary?",
+            "context": "Worker context.",
+            "options": ["Use Dataset A.", "Use Dataset B."],
+            "reason_for_escalation": "Dataset choice affects experiments.",
+            "related_artifacts": [],
+        },
+        plan_text="# Plan",
+        workspace_summary="Workspace",
+    )
+
+    assert "TEST-ONLY MANAGER SPLIT MODE" in captured[-1]
+    assert "Resolve about half" in captured[-1]
+    assert "at least one evidence idea and at least one decision idea" in captured[-1]
+
+    captured.clear()
+
+    class ReviewBackend:
+        def send(self, messages):
+            captured.append(messages[-1]["content"])
+
+            class Response:
+                text = (
+                    '{"status":"not_aligned","context":"needs test revision",'
+                    '"manager_feedback":"Make one bounded improvement."}'
+                )
+
+            return Response()
+
+    monkeypatch.setenv("NEURICO_HITL_TEST_FORCE_REVIEW_REVISION", "1")
+    monkeypatch.setattr(
+        "interactive.llm_backend.create_backend",
+        lambda config: ReviewBackend(),
+    )
+
+    manager = HitlRuntime._default_manager({})
+    manager.review_stage(
+        pipeline_stage="resource_finder",
+        plan_path=Path("plans/resource_finder_plan.md"),
+        plan_text="# Plan",
+        workspace_summary="Workspace",
+    )
+
+    normalized_prompt = " ".join(captured[-1].split())
+    assert "TEST-ONLY REVIEW REVISION MODE" in captured[-1]
+    assert "first review round" in normalized_prompt
+    assert "preserve current progress" in normalized_prompt
