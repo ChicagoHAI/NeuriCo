@@ -199,6 +199,13 @@ def _is_feedback_placeholder(response: str) -> bool:
     return normalized in {"", "provide feedback", "feedback"}
 
 
+def _require_text(value: Any, field_name: str, context: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise HitlValidationError(f"{context} must include non-empty `{field_name}`.")
+    return text
+
+
 def _env_enabled(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -468,9 +475,11 @@ class HitlRuntime:
                 workspace_summary=self.workspace_summary(),
             )
             if review.get("status") == "not_ready":
-                feedback = str(review.get("manager_feedback", "")).strip()
-                if not feedback:
-                    feedback = "Revise the plan to make concrete next steps, risks, and outputs explicit."
+                feedback = _require_text(
+                    review.get("manager_feedback"),
+                    "manager_feedback",
+                    "Manager plan review with status='not_ready'",
+                )
                 self.log.append(
                     {
                         "pipeline_stage": self.pipeline_stage,
@@ -622,12 +631,21 @@ class HitlRuntime:
             if checkpoint["idea_type"] == "decision":
                 extra["options"] = decision_options
         else:
-            raw_decision = str(review.get("decision", review.get("manager_feedback", ""))).strip()
+            feedback = _require_text(
+                review.get("manager_feedback"),
+                "manager_feedback",
+                "Manager checkpoint resolution",
+            )
             if checkpoint["idea_type"] == "decision":
+                raw_decision = _require_text(
+                    review.get("decision"),
+                    "decision",
+                    "Manager-resolved decision checkpoint",
+                )
                 decision = _resolve_manager_option(raw_decision, decision_options)["decision"]
             else:
+                raw_decision = str(review.get("decision", feedback)).strip()
                 decision = raw_decision
-            feedback = str(review.get("manager_feedback", raw_decision)).strip()
             level = "B"
             actor = "manager"
             extra = {
@@ -999,7 +1017,15 @@ class LLMHitlManager:
         data = self._json_call(prompt)
         status = data.get("status")
         if status not in {"ready", "not_ready"}:
-            data["status"] = "not_ready"
+            raise HitlValidationError(
+                "Manager plan review must return status 'ready' or 'not_ready'."
+            )
+        if status == "not_ready":
+            _require_text(
+                data.get("manager_feedback"),
+                "manager_feedback",
+                "Manager plan review with status='not_ready'",
+            )
         return data
 
     def review_checkpoint(
@@ -1020,7 +1046,28 @@ class LLMHitlManager:
             checkpoint_json=json.dumps(checkpoint, indent=2, ensure_ascii=False),
         )
         data = self._json_call(prompt)
-        data["requires_human"] = bool(data.get("requires_human"))
+        if not isinstance(data.get("requires_human"), bool):
+            raise HitlValidationError(
+                "Manager checkpoint review must return boolean `requires_human`."
+            )
+        if data["requires_human"]:
+            _require_text(
+                data.get("manager_escalation_reason"),
+                "manager_escalation_reason",
+                "Manager checkpoint escalation",
+            )
+        else:
+            _require_text(
+                data.get("manager_feedback"),
+                "manager_feedback",
+                "Manager checkpoint resolution",
+            )
+            if checkpoint.get("idea_type") == "decision":
+                _require_text(
+                    data.get("decision"),
+                    "decision",
+                    "Manager-resolved decision checkpoint",
+                )
         return data
 
     def _checkpoint_test_prompt_block(self) -> str:
@@ -1047,7 +1094,11 @@ class LLMHitlManager:
             plan_text=plan_text,
         )
         data = self._json_call(prompt)
-        return str(data.get("manager_feedback", human_response)).strip()
+        return _require_text(
+            data.get("manager_feedback"),
+            "manager_feedback",
+            "Manager translation of human HITL feedback",
+        )
 
     def review_stage(
         self,
@@ -1068,7 +1119,15 @@ class LLMHitlManager:
         )
         data = self._json_call(prompt)
         if data.get("status") not in {"aligned", "not_aligned"}:
-            data["status"] = "not_aligned"
+            raise HitlValidationError(
+                "Manager stage review must return status 'aligned' or 'not_aligned'."
+            )
+        if data.get("status") == "not_aligned":
+            _require_text(
+                data.get("manager_feedback"),
+                "manager_feedback",
+                "Manager stage review with status='not_aligned'",
+            )
         return data
 
     def _review_test_prompt_block(self) -> str:

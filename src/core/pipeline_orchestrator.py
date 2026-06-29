@@ -36,7 +36,7 @@ from agents.manifest_trimmer import make_trimmer_callable
 from core.scorer import run_scorer
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
 from core.workspace_manifest import build_manifest, curate_manifest
-from core.hitl import HitlRuntime
+from core.hitl import HitlRuntime, HitlValidationError
 from templates.research_agent_instructions import generate_instructions
 
 
@@ -541,9 +541,8 @@ class ResearchPipelineOrchestrator:
 
                     feedback = str(approval.get("feedback", "")).strip()
                     if not feedback:
-                        feedback = (
-                            "Revise the living resource_finder plan so it is concrete, "
-                            "reviewable, and ready for execution."
+                        raise HitlValidationError(
+                            "HITL plan revision requested without manager or human feedback."
                         )
                     plan_marker = self.work_dir / ".resource_finder_plan_complete"
                     if plan_marker.exists():
@@ -678,9 +677,8 @@ class ResearchPipelineOrchestrator:
 
                 feedback = str(review.get("manager_feedback", "")).strip()
                 if not feedback:
-                    feedback = (
-                        "Revise the living plan to close gaps between current "
-                        "artifacts and the approved resource_finder plan."
+                    raise HitlValidationError(
+                        "HITL review revision requested without manager_feedback."
                     )
                 runtime.log_review_feedback(feedback)
                 pending_feedback = feedback

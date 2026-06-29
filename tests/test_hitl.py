@@ -105,6 +105,28 @@ class FakeManagerWithCustomDecision:
         }
 
 
+class FakePlanNotReadyWithoutFeedbackManager:
+    def review_plan(self, **kwargs):
+        return {
+            "status": "not_ready",
+            "context": "Manager found the plan incomplete.",
+        }
+
+
+class FakeManagerWithoutFeedback:
+    def review_checkpoint(self, **kwargs):
+        return {
+            "requires_human": False,
+            "context": "Manager resolved a raised decision but forgot feedback.",
+            "basis": "Dataset A has clearer licensing.",
+            "options": [
+                "Use Dataset A as the primary dataset.",
+                "Use Dataset B as the primary dataset.",
+            ],
+            "decision": "Use Dataset A as the primary dataset.",
+        }
+
+
 class FakePlanReadyManager:
     def __init__(self):
         self.feedback_calls = []
@@ -204,6 +226,22 @@ def test_plan_feedback_placeholder_is_rejected(tmp_path):
         runtime.approve_plan_loop()
 
     assert manager.feedback_calls == []
+    assert read_jsonl(runtime.log.path) == []
+
+
+def test_manager_not_ready_plan_requires_feedback(tmp_path):
+    runtime = HitlRuntime(
+        tmp_path,
+        "resource_finder",
+        channel=FakeChannel(response="1"),
+        manager=FakePlanNotReadyWithoutFeedbackManager(),
+    )
+    runtime.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.paths.plan_path.write_text("# Resource finder plan\n", encoding="utf-8")
+
+    with pytest.raises(HitlValidationError, match="status='not_ready'.*manager_feedback"):
+        runtime.approve_plan_loop()
+
     assert read_jsonl(runtime.log.path) == []
 
 
@@ -712,6 +750,35 @@ def test_manager_resolved_decision_must_match_option(tmp_path):
     )
 
     with pytest.raises(HitlValidationError, match="must match a substantive option"):
+        runtime.resolve_checkpoint()
+
+
+def test_manager_resolved_checkpoint_requires_feedback(tmp_path):
+    runtime = HitlRuntime(
+        tmp_path,
+        "resource_finder",
+        channel=FakeChannel(),
+        manager=FakeManagerWithoutFeedback(),
+    )
+    runtime.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.paths.plan_path.write_text("# Resource finder plan\n", encoding="utf-8")
+    runtime.paths.current_checkpoint.write_text(
+        json.dumps(
+            {
+                "pipeline_stage": "resource_finder",
+                "hitl_stage": "execution",
+                "idea_type": "decision",
+                "basis": "resources.md compares two viable datasets.",
+                "decision_needed": "Which dataset should be prioritized?",
+                "context": "Worker found two viable datasets.",
+                "options": ["Use dataset A.", "Use dataset B."],
+                "reason_for_escalation": "Dataset choice changes the experiment surface.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(HitlValidationError, match="Manager checkpoint resolution.*manager_feedback"):
         runtime.resolve_checkpoint()
 
 
@@ -1307,6 +1374,52 @@ def test_manager_prompts_encode_review_criteria(monkeypatch):
     assert "artifact-based" in captured[-1]
     assert "no unresolved checkpoint remains" in captured[-1]
     assert "Return exactly one JSON object" in captured[-1]
+
+
+def test_llm_manager_rejects_invalid_plan_status(monkeypatch):
+    class Backend:
+        def send(self, messages):
+            class Response:
+                text = '{"status":"maybe","context":"unclear","manager_feedback":""}'
+
+            return Response()
+
+    monkeypatch.setattr(
+        "interactive.llm_backend.create_backend",
+        lambda config: Backend(),
+    )
+
+    manager = HitlRuntime._default_manager({})
+    with pytest.raises(HitlValidationError, match="status 'ready' or 'not_ready'"):
+        manager.review_plan(
+            pipeline_stage="resource_finder",
+            plan_path=Path("plans/resource_finder_plan.md"),
+            plan_text="# Plan",
+            workspace_summary="Workspace",
+        )
+
+
+def test_llm_manager_requires_review_feedback_when_not_aligned(monkeypatch):
+    class Backend:
+        def send(self, messages):
+            class Response:
+                text = '{"status":"not_aligned","context":"missing artifact","manager_feedback":""}'
+
+            return Response()
+
+    monkeypatch.setattr(
+        "interactive.llm_backend.create_backend",
+        lambda config: Backend(),
+    )
+
+    manager = HitlRuntime._default_manager({})
+    with pytest.raises(HitlValidationError, match="status='not_aligned'.*manager_feedback"):
+        manager.review_stage(
+            pipeline_stage="resource_finder",
+            plan_path=Path("plans/resource_finder_plan.md"),
+            plan_text="# Plan",
+            workspace_summary="Workspace",
+        )
 
 
 def test_manager_test_mode_prompts_come_from_templates(monkeypatch):
