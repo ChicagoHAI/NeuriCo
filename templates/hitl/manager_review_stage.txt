@@ -19,8 +19,6 @@ known limitations are documented, and no unresolved checkpoint remains.
 If not_aligned, manager_feedback must tell the stage worker exactly how to
 revise the living plan and artifacts while preserving completed progress.
 
-{{ test_block }}
-
 Pipeline stage: {{ pipeline_stage }}
 Plan path: {{ plan_path }}
 Workspace summary:

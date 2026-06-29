@@ -32,8 +32,6 @@ settles that preference clearly.
 If resolving as manager, manager_feedback must tell the worker how to update the
 living plan and continue without losing progress.
 
-{{ test_block }}
-
 Pipeline stage: {{ pipeline_stage }}
 Workspace summary:
 {{ workspace_summary }}

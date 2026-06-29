@@ -88,4 +88,3 @@ is invalid and will stop the run.
 
 Only create `.resource_finder_complete` when all stage deliverables are complete
 and no unresolved checkpoint exists.
-{{ test_block }}

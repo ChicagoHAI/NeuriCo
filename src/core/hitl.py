@@ -206,10 +206,6 @@ def _require_text(value: Any, field_name: str, context: str) -> str:
     return text
 
 
-def _env_enabled(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _hitl_template_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "templates" / "hitl"
 
@@ -413,21 +409,12 @@ class HitlRuntime:
         self.current_hitl_stage = "execution"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
-        test_block = ""
-        if _env_enabled("NEURICO_HITL_TEST_FORCE_IDEA_MIX"):
-            test_block = _load_hitl_template(
-                "test_resource_finder_idea_mix.txt",
-                pipeline_stage=self.pipeline_stage,
-                plan_path=rel_plan,
-                checkpoint_path=rel_checkpoint,
-            )
         return _load_hitl_template(
             "worker_execution.txt",
             pipeline_stage=self.pipeline_stage,
             mode=mode,
             plan_path=rel_plan,
             checkpoint_path=rel_checkpoint,
-            test_block=test_block,
         )
 
     def review_prompt_block(self) -> str:
@@ -1039,7 +1026,6 @@ class LLMHitlManager:
         prompt = _load_hitl_template(
             "manager_review_checkpoint.txt",
             json_output_contract=self._json_output_contract(),
-            test_block=self._checkpoint_test_prompt_block(),
             pipeline_stage=pipeline_stage,
             workspace_summary=workspace_summary,
             plan_text=plan_text,
@@ -1069,11 +1055,6 @@ class LLMHitlManager:
                     "Manager-resolved decision checkpoint",
                 )
         return data
-
-    def _checkpoint_test_prompt_block(self) -> str:
-        if not _env_enabled("NEURICO_HITL_TEST_FORCE_MANAGER_SPLIT"):
-            return ""
-        return _load_hitl_template("test_manager_split.txt")
 
     def feedback_from_human(
         self,
@@ -1111,7 +1092,6 @@ class LLMHitlManager:
         prompt = _load_hitl_template(
             "manager_review_stage.txt",
             json_output_contract=self._json_output_contract(),
-            test_block=self._review_test_prompt_block(),
             pipeline_stage=pipeline_stage,
             plan_path=plan_path,
             workspace_summary=workspace_summary,
@@ -1129,11 +1109,6 @@ class LLMHitlManager:
                 "Manager stage review with status='not_aligned'",
             )
         return data
-
-    def _review_test_prompt_block(self) -> str:
-        if not _env_enabled("NEURICO_HITL_TEST_FORCE_REVIEW_REVISION"):
-            return ""
-        return _load_hitl_template("test_review_revision.txt")
 
     def _json_call(self, prompt: str) -> Dict[str, Any]:
         response = self.backend.send(
