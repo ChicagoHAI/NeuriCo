@@ -329,6 +329,20 @@ Escalate (pause and request feedback) if any of:
     justification) + experiment-design recommendations incl. the 3-class baseline
     AND the 2-class future-analysis note.
   - **`.resource_finder_complete`** marker created.
+- [x] **Test-review revision applied (manager feedback, 2026-06-29):** added a
+  *Reproduction Quickstart* section to `resources.md` (the resource catalog
+  artifact) giving the downstream runner the exact ordered command sequence to
+  recreate this stage's data from scratch — (1) `uv venv` + `pyproject.toml`
+  (`package = false`) + `uv add pandas scikit-learn requests`, (2) the S3 primary
+  fetch+extract of `data.tar.gz` with the documented `allenai/scifact` GitHub
+  raw-JSONL fallback, (3) `python datasets/build_pairs.py` with the expected
+  assertion outcomes (train 919 / dev 340, all three labels, CONTRADICT minority),
+  including the one-line expected label histogram for self-verification and a
+  cross-reference to `datasets/README.md` (no prose duplicated). **No technical,
+  dataset, or scope decisions changed — documentation-only.** The 919/340 pairs,
+  the schema, the resolved 4-idea sequence, and the `.resource_finder_complete`
+  marker are untouched. Next steps: none — stage remains complete pending review
+  confirmation of this revision.
 
 ### Forced-test idea checklist (NEURICO_HITL_TEST_FORCE_IDEA_MIX)
 
