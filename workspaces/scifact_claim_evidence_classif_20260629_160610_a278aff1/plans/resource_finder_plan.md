@@ -246,10 +246,16 @@ Escalate (pause and request feedback) if any of:
 - [x] **Pair rebuild done (`build_pairs.py`).** Emitted
   `datasets/scifact_pairs/{train,dev}.csv` (919 / 340 pairs, all three labels,
   CONTRADICT minority — Section 4 box 5 checked).
-- [ ] **Evidence idea (slot 1) raised and checkpointed** on the label histogram;
-  stopping for runtime resolution. On resume: record resolution, increment the
-  "Resolved execution evidence ideas" counter, then continue to slot 2 (the
-  sole-source-vs-fallback decision idea).
+- [x] **Evidence idea (slot 1) resolved (B level, 2026-06-29).** The
+  `build_pairs.py` pair-rebuild label histogram matches the Section 5 autonomous
+  criteria exactly (train 919 / dev 340, all three labels present, CONTRADICT the
+  minority), so no human input was needed. Recorded in *Resolved Ideas* below
+  (evidence-type); "Resolved execution evidence ideas" incremented 0/2 → 1/2.
+  Next: sequence slot 2 — the AllenAI-sole-source-vs-documented-fallback decision
+  idea — raised as the next checkpoint.
+- [ ] **Decision idea (slot 2) raised and checkpointed** on whether to accept the
+  AllenAI S3 tarball as the sole dataset source or document a fallback mirror;
+  stopping for runtime resolution.
 - [ ] Execution remaining (after the 4-idea sequence resolves): samples, dataset
   docs, papers, `literature_review.md`, `resources.md`, completion marker.
 
@@ -258,7 +264,8 @@ Escalate (pause and request feedback) if any of:
 Required before `.resource_finder_complete`: ≥2 resolved execution **evidence**
 ideas and ≥2 resolved execution **decision** ideas.
 
-- Resolved execution evidence ideas: **0 / 2** _(unchanged — see note below)_
+- Resolved execution evidence ideas: **1 / 2** _(slot 1 = pair-rebuild label
+  histogram, resolved B level 2026-06-29 — see Resolved Ideas)_
 - Resolved execution decision ideas: **0 / 2**
 - Resolved (pre-rebuild gate, NOT one of the 2/2 evidence ideas): **Evidence
   idea #1** — dataset acquisition provenance (tarball size, file layout, row
@@ -266,12 +273,19 @@ ideas and ≥2 resolved execution **decision** ideas.
   provenance gate item, distinct from the two required pair-rebuild/execution
   evidence ideas; deliberately NOT counted toward "Resolved execution evidence
   ideas (0/2)". Sequence slot 1 of 4 complete.
-- Currently raised (unresolved): **Evidence idea (sequence slot 1 of 4)** —
-  `build_pairs.py` pair-rebuild label histogram as evidence the three classes
-  are present (train {SUPPORT 370, NOINFO 355, CONTRADICT 194} = 919;
-  dev {SUPPORT 138, NOINFO 131, CONTRADICT 71} = 340). Checkpoint written to
+- Currently raised (unresolved): **Decision idea (sequence slot 2 of 4)** —
+  whether to accept the AllenAI S3 tarball
+  (`https://scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz`) as the
+  **sole** dataset source, or to document/adopt a fallback mirror (BigBIO repo /
+  `allenai/scifact` GitHub) for reproducibility resilience. Checkpoint written to
   `.neurico/hitl/checkpoints/pending_idea.json`; stopping for runtime resolution.
-  Next after resolution: slot 2 = AllenAI-sole-source-vs-fallback decision idea.
+  Next after resolution: slot 3 (the next sequenced idea).
+- Resolved: **Evidence idea (sequence slot 1 of 4)** — `build_pairs.py`
+  pair-rebuild label histogram as evidence the three classes are present
+  (train {SUPPORT 370, NOINFO 355, CONTRADICT 194} = 919;
+  dev {SUPPORT 138, NOINFO 131, CONTRADICT 71} = 340). Resolved B level
+  (autonomous match to Section 5); counted as the first of the 2 required
+  execution evidence ideas.
 
 _Resources so far: SciFact AllenAI release downloaded + extracted to
 `datasets/scifact_raw/data/` (git-ignored target); no pairs/papers/docs yet._
@@ -305,3 +319,19 @@ runtime owns and populates those. Format:
   This is the pre-rebuild provenance gate, distinct from the two required
   pair-rebuild/execution evidence ideas, so the "Resolved execution evidence ideas
   (0/2)" counter is intentionally left unincremented.
+
+- **Idea:** Pair-rebuild label histogram (sequence slot 1 of 4) — does
+  `build_pairs.py`'s emitted 3-class distribution confirm all three labels are
+  present with a sane shape (CONTRADICT minority), per the Section 5 autonomous
+  criteria? _(evidence-type)_
+  **Resolution:** Verified the emitted CSVs: **train = 919 pairs {SUPPORT 370,
+  NOINFO 355, CONTRADICT 194}; dev = 340 pairs {SUPPORT 138, NOINFO 131,
+  CONTRADICT 71}; corpus = 5183 docs.** All three labels present, CONTRADICT the
+  minority class in both splits — an exact match to the Section 5 autonomous
+  proceed criteria (~919/340, all labels, CONTRADICT minority). No human input
+  needed.
+  **Decision:** Resolved at **B level** (autonomous). This is the first of the two
+  required execution **evidence** ideas, so "Resolved execution evidence ideas" is
+  incremented **0/2 → 1/2**. The histogram stands as logged evidence the
+  pipeline produces the expected 3-class supervised pairs; proceed to slot 2 (the
+  AllenAI-sole-source-vs-documented-fallback decision idea).
