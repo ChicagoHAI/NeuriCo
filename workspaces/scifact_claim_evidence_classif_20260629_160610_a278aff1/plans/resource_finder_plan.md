@@ -115,7 +115,10 @@ Will reconsider if the rebuild needs the official evidence-linking logic.
      *(Observed: train = 919 pairs {SUPPORT 370, NOINFO 355, CONTRADICT 194};
      dev = 340 pairs {SUPPORT 138, NOINFO 131, CONTRADICT 71}; corpus 5183 docs.
      All three labels present, CONTRADICT the minority — assertions passed.)*
-   - [ ] Sample written: `datasets/samples.json` (first ~10 rows) saved.
+   - [x] Sample written: `datasets/scifact_pairs/samples.json` (9 rows, 3 per
+     label; evidence truncated to ~400 chars) saved alongside `datasets/README.md`
+     (S3 primary + documented `allenai/scifact` GitHub raw-JSONL fallback) and
+     `datasets/.gitignore`. Smoke-test gate complete.
 
    If any box fails, stop and consult Sections 5–6 (autonomous vs. escalate)
    before continuing.
@@ -199,9 +202,15 @@ Escalate (pause and request feedback) if any of:
 
 ## 7. Known Risks, Gaps, Stop Conditions
 
-- **Risk:** AllenAI S3 availability — single source of truth. *Mitigation:* the
-  BigBIO repo and `allenai/scifact` GitHub mirror the same data; document as
-  fallback, escalate only if all fail.
+- **Risk:** AllenAI S3 availability — single source of truth. *Mitigation
+  (resolved, decision idea slot 2, 2026-06-29):* the AllenAI S3 tarball stays the
+  **primary** source of truth; the `allenai/scifact` GitHub **raw-JSONL mirror** is
+  now a **documented, runner-reproducible fallback** recorded in
+  `datasets/README.md` with explicit download instructions — no longer escalate-
+  only. The runner can reproduce acquisition from GitHub if S3 is unavailable; the
+  data content, the 919/340 pair counts, and the pure-Python mirror-agnostic
+  rebuild path are unchanged. Escalate only if **both** S3 and the GitHub mirror
+  fail.
 - **Risk:** `datasets>=4` / dependency drift breaking even the fallback loaders.
   *Mitigation:* the rebuild path is pure-Python over JSONL, independent of the
   `datasets` library.
@@ -253,11 +262,20 @@ Escalate (pause and request feedback) if any of:
   (evidence-type); "Resolved execution evidence ideas" incremented 0/2 → 1/2.
   Next: sequence slot 2 — the AllenAI-sole-source-vs-documented-fallback decision
   idea — raised as the next checkpoint.
-- [ ] **Decision idea (slot 2) raised and checkpointed** on whether to accept the
-  AllenAI S3 tarball as the sole dataset source or document a fallback mirror;
+- [x] **Decision idea (slot 2) resolved (human feedback, 2026-06-29).** Human kept
+  the AllenAI S3 URL as the **primary** source of truth and adopted a documented
+  `allenai/scifact` GitHub raw-JSONL **fallback** in `datasets/README.md` (download
+  instructions the runner can use if S3 is unavailable). Documentation-only — data
+  content, 919/340 counts, and the pure-Python rebuild path unchanged. Section 7
+  risk updated (fallback now documented, not escalate-only); *Resolved Ideas* entry
+  added (decision-type); "Resolved execution decision ideas" incremented 0/2 → 1/2.
+  Next: sequence slot 3 — the second evidence idea (data-quality of rebuilt pairs).
+- [ ] **Evidence idea (slot 3) raised and checkpointed** — data-quality evidence of
+  the rebuilt pairs (well-formedness, no empty fields, duplicate-row count);
   stopping for runtime resolution.
-- [ ] Execution remaining (after the 4-idea sequence resolves): samples, dataset
-  docs, papers, `literature_review.md`, `resources.md`, completion marker.
+- [ ] Execution remaining (after the 4-idea sequence resolves): papers,
+  `literature_review.md`, `resources.md`, completion marker. *(samples + dataset
+  docs written alongside the slot-2 resolution.)*
 
 ### Forced-test idea checklist (NEURICO_HITL_TEST_FORCE_IDEA_MIX)
 
@@ -266,20 +284,31 @@ ideas and ≥2 resolved execution **decision** ideas.
 
 - Resolved execution evidence ideas: **1 / 2** _(slot 1 = pair-rebuild label
   histogram, resolved B level 2026-06-29 — see Resolved Ideas)_
-- Resolved execution decision ideas: **0 / 2**
+- Resolved execution decision ideas: **1 / 2** _(slot 2 = AllenAI-S3-sole-source
+  vs documented fallback; resolved by human 2026-06-29 — S3 primary + GitHub
+  raw-JSONL fallback in README; see Resolved Ideas)_
 - Resolved (pre-rebuild gate, NOT one of the 2/2 evidence ideas): **Evidence
   idea #1** — dataset acquisition provenance (tarball size, file layout, row
   counts). Resolved at B level (autonomous match). This is the acquisition-
   provenance gate item, distinct from the two required pair-rebuild/execution
   evidence ideas; deliberately NOT counted toward "Resolved execution evidence
   ideas (0/2)". Sequence slot 1 of 4 complete.
-- Currently raised (unresolved): **Decision idea (sequence slot 2 of 4)** —
-  whether to accept the AllenAI S3 tarball
+- Currently raised (unresolved): **Evidence idea (sequence slot 3 of 4)** —
+  data-quality evidence that the rebuilt `scifact_pairs/{train,dev}.csv` are
+  well-formed: zero empty `claim`/`evidence` fields, evidence texts are real
+  multi-sentence abstracts (median ~188 words), and only **3/919 train** &
+  **1/340 dev** exact-duplicate `(claim,evidence,label)` rows (negligible). Logged
+  as evidence of dataset suitability per Section 5 — no decision needed. Checkpoint
+  written to `.neurico/hitl/checkpoints/pending_idea.json`; stopping for runtime
+  resolution. Next after resolution: slot 4 (the second decision idea).
+- Resolved: **Decision idea (sequence slot 2 of 4)** — whether to accept the
+  AllenAI S3 tarball
   (`https://scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz`) as the
-  **sole** dataset source, or to document/adopt a fallback mirror (BigBIO repo /
-  `allenai/scifact` GitHub) for reproducibility resilience. Checkpoint written to
-  `.neurico/hitl/checkpoints/pending_idea.json`; stopping for runtime resolution.
-  Next after resolution: slot 3 (the next sequenced idea).
+  **sole** dataset source, or document a fallback mirror. **Resolved by human
+  2026-06-29:** keep S3 as **primary** source of truth and **add a documented
+  `allenai/scifact` GitHub raw-JSONL fallback** to `datasets/README.md`.
+  Documentation-only; counts/rebuild unchanged. First of the two required
+  execution **decision** ideas → "Resolved execution decision ideas" 0/2 → 1/2.
 - Resolved: **Evidence idea (sequence slot 1 of 4)** — `build_pairs.py`
   pair-rebuild label histogram as evidence the three classes are present
   (train {SUPPORT 370, NOINFO 355, CONTRADICT 194} = 919;
@@ -335,3 +364,24 @@ runtime owns and populates those. Format:
   incremented **0/2 → 1/2**. The histogram stands as logged evidence the
   pipeline produces the expected 3-class supervised pairs; proceed to slot 2 (the
   AllenAI-sole-source-vs-documented-fallback decision idea).
+
+- **Idea:** AllenAI S3 sole source vs documented fallback (sequence slot 2 of 4) —
+  accept the AllenAI S3 tarball
+  (`https://scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz`) as the
+  **sole** dataset source, or document/adopt a fallback mirror for reproducibility
+  resilience? _(decision-type)_
+  **Resolution:** Escalated to the human. The S3 release is the only acquisition
+  path the plan currently documents; the `allenai/scifact` GitHub repo mirrors the
+  same `corpus.jsonl` + `claims_{train,dev,test}.jsonl` content as raw JSONL.
+  Human decided to **keep the AllenAI S3 URL as the PRIMARY source of truth and ADD
+  an explicit `allenai/scifact` GitHub raw-JSONL fallback** to `datasets/README.md`
+  — documented download instructions the runner can use to reproduce acquisition if
+  S3 is unavailable.
+  **Decision:** Adopt the documented GitHub fallback. **Decision = S3 primary +
+  GitHub raw-JSONL fallback in README.** This is documentation-only: the data
+  content, the 919/340 pair counts, and the pure-Python mirror-agnostic rebuild
+  path (`build_pairs.py`) are **unchanged**. Section 7 risk updated so the
+  single-source risk records the GitHub mirror as a runner-reproducible fallback
+  (no longer escalate-only). First of the two required execution **decision** ideas
+  → "Resolved execution decision ideas" incremented **0/2 → 1/2**. Proceed to slot
+  3 (second evidence idea).
