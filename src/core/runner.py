@@ -11,8 +11,6 @@ This module orchestrates the execution of research by:
 
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from datetime import datetime
-import fnmatch
 import json
 import subprocess
 import shlex
@@ -140,6 +138,8 @@ class ResearchRunner:
         autoresearch_iterations: int = 1,
         autoresearch_history_dir: Optional[Path] = None,
         continue_autoresearch: bool = False,
+        bootstrap_autoresearch_baseline: bool = False,
+        proposer_timeout: int = 900,
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -174,16 +174,26 @@ class ResearchRunner:
         print(f"🚀 Starting research: {idea_id}")
         print(f"   Provider: {provider}")
         print(f"   GitHub: {'Enabled' if self.use_github else 'Disabled'}")
-        if autoresearch and continue_autoresearch:
+        autoresearch_modes = [
+            name
+            for name, enabled in (
+                ("--autoresearch", autoresearch),
+                ("--continue-autoresearch", continue_autoresearch),
+                ("--bootstrap-autoresearch-baseline", bootstrap_autoresearch_baseline),
+            )
+            if enabled
+        ]
+        if len(autoresearch_modes) > 1:
             raise ValueError(
-                "Use either --autoresearch for a full pipeline run or "
-                "--continue-autoresearch for an existing scored workspace, not both."
+                "Choose at most one AutoResearch entry mode: " + ", ".join(autoresearch_modes)
             )
         if autoresearch and not scoring_enabled:
             print("   AutoResearch requires scoring; enabling scoring mode.")
             scoring_enabled = True
         if continue_autoresearch:
             print("   Continue AutoResearch: enabled")
+        if bootstrap_autoresearch_baseline:
+            print("   Bootstrap AutoResearch baseline: enabled")
         print("=" * 80)
 
         # Load idea
@@ -330,15 +340,20 @@ class ResearchRunner:
             success = False
             pipeline_result: Dict[str, Any] = {}
             try:
-                pipeline_result = self._run_continue_autoresearch(
+                from core.autoresearch import continue_from_current_best
+
+                pipeline_result = continue_from_current_best(
                     idea=idea,
                     idea_id=idea_id,
                     work_dir=work_dir,
+                    templates_dir=self.project_root / "templates",
                     provider=provider,
                     full_permissions=full_permissions,
                     scorer_timeout=scorer_timeout,
-                    autoresearch_iterations=autoresearch_iterations,
+                    iterations=autoresearch_iterations,
                     autoresearch_history_dir=autoresearch_history_dir,
+                    proposer_timeout=proposer_timeout,
+                    comment_timeout=timeout,
                 )
                 success = pipeline_result.get("success", False)
 
@@ -362,6 +377,39 @@ class ResearchRunner:
                 "github_url": github_url,
                 "success": success,
                 "autoresearch": pipeline_result.get("autoresearch"),
+            }
+
+        if bootstrap_autoresearch_baseline:
+            success = False
+            baseline_result: Dict[str, Any] = {}
+            try:
+                from core.autoresearch import construct_bootstrap_initial_node
+
+                baseline_result = construct_bootstrap_initial_node(
+                    idea=idea,
+                    idea_id=idea_id,
+                    work_dir=work_dir,
+                    templates_dir=self.project_root / "templates",
+                    provider=provider,
+                    full_permissions=full_permissions,
+                    rule_maker_timeout=rule_maker_timeout,
+                    scorer_timeout=scorer_timeout,
+                    manifest_trimmer_timeout=manifest_trimmer_timeout,
+                    autoresearch_history_dir=autoresearch_history_dir,
+                    prepare_workspace=self._copy_workspace_resources,
+                )
+                success = baseline_result.get("success", False)
+            except Exception as e:
+                print(f"\n❌ Bootstrap AutoResearch baseline error: {e}")
+                success = False
+            finally:
+                self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+
+            return {
+                "work_dir": work_dir,
+                "github_url": github_url,
+                "success": success,
+                "bootstrap_autoresearch_baseline": baseline_result,
             }
 
         # Copy helper scripts to workspace
@@ -416,46 +464,80 @@ class ResearchRunner:
                     pass  # Unreadable state file — run all stages normally
 
             try:
-                pipeline_result = orchestrator.run_pipeline(
-                    idea=idea,
-                    provider=provider,
-                    pause_after_resources=pause_after_resources,
-                    skip_resource_finder=skip_resource_finder,
-                    resource_finder_timeout=resource_finder_timeout,
-                    experiment_runner_timeout=timeout,
-                    full_permissions=full_permissions,
-                    use_scribe=use_scribe,
-                    scoring_enabled=scoring_enabled,
-                    rule_maker_timeout=rule_maker_timeout,
-                    scorer_timeout=scorer_timeout,
-                    bootstrap_mode=bootstrap_mode,
-                    manifest_trimmer_timeout=manifest_trimmer_timeout,
-                )
-
-                success = pipeline_result.get("success", False)
-
-                if autoresearch and success:
-                    print()
-                    print("=" * 80)
-                    print("🔁 STAGE: AutoResearch")
-                    print("=" * 80)
-                    print()
-
-                    history_root, _history_source = self._resolve_autoresearch_history_root(
-                        work_dir=work_dir,
-                        explicit_history_root=autoresearch_history_dir,
+                if autoresearch:
+                    from core.autoresearch import (
+                        construct_fresh_initial_node,
+                        continue_from_current_best,
                     )
-                    autoresearch_result = self._run_autoresearch_stage(
+
+                    print()
+                    print("=" * 80)
+                    print("🔁 STAGE: AutoResearch Initial Node")
+                    print("=" * 80)
+                    print()
+
+                    initial_result = construct_fresh_initial_node(
                         idea=idea,
-                        idea_id=idea_id,
                         work_dir=work_dir,
-                        history_root=history_root,
+                        templates_dir=self.project_root / "templates",
                         provider=provider,
+                        pause_after_resources=pause_after_resources,
+                        skip_resource_finder=skip_resource_finder,
+                        resource_finder_timeout=resource_finder_timeout,
+                        experiment_runner_timeout=timeout,
                         full_permissions=full_permissions,
-                        iterations=autoresearch_iterations,
+                        use_scribe=use_scribe,
+                        rule_maker_timeout=rule_maker_timeout,
                         scorer_timeout=scorer_timeout,
+                        manifest_trimmer_timeout=manifest_trimmer_timeout,
+                        autoresearch_history_dir=autoresearch_history_dir,
                     )
-                    pipeline_result["autoresearch"] = autoresearch_result
+                    pipeline_result = initial_result.pipeline_result or {
+                        "success": initial_result.success,
+                    }
+                    pipeline_result["autoresearch_initial_node"] = {
+                        "success": initial_result.success,
+                        "mode": initial_result.mode,
+                        "initial_sha": initial_result.initial_sha,
+                        "current_best_sha": initial_result.current_best_sha,
+                        "reason": initial_result.reason,
+                    }
+                    success = initial_result.success
+
+                    if success:
+                        autoresearch_result = continue_from_current_best(
+                            idea=idea,
+                            idea_id=idea_id,
+                            work_dir=work_dir,
+                            templates_dir=self.project_root / "templates",
+                            provider=provider,
+                            full_permissions=full_permissions,
+                            scorer_timeout=scorer_timeout,
+                            iterations=autoresearch_iterations,
+                            autoresearch_history_dir=autoresearch_history_dir,
+                            proposer_timeout=proposer_timeout,
+                            comment_timeout=timeout,
+                        )
+                        pipeline_result["autoresearch"] = autoresearch_result.get("autoresearch")
+                        success = autoresearch_result.get("success", False)
+                else:
+                    pipeline_result = orchestrator.run_pipeline(
+                        idea=idea,
+                        provider=provider,
+                        pause_after_resources=pause_after_resources,
+                        skip_resource_finder=skip_resource_finder,
+                        resource_finder_timeout=resource_finder_timeout,
+                        experiment_runner_timeout=timeout,
+                        full_permissions=full_permissions,
+                        use_scribe=use_scribe,
+                        scoring_enabled=scoring_enabled,
+                        rule_maker_timeout=rule_maker_timeout,
+                        scorer_timeout=scorer_timeout,
+                        bootstrap_mode=bootstrap_mode,
+                        manifest_trimmer_timeout=manifest_trimmer_timeout,
+                    )
+
+                    success = pipeline_result.get("success", False)
 
                 # Paper writing stage (optional)
                 if write_paper and success:
@@ -477,7 +559,17 @@ class ResearchRunner:
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
 
             # Return result info
-            return {"work_dir": work_dir, "github_url": github_url, "success": success}
+            result = {
+                "work_dir": work_dir,
+                "github_url": github_url,
+                "success": success,
+                "pipeline_result": pipeline_result,
+            }
+            if "autoresearch_initial_node" in pipeline_result:
+                result["autoresearch_initial_node"] = pipeline_result["autoresearch_initial_node"]
+            if "autoresearch" in pipeline_result:
+                result["autoresearch"] = pipeline_result["autoresearch"]
+            return result
 
         # LEGACY MONOLITHIC MODE BELOW
         print()
@@ -767,233 +859,6 @@ https://github.com/ChicagoHAI/neurico
                 print("   Changes are available locally")
 
         return {"work_dir": work_dir, "github_url": github_url, "success": result["success"]}
-
-    def _run_continue_autoresearch(
-        self,
-        idea: Dict[str, Any],
-        idea_id: str,
-        work_dir: Path,
-        provider: str,
-        full_permissions: bool,
-        scorer_timeout: int,
-        autoresearch_iterations: int,
-        autoresearch_history_dir: Optional[Path],
-    ) -> Dict[str, Any]:
-        """Continue AutoResearch from an existing scored workspace."""
-        print()
-        print("=" * 80)
-        print("🔁 CONTINUE AUTORESEARCH")
-        print("=" * 80)
-        print()
-
-        current_sha = self._validate_continue_autoresearch_workspace(work_dir)
-        history_root, history_source = self._resolve_autoresearch_history_root(
-            work_dir=work_dir,
-            explicit_history_root=autoresearch_history_dir,
-        )
-
-        from core.autoresearch import AttemptHistoryManager
-
-        history = AttemptHistoryManager(history_root, idea_id)
-        existing_attempts = history.list_attempts(current_sha)
-
-        print(f"   Work dir: {work_dir}")
-        print(f"   Current parent node: {current_sha}")
-        print(f"   History root: {history_root}")
-        print(f"   History source: {history_source}")
-        print(f"   Existing attempts for this node: {len(existing_attempts)}")
-        print(f"   Next attempt: attempt_{len(existing_attempts) + 1}")
-        print(f"   Iterations: {autoresearch_iterations}")
-        print()
-
-        autoresearch_payload = self._run_autoresearch_stage(
-            idea=idea,
-            idea_id=idea_id,
-            work_dir=work_dir,
-            history_root=history_root,
-            provider=provider,
-            full_permissions=full_permissions,
-            iterations=autoresearch_iterations,
-            scorer_timeout=scorer_timeout,
-        )
-
-        return {
-            "success": autoresearch_payload["success"],
-            "mode": "continue_autoresearch",
-            "work_dir": str(work_dir),
-            "autoresearch": autoresearch_payload,
-        }
-
-    def _validate_continue_autoresearch_workspace(self, work_dir: Path) -> str:
-        """Validate the workspace can be used as a continuation parent."""
-        from core.autoresearch import CheckpointManager
-
-        work_dir = Path(work_dir)
-        if not work_dir.exists():
-            raise ValueError(f"Workspace does not exist: {work_dir}")
-
-        checkpoints = CheckpointManager(work_dir)
-        if not checkpoints.has_commits:
-            raise ValueError(
-                "Cannot continue AutoResearch because the workspace has no Git checkpoint."
-            )
-
-        required_paths = [
-            work_dir / "scoring" / "results.json",
-            work_dir / "scoring" / "interface.md",
-            work_dir / "scoring" / "eval.py",
-        ]
-        missing = [str(path.relative_to(work_dir)) for path in required_paths if not path.exists()]
-        if missing:
-            raise ValueError(
-                "Cannot continue AutoResearch because required scoring files are missing: "
-                + ", ".join(missing)
-            )
-
-        status_lines = [
-            line
-            for line in checkpoints.repo.git.status("--porcelain").splitlines()
-            if line.strip() and not self._is_allowed_continue_dirty_status(line)
-        ]
-        if status_lines:
-            raise ValueError(
-                "Cannot continue AutoResearch with a dirty workspace. "
-                "Commit, stash, or remove pending changes first. Status:\n"
-                + "\n".join(status_lines[:20])
-            )
-
-        current_sha = checkpoints.current_sha()
-        if current_sha is None:
-            raise ValueError("Cannot continue AutoResearch because Git HEAD is unavailable.")
-        return current_sha
-
-    @staticmethod
-    def _is_allowed_continue_dirty_status(status_line: str) -> bool:
-        """Allow known paper-writer outputs to coexist with continuation."""
-        from core.autoresearch import PAPER_OUTPUT_PATTERNS
-
-        rel_path = ResearchRunner._status_line_path(status_line)
-        if rel_path is None:
-            return False
-
-        for pattern in PAPER_OUTPUT_PATTERNS:
-            if pattern.endswith("/") and rel_path.startswith(pattern):
-                return True
-            if fnmatch.fnmatch(rel_path, pattern):
-                return True
-        return False
-
-    @staticmethod
-    def _status_line_path(status_line: str) -> Optional[str]:
-        if len(status_line) < 4:
-            return None
-        path = status_line[3:].strip()
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        if path.startswith('"') and path.endswith('"'):
-            path = path[1:-1]
-        return path or None
-
-    def _run_autoresearch_stage(
-        self,
-        idea: Dict[str, Any],
-        idea_id: str,
-        work_dir: Path,
-        history_root: Path,
-        provider: str,
-        full_permissions: bool,
-        iterations: int,
-        scorer_timeout: int,
-    ) -> Dict[str, Any]:
-        """Run AutoResearch and persist continuation metadata."""
-        from core.autoresearch import run_autoresearch_loop
-
-        autoresearch_result = run_autoresearch_loop(
-            idea=idea,
-            idea_id=idea_id,
-            work_dir=work_dir,
-            history_root=history_root,
-            iterations=iterations,
-            provider=provider,
-            templates_dir=self.project_root / "templates",
-            full_permissions=full_permissions,
-            scorer_timeout=scorer_timeout,
-        )
-        payload = self._autoresearch_result_payload(autoresearch_result)
-        self._write_autoresearch_state(
-            work_dir=work_dir,
-            history_root=history_root,
-            autoresearch_payload=payload,
-            iterations=iterations,
-        )
-        return payload
-
-    @staticmethod
-    def _autoresearch_result_payload(autoresearch_result) -> Dict[str, Any]:
-        return {
-            "success": autoresearch_result.success,
-            "initial_sha": autoresearch_result.initial_sha,
-            "current_best_sha": autoresearch_result.current_best_sha,
-            "iterations": [
-                {
-                    "iteration": item.iteration,
-                    "parent_sha": item.parent_sha,
-                    "child_sha": item.child_sha,
-                    "accepted": item.accepted,
-                    "reason": item.reason,
-                    "attempt_dir": str(item.attempt_dir),
-                }
-                for item in autoresearch_result.iterations
-            ],
-        }
-
-    def _resolve_autoresearch_history_root(
-        self,
-        work_dir: Path,
-        explicit_history_root: Optional[Path],
-    ) -> tuple[Path, str]:
-        if explicit_history_root is not None:
-            return Path(explicit_history_root), "cli"
-
-        state_path = self._autoresearch_state_path(work_dir)
-        if state_path.exists():
-            try:
-                state = json.loads(state_path.read_text(encoding="utf-8"))
-                saved_history_root = state.get("history_root")
-                if saved_history_root:
-                    saved_path = Path(saved_history_root)
-                    if saved_path.exists():
-                        return saved_path, "saved autoresearch state"
-                    print(
-                        "   Warning: Saved AutoResearch history root does not exist; "
-                        f"using default instead: {saved_path}"
-                    )
-            except (OSError, json.JSONDecodeError):
-                print(f"   Warning: Could not read AutoResearch state: {state_path}")
-
-        return Path(work_dir) / "logs" / "experiment-autoresearch", "default"
-
-    def _write_autoresearch_state(
-        self,
-        work_dir: Path,
-        history_root: Path,
-        autoresearch_payload: Dict[str, Any],
-        iterations: int,
-    ) -> None:
-        state_path = self._autoresearch_state_path(work_dir)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state = {
-            "history_root": str(Path(history_root)),
-            "last_initial_sha": autoresearch_payload.get("initial_sha"),
-            "last_current_best_sha": autoresearch_payload.get("current_best_sha"),
-            "last_run_iterations": iterations,
-            "updated_at": datetime.now().isoformat(),
-        }
-        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
-
-    @staticmethod
-    def _autoresearch_state_path(work_dir: Path) -> Path:
-        return Path(work_dir) / ".neurico" / "autoresearch_state.json"
 
     def _run_paper_writer_stage(
         self,
@@ -1344,26 +1209,46 @@ def main():
         "--bootstrap-rule-maker",
         action="store_true",
         help="Bootstrap mode: design a scoring protocol for an existing workspace whose "
-             "experiment_runner has already produced its outputs. Skips resource_finder, "
-             "forward rule_maker, and experiment_runner stages. Inserts the workspace_manifest "
-             "two-pass curation (mechanical + trimmer agent) and the bootstrap rule_maker, "
-             "then runs the scorer."
+        "experiment_runner has already produced its outputs. Skips resource_finder, "
+        "forward rule_maker, and experiment_runner stages. Inserts the workspace_manifest "
+        "two-pass curation (mechanical + trimmer agent) and the bootstrap rule_maker, "
+        "then runs the scorer.",
+    )
+    parser.add_argument(
+        "--bootstrap-autoresearch-baseline",
+        action="store_true",
+        help="Convert an existing unscored workspace into a scored AutoResearch "
+        "baseline checkpoint. Reuses the bootstrap rule_maker pipeline to "
+        "create the scoring protocol, runs the scorer, checkpoints the "
+        "scored baseline, and writes AutoResearch continuation state. "
+        "Does not run AutoResearch iterations.",
+    )
+    parser.add_argument(
+        "--proposer-timeout",
+        type=int,
+        default=900,
+        help="Timeout for proposal generation stages in seconds " "(default: 900 = 15 min)",
     )
     parser.add_argument(
         "--manifest-trimmer-timeout",
         type=int,
         default=300,
         help="Timeout for each manifest_trimmer agent call in seconds (default: 300 = 5 min, "
-             "bootstrap mode only)"
+        "bootstrap mode only)",
     )
 
     args = parser.parse_args()
-    if args.autoresearch and args.continue_autoresearch:
-        parser.error(
-            "Use either --autoresearch for a full pipeline run or "
-            "--continue-autoresearch for an existing scored workspace, not both."
+    autoresearch_modes = [
+        name
+        for name, enabled in (
+            ("--autoresearch", args.autoresearch),
+            ("--continue-autoresearch", args.continue_autoresearch),
+            ("--bootstrap-autoresearch-baseline", args.bootstrap_autoresearch_baseline),
         )
-
+        if enabled
+    ]
+    if len(autoresearch_modes) > 1:
+        parser.error("Choose at most one AutoResearch entry mode: " + ", ".join(autoresearch_modes))
     runner = ResearchRunner(use_github=not args.no_github, github_org=args.github_org)
 
     # Handle comment mode separately
@@ -1421,6 +1306,8 @@ def main():
             autoresearch_iterations=args.autoresearch_iterations,
             autoresearch_history_dir=args.autoresearch_history_dir,
             continue_autoresearch=args.continue_autoresearch,
+            bootstrap_autoresearch_baseline=args.bootstrap_autoresearch_baseline,
+            proposer_timeout=args.proposer_timeout,
         )
 
         print()

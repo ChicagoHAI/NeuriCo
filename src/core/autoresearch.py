@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional
+import fnmatch
 import json
 import math
 import re
@@ -41,8 +42,12 @@ HIDDEN_SCORING_PATTERNS = (
     ".scoring_sealed/",
 )
 
-AUTORESEARCH_LOG_PATTERNS = ("logs/experiment-autoresearch/",)
+AUTORESEARCH_LOG_PATTERNS = (
+    "logs/experiment-autoresearch/",
+    "logs/bootstrap_baseline/",
+)
 AUTORESEARCH_STATE_PATTERNS = (".neurico/autoresearch_state.json",)
+BOOTSTRAP_BASELINE_STATE_PATTERNS = (".neurico/bootstrap_baseline_state.json",)
 AGENT_LOCAL_PATTERNS = (".claude/", ".gemini/", ".codex/")
 PAPER_OUTPUT_PATTERNS = (
     "paper/",
@@ -56,11 +61,136 @@ CHECKPOINT_EXCLUDE_PATTERNS = (
     HIDDEN_SCORING_PATTERNS
     + AUTORESEARCH_LOG_PATTERNS
     + AUTORESEARCH_STATE_PATTERNS
+    + BOOTSTRAP_BASELINE_STATE_PATTERNS
     + AGENT_LOCAL_PATTERNS
     + PAPER_OUTPUT_PATTERNS
 )
 
 COMPARISON_EPS = 1e-6
+
+
+def autoresearch_state_path(work_dir: Path) -> Path:
+    """Return the per-workspace AutoResearch continuation state path."""
+    return Path(work_dir) / ".neurico" / "autoresearch_state.json"
+
+
+def bootstrap_baseline_state_path(work_dir: Path) -> Path:
+    """Return the per-workspace bootstrap baseline construction state path."""
+    return Path(work_dir) / ".neurico" / "bootstrap_baseline_state.json"
+
+
+def read_bootstrap_baseline_state(work_dir: Path) -> Dict[str, Any]:
+    """Read bootstrap baseline state, returning an empty dict when absent/invalid."""
+    state_path = bootstrap_baseline_state_path(work_dir)
+    if not state_path.exists():
+        return {}
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def read_autoresearch_state(work_dir: Path) -> Dict[str, Any]:
+    """Read AutoResearch continuation state, returning an empty dict when absent/invalid."""
+    state_path = autoresearch_state_path(work_dir)
+    if not state_path.exists():
+        return {}
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def autoresearch_state_lineage_source_sha(state: Dict[str, Any]) -> Optional[str]:
+    """Return the first scored node for this lineage."""
+    value = state.get("lineage_source_sha")
+    return value if isinstance(value, str) and value else None
+
+
+def autoresearch_state_current_best_sha(state: Dict[str, Any]) -> Optional[str]:
+    """Return the current best node."""
+    value = state.get("current_best_sha")
+    return value if isinstance(value, str) and value else None
+
+
+def autoresearch_state_last_iteration(state: Dict[str, Any]) -> int:
+    """Return the cumulative number of completed AutoResearch iterations."""
+    value = state.get("last_iteration")
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def write_bootstrap_baseline_state(
+    *,
+    work_dir: Path,
+    history_root: Path,
+    bootstrap_source_sha: str,
+    autoresearch_ready_sha: Optional[str],
+    last_attempt: int,
+) -> None:
+    """Persist bootstrap baseline construction progress without marking it current-best."""
+    state_path = bootstrap_baseline_state_path(work_dir)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now().isoformat()
+    state = {
+        "history_root": str(Path(history_root)),
+        "bootstrap_source_sha": bootstrap_source_sha,
+        "autoresearch_ready_sha": autoresearch_ready_sha,
+        "last_attempt": last_attempt,
+        "updated_at": now,
+    }
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def resolve_autoresearch_history_root(
+    work_dir: Path,
+    explicit_history_root: Optional[Path],
+) -> tuple[Path, str]:
+    """Resolve the AutoResearch history root from CLI, state, or default."""
+    if explicit_history_root is not None:
+        return Path(explicit_history_root), "cli"
+
+    state_path = autoresearch_state_path(work_dir)
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            saved_history_root = state.get("history_root")
+            if saved_history_root:
+                saved_path = Path(saved_history_root)
+                if saved_path.exists():
+                    return saved_path, "saved autoresearch state"
+                print(
+                    "   Warning: Saved AutoResearch history root does not exist; "
+                    f"using default instead: {saved_path}"
+                )
+        except (OSError, json.JSONDecodeError):
+            print(f"   Warning: Could not read AutoResearch state: {state_path}")
+
+    return Path(work_dir) / "logs" / "experiment-autoresearch", "default"
+
+
+def write_autoresearch_state(
+    *,
+    work_dir: Path,
+    history_root: Path,
+    lineage_source_sha: Optional[str],
+    current_best_sha: Optional[str],
+    last_iteration: int,
+) -> None:
+    """Persist enough state for a later --continue-autoresearch run."""
+    state_path = autoresearch_state_path(work_dir)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        "history_root": str(Path(history_root)),
+        "lineage_source_sha": lineage_source_sha,
+        "current_best_sha": current_best_sha,
+        "last_iteration": last_iteration,
+        "updated_at": datetime.now().isoformat(),
+    }
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
 
 ProposalGeneratorHook = Callable[
     [Dict[str, Any], Path, str, Path, list[Dict[str, Any]]],
@@ -108,6 +238,22 @@ class AutoResearchRunResult:
     initial_sha: str
     current_best_sha: str
     iterations: list[AutoResearchIterationResult] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class InitialAutoResearchNodeResult:
+    """Summary of a phase-1 AutoResearch initial-node construction."""
+
+    success: bool
+    mode: str
+    work_dir: str
+    initial_sha: Optional[str] = None
+    current_best_sha: Optional[str] = None
+    reason: Optional[str] = None
+    pipeline_result: Optional[Dict[str, Any]] = None
+    attempt_dir: Optional[str] = None
+    bootstrap_source_sha: Optional[str] = None
+    decision_path: Optional[str] = None
 
 
 class CheckpointManager:
@@ -199,23 +345,42 @@ class CheckpointManager:
         commit = self.repo.index.commit(message)
         return Checkpoint(sha=commit.hexsha, message=message)
 
-    def restore_checkpoint(self, sha: str) -> None:
+    def restore_checkpoint(
+        self,
+        sha: str,
+        *,
+        clean_untracked_public: bool = False,
+        remove_hidden_scoring: bool = False,
+    ) -> None:
         """
         Restore tracked workspace files to a checkpoint.
 
-        This intentionally avoids `git clean` so ignored datasets, venvs, and
-        other local resources are preserved. AutoResearch controller logs are
-        additionally preserved across reset so attempt history remains a
-        permanent workspace log, not part of mutable experiment state.
+        By default this avoids `git clean` so ignored datasets, venvs, and
+        other local resources are preserved. Bootstrap baseline recovery may
+        request removal of public untracked files and hidden scoring harness
+        files so failed transforms do not contaminate the original unscored
+        checkpoint.
         """
         preserved_paths = self._copy_preserved_paths_to_temp(
             AUTORESEARCH_LOG_PATTERNS + PAPER_OUTPUT_PATTERNS
         )
         try:
             self.repo.git.reset("--hard", sha)
+            if clean_untracked_public:
+                self.repo.git.clean("-fd")
+            if remove_hidden_scoring:
+                self._remove_workspace_paths(HIDDEN_SCORING_PATTERNS)
         finally:
             if preserved_paths is not None:
                 self._restore_preserved_paths_from_temp(preserved_paths)
+
+    def checkpoint_exists(self, sha: str) -> bool:
+        """Return whether a commit object exists in this workspace repository."""
+        try:
+            self.repo.git.cat_file("-e", f"{sha}^{{commit}}")
+            return True
+        except GitCommandError:
+            return False
 
     def current_sha(self) -> Optional[str]:
         if not self.has_commits:
@@ -288,6 +453,14 @@ class CheckpointManager:
                 shutil.copy2(source, target)
         finally:
             shutil.rmtree(temp_parent, ignore_errors=True)
+
+    def _remove_workspace_paths(self, patterns: Iterable[str]) -> None:
+        for rel_path in self._matching_workspace_paths(patterns):
+            target = self.work_dir / rel_path
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            elif target.exists():
+                target.unlink()
 
     def _matching_workspace_paths(self, patterns: Iterable[str]) -> list[Path]:
         matches: set[Path] = set()
@@ -418,12 +591,14 @@ class AttemptHistoryManager:
             summaries.append(
                 {
                     "attempt_dir": str(attempt_dir),
-                    "proposal": proposal_path.read_text(encoding="utf-8")
-                    if proposal_path.exists()
-                    else "",
-                    "child_sha": child_path.read_text(encoding="utf-8").strip()
-                    if child_path.exists()
-                    else "",
+                    "proposal": (
+                        proposal_path.read_text(encoding="utf-8") if proposal_path.exists() else ""
+                    ),
+                    "child_sha": (
+                        child_path.read_text(encoding="utf-8").strip()
+                        if child_path.exists()
+                        else ""
+                    ),
                     "decision": decision,
                 }
             )
@@ -559,6 +734,7 @@ class ScoringResultComparator:
         candidate_satisfied = {
             name for name, prop in candidate.properties.items() if prop["satisfied"]
         }
+        all_properties = set(parent.properties)
         lost_satisfied = sorted(parent_satisfied - candidate_satisfied)
         gained_satisfied = sorted(candidate_satisfied - parent_satisfied)
 
@@ -568,6 +744,44 @@ class ScoringResultComparator:
                 reason=(
                     "Candidate loses previously satisfied scoring properties: "
                     f"{', '.join(lost_satisfied)}."
+                ),
+                parent_summary=parent,
+                candidate_summary=candidate,
+            )
+
+        if parent_satisfied == all_properties:
+            improved_properties = []
+            regressed_but_satisfied_properties = []
+            for name in sorted(candidate_keys):
+                parent_prop = parent.properties[name]
+                candidate_prop = candidate.properties[name]
+                if candidate_prop["margin"] > parent_prop["margin"] + COMPARISON_EPS:
+                    improved_properties.append(name)
+                elif candidate_prop["margin"] < parent_prop["margin"] - COMPARISON_EPS:
+                    regressed_but_satisfied_properties.append(name)
+
+            if improved_properties:
+                reason = (
+                    "Parent and candidate both satisfy all scoring properties. "
+                    f"Candidate improves {', '.join(improved_properties)}."
+                )
+                if regressed_but_satisfied_properties:
+                    reason += (
+                        " Regressed-but-still-satisfied properties: "
+                        f"{', '.join(regressed_but_satisfied_properties)}."
+                    )
+                return ComparisonDecision(
+                    accepted=True,
+                    reason=reason,
+                    parent_summary=parent,
+                    candidate_summary=candidate,
+                )
+
+            return ComparisonDecision(
+                accepted=False,
+                reason=(
+                    "Parent and candidate both satisfy all scoring properties, "
+                    "but candidate does not improve any metric."
                 ),
                 parent_summary=parent,
                 candidate_summary=candidate,
@@ -722,6 +936,565 @@ class ScoringResultComparator:
         }
 
 
+def construct_fresh_initial_node(
+    *,
+    idea: Dict[str, Any],
+    work_dir: Path,
+    templates_dir: Path,
+    provider: str,
+    pause_after_resources: bool,
+    skip_resource_finder: bool,
+    resource_finder_timeout: int,
+    experiment_runner_timeout: int,
+    full_permissions: bool,
+    use_scribe: bool,
+    rule_maker_timeout: int,
+    scorer_timeout: int,
+    manifest_trimmer_timeout: int,
+    autoresearch_history_dir: Optional[Path],
+) -> InitialAutoResearchNodeResult:
+    """Run the fresh scored pipeline and mark its output as the initial best node."""
+    from core.pipeline_orchestrator import ResearchPipelineOrchestrator
+
+    orchestrator = ResearchPipelineOrchestrator(
+        work_dir=work_dir,
+        templates_dir=templates_dir,
+    )
+    pipeline_result = orchestrator.run_pipeline(
+        idea=idea,
+        provider=provider,
+        pause_after_resources=pause_after_resources,
+        skip_resource_finder=skip_resource_finder,
+        resource_finder_timeout=resource_finder_timeout,
+        experiment_runner_timeout=experiment_runner_timeout,
+        full_permissions=full_permissions,
+        use_scribe=use_scribe,
+        scoring_enabled=True,
+        rule_maker_timeout=rule_maker_timeout,
+        scorer_timeout=scorer_timeout,
+        bootstrap_mode=False,
+        manifest_trimmer_timeout=manifest_trimmer_timeout,
+    )
+
+    if not pipeline_result.get("success", False):
+        return InitialAutoResearchNodeResult(
+            success=False,
+            mode="fresh_initial_node",
+            work_dir=str(work_dir),
+            reason="Fresh scored pipeline failed.",
+            pipeline_result=pipeline_result,
+        )
+
+    checkpoints = CheckpointManager(work_dir)
+    initial = checkpoints.create_checkpoint("AutoResearch initial public scored state")
+    history_root, _history_source = resolve_autoresearch_history_root(
+        work_dir,
+        autoresearch_history_dir,
+    )
+    write_autoresearch_state(
+        work_dir=work_dir,
+        history_root=history_root,
+        lineage_source_sha=initial.sha,
+        current_best_sha=initial.sha,
+        last_iteration=0,
+    )
+    return InitialAutoResearchNodeResult(
+        success=True,
+        mode="fresh_initial_node",
+        work_dir=str(work_dir),
+        initial_sha=initial.sha,
+        current_best_sha=initial.sha,
+        reason="Fresh scored pipeline succeeded and initial checkpoint was created.",
+        pipeline_result=pipeline_result,
+    )
+
+
+def construct_bootstrap_initial_node(
+    *,
+    idea: Dict[str, Any],
+    idea_id: str,
+    work_dir: Path,
+    templates_dir: Path,
+    provider: str,
+    full_permissions: bool,
+    rule_maker_timeout: int,
+    scorer_timeout: int,
+    manifest_trimmer_timeout: int,
+    autoresearch_history_dir: Optional[Path],
+    prepare_workspace: Optional[Callable[[Path], None]] = None,
+) -> Dict[str, Any]:
+    """Create an initial scored AutoResearch node from an existing unscored workspace."""
+    from core.pipeline_orchestrator import ResearchPipelineOrchestrator
+
+    print()
+    print("=" * 80)
+    print("🔁 BOOTSTRAP AUTORESEARCH BASELINE")
+    print("=" * 80)
+    print()
+
+    work_dir = Path(work_dir)
+    checkpoints = CheckpointManager(work_dir)
+    autoresearch_state = read_autoresearch_state(work_dir)
+    saved_current_best_sha = autoresearch_state_current_best_sha(autoresearch_state)
+    if isinstance(saved_current_best_sha, str) and checkpoints.checkpoint_exists(
+        saved_current_best_sha
+    ):
+        print("✅ Workspace already has AutoResearch current best.")
+        print(f"   Current best checkpoint: {saved_current_best_sha}")
+        print("   No bootstrap baseline attempt was created.")
+        return {
+            "success": True,
+            "mode": "bootstrap_initial_node",
+            "work_dir": str(work_dir),
+            "attempt_dir": None,
+            "bootstrap_source_sha": None,
+            "child_sha": None,
+            "baseline_sha": saved_current_best_sha,
+            "initial_sha": autoresearch_state_lineage_source_sha(autoresearch_state),
+            "current_best_sha": saved_current_best_sha,
+            "reason": "Workspace already has AutoResearch current best.",
+            "decision_path": None,
+        }
+
+    bootstrap_history_root = work_dir / "logs" / "bootstrap_baseline"
+    bootstrap_state = read_bootstrap_baseline_state(work_dir)
+    saved_source_sha = bootstrap_state.get("bootstrap_source_sha")
+
+    if isinstance(saved_source_sha, str) and checkpoints.checkpoint_exists(saved_source_sha):
+        bootstrap_source_sha = saved_source_sha
+    else:
+        source = checkpoints.create_checkpoint("Bootstrap baseline original unscored workspace")
+        bootstrap_source_sha = source.sha
+        write_bootstrap_baseline_state(
+            work_dir=work_dir,
+            history_root=bootstrap_history_root,
+            bootstrap_source_sha=bootstrap_source_sha,
+            autoresearch_ready_sha=None,
+            last_attempt=0,
+        )
+
+    bootstrap_history = AttemptHistoryManager(
+        bootstrap_history_root,
+        idea_id,
+    )
+    attempt_dir = bootstrap_history.next_attempt_dir(bootstrap_source_sha)
+    attempt_number = AttemptHistoryManager._attempt_number(attempt_dir.name) or 0
+
+    print(f"   Work dir: {work_dir}")
+    print(f"   Bootstrap source checkpoint: {bootstrap_source_sha}")
+    print(f"   Bootstrap attempt dir: {attempt_dir}")
+    print()
+
+    orchestrator = ResearchPipelineOrchestrator(
+        work_dir=work_dir,
+        templates_dir=templates_dir,
+    )
+
+    baseline_sha: Optional[str] = None
+    child_sha: Optional[str] = None
+    comment_result: Optional[Dict[str, Any]] = None
+    scorer_result: Dict[str, Any] = {}
+    reason = ""
+    accepted = False
+
+    def parent_summary() -> ScoreSummary:
+        return ScoreSummary(
+            valid=False,
+            source="parent",
+            error="Original workspace was unscored.",
+        )
+
+    def write_state(ready_sha: Optional[str]) -> None:
+        write_bootstrap_baseline_state(
+            work_dir=work_dir,
+            history_root=bootstrap_history_root,
+            bootstrap_source_sha=bootstrap_source_sha,
+            autoresearch_ready_sha=ready_sha,
+            last_attempt=attempt_number,
+        )
+
+    def finish_attempt(
+        *,
+        child_sha_value: Optional[str],
+        baseline_sha_value: Optional[str],
+        accepted_value: bool,
+        reason_value: str,
+        child_summary_value: ScoreSummary,
+    ) -> Dict[str, Any]:
+        return _finish_bootstrap_initial_node_attempt(
+            attempt_dir=attempt_dir,
+            work_dir=work_dir,
+            bootstrap_source_sha=bootstrap_source_sha,
+            child_sha=child_sha_value,
+            baseline_sha=baseline_sha_value,
+            accepted=accepted_value,
+            reason=reason_value,
+            parent_summary=parent_summary(),
+            child_summary=child_summary_value,
+            comment_result=comment_result,
+            scorer_result=scorer_result,
+        )
+
+    try:
+        if prepare_workspace is not None:
+            prepare_workspace(work_dir)
+
+        pipeline_result = orchestrator.run_pipeline(
+            idea=idea,
+            provider=provider,
+            full_permissions=full_permissions,
+            scoring_enabled=True,
+            bootstrap_mode=True,
+            manifest_trimmer_timeout=manifest_trimmer_timeout,
+            rule_maker_timeout=rule_maker_timeout,
+            scorer_timeout=scorer_timeout,
+        )
+        scorer_result = pipeline_result.get("stages", {}).get("scorer", {})
+        scorer_ok = scorer_result.get("success", False)
+
+        if scorer_ok:
+            child_summary = ScoringResultComparator().load_summary(
+                work_dir / "scoring" / "results.json",
+                source="candidate",
+            )
+            baseline = checkpoints.create_checkpoint("Bootstrap baseline scored workspace")
+            baseline_sha = baseline.sha
+            child_sha = baseline.sha
+            accepted = True
+            reason = "Bootstrap baseline scorer succeeded and checkpoint was created."
+            history_root, _history_source = resolve_autoresearch_history_root(
+                work_dir, autoresearch_history_dir
+            )
+            write_autoresearch_state(
+                work_dir=work_dir,
+                history_root=history_root,
+                lineage_source_sha=baseline_sha,
+                current_best_sha=baseline_sha,
+                last_iteration=0,
+            )
+            print()
+            print("✅ Bootstrap AutoResearch baseline is ready.")
+            print(f"   Baseline checkpoint: {baseline_sha}")
+            print("   Next step: run --continue-autoresearch")
+        else:
+            reason = (
+                scorer_result.get("error")
+                or pipeline_result.get("error")
+                or "Bootstrap baseline pipeline failed."
+            )
+            child_summary = ScoreSummary(
+                valid=False,
+                source="candidate",
+                error=reason,
+            )
+            failed_candidate = checkpoints.create_checkpoint(
+                "Bootstrap baseline failed candidate workspace"
+            )
+            child_sha = failed_candidate.sha
+
+        result = finish_attempt(
+            child_sha_value=child_sha,
+            baseline_sha_value=baseline_sha,
+            accepted_value=accepted,
+            reason_value=reason,
+            child_summary_value=child_summary,
+        )
+        write_state(baseline_sha)
+        return result
+    except Exception as e:
+        reason = str(e) or e.__class__.__name__
+        child_summary = ScoreSummary(
+            valid=False,
+            source="candidate",
+            error=reason,
+        )
+        try:
+            failed_candidate = checkpoints.create_checkpoint(
+                "Bootstrap baseline failed candidate workspace"
+            )
+            child_sha = failed_candidate.sha
+        except Exception:
+            child_sha = None
+        result = finish_attempt(
+            child_sha_value=child_sha,
+            baseline_sha_value=None,
+            accepted_value=False,
+            reason_value=reason,
+            child_summary_value=child_summary,
+        )
+        write_state(None)
+        return result
+    finally:
+        if baseline_sha is None:
+            checkpoints.restore_checkpoint(
+                bootstrap_source_sha,
+                clean_untracked_public=True,
+                remove_hidden_scoring=True,
+            )
+
+
+def continue_from_current_best(
+    *,
+    idea: Dict[str, Any],
+    idea_id: str,
+    work_dir: Path,
+    templates_dir: Path,
+    provider: str,
+    full_permissions: bool,
+    scorer_timeout: int,
+    iterations: int,
+    autoresearch_history_dir: Optional[Path],
+    proposer_timeout: int,
+    comment_timeout: int,
+) -> Dict[str, Any]:
+    """Validate the current scored node and run Phase 2 AutoResearch search."""
+    print()
+    print("=" * 80)
+    print("🔁 CONTINUE AUTORESEARCH")
+    print("=" * 80)
+    print()
+
+    current_sha = validate_continue_autoresearch_workspace(work_dir)
+    state = read_autoresearch_state(work_dir)
+    lineage_source_sha = autoresearch_state_lineage_source_sha(state) or current_sha
+    previous_last_iteration = autoresearch_state_last_iteration(state)
+    history_root, history_source = resolve_autoresearch_history_root(
+        work_dir,
+        autoresearch_history_dir,
+    )
+
+    if iterations == 0:
+        print(f"   Work dir: {work_dir}")
+        print(f"   Current parent node: {current_sha}")
+        print(f"   History root: {history_root}")
+        print(f"   History source: {history_source}")
+        print("   Iterations: 0")
+        print("   No AutoResearch attempts created.")
+        print()
+        return {
+            "success": True,
+            "mode": "continue_autoresearch",
+            "work_dir": str(work_dir),
+            "autoresearch": {
+                "success": True,
+                "initial_sha": lineage_source_sha,
+                "current_best_sha": current_sha,
+                "iterations": [],
+            },
+        }
+
+    history = AttemptHistoryManager(history_root, idea_id)
+    existing_attempts = history.list_attempts(current_sha)
+
+    print(f"   Work dir: {work_dir}")
+    print(f"   Current parent node: {current_sha}")
+    print(f"   History root: {history_root}")
+    print(f"   History source: {history_source}")
+    print(f"   Existing attempts for this node: {len(existing_attempts)}")
+    print(f"   Next attempt: attempt_{len(existing_attempts) + 1}")
+    print(f"   Iterations: {iterations}")
+    print()
+
+    autoresearch_result = run_autoresearch_loop(
+        idea=idea,
+        idea_id=idea_id,
+        work_dir=work_dir,
+        history_root=history_root,
+        iterations=iterations,
+        provider=provider,
+        templates_dir=templates_dir,
+        full_permissions=full_permissions,
+        proposal_timeout=proposer_timeout,
+        comment_timeout=comment_timeout,
+        scorer_timeout=scorer_timeout,
+    )
+    payload = autoresearch_result_payload(autoresearch_result)
+    payload["initial_sha"] = lineage_source_sha
+    write_autoresearch_state(
+        work_dir=work_dir,
+        history_root=history_root,
+        lineage_source_sha=lineage_source_sha,
+        current_best_sha=payload.get("current_best_sha"),
+        last_iteration=previous_last_iteration + len(payload.get("iterations", [])),
+    )
+
+    return {
+        "success": payload["success"],
+        "mode": "continue_autoresearch",
+        "work_dir": str(work_dir),
+        "autoresearch": payload,
+    }
+
+
+def validate_continue_autoresearch_workspace(work_dir: Path) -> str:
+    """Validate the workspace is positioned at its saved AutoResearch current best."""
+    work_dir = Path(work_dir)
+    if not work_dir.exists():
+        raise ValueError(f"Workspace does not exist: {work_dir}")
+
+    checkpoints = CheckpointManager(work_dir)
+    if not checkpoints.has_commits:
+        raise ValueError(
+            "Cannot continue AutoResearch because the workspace has no Git checkpoint."
+        )
+
+    state = read_autoresearch_state(work_dir)
+    current_best_sha = autoresearch_state_current_best_sha(state)
+    if current_best_sha is None:
+        raise ValueError(
+            "Cannot continue AutoResearch because .neurico/autoresearch_state.json "
+            "does not define current_best_sha."
+        )
+    if not checkpoints.checkpoint_exists(current_best_sha):
+        raise ValueError(
+            "Cannot continue AutoResearch because current_best_sha does not exist "
+            f"in this workspace Git repository: {current_best_sha}"
+        )
+
+    required_paths = [
+        work_dir / "scoring" / "results.json",
+        work_dir / "scoring" / "interface.md",
+        work_dir / "scoring" / "eval.py",
+    ]
+    missing = [str(path.relative_to(work_dir)) for path in required_paths if not path.exists()]
+    if missing:
+        raise ValueError(
+            "Cannot continue AutoResearch because required scoring files are missing: "
+            + ", ".join(missing)
+        )
+
+    status_lines = [
+        line
+        for line in checkpoints.repo.git.status("--porcelain").splitlines()
+        if line.strip() and not _is_allowed_continue_dirty_status(line)
+    ]
+    if status_lines:
+        raise ValueError(
+            "Cannot continue AutoResearch with a dirty workspace. "
+            "Commit, stash, or remove pending changes first. Status:\n"
+            + "\n".join(status_lines[:20])
+        )
+
+    current_sha = checkpoints.current_sha()
+    if current_sha is None:
+        raise ValueError("Cannot continue AutoResearch because Git HEAD is unavailable.")
+    if current_sha != current_best_sha:
+        raise ValueError(
+            "Cannot continue AutoResearch because workspace HEAD does not match "
+            "current_best_sha. "
+            f"HEAD={current_sha}; current_best_sha={current_best_sha}"
+        )
+    return current_best_sha
+
+
+def autoresearch_result_payload(autoresearch_result: AutoResearchRunResult) -> Dict[str, Any]:
+    """Convert an AutoResearchRunResult into the public runner payload shape."""
+    return {
+        "success": autoresearch_result.success,
+        "initial_sha": autoresearch_result.initial_sha,
+        "current_best_sha": autoresearch_result.current_best_sha,
+        "iterations": [
+            {
+                "iteration": item.iteration,
+                "parent_sha": item.parent_sha,
+                "child_sha": item.child_sha,
+                "accepted": item.accepted,
+                "reason": item.reason,
+                "attempt_dir": str(item.attempt_dir),
+            }
+            for item in autoresearch_result.iterations
+        ],
+    }
+
+
+def _finish_bootstrap_initial_node_attempt(
+    *,
+    attempt_dir: Path,
+    work_dir: Path,
+    bootstrap_source_sha: str,
+    child_sha: Optional[str],
+    baseline_sha: Optional[str],
+    accepted: bool,
+    reason: str,
+    parent_summary: ScoreSummary,
+    child_summary: ScoreSummary,
+    comment_result: Optional[Dict[str, Any]],
+    scorer_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    attempt_dir = Path(attempt_dir)
+    results_path_value = scorer_result.get("results_path") if scorer_result else None
+    results_path = Path(results_path_value) if results_path_value else None
+    if results_path is not None and results_path.exists():
+        shutil.copyfile(results_path, attempt_dir / "results.json")
+    else:
+        (attempt_dir / "results.json").write_text(
+            json.dumps({"error": "results.json missing"}, indent=2),
+            encoding="utf-8",
+        )
+
+    child_pointer = child_sha or baseline_sha
+    (attempt_dir / "child_pointer.txt").write_text(
+        f"{child_pointer}\n" if child_pointer else "",
+        encoding="utf-8",
+    )
+
+    decision = {
+        "parent_node_id": bootstrap_source_sha,
+        "parent_sha": bootstrap_source_sha,
+        "child_node_id": child_pointer,
+        "child_sha": child_pointer,
+        "baseline_sha": baseline_sha,
+        "accepted": accepted,
+        "reason": reason,
+        "parent_score_summary": parent_summary.as_dict(),
+        "child_score_summary": child_summary.as_dict(),
+        "comment_result": comment_result,
+        "scorer_result": scorer_result,
+    }
+    (attempt_dir / "decision.json").write_text(
+        json.dumps(decision, indent=2),
+        encoding="utf-8",
+    )
+    return {
+        "success": accepted,
+        "mode": "bootstrap_initial_node",
+        "work_dir": str(work_dir),
+        "attempt_dir": str(attempt_dir),
+        "bootstrap_source_sha": bootstrap_source_sha,
+        "child_sha": child_pointer,
+        "baseline_sha": baseline_sha,
+        "initial_sha": baseline_sha,
+        "current_best_sha": baseline_sha,
+        "reason": reason,
+        "decision_path": str(attempt_dir / "decision.json"),
+    }
+
+
+def _is_allowed_continue_dirty_status(status_line: str) -> bool:
+    """Allow known paper-writer outputs to coexist with continuation."""
+    rel_path = _status_line_path(status_line)
+    if rel_path is None:
+        return False
+
+    for pattern in PAPER_OUTPUT_PATTERNS:
+        if pattern.endswith("/") and rel_path.startswith(pattern):
+            return True
+        if fnmatch.fnmatch(rel_path, pattern):
+            return True
+    return False
+
+
+def _status_line_path(status_line: str) -> Optional[str]:
+    if len(status_line) < 4:
+        return None
+    path = status_line[3:].strip()
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    if path.startswith('"') and path.endswith('"'):
+        path = path[1:-1]
+    return path or None
+
+
 class AutoResearchController:
     """
     Runs the experiment-stage AutoResearch loop.
@@ -776,7 +1549,6 @@ class AutoResearchController:
             if result.accepted and result.child_sha:
                 current_best_sha = result.child_sha
 
-        self.checkpoints.restore_checkpoint(current_best_sha)
         return AutoResearchRunResult(
             success=True,
             initial_sha=initial.sha,
@@ -790,7 +1562,6 @@ class AutoResearchController:
         parent_sha: str,
     ) -> AutoResearchIterationResult:
         """Run one proposal/comment/scorer/checkpoint/compare attempt."""
-        self.checkpoints.restore_checkpoint(parent_sha)
         parent_results_path = self.work_dir / "scoring" / "results.json"
         parent_summary = self.comparator.load_summary(
             parent_results_path,
@@ -833,38 +1604,68 @@ class AutoResearchController:
                 source="candidate",
                 error=f"AutoResearch proposal/comment stage failed: {pre_scoring_error}",
             )
+            self._clear_stale_results_json()
+            results_path = self.work_dir / "scoring" / "results.json"
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+            results_path.write_text(
+                json.dumps(
+                    {
+                        "overall_satisfied": False,
+                        "error": candidate_summary.error,
+                        "generated_by": "autoresearch",
+                        "created_at": datetime.now().isoformat(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            child_sha: Optional[str] = None
+            checkpoint_error: Optional[str] = None
+            try:
+                candidate_checkpoint = self.checkpoints.create_checkpoint(
+                    f"AutoResearch failed candidate iteration {iteration}"
+                )
+                child_sha = candidate_checkpoint.sha
+            except Exception as e:
+                checkpoint_error = str(e)
+            reason = candidate_summary.error
+            if checkpoint_error:
+                reason = f"Candidate could not be checkpointed: {checkpoint_error}"
             decision_payload = {
                 "parent_node_id": parent_sha,
                 "parent_sha": parent_sha,
-                "child_node_id": None,
-                "child_sha": None,
+                "child_node_id": child_sha,
+                "child_sha": child_sha,
                 "accepted": False,
-                "reason": candidate_summary.error,
+                "reason": reason,
                 "parent_score_summary": parent_summary.as_dict(),
                 "child_score_summary": candidate_summary.as_dict(),
                 "comment_result": comment_result,
                 "scorer_result": {},
             }
-            self._record_failed_before_checkpoint(
-                attempt_dir=attempt_dir,
-                parent_sha=parent_sha,
-                results_path=self.work_dir / "scoring" / "results.json",
-                decision=decision_payload,
-                failure_results={
-                    "overall_satisfied": False,
-                    "error": candidate_summary.error,
-                    "generated_by": "autoresearch",
-                    "created_at": datetime.now().isoformat(),
-                },
-            )
+            if child_sha:
+                self.history.complete_attempt(
+                    attempt_dir=attempt_dir,
+                    parent_sha=parent_sha,
+                    child_sha=child_sha,
+                    results_path=results_path,
+                    decision=decision_payload,
+                )
+            else:
+                self._record_failed_before_checkpoint(
+                    attempt_dir=attempt_dir,
+                    parent_sha=parent_sha,
+                    results_path=results_path,
+                    decision=decision_payload,
+                )
             self.checkpoints.restore_checkpoint(parent_sha)
             return AutoResearchIterationResult(
                 iteration=iteration,
                 parent_sha=parent_sha,
-                child_sha=None,
+                child_sha=child_sha,
                 attempt_dir=attempt_dir,
                 accepted=False,
-                reason=candidate_summary.error,
+                reason=reason,
                 proposal=proposal,
                 comment_result=comment_result,
                 scorer_result={},
