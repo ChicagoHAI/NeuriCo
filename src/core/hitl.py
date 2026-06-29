@@ -15,8 +15,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from jinja2 import Environment, FileSystemLoader
-
 
 PIPELINE_STAGES = {
     "resource_finder",
@@ -58,8 +56,6 @@ IDEA_RECORD_FIELD_ORDER = [
     "worker_escalation_reason",
     "manager_escalation_reason",
 ]
-_HITL_TEMPLATE_ENV: Optional[Environment] = None
-
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -212,15 +208,12 @@ def _hitl_template_dir() -> Path:
 
 
 def _load_hitl_template(name: str, **kwargs: Any) -> str:
-    global _HITL_TEMPLATE_ENV
-    if _HITL_TEMPLATE_ENV is None:
-        _HITL_TEMPLATE_ENV = Environment(
-            loader=FileSystemLoader(str(_hitl_template_dir())),
-            autoescape=False,
-            trim_blocks=True,
-            lstrip_blocks=True,
-        )
-    return _HITL_TEMPLATE_ENV.get_template(name).render(**kwargs)
+    from templates.prompt_generator import PromptGenerator
+
+    templates_dir = _hitl_template_dir().parent
+    generator = PromptGenerator(templates_dir)
+    template = generator.load_template(f"hitl/{name}")
+    return generator.render_template(template, kwargs)
 
 
 def _resolve_manager_option(response: str, options: List[Dict[str, str]]) -> Dict[str, str]:
