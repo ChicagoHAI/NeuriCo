@@ -110,8 +110,11 @@ Will reconsider if the rebuild needs the official evidence-linking logic.
    - [x] Row counts verified: claims_train = 809, claims_dev = 300, corpus ~5k docs.
      *(Observed: claims_train = 809, claims_dev = 300, claims_test = 300,
      corpus = 5183 — exact match to plan assumptions.)*
-   - [ ] Pair rebuild asserts: `build_pairs.py` emits ~919 train / ~340 dev rows,
+   - [x] Pair rebuild asserts: `build_pairs.py` emits ~919 train / ~340 dev rows,
      all three labels (`SUPPORT`, `CONTRADICT`, `NOINFO`) present; log the label histogram.
+     *(Observed: train = 919 pairs {SUPPORT 370, NOINFO 355, CONTRADICT 194};
+     dev = 340 pairs {SUPPORT 138, NOINFO 131, CONTRADICT 71}; corpus 5183 docs.
+     All three labels present, CONTRADICT the minority — assertions passed.)*
    - [ ] Sample written: `datasets/samples.json` (first ~10 rows) saved.
 
    If any box fails, stop and consult Sections 5–6 (autonomous vs. escalate)
@@ -240,10 +243,15 @@ Escalate (pause and request feedback) if any of:
   Recorded in *Resolved Ideas* below (tarball 3,115,079 bytes; layout + counts an
   exact match). Acquisition gate passed. Pre-rebuild gate item — not counted toward
   the 2/2 execution evidence-idea requirement.
-- [ ] Execution remaining: pair rebuild (`build_pairs.py`) — raise the label-
-  histogram evidence idea and the sole-source-vs-fallback decision idea here —
-  then samples, dataset docs, papers, `literature_review.md`, `resources.md`,
-  completion marker.
+- [x] **Pair rebuild done (`build_pairs.py`).** Emitted
+  `datasets/scifact_pairs/{train,dev}.csv` (919 / 340 pairs, all three labels,
+  CONTRADICT minority — Section 4 box 5 checked).
+- [ ] **Evidence idea (slot 1) raised and checkpointed** on the label histogram;
+  stopping for runtime resolution. On resume: record resolution, increment the
+  "Resolved execution evidence ideas" counter, then continue to slot 2 (the
+  sole-source-vs-fallback decision idea).
+- [ ] Execution remaining (after the 4-idea sequence resolves): samples, dataset
+  docs, papers, `literature_review.md`, `resources.md`, completion marker.
 
 ### Forced-test idea checklist (NEURICO_HITL_TEST_FORCE_IDEA_MIX)
 
@@ -258,9 +266,12 @@ ideas and ≥2 resolved execution **decision** ideas.
   provenance gate item, distinct from the two required pair-rebuild/execution
   evidence ideas; deliberately NOT counted toward "Resolved execution evidence
   ideas (0/2)". Sequence slot 1 of 4 complete.
-- Currently raised (unresolved): **none** — next up is the `build_pairs.py`
-  label-histogram evidence idea (slot 2) and the AllenAI-sole-source-vs-fallback
-  decision idea, to be raised at the pair-rebuild step per Section 4.
+- Currently raised (unresolved): **Evidence idea (sequence slot 1 of 4)** —
+  `build_pairs.py` pair-rebuild label histogram as evidence the three classes
+  are present (train {SUPPORT 370, NOINFO 355, CONTRADICT 194} = 919;
+  dev {SUPPORT 138, NOINFO 131, CONTRADICT 71} = 340). Checkpoint written to
+  `.neurico/hitl/checkpoints/pending_idea.json`; stopping for runtime resolution.
+  Next after resolution: slot 2 = AllenAI-sole-source-vs-fallback decision idea.
 
 _Resources so far: SciFact AllenAI release downloaded + extracted to
 `datasets/scifact_raw/data/` (git-ignored target); no pairs/papers/docs yet._
