@@ -270,20 +270,35 @@ Escalate (pause and request feedback) if any of:
   risk updated (fallback now documented, not escalate-only); *Resolved Ideas* entry
   added (decision-type); "Resolved execution decision ideas" incremented 0/2 → 1/2.
   Next: sequence slot 3 — the second evidence idea (data-quality of rebuilt pairs).
-- [ ] **Evidence idea (slot 3) raised and checkpointed** — data-quality evidence of
-  the rebuilt pairs (well-formedness, no empty fields, duplicate-row count);
-  stopping for runtime resolution.
+- [x] **Evidence idea (slot 3) resolved (approved, 2026-06-29).** Data-quality
+  evidence of the rebuilt pairs verified directly on the CSVs and **approved**:
+  train 919 rows / dev 340 rows, **0** empty `claim` and **0** empty `evidence`
+  fields in both splits; **807** unique claims & **565** unique evidence docs
+  (train), **300** unique claims & **283** unique evidence docs (dev); claim length
+  3/12/39 and 4/12/29 words (min/median/max); evidence length 64/188/713 and
+  66/192/1070 words; each evidence string is the cited doc's full title+abstract.
+  Exact-duplicate `(claim,evidence,label)` rows: **3/919 train, 1/340 dev**.
+  Conclusion: well-formed and suitable for the TF-IDF + LogReg baseline as-is;
+  duplicates **preserved** (documented, not removed) for this smoke test — the
+  handful of exact duplicates is immaterial. Recorded in *Resolved Ideas* below
+  (evidence-type) and in `datasets/README.md`; "Resolved execution evidence ideas"
+  incremented **1/2 → 2/2** (decision ideas remain 1/2). Section 4 slot-3 checklist
+  item marked complete.
+- [ ] **Decision idea (slot 4) raised and checkpointed** — the second decision
+  idea (3-class as-built vs. 2-class SUPPORT-vs-CONTRADICT scope); stopping for
+  runtime resolution.
 - [ ] Execution remaining (after the 4-idea sequence resolves): papers,
   `literature_review.md`, `resources.md`, completion marker. *(samples + dataset
-  docs written alongside the slot-2 resolution.)*
+  docs written alongside the slot-2/slot-3 resolutions.)*
 
 ### Forced-test idea checklist (NEURICO_HITL_TEST_FORCE_IDEA_MIX)
 
 Required before `.resource_finder_complete`: ≥2 resolved execution **evidence**
 ideas and ≥2 resolved execution **decision** ideas.
 
-- Resolved execution evidence ideas: **1 / 2** _(slot 1 = pair-rebuild label
-  histogram, resolved B level 2026-06-29 — see Resolved Ideas)_
+- Resolved execution evidence ideas: **2 / 2** _(slot 1 = pair-rebuild label
+  histogram, resolved B level 2026-06-29; slot 3 = data-quality / well-formedness
+  of rebuilt pairs, resolved approved 2026-06-29 — both in Resolved Ideas)_
 - Resolved execution decision ideas: **1 / 2** _(slot 2 = AllenAI-S3-sole-source
   vs documented fallback; resolved by human 2026-06-29 — S3 primary + GitHub
   raw-JSONL fallback in README; see Resolved Ideas)_
@@ -293,14 +308,26 @@ ideas and ≥2 resolved execution **decision** ideas.
   provenance gate item, distinct from the two required pair-rebuild/execution
   evidence ideas; deliberately NOT counted toward "Resolved execution evidence
   ideas (0/2)". Sequence slot 1 of 4 complete.
-- Currently raised (unresolved): **Evidence idea (sequence slot 3 of 4)** —
-  data-quality evidence that the rebuilt `scifact_pairs/{train,dev}.csv` are
-  well-formed: zero empty `claim`/`evidence` fields, evidence texts are real
-  multi-sentence abstracts (median ~188 words), and only **3/919 train** &
-  **1/340 dev** exact-duplicate `(claim,evidence,label)` rows (negligible). Logged
-  as evidence of dataset suitability per Section 5 — no decision needed. Checkpoint
-  written to `.neurico/hitl/checkpoints/pending_idea.json`; stopping for runtime
-  resolution. Next after resolution: slot 4 (the second decision idea).
+- Currently raised (unresolved): **Decision idea (sequence slot 4 of 4)** —
+  whether the baseline should target the **3-class** formulation as built
+  (`SUPPORT` / `CONTRADICT` / `NOINFO`), or the **2-class** SUPPORT-vs-CONTRADICT
+  task the hypothesis wording ("supporting or contradicting") literally implies.
+  This is the Section 6 *scope-creep signal* — a research-scope decision the
+  manager/human should confirm before the runner commits, since bag-of-words is
+  known to be weak on the harder 2-class cut. Checkpoint written to
+  `.neurico/hitl/checkpoints/pending_idea.json`; stopping for runtime resolution.
+  Second of the two required execution **decision** ideas.
+- Resolved: **Evidence idea (sequence slot 3 of 4)** — data-quality / well-
+  formedness evidence of the rebuilt `scifact_pairs/{train,dev}.csv`. **Resolved
+  approved 2026-06-29:** train 919 rows / dev 340 rows; **0** empty `claim` and
+  **0** empty `evidence` fields both splits; 807 unique claims & 565 unique
+  evidence docs (train), 300 & 283 (dev); claim length 3/12/39 & 4/12/29 words,
+  evidence length 64/188/713 & 66/192/1070 words; evidence strings are the cited
+  doc's full title+abstract. Exact-duplicate `(claim,evidence,label)` rows =
+  **3/919 train, 1/340 dev** — immaterial, **preserved (not deduplicated)** for
+  this smoke test. Conclusion: well-formed and suitable for TF-IDF + LogReg as-is.
+  Second of the two required execution **evidence** ideas → "Resolved execution
+  evidence ideas" 1/2 → 2/2.
 - Resolved: **Decision idea (sequence slot 2 of 4)** — whether to accept the
   AllenAI S3 tarball
   (`https://scifact.s3-us-west-2.amazonaws.com/release/latest/data.tar.gz`) as the
@@ -385,3 +412,26 @@ runtime owns and populates those. Format:
   (no longer escalate-only). First of the two required execution **decision** ideas
   → "Resolved execution decision ideas" incremented **0/2 → 1/2**. Proceed to slot
   3 (second evidence idea).
+
+- **Idea:** Data-quality / well-formedness of the rebuilt pairs (sequence slot 3
+  of 4) — are `scifact_pairs/{train,dev}.csv` well-formed and suitable for the
+  TF-IDF + LogReg baseline as-is, and how many exact-duplicate rows do they carry?
+  _(evidence-type)_
+  **Resolution:** Verified directly on the full CSVs. **train = 919 rows, dev =
+  340 rows; 0 empty `claim` fields and 0 empty `evidence` fields in both splits.**
+  **807** unique claims & **565** unique evidence docs (train); **300** unique
+  claims & **283** unique evidence docs (dev). Claim length min/median/max =
+  **3/12/39** words (train) and **4/12/29** (dev); evidence length =
+  **64/188/713** words (train) and **66/192/1070** (dev). Each `evidence` string
+  is the cited document's full **title + abstract** (identical for every pair
+  citing that doc), so all three classes are textually comparable and the
+  multi-sentence evidence is real. Exact-duplicate `(claim,evidence,label)` rows:
+  **3/919 train** and **1/340 dev**.
+  **Decision:** Resolved **approved** 2026-06-29. The data is well-formed and
+  suitable for the TF-IDF + LogReg baseline **as-is**. Per the resolution, the
+  duplicates are **deliberately preserved** (documented, not removed) for this
+  smoke test — the handful of exact duplicates is immaterial at this scale; **no
+  deduplication** is applied. Recorded in `datasets/README.md` (new *Data quality*
+  table + conclusion). Second of the two required execution **evidence** ideas →
+  "Resolved execution evidence ideas" incremented **1/2 → 2/2** (decision ideas
+  remain 1/2). Proceed to slot 4 (the second decision idea).
