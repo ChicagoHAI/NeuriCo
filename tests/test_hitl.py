@@ -1276,6 +1276,10 @@ def test_worker_prompts_encode_hitl_control_protocol(tmp_path):
     assert "Locate the last recorded progress and continue from there." in continuation_prompt
     assert "First update `plans/resource_finder_plan.md` with the resolution" in continuation_prompt
     assert ".neurico/hitl/checkpoints/pending_idea.json" in continuation_prompt
+    assert '"idea_type": "decision | evidence"' in continuation_prompt
+    assert "Use top-level `idea_type`, never `category` or `type`." in continuation_prompt
+    assert "Decision checkpoints require top-level `decision_needed`" in continuation_prompt
+    assert "Evidence checkpoints require top-level `evidence`" in continuation_prompt
     assert "Only create `.resource_finder_complete` when continued execution finishes" in continuation_prompt
 
     plan_revision_prompt = runtime.plan_revision_prompt_block("Clarify checkpoints.")
@@ -1314,6 +1318,7 @@ def test_worker_test_mode_prompt_comes_from_template(tmp_path, monkeypatch):
         "top-level `decision_needed` is absent, fix the packet"
         in normalized_execution_prompt
     )
+    assert "never `category` or `type`" in normalized_execution_prompt
     assert "plans/resource_finder_plan.md" in execution_prompt
     assert ".neurico/hitl/checkpoints/pending_idea.json" in execution_prompt
 

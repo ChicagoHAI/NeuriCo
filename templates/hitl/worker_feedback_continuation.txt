@@ -22,5 +22,27 @@ stage artifacts. If another raised idea appears, write a checkpoint to
 `{{ checkpoint_path }}` and stop. Use exactly this path; do not add timestamps,
 suffixes, or alternate filenames.
 
+Use the same checkpoint schema as HITL execution mode. A checkpoint packet must
+use these exact top-level keys:
+{
+  "idea_type": "decision | evidence",
+  "context": "REQUIRED. Worker-provided self-contained context. Use this exact key.",
+  "basis": "evidence, reason, or provenance supporting this idea",
+  "decision_needed": "required for decision ideas",
+  "evidence": "required for evidence ideas",
+  "options": ["required substantive workflow choices for raised decision ideas; omit for evidence ideas"],
+  "reason_for_escalation": "why manager/human feedback is needed",
+  "related_artifacts": [
+    {"path": "relative/path", "description": "why it matters"}
+  ]
+}
+
+Do not use aliases for these schema keys. In particular:
+- Use top-level `idea_type`, never `category` or `type`.
+- Decision checkpoints require top-level `decision_needed` and `options`.
+- Evidence checkpoints require top-level `evidence` and must omit
+  `decision_needed` and `options`.
+- Do not write `pipeline_stage` or `hitl_stage`; runtime owns those fields.
+
 Only create `.resource_finder_complete` when continued execution finishes all
 stage deliverables and no unresolved checkpoint exists.
