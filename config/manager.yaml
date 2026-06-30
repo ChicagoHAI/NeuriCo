@@ -5,7 +5,7 @@
 
 manager:
   # LLM backend for manager reasoning
-  # Options: "cli" (uses claude -p, no extra keys), "anthropic_api", "openrouter"
+  # Options: "cli" (uses claude -p, no extra keys), "anthropic_api", "openrouter", "requesty"
   # Can also be set via NEURICO_MANAGER_BACKEND env var
   llm_backend: cli
 
@@ -13,6 +13,7 @@ manager:
   # For cli: uses whatever claude version is installed
   # For anthropic_api: e.g., "claude-sonnet-4-20250514"
   # For openrouter: e.g., "anthropic/claude-sonnet-4"
+  # For requesty: e.g., "anthropic/claude-sonnet-4" (OpenAI-compatible, needs REQUESTY_API_KEY)
   # Can also be set via NEURICO_MANAGER_MODEL env var
   llm_model: null
 
