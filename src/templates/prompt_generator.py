@@ -16,6 +16,7 @@ import sys
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.config_loader import ConfigLoader, normalize_domain
+from core.compute_backend import get_runtime_compute_backend
 
 
 class PromptGenerator:
@@ -546,8 +547,136 @@ Location: {run_dir}
 
         return self.render_template(template, variables)
 
+    @staticmethod
+    def _skill_root_for_provider(provider: str) -> str:
+        return f".{provider}/skills"
+
+    def _generate_compute_backend_section(
+        self, idea_spec: Dict[str, Any], mode: str, provider: str = "claude"
+    ) -> str:
+        """
+        Generate operational compute-backend constraints for execution agents.
+
+        Missing --compute-backend means local and intentionally emits nothing.
+        """
+        backend = get_runtime_compute_backend(idea_spec)
+        if backend == "local":
+            return ""
+        if backend == "modal" and mode == "comment":
+            return ""
+
+        skill_root = self._skill_root_for_provider(provider)
+        dsi_skill_path = f"{skill_root}/dsi-slurm/SKILL.md"
+        summary_target = "REPORT.md"
+        if mode == "comment":
+            summary_target = "REPORT.md or the comment-handler summary"
+
+        backend_sections = {
+            "dsi-slurm": f"""
+════════════════════════════════════════════════════════════════════════════════
+COMPUTE BACKEND: dsi-slurm
+════════════════════════════════════════════════════════════════════════════════
+
+Use the `{skill_root}/dsi-slurm/` skill for any cluster training, evaluation,
+or batch execution. Before writing or submitting Slurm jobs, read
+`{dsi_skill_path}` and follow its guidance.
+
+The local workspace is for orchestration and reporting only. Do not run
+training, evaluation, model selection, benchmarking, scored-output generation,
+smoke tests, or result-changing validation locally.
+
+Local commands may inspect files, edit code, prepare scripts, package inputs,
+and verify already-copied results only.
+
+DSI Slurm is the only allowed compute surface for experiment workload.
+
+When using this backend:
+
+1. Use the operating guidance and resource conventions from the `dsi-slurm`
+   skill. Do not hand-write an unrelated cluster workflow.
+2. NeuriCo runtime creates the remote workspace and records it in
+   `.neurico/dsi_slurm_remote_workspace.json`. Use only that remote workspace.
+   Do not create, choose, or reuse another remote root.
+3. Run the skill's setup/discovery checks before the first cluster submission.
+   Surface missing account, partition, module, storage, or GPU details in the
+   final report instead of guessing.
+4. Start with a cheap smoke job when possible, then scale to the full run.
+5. You are responsible for copying required experiment outputs from the remote
+   workspace back to the same relative paths in the local workspace before
+   reporting success. This includes configs, checkpoints, metrics, reports,
+   figures, predictions, evaluation outputs, and files required by scoring.
+6. Copy each terminal job's `dsi-slurm-artifacts/<JOB_ID>/` bundle back to the
+   local workspace. NeuriCo runtime archives local `dsi-slurm-artifacts/` into
+   logs after the stage.
+7. Do not remove the remote workspace. NeuriCo runtime removes it after the
+   stage finishes.
+8. At the end of the run, the local workspace must contain enough information
+   to reproduce or resume the experiment without relying on hidden cluster
+   state.
+
+Do not use Modal, local GPU fallback, or any other off-machine backend unless
+the user reruns NeuriCo with a different `--compute-backend`.
+
+If `{dsi_skill_path}` is missing, or required DSI Slurm details such as
+account, partition, GPU type, or submission access are unavailable, do not
+submit jobs and do not switch to another backend. Record the missing
+requirement clearly in {summary_target}, mark the experiment as blocked by
+configuration, and keep any local preparatory work reproducible.
+
+""",
+            "modal": """
+════════════════════════════════════════════════════════════════════════════════
+
+COMPUTE BACKENDS BEYOND THE LOCAL CONTAINER
+────────────────────────────────────────────────────────────────────────────────
+
+If your experiment needs model training, fine-tuning, or LLM serving that
+exceeds the local Docker container's GPU (or there is no local GPU), check
+.claude/skills/ for a compute backend that fits.
+
+DISCOVERY (do not hard-code a specific backend):
+
+1. List skills: `ls .claude/skills/`
+2. For each skill, read its SKILL.md frontmatter. Skills tagged
+   `compute-backend` describe ways to run workloads off-machine.
+3. Pick the backend whose description matches your need:
+   - Tag `training` → fine-tuning, LoRA SFT, full SFT, data prep, GPU eval
+   - Tag `serving` → deploying a model as an HTTPS endpoint for queries
+4. Read the chosen skill's SKILL.md end-to-end before writing any code that
+   uses it. The skill describes a setup doctor, a scaffolder, and a
+   leave-no-trace lifecycle that you MUST follow — your scaffolded script will
+   call lifecycle.register() / pull_all() / teardown() automatically.
+
+REQUIREMENTS WHEN A COMPUTE BACKEND IS USED:
+
+✓ Use the skill's scaffolder to generate the off-machine app — do NOT
+  hand-write volume / environment / app names. The lifecycle sweep finds
+  resources by name and only the scaffolder names them correctly.
+✓ Run the skill's setup doctor (e.g. `check_modal_setup.py`) BEFORE the
+  first off-machine call. Surface its `fix:` output if anything fails.
+✓ Pull all training logs, trained models, run configs, and metadata into
+  the workspace BEFORE teardown — the skill enforces this, do not override.
+✓ At the end of the run the workspace must contain enough to reproduce the
+  experiment without any cloud-side state.
+
+✗ Do not assume Modal specifically. The skills directory may grow other
+  backends; the discovery + reproducibility contract above applies to all.
+
+If no compute-backend skill is present and the experiment cannot run on the
+local container, document the gap in REPORT.md and reduce model scale until
+it fits.
+
+════════════════════════════════════════════════════════════════════════════════
+
+""",
+        }
+
+        return backend_sections.get(backend, "")
+
     def generate_session_instructions(self, prompt: str, work_dir: str,
-                                       use_scribe: bool = False, domain: str = 'general') -> str:
+                                       use_scribe: bool = False, domain: str = 'general',
+                                       idea_spec: Optional[Dict[str, Any]] = None,
+                                       provider: str = "claude") -> str:
         """
         Generate session instructions from template.
 
@@ -597,10 +726,15 @@ and the general workflow, ALWAYS follow the user's instructions.
             code_workflow = "✓ Write Python scripts in src/ directory for experiments and analysis"
             code_reminder = "- Write Python scripts (.py) in src/ for experiments (NOT Jupyter notebooks)"
 
+        compute_backend_section = self._generate_compute_backend_section(
+            idea_spec or {}, mode="experiment", provider=provider
+        )
+
         # Prepare variables
         variables = {
             'session_start': session_start,
             'priority_section': priority_section,
+            'compute_backend_section': compute_backend_section,
             'code_workflow': code_workflow,
             'code_reminder': code_reminder,
             'prompt': prompt,
@@ -755,7 +889,9 @@ RESEARCH DOMAIN:
 
         return full_prompt
 
-    def generate_comment_prompt(self, idea: Dict[str, Any], work_dir: Path) -> str:
+    def generate_comment_prompt(
+        self, idea: Dict[str, Any], work_dir: Path, provider: str = "claude"
+    ) -> str:
         """
         Generate comment handler prompt from template.
 
@@ -789,7 +925,10 @@ RESEARCH DOMAIN:
             'domain': domain,
             'comments': comments,
             'work_dir': str(work_dir),
-            'priority_section': priority_section
+            'priority_section': priority_section,
+            'compute_backend_section': self._generate_compute_backend_section(
+                idea_spec, mode="comment", provider=provider
+            )
         }
 
         # Render template with variables

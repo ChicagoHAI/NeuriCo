@@ -140,7 +140,8 @@ def resolve_workspace(
 def generate_comment_prompt(
     idea: Dict[str, Any],
     work_dir: Path,
-    templates_dir: Path
+    templates_dir: Path,
+    provider: str = "claude",
 ) -> str:
     """
     Generate the comment handler prompt by combining template with idea comments.
@@ -156,7 +157,7 @@ def generate_comment_prompt(
     from templates.prompt_generator import PromptGenerator
 
     generator = PromptGenerator(templates_dir)
-    return generator.generate_comment_prompt(idea, work_dir)
+    return generator.generate_comment_prompt(idea, work_dir, provider=provider)
 
 
 def run_comment_handler(
@@ -219,9 +220,34 @@ def run_comment_handler(
     print("-" * 40)
     print()
 
+    from core.dsi_slurm_remote import dsi_slurm_remote_workspace
+
+    with dsi_slurm_remote_workspace(idea, work_dir) as dsi_remote_info:
+        if dsi_remote_info is not None:
+            print(f"DSI remote workspace: {dsi_remote_info['remote_root']}")
+        return _run_comment_handler_with_remote_workspace(
+            idea=idea,
+            work_dir=work_dir,
+            provider=provider,
+            templates_dir=templates_dir,
+            timeout=timeout,
+            full_permissions=full_permissions,
+            dsi_remote_info=dsi_remote_info,
+        )
+
+
+def _run_comment_handler_with_remote_workspace(
+    idea: Dict[str, Any],
+    work_dir: Path,
+    provider: str,
+    templates_dir: Path,
+    timeout: int,
+    full_permissions: bool,
+    dsi_remote_info: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
     # Generate prompt
     print("Generating comment handler prompt...")
-    prompt = generate_comment_prompt(idea, work_dir, templates_dir)
+    prompt = generate_comment_prompt(idea, work_dir, templates_dir, provider=provider)
 
     # Save prompt for reference
     logs_dir = work_dir / "logs"
@@ -267,6 +293,9 @@ def run_comment_handler(
     # Set environment variables
     env = os.environ.copy()
     env['PYTHONUNBUFFERED'] = '1'
+    if dsi_remote_info is not None:
+        env["NEURICO_DSI_REMOTE_ROOT"] = dsi_remote_info["remote_root"]
+        env["NEURICO_DSI_RSYNC_REMOTE_ROOT"] = dsi_remote_info["rsync_remote_root"]
 
     if provider == "gemini":
         env['GEMINI_CLI_IDE_DISABLE'] = '1'

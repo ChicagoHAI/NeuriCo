@@ -19,6 +19,7 @@ import time
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from core.compute_backend import get_runtime_compute_backend
 from core.security import sanitize_text
 
 
@@ -35,12 +36,81 @@ TRANSCRIPT_FLAGS = {
 }
 
 
+def _skill_root_for_provider(provider: str) -> str:
+    return f".{provider}/skills"
+
+
+def _generate_compute_backend_section(idea_spec: Dict[str, Any], provider: str = "claude") -> str:
+    """Return proposer-only backend constraints for explicit remote backends."""
+    backend = get_runtime_compute_backend(idea_spec)
+    skill_root = _skill_root_for_provider(provider)
+    dsi_skill_path = f"{skill_root}/dsi-slurm/SKILL.md"
+    if backend == "dsi-slurm":
+        return f"""
+═══════════════════════════════════════════════════════════════════════════════
+                              COMPUTE BACKEND: dsi-slurm
+═══════════════════════════════════════════════════════════════════════════════
+
+Runtime execution is pinned to DSI Slurm by `--compute-backend dsi-slurm`.
+Any proposal that requires cluster training, evaluation, or batch execution
+must tell comment mode to use `{skill_root}/dsi-slurm/` by reading
+`{dsi_skill_path}` and following that skill's guidance.
+
+The proposal must preserve this compute invariant: the local workspace is for
+orchestration and reporting only. Comment mode must not run training,
+evaluation, model selection, benchmarking, scored-output generation, smoke
+tests, or result-changing validation locally. Local commands may inspect files,
+edit code, prepare scripts, package inputs, and verify already-copied results
+only. DSI Slurm is the only allowed compute surface for experiment workload.
+
+The proposal should preserve the backend lifecycle contract: setup/discovery
+checks first, use only the runtime-provided remote workspace, cheap smoke job
+when possible, explicit resource requests, and copy-back of all required
+results from the remote workspace to the same relative local paths. Comment
+mode must also copy each terminal job's `dsi-slurm-artifacts/<JOB_ID>/` bundle
+back to the local workspace. NeuriCo runtime creates/removes the remote
+workspace and archives local `dsi-slurm-artifacts/`; comment mode must not
+remove the remote workspace itself.
+
+Do not propose Modal, local GPU fallback, or any other off-machine backend. If
+missing DSI Slurm configuration or access would block the proposed change, make
+that blocker explicit in the proposal rather than suggesting a backend switch.
+
+"""
+    if backend == "modal":
+        return """
+═══════════════════════════════════════════════════════════════════════════════
+                              COMPUTE BUDGET
+═══════════════════════════════════════════════════════════════════════════════
+
+If your proposal would require GPU model training, fine-tuning, or LLM serving
+that exceeds the local container, the workspace may have a compute-backend
+skill available. Do not propose a backend by name. Instead, scope your proposal
+so that:
+
+1. If a compute backend is available, you state the proposal's compute needs
+   (model size, GPU memory, expected wall time) and note that an off-machine
+   backend may be required — the experiment_runner agent will discover and
+   pick the appropriate skill.
+2. If no compute backend is available, propose only changes that fit on the
+   local container (smaller models, fewer steps, eval-only paths).
+
+Treat compute-backend availability as a constraint to scope around, not as a
+licence to propose unbounded training jobs.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+"""
+    return ""
+
+
 def generate_autoresearch_proposal_prompt(
     idea: Dict[str, Any],
     work_dir: Path,
     parent_sha: str,
     attempt_dir: Path,
     templates_dir: Path,
+    provider: str = "claude",
     attempt_history: Optional[list[Dict[str, Any]]] = None,
 ) -> str:
     """
@@ -81,6 +151,7 @@ def generate_autoresearch_proposal_prompt(
         attempt_dir=str(attempt_dir),
         proposal_path=str(attempt_dir / "proposal.md"),
         public_context=context,
+        compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
     )
 
 
@@ -154,6 +225,7 @@ def run_autoresearch_proposer(
         parent_sha=parent_sha,
         attempt_dir=attempt_dir,
         templates_dir=Path(templates_dir),
+        provider=provider,
         attempt_history=attempt_history,
     )
 

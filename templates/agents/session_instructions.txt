@@ -1,5 +1,6 @@
 {{ session_start }}
 {{ priority_section }}
+{{ compute_backend_section }}
 CRITICAL: Environment Setup
 ────────────────────────────────────────────────────────────────────────────────
 You MUST use an isolated environment for this project. DO NOT use the
@@ -106,49 +107,6 @@ At the START of your session, check for GPU availability:
    - GPU model and memory
    - Batch sizes used
    - Training time comparisons
-
-════════════════════════════════════════════════════════════════════════════════
-
-COMPUTE BACKENDS BEYOND THE LOCAL CONTAINER
-────────────────────────────────────────────────────────────────────────────────
-
-If your experiment needs model training, fine-tuning, or LLM serving that
-exceeds the local Docker container's GPU (or there is no local GPU), check
-.claude/skills/ for a compute backend that fits.
-
-DISCOVERY (do not hard-code a specific backend):
-
-1. List skills: `ls .claude/skills/`
-2. For each skill, read its SKILL.md frontmatter. Skills tagged
-   `compute-backend` describe ways to run workloads off-machine.
-3. Pick the backend whose description matches your need:
-   - Tag `training` → fine-tuning, LoRA SFT, full SFT, data prep, GPU eval
-   - Tag `serving` → deploying a model as an HTTPS endpoint for queries
-4. Read the chosen skill's SKILL.md end-to-end before writing any code that
-   uses it. The skill describes a setup doctor, a scaffolder, and a
-   leave-no-trace lifecycle that you MUST follow — your scaffolded script will
-   call lifecycle.register() / pull_all() / teardown() automatically.
-
-REQUIREMENTS WHEN A COMPUTE BACKEND IS USED:
-
-✓ Use the skill's scaffolder to generate the off-machine app — do NOT
-  hand-write volume / environment / app names. The lifecycle sweep finds
-  resources by name and only the scaffolder names them correctly.
-✓ Run the skill's setup doctor (e.g. `check_modal_setup.py`) BEFORE the
-  first off-machine call. Surface its `fix:` output if anything fails.
-✓ Pull all training logs, trained models, run configs, and metadata into
-  the workspace BEFORE teardown — the skill enforces this, do not override.
-✓ At the end of the run the workspace must contain enough to reproduce the
-  experiment without any cloud-side state.
-
-✗ Do not assume Modal specifically. The skills directory may grow other
-  backends; the discovery + reproducibility contract above applies to all.
-
-If no compute-backend skill is present and the experiment cannot run on the
-local container, document the gap in REPORT.md and reduce model scale until
-it fits.
-
-════════════════════════════════════════════════════════════════════════════════
 
 CRITICAL: Resources Have Been Pre-Gathered
 ────────────────────────────────────────────────────────────────────────────────
