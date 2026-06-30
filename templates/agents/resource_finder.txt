@@ -385,7 +385,31 @@ Check these sources in order:
 TARGET: Find suitable datasets for the research task
 PREFER: Established benchmarks over custom data
 
-STEP 3: Download and Validate Datasets
+STEP 3: Verify Dataset Accessibility (Pre-flight Check)
+─────────────────────────────────────────────────────────────────────────────
+
+Before downloading, verify each candidate dataset actually exists and is
+reachable. This avoids wasting time on broken links or moved datasets.
+
+For each candidate from STEP 2:
+
+    python .claude/skills/dataset-verifier/scripts/verify_dataset.py <id_or_url>
+
+Examples:
+    python .claude/skills/dataset-verifier/scripts/verify_dataset.py glue
+    python .claude/skills/dataset-verifier/scripts/verify_dataset.py https://www.kaggle.com/datasets/uciml/iris
+
+Output is JSON with {id, exists, url, error}. Exit code 0 = exists, 1 = not.
+
+DECISION RULE:
+- exists=true  → proceed to STEP 4 (download)
+- exists=false → drop the candidate, log the error in resources.md, pick the
+                 next best candidate from STEP 2 results
+
+Run the verifier on ALL candidates before any download. A failed verify is
+cheap (single HTTP HEAD); a failed download wastes minutes.
+
+STEP 4: Download and Validate Datasets
 ─────────────────────────────────────────────────────────────────────────────
 
 IMPORTANT: Git-Friendly Dataset Handling
@@ -515,7 +539,7 @@ For each dataset:
        json.dump(samples, f, indent=2)
    ```
 
-STEP 4: Exploratory Data Analysis (Quick Check)
+STEP 5: Exploratory Data Analysis (Quick Check)
 ─────────────────────────────────────────────────────────────────────────────
 
 For each dataset:
