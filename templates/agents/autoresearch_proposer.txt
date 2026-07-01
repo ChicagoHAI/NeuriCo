@@ -47,6 +47,38 @@ a src/ file tree. The src/ listing intentionally contains no source contents.
 ```
 
 ═══════════════════════════════════════════════════════════════════════════════
+                       CROSS-RUN WHITEBOARD (active tips)
+═══════════════════════════════════════════════════════════════════════════════
+
+Tips carried over from prior attempts (including REJECTED ones) that comment
+handlers thought were worth keeping. This survives across attempts. Treat these
+as hints, not ground truth. If a tip contradicts your reasoning or the current
+scoring rules, prune it.
+
+You have one tool that touches the whiteboard, exposed as a console
+script called `whiteboard` (it auto-detects the workspace by walking up
+from cwd; no --workspace flag needed when you run it from anywhere
+inside the workspace):
+
+  whiteboard view
+
+  whiteboard prune-tip <TIP_ID> \
+      --reason "<why this tip is wrong or unproductive>"
+
+Prune a tip when:
+- The tip's advice was tried at a previous attempt and rejected, and the
+  proposal you are about to write also does not want to follow it.
+- The tip is stale (superseded by a later accepted attempt).
+- The tip is factually wrong or contradicts the scoring interface.
+
+Do NOT prune a tip you would still like a future implementer to consider,
+even if your current proposal ignores it.
+
+If the section below is empty, there are no active tips.
+
+{{ public_context.whiteboard_active_tips_md }}
+
+═══════════════════════════════════════════════════════════════════════════════
                               OUTPUT FORMAT
 ═══════════════════════════════════════════════════════════════════════════════
 
