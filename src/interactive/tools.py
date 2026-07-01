@@ -18,6 +18,116 @@ from datetime import datetime
 from interactive.session_state import SessionState
 
 
+# Solvent volume fractions are physical fractions of a mixture, so they must sum
+# to 1. Wet-lab pipetting and rounding make an exact 1.0 unrealistic, so we allow
+# a small tolerance rather than rejecting otherwise-fine recipes.
+_V_SUM_TOL = 0.02
+
+
+def _is_number(val: Any) -> bool:
+    """True for a real numeric value. Excludes bool, which is an int subclass in
+    Python and would otherwise sneak through as 0/1."""
+    return isinstance(val, (int, float)) and not isinstance(val, bool)
+
+
+def _validate_molarity_map(m: Any, label: str, name: str, field: str,
+                           errors: List[str]) -> Dict[str, float]:
+    """Validate an optional salt/additive molarity map (name -> molarity).
+    Returns the cleaned map; appends human-readable problems to `errors`."""
+    if m is None:
+        return {}
+    if not isinstance(m, dict):
+        errors.append(f"{label} ('{name}'): '{field}' must be an object mapping "
+                      "substance name -> molarity.")
+        return {}
+    clean: Dict[str, float] = {}
+    for k, val in m.items():
+        if not _is_number(val) or val < 0:
+            errors.append(f"{label} ('{name}'): '{field}' entry '{k}' must be a "
+                          "non-negative number.")
+        else:
+            clean[str(k)] = float(val)
+    return clean
+
+
+def validate_recipes(recipes: List[Any]) -> tuple:
+    """Validate a batch of BatteryLab solvency-style recipes.
+
+    Returns (cleaned_recipes, errors). When `errors` is non-empty the batch must
+    NOT be delivered — the caller should surface the errors so the recipe can be
+    fixed and re-submitted. The `volume` field is interpreted in MILLILITERS
+    (e.g. 0.05 == 50 µL), matching the BatteryLab robot's [B]atch loader.
+
+    A valid recipe looks like:
+        {"recipe_name": "round1_cell_01",
+         "target_electrolyte": {
+            "name": "round1_cell_01",
+            "volume": 0.05,                       # mL
+            "v": {"water": 0.5, "propylene glycol": 0.5},   # fractions, sum=1
+            "s": {"ZnSO4": 1.0},                  # optional salt molarities
+            "a": {"...": 0.1}}}                    # optional additive molarities
+    """
+    cleaned: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for i, rec in enumerate(recipes):
+        label = f"recipe[{i}]"
+        if not isinstance(rec, dict):
+            errors.append(f"{label}: must be a JSON object.")
+            continue
+
+        name = rec.get("recipe_name")
+        if not isinstance(name, str) or not name.strip():
+            errors.append(f"{label}: missing a non-empty 'recipe_name'.")
+            name = name.strip() if isinstance(name, str) else ""
+
+        te = rec.get("target_electrolyte")
+        if not isinstance(te, dict):
+            errors.append(f"{label} ('{name}'): missing the 'target_electrolyte' object.")
+            continue
+
+        te_name = te.get("name")
+        te_name = te_name.strip() if isinstance(te_name, str) and te_name.strip() else name
+
+        vol = te.get("volume")
+        if not _is_number(vol) or vol <= 0:
+            errors.append(f"{label} ('{name}'): 'volume' must be a positive number "
+                          "in millilitres (e.g. 0.05 for 50 µL).")
+
+        v = te.get("v")
+        clean_v: Dict[str, float] = {}
+        if not isinstance(v, dict) or not v:
+            errors.append(f"{label} ('{name}'): 'v' (solvent volume fractions) must "
+                          "be a non-empty object.")
+        else:
+            v_ok = True
+            for k, val in v.items():
+                if not _is_number(val) or val < 0:
+                    errors.append(f"{label} ('{name}'): solvent '{k}' fraction must "
+                                  "be a non-negative number.")
+                    v_ok = False
+                else:
+                    clean_v[str(k)] = float(val)
+            if v_ok:
+                total = sum(clean_v.values())
+                if abs(total - 1.0) > _V_SUM_TOL:
+                    errors.append(f"{label} ('{name}'): solvent fractions 'v' sum to "
+                                  f"{total:.3f}; they must sum to 1.0 (±{_V_SUM_TOL}).")
+
+        clean_s = _validate_molarity_map(te.get("s"), label, name, "s", errors)
+        clean_a = _validate_molarity_map(te.get("a"), label, name, "a", errors)
+
+        te_clean: Dict[str, Any] = {"name": te_name,
+                                    "volume": float(vol) if _is_number(vol) else vol,
+                                    "v": clean_v}
+        if clean_s:
+            te_clean["s"] = clean_s
+        if clean_a:
+            te_clean["a"] = clean_a
+        cleaned.append({"recipe_name": name, "target_electrolyte": te_clean})
+
+    return cleaned, errors
+
+
 class ToolExecutor:
     """
     Executes tools called by the manager LLM.
@@ -70,6 +180,7 @@ class ToolExecutor:
             "update_research_state": self._update_research_state,
             "assess": self._assess,
             "design_panel": self._design_panel,
+            "deliver_recipe": self._deliver_recipe,
         }
 
         handler = handlers.get(tool_name)
@@ -333,6 +444,84 @@ class ToolExecutor:
         if response is None:
             return "[User ended the session without responding.]"
         return response
+
+    def _deliver_recipe(self, args: Dict[str, Any]) -> str:
+        """Battery-lab mode: hand a validated electrolyte recipe batch to the
+        human for wet-lab execution, then pause.
+
+        This is the wet-lab analogue of run_agent: the experiment is run by a
+        *human* on the BatteryLab robot, not by an in-Docker agent. The recipe is
+        written in BatteryLab's solvency-style JSON (volume in mL) so it can be
+        fed straight to the robot's [B]atch loader. The batch is validated first;
+        an invalid batch is NOT delivered so the manager can fix and retry."""
+        recipes = args.get("recipes")
+        rationale = str(args.get("rationale", "")).strip()
+
+        # The CLI backend's tool-call shim can hand the array back as a
+        # JSON-encoded string — coerce it before validating.
+        if isinstance(recipes, str):
+            try:
+                recipes = json.loads(recipes)
+            except (json.JSONDecodeError, ValueError):
+                return ("Error: 'recipes' was a string that is not valid JSON. "
+                        "Pass a JSON array of recipe objects.")
+        if isinstance(recipes, dict):
+            recipes = [recipes]
+        if not isinstance(recipes, list) or not recipes:
+            return ("Error: 'recipes' must be a non-empty JSON array of recipe "
+                    "objects in BatteryLab solvency format.")
+
+        cleaned, errors = validate_recipes(recipes)
+        if errors:
+            # Do NOT write or pause — let the manager fix the recipe and retry.
+            return ("Recipe NOT delivered — validation failed. Fix these and call "
+                    "deliver_recipe again:\n- " + "\n- ".join(errors))
+
+        # Number the delivery from prior rounds so a long, repeated campaign keeps
+        # an ordered, append-only trail under the workspace.
+        recipe_root = self.work_dir / "BL-recipes"
+        recipe_root.mkdir(parents=True, exist_ok=True)
+        round_n = len([p for p in recipe_root.glob("round-*") if p.is_dir()]) + 1
+        round_dir = recipe_root / f"round-{round_n}"
+        round_dir.mkdir(parents=True, exist_ok=True)
+
+        recipe_file = round_dir / "recipes.json"
+        recipe_file.write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
+        if rationale:
+            (round_dir / "rationale.md").write_text(
+                f"# Recipe round {round_n} — rationale\n\n{rationale}\n",
+                encoding="utf-8")
+
+        names = ", ".join(r["recipe_name"] for r in cleaned)
+
+        # Record in the world model: a delivered recipe is a real (human-run)
+        # experiment and a decision worth grading later.
+        self.research.add_finding(
+            f"Delivered recipe round {round_n} ({len(cleaned)} cell(s)): {names}",
+            kind="note", insight=rationale)
+        self.research.set_fields(
+            current_best=f"Round {round_n} recipe delivered — awaiting wet-lab results")
+        self.session.update_findings(phase="wet_lab_pause")
+
+        pretty = json.dumps(cleaned, indent=2)
+        self.channel.send(
+            f"🧪 Recipe round {round_n} ready for the wet lab "
+            f"({len(cleaned)} cell(s)). Saved to {recipe_file}.\n\n"
+            f"```json\n{pretty}\n```",
+            kind="system")
+
+        prompt_msg = (
+            f"Recipe round {round_n} is ready ({len(cleaned)} cell(s): {names}). "
+            "Please run it on BatteryLab and drop the results into the "
+            "BL-results folder.\n\n"
+            "Reply when results are ready, or with any feedback / changes."
+        )
+        response = self.channel.prompt(message=prompt_msg)
+        if response is None:
+            return (f"Recipe round {round_n} delivered and saved to {recipe_file}, "
+                    "but the session ended before the human replied.")
+        return (f"Recipe round {round_n} delivered ({names}). "
+                f"Human replied: {response}")
 
     def _update_session(self, args: Dict[str, Any]) -> str:
         """Update session state."""

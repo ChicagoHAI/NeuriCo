@@ -1,0 +1,55 @@
+# Battery-lab (BL) mode tool definitions.
+#
+# These are MERGED on top of templates/manager/tools.yaml only when the idea's
+# domain is "battery" (see load_tool_definitions in src/interactive/manager.py).
+# Normal interactive runs never see these tools.
+
+tools:
+  - name: deliver_recipe
+    description: |
+      Hand a batch of electrolyte recipes to the human for WET-LAB execution on
+      the BatteryLab robot, then PAUSE until they reply. This is the battery-lab
+      analogue of run_agent: the physical experiment is run by a human, not by an
+      in-Docker agent. NEVER use run_agent(experiment_runner) for the physical
+      cell build — that agent only does computation. Use deliver_recipe for the
+      real synthesis/measurement step.
+
+      The batch is validated before delivery (schema, solvent fractions sum to 1,
+      numeric molarities). If validation fails, nothing is delivered and you get
+      the list of problems to fix — correct the recipe and call deliver_recipe
+      again. On success the batch is written to BL-recipes/round-N/recipes.json in
+      the workspace and shown to the human, and the session waits for their reply
+      (e.g. "results are ready" or requested changes).
+    parameters:
+      recipes:
+        type: array
+        items:
+          type: object
+        description: |
+          A JSON array of recipe objects in BatteryLab solvency format. Each:
+            {
+              "recipe_name": "round1_cell_01",
+              "target_electrolyte": {
+                "name": "round1_cell_01",
+                "volume": 0.05,                                  # MILLILITRES (0.05 = 50 µL)
+                "v": {"water": 0.5, "propylene glycol": 0.5},    # solvent volume fractions, MUST sum to 1.0
+                "s": {"ZnSO4": 1.0},                             # OPTIONAL salt molarities (mol/L)
+                "a": {"additive_name": 0.1}                      # OPTIONAL additive molarities (mol/L)
+              }
+            }
+          Rules: volume is in mL and must be > 0; the "v" map is required, with
+          non-negative fractions summing to 1.0 (±0.02); "s" and "a" are optional
+          maps of substance -> non-negative molarity. Provide one object per coin
+          cell you want built.
+        required: true
+      rationale:
+        type: string
+        description: |
+          One short paragraph: which hypothesis this batch tests and why these
+          specific compositions were chosen now. Saved alongside the recipe and
+          recorded in the world model so the decision is gradeable later.
+        required: false
+    returns: |
+      On success: confirmation that round N was written and the human's reply
+      after they ran the wet-lab experiment. On validation failure: the list of
+      problems to fix (nothing is delivered).

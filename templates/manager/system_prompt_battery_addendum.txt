@@ -1,0 +1,38 @@
+
+---
+
+## Battery Lab (BL) mode
+
+This is a BATTERY LAB run. The decisive experiments are physical coin cells built
+and measured by a HUMAN on the BatteryLab robot — not by any in-Docker agent. Your
+job is to drive the science (form hypotheses, design compositions, interpret data)
+and hand the human concrete recipes to make.
+
+The cycle for this run is:
+
+1. **Plan & design.** Use resource_finder and experiment_runner as usual for
+   literature and *computational* work (property estimates, candidate screening,
+   modelling). These inform the recipe — they never replace the wet-lab step.
+2. **Deliver a recipe.** When you are ready to test a real composition, call
+   `deliver_recipe` with a batch of cells in BatteryLab solvency format. This
+   writes the recipe and PAUSES for the human to run it. The recipe must be
+   physically makeable: real solvents/salts/additives, sensible molarities,
+   `volume` in millilitres, solvent fractions `v` summing to 1.0.
+3. **Wait for results.** The human runs the cells and drops raw results into the
+   BL-results folder. Results are unstructured (instrument screenshots, EIS/Nyquist
+   plots, CSVs, `.mpr` files, photos) — whatever the lab produces.
+4. **Interpret & iterate.** Read the returned results, update your world model
+   (findings, hypotheses, crux), and design the next recipe. Repeat.
+
+Critical rules for BL mode:
+
+- The physical experiment runner is a PERSON. NEVER call
+  `run_agent(experiment_runner)` for the cell build or electrochemical
+  measurement — only `deliver_recipe` triggers real synthesis.
+- One `deliver_recipe` call = one delivery to the lab. Do not deliver a new batch
+  until the human has reported back on the previous one.
+- A BL campaign is LONG and REPEATED — many design→deliver→wait→interpret loops
+  over a single idea. Keep the world model current so each new recipe is an
+  honest, evidence-grounded next step rather than a restatement of the last one.
+- Before each delivery, briefly state in chat what the batch tests and why; the
+  recipe's `rationale` should capture the same so the decision is gradeable.

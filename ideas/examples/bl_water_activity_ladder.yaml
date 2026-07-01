@@ -1,0 +1,151 @@
+# Battery Lab idea — recipe-generation run (normal mode, RF + ER, stop before paper)
+#
+# Run with:
+#   ./neurico submit ideas/bl_water_activity_ladder.yaml
+#   ./neurico run <printed_idea_id> --no-write-paper --no-github --provider claude
+#
+# The deliverable is a BATCH OF ELECTROLYTE RECIPES in BatteryLab solvency JSON,
+# NOT a computational report. The wet-lab measurements are done later by humans.
+
+idea:
+  title: "Water-activity ladder in aqueous Zn electrolytes: co-solvent fraction vs ionic conductivity"
+
+  domain: battery
+
+  hypothesis: |
+    In an aqueous Zn-ion electrolyte at fixed salt content, progressively
+    replacing water with a water-miscible co-solvent (e.g. propylene glycol)
+    lowers the water activity of the electrolyte. As water activity decreases,
+    ionic conductivity is expected to decrease smoothly and monotonically, while
+    parasitic water reactions at the Zn anode are suppressed. We hypothesize that
+    water activity, estimated from composition, predicts the ionic-conductivity
+    ranking across the series — i.e. it behaves as a transferable descriptor over
+    this range.
+
+  background:
+    description: |
+      GOAL OF THIS RUN — READ CAREFULLY.
+
+      This is a Battery Lab (BL) run. Your job is NOT to run a computational
+      experiment and write a report. Your job is to DESIGN A BATCH OF ELECTROLYTE
+      RECIPES that a human will physically build and measure on the BatteryLab
+      coin-cell robot. The single, primary deliverable of this run is a recipe
+      file in BatteryLab's solvency JSON format (schema below). Do NOT attempt any
+      physical, electrochemical, or wet-lab experiment — you cannot run one, and
+      the robot/humans will do the measurements later.
+
+      Scientific context. The broader open question in the aqueous Zn battery
+      field is the relationship between WATER ACTIVITY and performance (ionic
+      conductivity and Coulombic efficiency): when does water activity serve as a
+      transferable descriptor, and when does it fail? Lowering water activity
+      (e.g. by adding a water-miscible co-solvent, or raising salt concentration)
+      tends to suppress parasitic water reactions at the Zn anode (hydrogen
+      evolution, corrosion) and widen the stability window, improving Zn
+      reversibility — but it also raises viscosity and tends to REDUCE ionic
+      conductivity and Zn-ion transport. The interesting science lives in this
+      trade-off.
+
+      This first, deliberately SIMPLE study turns one knob: the water-to-
+      co-solvent volume ratio, at a fixed Zn salt concentration. It produces the
+      first rung of a "water activity vs performance" map and exercises the whole
+      design -> build -> measure loop end to end. Ionic conductivity (measured by
+      EIS) is the target performance metric here; it is directly measurable on the
+      existing BatteryLab setup.
+
+      Assume all reactants are available — you may choose whatever Zn salt,
+      co-solvent(s), and additives you judge sensible; assume the lab can stock
+      them. Use any literature you gather to ground the choices (which co-solvent,
+      what salt concentration is reasonable, roughly how water activity is expected
+      to move with composition), but keep the chemistry defensible and simple.
+
+      ──────────────────────────────────────────────────────────────────────────
+      RECIPE OUTPUT FORMAT — BatteryLab solvency JSON (MANDATORY, EXACT SHAPE)
+
+      Write a single JSON file: BL-recipes/idx-0.json (relative to the workspace
+      root). It must be a JSON ARRAY of recipe objects. Each object:
+
+        {
+          "recipe_name": "wa_ladder_cell_01",        # unique, human-readable
+          "target_electrolyte": {
+            "name": "wa_ladder_target_01",            # name for the formulation
+            "volume": 0.05,                           # TOTAL volume in MILLILITRES (0.05 = 50 uL)
+            "v": {"water": 0.8, "propylene glycol": 0.2},  # solvent VOLUME FRACTIONS, MUST sum to 1.0
+            "s": {"ZnSO4": 1.0},                      # OPTIONAL: salt molarities (mol/L)
+            "a": {"additive_name": 0.1}               # OPTIONAL: additive molarities (mol/L)
+          }
+        }
+
+      Hard rules for every recipe:
+        - "volume" is in millilitres and > 0 (use 0.05 mL = 50 uL unless you have
+          a reason to vary it).
+        - "v" is REQUIRED, non-empty, with non-negative fractions that SUM TO 1.0.
+        - "s" and "a" are optional maps of substance name -> non-negative molarity.
+        - Hold the salt content FIXED across the ladder; vary only the water /
+          co-solvent split, so water activity is the single independent variable.
+        - Produce roughly 6-8 cells spanning a wide range of water activity (from
+          water-rich to co-solvent-rich), e.g. water volume fraction stepping from
+          ~0.9 down to ~0.2. Order them from highest to lowest water activity.
+      ──────────────────────────────────────────────────────────────────────────
+
+  methodology:
+    approach: |
+      Rational design of a single-variable composition ladder. Use brief
+      literature grounding, estimate how water activity changes with co-solvent
+      fraction, then emit a fixed-salt water/co-solvent series as BatteryLab
+      recipes. No physical experiments are run in this session.
+
+    steps:
+      - "Briefly review literature on water activity in aqueous Zn electrolytes and on water-miscible co-solvents that lower water activity while preserving Zn-ion transport."
+      - "Pick one Zn salt and a fixed salt concentration, and one primary water-miscible co-solvent. Justify the choices in one short paragraph."
+      - "Define a 6-8 point water/co-solvent volume-fraction ladder at the fixed salt content, spanning water-rich to co-solvent-rich, so water activity is the single independent variable."
+      - "For each composition, estimate (qualitatively or with a simple model) the relative water activity, so the cells can be ordered from highest to lowest water activity."
+      - "Write all recipes as a JSON array to BL-recipes/idx-0.json in the exact BatteryLab solvency format specified in the background. Validate that every recipe's 'v' fractions sum to 1.0 and volume is in mL."
+      - "Write a short recipes_rationale.md mapping each recipe_name to its intended water-activity level, the expected ionic-conductivity trend, and the design reasoning. Then stop — do not run experiments."
+
+    metrics:
+      - "Estimated relative water activity per composition (design-time)"
+      - "Ionic conductivity (to be measured later by EIS on BatteryLab — not in this session)"
+
+  constraints:
+    compute: cpu_only
+    time_limit: 1800
+    memory: "4GB"
+    dependencies:
+      - "numpy"
+
+  expected_outputs:
+    - type: dataset
+      format: json
+      description: |
+        BL-recipes/idx-0.json — the PRIMARY deliverable. A JSON array of 6-8
+        BatteryLab solvency-format electrolyte recipes forming a fixed-salt
+        water/co-solvent ladder that spans a wide range of water activity. Must
+        follow the exact schema in the background (recipe_name, target_electrolyte
+        with name, volume in mL, v fractions summing to 1.0, optional s/a
+        molarities). This file is what gets sent to the wet lab.
+
+    - type: report
+      format: markdown
+      description: |
+        recipes_rationale.md — a short note mapping each recipe to its intended
+        water-activity level, the expected ionic-conductivity trend, and the
+        design reasoning (salt and co-solvent choice). Keep it brief; the recipes
+        are the deliverable, not a full research report.
+
+  evaluation_criteria:
+    - "BL-recipes/idx-0.json exists and is a valid JSON array of recipe objects in the exact BatteryLab solvency format."
+    - "Every recipe has volume in mL (> 0) and solvent fractions 'v' that sum to 1.0."
+    - "Salt content is held fixed across the batch; only the water/co-solvent fraction varies, so water activity is the single independent variable."
+    - "The batch contains 6-8 cells spanning water-rich to co-solvent-rich, ordered by descending water activity."
+    - "No physical or electrochemical experiment was attempted; the run stops once recipes and the short rationale are written."
+
+  metadata:
+    author: "gujingxuan"
+    tags:
+      - "battery"
+      - "zinc"
+      - "water-activity"
+      - "electrolyte"
+      - "recipe-generation"
+    priority: high
+    estimated_duration: "15-30 minutes"

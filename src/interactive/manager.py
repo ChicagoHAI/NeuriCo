@@ -119,16 +119,29 @@ def load_config() -> Dict[str, Any]:
     return {}
 
 
-def load_tool_definitions() -> List[Dict[str, Any]]:
-    """Load tool definitions from templates/manager/tools.yaml."""
+def load_tool_definitions(domain: str = "") -> List[Dict[str, Any]]:
+    """Load tool definitions from templates/manager/tools.yaml.
+
+    For the battery domain, merge in the extra BL-mode tools (e.g.
+    deliver_recipe) from tools_battery.yaml so normal interactive runs never see
+    them.
+    """
     tools_file = PROJECT_ROOT / "templates" / "manager" / "tools.yaml"
     if not tools_file.exists():
         raise FileNotFoundError(f"Tool definitions not found: {tools_file}")
 
     with open(tools_file) as f:
         data = yaml.safe_load(f)
+    tools = data.get("tools", [])
 
-    return data.get("tools", [])
+    if (domain or "").lower() == "battery":
+        battery_file = PROJECT_ROOT / "templates" / "manager" / "tools_battery.yaml"
+        if battery_file.exists():
+            with open(battery_file) as f:
+                battery_data = yaml.safe_load(f) or {}
+            tools = tools + battery_data.get("tools", [])
+
+    return tools
 
 
 def load_system_prompt(idea: Dict[str, Any], workspace: Path,
@@ -169,6 +182,14 @@ def load_system_prompt(idea: Dict[str, Any], workspace: Path,
     rendered = rendered.replace("{{ workspace_path }}", str(workspace))
     rendered = rendered.replace("{{ provider }}", provider)
     rendered = rendered.replace("{{ engagement_instructions }}", engagement_instructions)
+
+    # Battery-lab mode: append the BL workflow addendum so the manager knows the
+    # wet-lab step is a human running deliver_recipe, not an in-Docker agent.
+    if idea_content.get("domain", "").lower() == "battery":
+        addendum_file = (PROJECT_ROOT / "templates" / "manager"
+                         / "system_prompt_battery_addendum.txt")
+        if addendum_file.exists():
+            rendered = rendered + "\n" + addendum_file.read_text()
 
     return rendered
 
@@ -250,7 +271,7 @@ class InteractiveManager:
         self.tools = ToolExecutor(workspace, self.session, idea_file, provider,
                                   PROJECT_ROOT, channel=self.channel,
                                   research=self.research)
-        self.tool_definitions = load_tool_definitions()
+        self.tool_definitions = load_tool_definitions(idea_content.get("domain", ""))
         # Base system prompt; the live research-state digest is appended fresh
         # each turn (see _agent_step) so the manager always reasons over current
         # state without polluting the persisted conversation history.
