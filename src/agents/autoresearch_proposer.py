@@ -177,8 +177,22 @@ def collect_public_proposal_context(
         "results_metrics_json": _read_json_or_text(work_dir / "results" / "metrics.json"),
         "src_tree": _list_tree(work_dir / "src"),
         "attempt_history": attempt_history or [],
+        "whiteboard_active_tips_md": _render_whiteboard(work_dir),
     }
     return context
+
+
+def _render_whiteboard(work_dir: Path) -> str:
+    """Render the AutoResearch cross-run whiteboard's active tips as markdown."""
+    try:
+        from core.whiteboard import Whiteboard
+    except ImportError:  # pragma: no cover
+        return ""
+    try:
+        wb = Whiteboard(work_dir).load()
+        return wb.render_markdown()
+    except Exception as e:  # pragma: no cover
+        return f"_(whiteboard read error: {e})_\n"
 
 
 def run_autoresearch_proposer(

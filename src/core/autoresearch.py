@@ -69,6 +69,11 @@ CHECKPOINT_EXCLUDE_PATTERNS = (
 
 COMPARISON_EPS = 1e-6
 
+# Allowed drop in a satisfied-property's normalized margin before the
+# comparator calls it a regression. Strict COMPARISON_EPS on unsatisfied
+# properties (bottlenecks) stays. See _compare_properties for use.
+SATISFIED_MARGIN_REGRESSION_TOLERANCE = 0.05
+
 
 def autoresearch_state_path(work_dir: Path) -> Path:
     """Return the per-workspace AutoResearch continuation state path."""
@@ -566,6 +571,19 @@ class AttemptHistoryManager:
             json.dumps(decision_payload, indent=2),
             encoding="utf-8",
         )
+
+        # Snapshot the cross-run whiteboard for audit. The live whiteboard
+        # keeps living at <history_root>/whiteboard.json and survives across
+        # attempts (rejected or accepted); the snapshot lets us reconstruct
+        # what the handler for this attempt saw / left behind.
+        try:
+            live = self.history_root / "whiteboard.json"
+            if live.exists():
+                shutil.copyfile(live, attempt_dir / "whiteboard_snapshot.json")
+        except Exception:
+            # Whiteboard is best-effort; never fail an attempt over the audit copy.
+            pass
+
         return attempt_dir
 
     def list_attempts(self, parent_sha: str) -> list[Path]:
@@ -805,7 +823,14 @@ class ScoringResultComparator:
             candidate_prop = candidate.properties[name]
             parent_margin = parent_prop["margin"]
             candidate_margin = candidate_prop["margin"]
-            if candidate_margin < parent_margin - COMPARISON_EPS:
+            # Strict no-regression on the bottleneck / unsatisfied props;
+            # small margin drops on already-satisfied props are tolerated.
+            allowed_drop = (
+                SATISFIED_MARGIN_REGRESSION_TOLERANCE
+                if parent_prop["satisfied"] and candidate_prop["satisfied"]
+                else COMPARISON_EPS
+            )
+            if candidate_margin < parent_margin - allowed_drop:
                 return ComparisonDecision(
                     accepted=False,
                     reason=f"Candidate regressed normalized margin for scoring property {name}.",
