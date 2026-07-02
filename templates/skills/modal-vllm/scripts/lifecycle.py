@@ -147,9 +147,16 @@ def capture_endpoint(
     }
     live.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
-    sentinel = base.load_sentinel(workspace) or {}
-    sentinel["endpoint_captured"] = True
-    base.save_sentinel(sentinel, workspace)
+    # Use update_sentinel so the read-modify-write is one locked transaction.
+    # A prior load_sentinel + mutate + save_sentinel dropped the sentinel lock
+    # between the read and write, letting a concurrent pull_all() or teardown()
+    # commit its own change in between and get clobbered when this write landed
+    # (e.g. pull_complete=True flipped back to the older value).
+    def _mark_captured(existing: Dict[str, Any]) -> Dict[str, Any]:
+        existing["endpoint_captured"] = True
+        existing["endpoint_captured_at"] = base.now_iso()
+        return existing
+    base.update_sentinel(workspace, _mark_captured)
     return live
 
 

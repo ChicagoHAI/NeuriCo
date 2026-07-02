@@ -35,8 +35,27 @@ APP_NAME          = "${APP_NAME}"
 HF_VOLUME         = "${HF_VOLUME}"
 VLLM_CACHE_VOLUME = "${VLLM_CACHE_VOLUME}"
 
+# Discover lifecycle.py by walking UP from this file's own path, not from CWD.
+# `Path(".claude/skills/...")` resolves against the current working directory,
+# so `python /abs/path/workspace/src/modal_serve.py capture-endpoint` from any
+# other cwd would silently miss the skill directory, land in the except branch,
+# and later NoneType-crash inside capture_endpoint(). Anchoring on __file__
+# makes the lookup cwd-invariant. Inside the Modal container the walk finds
+# nothing and we still fall through to lifecycle=None as intended.
 try:
-    sys.path.insert(0, str(Path(".claude/skills/modal-vllm/scripts")))
+    _here = Path(__file__).resolve().parent
+    _skill_scripts = None
+    for _anc in [_here, *_here.parents]:
+        _cand = _anc / ".claude" / "skills" / "modal-vllm" / "scripts"
+        if (_cand / "lifecycle.py").exists():
+            _skill_scripts = _cand
+            break
+    if _skill_scripts is None:
+        raise ImportError(
+            "modal-vllm/scripts/lifecycle.py not found under any ancestor of "
+            + str(_here)
+        )
+    sys.path.insert(0, str(_skill_scripts))
     import lifecycle  # noqa: E402
 except ImportError:
     lifecycle = None  # type: ignore[assignment]

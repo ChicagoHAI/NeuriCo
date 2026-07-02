@@ -397,24 +397,27 @@ def register(
     Overwriting that sentinel would orphan the prior env in Modal with no
     local record — teardown the old experiment first.
     """
-    existing_pre = load_sentinel(workspace) or {}
-    prior_exp = existing_pre.get("exp_id")
-    if prior_exp and prior_exp != exp_id and not existing_pre.get("torn_down"):
-        raise RuntimeError(
-            f"workspace already has an in-flight experiment {prior_exp!r}; "
-            f"refusing to re-key to {exp_id!r} (the previous Modal env "
-            f"would be orphaned). Teardown first with: "
-            f"python lifecycle.py teardown --exp-id {prior_exp}"
-        )
-
     env = env_name_for(exp_id)
-    ensure_environment(env)
 
-    # Write the sentinel BEFORE minting secrets so a partial failure leaves a
-    # local record of the env. Without this, a secret-mint failure on the 2nd
-    # of N secrets would leave Modal-side state (env + first secret) that no
-    # local file knows about — no way to recover via lifecycle.py teardown.
+    # Claim the sentinel FIRST, atomically, before touching Modal. The prior-exp
+    # check MUST run inside the same lock+write as the claim; if it runs outside,
+    # two concurrent register() calls with different exp_ids can both see an
+    # empty sentinel, both create their Modal env, and the loser's write
+    # overwrites the winner's local record. That orphans the winner's env in
+    # Modal with no lifecycle handle to teardown against.
+    #
+    # manifest_version is a monotonic fence: pull_all() captures it at read time
+    # and refuses to write pull_complete=True if a newer register() has since
+    # replaced the manifest under the same exp_id.
     def _base(existing: Dict[str, Any]) -> Dict[str, Any]:
+        prior_exp = existing.get("exp_id")
+        if prior_exp and prior_exp != exp_id and not existing.get("torn_down"):
+            raise RuntimeError(
+                f"workspace already has an in-flight experiment {prior_exp!r}; "
+                f"refusing to re-key to {exp_id!r} (the previous Modal env "
+                f"would be orphaned). Teardown first with: "
+                f"python lifecycle.py teardown --exp-id {prior_exp}"
+            )
         return {
             "exp_id": exp_id,
             "environment": env,
@@ -423,6 +426,7 @@ def register(
             "secrets": sorted(set(existing.get("secrets", []))),
             # Replace rather than merge — see the docstring rationale.
             "pull_manifest": list(pull_manifest or []),
+            "manifest_version": int(existing.get("manifest_version", 0)) + 1,
             "share_hf_cache": share_hf_cache,
             "first_registered_at":
                 existing.get("first_registered_at") or now_iso(),
@@ -431,6 +435,10 @@ def register(
             "torn_down": False,
         }
     sentinel = update_sentinel(workspace, _base)
+
+    # Only NOW do we touch Modal. A prior-exp collision above raises without
+    # having created any Modal state, so the loser cannot orphan an env.
+    ensure_environment(env)
 
     minted: List[str] = []
     try:
@@ -471,6 +479,14 @@ def pull_all(
         )
     env = sentinel["environment"]
     workspace_dir = workspace_root(workspace)
+
+    # Fence token: capture the manifest_version we are about to pull. If a
+    # concurrent register() replaces the manifest while our pulls are in flight,
+    # existing["manifest_version"] will have advanced by the time _record runs,
+    # and we MUST NOT mark the newer stage's pull_complete=True based on the
+    # older pull. exp_id alone is not sufficient — chained stages reuse the
+    # same exp_id while swapping the manifest.
+    captured_version = int(sentinel.get("manifest_version", 0))
 
     manifest: List[ManifestEntry] = sentinel.get("pull_manifest", [])
     pulled: List[Dict[str, str]] = []
@@ -517,14 +533,30 @@ def pull_all(
 
     pull_complete = not errors and not missing_required
 
-    # Merge under the sentinel lock so a parallel stage's update isn't lost.
+    # Merge under the sentinel lock so a parallel stage's update isn't lost,
+    # AND refuse the write if the fence has advanced. A skipped write here
+    # means a newer register() replaced the manifest during our pull; we did
+    # not pull the newer manifest, so we must not claim its pull is complete.
+    stale = False
     def _record(existing: Dict[str, Any]) -> Dict[str, Any]:
+        nonlocal stale
+        if int(existing.get("manifest_version", 0)) != captured_version:
+            stale = True
+            return existing
         existing["pull_complete"] = pull_complete
         existing["pull_errors"] = errors
         existing["pull_missing"] = missing_required
         existing["last_pulled_at"] = now_iso()
         return existing
     update_sentinel(workspace, _record)
+
+    if stale:
+        raise RuntimeError(
+            f"pull_all() raced a concurrent register() for exp_id={exp_id!r} "
+            f"(manifest_version advanced from {captured_version}); this "
+            f"pull was against a superseded manifest. Re-run: "
+            f"python lifecycle.py pull --exp-id {exp_id}"
+        )
 
     if not pull_complete:
         raise RuntimeError(
