@@ -22,6 +22,7 @@ from datetime import datetime
 from core.scorer import load_scoring_results
 from core.scoring_seal import seal_scoring_files, unseal_scoring_files
 from core.dsi_slurm_artifacts import DSI_SLURM_ARTIFACTS_DIR, move_dsi_slurm_artifacts
+from core.whiteboard import whiteboard_path
 
 try:
     from git import Repo, InvalidGitRepositoryError, NoSuchPathError
@@ -492,9 +493,20 @@ class CheckpointManager:
 class AttemptHistoryManager:
     """Stores AutoResearch attempt history under a NeuriCo logs directory."""
 
-    def __init__(self, history_root: Path, idea_id: str):
+    def __init__(
+        self,
+        history_root: Path,
+        idea_id: str,
+        work_dir: Optional[Path] = None,
+    ):
         self.history_root = Path(history_root)
         self.idea_id = idea_id
+        # `work_dir` locates the live whiteboard, which always lives at
+        # <work_dir>/logs/experiment-autoresearch/whiteboard.json regardless
+        # of where the attempt history root is. When omitted (e.g. legacy
+        # tests) whiteboard snapshotting is skipped rather than resolved
+        # against `history_root`, which is not where the whiteboard writes.
+        self.work_dir = Path(work_dir) if work_dir is not None else None
         self.history_root.mkdir(parents=True, exist_ok=True)
 
     def next_attempt_dir(self, parent_sha: str) -> Path:
@@ -572,19 +584,26 @@ class AttemptHistoryManager:
             encoding="utf-8",
         )
 
-        # Snapshot the cross-run whiteboard for audit. The live whiteboard
-        # keeps living at <history_root>/whiteboard.json and survives across
-        # attempts (rejected or accepted); the snapshot lets us reconstruct
-        # what the handler for this attempt saw / left behind.
+        self._snapshot_whiteboard(attempt_dir)
+
+        return attempt_dir
+
+    def _snapshot_whiteboard(self, attempt_dir: Path) -> None:
+        """Copy the live whiteboard.json into an attempt directory for audit.
+
+        The live whiteboard survives across rejected attempts by design, so
+        the per-attempt snapshot is the only way to see what the handler
+        for this specific attempt observed / left behind.
+        """
+        if self.work_dir is None:
+            return
         try:
-            live = self.history_root / "whiteboard.json"
+            live = whiteboard_path(self.work_dir)
             if live.exists():
-                shutil.copyfile(live, attempt_dir / "whiteboard_snapshot.json")
+                shutil.copyfile(live, Path(attempt_dir) / "whiteboard_snapshot.json")
         except Exception:
             # Whiteboard is best-effort; never fail an attempt over the audit copy.
             pass
-
-        return attempt_dir
 
     def list_attempts(self, parent_sha: str) -> list[Path]:
         parent_dir = self.parent_dir(parent_sha)
@@ -1102,6 +1121,7 @@ def construct_bootstrap_initial_node(
     bootstrap_history = AttemptHistoryManager(
         bootstrap_history_root,
         idea_id,
+        work_dir=work_dir,
     )
     attempt_dir = bootstrap_history.next_attempt_dir(bootstrap_source_sha)
     attempt_number = AttemptHistoryManager._attempt_number(attempt_dir.name) or 0
@@ -1309,7 +1329,7 @@ def continue_from_current_best(
             },
         }
 
-    history = AttemptHistoryManager(history_root, idea_id)
+    history = AttemptHistoryManager(history_root, idea_id, work_dir=work_dir)
     existing_attempts = history.list_attempts(current_sha)
 
     print(f"   Work dir: {work_dir}")
@@ -1547,7 +1567,9 @@ class AutoResearchController:
         self.idea_id = idea_id
         self.work_dir = Path(work_dir)
         self.checkpoints = checkpoint_manager or CheckpointManager(self.work_dir)
-        self.history = history_manager or AttemptHistoryManager(history_root, idea_id)
+        self.history = history_manager or AttemptHistoryManager(
+            history_root, idea_id, work_dir=self.work_dir
+        )
         self.comparator = comparator or ScoringResultComparator()
         self.proposal_generator = proposal_generator
         self.comment_mode = comment_mode
@@ -1870,6 +1892,8 @@ class AutoResearchController:
             json.dumps(decision_payload, indent=2),
             encoding="utf-8",
         )
+
+        self.history._snapshot_whiteboard(attempt_dir)
 
 
 def run_autoresearch_loop(

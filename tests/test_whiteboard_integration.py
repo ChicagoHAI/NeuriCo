@@ -122,7 +122,9 @@ def test_complete_attempt_snapshots_whiteboard(tmp_path: Path):
     # Confirm the live file is under history_root (default whiteboard_path).
     assert (history_root / "whiteboard.json").exists()
 
-    mgr = AttemptHistoryManager(history_root=history_root, idea_id="demo")
+    mgr = AttemptHistoryManager(
+        history_root=history_root, idea_id="demo", work_dir=tmp_path
+    )
     parent_sha = "a" * 40
     attempt_dir = mgr.next_attempt_dir(parent_sha)
     mgr.write_proposal(attempt_dir, "# Proposal\n\nsome text\n")
@@ -153,7 +155,9 @@ def test_complete_attempt_no_whiteboard_is_ok(tmp_path: Path):
     from core.autoresearch import AttemptHistoryManager
 
     history_root = tmp_path / "logs" / "experiment-autoresearch"
-    mgr = AttemptHistoryManager(history_root=history_root, idea_id="demo")
+    mgr = AttemptHistoryManager(
+        history_root=history_root, idea_id="demo", work_dir=tmp_path
+    )
     parent_sha = "a" * 40
     attempt_dir = mgr.next_attempt_dir(parent_sha)
     mgr.write_proposal(attempt_dir, "# Proposal\n")
@@ -174,3 +178,72 @@ def test_complete_attempt_no_whiteboard_is_ok(tmp_path: Path):
     assert (attempt_dir / "decision.json").exists()
     assert (attempt_dir / "child_pointer.txt").exists()
     assert not (attempt_dir / "whiteboard_snapshot.json").exists()
+
+
+def test_complete_attempt_snapshots_with_external_history_root(tmp_path: Path):
+    """Snapshot must resolve the live whiteboard against work_dir, not history_root.
+
+    Regression for PR #137 review finding: `history_root` may point outside
+    the workspace entirely, and `Whiteboard(work_dir)` always writes to
+    <work_dir>/logs/experiment-autoresearch/whiteboard.json.
+    """
+    from core.autoresearch import AttemptHistoryManager
+
+    work_dir = tmp_path / "workspace"
+    work_dir.mkdir()
+    external_history_root = tmp_path / "elsewhere" / "attempt_history"
+    external_history_root.mkdir(parents=True)
+
+    wb = Whiteboard(work_dir).load()
+    wb.add_tip("survives external history root", category="insight")
+    wb.save()
+
+    mgr = AttemptHistoryManager(
+        history_root=external_history_root, idea_id="demo", work_dir=work_dir
+    )
+    parent_sha = "a" * 40
+    attempt_dir = mgr.next_attempt_dir(parent_sha)
+    mgr.write_proposal(attempt_dir, "# Proposal\n")
+
+    fake_results = work_dir / "scoring" / "results.json"
+    fake_results.parent.mkdir(parents=True, exist_ok=True)
+    fake_results.write_text(json.dumps({"properties": {}, "eval_meta": {}}))
+
+    mgr.complete_attempt(
+        attempt_dir=attempt_dir,
+        parent_sha=parent_sha,
+        child_sha="b" * 40,
+        results_path=fake_results,
+        decision={"accepted": True, "reason": "good"},
+    )
+
+    snap = attempt_dir / "whiteboard_snapshot.json"
+    assert snap.exists()
+    snap_data = json.loads(snap.read_text())
+    assert snap_data["tips"][0]["content"] == "survives external history root"
+
+
+def test_snapshot_whiteboard_helper_is_reusable(tmp_path: Path):
+    """The snapshot helper is what pre-checkpoint failure paths call.
+
+    Regression for PR #137 review finding: attempts that failed before
+    checkpoint creation must also carry a whiteboard snapshot.
+    """
+    from core.autoresearch import AttemptHistoryManager
+
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip("must be captured even on pre-checkpoint failure", category="pitfall")
+    wb.save()
+
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    mgr = AttemptHistoryManager(
+        history_root=history_root, idea_id="demo", work_dir=tmp_path
+    )
+    attempt_dir = mgr.next_attempt_dir("a" * 40)
+
+    mgr._snapshot_whiteboard(attempt_dir)
+
+    snap = attempt_dir / "whiteboard_snapshot.json"
+    assert snap.exists()
+    snap_data = json.loads(snap.read_text())
+    assert snap_data["tips"][0]["category"] == "pitfall"
