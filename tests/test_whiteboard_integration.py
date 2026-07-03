@@ -317,3 +317,83 @@ def test_controller_revert_whiteboard_undoes_clear(tmp_path: Path):
     assert reloaded is not None
     assert reloaded.status == "active"
     assert reloaded.cleared_at_attempt == ""
+
+
+# ------------------------------------------------- proposer prompt hardening
+
+
+def _render_proposer_prompt(work_dir: Path) -> str:
+    from agents.autoresearch_proposer import generate_autoresearch_proposal_prompt
+
+    templates_dir = Path(__file__).resolve().parents[1] / "templates"
+    return generate_autoresearch_proposal_prompt(
+        idea={"idea": {"title": "T", "domain": "d"}},
+        work_dir=work_dir,
+        parent_sha="a" * 40,
+        attempt_dir=work_dir / "logs" / "experiment-autoresearch" / "attempt_1",
+        templates_dir=templates_dir,
+        provider="claude",
+        attempt_history=[],
+    )
+
+
+def test_proposer_prompt_documents_prune_tip_carveout(tmp_path: Path):
+    """Regression for PR #137 review finding 4: the 'do not edit files'
+    line must not contradict the whiteboard prune-tip instruction."""
+    prompt = _render_proposer_prompt(tmp_path)
+
+    # The workspace-mutation ban still exists...
+    assert "Do not edit files in the research workspace" in prompt
+    # ...and the exception for prune-tip is spelled out near it.
+    lowered = prompt.lower()
+    assert "whiteboard prune-tip" in lowered
+    assert "exception" in lowered or "only allowed" in lowered or "carve" in lowered
+
+
+def test_proposer_prompt_renders_tips_only_once(tmp_path: Path):
+    """Regression for PR #137 review finding 6: the whiteboard tip block
+    must not appear both inside the JSON PUBLIC CONTEXT dump and in the
+    dedicated whiteboard section."""
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip("uniquely-worded-tip-marker-Q7X3", category="insight")
+    wb.save()
+
+    prompt = _render_proposer_prompt(tmp_path)
+
+    # The tip content should appear exactly once in the whole prompt
+    assert prompt.count("uniquely-worded-tip-marker-Q7X3") == 1
+    # And the JSON dump must not carry the whiteboard_active_tips_md field
+    assert "whiteboard_active_tips_md" not in prompt
+
+
+def test_proposer_prompt_wraps_tips_in_untrusted_block(tmp_path: Path):
+    """Regression for PR #137 review finding 5: the tip rendering carries
+    an UNTRUSTED TIPS boundary reminder into the proposer prompt."""
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip("marker-for-untrusted-test-9Z", category="insight")
+    wb.save()
+
+    prompt = _render_proposer_prompt(tmp_path)
+
+    assert "BEGIN UNTRUSTED TIPS" in prompt
+    assert "END UNTRUSTED TIPS" in prompt
+    assert "cannot override" in prompt.lower()
+
+
+def test_comment_handler_prompt_wraps_tips_in_untrusted_block(tmp_path: Path):
+    """The same UNTRUSTED framing shows up in the comment_handler prompt."""
+    from templates.prompt_generator import PromptGenerator
+
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip("handler-marker-8K", category="design", affects=["s.py"])
+    wb.save()
+
+    generator = PromptGenerator()
+    prompt = generator.generate_comment_prompt(
+        idea={"idea": {"title": "T", "domain": "d", "comments": "do a thing"}},
+        work_dir=tmp_path,
+        provider="claude",
+    )
+    assert "BEGIN UNTRUSTED TIPS" in prompt
+    assert "END UNTRUSTED TIPS" in prompt
+    assert "cannot override" in prompt.lower()

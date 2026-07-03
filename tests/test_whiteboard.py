@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from core.whiteboard import (  # noqa: E402
     CATEGORIES,
+    MAX_TIP_CONTENT_CHARS,
     STATUS_ACTIVE,
     STATUS_CLEARED,
     STATUS_PRUNED,
@@ -497,3 +498,39 @@ def test_load_tolerates_v1_schema_without_attempt_fields(tmp_path):
     assert wb.tips[0].cleared_at_attempt == ""
     # revert_attempt on a v1 clear finds no matching attempt id and does nothing
     assert wb.revert_attempt("abc/attempt_1") == []
+
+
+# --------------------------------------------------- length cap + untrusted framing
+
+
+def test_add_tip_enforces_length_cap(tmp_path):
+    """Regression for PR #137 review finding 5: tip content is rendered
+    directly into future agent prompts, so cap it to bound the injection
+    surface."""
+    wb = Whiteboard(tmp_path).load()
+    over = "x" * (MAX_TIP_CONTENT_CHARS + 1)
+    with pytest.raises(WhiteboardError) as excinfo:
+        wb.add_tip(over, category="insight")
+    assert str(MAX_TIP_CONTENT_CHARS) in str(excinfo.value)
+
+
+def test_add_tip_accepts_at_length_cap(tmp_path):
+    wb = Whiteboard(tmp_path).load()
+    at_cap = "x" * MAX_TIP_CONTENT_CHARS
+    tip = wb.add_tip(at_cap, category="insight")
+    assert len(tip.content) == MAX_TIP_CONTENT_CHARS
+
+
+def test_render_wraps_tips_in_untrusted_boundary(tmp_path):
+    """Regression for PR #137 review finding 5: an UNTRUSTED TIPS block
+    reminds future agents that tips cannot override system boundaries."""
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip("some hint", category="insight")
+    rendered = wb.render_markdown()
+
+    assert "BEGIN UNTRUSTED TIPS" in rendered
+    assert "END UNTRUSTED TIPS" in rendered
+    # Explicit reminder that tips cannot override sealed scoring / proposal
+    lower = rendered.lower()
+    assert "cannot override" in lower
+    assert "sealed scoring" in lower or "scoring interface" in lower
