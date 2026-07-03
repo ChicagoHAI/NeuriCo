@@ -19,8 +19,11 @@ from core.whiteboard import (  # noqa: E402
     STATUS_PRUNED,
     Whiteboard,
     WhiteboardError,
+    current_attempt_marker_path,
     find_workspace_root,
+    read_current_attempt_marker,
     whiteboard_path,
+    write_current_attempt_marker,
 )
 
 
@@ -65,7 +68,7 @@ def test_save_and_reload_round_trip(tmp_path):
     p = whiteboard_path(tmp_path)
     assert p.exists()
     raw = json.loads(p.read_text())
-    assert raw["schema_version"] == 1
+    assert raw["schema_version"] == 2
     assert raw["next_id_num"] == 3
     assert len(raw["tips"]) == 2
 
@@ -327,3 +330,170 @@ def test_cli_errors_when_no_marker_and_no_workspace_flag(tmp_path, monkeypatch):
     # the clear error. Both are acceptable; a silent write to /tmp is not.
     if r.returncode != 0:
         assert "Could not locate a NeuriCo workspace" in r.stderr
+
+
+# ------------------------------------------ attempt-scoped clear / prune / revert
+
+
+def test_clear_tip_records_attempt(tmp_path):
+    wb = Whiteboard(tmp_path).load()
+    tip = wb.add_tip("x", category="insight")
+    wb.clear_tip(tip.id, attempt="abc/attempt_3")
+    assert tip.status == STATUS_CLEARED
+    assert tip.cleared_at_attempt == "abc/attempt_3"
+
+
+def test_prune_tip_records_attempt(tmp_path):
+    wb = Whiteboard(tmp_path).load()
+    tip = wb.add_tip("bad idea", category="design")
+    wb.prune_tip(tip.id, reason="wrong direction", attempt="abc/attempt_3")
+    assert tip.status == STATUS_PRUNED
+    assert tip.pruned_at_attempt == "abc/attempt_3"
+
+
+def test_revert_attempt_flips_cleared_back_to_active(tmp_path):
+    """Regression for PR #137 review finding 1: a clear made during a
+    rejected attempt must be undone when the attempt is rolled back."""
+    wb = Whiteboard(tmp_path).load()
+    survivor = wb.add_tip("survivor", category="insight")
+    wb.clear_tip(survivor.id, author="handler", attempt="abc/attempt_3")
+    assert survivor.status == STATUS_CLEARED
+
+    reverted = wb.revert_attempt("abc/attempt_3")
+
+    assert [t.id for t in reverted] == [survivor.id]
+    assert survivor.status == STATUS_ACTIVE
+    assert survivor.cleared_at == 0.0
+    assert survivor.cleared_by == ""
+    assert survivor.cleared_at_attempt == ""
+
+
+def test_revert_attempt_flips_pruned_back_to_active(tmp_path):
+    wb = Whiteboard(tmp_path).load()
+    tip = wb.add_tip("possibly bad", category="design")
+    wb.prune_tip(tip.id, reason="conflicts with scoring", attempt="abc/attempt_5")
+    assert tip.status == STATUS_PRUNED
+
+    wb.revert_attempt("abc/attempt_5")
+
+    assert tip.status == STATUS_ACTIVE
+    assert tip.pruned_reason == ""
+    assert tip.pruned_at_attempt == ""
+
+
+def test_revert_attempt_leaves_other_attempts_untouched(tmp_path):
+    wb = Whiteboard(tmp_path).load()
+    t1 = wb.add_tip("one", category="insight")
+    t2 = wb.add_tip("two", category="insight")
+    wb.clear_tip(t1.id, attempt="abc/attempt_2")
+    wb.clear_tip(t2.id, attempt="abc/attempt_3")
+
+    reverted = wb.revert_attempt("abc/attempt_3")
+
+    assert [r.id for r in reverted] == [t2.id]
+    assert t1.status == STATUS_CLEARED
+    assert t2.status == STATUS_ACTIVE
+
+
+def test_revert_attempt_leaves_new_adds_intact(tmp_path):
+    """Adds during the rejected attempt survive; only clears/prunes revert."""
+    wb = Whiteboard(tmp_path).load()
+    added = wb.add_tip("learned during rejected attempt", category="insight")
+    wb.revert_attempt("abc/attempt_9")
+    assert added.status == STATUS_ACTIVE
+
+
+def test_revert_attempt_empty_attempt_is_noop(tmp_path):
+    wb = Whiteboard(tmp_path).load()
+    tip = wb.add_tip("x", category="insight")
+    wb.clear_tip(tip.id, attempt="abc/attempt_1")
+    assert wb.revert_attempt("") == []
+    assert tip.status == STATUS_CLEARED
+
+
+# -------------------------------------------------- current-attempt marker file
+
+
+def test_current_attempt_marker_round_trip(tmp_path):
+    assert read_current_attempt_marker(tmp_path) == ""
+    write_current_attempt_marker(tmp_path, "abc/attempt_2")
+    assert read_current_attempt_marker(tmp_path) == "abc/attempt_2"
+
+
+def test_cli_clear_tip_reads_current_attempt_marker(tmp_path):
+    """`whiteboard clear-tip` picks up .current_attempt without --attempt."""
+    # Populate a whiteboard with an active tip
+    wb = Whiteboard(tmp_path).load()
+    tip = wb.add_tip("targeted", category="insight")
+    wb.save()
+
+    # Controller-side would write the marker at iteration start
+    write_current_attempt_marker(tmp_path, "abc/attempt_4")
+
+    import os
+    env = {"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    env.update(os.environ)
+    r = subprocess.run(
+        [sys.executable, "-m", "core.whiteboard",
+         "--workspace", str(tmp_path), "clear-tip", tip.id],
+        capture_output=True, text=True, env=env,
+    )
+    assert r.returncode == 0, r.stderr
+    reloaded = Whiteboard(tmp_path).load()
+    reloaded_tip = reloaded.find(tip.id)
+    assert reloaded_tip is not None
+    assert reloaded_tip.status == STATUS_CLEARED
+    assert reloaded_tip.cleared_at_attempt == "abc/attempt_4"
+
+
+def test_cli_explicit_attempt_beats_marker(tmp_path):
+    wb = Whiteboard(tmp_path).load()
+    tip = wb.add_tip("x", category="design")
+    wb.save()
+    write_current_attempt_marker(tmp_path, "abc/attempt_marker")
+
+    import os
+    env = {"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    env.update(os.environ)
+    r = subprocess.run(
+        [sys.executable, "-m", "core.whiteboard",
+         "--workspace", str(tmp_path),
+         "prune-tip", tip.id, "--reason", "no", "--attempt", "abc/attempt_flag"],
+        capture_output=True, text=True, env=env,
+    )
+    assert r.returncode == 0, r.stderr
+    reloaded_tip = Whiteboard(tmp_path).load().find(tip.id)
+    assert reloaded_tip.pruned_at_attempt == "abc/attempt_flag"
+
+
+# --------------------------------------------- schema-v1 whiteboards still load
+
+
+def test_load_tolerates_v1_schema_without_attempt_fields(tmp_path):
+    """Whiteboards written before PR #137 fixes must still load. New
+    per-attempt fields default to empty and revert becomes a no-op for
+    those older clears/prunes."""
+    v1_payload = {
+        "schema_version": 1,
+        "next_id_num": 2,
+        "tips": [
+            {
+                "id": "T1",
+                "category": "insight",
+                "content": "old tip",
+                "status": STATUS_CLEARED,
+                "cleared_by": "handler",
+                "cleared_at": 100.0,
+                # no cleared_at_attempt / pruned_at_attempt
+            },
+        ],
+    }
+    path = whiteboard_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(v1_payload), encoding="utf-8")
+
+    wb = Whiteboard(tmp_path).load()
+    assert wb.tips[0].id == "T1"
+    assert wb.tips[0].cleared_at_attempt == ""
+    # revert_attempt on a v1 clear finds no matching attempt id and does nothing
+    assert wb.revert_attempt("abc/attempt_1") == []

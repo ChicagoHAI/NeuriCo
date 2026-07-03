@@ -48,8 +48,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 WHITEBOARD_FILENAME = "whiteboard.json"
+CURRENT_ATTEMPT_FILENAME = ".current_attempt"
 
 CATEGORIES: tuple[str, ...] = ("insight", "design", "pitfall", "code_pattern", "informative")
 INFORMATIVE_CATEGORY = "informative"
@@ -71,8 +72,10 @@ class Tip:
     # Set on clear / prune:
     cleared_by: str = ""     # author string of the handler that claimed it
     cleared_at: float = 0.0
+    cleared_at_attempt: str = ""   # attempt id (e.g. "<parent_sha>/attempt_3")
     pruned_reason: str = ""
     pruned_at: float = 0.0
+    pruned_at_attempt: str = ""
 
     def is_active(self) -> bool:
         return self.status == STATUS_ACTIVE
@@ -87,6 +90,39 @@ class WhiteboardError(RuntimeError):
 
 def whiteboard_path(work_dir: Path) -> Path:
     return Path(work_dir) / "logs" / "experiment-autoresearch" / WHITEBOARD_FILENAME
+
+
+def current_attempt_marker_path(work_dir: Path) -> Path:
+    return Path(work_dir) / "logs" / "experiment-autoresearch" / CURRENT_ATTEMPT_FILENAME
+
+
+def write_current_attempt_marker(work_dir: Path, attempt_id: str) -> None:
+    """Record the attempt id the whiteboard CLI should attribute mutations to.
+
+    Called by the AutoResearch controller at the start of each iteration so
+    that comment_handler / proposer subprocesses running `whiteboard
+    clear-tip` and `whiteboard prune-tip` can automatically tag their
+    mutations. If the marker is missing, the CLI still works but the
+    mutation is unattributed and cannot be rolled back on rejection.
+    """
+    marker = current_attempt_marker_path(work_dir)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(attempt_id.strip() + "\n", encoding="utf-8")
+
+
+def clear_current_attempt_marker(work_dir: Path) -> None:
+    marker = current_attempt_marker_path(work_dir)
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def read_current_attempt_marker(work_dir: Path) -> str:
+    marker = current_attempt_marker_path(work_dir)
+    if not marker.exists():
+        return ""
+    return marker.read_text(encoding="utf-8").strip()
 
 
 # Directories that identify a NeuriCo AutoResearch workspace. Auto-detect
@@ -216,7 +252,13 @@ class Whiteboard:
         self.tips.append(tip)
         return tip
 
-    def clear_tip(self, tip_id: str, *, author: str = "") -> Tip:
+    def clear_tip(
+        self,
+        tip_id: str,
+        *,
+        author: str = "",
+        attempt: str = "",
+    ) -> Tip:
         t = self.find(tip_id)
         if t is None:
             raise WhiteboardError(f"no tip with id {tip_id!r}")
@@ -232,9 +274,17 @@ class Whiteboard:
         t.status = STATUS_CLEARED
         t.cleared_by = author
         t.cleared_at = time.time()
+        t.cleared_at_attempt = attempt
         return t
 
-    def prune_tip(self, tip_id: str, *, reason: str, author: str = "") -> Tip:
+    def prune_tip(
+        self,
+        tip_id: str,
+        *,
+        reason: str,
+        author: str = "",
+        attempt: str = "",
+    ) -> Tip:
         reason = (reason or "").strip()
         if not reason:
             raise WhiteboardError("prune_tip requires a non-empty --reason")
@@ -248,11 +298,46 @@ class Whiteboard:
         t.status = STATUS_PRUNED
         t.pruned_reason = reason
         t.pruned_at = time.time()
+        t.pruned_at_attempt = attempt
         # Author is recorded on the pruned tip for audit even though we
         # don't have a dedicated field; embed it in the reason if needed.
         if author:
             t.pruned_reason = f"[{author}] {reason}"
         return t
+
+    def revert_attempt(self, attempt: str) -> list[Tip]:
+        """Undo clears/prunes recorded under `attempt`.
+
+        Called by the AutoResearch controller after a candidate attempt is
+        rejected and the code change is `git reset --hard`-ed away. The
+        whiteboard itself is not restored from disk (it lives outside the
+        checkpoint), so we walk tips and flip any cleared_at_attempt /
+        pruned_at_attempt equal to `attempt` back to STATUS_ACTIVE. New
+        add_tip operations from the rejected attempt are preserved: the
+        learning survives even when the code change does not.
+
+        Returns the list of tips that were reverted.
+        """
+        if not attempt:
+            return []
+        reverted: list[Tip] = []
+        for t in self.tips:
+            reverted_now = False
+            if t.status == STATUS_CLEARED and t.cleared_at_attempt == attempt:
+                t.status = STATUS_ACTIVE
+                t.cleared_by = ""
+                t.cleared_at = 0.0
+                t.cleared_at_attempt = ""
+                reverted_now = True
+            elif t.status == STATUS_PRUNED and t.pruned_at_attempt == attempt:
+                t.status = STATUS_ACTIVE
+                t.pruned_reason = ""
+                t.pruned_at = 0.0
+                t.pruned_at_attempt = ""
+                reverted_now = True
+            if reverted_now:
+                reverted.append(t)
+        return reverted
 
     # ---- view / render ----
 
@@ -339,6 +424,14 @@ def _cmd_add_tip(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_attempt(args: argparse.Namespace, ws: Path) -> str:
+    """Attempt id: explicit --attempt beats the workspace marker."""
+    explicit = getattr(args, "attempt", None)
+    if explicit:
+        return explicit.strip()
+    return read_current_attempt_marker(ws)
+
+
 def _cmd_clear_tip(args: argparse.Namespace) -> int:
     try:
         ws = _resolve_workspace(args)
@@ -347,7 +440,11 @@ def _cmd_clear_tip(args: argparse.Namespace) -> int:
         return 2
     wb = _load(ws)
     try:
-        tip = wb.clear_tip(args.tip_id, author=args.author or "")
+        tip = wb.clear_tip(
+            args.tip_id,
+            author=args.author or "",
+            attempt=_resolve_attempt(args, ws),
+        )
     except WhiteboardError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -364,7 +461,12 @@ def _cmd_prune_tip(args: argparse.Namespace) -> int:
         return 2
     wb = _load(ws)
     try:
-        tip = wb.prune_tip(args.tip_id, reason=args.reason, author=args.author or "")
+        tip = wb.prune_tip(
+            args.tip_id,
+            reason=args.reason,
+            author=args.author or "",
+            attempt=_resolve_attempt(args, ws),
+        )
     except WhiteboardError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -418,6 +520,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument("tip_id", help="Tip id, e.g. T3.")
     c.add_argument("--author", default="", help="Optional attribution.")
+    c.add_argument(
+        "--attempt",
+        default=None,
+        help="Attempt id to attribute this clear to. Defaults to the "
+             ".current_attempt marker written by AutoResearch, so on "
+             "rejection the controller can revert the clear.",
+    )
     c.set_defaults(func=_cmd_clear_tip)
 
     p = sub.add_parser(
@@ -427,6 +536,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("tip_id")
     p.add_argument("--reason", required=True)
     p.add_argument("--author", default="autoresearch_proposer")
+    p.add_argument(
+        "--attempt",
+        default=None,
+        help="Attempt id to attribute this prune to. Defaults to the "
+             ".current_attempt marker written by AutoResearch, so on "
+             "rejection the controller can revert the prune.",
+    )
     p.set_defaults(func=_cmd_prune_tip)
 
     return parser

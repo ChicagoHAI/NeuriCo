@@ -247,3 +247,73 @@ def test_snapshot_whiteboard_helper_is_reusable(tmp_path: Path):
     assert snap.exists()
     snap_data = json.loads(snap.read_text())
     assert snap_data["tips"][0]["category"] == "pitfall"
+
+
+# ------------------------------------------- controller reject-time revert path
+
+
+def _bare_controller(work_dir: Path, history_root: Path):
+    """Build an AutoResearchController with no-op hooks. Enough to test the
+    whiteboard helper methods without touching git or the scorer."""
+    from core.autoresearch import AutoResearchController
+
+    def _noop_proposal(*args, **kwargs):
+        return "proposal"
+
+    def _noop_comment(*args, **kwargs):
+        return {"success": True}
+
+    def _noop_scorer(*args, **kwargs):
+        return {"success": True}
+
+    class _NoCheckpoints:
+        def create_checkpoint(self, *_a, **_k):
+            raise AssertionError("not used")
+
+        def restore_checkpoint(self, *_a, **_k):
+            return None
+
+        def checkpoint_exists(self, *_a, **_k):
+            return True
+
+    return AutoResearchController(
+        idea={"idea": {"title": "t", "domain": "d", "comments": ""}},
+        idea_id="demo",
+        work_dir=work_dir,
+        history_root=history_root,
+        proposal_generator=_noop_proposal,
+        comment_mode=_noop_comment,
+        scorer=_noop_scorer,
+        checkpoint_manager=_NoCheckpoints(),
+    )
+
+
+def test_controller_attempt_id_matches_disk_layout(tmp_path: Path):
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    ctrl = _bare_controller(tmp_path, history_root)
+    attempt_dir = ctrl.history.next_attempt_dir("a" * 40)
+    aid = ctrl._attempt_id(attempt_dir)
+    # <safe_parent_sha>/<attempt_N>
+    assert aid.endswith("/attempt_1")
+    assert "a" * 40 in aid
+
+
+def test_controller_revert_whiteboard_undoes_clear(tmp_path: Path):
+    """Regression for PR #137 review finding 1: the controller's rejection
+    path must revert the whiteboard mutations the handler made."""
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    ctrl = _bare_controller(tmp_path, history_root)
+    attempt_dir = ctrl.history.next_attempt_dir("a" * 40)
+    attempt_id = ctrl._attempt_id(attempt_dir)
+
+    wb = Whiteboard(tmp_path).load()
+    tip = wb.add_tip("survivor tip", category="insight")
+    wb.clear_tip(tip.id, author="handler", attempt=attempt_id)
+    wb.save()
+
+    ctrl._revert_whiteboard_for(attempt_id)
+
+    reloaded = Whiteboard(tmp_path).load().find(tip.id)
+    assert reloaded is not None
+    assert reloaded.status == "active"
+    assert reloaded.cleared_at_attempt == ""

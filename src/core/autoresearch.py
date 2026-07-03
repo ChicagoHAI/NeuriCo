@@ -22,7 +22,12 @@ from datetime import datetime
 from core.scorer import load_scoring_results
 from core.scoring_seal import seal_scoring_files, unseal_scoring_files
 from core.dsi_slurm_artifacts import DSI_SLURM_ARTIFACTS_DIR, move_dsi_slurm_artifacts
-from core.whiteboard import whiteboard_path
+from core.whiteboard import (
+    Whiteboard,
+    clear_current_attempt_marker,
+    whiteboard_path,
+    write_current_attempt_marker,
+)
 
 try:
     from git import Repo, InvalidGitRepositoryError, NoSuchPathError
@@ -1618,6 +1623,8 @@ class AutoResearchController:
 
         attempt_history = self.history.load_attempt_summaries(parent_sha)
         attempt_dir = self.history.next_attempt_dir(parent_sha)
+        attempt_id = self._attempt_id(attempt_dir)
+        write_current_attempt_marker(self.work_dir, attempt_id)
 
         sealed_dir = seal_scoring_files(self.work_dir)
         proposal = ""
@@ -1708,6 +1715,8 @@ class AutoResearchController:
                     decision=decision_payload,
                 )
             self.checkpoints.restore_checkpoint(parent_sha)
+            self._revert_whiteboard_for(attempt_id)
+            clear_current_attempt_marker(self.work_dir)
             return AutoResearchIterationResult(
                 iteration=iteration,
                 parent_sha=parent_sha,
@@ -1789,6 +1798,8 @@ class AutoResearchController:
 
         if not accepted:
             self.checkpoints.restore_checkpoint(parent_sha)
+            self._revert_whiteboard_for(attempt_id)
+        clear_current_attempt_marker(self.work_dir)
 
         return AutoResearchIterationResult(
             iteration=iteration,
@@ -1855,6 +1866,39 @@ class AutoResearchController:
         results_path = self.work_dir / "scoring" / "results.json"
         if results_path.exists():
             results_path.unlink()
+
+    def _attempt_id(self, attempt_dir: Path) -> str:
+        """Stable id for the attempt used to attribute whiteboard mutations.
+
+        Format matches the on-disk layout: <safe_parent_sha>/<attempt_N>.
+        Recorded on tips by clear_tip / prune_tip so a rejection can be
+        rolled back with `revert_attempt`.
+        """
+        attempt_dir = Path(attempt_dir)
+        try:
+            return str(attempt_dir.relative_to(self.history.history_root))
+        except ValueError:
+            return attempt_dir.name
+
+    def _revert_whiteboard_for(self, attempt_id: str) -> None:
+        """Undo any clear/prune the comment_handler or proposer made this attempt.
+
+        The rejected code change is being rolled back by `restore_checkpoint`,
+        so tips the handler claimed as incorporated no longer are, and tips
+        the proposer pruned as wrong were pruned based on a plan that will
+        not survive. Adds are left alone: their content is the learning we
+        want to keep across rejection.
+        """
+        if not attempt_id:
+            return
+        try:
+            wb = Whiteboard(self.work_dir).load()
+            reverted = wb.revert_attempt(attempt_id)
+            if reverted:
+                wb.save()
+        except Exception:
+            # Whiteboard is best-effort; never fail an iteration over it.
+            pass
 
     def _move_dsi_slurm_artifacts_to_attempt(self, attempt_dir: Path) -> None:
         move_dsi_slurm_artifacts(
