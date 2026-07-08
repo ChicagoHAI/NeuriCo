@@ -51,16 +51,36 @@ type "not found" / "already stopped" are tolerated.
 
 ## Endpoint capture
 
-After `modal deploy`, the scaffolder template runs `modal token new --proxy`
-to mint a proxy-auth token, then writes:
+Proxy-auth tokens are minted ONCE per endpoint via the Modal dashboard, not
+by the scaffolder template:
+
+```
+Modal dashboard → Settings → Proxy Auth Tokens → Create
+```
+
+After `modal deploy`, pass the dashboard-minted token pair via env vars to
+the generated script's `capture-endpoint` subcommand:
+
+```bash
+MODAL_KEY=wk-... MODAL_SECRET=ws-... \
+    python src/modal_serve.py capture-endpoint
+```
+
+That writes:
 
 ```
 .neurico/modal_endpoint.json     (live, includes secret)
+```
+
+The live JSON is destroyed at teardown. `pull_all()` later writes a redacted
+copy:
+
+```
 artifacts/vllm_endpoint.json     (redacted, kept after teardown)
 ```
 
-The live JSON is destroyed at teardown. The redacted one keeps base model,
-revision, vllm flags, and served-model names — enough to redeploy bit-identical.
+The redacted file keeps base model, revision, vllm flags, and served-model
+names — enough to redeploy bit-identical.
 
 ## What pull_all() pulls (vLLM)
 
@@ -71,10 +91,18 @@ revision, vllm flags, and served-model names — enough to redeploy bit-identica
 
 No HF cache, no model weights — they're public and re-fetchable.
 
+`/logs/vllm_stats.log` in the table above is a **volume-root path**, not the
+path inside the running container. If your serving function mounts the logs
+volume at `/var/log/vllm` and writes `/var/log/vllm/vllm_stats.log` inside
+the container, the manifest entry to pull it back is
+`"from": "/vllm_stats.log"` (relative to the volume root) — see
+`modal-training/references/lifecycle.md` for the full path-discipline
+explanation.
+
 ## Failure modes
 
 | Failure | Behavior |
 |---|---|
 | `modal deploy` fails | No app registered; sentinel keeps `apps=[]`; teardown still runs `modal environment delete` cleanly |
 | App is stopped manually | Teardown's `app stop` tolerates "already stopped" |
-| User stops mid-experiment | Re-run `lifecycle.py teardown --exp-id <id>` from CLI |
+| User stops mid-experiment | Re-run `python .claude/skills/modal-vllm/scripts/lifecycle.py teardown --exp-id <id>` from CLI |

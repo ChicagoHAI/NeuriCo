@@ -382,19 +382,38 @@ class ResearchPipelineOrchestrator:
 
         The modal-training / modal-vllm skills' lifecycle.register() writes
         .neurico/modal_resources.json on first use. If the file is absent,
-        this method is a no-op (~50µs). If present, it invokes the skill's
-        modal_sweep.py script, which deletes the Modal environment
-        (cascading to volumes, apps, and secrets it owns).
+        this method is a no-op (~50µs). If present, it picks the right
+        sweep script for the workspace: a vllm sweep when the sentinel
+        records a vllm deployment (endpoint_captured flag or any apps),
+        otherwise the modal-training sweep. The vllm sweep additionally
+        redacts the live endpoint JSON to artifacts/ before teardown, which
+        the training sweep never does — using the wrong one on a vllm-only
+        workspace leaks live proxy-auth tokens into the artifact dir.
 
         Skills are copied into per-provider directories (.claude/.codex/
         .gemini); we try the running provider's directory first and fall
-        back across the others so cleanup works on any provider. If no
-        directory has the script, log a warning and let the user clean up
-        manually.
+        back across the others so cleanup works on any provider. If the
+        chosen skill's sweep is missing under any directory, fall back to
+        the training sweep so at least the env gets destroyed.
         """
-        sentinel = self.work_dir / ".neurico" / "modal_resources.json"
-        if not sentinel.exists():
+        sentinel_path = self.work_dir / ".neurico" / "modal_resources.json"
+        if not sentinel_path.exists():
             return
+
+        try:
+            sentinel_data = json.loads(sentinel_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            sentinel_data = {}
+
+        # vllm marker: either the redacted-endpoint flag has been set, or the
+        # sentinel claims a deployed app (vllm deploys always register one;
+        # modal-training never does).
+        uses_vllm = bool(
+            sentinel_data.get("endpoint_captured")
+            or sentinel_data.get("apps")
+        )
+        primary_skill = "modal-vllm" if uses_vllm else "modal-training"
+        fallback_skill = "modal-training"
 
         preferred = self._PROVIDER_SKILL_DIRS.get(
             provider, next(iter(self._PROVIDER_SKILL_DIRS.values()))
@@ -402,28 +421,32 @@ class ResearchPipelineOrchestrator:
         search_order = [preferred] + [
             d for d in self._PROVIDER_SKILL_DIRS.values() if d != preferred
         ]
-        sweep_script = None
-        for skill_root in search_order:
-            candidate = (
-                self.work_dir / skill_root / "skills" / "modal-training"
-                / "scripts" / "modal_sweep.py"
-            )
-            if candidate.exists():
-                sweep_script = candidate
-                break
+
+        def _find_sweep(skill: str):
+            for skill_root in search_order:
+                cand = (
+                    self.work_dir / skill_root / "skills" / skill
+                    / "scripts" / "modal_sweep.py"
+                )
+                if cand.exists():
+                    return cand
+            return None
+
+        sweep_script = _find_sweep(primary_skill)
+        if sweep_script is None and primary_skill != fallback_skill:
+            sweep_script = _find_sweep(fallback_skill)
         if sweep_script is None:
-            # Skill not present under any provider directory (older neurico
-            # template, or all three got dropped); log so the user can
-            # clean up manually.
             print()
-            print(f"⚠️  Modal sentinel present at {sentinel} but sweep script "
-                  f"missing under any of "
-                  f"{list(self._PROVIDER_SKILL_DIRS.values())}; "
-                  f"clean up manually with `modal environment list`.")
+            print(f"⚠️  Modal sentinel present at {sentinel_path} but no sweep "
+                  f"script found under any of "
+                  f"{list(self._PROVIDER_SKILL_DIRS.values())} for "
+                  f"{primary_skill}/{fallback_skill}; clean up manually "
+                  f"with `modal environment list`.")
             return
 
         print()
-        print(f"🧹 Modal sweep: tearing down per-experiment environment")
+        print(f"🧹 Modal sweep ({sweep_script.parent.parent.name}): "
+              f"tearing down per-experiment environment")
         try:
             subprocess.run(
                 [sys.executable, str(sweep_script),

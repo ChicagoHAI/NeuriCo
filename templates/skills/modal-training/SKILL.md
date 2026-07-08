@@ -166,11 +166,15 @@ modal environment list | grep neurico-        # should be empty after a clean ru
 
 GPU type is the agent's call. Choose based on:
 
-- **L40S (48 GB)**: 14B fp16 fits with ~$1.50/hr cost
-- **H100 (80 GB)**: 14B+ full FT or >14B LoRA, ~$3.50/hr
-- **A100-40GB**: middle ground, often cheaper queue depth
+- **L40S (48 GB)**: 14B fp16 fits, ~$1.95/hr
+- **H100 (80 GB)**: 14B+ full FT or >14B LoRA, ~$4.95/hr
+- **A100-40GB**: middle ground (~$3.40/hr), often cheaper queue depth
 
-Cap `max_steps` aggressively — LoRA SFT plateaus by step ~2000 on most workloads. See `references/cost_guide.md` for fuller pricing and budget patterns.
+These match the rate table in `references/modal_basics.md` — that doc is
+the single source of truth for current Modal pricing; update both together
+if Modal's rates change. Cap `max_steps` aggressively — LoRA SFT plateaus
+by step ~2000 on most workloads. See `references/cost_guide.md` for fuller
+budget patterns.
 
 ## Files in this skill
 
