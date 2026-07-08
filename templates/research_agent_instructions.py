@@ -35,7 +35,8 @@ def extract_user_instructions(prompt: str) -> str:
 
 
 def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
-                          domain: str = 'general') -> str:
+                          domain: str = 'general', idea_spec=None,
+                          provider: str = "claude") -> str:
     """
     Generate comprehensive session instructions for the research agent.
 
@@ -54,7 +55,14 @@ def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
     from templates.prompt_generator import PromptGenerator
     generator = PromptGenerator()
     try:
-        return generator.generate_session_instructions(prompt, work_dir, use_scribe, domain=domain)
+        return generator.generate_session_instructions(
+            prompt,
+            work_dir,
+            use_scribe,
+            domain=domain,
+            idea_spec=idea_spec,
+            provider=provider,
+        )
     except TypeError:
         # Backwards compatibility: old Docker images don't support 'domain' parameter
         print(

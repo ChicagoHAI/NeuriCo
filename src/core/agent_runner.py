@@ -35,6 +35,7 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from core.compute_backend import attach_runtime_compute_backend
 from core.security import sanitize_text
 
 
@@ -154,7 +155,8 @@ def _build_agent_command(provider: str, full_permissions: bool = True,
 
 def _run_cli_agent(cmd: str, prompt: str, work_dir: Path,
                    log_file: Path, transcript_file: Path,
-                   tracker: RunTracker) -> Dict[str, Any]:
+                   tracker: RunTracker,
+                   env_extra: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """
     Execute a CLI agent with streaming output capture.
 
@@ -162,6 +164,8 @@ def _run_cli_agent(cmd: str, prompt: str, work_dir: Path,
     """
     env = os.environ.copy()
     env['PYTHONUNBUFFERED'] = '1'
+    if env_extra:
+        env.update(env_extra)
 
     # Disable IDE integration for Gemini CLI
     if 'gemini' in cmd:
@@ -276,43 +280,70 @@ def run_experiment_runner(idea: Dict[str, Any], work_dir: Path, provider: str,
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
 
-    # Generate research prompt
-    prompt_generator = PromptGenerator(templates_dir)
-    prompt = prompt_generator.generate_research_prompt(idea, root_dir=work_dir)
+    from core.dsi_slurm_remote import dsi_slurm_remote_workspace
 
-    # Save prompt
-    prompt_file = work_dir / "logs" / "research_prompt.txt"
-    prompt_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(prompt_file, 'w', encoding='utf-8') as f:
-        f.write(prompt)
+    with dsi_slurm_remote_workspace(idea, work_dir) as dsi_remote_info:
+        env_extra = None
+        if dsi_remote_info is not None:
+            env_extra = {
+                "NEURICO_DSI_REMOTE_ROOT": dsi_remote_info["remote_root"],
+                "NEURICO_DSI_RSYNC_REMOTE_ROOT": dsi_remote_info["rsync_remote_root"],
+            }
+            print(f"   DSI remote workspace: {dsi_remote_info['remote_root']}")
 
-    # Generate session instructions
-    domain = idea.get('idea', {}).get('domain', 'general')
-    session_instructions = generate_instructions(
-        prompt=prompt,
-        work_dir=str(work_dir),
-        use_scribe=use_scribe,
-        domain=domain
-    )
+        # Generate research prompt
+        prompt_generator = PromptGenerator(templates_dir)
+        prompt = prompt_generator.generate_research_prompt(idea, root_dir=work_dir)
 
-    # Save session instructions
-    session_file = work_dir / "logs" / "session_instructions.txt"
-    with open(session_file, 'w', encoding='utf-8') as f:
-        f.write(session_instructions)
+        # Save prompt
+        prompt_file = work_dir / "logs" / "research_prompt.txt"
+        prompt_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(prompt_file, 'w', encoding='utf-8') as f:
+            f.write(prompt)
 
-    # Build and run command
-    cmd = _build_agent_command(provider, full_permissions, use_scribe)
-    if use_scribe:
-        env_extra = {'SCRIBE_RUN_DIR': str(work_dir)}
-        os.environ.update(env_extra)
+        # Generate session instructions
+        domain = idea.get('idea', {}).get('domain', 'general')
+        session_instructions = generate_instructions(
+            prompt=prompt,
+            work_dir=str(work_dir),
+            use_scribe=use_scribe,
+            domain=domain,
+            idea_spec=idea.get('idea', {}),
+            provider=provider,
+        )
 
-    log_file = work_dir / "logs" / f"execution_{provider}.log"
-    transcript_file = work_dir / "logs" / f"execution_{provider}_transcript.jsonl"
+        # Save session instructions
+        session_file = work_dir / "logs" / "session_instructions.txt"
+        with open(session_file, 'w', encoding='utf-8') as f:
+            f.write(session_instructions)
 
-    # Experiment runner uses session_instructions (not raw prompt) as input
-    result = _run_cli_agent(cmd, session_instructions, work_dir, log_file, transcript_file, tracker)
+        # Build and run command
+        cmd = _build_agent_command(provider, full_permissions, use_scribe)
+        if use_scribe:
+            env_extra = env_extra or {}
+            env_extra['SCRIBE_RUN_DIR'] = str(work_dir)
 
-    return result
+        log_file = work_dir / "logs" / f"execution_{provider}.log"
+        transcript_file = work_dir / "logs" / f"execution_{provider}_transcript.jsonl"
+
+        # Experiment runner uses session_instructions (not raw prompt) as input
+        result = _run_cli_agent(
+            cmd,
+            session_instructions,
+            work_dir,
+            log_file,
+            transcript_file,
+            tracker,
+            env_extra=env_extra,
+        )
+        if result.get("success") and dsi_remote_info is not None:
+            from core.dsi_slurm_artifacts import archive_dsi_slurm_artifacts
+
+            archived_dsi_artifacts = archive_dsi_slurm_artifacts(work_dir)
+            if archived_dsi_artifacts is not None:
+                result["dsi_slurm_artifacts"] = str(archived_dsi_artifacts)
+
+        return result
 
 
 def run_paper_writer(idea: Dict[str, Any], work_dir: Path, provider: str,
@@ -361,16 +392,35 @@ def run_comment_handler(idea: Dict[str, Any], work_dir: Path, provider: str,
     if not comments:
         return {'success': False, 'error': 'No comments found in idea file'}
 
-    prompt = generate_comment_prompt(idea, work_dir, templates_dir)
+    from core.dsi_slurm_remote import dsi_slurm_remote_workspace
 
-    # Build and run command
-    cmd = _build_agent_command(provider, full_permissions)
-    log_file = work_dir / "logs" / f"comment_handler_{provider}.log"
-    transcript_file = work_dir / "logs" / f"comment_handler_{provider}_transcript.jsonl"
+    with dsi_slurm_remote_workspace(idea, work_dir) as dsi_remote_info:
+        env_extra = None
+        if dsi_remote_info is not None:
+            env_extra = {
+                "NEURICO_DSI_REMOTE_ROOT": dsi_remote_info["remote_root"],
+                "NEURICO_DSI_RSYNC_REMOTE_ROOT": dsi_remote_info["rsync_remote_root"],
+            }
+            print(f"   DSI remote workspace: {dsi_remote_info['remote_root']}")
 
-    result = _run_cli_agent(cmd, prompt, work_dir, log_file, transcript_file, tracker)
+        prompt = generate_comment_prompt(idea, work_dir, templates_dir, provider=provider)
 
-    return result
+        # Build and run command
+        cmd = _build_agent_command(provider, full_permissions)
+        log_file = work_dir / "logs" / f"comment_handler_{provider}.log"
+        transcript_file = work_dir / "logs" / f"comment_handler_{provider}_transcript.jsonl"
+
+        result = _run_cli_agent(
+            cmd,
+            prompt,
+            work_dir,
+            log_file,
+            transcript_file,
+            tracker,
+            env_extra=env_extra,
+        )
+
+        return result
 
 
 # Agent dispatch table
@@ -455,6 +505,12 @@ def main():
         help="AI provider (default: claude)"
     )
     parser.add_argument(
+        "--compute-backend",
+        default="local",
+        choices=["local", "dsi-slurm", "modal"],
+        help="Compute backend for experiment/comment agents (default: local)"
+    )
+    parser.add_argument(
         "--run-id",
         required=True,
         help="Unique identifier for this invocation"
@@ -488,6 +544,7 @@ def main():
     import yaml
     with open(args.idea_file, 'r') as f:
         idea = yaml.safe_load(f)
+    attach_runtime_compute_backend(idea, args.compute_backend)
 
     work_dir = Path(args.workspace)
 
