@@ -22,6 +22,12 @@ from datetime import datetime
 from core.scorer import load_scoring_results
 from core.scoring_seal import seal_scoring_files, unseal_scoring_files
 from core.dsi_slurm_artifacts import DSI_SLURM_ARTIFACTS_DIR, move_dsi_slurm_artifacts
+from core.whiteboard import (
+    Whiteboard,
+    clear_current_attempt_marker,
+    whiteboard_path,
+    write_current_attempt_marker,
+)
 
 try:
     from git import Repo, InvalidGitRepositoryError, NoSuchPathError
@@ -68,6 +74,11 @@ CHECKPOINT_EXCLUDE_PATTERNS = (
 )
 
 COMPARISON_EPS = 1e-6
+
+# Allowed drop in a satisfied-property's normalized margin before the
+# comparator calls it a regression. Strict COMPARISON_EPS on unsatisfied
+# properties (bottlenecks) stays. See _compare_properties for use.
+SATISFIED_MARGIN_REGRESSION_TOLERANCE = 0.05
 
 
 def autoresearch_state_path(work_dir: Path) -> Path:
@@ -487,9 +498,20 @@ class CheckpointManager:
 class AttemptHistoryManager:
     """Stores AutoResearch attempt history under a NeuriCo logs directory."""
 
-    def __init__(self, history_root: Path, idea_id: str):
+    def __init__(
+        self,
+        history_root: Path,
+        idea_id: str,
+        work_dir: Optional[Path] = None,
+    ):
         self.history_root = Path(history_root)
         self.idea_id = idea_id
+        # `work_dir` locates the live whiteboard, which always lives at
+        # <work_dir>/logs/experiment-autoresearch/whiteboard.json regardless
+        # of where the attempt history root is. When omitted (e.g. legacy
+        # tests) whiteboard snapshotting is skipped rather than resolved
+        # against `history_root`, which is not where the whiteboard writes.
+        self.work_dir = Path(work_dir) if work_dir is not None else None
         self.history_root.mkdir(parents=True, exist_ok=True)
 
     def next_attempt_dir(self, parent_sha: str) -> Path:
@@ -566,7 +588,27 @@ class AttemptHistoryManager:
             json.dumps(decision_payload, indent=2),
             encoding="utf-8",
         )
+
+        self._snapshot_whiteboard(attempt_dir)
+
         return attempt_dir
+
+    def _snapshot_whiteboard(self, attempt_dir: Path) -> None:
+        """Copy the live whiteboard.json into an attempt directory for audit.
+
+        The live whiteboard survives across rejected attempts by design, so
+        the per-attempt snapshot is the only way to see what the handler
+        for this specific attempt observed / left behind.
+        """
+        if self.work_dir is None:
+            return
+        try:
+            live = whiteboard_path(self.work_dir)
+            if live.exists():
+                shutil.copyfile(live, Path(attempt_dir) / "whiteboard_snapshot.json")
+        except Exception:
+            # Whiteboard is best-effort; never fail an attempt over the audit copy.
+            pass
 
     def list_attempts(self, parent_sha: str) -> list[Path]:
         parent_dir = self.parent_dir(parent_sha)
@@ -805,7 +847,14 @@ class ScoringResultComparator:
             candidate_prop = candidate.properties[name]
             parent_margin = parent_prop["margin"]
             candidate_margin = candidate_prop["margin"]
-            if candidate_margin < parent_margin - COMPARISON_EPS:
+            # Strict no-regression on the bottleneck / unsatisfied props;
+            # small margin drops on already-satisfied props are tolerated.
+            allowed_drop = (
+                SATISFIED_MARGIN_REGRESSION_TOLERANCE
+                if parent_prop["satisfied"] and candidate_prop["satisfied"]
+                else COMPARISON_EPS
+            )
+            if candidate_margin < parent_margin - allowed_drop:
                 return ComparisonDecision(
                     accepted=False,
                     reason=f"Candidate regressed normalized margin for scoring property {name}.",
@@ -1077,6 +1126,7 @@ def construct_bootstrap_initial_node(
     bootstrap_history = AttemptHistoryManager(
         bootstrap_history_root,
         idea_id,
+        work_dir=work_dir,
     )
     attempt_dir = bootstrap_history.next_attempt_dir(bootstrap_source_sha)
     attempt_number = AttemptHistoryManager._attempt_number(attempt_dir.name) or 0
@@ -1284,7 +1334,7 @@ def continue_from_current_best(
             },
         }
 
-    history = AttemptHistoryManager(history_root, idea_id)
+    history = AttemptHistoryManager(history_root, idea_id, work_dir=work_dir)
     existing_attempts = history.list_attempts(current_sha)
 
     print(f"   Work dir: {work_dir}")
@@ -1522,7 +1572,9 @@ class AutoResearchController:
         self.idea_id = idea_id
         self.work_dir = Path(work_dir)
         self.checkpoints = checkpoint_manager or CheckpointManager(self.work_dir)
-        self.history = history_manager or AttemptHistoryManager(history_root, idea_id)
+        self.history = history_manager or AttemptHistoryManager(
+            history_root, idea_id, work_dir=self.work_dir
+        )
         self.comparator = comparator or ScoringResultComparator()
         self.proposal_generator = proposal_generator
         self.comment_mode = comment_mode
@@ -1571,6 +1623,8 @@ class AutoResearchController:
 
         attempt_history = self.history.load_attempt_summaries(parent_sha)
         attempt_dir = self.history.next_attempt_dir(parent_sha)
+        attempt_id = self._attempt_id(attempt_dir)
+        write_current_attempt_marker(self.work_dir, attempt_id)
 
         sealed_dir = seal_scoring_files(self.work_dir)
         proposal = ""
@@ -1661,6 +1715,8 @@ class AutoResearchController:
                     decision=decision_payload,
                 )
             self.checkpoints.restore_checkpoint(parent_sha)
+            self._revert_whiteboard_for(attempt_id)
+            clear_current_attempt_marker(self.work_dir)
             return AutoResearchIterationResult(
                 iteration=iteration,
                 parent_sha=parent_sha,
@@ -1742,6 +1798,8 @@ class AutoResearchController:
 
         if not accepted:
             self.checkpoints.restore_checkpoint(parent_sha)
+            self._revert_whiteboard_for(attempt_id)
+        clear_current_attempt_marker(self.work_dir)
 
         return AutoResearchIterationResult(
             iteration=iteration,
@@ -1809,6 +1867,39 @@ class AutoResearchController:
         if results_path.exists():
             results_path.unlink()
 
+    def _attempt_id(self, attempt_dir: Path) -> str:
+        """Stable id for the attempt used to attribute whiteboard mutations.
+
+        Format matches the on-disk layout: <safe_parent_sha>/<attempt_N>.
+        Recorded on tips by clear_tip / prune_tip so a rejection can be
+        rolled back with `revert_attempt`.
+        """
+        attempt_dir = Path(attempt_dir)
+        try:
+            return str(attempt_dir.relative_to(self.history.history_root))
+        except ValueError:
+            return attempt_dir.name
+
+    def _revert_whiteboard_for(self, attempt_id: str) -> None:
+        """Undo any clear/prune the comment_handler or proposer made this attempt.
+
+        The rejected code change is being rolled back by `restore_checkpoint`,
+        so tips the handler claimed as incorporated no longer are, and tips
+        the proposer pruned as wrong were pruned based on a plan that will
+        not survive. Adds are left alone: their content is the learning we
+        want to keep across rejection.
+        """
+        if not attempt_id:
+            return
+        try:
+            wb = Whiteboard(self.work_dir).load()
+            reverted = wb.revert_attempt(attempt_id)
+            if reverted:
+                wb.save()
+        except Exception:
+            # Whiteboard is best-effort; never fail an iteration over it.
+            pass
+
     def _move_dsi_slurm_artifacts_to_attempt(self, attempt_dir: Path) -> None:
         move_dsi_slurm_artifacts(
             self.work_dir,
@@ -1845,6 +1936,8 @@ class AutoResearchController:
             json.dumps(decision_payload, indent=2),
             encoding="utf-8",
         )
+
+        self.history._snapshot_whiteboard(attempt_dir)
 
 
 def run_autoresearch_loop(

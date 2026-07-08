@@ -993,7 +993,11 @@ https://github.com/ChicagoHAI/neurico
         template_content = template_gitignore.read_text(encoding="utf-8")
 
         if workspace_gitignore.exists():
-            # Merge: append only patterns not already present
+            # Merge: append only patterns not already present. Skip the append
+            # entirely if every non-comment/non-blank pattern in the template
+            # is already covered, so the merge is idempotent across relaunches
+            # (previous behaviour appended the template's section headers on
+            # every run, leaving the tree dirty for --continue-autoresearch).
             existing_content = workspace_gitignore.read_text(encoding="utf-8")
             existing_lines = set(
                 line.strip()
@@ -1001,18 +1005,34 @@ https://github.com/ChicagoHAI/neurico
                 if line.strip() and not line.strip().startswith("#")
             )
 
-            new_lines = []
-            for line in template_content.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("#") or not stripped:
-                    # Keep comments and blank lines for readability
-                    new_lines.append(line)
-                elif stripped not in existing_lines:
-                    new_lines.append(line)
+            template_data_lines = [
+                line.strip()
+                for line in template_content.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            missing = [l for l in template_data_lines if l not in existing_lines]
+            if not missing:
+                print(
+                    f"   Research .gitignore patterns already present, skipping merge"
+                )
+            else:
+                new_lines = []
+                for line in template_content.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        # Carry comments / blanks alongside new data lines only.
+                        new_lines.append(line)
+                    elif stripped not in existing_lines:
+                        new_lines.append(line)
 
-            merged_content = existing_content.rstrip("\n") + "\n\n" + "\n".join(new_lines) + "\n"
-            workspace_gitignore.write_text(merged_content, encoding="utf-8")
-            print(f"   Merged research .gitignore patterns into workspace")
+                merged_content = (
+                    existing_content.rstrip("\n") + "\n\n" + "\n".join(new_lines) + "\n"
+                )
+                workspace_gitignore.write_text(merged_content, encoding="utf-8")
+                print(
+                    f"   Merged {len(missing)} new research .gitignore pattern(s) "
+                    f"into workspace"
+                )
         else:
             # No existing .gitignore (e.g. local-only mode), copy template directly
             import shutil

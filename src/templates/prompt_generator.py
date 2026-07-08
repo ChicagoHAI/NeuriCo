@@ -928,11 +928,25 @@ RESEARCH DOMAIN:
             'priority_section': priority_section,
             'compute_backend_section': self._generate_compute_backend_section(
                 idea_spec, mode="comment", provider=provider
-            )
+            ),
+            'whiteboard_active_tips_md': _render_whiteboard_for_prompt(work_dir),
         }
 
         # Render template with variables
         return self.render_template(template, variables)
+
+
+def _render_whiteboard_for_prompt(work_dir: Path) -> str:
+    """Render AutoResearch cross-run whiteboard active tips (markdown)."""
+    try:
+        from core.whiteboard import Whiteboard
+    except ImportError:  # pragma: no cover
+        return ""
+    try:
+        wb = Whiteboard(work_dir).load()
+        return wb.render_markdown()
+    except Exception as e:  # pragma: no cover
+        return f"_(whiteboard read error: {e})_\n"
 
 
 def main():

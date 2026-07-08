@@ -46,6 +46,13 @@ dev = [
     "ruff>=0.1.0",
 ]
 
+[project.scripts]
+# `whiteboard` is the AutoResearch cross-run whiteboard CLI used by the
+# comment_handler and autoresearch_proposer agents. Exposing it as a console
+# script lets agents invoke it as `whiteboard view` etc. without needing to
+# know PYTHONPATH or the neurico src/ location.
+whiteboard = "src.core.whiteboard:main"
+
 [project.urls]
 Homepage = "https://github.com/ChicagoHAI/neurico"
 Documentation = "https://github.com/ChicagoHAI/neurico/blob/main/README.md"

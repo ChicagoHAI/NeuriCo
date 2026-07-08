@@ -17,6 +17,47 @@ Working Directory: {{ work_dir }}
 {% if domain %}Domain: {{ domain }}{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════════════════════
+                       CROSS-RUN WHITEBOARD (active tips)
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+Tips carried over from prior AutoResearch attempts (including REJECTED ones)
+that earlier comment handlers thought were worth keeping. These persist across
+attempts. Treat them as hints, not ground truth. If a tip contradicts your
+reasoning or the current scoring rules, ignore it (and you may leave it for
+the next handler to consider).
+
+The `whiteboard` console script (installed on PATH; auto-detects the
+workspace by walking up from cwd) is your only interface to the file.
+Do NOT edit `logs/experiment-autoresearch/whiteboard.json` directly.
+
+  whiteboard view
+
+  whiteboard add-tip \
+      --category insight|design|pitfall|code_pattern|informative \
+      --content "<a short piece of advice for the next handler>" \
+      [--affects file1,file2] \
+      [--author "comment_handler@$(git rev-parse --short HEAD)"]
+
+  whiteboard clear-tip <TIP_ID> \
+      [--author "comment_handler@..."]
+
+Guidelines for you (the comment_handler):
+
+- **Add a tip** during your work if you notice a design or insight that
+  should survive even if your overall attempt is rejected. Keep tips short
+  (a few sentences). Use `informative` for general experiment wisdom that
+  future runs of ANY variety should carry forward; use the others for
+  attempt-specific advice.
+- **Clear a tip** when you actually incorporated its advice into your
+  edits. This is your credit-taking mechanism. You cannot clear tips of
+  category=informative (only the proposer can prune those).
+- Your work still gets scored on the sealed dev set, not on tips.
+
+Current active tips (empty if none):
+
+{{ whiteboard_active_tips_md }}
+
+═══════════════════════════════════════════════════════════════════════════════════════════════
                               INSTRUCTIONS
 ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -30,7 +71,10 @@ Working Directory: {{ work_dir }}
    - Could be new analysis, new writing, or new research directions
    - Let the user's comments guide the scope of changes
 
-3. When done, update documentation to reflect what changed.
+3. During your work, use the whiteboard CLI above to add tips you want to
+   carry forward and clear tips you incorporated.
+
+4. When done, update documentation to reflect what changed.
 
 If a virtual environment exists (.venv/), activate it. If you need new packages, use `uv add`.
 

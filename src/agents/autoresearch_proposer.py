@@ -143,6 +143,14 @@ def generate_autoresearch_proposal_prompt(
         attempt_history=attempt_history or [],
     )
 
+    # Whiteboard tips get their own dedicated UNTRUSTED TIPS section in the
+    # template, so drop them from the JSON public_context dump to avoid
+    # rendering the same block twice in the proposer prompt.
+    whiteboard_active_tips_md = context.pop(
+        "whiteboard_active_tips_md",
+        "_(whiteboard has no active tips)_\n",
+    )
+
     return template.render(
         title=idea_spec.get("title", "Untitled Research"),
         domain=idea_spec.get("domain", ""),
@@ -151,6 +159,7 @@ def generate_autoresearch_proposal_prompt(
         attempt_dir=str(attempt_dir),
         proposal_path=str(attempt_dir / "proposal.md"),
         public_context=context,
+        whiteboard_active_tips_md=whiteboard_active_tips_md,
         compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
     )
 
@@ -177,8 +186,22 @@ def collect_public_proposal_context(
         "results_metrics_json": _read_json_or_text(work_dir / "results" / "metrics.json"),
         "src_tree": _list_tree(work_dir / "src"),
         "attempt_history": attempt_history or [],
+        "whiteboard_active_tips_md": _render_whiteboard(work_dir),
     }
     return context
+
+
+def _render_whiteboard(work_dir: Path) -> str:
+    """Render the AutoResearch cross-run whiteboard's active tips as markdown."""
+    try:
+        from core.whiteboard import Whiteboard
+    except ImportError:  # pragma: no cover
+        return ""
+    try:
+        wb = Whiteboard(work_dir).load()
+        return wb.render_markdown()
+    except Exception as e:  # pragma: no cover
+        return f"_(whiteboard read error: {e})_\n"
 
 
 def run_autoresearch_proposer(
