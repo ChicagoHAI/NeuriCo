@@ -2,7 +2,7 @@
 LLM Backend Abstraction
 
 Provides a unified interface for calling LLMs, whether via CLI (claude -p)
-or API (Anthropic SDK / OpenRouter). The backend is configured by the user
+or API (Anthropic SDK / OpenRouter / Requesty). The backend is configured by the user
 in config/manager.yaml or .env.
 """
 
@@ -40,7 +40,7 @@ class LLMBackend:
     def __init__(self, backend: str = "cli", model: Optional[str] = None):
         """
         Args:
-            backend: "cli", "anthropic_api", or "openrouter"
+            backend: "cli", "anthropic_api", "openrouter", or "requesty"
             model: Model name override (None = default for backend)
         """
         self.backend = backend
@@ -65,6 +65,8 @@ class LLMBackend:
             return self._send_anthropic_api(messages, tools)
         elif self.backend == "openrouter":
             return self._send_openrouter(messages, tools)
+        elif self.backend == "requesty":
+            return self._send_requesty(messages, tools)
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
 
@@ -337,6 +339,72 @@ class LLMBackend:
 
         response = httpx.post(
             "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=120
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        # Parse OpenAI-compatible response
+        choice = data["choices"][0]["message"]
+        text = choice.get("content", "") or ""
+        tool_calls = []
+
+        for tc in choice.get("tool_calls", []):
+            func = tc.get("function", {})
+            args = func.get("arguments", "{}")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {"raw": args}
+            tool_calls.append(ToolCall(
+                id=tc.get("id", ""),
+                name=func.get("name", ""),
+                arguments=args
+            ))
+
+        return LLMResponse(text=text, tool_calls=tool_calls, raw=data)
+
+    def _send_requesty(self, messages: List[Dict[str, Any]],
+                       tools: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
+        """Send via Requesty (OpenAI-compatible router). Requires REQUESTY_API_KEY."""
+        try:
+            import httpx
+        except ImportError:
+            raise ImportError(
+                "httpx package required for Requesty backend. "
+                "Install with: pip install httpx"
+            )
+
+        api_key = os.environ.get("REQUESTY_API_KEY")
+        if not api_key:
+            raise ValueError("REQUESTY_API_KEY environment variable required for requesty backend")
+
+        model = self.model or "anthropic/claude-sonnet-4"
+
+        payload = {
+            "model": model,
+            "messages": [{"role": m["role"], "content": m["content"]} for m in messages],
+            "max_tokens": 4096,
+        }
+
+        if tools:
+            payload["tools"] = [{
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("parameters", {})
+                }
+            } for t in tools]
+
+        response = httpx.post(
+            "https://router.requesty.ai/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",

@@ -115,7 +115,7 @@ works — that's how you see *what it believes and why*, not just what it's doin
 | `--cli` | off (web is default) | Use the **terminal** interface instead of the browser |
 | `--port N` | `7890` | Port for the web UI (auto-retries if taken) |
 | `--no-browser` | off | Start the web server but don't auto-open the browser |
-| `--backend {cli\|anthropic_api\|openrouter}` | from config | Which backend powers the manager's own reasoning |
+| `--backend {cli\|anthropic_api\|openrouter\|requesty}` | from config | Which backend powers the manager's own reasoning |
 
 **Examples** (`<idea_id>` is the full ID that `submit` printed, e.g.
 `titanic_survival_prediction_20260606_213145_67d058cf`)
