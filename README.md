@@ -410,6 +410,29 @@ Paper-finder starts automatically in Docker — no extra setup needed.
 
 </details>
 
+## Testing
+
+Install dev dependencies and run the test suite:
+
+```bash
+# Install uv if you don't have it
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install project with dev dependencies
+uv sync --dev
+
+# Run all tests
+uv run pytest tests/ -v
+
+# Run unit tests only
+uv run pytest tests/test_security.py tests/test_config_loader.py tests/test_idea_manager.py tests/test_pipeline_state.py -v
+
+# Run integration tests only
+uv run pytest tests/test_pipeline_orchestrator_integration.py -v
+```
+
+No API keys or external services are required — all tests use temporary directories and mock data.
+
 ## Documentation
 
 - **[docs/WORKFLOW.md](docs/WORKFLOW.md)** - Complete workflow guide
