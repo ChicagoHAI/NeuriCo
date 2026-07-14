@@ -1002,6 +1002,7 @@ def construct_fresh_initial_node(
     scorer_timeout: int,
     manifest_trimmer_timeout: int,
     autoresearch_history_dir: Optional[Path],
+    hitl_enabled: bool = False,
 ) -> InitialAutoResearchNodeResult:
     """Run the fresh scored pipeline and mark its output as the initial best node."""
     from core.pipeline_orchestrator import ResearchPipelineOrchestrator
@@ -1024,6 +1025,7 @@ def construct_fresh_initial_node(
         scorer_timeout=scorer_timeout,
         bootstrap_mode=False,
         manifest_trimmer_timeout=manifest_trimmer_timeout,
+        hitl_enabled=hitl_enabled,
     )
 
     if not pipeline_result.get("success", False):

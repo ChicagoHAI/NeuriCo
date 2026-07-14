@@ -146,6 +146,7 @@ class ResearchRunner:
         bootstrap_autoresearch_baseline: bool = False,
         proposer_timeout: int = 900,
         compute_backend: str = "local",
+        hitl: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -167,6 +168,8 @@ class ResearchRunner:
             paper_style: Paper template style (neurips, icml, acl, ams). None = auto-detect from domain
             paper_timeout: Timeout for paper writing in seconds
             force_fresh: Ignore existing local workspace and start a new run from scratch
+            hitl: Enable plan-centered human-in-the-loop workflow for supported
+                stages. V1 supports resource_finder.
 
         Returns:
             Dictionary with:
@@ -182,6 +185,8 @@ class ResearchRunner:
         print(f"   GitHub: {'Enabled' if self.use_github else 'Disabled'}")
         compute_backend = normalize_compute_backend(compute_backend)
         print(f"   Compute backend: {compute_backend}")
+        if hitl:
+            print("   HITL: enabled (resource_finder v1)")
         autoresearch_modes = [
             name
             for name, enabled in (
@@ -470,6 +475,7 @@ class ResearchRunner:
             orchestrator = ResearchPipelineOrchestrator(
                 work_dir=work_dir, templates_dir=self.project_root / "templates"
             )
+            success = False
 
             # If resuming into an existing workspace, check which stages already completed
             # and skip them — read pipeline_state.json directly rather than relying on
@@ -516,6 +522,7 @@ class ResearchRunner:
                         scorer_timeout=scorer_timeout,
                         manifest_trimmer_timeout=manifest_trimmer_timeout,
                         autoresearch_history_dir=autoresearch_history_dir,
+                        hitl_enabled=hitl,
                     )
                     pipeline_result = initial_result.pipeline_result or {
                         "success": initial_result.success,
@@ -560,6 +567,7 @@ class ResearchRunner:
                         scorer_timeout=scorer_timeout,
                         bootstrap_mode=bootstrap_mode,
                         manifest_trimmer_timeout=manifest_trimmer_timeout,
+                        hitl_enabled=hitl,
                     )
 
                     success = pipeline_result.get("success", False)
@@ -757,11 +765,15 @@ https://github.com/ChicagoHAI/neurico
                     print(f"\n⚠️  Failed to push to GitHub: {e}")
                     print("   Results are available locally")
 
-            # Update idea status
-            self.idea_manager.update_status(idea_id, "completed")
+            # Update idea status. Leave unsuccessful/interrupted runs in progress
+            # so they can be inspected and resumed instead of falsely archived.
+            self.idea_manager.update_status(idea_id, "completed" if success else "in_progress")
 
             print()
-            print(f"✅ Research completed!")
+            if success:
+                print("✅ Research completed!")
+            else:
+                print("⚠️  Research did not complete successfully.")
             print(f"   Location: {work_dir}")
             if github_url:
                 print(f"   GitHub: {github_url}")
@@ -1090,10 +1102,13 @@ https://github.com/ChicagoHAI/neurico
                 print("   Results are available locally")
 
         # Update idea status
-        self.idea_manager.update_status(idea_id, "completed")
+        self.idea_manager.update_status(idea_id, "completed" if success else "in_progress")
 
         print()
-        print(f"✅ Research completed!")
+        if success:
+            print("✅ Research completed!")
+        else:
+            print("⚠️  Research did not complete successfully.")
         print(f"   Location: {work_dir}")
         if github_url:
             print(f"   GitHub: {github_url}")
@@ -1289,6 +1304,11 @@ def main():
         help="Timeout for each manifest_trimmer agent call in seconds (default: 300 = 5 min, "
         "bootstrap mode only)",
     )
+    parser.add_argument(
+        "--hitl",
+        action="store_true",
+        help="Enable plan-centered human-in-the-loop workflow (v1 supports resource_finder)",
+    )
 
     args = parser.parse_args()
     autoresearch_modes = [
@@ -1363,11 +1383,15 @@ def main():
             bootstrap_autoresearch_baseline=args.bootstrap_autoresearch_baseline,
             proposer_timeout=args.proposer_timeout,
             compute_backend=args.compute_backend,
+            hitl=args.hitl,
         )
 
         print()
         print("=" * 80)
-        print("SUCCESS! Research execution completed.")
+        if result.get("success"):
+            print("SUCCESS! Research execution completed.")
+        else:
+            print("Research execution did not complete successfully.")
         print(f"Location: {result['work_dir']}")
         if result.get("github_url"):
             print(f"GitHub: {result['github_url']}")

@@ -1,0 +1,25 @@
+═══════════════════════════════════════════════════════════════════════════════
+                         HITL PLAN REVISION MODE
+═══════════════════════════════════════════════════════════════════════════════
+
+You are revising your own `{{ pipeline_stage }}` living plan at `{{ plan_path }}`.
+
+This is plan revision only. Do not perform stage work.
+
+Required behavior:
+1. Read the existing plan and current workspace state.
+2. Preserve useful completed reasoning and progress.
+3. Apply only the manager/human feedback below.
+4. Make the plan concrete enough for another manager review.
+5. Update the progress section to explain what changed.
+
+Manager/human feedback to apply:
+
+{{ feedback }}
+
+Hard constraints:
+- Do not gather resources or modify stage output artifacts.
+- Do not create `.resource_finder_complete`.
+- The orchestrator removes `.resource_finder_plan_complete` before plan revision
+  starts. Recreate `.resource_finder_plan_complete` only after `{{ plan_path }}` is
+  revised, reviewable, and no unresolved checkpoint exists.

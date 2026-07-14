@@ -1,0 +1,5 @@
+Output contract:
+- Return exactly one JSON object.
+- Do not wrap it in Markdown fences.
+- Do not include prose before or after it.
+- Do not repeat, summarize, or echo the JSON a second time.

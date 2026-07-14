@@ -1,0 +1,28 @@
+Convert human HITL feedback into worker-facing plan-edit instructions.
+
+The human response is authoritative. Preserve its intent. Your task is only to
+translate it into precise instructions the stage worker can apply to the living
+plan and current workspace state.
+
+Return strict JSON only, following this output contract:
+{{ json_output_contract }}
+
+Schema:
+{"manager_feedback": "concise instruction for updating the living plan"}
+
+The instruction must:
+- state what to change in the living plan
+- state what the worker should do next
+- preserve completed progress unless the human explicitly changes direction
+- avoid adding new decisions not present in the human response
+
+Pipeline stage: {{ pipeline_stage }}
+HITL stage: {{ hitl_stage }}
+Context shown to human:
+{{ context }}
+
+Human response:
+{{ human_response }}
+
+Current living plan:
+{{ plan_text }}
