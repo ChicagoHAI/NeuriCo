@@ -163,7 +163,9 @@ start_paper_finder() {
     echo -e "${BLUE}Paper-finder Service:${NC}"
 
     if [ -n "$S2_API_KEY" ]; then
-        if [ -n "$OPENAI_API_KEY" ]; then
+        # Paper-finder needs one LLM key for relevance ranking:
+        # OpenRouter (default) or a direct OpenAI key
+        if [ -n "$OPENROUTER_KEY" ] || [ -n "$OPENROUTER_API_KEY" ] || [ -n "$OPENAI_API_KEY" ]; then
             echo -e "  ${GREEN}[OK]${NC} S2_API_KEY configured"
 
             # Check if paper-finder is installed
@@ -197,7 +199,7 @@ start_paper_finder() {
                 echo -e "  ${YELLOW}[WARN]${NC} Paper-finder not installed"
             fi
         else
-            echo -e "  ${YELLOW}[WARN]${NC} OPENAI_API_KEY required for paper-finder"
+            echo -e "  ${YELLOW}[WARN]${NC} OPENROUTER_KEY (or OPENAI_API_KEY) required for paper-finder"
         fi
     else
         echo -e "  ${YELLOW}[INFO]${NC} S2_API_KEY not set - paper-finder disabled"
