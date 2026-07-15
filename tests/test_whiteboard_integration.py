@@ -886,6 +886,9 @@ def test_hitl_candidate_failure_closes_before_scorer_and_cleans_public_state(
     idea_log = tmp_path / "logs" / "hitl" / "idea.jsonl"
     idea_log.parent.mkdir(parents=True, exist_ok=True)
     idea_log.write_text('{"idea_id":"I1","context":"before"}\n', encoding="utf-8")
+    before_archive = tmp_path / "logs" / "hitl" / "resolve_checkpoint" / "before.json"
+    before_archive.parent.mkdir(parents=True, exist_ok=True)
+    before_archive.write_text('{"idea_id":"I1"}\n', encoding="utf-8")
     scoring_dir = tmp_path / "scoring"
     scoring_dir.mkdir()
     (scoring_dir / "results.json").write_text(
@@ -931,6 +934,8 @@ def test_hitl_candidate_failure_closes_before_scorer_and_cleans_public_state(
             + '{"idea_id":"I2","context":"failed attempt"}\n',
             encoding="utf-8",
         )
+        failed_archive = tmp_path / "logs" / "hitl" / "resolve_checkpoint" / "failed.json"
+        failed_archive.write_text('{"idea_id":"I2"}\n', encoding="utf-8")
         return {
             "success": False,
             "hitl": True,
@@ -946,6 +951,8 @@ def test_hitl_candidate_failure_closes_before_scorer_and_cleans_public_state(
     assert "mechanical HITL failure" in result.reason
     assert not (tmp_path / "stray_public_file.txt").exists()
     assert idea_log.read_text(encoding="utf-8") == '{"idea_id":"I1","context":"before"}\n'
+    assert before_archive.read_text(encoding="utf-8") == '{"idea_id":"I1"}\n'
+    assert not (tmp_path / "logs" / "hitl" / "resolve_checkpoint" / "failed.json").exists()
     assert not result.attempt_dir.exists()
 
 
@@ -974,10 +981,15 @@ def test_recover_interrupted_hitl_attempt_uses_saved_external_history_root(tmp_p
         '{"version":1,"tips":[]}\n',
         encoding="utf-8",
     )
-    (attempt_dir / "hitl_idea_log_before.jsonl").write_text(
+    hitl_before = attempt_dir / "hitl_log_before"
+    hitl_before.mkdir()
+    (hitl_before / "idea.jsonl").write_text(
         '{"idea_id":"I1","context":"before"}\n',
         encoding="utf-8",
     )
+    before_archive = hitl_before / "resolve_checkpoint" / "before.json"
+    before_archive.parent.mkdir(parents=True)
+    before_archive.write_text('{"idea_id":"I1"}\n', encoding="utf-8")
     write_autoresearch_state(
         work_dir=work_dir,
         history_root=external_history,
@@ -999,6 +1011,9 @@ def test_recover_interrupted_hitl_attempt_uses_saved_external_history_root(tmp_p
         '{"idea_id":"I2","context":"interrupted attempt"}\n',
         encoding="utf-8",
     )
+    failed_archive = work_dir / "logs" / "hitl" / "resolve_checkpoint" / "failed.json"
+    failed_archive.parent.mkdir(parents=True, exist_ok=True)
+    failed_archive.write_text('{"idea_id":"I2"}\n', encoding="utf-8")
     (work_dir / "README.md").write_text("dirty\n", encoding="utf-8")
     (work_dir / "plans").mkdir()
     (work_dir / "plans" / "experiment_runner_plan.md").write_text("# dirty\n", encoding="utf-8")
@@ -1010,6 +1025,9 @@ def test_recover_interrupted_hitl_attempt_uses_saved_external_history_root(tmp_p
     assert not (work_dir / "plans" / "experiment_runner_plan.md").exists()
     assert whiteboard_path(work_dir).read_text(encoding="utf-8") == '{"version":1,"tips":[]}\n'
     assert idea_log.read_text(encoding="utf-8") == '{"idea_id":"I1","context":"before"}\n'
+    restored_archive = work_dir / "logs" / "hitl" / "resolve_checkpoint" / "before.json"
+    assert restored_archive.read_text(encoding="utf-8") == '{"idea_id":"I1"}\n'
+    assert not failed_archive.exists()
     assert not attempt_dir.exists()
     assert read_current_attempt_marker(work_dir) == ""
 

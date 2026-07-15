@@ -37,8 +37,12 @@ from core.hitl import (
     assert_path_state_unchanged,
     assert_plan_only_public_changes,
     maybe_public_workspace_inventory,
+    remove_hitl_log_dir_snapshot,
     parse_required_artifacts,
+    render_hitl_template,
+    restore_hitl_log_dir_snapshot,
     snapshot_path_state,
+    snapshot_hitl_log_dir,
     verify_required_artifacts,
 )
 
@@ -1336,10 +1340,10 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[Path]
         raise RuntimeError(
             f"Cannot recover interrupted HITL attempt: missing {before}"
         )
-    idea_log_before = attempt_dir / "hitl_idea_log_before.jsonl"
-    if not idea_log_before.is_file():
+    hitl_log_before = _hitl_log_snapshot_path(attempt_dir)
+    if not hitl_log_before.is_dir():
         raise RuntimeError(
-            f"Cannot recover interrupted HITL attempt: missing {idea_log_before}"
+            f"Cannot recover interrupted HITL attempt: missing {hitl_log_before}"
         )
 
     live_whiteboard = whiteboard_path(work_dir)
@@ -1354,7 +1358,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[Path]
         current_best_sha,
         clean_untracked_public=True,
     )
-    _restore_hitl_idea_log_snapshot(work_dir, attempt_dir)
+    _restore_hitl_log_snapshot(work_dir, attempt_dir)
     live_whiteboard.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(before, live_whiteboard)
     _clear_experiment_hitl_markers(work_dir)
@@ -1413,37 +1417,20 @@ def _clear_experiment_hitl_markers(work_dir: Path) -> None:
     autonomous_path.write_text("", encoding="utf-8")
 
 
-def _hitl_idea_log_path(work_dir: Path) -> Path:
-    return Path(work_dir) / "logs" / "hitl" / "idea.jsonl"
+def _hitl_log_snapshot_path(attempt_dir: Path) -> Path:
+    return Path(attempt_dir) / "hitl_log_before"
 
 
-def _hitl_idea_log_snapshot_path(attempt_dir: Path) -> Path:
-    return Path(attempt_dir) / "hitl_idea_log_before.jsonl"
+def _snapshot_hitl_log_before(work_dir: Path, attempt_dir: Path) -> None:
+    snapshot_hitl_log_dir(work_dir, _hitl_log_snapshot_path(attempt_dir))
 
 
-def _snapshot_hitl_idea_log_before(work_dir: Path, attempt_dir: Path) -> None:
-    snapshot = _hitl_idea_log_snapshot_path(attempt_dir)
-    snapshot.parent.mkdir(parents=True, exist_ok=True)
-    source = _hitl_idea_log_path(work_dir)
-    if source.exists():
-        shutil.copyfile(source, snapshot)
-    else:
-        snapshot.write_text("", encoding="utf-8")
+def _restore_hitl_log_snapshot(work_dir: Path, attempt_dir: Path) -> None:
+    restore_hitl_log_dir_snapshot(work_dir, _hitl_log_snapshot_path(attempt_dir))
 
 
-def _restore_hitl_idea_log_snapshot(work_dir: Path, attempt_dir: Path) -> None:
-    snapshot = _hitl_idea_log_snapshot_path(attempt_dir)
-    if not snapshot.exists():
-        raise RuntimeError(f"Cannot restore HITL idea log: missing {snapshot}")
-    target = _hitl_idea_log_path(work_dir)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(snapshot, target)
-
-
-def _remove_hitl_idea_log_snapshot(attempt_dir: Path) -> None:
-    snapshot = _hitl_idea_log_snapshot_path(attempt_dir)
-    if snapshot.exists():
-        snapshot.unlink()
+def _remove_hitl_log_snapshot(attempt_dir: Path) -> None:
+    remove_hitl_log_dir_snapshot(_hitl_log_snapshot_path(attempt_dir))
 
 
 def continue_from_current_best(
@@ -1830,7 +1817,7 @@ class AutoResearchController:
         attempt_id = attempt_dir.name
         self._ensure_whiteboard_before(attempt_dir)
         if self.hitl_enabled:
-            _snapshot_hitl_idea_log_before(self.work_dir, attempt_dir)
+            _snapshot_hitl_log_before(self.work_dir, attempt_dir)
         write_current_attempt_marker(self.work_dir, attempt_marker)
 
         sealed_dir = seal_scoring_files(self.work_dir)
@@ -1892,7 +1879,7 @@ class AutoResearchController:
                     parent_sha,
                     clean_untracked_public=True,
                 )
-                _restore_hitl_idea_log_snapshot(self.work_dir, attempt_dir)
+                _restore_hitl_log_snapshot(self.work_dir, attempt_dir)
                 self._restore_whiteboard_before(attempt_dir)
                 _clear_experiment_hitl_markers(self.work_dir)
                 shutil.rmtree(attempt_dir, ignore_errors=True)
@@ -2057,13 +2044,13 @@ class AutoResearchController:
                 parent_sha,
                 clean_untracked_public=True,
             )
-            _restore_hitl_idea_log_snapshot(self.work_dir, attempt_dir)
+            _restore_hitl_log_snapshot(self.work_dir, attempt_dir)
             self._restore_whiteboard_before(attempt_dir)
             _clear_experiment_hitl_markers(self.work_dir)
             shutil.rmtree(attempt_dir, ignore_errors=True)
         else:
             if self.hitl_enabled:
-                _remove_hitl_idea_log_snapshot(attempt_dir)
+                _remove_hitl_log_snapshot(attempt_dir)
 
         if not accepted and not (self.hitl_enabled and child_sha is None):
             self.checkpoints.restore_checkpoint(parent_sha)
@@ -2705,21 +2692,12 @@ class AutoResearchController:
         proposal_path: Path,
         autonomous_ideas_path: Path,
     ) -> str:
-        return (
-            "HITL PROPOSAL REVISION FEEDBACK\n\n"
-            f"Source: {source}\n\n"
-            "Revise only the AutoResearch proposal at:\n"
-            f"{proposal_path}\n\n"
-            "Preserve the current research objective and public evaluation protocol.\n"
-            "Do not modify public research-workspace files.\n"
-            "The only permitted workspace mutations are:\n"
-            "- the existing `whiteboard prune-tip` operation, used according to the\n"
-            "  proposer's normal whiteboard rules;\n"
-            "- appending valid C-level idea records to:\n"
-            f"  {autonomous_ideas_path}\n"
-            "Do not modify `logs/hitl/idea.jsonl` directly.\n\n"
-            "Feedback to apply exactly:\n"
-            f"{feedback.strip()}"
+        return render_hitl_template(
+            "proposal_feedback_suffix.txt",
+            source=source,
+            feedback=feedback.strip(),
+            proposal_path=proposal_path,
+            autonomous_ideas_path=autonomous_ideas_path,
         )
 
     @staticmethod

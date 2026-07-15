@@ -43,7 +43,10 @@ from core.hitl import (
     assert_plan_only_public_changes,
     maybe_public_workspace_inventory,
     parse_required_artifacts,
+    remove_hitl_log_dir_snapshot,
+    restore_hitl_log_dir_snapshot,
     snapshot_path_state,
+    snapshot_hitl_log_dir,
     verify_required_artifacts,
 )
 from core.whiteboard import whiteboard_path
@@ -1084,6 +1087,50 @@ class ResearchPipelineOrchestrator:
         runtime = HitlRuntime(self.work_dir, "experiment_runner")
         plan_marker = self.work_dir / runtime.paths.plan_marker_name
         completion_marker = self.work_dir / runtime.paths.completion_marker_name
+        hitl_log_snapshot_dir = (
+            self.work_dir
+            / ".neurico"
+            / "hitl"
+            / "rollback"
+            / "experiment_runner_log_before"
+        )
+        snapshot_hitl_log_dir(self.work_dir, hitl_log_snapshot_dir)
+        rollback_checkpoint = None
+        if scoring_enabled:
+            from core.autoresearch import CheckpointManager
+
+            rollback_checkpoint = CheckpointManager(self.work_dir).create_checkpoint(
+                "HITL experiment runner starting state"
+            )
+
+        def clear_hitl_runtime_markers() -> None:
+            for marker in (
+                runtime.paths.plan_marker_name,
+                runtime.paths.completion_marker_name,
+            ):
+                path = self.work_dir / marker
+                if path.exists():
+                    path.unlink()
+            runtime.clear_checkpoints_dir()
+            runtime.prepare_checkpoint_target()
+            runtime.prepare_autonomous_idea_target()
+
+        def restore_failed_hitl_state() -> None:
+            if rollback_checkpoint is not None:
+                from core.autoresearch import CheckpointManager
+
+                CheckpointManager(self.work_dir).restore_checkpoint(
+                    rollback_checkpoint.sha,
+                    clean_untracked_public=True,
+                )
+            restore_hitl_log_dir_snapshot(self.work_dir, hitl_log_snapshot_dir)
+            remove_hitl_log_dir_snapshot(hitl_log_snapshot_dir)
+            clear_hitl_runtime_markers()
+
+        def finalize_failed(failed: Dict[str, Any]) -> Dict[str, Any]:
+            restore_failed_hitl_state()
+            self.state.complete_stage("experiment_runner", False, failed)
+            return failed
 
         def plan_integrity_snapshot() -> Dict[str, Dict[str, Any]]:
             return {
@@ -1184,8 +1231,7 @@ class ResearchPipelineOrchestrator:
                         "phase": "plan",
                         "error": f"Missing HITL plan marker: {plan_marker.name}",
                     }
-                    self.state.complete_stage("experiment_runner", False, failed)
-                    return failed
+                    return finalize_failed(failed)
                 runtime.prepare_checkpoint_target()
 
                 for plan_round in range(5):
@@ -1231,8 +1277,7 @@ class ResearchPipelineOrchestrator:
                             "phase": "plan_revision",
                             "error": f"Missing HITL plan marker: {plan_marker.name}",
                         }
-                        self.state.complete_stage("experiment_runner", False, failed)
-                        return failed
+                        return finalize_failed(failed)
                     runtime.prepare_checkpoint_target()
                 if not plan_approved:
                     raise RuntimeError("HITL experiment plan approval did not converge.")
@@ -1303,8 +1348,7 @@ class ResearchPipelineOrchestrator:
                             "but also wrote a pending HITL idea"
                         ),
                     }
-                    self.state.complete_stage("experiment_runner", False, failed)
-                    return failed
+                    return finalize_failed(failed)
 
                 if has_checkpoint:
                     logged = runtime.resolve_checkpoint(
@@ -1324,8 +1368,7 @@ class ResearchPipelineOrchestrator:
                             "phase": mode,
                             "error": "experiment_runner failed without a pending HITL idea",
                         }
-                        self.state.complete_stage("experiment_runner", False, failed)
-                        return failed
+                        return finalize_failed(failed)
                     incomplete_exits += 1
                     if incomplete_exits > 3:
                         failed = {
@@ -1335,8 +1378,7 @@ class ResearchPipelineOrchestrator:
                             "phase": mode,
                             "error": "experiment_runner exited repeatedly without HITL terminal state",
                         }
-                        self.state.complete_stage("experiment_runner", False, failed)
-                        return failed
+                        return finalize_failed(failed)
                     mode = "continue"
                     continue
 
@@ -1355,13 +1397,13 @@ class ResearchPipelineOrchestrator:
                             "phase": mode,
                             "error": str(exc),
                         }
-                        self.state.complete_stage("experiment_runner", False, failed)
-                        return failed
+                        return finalize_failed(failed)
 
                 runtime.prepare_checkpoint_target()
                 review = runtime.review_stage()
                 if review.get("status") == "aligned":
                     runtime.log_stage_approval(str(review.get("context", "")))
+                    remove_hitl_log_dir_snapshot(hitl_log_snapshot_dir)
                     self.state.complete_stage("experiment_runner", True, result)
                     return {**result, "hitl": True, "phase": "complete"}
 
@@ -1380,11 +1422,14 @@ class ResearchPipelineOrchestrator:
                 "hitl": True,
                 "error": "HITL experiment_runner exceeded continuation rounds",
             }
-            self.state.complete_stage("experiment_runner", False, failed)
-            return failed
+            return finalize_failed(failed)
 
         except Exception as e:
             print(f"❌ HITL experiment runner stage failed: {e}")
+            try:
+                restore_failed_hitl_state()
+            except Exception as restore_error:
+                print(f"⚠️  Failed to restore HITL experiment runner state: {restore_error}")
             self.state.complete_stage("experiment_runner", False, {"error": str(e)})
             raise
 

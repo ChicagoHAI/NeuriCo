@@ -1745,6 +1745,92 @@ def test_orchestrator_resolves_experiment_checkpoint_before_continuing(
     ]
 
 
+def test_experiment_runner_hitl_failure_restores_checkpoint_and_hitl_log_dir(
+    tmp_path,
+    monkeypatch,
+):
+    from core.autoresearch import CheckpointManager
+
+    _write_minimal_scoring_contract(tmp_path)
+    (tmp_path / "README.md").write_text("before\n", encoding="utf-8")
+    idea_log = tmp_path / "logs" / "hitl" / "idea.jsonl"
+    idea_log.parent.mkdir(parents=True, exist_ok=True)
+    idea_log.write_text('{"idea_id":"I1","context":"before"}\n', encoding="utf-8")
+    before_archive = tmp_path / "logs" / "hitl" / "resolve_checkpoint" / "before.json"
+    before_archive.parent.mkdir(parents=True)
+    before_archive.write_text('{"idea_id":"I1"}\n', encoding="utf-8")
+
+    class FakePaths:
+        plan_marker_name = ".experiment_runner_plan_complete"
+        completion_marker_name = ".experiment_runner_complete"
+        plan_path = tmp_path / "plans" / "experiment_runner_plan.md"
+
+    class FakeRuntime:
+        def __init__(self, work_dir, pipeline_stage):
+            self.work_dir = Path(work_dir)
+            self.paths = FakePaths()
+
+        def plan_has_human_approval(self):
+            return True
+
+        def prepare_checkpoint_target(self):
+            pass
+
+        def prepare_autonomous_idea_target(self):
+            pass
+
+        def clear_checkpoints_dir(self):
+            pass
+
+        def resolve_checkpoint(self, hitl_stage=None, require_pending=False, **_kwargs):
+            return None
+
+        def has_pending_checkpoint_payload(self, hitl_stage=None):
+            return False
+
+        def consume_autonomous_ideas(self, *, hitl_stage, actor=None, **_kwargs):
+            return []
+
+        def execution_prompt_block(self, mode="execute"):
+            return f"EXPERIMENT EXECUTION: {mode}"
+
+    def failed_runner(self, **_kwargs):
+        (self.work_dir / "README.md").write_text("dirty\n", encoding="utf-8")
+        (self.work_dir / "stray.txt").write_text("stray\n", encoding="utf-8")
+        idea_log.write_text(
+            idea_log.read_text(encoding="utf-8")
+            + '{"idea_id":"I2","context":"failed"}\n',
+            encoding="utf-8",
+        )
+        failed_archive = self.work_dir / "logs" / "hitl" / "resolve_checkpoint" / "failed.json"
+        failed_archive.write_text('{"idea_id":"I2"}\n', encoding="utf-8")
+        return {"success": False, "return_code": 1}
+
+    monkeypatch.setattr("core.pipeline_orchestrator.HitlRuntime", FakeRuntime)
+    monkeypatch.setattr(
+        ResearchPipelineOrchestrator,
+        "_run_experiment_runner",
+        failed_runner,
+    )
+
+    orchestrator = ResearchPipelineOrchestrator(tmp_path)
+    result = orchestrator._run_experiment_runner_hitl(
+        idea={"idea": {"title": "Test"}},
+        provider="claude",
+        timeout=1,
+        full_permissions=False,
+        scoring_enabled=True,
+    )
+
+    assert result["success"] is False
+    assert "failed without a pending HITL idea" in result["error"]
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "before\n"
+    assert not (tmp_path / "stray.txt").exists()
+    assert idea_log.read_text(encoding="utf-8") == '{"idea_id":"I1","context":"before"}\n'
+    assert before_archive.read_text(encoding="utf-8") == '{"idea_id":"I1"}\n'
+    assert not (tmp_path / "logs" / "hitl" / "resolve_checkpoint" / "failed.json").exists()
+
+
 def test_worker_prompts_encode_hitl_control_protocol(tmp_path):
     runtime = HitlRuntime(
         tmp_path,

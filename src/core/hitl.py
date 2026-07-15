@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
@@ -87,6 +88,45 @@ def _apply_runtime_provenance(
     for key, value in (provenance or {}).items():
         if value is not None and str(value).strip():
             record[key] = str(value)
+
+
+def hitl_log_dir(work_dir: Path) -> Path:
+    """Return the finalized HITL log directory for a research workspace."""
+    return Path(work_dir) / "logs" / "hitl"
+
+
+def snapshot_hitl_log_dir(work_dir: Path, snapshot_dir: Path) -> None:
+    """Snapshot the whole HITL log directory for rollback/recovery."""
+    source = hitl_log_dir(work_dir)
+    snapshot_dir = Path(snapshot_dir)
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
+    if source.exists():
+        shutil.copytree(source, snapshot_dir)
+    else:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+
+def restore_hitl_log_dir_snapshot(work_dir: Path, snapshot_dir: Path) -> None:
+    """Restore the whole HITL log directory from a previous snapshot."""
+    snapshot_dir = Path(snapshot_dir)
+    if not snapshot_dir.is_dir():
+        raise RuntimeError(f"Cannot restore HITL log directory: missing {snapshot_dir}")
+    target = hitl_log_dir(work_dir)
+    if target.exists():
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if any(snapshot_dir.iterdir()):
+        shutil.copytree(snapshot_dir, target)
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+
+
+def remove_hitl_log_dir_snapshot(snapshot_dir: Path) -> None:
+    """Remove a temporary HITL log directory snapshot if it exists."""
+    snapshot_dir = Path(snapshot_dir)
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
 
 
 def _as_related_artifacts(value: Any) -> List[Dict[str, str]]:
@@ -241,6 +281,11 @@ def _load_hitl_template(name: str, **kwargs: Any) -> str:
     return generator.render_template(template, kwargs)
 
 
+def render_hitl_template(name: str, **kwargs: Any) -> str:
+    """Render a HITL prompt template from templates/hitl."""
+    return _load_hitl_template(name, **kwargs)
+
+
 def _resolve_manager_option(response: str, options: List[Dict[str, str]]) -> Dict[str, str]:
     resolved = _resolve_option_decision(response, options)
     if resolved["decision"] == "CUSTOM":
@@ -277,7 +322,7 @@ class HitlIdeaLog:
 
     def __init__(self, work_dir: Path):
         self.work_dir = Path(work_dir)
-        self.hitl_dir = self.work_dir / "logs" / "hitl"
+        self.hitl_dir = hitl_log_dir(self.work_dir)
         self.hitl_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.hitl_dir / "idea.jsonl"
 
@@ -965,29 +1010,33 @@ class HitlRuntime:
                 raise HitlValidationError("Raised evidence checkpoint needs evidence")
 
     def workspace_summary(self) -> str:
-        lines = [f"Workspace: {self.work_dir}"]
+        lines = [
+            f"Workspace root: {self.work_dir}",
+            "Read boundary: review only files under this workspace root. "
+            "Paths below are relative to the workspace root.",
+        ]
         if not self.work_dir.exists():
             lines.append("- workspace path does not exist")
             return "\n".join(lines)
 
-        entries = sorted(
+        skipped_names = {".git", ".venv", "__pycache__"}
+        visible_paths = sorted(
             p
-            for p in self.work_dir.iterdir()
-            if p.name not in {".git", ".venv", "__pycache__"}
+            for p in self.work_dir.rglob("*")
+            if not any(part in skipped_names for part in p.relative_to(self.work_dir).parts)
         )
-        if not entries:
+        if not visible_paths:
             lines.append("- workspace is empty")
             return "\n".join(lines)
 
-        for path in entries[:50]:
+        for path in visible_paths[:200]:
             rel = path.relative_to(self.work_dir)
             if path.is_dir():
-                files = sum(1 for p in path.rglob("*") if p.is_file())
-                lines.append(f"- {rel}/ ({files} files)")
+                lines.append(f"- {rel}/")
             elif path.exists():
                 lines.append(f"- {rel} ({path.stat().st_size} bytes)")
-        if len(entries) > 50:
-            lines.append(f"- ... {len(entries) - 50} more top-level entries")
+        if len(visible_paths) > 200:
+            lines.append(f"- ... {len(visible_paths) - 200} more workspace paths")
         return "\n".join(lines)
 
     def _record_from_checkpoint(
