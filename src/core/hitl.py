@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +25,7 @@ PIPELINE_STAGES = {
     "scorer",
     "paper_writer",
 }
-HITL_STAGES = {"plan", "execution", "review"}
+HITL_STAGES = {"plan", "execution", "proposal", "review"}
 LEVELS = {"A", "B", "C"}
 IDEA_TYPES = {"decision", "evidence"}
 ROUTING_OPTION_MARKERS = (
@@ -42,6 +44,8 @@ IDEA_RECORD_FIELD_ORDER = [
     "idea_type",
     "level",
     "actor",
+    "parent_node_id",
+    "attempt_id",
     "worker_context",
     "context",
     "related_artifacts",
@@ -74,6 +78,15 @@ def _ordered_idea_record(record: Dict[str, Any]) -> Dict[str, Any]:
         if key not in ordered:
             ordered[key] = value
     return ordered
+
+
+def _apply_runtime_provenance(
+    record: Dict[str, Any],
+    provenance: Optional[Dict[str, Any]],
+) -> None:
+    for key, value in (provenance or {}).items():
+        if value is not None and str(value).strip():
+            record[key] = str(value)
 
 
 def _as_related_artifacts(value: Any) -> List[Dict[str, str]]:
@@ -188,8 +201,17 @@ def _resolve_option_decision(response: str, options: List[Dict[str, str]]) -> Di
         if 0 <= idx < len(options):
             option = options[idx]
             return {"decision": option["option_id"], "feedback": option["text"]}
+    normalized_raw = raw.lower().strip().rstrip(".")
     for option in options:
-        if raw == option["option_id"] or raw == option["text"]:
+        normalized_text = option["text"].lower().strip().rstrip(".")
+        option_aliases = {normalized_text}
+        if normalized_text.endswith(" plan"):
+            option_aliases.add(normalized_text.removesuffix(" plan").strip())
+        if (
+            raw == option["option_id"]
+            or raw == option["text"]
+            or normalized_raw in option_aliases
+        ):
             return {"decision": option["option_id"], "feedback": option["text"]}
     return {"decision": "CUSTOM", "feedback": raw}
 
@@ -361,6 +383,18 @@ class HitlPaths:
     def current_checkpoint(self) -> Path:
         return self.checkpoints_dir / "pending_idea.json"
 
+    @property
+    def autonomous_ideas_path(self) -> Path:
+        return self.work_dir / ".neurico" / "hitl" / "autonomous_ideas.jsonl"
+
+    @property
+    def plan_marker_name(self) -> str:
+        return f".{self.pipeline_stage}_plan_complete"
+
+    @property
+    def completion_marker_name(self) -> str:
+        return f".{self.pipeline_stage}_complete"
+
 
 class HitlRuntime:
     """Small orchestration helper for one plan-centered HITL stage."""
@@ -381,6 +415,7 @@ class HitlRuntime:
         self.paths = HitlPaths(self.work_dir, pipeline_stage)
         self.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
         self.paths.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        self.paths.autonomous_ideas_path.parent.mkdir(parents=True, exist_ok=True)
         self.log = HitlIdeaLog(self.work_dir)
         self.channel = channel or self._default_channel()
         self.manager = manager or self._default_manager(config or {})
@@ -397,56 +432,102 @@ class HitlRuntime:
     def _default_manager(config: Dict[str, Any]) -> "LLMHitlManager":
         return LLMHitlManager(config)
 
-    def plan_prompt_block(self) -> str:
+    def plan_prompt_block(
+        self,
+        approved_proposal_path: Optional[Path] = None,
+        *,
+        requires_human_approval: bool = True,
+    ) -> str:
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
+        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
+        proposal_path_text = ""
+        if approved_proposal_path is not None:
+            proposal_path_text = str(Path(approved_proposal_path).resolve())
         return _load_hitl_template(
             "worker_plan.txt",
             pipeline_stage=self.pipeline_stage,
             plan_path=rel_plan,
+            approved_proposal_path=proposal_path_text,
+            requires_human_approval=requires_human_approval,
+            plan_completion_marker=self.paths.plan_marker_name,
+            completion_marker=self.paths.completion_marker_name,
+            autonomous_ideas_path=rel_autonomous_ideas,
+            hitl_stage="plan",
         )
 
     def execution_prompt_block(self, mode: str = "execute") -> str:
         self.current_hitl_stage = "execution"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
+        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
         return _load_hitl_template(
             "worker_execution.txt",
             pipeline_stage=self.pipeline_stage,
             mode=mode,
             plan_path=rel_plan,
             checkpoint_path=rel_checkpoint,
+            autonomous_ideas_path=rel_autonomous_ideas,
+            hitl_stage="execution",
+            plan_completion_marker=self.paths.plan_marker_name,
+            completion_marker=self.paths.completion_marker_name,
         )
 
-    def review_prompt_block(self) -> str:
+    def review_prompt_block(self, feedback: str = "") -> str:
         self.current_hitl_stage = "review"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
+        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
         return _load_hitl_template(
             "worker_review_revision.txt",
             pipeline_stage=self.pipeline_stage,
             plan_path=rel_plan,
             checkpoint_path=rel_checkpoint,
+            autonomous_ideas_path=rel_autonomous_ideas,
+            hitl_stage="review",
+            feedback=feedback,
+            plan_completion_marker=self.paths.plan_marker_name,
+            completion_marker=self.paths.completion_marker_name,
         )
 
     def plan_revision_prompt_block(self, feedback: str) -> str:
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
+        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
         return _load_hitl_template(
             "worker_plan_revision.txt",
             pipeline_stage=self.pipeline_stage,
             plan_path=rel_plan,
+            autonomous_ideas_path=rel_autonomous_ideas,
+            hitl_stage="plan",
             feedback=feedback,
+            plan_completion_marker=self.paths.plan_marker_name,
+            completion_marker=self.paths.completion_marker_name,
         )
 
     def feedback_continuation_prompt_block(self, feedback: str) -> str:
         self.current_hitl_stage = "execution"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
+        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
         return _load_hitl_template(
             "worker_feedback_continuation.txt",
             pipeline_stage=self.pipeline_stage,
             plan_path=rel_plan,
             checkpoint_path=rel_checkpoint,
+            autonomous_ideas_path=rel_autonomous_ideas,
+            hitl_stage="execution",
             feedback=feedback,
+            plan_completion_marker=self.paths.plan_marker_name,
+            completion_marker=self.paths.completion_marker_name,
+        )
+
+    def autonomous_ideas_prompt_block(self, hitl_stage: str) -> str:
+        if hitl_stage not in HITL_STAGES:
+            raise ValueError(f"Unsupported HITL stage for autonomous ideas: {hitl_stage}")
+        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
+        return _load_hitl_template(
+            "worker_autonomous_idea_contract.txt",
+            autonomous_ideas_path=rel_autonomous_ideas,
+            hitl_stage=hitl_stage,
         )
 
     def approve_plan_loop(
@@ -576,6 +657,7 @@ class HitlRuntime:
         hitl_stage: Optional[str] = None,
         *,
         require_pending: bool = False,
+        provenance: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         checkpoint = self.load_checkpoint(hitl_stage=hitl_stage, require_pending=require_pending)
         if checkpoint is None:
@@ -650,30 +732,36 @@ class HitlRuntime:
             manager_context=str(review.get("context", checkpoint.get("context", ""))),
             extra=extra,
         )
+        _apply_runtime_provenance(record, provenance)
         logged = self.log.append(record)
         self.archive_checkpoint(logged)
         return logged
 
-    def log_review_feedback(self, feedback: str) -> None:
-        self.log.append(
-            {
-                "pipeline_stage": self.pipeline_stage,
-                "hitl_stage": "review",
-                "level": "B",
-                "actor": "manager",
-                "idea_type": "decision",
-                "context": "Manager reviewed stage artifacts against the living plan.",
-                "basis": "Manager artifact review found gaps between the completed artifacts and the living plan.",
-                "options": [
-                    "Accept current artifacts as complete.",
-                    "Revise artifacts to match the living plan.",
-                ],
-                "decision": "O2",
-                "raised": True,
-                "manager_feedback": feedback,
-                "related_artifacts": self._plan_artifact(),
-            }
-        )
+    def log_review_feedback(
+        self,
+        feedback: str,
+        *,
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        record = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": "review",
+            "level": "B",
+            "actor": "manager",
+            "idea_type": "decision",
+            "context": "Manager reviewed stage artifacts against the living plan.",
+            "basis": "Manager artifact review found gaps between the completed artifacts and the living plan.",
+            "options": [
+                "Accept current artifacts as complete.",
+                "Revise artifacts to match the living plan.",
+            ],
+            "decision": "O2",
+            "raised": True,
+            "manager_feedback": feedback,
+            "related_artifacts": self._plan_artifact(),
+        }
+        _apply_runtime_provenance(record, provenance)
+        self.log.append(record)
 
     def review_stage(self) -> Dict[str, Any]:
         return self.manager.review_stage(
@@ -683,27 +771,85 @@ class HitlRuntime:
             workspace_summary=self.workspace_summary(),
         )
 
-    def log_stage_approval(self, context: str) -> None:
-        self.log.append(
-            {
-                "pipeline_stage": self.pipeline_stage,
-                "hitl_stage": "review",
-                "level": "B",
-                "actor": "manager",
-                "idea_type": "decision",
-                "context": context or "Manager approved completed stage artifacts.",
-                "basis": "Manager artifact review found the completed stage aligned with the living plan.",
-                "options": ["Approve stage completion.", "Request revision."],
-                "decision": "O1",
-                "raised": False,
-                "related_artifacts": self._plan_artifact(),
-            }
-        )
+    def log_stage_approval(
+        self,
+        context: str,
+        *,
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        record = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": "review",
+            "level": "B",
+            "actor": "manager",
+            "idea_type": "decision",
+            "context": context or "Manager approved completed stage artifacts.",
+            "basis": "Manager artifact review found the completed stage aligned with the living plan.",
+            "options": ["Approve stage completion.", "Request revision."],
+            "decision": "O1",
+            "raised": False,
+            "related_artifacts": self._plan_artifact(),
+        }
+        _apply_runtime_provenance(record, provenance)
+        self.log.append(record)
 
     def prepare_checkpoint_target(self) -> None:
         self._clear_checkpoint_dir()
         self.paths.current_checkpoint.write_text("", encoding="utf-8")
         self._loaded_checkpoint_path = None
+
+    def prepare_autonomous_idea_target(self) -> None:
+        self.paths.autonomous_ideas_path.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.autonomous_ideas_path.write_text("", encoding="utf-8")
+
+    def consume_autonomous_ideas(
+        self,
+        *,
+        hitl_stage: str,
+        actor: Optional[str] = None,
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        if hitl_stage not in HITL_STAGES:
+            raise HitlValidationError(f"Invalid autonomous idea hitl_stage: {hitl_stage}")
+        path = self.paths.autonomous_ideas_path
+        if not path.exists() or path.stat().st_size == 0:
+            return []
+
+        pending_records: List[Dict[str, Any]] = []
+        with open(path, encoding="utf-8") as f:
+            for line_number, line in enumerate(f, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    packet = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise HitlValidationError(
+                        "Invalid autonomous HITL idea JSONL at "
+                        f"{path.relative_to(self.work_dir)} line {line_number}: {exc}"
+                    ) from exc
+                if not isinstance(packet, dict):
+                    raise HitlValidationError(
+                        "Autonomous HITL idea packet must be a JSON object at "
+                        f"{path.relative_to(self.work_dir)} line {line_number}"
+                    )
+                pending_records.append(
+                    self._record_from_autonomous_idea(
+                        packet=packet,
+                        hitl_stage=hitl_stage,
+                        actor=actor or self.pipeline_stage,
+                        provenance=provenance,
+                    )
+                )
+        for record in pending_records:
+            validation_record = dict(record)
+            validation_record.setdefault("idea_id", "I0")
+            validation_record.setdefault("timestamp", _now())
+            if validation_record.get("idea_type") == "decision" and "options" in validation_record:
+                validation_record["options"] = _normalize_options(validation_record.get("options"))
+            self.log.validate(validation_record)
+        records = [self.log.append(record) for record in pending_records]
+        self.prepare_autonomous_idea_target()
+        return records
 
     def has_pending_checkpoint_payload(self, hitl_stage: Optional[str] = None) -> bool:
         return self.load_checkpoint(hitl_stage=hitl_stage, require_pending=False) is not None
@@ -819,25 +965,29 @@ class HitlRuntime:
                 raise HitlValidationError("Raised evidence checkpoint needs evidence")
 
     def workspace_summary(self) -> str:
-        interesting = [
-            "plans",
-            "literature_review.md",
-            "resources.md",
-            "papers",
-            "datasets",
-            "code",
-            "logs",
-        ]
         lines = [f"Workspace: {self.work_dir}"]
-        for rel in interesting:
-            path = self.work_dir / rel
+        if not self.work_dir.exists():
+            lines.append("- workspace path does not exist")
+            return "\n".join(lines)
+
+        entries = sorted(
+            p
+            for p in self.work_dir.iterdir()
+            if p.name not in {".git", ".venv", "__pycache__"}
+        )
+        if not entries:
+            lines.append("- workspace is empty")
+            return "\n".join(lines)
+
+        for path in entries[:50]:
+            rel = path.relative_to(self.work_dir)
             if path.is_dir():
                 files = sum(1 for p in path.rglob("*") if p.is_file())
                 lines.append(f"- {rel}/ ({files} files)")
             elif path.exists():
                 lines.append(f"- {rel} ({path.stat().st_size} bytes)")
-            else:
-                lines.append(f"- {rel} (missing)")
+        if len(entries) > 50:
+            lines.append(f"- ... {len(entries) - 50} more top-level entries")
         return "\n".join(lines)
 
     def _record_from_checkpoint(
@@ -891,6 +1041,51 @@ class HitlRuntime:
                     "evidence": checkpoint.get("evidence", ""),
                 }
         )
+        return record
+
+    def _record_from_autonomous_idea(
+        self,
+        *,
+        packet: Dict[str, Any],
+        hitl_stage: str,
+        actor: str,
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        idea_type = _require_text(
+            packet.get("idea_type"),
+            "idea_type",
+            "Autonomous HITL idea",
+        )
+        if idea_type not in IDEA_TYPES:
+            raise HitlValidationError(f"Invalid autonomous idea_type: {idea_type}")
+        record: Dict[str, Any] = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": hitl_stage,
+            "idea_type": idea_type,
+            "level": "C",
+            "actor": actor,
+            "context": _require_text(packet.get("context"), "context", "Autonomous HITL idea"),
+            "related_artifacts": _as_related_artifacts(packet.get("related_artifacts")),
+            "basis": _require_text(packet.get("basis"), "basis", "Autonomous HITL idea"),
+            "raised": False,
+        }
+        _apply_runtime_provenance(record, provenance)
+        if idea_type == "decision":
+            if "decision_needed" in packet:
+                record["decision_needed"] = str(packet.get("decision_needed", "")).strip()
+            if "options" in packet:
+                record["options"] = packet.get("options")
+            record["decision"] = _require_text(
+                packet.get("decision"),
+                "decision",
+                "Autonomous decision idea",
+            )
+        else:
+            record["evidence"] = _require_text(
+                packet.get("evidence"),
+                "evidence",
+                "Autonomous evidence idea",
+            )
         return record
 
     def _checkpoint_basis(
@@ -992,6 +1187,7 @@ class LLMHitlManager:
         plan_path: Path,
         plan_text: str,
         workspace_summary: str,
+        requires_human_approval: bool = True,
     ) -> Dict[str, Any]:
         prompt = _load_hitl_template(
             "manager_review_plan.txt",
@@ -1000,6 +1196,7 @@ class LLMHitlManager:
             plan_path=plan_path,
             workspace_summary=workspace_summary,
             plan_text=plan_text,
+            requires_human_approval=requires_human_approval,
         )
         data = self._json_call(prompt)
         status = data.get("status")
@@ -1110,6 +1307,41 @@ class LLMHitlManager:
             )
         return data
 
+    def review_proposal(
+        self,
+        *,
+        pipeline_stage: str,
+        proposal_path: Path,
+        proposal_text: str,
+        workspace_summary: str,
+        attempt_id: str,
+    ) -> Dict[str, Any]:
+        prompt = _load_hitl_template(
+            "manager_review_proposal.txt",
+            json_output_contract=self._json_output_contract(),
+            pipeline_stage=pipeline_stage,
+            proposal_path=proposal_path,
+            proposal_text=proposal_text,
+            workspace_summary=workspace_summary,
+            attempt_id=attempt_id,
+        )
+        data = self._json_call(prompt)
+        status = data.get("status")
+        if status not in {"legal", "revise_illegal"}:
+            raise HitlValidationError(
+                "Manager proposal review must return status 'legal' or 'revise_illegal'."
+            )
+        if status == "revise_illegal":
+            _require_text(
+                data.get("feedback"),
+                "feedback",
+                "Manager proposal legality review with status='revise_illegal'",
+            )
+        violations = data.get("violations", [])
+        if violations is not None and not isinstance(violations, list):
+            raise HitlValidationError("Manager proposal review `violations` must be a list.")
+        return data
+
     def _json_call(self, prompt: str) -> Dict[str, Any]:
         response = self.backend.send(
             [
@@ -1141,6 +1373,261 @@ def read_jsonl(path: Path) -> List[Dict[str, Any]]:
             if line.strip():
                 records.append(json.loads(line))
     return records
+
+
+@dataclass(frozen=True)
+class RequiredArtifact:
+    path: str
+    purpose: str
+    required: bool
+
+
+def parse_required_artifacts(interface_path: Path) -> List[RequiredArtifact]:
+    """Parse the strict `## Files to produce` table from scoring/interface.md."""
+    text = Path(interface_path).read_text(encoding="utf-8")
+    lines = text.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == "## Files to produce")
+    except StopIteration as exc:
+        raise HitlValidationError("scoring/interface.md missing `## Files to produce`.") from exc
+
+    idx = start + 1
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx + 1 >= len(lines):
+        raise HitlValidationError("`## Files to produce` must be followed by a Markdown table.")
+
+    header = _markdown_table_cells(lines[idx])
+    if header != ["Path", "Purpose", "Required"]:
+        raise HitlValidationError("Files-to-produce header must be exactly `Path | Purpose | Required`.")
+    alignment = _markdown_table_cells(lines[idx + 1])
+    if len(alignment) != 3 or any(not _is_alignment_cell(cell) for cell in alignment):
+        raise HitlValidationError("Files-to-produce table has invalid alignment row.")
+
+    artifacts: List[RequiredArtifact] = []
+    seen: set[str] = set()
+    row_idx = idx + 2
+    while row_idx < len(lines) and lines[row_idx].strip().startswith("|"):
+        cells = _markdown_table_cells(lines[row_idx])
+        if len(cells) != 3:
+            raise HitlValidationError("Files-to-produce rows must have exactly three cells.")
+        rel_path = _normalize_required_artifact_path(cells[0])
+        if rel_path in seen:
+            raise HitlValidationError(f"Duplicate required artifact path: {rel_path}")
+        seen.add(rel_path)
+        required_text = cells[2].strip().lower()
+        if required_text not in {"yes", "no", "recommended"}:
+            raise HitlValidationError(f"Unknown Required value for {rel_path}: {cells[2]}")
+        artifacts.append(
+            RequiredArtifact(
+                path=rel_path,
+                purpose=cells[1].strip(),
+                required=required_text == "yes",
+            )
+        )
+        row_idx += 1
+
+    if not any(artifact.required for artifact in artifacts):
+        raise HitlValidationError("Files-to-produce table must include at least one required artifact.")
+    return artifacts
+
+
+def verify_required_artifacts(work_dir: Path, artifacts: Iterable[RequiredArtifact]) -> None:
+    for artifact in artifacts:
+        if not artifact.required:
+            continue
+        path = Path(work_dir) / artifact.path
+        if not path.exists():
+            raise HitlValidationError(f"Required artifact missing: {artifact.path}")
+        if artifact.path.endswith("/"):
+            if not path.is_dir():
+                raise HitlValidationError(f"Required artifact should be a directory: {artifact.path}")
+            continue
+        if not path.is_file():
+            raise HitlValidationError(f"Required artifact should be a file: {artifact.path}")
+        if path.stat().st_size == 0:
+            raise HitlValidationError(f"Required artifact is empty: {artifact.path}")
+        if path.suffix == ".json":
+            json.loads(path.read_text(encoding="utf-8"))
+        elif path.suffix == ".csv":
+            import csv
+
+            with path.open(newline="", encoding="utf-8") as f:
+                next(csv.reader(f), None)
+
+
+def snapshot_path_state(path: Path) -> Dict[str, Any]:
+    path = Path(path)
+    if not path.exists():
+        return {"state": "missing", "sha256": None}
+    if path.is_file():
+        return {"state": "file", "sha256": _sha256_file(path)}
+    if path.is_dir():
+        return {"state": "directory", "sha256": None}
+    return {"state": "other", "sha256": None}
+
+
+def assert_path_state_unchanged(path: Path, expected: Dict[str, Any], label: str) -> None:
+    actual = snapshot_path_state(path)
+    if actual != expected:
+        raise HitlValidationError(
+            f"{label} changed unexpectedly: expected {expected}, got {actual}"
+        )
+
+
+def public_workspace_inventory(work_dir: Path) -> Dict[str, Dict[str, str]]:
+    """Inventory tracked and untracked public files using git's exclude rules."""
+    work_dir = Path(work_dir)
+    result = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=str(work_dir),
+        check=True,
+        capture_output=True,
+    )
+    inventory: Dict[str, Dict[str, str]] = {}
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        rel = raw.decode("utf-8")
+        path = (work_dir / rel).resolve()
+        try:
+            path.relative_to(work_dir.resolve())
+        except ValueError as exc:
+            raise HitlValidationError(f"Git inventory path escapes workspace: {rel}") from exc
+        if path.is_symlink():
+            inventory[rel] = {
+                "kind": "symlink",
+                "sha256": hashlib.sha256(os.readlink(path).encode("utf-8")).hexdigest(),
+            }
+        elif path.is_file():
+            inventory[rel] = {"kind": "regular_file", "sha256": _sha256_file(path)}
+        else:
+            inventory[rel] = {"kind": "other", "sha256": ""}
+    return inventory
+
+
+def changed_public_paths(
+    before: Dict[str, Dict[str, str]],
+    after: Dict[str, Dict[str, str]],
+) -> List[str]:
+    paths = set(before) | set(after)
+    return sorted(path for path in paths if before.get(path) != after.get(path))
+
+
+def assert_plan_only_public_changes(
+    *,
+    work_dir: Path,
+    before: Optional[Dict[str, Dict[str, str]]],
+    after: Optional[Dict[str, Dict[str, str]]],
+    plan_path: Path,
+    plan_marker_name: str,
+) -> None:
+    """Validate that a HITL planning run only changed planning/runtime artifacts."""
+    if before is None or after is None:
+        return
+    work_dir = Path(work_dir).resolve()
+    plan_path = Path(plan_path).resolve()
+    try:
+        plan_rel = str(plan_path.relative_to(work_dir))
+    except ValueError as exc:
+        raise HitlValidationError(f"HITL plan path escapes workspace: {plan_path}") from exc
+
+    allowed_exact = {plan_rel, plan_marker_name}
+    allowed_prefixes = (
+        "logs/hitl/",
+        ".neurico/hitl/",
+        ".neurico/runs/",
+    )
+    unexpected = [
+        path
+        for path in changed_public_paths(before, after)
+        if path not in allowed_exact
+        and not any(path.startswith(prefix) for prefix in allowed_prefixes)
+    ]
+    if unexpected:
+        raise HitlValidationError(
+            "HITL planning phase modified non-plan public artifact(s): "
+            + ", ".join(unexpected)
+        )
+
+
+def assert_meaningful_candidate_public_change(
+    *,
+    work_dir: Path,
+    before: Optional[Dict[str, Dict[str, str]]],
+    after: Optional[Dict[str, Dict[str, str]]],
+    plan_path: Path,
+    plan_marker_name: str,
+    completion_marker_name: str,
+) -> None:
+    """Require at least one candidate change beyond HITL control/runtime files."""
+    if before is None or after is None:
+        return
+    work_dir = Path(work_dir).resolve()
+    try:
+        plan_rel = str(Path(plan_path).resolve().relative_to(work_dir))
+    except ValueError as exc:
+        raise HitlValidationError(f"HITL plan path escapes workspace: {plan_path}") from exc
+
+    ignored_exact = {plan_rel, plan_marker_name, completion_marker_name}
+    ignored_prefixes = (
+        "logs/hitl/",
+        ".neurico/hitl/",
+        ".neurico/runs/",
+    )
+    meaningful = [
+        path
+        for path in changed_public_paths(before, after)
+        if path not in ignored_exact
+        and not any(path.startswith(prefix) for prefix in ignored_prefixes)
+    ]
+    if not meaningful:
+        raise HitlValidationError(
+            "AutoResearch HITL candidate produced no meaningful public workspace change before scoring."
+        )
+
+
+def maybe_public_workspace_inventory(work_dir: Path) -> Optional[Dict[str, Dict[str, str]]]:
+    """Return a public inventory when the workspace is a git worktree."""
+    work_dir = Path(work_dir)
+    if not (work_dir / ".git").exists():
+        return None
+    return public_workspace_inventory(work_dir)
+
+
+def _markdown_table_cells(line: str) -> List[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _is_alignment_cell(cell: str) -> bool:
+    return bool(cell) and set(cell) <= {"-", ":"} and "-" in cell
+
+
+def _normalize_required_artifact_path(value: str) -> str:
+    path = value.strip()
+    if path.startswith("`") and path.endswith("`") and path.count("`") == 2:
+        path = path[1:-1].strip()
+    wants_directory = path.endswith("/")
+    if not path or path.startswith("/") or "://" in path or "*" in path:
+        raise HitlValidationError(f"Unsafe artifact path: {value}")
+    parts = Path(path).parts
+    if any(part in {"", ".", ".."} for part in parts):
+        raise HitlValidationError(f"Unsafe artifact path: {value}")
+    normalized = Path(path).as_posix()
+    return f"{normalized}/" if wants_directory and not normalized.endswith("/") else normalized
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def find_pending_checkpoints(work_dir: Path) -> Iterable[Path]:

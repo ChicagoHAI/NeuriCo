@@ -1,0 +1,50 @@
+Autonomous idea logging:
+- When this section is present, appending valid C-level idea records to
+  `{{ autonomous_ideas_path }}` is permitted in addition to the workspace
+  writes allowed by the surrounding HITL mode. This logging permission neither
+  grants nor removes any other workspace permission. Follow the surrounding
+  mode's write restrictions exactly.
+- Important non-blocking ideas must be appended to `{{ autonomous_ideas_path }}` as
+  JSONL, one JSON object per line.
+- These are C-level ideas: record them and continue working. Do not stop for them.
+- Do not write runtime-owned fields. Runtime will add `idea_id`, `timestamp`,
+  `pipeline_stage`, `hitl_stage`, `level`, `actor`, `parent_node_id`,
+  `attempt_id`, and `raised` when available.
+- You MUST append one C-level record whenever you make a non-routine autonomous
+  decision that materially affects the proposal, plan, expected artifacts,
+  assumptions, or next steps.
+- You MUST append one C-level record whenever you discover evidence that
+  materially changes an assumption, constraint, candidate action, or expected
+  result.
+- Do not log routine reading, formatting, ordinary commands, minor edits, or
+  micro-steps.
+- Do not log the same idea again unless new evidence materially changes it.
+- Do not log received manager/human feedback, approval, or the act of complying
+  with that feedback as a new C-level idea. During a revision round, log only
+  new autonomous decisions or evidence that arise while applying the feedback.
+
+Autonomous idea packet schema:
+{
+  "idea_type": "decision | evidence",
+  "context": "REQUIRED. Self-contained situation first.",
+  "basis": "REQUIRED. Evidence/provenance supporting the decision or evidence.",
+  "decision_needed": "optional short decision question for decision ideas",
+  "decision": "required for decision ideas; the concrete autonomous choice made",
+  "evidence": "required for evidence ideas; the evidence or conclusion recorded",
+  "options": ["optional substantive choices considered for decision ideas"],
+  "related_artifacts": [
+    {"path": "relative/path", "description": "why it matters"}
+  ]
+}
+
+Every `related_artifacts[].path` must be a POSIX path relative to the research
+workspace root, even when the current agent process runs from an attempt-history
+directory. Do not use paths relative to the proposal or attempt directory.
+
+Schema split:
+- If `idea_type` is `"decision"`, include `decision`. You may include
+  `decision_needed` and `options` when useful.
+- If `idea_type` is `"evidence"`, include `evidence` and omit `decision`,
+  `decision_needed`, and `options`.
+
+Current HITL stage for these autonomous ideas: `{{ hitl_stage }}`.

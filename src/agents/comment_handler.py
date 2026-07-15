@@ -22,7 +22,7 @@ import time
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.security import sanitize_text
+from core.agent_runner import run_prebuilt_cli_agent
 
 
 # CLI commands for different providers
@@ -245,94 +245,42 @@ def _run_comment_handler_with_remote_workspace(
     full_permissions: bool,
     dsi_remote_info: Optional[Dict[str, str]],
 ) -> Dict[str, Any]:
-    # Generate prompt
-    print("Generating comment handler prompt...")
-    prompt = generate_comment_prompt(idea, work_dir, templates_dir, provider=provider)
+    launch = build_comment_handler_launch(
+        idea=idea,
+        work_dir=work_dir,
+        provider=provider,
+        templates_dir=templates_dir,
+        full_permissions=full_permissions,
+        dsi_remote_info=dsi_remote_info,
+    )
 
-    # Save prompt for reference
-    logs_dir = work_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-
-    prompt_file = logs_dir / "comment_handler_prompt.txt"
-    with open(prompt_file, 'w', encoding='utf-8') as f:
-        f.write(prompt)
-
-    print(f"   Prompt saved to: {prompt_file}")
-    print(f"   Prompt length: {len(prompt)} characters")
+    print(f"   Prompt saved to: {launch['prompt_file']}")
+    print(f"   Prompt length: {len(launch['prompt'])} characters")
     print()
 
-    # Prepare command
-    cmd = CLI_COMMANDS[provider]
-
-    # Add permission flags if requested
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
-
-    # Add transcript/JSON output flags
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
-
-    log_file = logs_dir / f"comment_handler_{provider}.log"
-    transcript_file = logs_dir / f"comment_handler_{provider}_transcript.jsonl"
-
     print(f"Launching {provider} CLI agent...")
-    print(f"   Command: {cmd}")
-    print(f"   Log file: {log_file}")
+    print(f"   Command: {launch['cmd']}")
+    print(f"   Log file: {launch['log_file']}")
     print()
     print("=" * 80)
     print("COMMENT HANDLER OUTPUT (streaming)")
     print("=" * 80)
     print()
 
-    # Set environment variables
-    env = os.environ.copy()
-    env['PYTHONUNBUFFERED'] = '1'
-    if dsi_remote_info is not None:
-        env["NEURICO_DSI_REMOTE_ROOT"] = dsi_remote_info["remote_root"]
-        env["NEURICO_DSI_RSYNC_REMOTE_ROOT"] = dsi_remote_info["rsync_remote_root"]
-
-    if provider == "gemini":
-        env['GEMINI_CLI_IDE_DISABLE'] = '1'
-
     # Execute agent
     success = False
     start_time = time.time()
 
     try:
-        with open(log_file, 'w', encoding='utf-8') as log_f, \
-             open(transcript_file, 'w', encoding='utf-8') as transcript_f:
-            process = subprocess.Popen(
-                shlex.split(cmd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                text=True,
-                encoding='utf-8',
-                bufsize=1,
-                cwd=str(work_dir)
-            )
-
-            # Send prompt
-            process.stdin.write(prompt)
-            process.stdin.close()
-
-            # Stream output (sanitized for security)
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    sanitized_line = sanitize_text(line)
-                    print(sanitized_line, end='')
-                    log_f.write(sanitized_line)
-                    transcript_f.write(sanitized_line)
-
-            # Wait for completion
-            return_code = process.wait(timeout=timeout)
+        result = run_prebuilt_cli_agent(
+            command_argv=launch["command_argv"],
+            prompt=launch["prompt"],
+            work_dir=launch["work_dir"],
+            log_file=launch["log_file"],
+            transcript_file=launch["transcript_file"],
+            env=launch["env"],
+            timeout=timeout,
+        )
 
         print()
         print("=" * 80)
@@ -340,18 +288,16 @@ def _run_comment_handler_with_remote_workspace(
         elapsed = time.time() - start_time
         print(f"Comment handler completed in {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
 
-        if return_code == 0:
+        if result["timed_out"]:
+            print(f"\nComment handler timed out after {timeout} seconds")
+            success = False
+        elif result["return_code"] == 0:
             print("Agent execution completed successfully!")
             success = True
         else:
-            print(f"Agent execution finished with return code: {return_code}")
+            print(f"Agent execution finished with return code: {result['return_code']}")
             # Still consider it a success if it completed (might have warnings)
             success = True
-
-    except subprocess.TimeoutExpired:
-        print(f"\nComment handler timed out after {timeout} seconds")
-        process.kill()
-        success = False
 
     except Exception as e:
         print(f"\nError during comment handling: {e}")
@@ -362,7 +308,65 @@ def _run_comment_handler_with_remote_workspace(
 
     return {
         'success': success,
-        'log_file': str(log_file),
-        'transcript_file': str(transcript_file),
+        'log_file': str(launch["log_file"]),
+        'transcript_file': str(launch["transcript_file"]),
         'elapsed_time': elapsed
+    }
+
+
+def build_comment_handler_launch(
+    *,
+    idea: Dict[str, Any],
+    work_dir: Path,
+    provider: str,
+    templates_dir: Path,
+    full_permissions: bool,
+    dsi_remote_info: Optional[Dict[str, str]],
+    prompt_override: str = "",
+    logs_dir: Optional[Path] = None,
+    log_prefix: str = "comment_handler",
+) -> Dict[str, Any]:
+    """Construct the current comment-handler prompt, command, env, and paths."""
+    print("Generating comment handler prompt...")
+    prompt = generate_comment_prompt(idea, work_dir, templates_dir, provider=provider)
+    if prompt_override.strip():
+        prompt = f"{prompt.rstrip()}\n\n{prompt_override.strip()}\n"
+
+    logs_dir = logs_dir or (work_dir / "logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt_file = logs_dir / f"{log_prefix}_prompt.txt"
+    with open(prompt_file, "w", encoding="utf-8") as f:
+        f.write(prompt)
+
+    cmd = CLI_COMMANDS[provider]
+    if full_permissions:
+        if provider == "codex":
+            cmd += " --yolo"
+        elif provider == "claude":
+            cmd += " --dangerously-skip-permissions"
+        elif provider == "gemini":
+            cmd += " --yolo --skip-trust"
+
+    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
+    if transcript_flag:
+        cmd += f" {transcript_flag}"
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    if dsi_remote_info is not None:
+        env["NEURICO_DSI_REMOTE_ROOT"] = dsi_remote_info["remote_root"]
+        env["NEURICO_DSI_RSYNC_REMOTE_ROOT"] = dsi_remote_info["rsync_remote_root"]
+    if provider == "gemini":
+        env["GEMINI_CLI_IDE_DISABLE"] = "1"
+
+    return {
+        "prompt": prompt,
+        "prompt_file": prompt_file,
+        "cmd": cmd,
+        "command_argv": shlex.split(cmd),
+        "env": env,
+        "work_dir": Path(work_dir),
+        "log_file": logs_dir / f"{log_prefix}_{provider}.log",
+        "transcript_file": logs_dir / f"{log_prefix}_{provider}_transcript.jsonl",
     }

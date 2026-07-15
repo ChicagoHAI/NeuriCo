@@ -112,6 +112,7 @@ def generate_autoresearch_proposal_prompt(
     templates_dir: Path,
     provider: str = "claude",
     attempt_history: Optional[list[Dict[str, Any]]] = None,
+    autonomous_ideas_path: Optional[Path] = None,
 ) -> str:
     """
     Generate the AutoResearch proposer prompt from a curated public context.
@@ -158,6 +159,8 @@ def generate_autoresearch_proposal_prompt(
         parent_sha=parent_sha,
         attempt_dir=str(attempt_dir),
         proposal_path=str(attempt_dir / "proposal.md"),
+        autonomous_ideas_path=str(autonomous_ideas_path or ""),
+        hitl_stage="proposal",
         public_context=context,
         whiteboard_active_tips_md=whiteboard_active_tips_md,
         compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
@@ -214,6 +217,8 @@ def run_autoresearch_proposer(
     timeout: int = 900,
     full_permissions: bool = True,
     attempt_history: Optional[list[Dict[str, Any]]] = None,
+    prompt_suffix: str = "",
+    autonomous_ideas_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Launch the AutoResearch proposer agent.
@@ -250,7 +255,10 @@ def run_autoresearch_proposer(
         templates_dir=Path(templates_dir),
         provider=provider,
         attempt_history=attempt_history,
+        autonomous_ideas_path=autonomous_ideas_path,
     )
+    if prompt_suffix.strip():
+        prompt = f"{prompt.rstrip()}\n\n{prompt_suffix.strip()}\n"
 
     prompt_file = attempt_dir / "proposer_prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")

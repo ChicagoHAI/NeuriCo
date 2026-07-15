@@ -18,8 +18,17 @@ Manager/human feedback to apply:
 {{ feedback }}
 
 Hard constraints:
-- Do not gather resources or modify stage output artifacts.
-- Do not create `.resource_finder_complete`.
-- The orchestrator removes `.resource_finder_plan_complete` before plan revision
-  starts. Recreate `.resource_finder_plan_complete` only after `{{ plan_path }}` is
+- The only permitted public workspace writes in this invocation are
+  `{{ plan_path }}` and `{{ plan_completion_marker }}`. You may also append
+  non-blocking autonomous ideas to the hidden HITL runtime path described below.
+- You may read the whiteboard, but you MUST NOT add, clear, or prune tips.
+- Do not modify `planning.md`.
+- Do not modify the approved proposal.
+- Do not perform stage execution work or modify stage output artifacts.
+- Do not create `{{ completion_marker }}`.
+- Do not create a pending execution checkpoint in plan mode.
+- The orchestrator removes `{{ plan_completion_marker }}` before plan revision
+  starts. Recreate `{{ plan_completion_marker }}` only after `{{ plan_path }}` is
   revised, reviewable, and no unresolved checkpoint exists.
+
+{% include "hitl/worker_autonomous_idea_contract.txt" %}

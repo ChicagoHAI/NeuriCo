@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional
 import fnmatch
+import inspect
 import json
 import math
 import re
@@ -20,13 +21,25 @@ import tempfile
 from datetime import datetime
 
 from core.scorer import load_scoring_results
-from core.scoring_seal import seal_scoring_files, unseal_scoring_files
+from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
 from core.dsi_slurm_artifacts import DSI_SLURM_ARTIFACTS_DIR, move_dsi_slurm_artifacts
 from core.whiteboard import (
     Whiteboard,
     clear_current_attempt_marker,
+    read_current_attempt_marker,
     whiteboard_path,
     write_current_attempt_marker,
+)
+from core.hitl import (
+    HitlRuntime,
+    HitlValidationError,
+    assert_meaningful_candidate_public_change,
+    assert_path_state_unchanged,
+    assert_plan_only_public_changes,
+    maybe_public_workspace_inventory,
+    parse_required_artifacts,
+    snapshot_path_state,
+    verify_required_artifacts,
 )
 
 try:
@@ -53,9 +66,16 @@ AUTORESEARCH_LOG_PATTERNS = (
     "logs/experiment-autoresearch/",
     "logs/bootstrap_baseline/",
 )
+HITL_LOG_PATTERNS = ("logs/hitl/",)
 AUTORESEARCH_STATE_PATTERNS = (".neurico/autoresearch_state.json",)
 BOOTSTRAP_BASELINE_STATE_PATTERNS = (".neurico/bootstrap_baseline_state.json",)
 AGENT_LOCAL_PATTERNS = (".claude/", ".gemini/", ".codex/")
+HITL_RUNTIME_PATTERNS = (
+    ".neurico/hitl/",
+    ".neurico/runs/",
+    ".experiment_runner_plan_complete",
+    ".experiment_runner_complete",
+)
 PAPER_OUTPUT_PATTERNS = (
     "paper/",
     "paper_draft/",
@@ -67,13 +87,16 @@ PAPER_OUTPUT_PATTERNS = (
 CHECKPOINT_EXCLUDE_PATTERNS = (
     HIDDEN_SCORING_PATTERNS
     + AUTORESEARCH_LOG_PATTERNS
+    + HITL_LOG_PATTERNS
     + AUTORESEARCH_STATE_PATTERNS
     + BOOTSTRAP_BASELINE_STATE_PATTERNS
     + AGENT_LOCAL_PATTERNS
+    + HITL_RUNTIME_PATTERNS
     + PAPER_OUTPUT_PATTERNS
 )
 
 COMPARISON_EPS = 1e-6
+MAX_INVALID_ATTEMPTS_PER_VALID_ITERATION = 3
 
 # Allowed drop in a satisfied-property's normalized margin before the
 # comparator calls it a regression. Strict COMPARISON_EPS on unsatisfied
@@ -209,6 +232,7 @@ ProposalGeneratorHook = Callable[
     Any,
 ]
 CommentModeHook = Callable[[Dict[str, Any], Path], Dict[str, Any]]
+HitlCommentModeHook = Callable[[Dict[str, Any], Path, str, str], Dict[str, Any]]
 ScorerHook = Callable[[Path], Dict[str, Any]]
 
 
@@ -374,7 +398,7 @@ class CheckpointManager:
         checkpoint.
         """
         preserved_paths = self._copy_preserved_paths_to_temp(
-            AUTORESEARCH_LOG_PATTERNS + PAPER_OUTPUT_PATTERNS
+            AUTORESEARCH_LOG_PATTERNS + HITL_LOG_PATTERNS + PAPER_OUTPUT_PATTERNS
         )
         try:
             self.repo.git.reset("--hard", sha)
@@ -1286,6 +1310,142 @@ def construct_bootstrap_initial_node(
             )
 
 
+def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[Path]:
+    """Recover a leftover HITL AutoResearch attempt before clean-workspace validation."""
+    work_dir = Path(work_dir)
+    marker = read_current_attempt_marker(work_dir)
+    if not marker:
+        return None
+
+    state = read_autoresearch_state(work_dir)
+    history_root_value = state.get("history_root")
+    current_best_sha = autoresearch_state_current_best_sha(state)
+    if not history_root_value:
+        raise RuntimeError(
+            "Cannot recover interrupted HITL attempt: saved AutoResearch history_root is missing."
+        )
+    if not current_best_sha:
+        raise RuntimeError(
+            "Cannot recover interrupted HITL attempt: saved current_best_sha is missing."
+        )
+
+    history_root = Path(history_root_value).resolve()
+    attempt_dir = _resolve_marked_attempt_dir(history_root, marker)
+    before = attempt_dir / "whiteboard_before.json"
+    if not before.is_file():
+        raise RuntimeError(
+            f"Cannot recover interrupted HITL attempt: missing {before}"
+        )
+    idea_log_before = attempt_dir / "hitl_idea_log_before.jsonl"
+    if not idea_log_before.is_file():
+        raise RuntimeError(
+            f"Cannot recover interrupted HITL attempt: missing {idea_log_before}"
+        )
+
+    live_whiteboard = whiteboard_path(work_dir)
+    if live_whiteboard.exists():
+        shutil.copyfile(live_whiteboard, attempt_dir / "whiteboard_snapshot.json")
+
+    sealed_dir = sealed_dir_for(work_dir)
+    if sealed_dir.exists():
+        unseal_scoring_files(work_dir, sealed_dir)
+
+    CheckpointManager(work_dir).restore_checkpoint(
+        current_best_sha,
+        clean_untracked_public=True,
+    )
+    _restore_hitl_idea_log_snapshot(work_dir, attempt_dir)
+    live_whiteboard.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(before, live_whiteboard)
+    _clear_experiment_hitl_markers(work_dir)
+    clear_current_attempt_marker(work_dir)
+    shutil.rmtree(attempt_dir, ignore_errors=True)
+    return attempt_dir
+
+
+def _resolve_marked_attempt_dir(history_root: Path, marker: str) -> Path:
+    marker = marker.strip()
+    parts = marker.split("/")
+    if len(parts) != 2:
+        raise RuntimeError(
+            "Invalid AutoResearch current-attempt marker; expected <parent>/attempt_N."
+        )
+    parent_component, attempt_component = parts
+    if (
+        not parent_component
+        or parent_component in {".", ".."}
+        or not re.fullmatch(r"[A-Za-z0-9_.-]+", parent_component)
+        or not re.fullmatch(r"attempt_\d+", attempt_component)
+    ):
+        raise RuntimeError(
+            "Invalid AutoResearch current-attempt marker; unsafe path component."
+        )
+    attempt_dir = (Path(history_root) / parent_component / attempt_component).resolve()
+    try:
+        attempt_dir.relative_to(Path(history_root).resolve())
+    except ValueError as exc:
+        raise RuntimeError(
+            "Invalid AutoResearch current-attempt marker; resolved path escapes history root."
+        ) from exc
+    if not attempt_dir.is_dir():
+        raise RuntimeError(f"Marked AutoResearch attempt directory is missing: {attempt_dir}")
+    return attempt_dir
+
+
+def _clear_experiment_hitl_markers(work_dir: Path) -> None:
+    work_dir = Path(work_dir)
+    for marker in (
+        ".experiment_runner_plan_complete",
+        ".experiment_runner_complete",
+    ):
+        path = work_dir / marker
+        if path.exists():
+            path.unlink()
+    checkpoint_dir = work_dir / ".neurico" / "hitl" / "checkpoints"
+    if checkpoint_dir.exists():
+        for path in checkpoint_dir.iterdir():
+            if path.is_file():
+                path.unlink()
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / "pending_idea.json").write_text("", encoding="utf-8")
+    autonomous_path = work_dir / ".neurico" / "hitl" / "autonomous_ideas.jsonl"
+    autonomous_path.parent.mkdir(parents=True, exist_ok=True)
+    autonomous_path.write_text("", encoding="utf-8")
+
+
+def _hitl_idea_log_path(work_dir: Path) -> Path:
+    return Path(work_dir) / "logs" / "hitl" / "idea.jsonl"
+
+
+def _hitl_idea_log_snapshot_path(attempt_dir: Path) -> Path:
+    return Path(attempt_dir) / "hitl_idea_log_before.jsonl"
+
+
+def _snapshot_hitl_idea_log_before(work_dir: Path, attempt_dir: Path) -> None:
+    snapshot = _hitl_idea_log_snapshot_path(attempt_dir)
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    source = _hitl_idea_log_path(work_dir)
+    if source.exists():
+        shutil.copyfile(source, snapshot)
+    else:
+        snapshot.write_text("", encoding="utf-8")
+
+
+def _restore_hitl_idea_log_snapshot(work_dir: Path, attempt_dir: Path) -> None:
+    snapshot = _hitl_idea_log_snapshot_path(attempt_dir)
+    if not snapshot.exists():
+        raise RuntimeError(f"Cannot restore HITL idea log: missing {snapshot}")
+    target = _hitl_idea_log_path(work_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(snapshot, target)
+
+
+def _remove_hitl_idea_log_snapshot(attempt_dir: Path) -> None:
+    snapshot = _hitl_idea_log_snapshot_path(attempt_dir)
+    if snapshot.exists():
+        snapshot.unlink()
+
+
 def continue_from_current_best(
     *,
     idea: Dict[str, Any],
@@ -1299,6 +1459,7 @@ def continue_from_current_best(
     autoresearch_history_dir: Optional[Path],
     proposer_timeout: int,
     comment_timeout: int,
+    hitl_enabled: bool = False,
 ) -> Dict[str, Any]:
     """Validate the current scored node and run Phase 2 AutoResearch search."""
     print()
@@ -1306,6 +1467,11 @@ def continue_from_current_best(
     print("🔁 CONTINUE AUTORESEARCH")
     print("=" * 80)
     print()
+
+    if hitl_enabled:
+        recovered_attempt = recover_interrupted_hitl_attempt_if_needed(work_dir)
+        if recovered_attempt is not None:
+            print(f"   Recovered interrupted HITL attempt: {recovered_attempt}")
 
     current_sha = validate_continue_autoresearch_workspace(work_dir)
     state = read_autoresearch_state(work_dir)
@@ -1360,6 +1526,7 @@ def continue_from_current_best(
         proposal_timeout=proposer_timeout,
         comment_timeout=comment_timeout,
         scorer_timeout=scorer_timeout,
+        hitl_enabled=hitl_enabled,
     )
     payload = autoresearch_result_payload(autoresearch_result)
     payload["initial_sha"] = lineage_source_sha
@@ -1569,6 +1736,9 @@ class AutoResearchController:
         checkpoint_manager: Optional[CheckpointManager] = None,
         history_manager: Optional[AttemptHistoryManager] = None,
         comparator: Optional[ScoringResultComparator] = None,
+        hitl_enabled: bool = False,
+        hitl_runtime: Optional[HitlRuntime] = None,
+        hitl_comment_mode: Optional[HitlCommentModeHook] = None,
     ):
         self.idea = idea
         self.idea_id = idea_id
@@ -1581,6 +1751,9 @@ class AutoResearchController:
         self.proposal_generator = proposal_generator
         self.comment_mode = comment_mode
         self.scorer = scorer
+        self.hitl_enabled = hitl_enabled
+        self.hitl_runtime = hitl_runtime
+        self.hitl_comment_mode = hitl_comment_mode
 
     def run(self, iterations: int) -> AutoResearchRunResult:
         """
@@ -1599,16 +1772,44 @@ class AutoResearchController:
         iteration_results: list[AutoResearchIterationResult] = []
 
         for iteration in range(1, iterations + 1):
-            result = self.run_iteration(iteration, current_best_sha)
-            iteration_results.append(result)
-            if result.accepted and result.child_sha:
-                current_best_sha = result.child_sha
+            if not self.hitl_enabled:
+                result = self.run_iteration(iteration, current_best_sha)
+                iteration_results.append(result)
+                if result.accepted and result.child_sha:
+                    current_best_sha = result.child_sha
+                continue
+
+            invalid_attempts = 0
+            while True:
+                result = self.run_iteration(iteration, current_best_sha)
+                if self._is_normal_scored_iteration(result):
+                    iteration_results.append(result)
+                    if result.accepted and result.child_sha:
+                        current_best_sha = result.child_sha
+                    break
+                invalid_attempts += 1
+                if invalid_attempts >= MAX_INVALID_ATTEMPTS_PER_VALID_ITERATION:
+                    return AutoResearchRunResult(
+                        success=False,
+                        initial_sha=initial.sha,
+                        current_best_sha=current_best_sha,
+                        iterations=iteration_results,
+                    )
 
         return AutoResearchRunResult(
             success=True,
             initial_sha=initial.sha,
             current_best_sha=current_best_sha,
             iterations=iteration_results,
+        )
+
+    @staticmethod
+    def _is_normal_scored_iteration(result: AutoResearchIterationResult) -> bool:
+        scorer_success = bool(result.scorer_result.get("success"))
+        return (
+            scorer_success
+            and result.candidate_summary.valid
+            and bool(result.child_sha)
         )
 
     def run_iteration(
@@ -1625,8 +1826,12 @@ class AutoResearchController:
 
         attempt_history = self.history.load_attempt_summaries(parent_sha)
         attempt_dir = self.history.next_attempt_dir(parent_sha)
-        attempt_id = self._attempt_id(attempt_dir)
-        write_current_attempt_marker(self.work_dir, attempt_id)
+        attempt_marker = self._attempt_id(attempt_dir)
+        attempt_id = attempt_dir.name
+        self._ensure_whiteboard_before(attempt_dir)
+        if self.hitl_enabled:
+            _snapshot_hitl_idea_log_before(self.work_dir, attempt_dir)
+        write_current_attempt_marker(self.work_dir, attempt_marker)
 
         sealed_dir = seal_scoring_files(self.work_dir)
         proposal = ""
@@ -1634,18 +1839,38 @@ class AutoResearchController:
         pre_scoring_error: Optional[str] = None
         try:
             try:
-                proposal_result = self.proposal_generator(
-                    self.idea,
-                    self.work_dir,
-                    parent_sha,
-                    attempt_dir,
-                    attempt_history,
-                )
-                proposal = self._resolve_proposal_text(attempt_dir, proposal_result)
-                self.history.write_proposal(attempt_dir, proposal)
-
-                comment_idea = self._idea_with_comments(proposal)
-                comment_result = self.comment_mode(comment_idea, self.work_dir)
+                if self.hitl_enabled:
+                    (
+                        proposal,
+                        approved_proposal_path,
+                        approved_proposal_snapshot,
+                    ) = self._run_proposal_admission_loop(
+                        parent_sha=parent_sha,
+                        attempt_dir=attempt_dir,
+                        attempt_id=attempt_id,
+                        attempt_history=attempt_history,
+                    )
+                    comment_result = self._run_candidate_experiment_hitl(
+                        proposal_path=approved_proposal_path,
+                        proposal_snapshot=approved_proposal_snapshot,
+                        parent_node_id=parent_sha,
+                        attempt_id=attempt_id,
+                    )
+                    if not comment_result.get("success"):
+                        raise RuntimeError(
+                            comment_result.get("error")
+                            or "AutoResearch HITL candidate experiment failed before scoring."
+                        )
+                else:
+                    proposal_result = self._call_proposal_generator(
+                        parent_sha=parent_sha,
+                        attempt_dir=attempt_dir,
+                        attempt_history=attempt_history,
+                    )
+                    proposal = self._resolve_proposal_text(attempt_dir, proposal_result)
+                    self.history.write_proposal(attempt_dir, proposal)
+                    comment_idea = self._idea_with_comments(proposal)
+                    comment_result = self.comment_mode(comment_idea, self.work_dir)
             except Exception as e:
                 pre_scoring_error = str(e)
                 comment_result = {
@@ -1662,6 +1887,29 @@ class AutoResearchController:
                 source="candidate",
                 error=f"AutoResearch proposal/comment stage failed: {pre_scoring_error}",
             )
+            if self.hitl_enabled:
+                self.checkpoints.restore_checkpoint(
+                    parent_sha,
+                    clean_untracked_public=True,
+                )
+                _restore_hitl_idea_log_snapshot(self.work_dir, attempt_dir)
+                self._restore_whiteboard_before(attempt_dir)
+                _clear_experiment_hitl_markers(self.work_dir)
+                shutil.rmtree(attempt_dir, ignore_errors=True)
+                clear_current_attempt_marker(self.work_dir)
+                return AutoResearchIterationResult(
+                    iteration=iteration,
+                    parent_sha=parent_sha,
+                    child_sha=None,
+                    attempt_dir=attempt_dir,
+                    accepted=False,
+                    reason=candidate_summary.error or "AutoResearch HITL attempt failed.",
+                    proposal=proposal,
+                    comment_result=comment_result,
+                    scorer_result={},
+                    parent_summary=parent_summary,
+                    candidate_summary=candidate_summary,
+                )
             self._clear_stale_results_json()
             results_path = self.work_dir / "scoring" / "results.json"
             results_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1716,8 +1964,14 @@ class AutoResearchController:
                     results_path=results_path,
                     decision=decision_payload,
                 )
-            self.checkpoints.restore_checkpoint(parent_sha)
-            self._revert_whiteboard_for(attempt_id)
+            self.checkpoints.restore_checkpoint(
+                parent_sha,
+                clean_untracked_public=self.hitl_enabled,
+            )
+            if self.hitl_enabled:
+                self._snapshot_then_restore_whiteboard_before(attempt_dir)
+            else:
+                self._revert_whiteboard_for(attempt_marker)
             clear_current_attempt_marker(self.work_dir)
             return AutoResearchIterationResult(
                 iteration=iteration,
@@ -1798,9 +2052,22 @@ class AutoResearchController:
                 decision=decision_payload,
             )
 
-        if not accepted:
+        if self.hitl_enabled and child_sha is None:
+            self.checkpoints.restore_checkpoint(
+                parent_sha,
+                clean_untracked_public=True,
+            )
+            _restore_hitl_idea_log_snapshot(self.work_dir, attempt_dir)
+            self._restore_whiteboard_before(attempt_dir)
+            _clear_experiment_hitl_markers(self.work_dir)
+            shutil.rmtree(attempt_dir, ignore_errors=True)
+        else:
+            if self.hitl_enabled:
+                _remove_hitl_idea_log_snapshot(attempt_dir)
+
+        if not accepted and not (self.hitl_enabled and child_sha is None):
             self.checkpoints.restore_checkpoint(parent_sha)
-            self._revert_whiteboard_for(attempt_id)
+            self._revert_whiteboard_for(attempt_marker)
         clear_current_attempt_marker(self.work_dir)
 
         return AutoResearchIterationResult(
@@ -1816,6 +2083,706 @@ class AutoResearchController:
             parent_summary=parent_summary,
             candidate_summary=candidate_summary,
         )
+
+    def _run_proposal_admission_loop(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_id: str,
+        attempt_history: list[Dict[str, Any]],
+    ) -> tuple[str, Path, Dict[str, Any]]:
+        runtime = self._proposal_hitl_runtime()
+        feedback_suffix = ""
+        proposal_path = Path(attempt_dir) / "proposal.md"
+
+        for round_idx in range(1, 6):
+            if round_idx > 1:
+                self._restore_whiteboard_before(attempt_dir)
+                try:
+                    proposal_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+            runtime.prepare_autonomous_idea_target()
+            proposal_result = self._call_proposal_generator(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+                attempt_history=attempt_history,
+                prompt_suffix=feedback_suffix,
+            )
+            proposal = self._resolve_proposal_text(attempt_dir, proposal_result)
+            self.history.write_proposal(attempt_dir, proposal)
+            proposal_path = self._validate_attempt_proposal_path(attempt_dir)
+            runtime.consume_autonomous_ideas(
+                hitl_stage="proposal",
+                actor="experiment_runner",
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": attempt_id,
+                },
+            )
+
+            review = runtime.manager.review_proposal(
+                pipeline_stage="experiment_runner",
+                proposal_path=proposal_path,
+                proposal_text=proposal,
+                workspace_summary=runtime.workspace_summary(),
+                attempt_id=attempt_id,
+            )
+            if review.get("status") == "revise_illegal":
+                feedback = str(review.get("feedback", "")).strip()
+                if not feedback:
+                    raise HitlValidationError(
+                        "Manager proposal legality revision lacked feedback."
+                    )
+                self._log_manager_proposal_revision(
+                    runtime=runtime,
+                    review=review,
+                    proposal_path=proposal_path,
+                    feedback=feedback,
+                    provenance={
+                        "parent_node_id": parent_sha,
+                        "attempt_id": attempt_id,
+                    },
+                )
+                feedback_suffix = self._proposal_feedback_suffix(
+                    source="manager legality review",
+                    feedback=feedback,
+                    proposal_path=proposal_path,
+                    autonomous_ideas_path=runtime.paths.autonomous_ideas_path,
+                )
+                continue
+
+            approval = self._ask_human_to_approve_proposal(
+                runtime=runtime,
+                proposal_path=proposal_path,
+                proposal_text=proposal,
+                review=review,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": attempt_id,
+                },
+            )
+            if approval["approved"]:
+                return proposal, proposal_path, snapshot_path_state(proposal_path)
+            feedback_suffix = self._proposal_feedback_suffix(
+                source="human feedback",
+                feedback=approval["feedback"],
+                proposal_path=proposal_path,
+                autonomous_ideas_path=runtime.paths.autonomous_ideas_path,
+            )
+
+        raise RuntimeError("AutoResearch HITL proposal admission did not converge.")
+
+    def _run_candidate_experiment_hitl(
+        self,
+        *,
+        proposal_path: Path,
+        proposal_snapshot: Dict[str, Any],
+        parent_node_id: str = "",
+        attempt_id: str = "",
+    ) -> Dict[str, Any]:
+        if self.hitl_comment_mode is None:
+            raise RuntimeError("HITL AutoResearch requires a HITL comment-handler runner.")
+        runtime = self._proposal_hitl_runtime()
+        plan_marker = self.work_dir / runtime.paths.plan_marker_name
+        completion_marker = self.work_dir / runtime.paths.completion_marker_name
+        candidate_inventory_before = maybe_public_workspace_inventory(self.work_dir)
+        attempt_provenance = {
+            "parent_node_id": parent_node_id,
+            "attempt_id": attempt_id,
+        }
+
+        def phase_idea(comments: str) -> Dict[str, Any]:
+            return self._idea_with_comments(comments)
+
+        def run_worker(comments: str, prompt: str, log_prefix: str) -> Dict[str, Any]:
+            return self.hitl_comment_mode(
+                phase_idea(comments),
+                self.work_dir,
+                prompt,
+                log_prefix,
+            )
+
+        def plan_integrity_snapshot() -> Dict[str, Dict[str, Any]]:
+            return {
+                "approved proposal": snapshot_path_state(proposal_path),
+                "scoring/interface.md": snapshot_path_state(
+                    self.work_dir / "scoring" / "interface.md"
+                ),
+                "scoring/results.json": snapshot_path_state(
+                    self.work_dir / "scoring" / "results.json"
+                ),
+                ".neurico/autoresearch_state.json": snapshot_path_state(
+                    self.work_dir / ".neurico" / "autoresearch_state.json"
+                ),
+                "whiteboard": snapshot_path_state(whiteboard_path(self.work_dir)),
+            }
+
+        def assert_plan_integrity(snapshot: Dict[str, Dict[str, Any]]) -> None:
+            assert_path_state_unchanged(
+                proposal_path,
+                snapshot["approved proposal"],
+                "Approved AutoResearch proposal",
+            )
+            assert_path_state_unchanged(
+                self.work_dir / "scoring" / "interface.md",
+                snapshot["scoring/interface.md"],
+                "scoring/interface.md",
+            )
+            assert_path_state_unchanged(
+                self.work_dir / "scoring" / "results.json",
+                snapshot["scoring/results.json"],
+                "scoring/results.json",
+            )
+            assert_path_state_unchanged(
+                self.work_dir / ".neurico" / "autoresearch_state.json",
+                snapshot[".neurico/autoresearch_state.json"],
+                ".neurico/autoresearch_state.json",
+            )
+            assert_path_state_unchanged(
+                whiteboard_path(self.work_dir),
+                snapshot["whiteboard"],
+                "AutoResearch whiteboard",
+            )
+
+        def run_plan_worker_checked(
+            comments: str,
+            prompt: str,
+            log_prefix: str,
+        ) -> Dict[str, Any]:
+            inventory_before = maybe_public_workspace_inventory(self.work_dir)
+            integrity_before = plan_integrity_snapshot()
+            try:
+                return run_worker(comments, prompt, log_prefix)
+            finally:
+                assert_plan_integrity(integrity_before)
+                assert_plan_only_public_changes(
+                    work_dir=self.work_dir,
+                    before=inventory_before,
+                    after=maybe_public_workspace_inventory(self.work_dir),
+                    plan_path=runtime.paths.plan_path,
+                    plan_marker_name=runtime.paths.plan_marker_name,
+                )
+
+        if plan_marker.exists():
+            plan_marker.unlink()
+        runtime.prepare_checkpoint_target()
+        runtime.prepare_autonomous_idea_target()
+        plan_result = run_plan_worker_checked(
+            (
+                f"Approved proposal path: {proposal_path}\n"
+                f"Control plan output path: {runtime.paths.plan_path}\n"
+                "Read the proposal. Write or update only the control plan at the output path. "
+                "Do not modify the proposal."
+            ),
+            runtime.plan_prompt_block(
+                approved_proposal_path=proposal_path,
+                requires_human_approval=False,
+            ),
+            "autoresearch_hitl_experiment_plan",
+        )
+        if runtime.has_pending_checkpoint_payload(hitl_stage="plan"):
+            raise RuntimeError("AutoResearch experiment plan wrote a pending HITL idea")
+        if plan_result.get("success"):
+            runtime.consume_autonomous_ideas(
+                hitl_stage="plan",
+                actor="experiment_runner",
+                provenance=attempt_provenance,
+            )
+        if not plan_marker.exists():
+            return {
+                **plan_result,
+                "success": False,
+                "hitl": True,
+                "phase": "plan",
+                "error": f"Missing HITL plan marker: {plan_marker.name}",
+            }
+        runtime.prepare_checkpoint_target()
+
+        for plan_round in range(5):
+            plan_text = runtime._read_required(runtime.paths.plan_path)
+            review = runtime.manager.review_plan(
+                pipeline_stage="experiment_runner",
+                plan_path=runtime.paths.plan_path,
+                plan_text=plan_text,
+                workspace_summary=runtime.workspace_summary(),
+                requires_human_approval=False,
+            )
+            if review.get("status") == "ready":
+                break
+            feedback = str(review.get("manager_feedback", "")).strip()
+            if not feedback:
+                raise HitlValidationError(
+                    "AutoResearch HITL candidate plan revision lacked manager_feedback."
+                )
+            plan_review_record = {
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "plan",
+                "level": "B",
+                "actor": "manager",
+                "idea_type": "decision",
+                "context": str(review.get("context", "Manager reviewed candidate experiment plan.")),
+                "basis": "Manager review found the candidate experiment plan was not ready.",
+                "options": [
+                    "Accept candidate experiment plan as ready.",
+                    "Revise candidate experiment plan before execution.",
+                ],
+                "decision": "O2",
+                "manager_feedback": feedback,
+                "raised": True,
+                "related_artifacts": [
+                    {
+                        "path": str(runtime.paths.plan_path.relative_to(self.work_dir)),
+                        "description": "AutoResearch candidate experiment HITL plan.",
+                    }
+                ],
+                **attempt_provenance,
+            }
+            runtime.log.append(plan_review_record)
+            if plan_marker.exists():
+                plan_marker.unlink()
+            runtime.prepare_checkpoint_target()
+            runtime.prepare_autonomous_idea_target()
+            revision_result = run_plan_worker_checked(
+                (
+                    "HITL plan-revision phase. Revise only "
+                    f"{runtime.paths.plan_path.relative_to(self.work_dir)} using the "
+                    "manager feedback in the strict HITL instructions."
+                ),
+                runtime.plan_revision_prompt_block(feedback),
+                f"autoresearch_hitl_experiment_plan_revision_{plan_round + 1}",
+            )
+            if runtime.has_pending_checkpoint_payload(hitl_stage="plan"):
+                raise RuntimeError(
+                    "AutoResearch experiment plan revision wrote a pending HITL idea"
+                )
+            if revision_result.get("success"):
+                runtime.consume_autonomous_ideas(
+                    hitl_stage="plan",
+                    actor="experiment_runner",
+                    provenance=attempt_provenance,
+                )
+            if not plan_marker.exists():
+                return {
+                    **revision_result,
+                    "success": False,
+                    "hitl": True,
+                    "phase": "plan_revision",
+                    "error": f"Missing HITL plan marker: {plan_marker.name}",
+                }
+            runtime.prepare_checkpoint_target()
+        else:
+            raise RuntimeError("AutoResearch HITL candidate plan review did not converge.")
+
+        mode = "execute"
+        pending_feedback = ""
+        last_result: Dict[str, Any] = {}
+
+        def resolved_feedback(record: Optional[Dict[str, Any]]) -> str:
+            if not record:
+                return ""
+            return str(
+                record.get("manager_feedback")
+                or record.get("human_feedback")
+                or record.get("decision")
+                or ""
+            ).strip()
+
+        for round_idx in range(8):
+            if completion_marker.exists():
+                completion_marker.unlink()
+
+            logged = runtime.resolve_checkpoint(
+                hitl_stage="execution",
+                provenance=attempt_provenance,
+            )
+            if logged is not None:
+                pending_feedback = resolved_feedback(logged)
+                mode = "continue"
+
+            if pending_feedback and mode != "revise":
+                run_hitl_stage = "execution"
+                prompt = runtime.feedback_continuation_prompt_block(pending_feedback)
+                log_prefix = f"autoresearch_hitl_experiment_feedback_continue_{round_idx + 1}"
+                comments = (
+                    "HITL feedback-continuation phase. Continue from the living plan "
+                    "and apply only the resolved manager/human feedback in the strict "
+                    "HITL instructions."
+                )
+                pending_feedback = ""
+            else:
+                run_hitl_stage = "review" if mode == "revise" else "execution"
+                prompt = (
+                    runtime.review_prompt_block(pending_feedback)
+                    if mode == "revise"
+                    else runtime.execution_prompt_block(mode=mode)
+                )
+                log_prefix = f"autoresearch_hitl_experiment_{mode}_{round_idx + 1}"
+                comments = (
+                    "HITL review-revision phase. Revise only against the living plan "
+                    "and manager feedback in the strict HITL instructions."
+                    if mode == "revise"
+                    else "HITL execution phase. Follow the living control plan; do not "
+                    "restart completed work."
+                )
+                if mode == "revise":
+                    pending_feedback = ""
+
+            runtime.prepare_checkpoint_target()
+            runtime.prepare_autonomous_idea_target()
+            result = run_worker(comments, prompt, log_prefix)
+            last_result = result
+
+            has_completion = completion_marker.exists()
+            has_checkpoint = runtime.has_pending_checkpoint_payload(hitl_stage=run_hitl_stage)
+            runtime.consume_autonomous_ideas(
+                hitl_stage=run_hitl_stage,
+                actor="experiment_runner",
+                provenance=attempt_provenance,
+            )
+            if has_completion and has_checkpoint:
+                return {
+                    **result,
+                    "success": False,
+                    "hitl": True,
+                    "phase": mode,
+                    "error": "AutoResearch candidate completed but also wrote a pending HITL idea",
+                }
+            if has_checkpoint:
+                logged = runtime.resolve_checkpoint(
+                    hitl_stage=run_hitl_stage,
+                    require_pending=True,
+                    provenance=attempt_provenance,
+                )
+                pending_feedback = resolved_feedback(logged)
+                mode = "continue"
+                continue
+            if not has_completion:
+                if not result.get("success"):
+                    return {
+                        **result,
+                        "success": False,
+                        "hitl": True,
+                        "phase": mode,
+                        "error": "AutoResearch candidate worker failed without a pending HITL idea",
+                    }
+                mode = "continue"
+                continue
+
+            try:
+                assert_path_state_unchanged(
+                    proposal_path,
+                    proposal_snapshot,
+                    "Approved AutoResearch proposal",
+                )
+                assert_meaningful_candidate_public_change(
+                    work_dir=self.work_dir,
+                    before=candidate_inventory_before,
+                    after=maybe_public_workspace_inventory(self.work_dir),
+                    plan_path=runtime.paths.plan_path,
+                    plan_marker_name=runtime.paths.plan_marker_name,
+                    completion_marker_name=runtime.paths.completion_marker_name,
+                )
+                required_artifacts = parse_required_artifacts(
+                    self.work_dir / "scoring" / "interface.md"
+                )
+                verify_required_artifacts(self.work_dir, required_artifacts)
+            except Exception as exc:
+                return {
+                    **result,
+                    "success": False,
+                    "hitl": True,
+                    "phase": mode,
+                    "error": str(exc),
+                }
+
+            runtime.prepare_checkpoint_target()
+            review = runtime.review_stage()
+            if review.get("status") == "aligned":
+                runtime.log_stage_approval(
+                    str(review.get("context", "")),
+                    provenance=attempt_provenance,
+                )
+                return {**result, "success": True, "hitl": True, "phase": "complete"}
+
+            feedback = str(review.get("manager_feedback", "")).strip()
+            if not feedback:
+                raise HitlValidationError(
+                    "AutoResearch HITL final review revision lacked manager_feedback."
+                )
+            runtime.log_review_feedback(feedback, provenance=attempt_provenance)
+            pending_feedback = feedback
+            mode = "revise"
+
+        return {
+            **last_result,
+            "success": False,
+            "hitl": True,
+            "error": "AutoResearch HITL candidate exceeded continuation rounds",
+        }
+
+    def _call_proposal_generator(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_history: list[Dict[str, Any]],
+        prompt_suffix: str = "",
+    ) -> Any:
+        args = (self.idea, self.work_dir, parent_sha, attempt_dir, attempt_history)
+        kwargs: Dict[str, Any] = {}
+        if prompt_suffix:
+            signature = inspect.signature(self.proposal_generator)
+            accepts_kwargs = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in signature.parameters.values()
+            )
+            if "prompt_suffix" not in signature.parameters and not accepts_kwargs:
+                raise TypeError(
+                    "HITL proposal revision requires a proposal generator that "
+                    "accepts prompt_suffix."
+                )
+            kwargs["prompt_suffix"] = prompt_suffix
+        return self.proposal_generator(*args, **kwargs)
+
+    def _proposal_hitl_runtime(self) -> HitlRuntime:
+        if self.hitl_runtime is None:
+            self.hitl_runtime = HitlRuntime(self.work_dir, "experiment_runner")
+        return self.hitl_runtime
+
+    def _validate_attempt_proposal_path(self, attempt_dir: Path) -> Path:
+        attempt_dir = Path(attempt_dir).resolve()
+        proposal_path = (attempt_dir / "proposal.md").resolve()
+        if not proposal_path.is_file():
+            raise RuntimeError(f"AutoResearch proposal.md missing: {proposal_path}")
+        try:
+            proposal_path.relative_to(attempt_dir)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"AutoResearch proposal path escaped attempt dir: {proposal_path}"
+            ) from exc
+        return proposal_path
+
+    def _ask_human_to_approve_proposal(
+        self,
+        *,
+        runtime: HitlRuntime,
+        proposal_path: Path,
+        proposal_text: str,
+        review: Dict[str, Any],
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        options = ["Approve proposal.", "Provide feedback."]
+        proposal_summary = self._proposal_approval_summary(proposal_text)
+        response = runtime.channel.prompt(
+            message=(
+                "AutoResearch proposal is legal and needs human approval.\n\n"
+                f"Proposal path: {proposal_path}\n\n"
+                "The manager found no evaluation-integrity violation. This is "
+                "not a recommendation of the proposal's scientific merit.\n\n"
+                f"Proposal summary:\n{proposal_summary}\n\n"
+                f"{str(review.get('context', '')).strip()}\n\n"
+                "Approve the proposal, or provide feedback to rerun the proposer."
+            ),
+            options=options,
+        )
+        if response is None:
+            raise RuntimeError("HITL proposal approval ended without a response.")
+        decision, human_feedback = self._resolve_two_option_decision(response, options)
+        approved = decision == "O1"
+        manager_feedback = ""
+        if not approved:
+            if decision == "O2":
+                feedback_response = runtime.channel.prompt(
+                    message=(
+                        "Please provide concrete feedback for revising the "
+                        "AutoResearch proposal."
+                    )
+                )
+                if feedback_response is None:
+                    raise RuntimeError("HITL proposal feedback ended without a response.")
+                human_feedback = feedback_response.strip()
+            if not human_feedback or human_feedback.lower() in {"provide feedback", "feedback"}:
+                raise RuntimeError(
+                    "HITL proposal feedback must contain concrete revision instructions."
+                )
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "proposal",
+            "level": "A",
+            "actor": "human",
+            "idea_type": "decision",
+            "context": str(
+                review.get(
+                    "context",
+                    "Human reviewed a legal AutoResearch proposal.",
+                )
+            ),
+            "basis": "The human made this proposal approval or feedback decision.",
+            "options": options,
+            "decision": decision,
+            "human_feedback": human_feedback,
+            "manager_feedback": manager_feedback,
+            "raised": True,
+            "manager_escalation_reason": (
+                "Human approval is required before an AutoResearch proposal "
+                "is admitted to experiment execution."
+            ),
+            "related_artifacts": [
+                {
+                    "path": str(proposal_path),
+                    "description": "AutoResearch proposal under human review.",
+                }
+            ],
+        }
+        if provenance:
+            record.update({k: v for k, v in provenance.items() if v})
+        runtime.log.append(record)
+        return {
+            "approved": approved,
+            "feedback": manager_feedback or human_feedback,
+        }
+
+    def _log_manager_proposal_revision(
+        self,
+        *,
+        runtime: HitlRuntime,
+        review: Dict[str, Any],
+        proposal_path: Path,
+        feedback: str,
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "proposal",
+            "level": "B",
+            "actor": "manager",
+            "idea_type": "decision",
+            "context": str(
+                review.get(
+                    "context",
+                    "Manager reviewed AutoResearch proposal legality.",
+                )
+            ),
+            "basis": "Manager legality review found proposal boundary or evaluation-integrity violations.",
+            "options": [
+                "Approve proposal as legal.",
+                "Revise illegal proposal before human approval.",
+            ],
+            "decision": "O2",
+            "manager_feedback": feedback,
+            "raised": True,
+            "related_artifacts": [
+                {
+                    "path": str(proposal_path),
+                    "description": "AutoResearch proposal requiring legality revision.",
+                }
+            ],
+        }
+        if provenance:
+            record.update({k: v for k, v in provenance.items() if v})
+        runtime.log.append(record)
+
+    @staticmethod
+    def _resolve_two_option_decision(
+        response: str,
+        options: list[str],
+    ) -> tuple[str, str]:
+        raw = response.strip()
+        if raw in {"1", "O1", options[0]}:
+            return "O1", options[0]
+        if raw in {"2", "O2", options[1]}:
+            return "O2", options[1]
+        return "CUSTOM", raw
+
+    @staticmethod
+    def _proposal_feedback_suffix(
+        *,
+        source: str,
+        feedback: str,
+        proposal_path: Path,
+        autonomous_ideas_path: Path,
+    ) -> str:
+        return (
+            "HITL PROPOSAL REVISION FEEDBACK\n\n"
+            f"Source: {source}\n\n"
+            "Revise only the AutoResearch proposal at:\n"
+            f"{proposal_path}\n\n"
+            "Preserve the current research objective and public evaluation protocol.\n"
+            "Do not modify public research-workspace files.\n"
+            "The only permitted workspace mutations are:\n"
+            "- the existing `whiteboard prune-tip` operation, used according to the\n"
+            "  proposer's normal whiteboard rules;\n"
+            "- appending valid C-level idea records to:\n"
+            f"  {autonomous_ideas_path}\n"
+            "Do not modify `logs/hitl/idea.jsonl` directly.\n\n"
+            "Feedback to apply exactly:\n"
+            f"{feedback.strip()}"
+        )
+
+    @staticmethod
+    def _proposal_approval_summary(proposal_text: str) -> str:
+        headings = [
+            "Target",
+            "Current state summary",
+            "Proposed modification",
+            "Expected artifacts",
+        ]
+        lines = proposal_text.splitlines()
+        sections: Dict[str, str] = {}
+        for idx, line in enumerate(lines):
+            title = line.strip().lstrip("#").strip().rstrip(":")
+            matched = next(
+                (heading for heading in headings if title.lower() == heading.lower()),
+                None,
+            )
+            if not matched:
+                continue
+            body: list[str] = []
+            for next_line in lines[idx + 1 :]:
+                if re.match(r"^\s*#{1,6}\s+", next_line):
+                    break
+                if len(body) >= 8:
+                    break
+                if next_line.strip():
+                    body.append(next_line.rstrip())
+            if body:
+                sections[matched] = "\n".join(body)
+
+        if sections:
+            parts = []
+            for heading in headings:
+                value = sections.get(heading, "Not explicitly stated.")
+                parts.append(f"{heading}:\n{value}")
+            return "\n\n".join(parts)
+
+        excerpt = "\n".join(line for line in lines[:40]).strip()
+        if len(excerpt) > 4000:
+            excerpt = excerpt[:4000].rstrip() + "\n[truncated]"
+        return excerpt or "Proposal text is empty."
+
+    def _ensure_whiteboard_before(self, attempt_dir: Path) -> None:
+        live = whiteboard_path(self.work_dir)
+        if not live.exists():
+            Whiteboard(self.work_dir).load().save()
+        before = Path(attempt_dir) / "whiteboard_before.json"
+        before.parent.mkdir(parents=True, exist_ok=True)
+        if not before.exists():
+            shutil.copyfile(live, before)
+
+    def _restore_whiteboard_before(self, attempt_dir: Path) -> None:
+        before = Path(attempt_dir) / "whiteboard_before.json"
+        if not before.exists():
+            raise RuntimeError(f"Missing AutoResearch whiteboard_before.json: {before}")
+        live = whiteboard_path(self.work_dir)
+        live.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(before, live)
+
+    def _snapshot_then_restore_whiteboard_before(self, attempt_dir: Path) -> None:
+        self.history._snapshot_whiteboard(attempt_dir)
+        self._restore_whiteboard_before(attempt_dir)
 
     def _ensure_results_json(
         self,
@@ -1954,6 +2921,7 @@ def run_autoresearch_loop(
     proposal_timeout: int = 900,
     comment_timeout: int = 1800,
     scorer_timeout: int = 600,
+    hitl_enabled: bool = False,
 ) -> AutoResearchRunResult:
     """
     Run AutoResearch with NeuriCo's real proposer, comment handler, and scorer.
@@ -1961,7 +2929,9 @@ def run_autoresearch_loop(
     This is the production integration point used by runner.py in Phase 6.
     """
     from agents.autoresearch_proposer import run_autoresearch_proposer
-    from agents.comment_handler import run_comment_handler
+    from agents.comment_handler import build_comment_handler_launch, run_comment_handler
+    from core.agent_runner import run_prebuilt_cli_agent
+    from core.dsi_slurm_remote import dsi_slurm_remote_workspace
     from core.scorer import run_scorer
 
     work_dir = Path(work_dir)
@@ -1973,8 +2943,14 @@ def run_autoresearch_loop(
         proposal_work_dir: Path,
         parent_sha: str,
         attempt_dir: Path,
-        attempt_history: list[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+            attempt_history: list[Dict[str, Any]],
+            prompt_suffix: str = "",
+        ) -> Dict[str, Any]:
+        autonomous_ideas_path = None
+        if hitl_enabled:
+            autonomous_ideas_path = (
+                Path(proposal_work_dir) / ".neurico" / "hitl" / "autonomous_ideas.jsonl"
+            )
         return run_autoresearch_proposer(
             idea=idea_payload,
             work_dir=proposal_work_dir,
@@ -1985,6 +2961,8 @@ def run_autoresearch_loop(
             timeout=proposal_timeout,
             full_permissions=full_permissions,
             attempt_history=attempt_history,
+            prompt_suffix=prompt_suffix,
+            autonomous_ideas_path=autonomous_ideas_path,
         )
 
     def comment_mode(comment_idea: Dict[str, Any], comment_work_dir: Path) -> Dict[str, Any]:
@@ -1996,6 +2974,37 @@ def run_autoresearch_loop(
             timeout=comment_timeout,
             full_permissions=full_permissions,
         )
+
+    def hitl_comment_mode(
+        comment_idea: Dict[str, Any],
+        comment_work_dir: Path,
+        prompt_override: str,
+        log_prefix: str,
+    ) -> Dict[str, Any]:
+        with dsi_slurm_remote_workspace(comment_idea, comment_work_dir) as dsi_remote_info:
+            launch = build_comment_handler_launch(
+                idea=comment_idea,
+                work_dir=comment_work_dir,
+                provider=provider,
+                templates_dir=templates_dir,
+                full_permissions=full_permissions,
+                dsi_remote_info=dsi_remote_info,
+                prompt_override=prompt_override,
+                logs_dir=comment_work_dir / "logs" / "hitl",
+                log_prefix=log_prefix,
+            )
+            result = run_prebuilt_cli_agent(
+                command_argv=launch["command_argv"],
+                prompt=launch["prompt"],
+                work_dir=launch["work_dir"],
+                log_file=launch["log_file"],
+                transcript_file=launch["transcript_file"],
+                env=launch["env"],
+                timeout=comment_timeout,
+            )
+            if result.get("timed_out"):
+                result["error"] = f"AutoResearch HITL comment handler timed out after {comment_timeout}s"
+            return result
 
     def scorer(score_work_dir: Path) -> Dict[str, Any]:
         return run_scorer(
@@ -2011,6 +3020,8 @@ def run_autoresearch_loop(
         proposal_generator=proposal_generator,
         comment_mode=comment_mode,
         scorer=scorer,
+        hitl_enabled=hitl_enabled,
+        hitl_comment_mode=hitl_comment_mode if hitl_enabled else None,
     )
     return controller.run(iterations=iterations)
 

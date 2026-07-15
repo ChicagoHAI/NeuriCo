@@ -7,19 +7,27 @@ You are revising `{{ pipeline_stage }}` artifacts after manager review.
 Read `{{ plan_path }}` and the current workspace state. Continue from recorded
 progress; do not redo completed work unless the plan explicitly requires it.
 
-Implement only the revisions required by the living plan. Keep `{{ plan_path }}`
-updated with progress and remaining gaps.
+Manager feedback to apply:
 
-The orchestrator removes `.resource_finder_complete` before review revision
+{{ feedback }}
+
+Apply only this feedback. Do not broaden the work beyond the approved plan.
+Keep `{{ plan_path }}` updated with progress and remaining gaps.
+
+The orchestrator removes `{{ completion_marker }}` before review revision
 starts. When the review revision is fully applied and there is no unresolved
-checkpoint, recreate `.resource_finder_complete`; this marker is the signal that
+checkpoint, recreate `{{ completion_marker }}`; this marker is the signal that
 the revised stage is complete and ready for another manager review.
 
 If another idea requires manager/human feedback, update `{{ plan_path }}`, write a
 checkpoint packet to `{{ checkpoint_path }}`, and stop without creating
-`.resource_finder_complete`. Use exactly this path; do not add timestamps,
+`{{ completion_marker }}`. Use exactly this path; do not add timestamps,
 suffixes, or alternate filenames.
 
-Do not write `pipeline_stage` or `hitl_stage` in the checkpoint packet. Runtime
-records `pipeline_stage` as `{{ pipeline_stage }}` and `hitl_stage` as `review` when
-it consumes `{{ checkpoint_path }}`.
+{% include "hitl/worker_escalation_policy.txt" %}
+
+{% include "hitl/worker_autonomous_idea_contract.txt" %}
+
+{% include "hitl/worker_checkpoint_contract.txt" %}
+
+{% include "hitl/worker_terminal_contract.txt" %}

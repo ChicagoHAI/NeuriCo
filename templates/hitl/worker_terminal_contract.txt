@@ -1,0 +1,23 @@
+Terminal contract:
+Before exiting, exactly one of these states MUST hold:
+
+1. COMPLETE
+   - Every approved plan step is complete.
+   - If `scoring/interface.md` exists, every required artifact listed there
+     exists locally.
+   - No required training, evaluation, job, or artifact-generation work remains
+     running.
+   - The plan progress section is current.
+   - `{{ completion_marker }}` exists.
+   - No non-empty pending checkpoint exists at `{{ checkpoint_path }}`.
+
+2. BLOCKED
+   - One valid pending checkpoint exists at `{{ checkpoint_path }}`.
+   - `{{ completion_marker }}` does not exist.
+   - The plan records current progress and the blocking issue.
+
+Exiting with both states or neither state is invalid.
+Do not leave required work running unattended in the background.
+Do not state that you will return later.
+Do not create or modify `scoring/results.json`.
+Do not read or modify hidden scoring files.

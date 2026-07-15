@@ -36,7 +36,17 @@ from agents.manifest_trimmer import make_trimmer_callable
 from core.scorer import run_scorer
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
 from core.workspace_manifest import build_manifest, curate_manifest
-from core.hitl import HitlRuntime, HitlValidationError
+from core.hitl import (
+    HitlRuntime,
+    HitlValidationError,
+    assert_path_state_unchanged,
+    assert_plan_only_public_changes,
+    maybe_public_workspace_inventory,
+    parse_required_artifacts,
+    snapshot_path_state,
+    verify_required_artifacts,
+)
+from core.whiteboard import whiteboard_path
 from templates.research_agent_instructions import generate_instructions
 
 
@@ -108,6 +118,26 @@ class PipelineState:
         """Check if a stage completed successfully."""
         stage = self.state["stages"].get(stage_name, {})
         return stage.get("status") == "completed" and stage.get("success", False)
+
+    def set_runtime_recovery(self, stage_name: str, payload: Dict[str, Any]) -> None:
+        recovery = self.state.setdefault("runtime_recovery", {})
+        recovery[stage_name] = dict(payload)
+        self._save()
+
+    def get_runtime_recovery(self, stage_name: str) -> Optional[Dict[str, Any]]:
+        recovery = self.state.get("runtime_recovery", {})
+        if not isinstance(recovery, dict):
+            return None
+        value = recovery.get(stage_name)
+        return value if isinstance(value, dict) else None
+
+    def clear_runtime_recovery(self, stage_name: str) -> None:
+        recovery = self.state.get("runtime_recovery")
+        if isinstance(recovery, dict) and stage_name in recovery:
+            del recovery[stage_name]
+            if not recovery:
+                self.state.pop("runtime_recovery", None)
+            self._save()
 
 
 # CLI commands for different providers (same as resource_finder.py)
@@ -247,6 +277,7 @@ class ResearchPipelineOrchestrator:
         results = {"success": False, "stages": {}, "work_dir": str(self.work_dir)}
         if scoring_enabled:
             results["mode"] = "scored"
+        experiment_recovery_armed = False
 
         try:
             # STAGE 1: Resource Finder
@@ -312,16 +343,31 @@ class ResearchPipelineOrchestrator:
             # out of the workspace for the duration of the runner stage. Always
             # unseal in the finally block (even on runner failure) so the scorer
             # can run.
+            if scoring_enabled and hitl_enabled:
+                recovery = self._arm_experiment_runner_recovery_checkpoint()
+                results["experiment_runner_recovery"] = recovery
+                experiment_recovery_armed = True
+
             sealed_dir = self._seal_runner_inputs() if scoring_enabled else None
             try:
-                results["stages"]["experiment_runner"] = self._run_experiment_runner(
-                    idea=idea,
-                    provider=provider,
-                    timeout=experiment_runner_timeout,
-                    full_permissions=full_permissions,
-                    use_scribe=use_scribe,
-                    scoring_enabled=scoring_enabled,
-                )
+                if hitl_enabled:
+                    results["stages"]["experiment_runner"] = self._run_experiment_runner_hitl(
+                        idea=idea,
+                        provider=provider,
+                        timeout=experiment_runner_timeout,
+                        full_permissions=full_permissions,
+                        use_scribe=use_scribe,
+                        scoring_enabled=scoring_enabled,
+                    )
+                else:
+                    results["stages"]["experiment_runner"] = self._run_experiment_runner(
+                        idea=idea,
+                        provider=provider,
+                        timeout=experiment_runner_timeout,
+                        full_permissions=full_permissions,
+                        use_scribe=use_scribe,
+                        scoring_enabled=scoring_enabled,
+                    )
             finally:
                 if scoring_enabled:
                     self._unseal_runner_inputs(sealed_dir)
@@ -339,6 +385,9 @@ class ResearchPipelineOrchestrator:
                     print()
                     print("🎉 PIPELINE COMPLETED SUCCESSFULLY!")
                     self.state.mark_completed()
+                    if experiment_recovery_armed:
+                        self.state.clear_runtime_recovery("experiment_runner")
+                        experiment_recovery_armed = False
                     results["success"] = True
                 elif runner_ok and not scorer_ok:
                     print()
@@ -363,6 +412,9 @@ class ResearchPipelineOrchestrator:
             raise
 
         finally:
+            if experiment_recovery_armed and not results.get("success", False):
+                self._recover_experiment_runner_from_runtime_checkpoint()
+
             # Sweep any Modal-side resources before the workspace is closed out.
             # Gated on .neurico/modal_resources.json — non-Modal runs are a
             # filesystem stat and return immediately.
@@ -378,6 +430,41 @@ class ResearchPipelineOrchestrator:
             print(f"📄 Pipeline results saved to: {results_file}")
 
         return results
+
+    def _arm_experiment_runner_recovery_checkpoint(self) -> Dict[str, Any]:
+        from core.autoresearch import CheckpointManager
+
+        checkpoint = CheckpointManager(self.work_dir).create_checkpoint(
+            "HITL pre-experiment recovery checkpoint"
+        )
+        payload = {
+            "kind": "pre_experiment_checkpoint",
+            "checkpoint_sha": checkpoint.sha,
+            "armed_at": datetime.now().isoformat(),
+        }
+        self.state.set_runtime_recovery("experiment_runner", payload)
+        return dict(payload)
+
+    def _recover_experiment_runner_from_runtime_checkpoint(self) -> None:
+        recovery = self.state.get_runtime_recovery("experiment_runner")
+        if not recovery:
+            return
+        checkpoint_sha = str(recovery.get("checkpoint_sha", "")).strip()
+        if not checkpoint_sha:
+            raise RuntimeError("Missing experiment_runner runtime recovery checkpoint_sha")
+
+        from core.autoresearch import CheckpointManager
+
+        print()
+        print("↩️  Recovering workspace to pre-experiment HITL checkpoint...")
+        CheckpointManager(self.work_dir).restore_checkpoint(
+            checkpoint_sha,
+            clean_untracked_public=True,
+        )
+        from core.autoresearch import _clear_experiment_hitl_markers
+
+        _clear_experiment_hitl_markers(self.work_dir)
+        self.state.clear_runtime_recovery("experiment_runner")
 
     # Provider → top-level skills directory inside the workspace. runner.py
     # copies templates/skills/* to every provider's directory so skills work
@@ -527,6 +614,7 @@ class ResearchPipelineOrchestrator:
                     plan_marker.unlink()
 
                 runtime.prepare_checkpoint_target()
+                runtime.prepare_autonomous_idea_target()
                 plan_result = run_resource_finder(
                     idea=idea,
                     work_dir=self.work_dir,
@@ -544,6 +632,11 @@ class ResearchPipelineOrchestrator:
                 ):
                     raise RuntimeError(
                         "resource_finder plan phase completed but also wrote a pending HITL idea"
+                    )
+                if plan_result.get("success"):
+                    runtime.consume_autonomous_ideas(
+                        hitl_stage="plan",
+                        actor="resource_finder",
                     )
                 if plan_result.get("success"):
                     runtime.prepare_checkpoint_target()
@@ -571,6 +664,7 @@ class ResearchPipelineOrchestrator:
                     if plan_marker.exists():
                         plan_marker.unlink()
                     runtime.prepare_checkpoint_target()
+                    runtime.prepare_autonomous_idea_target()
                     revision_result = run_resource_finder(
                         idea=idea,
                         work_dir=self.work_dir,
@@ -588,6 +682,11 @@ class ResearchPipelineOrchestrator:
                     ):
                         raise RuntimeError(
                             "resource_finder plan revision completed but also wrote a pending HITL idea"
+                        )
+                    if revision_result.get("success"):
+                        runtime.consume_autonomous_ideas(
+                            hitl_stage="plan",
+                            actor="resource_finder",
                         )
                     if revision_result.get("success"):
                         runtime.prepare_checkpoint_target()
@@ -626,7 +725,7 @@ class ResearchPipelineOrchestrator:
                     pending_feedback = resolved_feedback(logged)
                     mode = "continue"
 
-                if pending_feedback:
+                if pending_feedback and mode != "revise":
                     run_hitl_stage = "execution"
                     prompt_prefix = runtime.feedback_continuation_prompt_block(pending_feedback)
                     log_prefix = f"resource_finder_hitl_feedback_continue_{round_idx + 1}"
@@ -634,13 +733,16 @@ class ResearchPipelineOrchestrator:
                 else:
                     run_hitl_stage = "review" if mode == "revise" else "execution"
                     prompt_prefix = (
-                        runtime.review_prompt_block()
+                        runtime.review_prompt_block(pending_feedback)
                         if mode == "revise"
                         else runtime.execution_prompt_block(mode=mode)
                     )
                     log_prefix = f"resource_finder_hitl_{mode}_{round_idx + 1}"
+                    if mode == "revise":
+                        pending_feedback = ""
 
                 runtime.prepare_checkpoint_target()
+                runtime.prepare_autonomous_idea_target()
                 result = run_resource_finder(
                     idea=idea,
                     work_dir=self.work_dir,
@@ -656,6 +758,10 @@ class ResearchPipelineOrchestrator:
                 last_result = result
 
                 if not result.get("success"):
+                    runtime.consume_autonomous_ideas(
+                        hitl_stage=run_hitl_stage,
+                        actor="resource_finder",
+                    )
                     try:
                         logged = runtime.resolve_checkpoint(
                             hitl_stage=run_hitl_stage,
@@ -675,6 +781,10 @@ class ResearchPipelineOrchestrator:
                     mode = "continue"
                     continue
 
+                runtime.consume_autonomous_ideas(
+                    hitl_stage=run_hitl_stage,
+                    actor="resource_finder",
+                )
                 if runtime.has_pending_checkpoint_payload(hitl_stage=run_hitl_stage):
                     failed = {
                         **result,
@@ -765,6 +875,9 @@ class ResearchPipelineOrchestrator:
         full_permissions: bool,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
+        hitl_prompt_suffix: str = "",
+        log_prefix: str = "execution",
+        track_pipeline_state: bool = True,
     ) -> Dict[str, Any]:
         """Run experiment runner stage (raw CLI by default, scribe optional)."""
         print()
@@ -776,13 +889,12 @@ class ResearchPipelineOrchestrator:
         print("─" * 80)
         print()
 
-        self.state.start_stage("experiment_runner")
+        if track_pipeline_state:
+            self.state.start_stage("experiment_runner")
 
         # Import here to avoid circular dependency
-        import subprocess
         import shlex
         import os
-        from core.security import sanitize_text
 
         dsi_remote_info = None
         try:
@@ -805,7 +917,12 @@ class ResearchPipelineOrchestrator:
             )
 
             # Save prompt
-            prompt_file = self.work_dir / "logs" / "research_prompt.txt"
+            if log_prefix == "execution":
+                prompt_file = self.work_dir / "logs" / "research_prompt.txt"
+                session_file = self.work_dir / "logs" / "session_instructions.txt"
+            else:
+                prompt_file = self.work_dir / "logs" / f"{log_prefix}_research_prompt.txt"
+                session_file = self.work_dir / "logs" / f"{log_prefix}_session_instructions.txt"
             prompt_file.parent.mkdir(parents=True, exist_ok=True)
             with open(prompt_file, "w", encoding="utf-8") as f:
                 f.write(prompt)
@@ -824,9 +941,13 @@ class ResearchPipelineOrchestrator:
                 idea_spec=idea.get("idea", {}),
                 provider=provider,
             )
+            if hitl_prompt_suffix.strip():
+                session_instructions = (
+                    f"{session_instructions.rstrip()}\n\n{hitl_prompt_suffix.strip()}\n"
+                )
 
             # Save session instructions
-            session_file = self.work_dir / "logs" / "session_instructions.txt"
+            session_file.parent.mkdir(parents=True, exist_ok=True)
             with open(session_file, "w", encoding="utf-8") as f:
                 f.write(session_instructions)
 
@@ -854,8 +975,8 @@ class ResearchPipelineOrchestrator:
             elif provider == "gemini":
                 cmd += " --output-format stream-json"
 
-            log_file = self.work_dir / "logs" / f"execution_{provider}.log"
-            transcript_file = self.work_dir / "logs" / f"execution_{provider}_transcript.jsonl"
+            log_file = self.work_dir / "logs" / f"{log_prefix}_{provider}.log"
+            transcript_file = self.work_dir / "logs" / f"{log_prefix}_{provider}_transcript.jsonl"
 
             mode_str = "scribe (notebooks)" if use_scribe else "raw CLI"
             print(f"▶️  Launching {provider} in {mode_str} mode...")
@@ -878,41 +999,19 @@ class ResearchPipelineOrchestrator:
                 env["SCRIBE_RUN_DIR"] = str(self.work_dir)
 
             # Execute agent
-            success = False
+            from core.agent_runner import run_prebuilt_cli_agent
+
             start_time = time.time()
-
-            with (
-                open(log_file, "w", encoding="utf-8") as log_f,
-                open(transcript_file, "w", encoding="utf-8") as transcript_f,
-            ):
-                process = subprocess.Popen(
-                    shlex.split(cmd),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    text=True,
-                    encoding="utf-8",
-                    bufsize=1,
-                    cwd=str(self.work_dir),
-                )
-
-                # Send session instructions
-                process.stdin.write(session_instructions)
-                process.stdin.close()
-
-                # Stream output to both log file and transcript file (sanitized for security)
-                # For Claude/Codex with JSON flags, the output IS the transcript
-                # For Gemini, the output is regular text but sessions are saved separately
-                for line in iter(process.stdout.readline, ""):
-                    if line:
-                        sanitized_line = sanitize_text(line)
-                        print(sanitized_line, end="")
-                        log_f.write(sanitized_line)
-                        transcript_f.write(sanitized_line)
-
-                # Wait for completion
-                return_code = process.wait(timeout=timeout)
+            run_result = run_prebuilt_cli_agent(
+                command_argv=shlex.split(cmd),
+                prompt=session_instructions,
+                work_dir=self.work_dir,
+                log_file=log_file,
+                transcript_file=transcript_file,
+                env=env,
+                timeout=timeout,
+            )
+            return_code = run_result["return_code"]
 
             print()
             print("=" * 80)
@@ -920,7 +1019,10 @@ class ResearchPipelineOrchestrator:
             elapsed = time.time() - start_time
             print(f"⏱️  Experiment runner completed in {elapsed:.1f}s ({elapsed / 60:.1f} minutes)")
 
-            if return_code == 0:
+            if run_result.get("timed_out"):
+                print(f"\n⏱️  Experiment runner timed out after {timeout} seconds")
+                success = False
+            elif return_code == 0:
                 print("✅ Experiment execution completed successfully!")
                 success = True
             else:
@@ -941,21 +1043,16 @@ class ResearchPipelineOrchestrator:
                 if archived_dsi_artifacts is not None:
                     result["dsi_slurm_artifacts"] = str(archived_dsi_artifacts)
 
-            self.state.complete_stage("experiment_runner", success, result)
+            if track_pipeline_state:
+                self.state.complete_stage("experiment_runner", success, result)
 
-            return result
-
-        except subprocess.TimeoutExpired:
-            print(f"\n⏱️  Experiment runner timed out after {timeout} seconds")
-            process.kill()
-            result = {"success": False, "error": "timeout"}
-            self.state.complete_stage("experiment_runner", False, result)
             return result
 
         except Exception as e:
             print(f"❌ Experiment runner stage failed: {e}")
             result = {"success": False, "error": str(e)}
-            self.state.complete_stage("experiment_runner", False, result)
+            if track_pipeline_state:
+                self.state.complete_stage("experiment_runner", False, result)
             raise
         finally:
             if dsi_remote_info is not None:
@@ -966,6 +1063,330 @@ class ResearchPipelineOrchestrator:
                         "⚠️  Failed to remove dsi-cluster remote workspace: "
                         f"{cleanup_error}"
                     )
+
+    def _run_experiment_runner_hitl(
+        self,
+        idea: Dict[str, Any],
+        provider: str,
+        timeout: int,
+        full_permissions: bool,
+        use_scribe: bool = False,
+        scoring_enabled: bool = False,
+    ) -> Dict[str, Any]:
+        """Run experiment_runner through the plan-centered HITL workflow."""
+        print()
+        print("─" * 80)
+        print("STAGE 3: EXPERIMENT RUNNER  (HITL)")
+        print("─" * 80)
+        print()
+
+        self.state.start_stage("experiment_runner")
+        runtime = HitlRuntime(self.work_dir, "experiment_runner")
+        plan_marker = self.work_dir / runtime.paths.plan_marker_name
+        completion_marker = self.work_dir / runtime.paths.completion_marker_name
+
+        def plan_integrity_snapshot() -> Dict[str, Dict[str, Any]]:
+            return {
+                "scoring/interface.md": snapshot_path_state(
+                    self.work_dir / "scoring" / "interface.md"
+                ),
+                "scoring/results.json": snapshot_path_state(
+                    self.work_dir / "scoring" / "results.json"
+                ),
+                ".neurico/autoresearch_state.json": snapshot_path_state(
+                    self.work_dir / ".neurico" / "autoresearch_state.json"
+                ),
+                "whiteboard": snapshot_path_state(whiteboard_path(self.work_dir)),
+            }
+
+        def assert_plan_integrity(snapshot: Dict[str, Dict[str, Any]]) -> None:
+            assert_path_state_unchanged(
+                self.work_dir / "scoring" / "interface.md",
+                snapshot["scoring/interface.md"],
+                "scoring/interface.md",
+            )
+            assert_path_state_unchanged(
+                self.work_dir / "scoring" / "results.json",
+                snapshot["scoring/results.json"],
+                "scoring/results.json",
+            )
+            assert_path_state_unchanged(
+                self.work_dir / ".neurico" / "autoresearch_state.json",
+                snapshot[".neurico/autoresearch_state.json"],
+                ".neurico/autoresearch_state.json",
+            )
+            assert_path_state_unchanged(
+                whiteboard_path(self.work_dir),
+                snapshot["whiteboard"],
+                "AutoResearch whiteboard",
+            )
+
+        def run_plan_runner_checked(**kwargs: Any) -> Dict[str, Any]:
+            inventory_before = maybe_public_workspace_inventory(self.work_dir)
+            integrity_before = plan_integrity_snapshot()
+            try:
+                return self._run_experiment_runner(**kwargs)
+            finally:
+                assert_plan_integrity(integrity_before)
+                assert_plan_only_public_changes(
+                    work_dir=self.work_dir,
+                    before=inventory_before,
+                    after=maybe_public_workspace_inventory(self.work_dir),
+                    plan_path=runtime.paths.plan_path,
+                    plan_marker_name=runtime.paths.plan_marker_name,
+                )
+
+        def resolved_feedback(record: Optional[Dict[str, Any]]) -> str:
+            if not record:
+                return ""
+            return str(
+                record.get("manager_feedback")
+                or record.get("human_feedback")
+                or record.get("decision")
+                or ""
+            ).strip()
+
+        try:
+            plan_approved = runtime.plan_has_human_approval()
+            if runtime.has_pending_checkpoint_payload(hitl_stage="execution"):
+                plan_approved = True
+
+            if not plan_approved:
+                if plan_marker.exists():
+                    plan_marker.unlink()
+                runtime.prepare_checkpoint_target()
+                runtime.prepare_autonomous_idea_target()
+                plan_result = run_plan_runner_checked(
+                    idea=idea,
+                    provider=provider,
+                    timeout=min(timeout, 1800),
+                    full_permissions=full_permissions,
+                    use_scribe=use_scribe,
+                    scoring_enabled=scoring_enabled,
+                    hitl_prompt_suffix=runtime.plan_prompt_block(),
+                    log_prefix="hitl/experiment_runner_hitl_plan",
+                    track_pipeline_state=False,
+                )
+                if runtime.has_pending_checkpoint_payload(hitl_stage="plan"):
+                    raise RuntimeError(
+                        "experiment_runner plan phase wrote a pending HITL idea"
+                    )
+                if plan_result.get("success"):
+                    runtime.consume_autonomous_ideas(
+                        hitl_stage="plan",
+                        actor="experiment_runner",
+                    )
+                if not plan_marker.exists():
+                    failed = {
+                        **plan_result,
+                        "success": False,
+                        "hitl": True,
+                        "phase": "plan",
+                        "error": f"Missing HITL plan marker: {plan_marker.name}",
+                    }
+                    self.state.complete_stage("experiment_runner", False, failed)
+                    return failed
+                runtime.prepare_checkpoint_target()
+
+                for plan_round in range(5):
+                    approval = runtime.approve_plan_loop()
+                    if approval.get("approved"):
+                        plan_approved = True
+                        break
+
+                    feedback = str(approval.get("feedback", "")).strip()
+                    if not feedback:
+                        raise HitlValidationError(
+                            "HITL experiment plan revision requested without feedback."
+                        )
+                    if plan_marker.exists():
+                        plan_marker.unlink()
+                    runtime.prepare_checkpoint_target()
+                    runtime.prepare_autonomous_idea_target()
+                    revision_result = run_plan_runner_checked(
+                        idea=idea,
+                        provider=provider,
+                        timeout=min(timeout, 1800),
+                        full_permissions=full_permissions,
+                        use_scribe=use_scribe,
+                        scoring_enabled=scoring_enabled,
+                        hitl_prompt_suffix=runtime.plan_revision_prompt_block(feedback),
+                        log_prefix=f"hitl/experiment_runner_hitl_plan_revision_{plan_round + 1}",
+                        track_pipeline_state=False,
+                    )
+                    if runtime.has_pending_checkpoint_payload(hitl_stage="plan"):
+                        raise RuntimeError(
+                            "experiment_runner plan revision wrote a pending HITL idea"
+                        )
+                    if revision_result.get("success"):
+                        runtime.consume_autonomous_ideas(
+                            hitl_stage="plan",
+                            actor="experiment_runner",
+                        )
+                    if not plan_marker.exists():
+                        failed = {
+                            **revision_result,
+                            "success": False,
+                            "hitl": True,
+                            "phase": "plan_revision",
+                            "error": f"Missing HITL plan marker: {plan_marker.name}",
+                        }
+                        self.state.complete_stage("experiment_runner", False, failed)
+                        return failed
+                    runtime.prepare_checkpoint_target()
+                if not plan_approved:
+                    raise RuntimeError("HITL experiment plan approval did not converge.")
+
+            mode = "execute"
+            pending_feedback = ""
+            last_result: Dict[str, Any] = {}
+            incomplete_exits = 0
+
+            for round_idx in range(8):
+                if completion_marker.exists():
+                    completion_marker.unlink()
+
+                logged = runtime.resolve_checkpoint(hitl_stage="execution")
+                if logged is not None:
+                    pending_feedback = resolved_feedback(logged)
+                    mode = "continue"
+
+                if pending_feedback and mode != "revise":
+                    run_hitl_stage = "execution"
+                    prompt_suffix = runtime.feedback_continuation_prompt_block(
+                        pending_feedback
+                    )
+                    log_prefix = f"hitl/experiment_runner_hitl_feedback_continue_{round_idx + 1}"
+                    pending_feedback = ""
+                else:
+                    run_hitl_stage = "review" if mode == "revise" else "execution"
+                    prompt_suffix = (
+                        runtime.review_prompt_block(pending_feedback)
+                        if mode == "revise"
+                        else runtime.execution_prompt_block(mode=mode)
+                    )
+                    log_prefix = f"hitl/experiment_runner_hitl_{mode}_{round_idx + 1}"
+                    if mode == "revise":
+                        pending_feedback = ""
+
+                runtime.prepare_checkpoint_target()
+                runtime.prepare_autonomous_idea_target()
+                result = self._run_experiment_runner(
+                    idea=idea,
+                    provider=provider,
+                    timeout=timeout,
+                    full_permissions=full_permissions,
+                    use_scribe=use_scribe,
+                    scoring_enabled=scoring_enabled,
+                    hitl_prompt_suffix=prompt_suffix,
+                    log_prefix=log_prefix,
+                    track_pipeline_state=False,
+                )
+                last_result = result
+
+                has_completion = completion_marker.exists()
+                has_checkpoint = runtime.has_pending_checkpoint_payload(
+                    hitl_stage=run_hitl_stage
+                )
+                runtime.consume_autonomous_ideas(
+                    hitl_stage=run_hitl_stage,
+                    actor="experiment_runner",
+                )
+                if has_completion and has_checkpoint:
+                    failed = {
+                        **result,
+                        "success": False,
+                        "hitl": True,
+                        "phase": mode,
+                        "error": (
+                            "experiment_runner completed with completion marker "
+                            "but also wrote a pending HITL idea"
+                        ),
+                    }
+                    self.state.complete_stage("experiment_runner", False, failed)
+                    return failed
+
+                if has_checkpoint:
+                    logged = runtime.resolve_checkpoint(
+                        hitl_stage=run_hitl_stage,
+                        require_pending=True,
+                    )
+                    pending_feedback = resolved_feedback(logged)
+                    mode = "continue"
+                    continue
+
+                if not has_completion:
+                    if not result.get("success"):
+                        failed = {
+                            **result,
+                            "success": False,
+                            "hitl": True,
+                            "phase": mode,
+                            "error": "experiment_runner failed without a pending HITL idea",
+                        }
+                        self.state.complete_stage("experiment_runner", False, failed)
+                        return failed
+                    incomplete_exits += 1
+                    if incomplete_exits > 3:
+                        failed = {
+                            **result,
+                            "success": False,
+                            "hitl": True,
+                            "phase": mode,
+                            "error": "experiment_runner exited repeatedly without HITL terminal state",
+                        }
+                        self.state.complete_stage("experiment_runner", False, failed)
+                        return failed
+                    mode = "continue"
+                    continue
+
+                required_artifacts = []
+                if scoring_enabled:
+                    try:
+                        required_artifacts = parse_required_artifacts(
+                            self.work_dir / "scoring" / "interface.md"
+                        )
+                        verify_required_artifacts(self.work_dir, required_artifacts)
+                    except Exception as exc:
+                        failed = {
+                            **result,
+                            "success": False,
+                            "hitl": True,
+                            "phase": mode,
+                            "error": str(exc),
+                        }
+                        self.state.complete_stage("experiment_runner", False, failed)
+                        return failed
+
+                runtime.prepare_checkpoint_target()
+                review = runtime.review_stage()
+                if review.get("status") == "aligned":
+                    runtime.log_stage_approval(str(review.get("context", "")))
+                    self.state.complete_stage("experiment_runner", True, result)
+                    return {**result, "hitl": True, "phase": "complete"}
+
+                feedback = str(review.get("manager_feedback", "")).strip()
+                if not feedback:
+                    raise HitlValidationError(
+                        "HITL experiment review revision requested without manager_feedback."
+                    )
+                runtime.log_review_feedback(feedback)
+                pending_feedback = feedback
+                mode = "revise"
+
+            failed = {
+                **last_result,
+                "success": False,
+                "hitl": True,
+                "error": "HITL experiment_runner exceeded continuation rounds",
+            }
+            self.state.complete_stage("experiment_runner", False, failed)
+            return failed
+
+        except Exception as e:
+            print(f"❌ HITL experiment runner stage failed: {e}")
+            self.state.complete_stage("experiment_runner", False, {"error": str(e)})
+            raise
 
     # ---- Scoring-mode helpers (rule_maker / scorer / seal) ---------------
     # These methods are only invoked when run_pipeline(scoring_enabled=True).

@@ -25,9 +25,11 @@ from typing import Dict, Any, Optional
 import argparse
 import json
 import os
+import signal
 import shlex
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -213,6 +215,112 @@ def _run_cli_agent(cmd: str, prompt: str, work_dir: Path,
         'log_file': str(log_file),
         'transcript_file': str(transcript_file)
     }
+
+
+def run_prebuilt_cli_agent(
+    *,
+    command_argv: list[str],
+    prompt: str,
+    work_dir: Path,
+    log_file: Path,
+    transcript_file: Path,
+    env: Dict[str, str],
+    timeout: Optional[int] = None,
+    tracker: Optional[RunTracker] = None,
+) -> Dict[str, Any]:
+    """
+    Execute a caller-constructed CLI command with streaming capture.
+
+    The caller owns provider flags, environment, working directory, and any
+    backend setup/cleanup. This helper only handles subprocess execution,
+    sanitized output streaming, optional wall-clock timeout, and reaping.
+    """
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    transcript_file.parent.mkdir(parents=True, exist_ok=True)
+
+    start_time = time.time()
+    timed_out = False
+    return_code: Optional[int] = None
+
+    with open(log_file, "w", encoding="utf-8") as log_f, open(
+        transcript_file, "w", encoding="utf-8"
+    ) as transcript_f:
+        process = subprocess.Popen(
+            command_argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            bufsize=1,
+            cwd=str(work_dir),
+            start_new_session=timeout is not None,
+        )
+        if tracker is not None:
+            tracker.mark_running(process.pid)
+
+        if process.stdin is not None:
+            process.stdin.write(prompt)
+            process.stdin.close()
+
+        def _drain_output() -> None:
+            assert process.stdout is not None
+            for line in iter(process.stdout.readline, ""):
+                if line:
+                    sanitized_line = sanitize_text(line)
+                    print(sanitized_line, end="")
+                    log_f.write(sanitized_line)
+                    transcript_f.write(sanitized_line)
+
+        reader = threading.Thread(target=_drain_output, daemon=True)
+        reader.start()
+
+        deadline = (start_time + timeout) if timeout is not None else None
+        while True:
+            return_code = process.poll()
+            if return_code is not None:
+                break
+            if deadline is not None and time.time() >= deadline:
+                timed_out = True
+                _terminate_process_group(process)
+                break
+            time.sleep(0.05)
+
+        if timed_out:
+            try:
+                return_code = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(process)
+                return_code = process.wait()
+        else:
+            return_code = process.wait()
+        reader.join(timeout=5)
+
+    elapsed = time.time() - start_time
+    success = (return_code == 0) and not timed_out
+    return {
+        "success": success,
+        "return_code": return_code,
+        "elapsed_time": elapsed,
+        "log_file": str(log_file),
+        "transcript_file": str(transcript_file),
+        "timed_out": timed_out,
+    }
+
+
+def _terminate_process_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+    except Exception:
+        process.terminate()
+
+
+def _kill_process_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except Exception:
+        process.kill()
 
 
 def run_resource_finder(idea: Dict[str, Any], work_dir: Path, provider: str,

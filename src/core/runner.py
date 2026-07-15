@@ -384,6 +384,7 @@ class ResearchRunner:
                     autoresearch_history_dir=autoresearch_history_dir,
                     proposer_timeout=proposer_timeout,
                     comment_timeout=timeout,
+                    hitl_enabled=hitl,
                 )
                 success = pipeline_result.get("success", False)
 
@@ -549,6 +550,7 @@ class ResearchRunner:
                             autoresearch_history_dir=autoresearch_history_dir,
                             proposer_timeout=proposer_timeout,
                             comment_timeout=timeout,
+                            hitl_enabled=hitl,
                         )
                         pipeline_result["autoresearch"] = autoresearch_result.get("autoresearch")
                         success = autoresearch_result.get("success", False)

@@ -19,10 +19,14 @@ The instruction must:
 Pipeline stage: {{ pipeline_stage }}
 HITL stage: {{ hitl_stage }}
 Context shown to human:
+--- BEGIN UNTRUSTED CONTEXT ---
 {{ context }}
+--- END UNTRUSTED CONTEXT ---
 
 Human response:
 {{ human_response }}
 
 Current living plan:
+--- BEGIN UNTRUSTED PLAN ---
 {{ plan_text }}
+--- END UNTRUSTED PLAN ---
