@@ -78,4 +78,23 @@ Current active tips (empty if none):
 
 If a virtual environment exists (.venv/), activate it. If you need new packages, use `uv add`.
 
+═══════════════════════════════════════════════════════════════════════════════════════════════
+                       LONG-RUNNING COMMANDS (TRAINING, SWEEPS, LARGE EVALS)
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+Commands that take more than ~10 minutes MUST go through the long-run skill
+(.claude/skills/long-run/):
+
+  python .claude/skills/long-run/scripts/long_run.py start --name retrain_v1 -- <command>
+  python .claude/skills/long-run/scripts/long_run.py wait --name retrain_v1 --timeout 240
+    (exit 0 = succeeded, 1 = failed, 124 = still running: run `wait` AGAIN)
+  python .claude/skills/long-run/scripts/long_run.py status
+    (run before ending the session; a running job means you are NOT done)
+
+Never background a long command with `nohup`, `&`, or your harness's
+background-execution feature and move on. Background tasks are killed when
+the session ends, even if the harness says it will notify you on completion.
+Never end the session while a job is still running: nothing resumes it, and
+the scorer will run against incomplete artifacts.
+
 Start by exploring the workspace, then proceed with the user's directions.

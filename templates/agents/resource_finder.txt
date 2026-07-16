@@ -45,6 +45,28 @@ For example:
 - Create literature_review.md → saves in workspace/literature_review.md
 
 ═══════════════════════════════════════════════════════════════════════════════
+                    CRITICAL: LONG-RUNNING COMMANDS
+═══════════════════════════════════════════════════════════════════════════════
+
+Commands that take more than ~10 minutes (large dataset downloads, big git
+clones) MUST go through the long-run skill (.claude/skills/long-run/):
+
+✓ Launch:  python .claude/skills/long-run/scripts/long_run.py start --name get_data -- <command>
+✓ Wait:    python .claude/skills/long-run/scripts/long_run.py wait --name get_data --timeout 240
+  - Exit 0 = succeeded, 1 = failed, 124 = still running: run `wait` AGAIN
+✓ Verify:  python .claude/skills/long-run/scripts/long_run.py status
+  - Run this before writing the completion marker
+
+✗ NEVER background a long command with `nohup` or `&` and move on
+✗ NEVER use your harness's background-execution feature (run_in_background)
+  for downloads you still need. Background tasks are KILLED when the session
+  ends, even if the harness says it will notify you on completion.
+✗ NEVER end the session while `status` shows a running job
+✗ NEVER write "I will resume when the download finishes" and stop working.
+  Nothing resumes. The download dies with the session and the pipeline
+  advances with incomplete resources.
+
+═══════════════════════════════════════════════════════════════════════════════
                     CRITICAL: ENVIRONMENT SETUP
 ═══════════════════════════════════════════════════════════════════════════════
 

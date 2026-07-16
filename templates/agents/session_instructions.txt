@@ -244,6 +244,8 @@ Phase 3: Implementation (60-90 min)
 Phase 4: Experimentation (60-90 min)
   ✓ Run baseline experiments
   ✓ Run proposed method experiments
+  ✓ Run any command expected to take >10 minutes through the long-run skill
+    (see LONG-RUNNING COMMANDS below) - never plain `nohup` or `&`
   ✓ Collect results systematically (save to results/ directory)
   ✓ Generate visualizations
   ✓ Monitor for issues
@@ -275,6 +277,33 @@ CRITICAL REMINDERS:
 - If you encounter issues, document them and continue
 - Even if experiments fail, complete Phase 6 documenting what happened
 - REPORT.md is mandatory - it's the primary deliverable
+
+LONG-RUNNING COMMANDS (TRAINING, SWEEPS, LARGE EVALS):
+────────────────────────────────────────────────────────────────────────────────
+Commands that take more than ~10 minutes MUST go through the long-run skill
+(.claude/skills/long-run/). It launches the command as a detached, registered
+job and gives you a bounded wait you can repeat until the job finishes.
+
+✓ Launch:  python .claude/skills/long-run/scripts/long_run.py start --name train_v1 -- <command>
+✓ Wait:    python .claude/skills/long-run/scripts/long_run.py wait --name train_v1 --timeout 240
+  - Exit 0 = succeeded, 1 = failed, 124 = still running: run `wait` AGAIN
+  - Between wait calls you may do other useful work, then return to the loop
+✓ Verify:  python .claude/skills/long-run/scripts/long_run.py status
+  - Run this before declaring ANY phase complete
+
+✗ NEVER background a long command with `nohup` or `&` and move on
+✗ NEVER use your harness's background-execution feature (run_in_background /
+  "run in background" tool options) for experiment commands. Background tasks
+  are KILLED when the session ends, even if the harness says it will notify
+  you on completion. Use the long-run skill: its jobs survive session end.
+✗ NEVER end the session while `status` shows a running job
+✗ NEVER write "I will check back when training finishes" and exit
+  - Nothing checks back. The run's results will be lost and the pipeline
+    will treat the incomplete session as a success.
+
+If the training genuinely cannot finish in this session, that is a design
+problem: reduce epochs, subsample data, or use a smaller model so the full
+experiment fits. An incomplete run documented honestly beats an orphaned job.
 
 WORKSPACE DIRECTORY AND DIRECTORY SAFETY:
 ────────────────────────────────────────────────────────────────────────────────
