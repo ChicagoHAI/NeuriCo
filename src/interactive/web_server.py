@@ -27,7 +27,6 @@ import json
 import mimetypes
 import re
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -35,13 +34,14 @@ from typing import Optional
 from interactive.channel import WebChannel
 from interactive import agent_log
 
-
 # ---------------------------------------------------------------------------
 # Agent-log tailer
 # ---------------------------------------------------------------------------
 
-def _tail_agent_logs(log_dir: Path, channel: WebChannel,
-                     project_root: Path, stop: threading.Event) -> None:
+
+def _tail_agent_logs(
+    log_dir: Path, channel: WebChannel, project_root: Path, stop: threading.Event
+) -> None:
     """Incrementally tail the workspace transcripts and emit formatted entries
     into the channel as `agentlog` events."""
     offsets: dict = {}
@@ -74,8 +74,7 @@ def _tail_agent_logs(log_dir: Path, channel: WebChannel,
                             obj = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        entry = {"ts": obj.get("timestamp", ""),
-                                 "source": source_name, "raw": obj}
+                        entry = {"ts": obj.get("timestamp", ""), "source": source_name, "raw": obj}
                         if entry["ts"]:
                             last_ts = entry["ts"]
                         # Defensive: a single malformed entry must not kill the
@@ -187,8 +186,12 @@ def _compute_dashboard(workspace: Path, project_root: Path) -> dict:
     #   - a running agent → its phase (most real-time);
     #   - else the most recent agent's phase — unless the manager has set a
     #     meaningful terminal state, which we keep.
-    _AGENT_PHASE = {"resource_finder": "exploring", "experiment_runner": "experimenting",
-                    "paper_writer": "writing", "comment_handler": "revising"}
+    _AGENT_PHASE = {
+        "resource_finder": "exploring",
+        "experiment_runner": "experimenting",
+        "paper_writer": "writing",
+        "comment_handler": "revising",
+    }
     _TERMINAL = {"complete", "completed", "done", "finished", "blocked", "failed"}
     if running_agents:
         phase = _AGENT_PHASE.get(running_agents[-1], phase) or phase
@@ -197,8 +200,9 @@ def _compute_dashboard(workspace: Path, project_root: Path) -> dict:
 
     cost = _sum_cost(workspace / "logs", project_root)
     papers = _count_files(workspace / "papers", workspace / "paper_search_results")
-    files = _count_files(workspace / "code", workspace / "figures",
-                         workspace / "results", workspace / "paper_draft")
+    files = _count_files(
+        workspace / "code", workspace / "figures", workspace / "results", workspace / "paper_draft"
+    )
     if (workspace / "REPORT.md").exists():
         files += 1
 
@@ -214,8 +218,9 @@ def _compute_dashboard(workspace: Path, project_root: Path) -> dict:
     }
 
 
-def _emit_dashboard(workspace: Path, project_root: Path, channel: WebChannel,
-                    stop: threading.Event) -> None:
+def _emit_dashboard(
+    workspace: Path, project_root: Path, channel: WebChannel, stop: threading.Event
+) -> None:
     """Periodically push a `dashboard` event, but only when something changed
     (keeps the SSE history small for reconnects)."""
     last = None
@@ -225,22 +230,29 @@ def _emit_dashboard(workspace: Path, project_root: Path, channel: WebChannel,
         except Exception:
             d = None
         if d is not None:
-            sig = (d["phase"], d["cost"], d["agents_done"], d["agents_running"],
-                   d["papers"], d["files"], d["started"])
+            sig = (
+                d["phase"],
+                d["cost"],
+                d["agents_done"],
+                d["agents_running"],
+                d["papers"],
+                d["files"],
+                d["started"],
+            )
             if sig != last:
                 last = sig
                 channel.emit_raw(d)
         stop.wait(3.0)
 
 
-def _emit_research_state(workspace: Path, channel: WebChannel,
-                         stop: threading.Event) -> None:
+def _emit_research_state(workspace: Path, channel: WebChannel, stop: threading.Event) -> None:
     """Push the manager's world model (the `research` event) to the browser when
     it changes. The manager writes research_state.json via update_research_state
     / assess; we poll it and fan a snapshot out to the Research whiteboard. Polled
     (not in-process) so it works identically for fresh and resumed sessions and
     stays decoupled from the manager loop."""
     from interactive.research_state import ResearchState
+
     state_file = workspace / ".neurico" / "research_state.json"
     last_stamp = None
     while not stop.is_set():
@@ -415,6 +427,8 @@ PAGE = r"""<!DOCTYPE html>
   #msg:focus{outline:none;border-color:#58a6ff}
   #send{background:#238636;color:#fff;border:none;border-radius:8px;padding:9px 18px;font-size:14px;font-weight:600;cursor:pointer}
   #send:hover{background:#2ea043}
+  #replyrequest{background:#9e6a03;color:#fff;border:1px solid #d29922;border-radius:8px;padding:9px 12px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
+  #replyrequest:hover{background:#bb8009}
 </style>
 </head>
 <body>
@@ -444,6 +458,7 @@ PAGE = r"""<!DOCTYPE html>
         <div id="options"></div>
         <div id="inputrow">
           <textarea id="msg" rows="1" placeholder="Type a message to the manager… (Enter to send, Shift+Enter for newline)"></textarea>
+          <button id="replyrequest" hidden>Reply to request</button>
           <button id="send">Send</button>
         </div>
       </div>
@@ -473,8 +488,9 @@ PAGE = r"""<!DOCTYPE html>
   const composer=document.getElementById('composer');
   const msg=document.getElementById('msg');
   const send=document.getElementById('send');
+  const replyRequest=document.getElementById('replyrequest');
 
-  let awaitingReply=false;   // true only while the manager is actively asking
+  let resolutionReplyPending=false;
 
   function atBottom(el){return el.scrollHeight-el.scrollTop-el.clientHeight<80;}
 
@@ -602,7 +618,7 @@ PAGE = r"""<!DOCTYPE html>
     if(!Array.isArray(opts)) opts=opts?[opts]:[];
     opts.forEach(o=>{
       const b=document.createElement('button');
-      b.className='opt'; b.textContent=o; b.onclick=()=>submit(o);
+      b.className='opt'; b.textContent=o; b.onclick=()=>submit(o,'resolution_reply');
       optionsEl.appendChild(b);
     });
   }
@@ -632,9 +648,9 @@ PAGE = r"""<!DOCTYPE html>
 
   function setStatus(d){
     if(d.phase) document.getElementById('s-phase').textContent=d.phase;
-    if(d.closed){connEl.textContent='Session ended';hint.textContent='';awaitingReply=false;composer.classList.remove('awaiting');setThinking(false);return;}
+    if(d.closed){connEl.textContent='Session ended';hint.textContent='';resolutionReplyPending=false;replyRequest.hidden=true;composer.classList.remove('awaiting');setThinking(false);return;}
     if(d.thinking){hint.textContent='🤔 Manager is thinking…';connEl.textContent='working';setThinking(true);}
-    if(d.waiting===false){awaitingReply=false;composer.classList.remove('awaiting');}
+    if(d.waiting===false){resolutionReplyPending=false;replyRequest.hidden=true;composer.classList.remove('awaiting');}
     if(d.label){connEl.textContent=d.label;}
   }
 
@@ -778,36 +794,44 @@ PAGE = r"""<!DOCTYPE html>
   es.addEventListener('research',e=>setResearch(JSON.parse(e.data)));
   es.addEventListener('prompt',e=>{
     const d=JSON.parse(e.data);
-    setThinking(false);   // the manager finished thinking and is now asking
+    setThinking(false);
     renderOptions(d.options);
-    awaitingReply=true;
+    resolutionReplyPending=true;
+    replyRequest.hidden=false;
     composer.classList.add('awaiting');
-    hint.textContent='⏳ Your turn — the manager is waiting for your reply';
-    connEl.textContent='waiting for you';
+    hint.textContent='A worker request needs a reply. You can still send ordinary messages to the manager.';
+    connEl.textContent='resolution reply needed';
     msg.focus();
+  });
+  es.addEventListener('resolution_cleared',()=>{
+    resolutionReplyPending=false;
+    replyRequest.hidden=true;
+    composer.classList.remove('awaiting');
+    optionsEl.innerHTML='';
+    hint.textContent='The previous worker request was cancelled during recovery.';
+    connEl.textContent='connected';
   });
   es.addEventListener('status',e=>setStatus(JSON.parse(e.data)));
   es.onerror=()=>{connEl.textContent='connection lost – reload to retry';};
 
-  function submit(text){
+  function submit(text,input_kind='conversation'){
     text=(text||'').trim();
     if(!text) return;
-    const wasAwaiting=awaitingReply;
-    fetch('/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
-    if(!wasAwaiting){
-      // Typed while the manager isn't actively asking: it's queued, not lost.
+    fetch('/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,input_kind})});
+    if(input_kind==='conversation'){
       hint.textContent='✓ Message queued — the manager will see it at its next checkpoint.';
     }else{
-      // Answered a question: the manager is about to think — show it immediately
-      // so the wait never looks like the session died.
-      hint.textContent='';
+      hint.textContent='Resolution reply received — the manager will continue the review.';
       setThinking(true);
+      resolutionReplyPending=false;
+      replyRequest.hidden=true;
+      composer.classList.remove('awaiting');
+      optionsEl.innerHTML='';
     }
-    awaitingReply=false;
-    composer.classList.remove('awaiting');
-    msg.value=''; optionsEl.innerHTML=''; autosize();
+    msg.value=''; autosize();
   }
   send.onclick=()=>submit(msg.value);
+  replyRequest.onclick=()=>{if(resolutionReplyPending) submit(msg.value,'resolution_reply');};
   msg.addEventListener('keydown',e=>{
     if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit(msg.value);}
   });
@@ -841,8 +865,7 @@ def _brand_file(project_root: Path, key: str) -> Optional[Path]:
     return None
 
 
-def _make_handler(channel: WebChannel, workspace_name: str, title: str,
-                  project_root: Path):
+def _make_handler(channel: WebChannel, workspace_name: str, title: str, project_root: Path):
     page = PAGE.replace("{{WORKSPACE}}", workspace_name).replace("{{TITLE}}", title)
 
     class Handler(BaseHTTPRequestHandler):
@@ -860,7 +883,7 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str,
 
             elif self.path.startswith("/brand/"):
                 # Optional branding image; 404 (handled gracefully by the page) if absent.
-                f = _brand_file(project_root, self.path[len("/brand/"):])
+                f = _brand_file(project_root, self.path[len("/brand/") :])
                 if f is None:
                     self.send_response(404)
                     self.end_headers()
@@ -916,11 +939,14 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str,
                 raw = self.rfile.read(length) if length else b""
                 text = ""
                 try:
-                    text = json.loads(raw.decode("utf-8")).get("text", "")
+                    payload = json.loads(raw.decode("utf-8"))
+                    text = payload.get("text", "")
+                    input_kind = payload.get("input_kind", "conversation")
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     text = raw.decode("utf-8", errors="replace")
+                    input_kind = "conversation"
                 if text:
-                    channel.submit_input(text)
+                    channel.submit_input(text, input_kind=input_kind)
                 self.send_response(204)
                 self.end_headers()
             else:
@@ -933,9 +959,15 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str,
 class InteractiveWebServer:
     """Owns the HTTP server thread, the agent-log tailer, and the dashboard feed."""
 
-    def __init__(self, channel: WebChannel, workspace: Path,
-                 project_root: Path, title: str, port: int = 7890,
-                 host: str = "localhost"):
+    def __init__(
+        self,
+        channel: WebChannel,
+        workspace: Path,
+        project_root: Path,
+        title: str,
+        port: int = 7890,
+        host: str = "localhost",
+    ):
         self.channel = channel
         self.workspace = Path(workspace)
         self.project_root = Path(project_root)
@@ -955,8 +987,7 @@ class InteractiveWebServer:
         return f"http://{self.host}:{self.port}"
 
     def start(self) -> None:
-        handler = _make_handler(self.channel, self.workspace.name, self.title,
-                                self.project_root)
+        handler = _make_handler(self.channel, self.workspace.name, self.title, self.project_root)
         # Try the requested port, then a few above it if taken.
         last_err = None
         for port in range(self.port, self.port + 10):
@@ -969,27 +1000,29 @@ class InteractiveWebServer:
         if self._httpd is None:
             raise RuntimeError(f"Could not bind a port near {self.port}: {last_err}")
 
-        self._server_thread = threading.Thread(
-            target=self._httpd.serve_forever, daemon=True)
+        self._server_thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._server_thread.start()
 
         log_dir = self.workspace / "logs"
         self._tailer_thread = threading.Thread(
             target=_tail_agent_logs,
             args=(log_dir, self.channel, self.project_root, self._stop),
-            daemon=True)
+            daemon=True,
+        )
         self._tailer_thread.start()
 
         self._dash_thread = threading.Thread(
             target=_emit_dashboard,
             args=(self.workspace, self.project_root, self.channel, self._stop),
-            daemon=True)
+            daemon=True,
+        )
         self._dash_thread.start()
 
         self._research_thread = threading.Thread(
             target=_emit_research_state,
             args=(self.workspace, self.channel, self._stop),
-            daemon=True)
+            daemon=True,
+        )
         self._research_thread.start()
 
     def stop(self) -> None:

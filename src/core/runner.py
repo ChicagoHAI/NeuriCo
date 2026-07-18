@@ -10,8 +10,7 @@ This module orchestrates the execution of research by:
 """
 
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-import json
+from typing import Optional, Dict, Any
 import subprocess
 import shlex
 import sys
@@ -146,7 +145,10 @@ class ResearchRunner:
         bootstrap_autoresearch_baseline: bool = False,
         proposer_timeout: int = 900,
         compute_backend: str = "local",
-        hitl: bool = False,
+        hitl_autoresearch: Optional[str] = None,
+        hitl_continue_autoresearch: Optional[str] = None,
+        hitl_manager_port: int = 7890,
+        hitl_manager_no_browser: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -168,8 +170,10 @@ class ResearchRunner:
             paper_style: Paper template style (neurips, icml, acl, ams). None = auto-detect from domain
             paper_timeout: Timeout for paper writing in seconds
             force_fresh: Ignore existing local workspace and start a new run from scratch
-            hitl: Enable plan-centered human-in-the-loop workflow for supported
-                stages. V1 supports resource_finder.
+            hitl_autoresearch: Human interface for fresh HITL AutoResearch:
+                ``web`` or ``cli``.
+            hitl_continue_autoresearch: Human interface for continuing an
+                existing HITL AutoResearch workspace: ``web`` or ``cli``.
 
         Returns:
             Dictionary with:
@@ -185,8 +189,35 @@ class ResearchRunner:
         print(f"   GitHub: {'Enabled' if self.use_github else 'Disabled'}")
         compute_backend = normalize_compute_backend(compute_backend)
         print(f"   Compute backend: {compute_backend}")
+        hitl_modes = {
+            "--hitl-autoresearch": hitl_autoresearch,
+            "--hitl-continue-autoresearch": hitl_continue_autoresearch,
+        }
+        invalid_hitl_modes = [
+            name for name, mode in hitl_modes.items() if mode not in {None, "web", "cli"}
+        ]
+        if invalid_hitl_modes:
+            raise ValueError("HITL mode must be 'web' or 'cli'.")
+        selected_hitl_modes = [name for name, mode in hitl_modes.items() if mode]
+        if len(selected_hitl_modes) > 1:
+            raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
+        hitl = hitl_autoresearch or hitl_continue_autoresearch
+        if hitl_autoresearch:
+            if autoresearch or continue_autoresearch:
+                raise ValueError(
+                    "--hitl-autoresearch already selects fresh AutoResearch; do not add "
+                    "--autoresearch or --continue-autoresearch."
+                )
+            autoresearch = True
+        if hitl_continue_autoresearch:
+            if autoresearch or continue_autoresearch:
+                raise ValueError(
+                    "--hitl-continue-autoresearch already selects continuation; do not add "
+                    "--autoresearch or --continue-autoresearch."
+                )
+            continue_autoresearch = True
         if hitl:
-            print("   HITL: enabled (resource_finder v1)")
+            print(f"   HITL: enabled ({hitl})")
         autoresearch_modes = [
             name
             for name, enabled in (
@@ -366,26 +397,72 @@ class ResearchRunner:
         # Copy helper scripts and backend-selected skills to workspace.
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
 
+        recovered_hitl_attempt = None
+        if hitl and continue_autoresearch:
+            # Recovery can restore the private HITL manager database. Do it before
+            # the host starts accepting conversation messages against that state.
+            from core.hitl_autoresearch import recover_interrupted_hitl_autoresearch_attempt
+
+            recovered_hitl_attempt = recover_interrupted_hitl_autoresearch_attempt(work_dir)
+
+        hitl_host = None
+        if hitl:
+            if not multi_agent:
+                raise ValueError("HITL AutoResearch requires the multi-agent pipeline.")
+            from core.hitl_manager_host import HitlManagerHost
+            from interactive.manager import load_config as load_manager_config
+
+            hitl_host = HitlManagerHost(
+                work_dir=work_dir,
+                config=load_manager_config(),
+                interface=hitl,
+                project_root=self.project_root,
+                title=title,
+                port=hitl_manager_port,
+                open_browser=not hitl_manager_no_browser,
+            )
+            hitl_host.start()
+
         if continue_autoresearch:
             success = False
             pipeline_result: Dict[str, Any] = {}
             try:
-                from core.autoresearch import continue_from_current_best
+                if hitl:
+                    from core.hitl_autoresearch import continue_hitl_autoresearch
 
-                pipeline_result = continue_from_current_best(
-                    idea=idea,
-                    idea_id=idea_id,
-                    work_dir=work_dir,
-                    templates_dir=self.project_root / "templates",
-                    provider=provider,
-                    full_permissions=full_permissions,
-                    scorer_timeout=scorer_timeout,
-                    iterations=autoresearch_iterations,
-                    autoresearch_history_dir=autoresearch_history_dir,
-                    proposer_timeout=proposer_timeout,
-                    comment_timeout=timeout,
-                    hitl_enabled=hitl,
-                )
+                    pipeline_result = continue_hitl_autoresearch(
+                        idea=idea,
+                        idea_id=idea_id,
+                        work_dir=work_dir,
+                        templates_dir=self.project_root / "templates",
+                        provider=provider,
+                        full_permissions=full_permissions,
+                        scorer_timeout=scorer_timeout,
+                        iterations=autoresearch_iterations,
+                        autoresearch_history_dir=autoresearch_history_dir,
+                        proposer_timeout=proposer_timeout,
+                        comment_timeout=timeout,
+                        manager=hitl_host.manager,
+                        channel=hitl_host.channel,
+                        manager_config=hitl_host.manager.config,
+                        recovered_attempt=recovered_hitl_attempt,
+                    )
+                else:
+                    from core.autoresearch import continue_from_current_best
+
+                    pipeline_result = continue_from_current_best(
+                        idea=idea,
+                        idea_id=idea_id,
+                        work_dir=work_dir,
+                        templates_dir=self.project_root / "templates",
+                        provider=provider,
+                        full_permissions=full_permissions,
+                        scorer_timeout=scorer_timeout,
+                        iterations=autoresearch_iterations,
+                        autoresearch_history_dir=autoresearch_history_dir,
+                        proposer_timeout=proposer_timeout,
+                        comment_timeout=timeout,
+                    )
                 success = pipeline_result.get("success", False)
 
                 if write_paper and success:
@@ -402,6 +479,8 @@ class ResearchRunner:
                 success = False
             finally:
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                if hitl_host:
+                    hitl_host.stop()
 
             return {
                 "work_dir": work_dir,
@@ -438,6 +517,8 @@ class ResearchRunner:
                 success = False
             finally:
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                if hitl_host:
+                    hitl_host.stop()
 
             return {
                 "work_dir": work_dir,
@@ -474,7 +555,11 @@ class ResearchRunner:
             from core.pipeline_orchestrator import ResearchPipelineOrchestrator
 
             orchestrator = ResearchPipelineOrchestrator(
-                work_dir=work_dir, templates_dir=self.project_root / "templates"
+                work_dir=work_dir,
+                templates_dir=self.project_root / "templates",
+                hitl_manager=hitl_host.manager if hitl_host else None,
+                hitl_channel=hitl_host.channel if hitl_host else None,
+                hitl_manager_config=hitl_host.manager.config if hitl_host else None,
             )
             success = False
 
@@ -497,10 +582,16 @@ class ResearchRunner:
 
             try:
                 if autoresearch:
-                    from core.autoresearch import (
-                        construct_fresh_initial_node,
-                        continue_from_current_best,
-                    )
+                    if hitl:
+                        from core.hitl_autoresearch import (
+                            continue_hitl_autoresearch,
+                            run_fresh_hitl_autoresearch_initial_node,
+                        )
+                    else:
+                        from core.autoresearch import (
+                            construct_fresh_initial_node,
+                            continue_from_current_best,
+                        )
 
                     print()
                     print("=" * 80)
@@ -508,23 +599,31 @@ class ResearchRunner:
                     print("=" * 80)
                     print()
 
-                    initial_result = construct_fresh_initial_node(
-                        idea=idea,
-                        work_dir=work_dir,
-                        templates_dir=self.project_root / "templates",
-                        provider=provider,
-                        pause_after_resources=pause_after_resources,
-                        skip_resource_finder=skip_resource_finder,
-                        resource_finder_timeout=resource_finder_timeout,
-                        experiment_runner_timeout=timeout,
-                        full_permissions=full_permissions,
-                        use_scribe=use_scribe,
-                        rule_maker_timeout=rule_maker_timeout,
-                        scorer_timeout=scorer_timeout,
-                        manifest_trimmer_timeout=manifest_trimmer_timeout,
-                        autoresearch_history_dir=autoresearch_history_dir,
-                        hitl_enabled=hitl,
-                    )
+                    initial_args = {
+                        "idea": idea,
+                        "work_dir": work_dir,
+                        "templates_dir": self.project_root / "templates",
+                        "provider": provider,
+                        "pause_after_resources": pause_after_resources,
+                        "skip_resource_finder": skip_resource_finder,
+                        "resource_finder_timeout": resource_finder_timeout,
+                        "experiment_runner_timeout": timeout,
+                        "full_permissions": full_permissions,
+                        "use_scribe": use_scribe,
+                        "rule_maker_timeout": rule_maker_timeout,
+                        "scorer_timeout": scorer_timeout,
+                        "manifest_trimmer_timeout": manifest_trimmer_timeout,
+                        "autoresearch_history_dir": autoresearch_history_dir,
+                    }
+                    if hitl:
+                        initial_result = run_fresh_hitl_autoresearch_initial_node(
+                            **initial_args,
+                            manager=hitl_host.manager,
+                            channel=hitl_host.channel,
+                            manager_config=hitl_host.manager.config,
+                        )
+                    else:
+                        initial_result = construct_fresh_initial_node(**initial_args)
                     pipeline_result = initial_result.pipeline_result or {
                         "success": initial_result.success,
                     }
@@ -538,20 +637,28 @@ class ResearchRunner:
                     success = initial_result.success
 
                     if success:
-                        autoresearch_result = continue_from_current_best(
-                            idea=idea,
-                            idea_id=idea_id,
-                            work_dir=work_dir,
-                            templates_dir=self.project_root / "templates",
-                            provider=provider,
-                            full_permissions=full_permissions,
-                            scorer_timeout=scorer_timeout,
-                            iterations=autoresearch_iterations,
-                            autoresearch_history_dir=autoresearch_history_dir,
-                            proposer_timeout=proposer_timeout,
-                            comment_timeout=timeout,
-                            hitl_enabled=hitl,
-                        )
+                        continuation_args = {
+                            "idea": idea,
+                            "idea_id": idea_id,
+                            "work_dir": work_dir,
+                            "templates_dir": self.project_root / "templates",
+                            "provider": provider,
+                            "full_permissions": full_permissions,
+                            "scorer_timeout": scorer_timeout,
+                            "iterations": autoresearch_iterations,
+                            "autoresearch_history_dir": autoresearch_history_dir,
+                            "proposer_timeout": proposer_timeout,
+                            "comment_timeout": timeout,
+                        }
+                        if hitl:
+                            autoresearch_result = continue_hitl_autoresearch(
+                                **continuation_args,
+                                manager=hitl_host.manager,
+                                channel=hitl_host.channel,
+                                manager_config=hitl_host.manager.config,
+                            )
+                        else:
+                            autoresearch_result = continue_from_current_best(**continuation_args)
                         pipeline_result["autoresearch"] = autoresearch_result.get("autoresearch")
                         success = autoresearch_result.get("success", False)
                 else:
@@ -569,7 +676,7 @@ class ResearchRunner:
                         scorer_timeout=scorer_timeout,
                         bootstrap_mode=bootstrap_mode,
                         manifest_trimmer_timeout=manifest_trimmer_timeout,
-                        hitl_enabled=hitl,
+                        hitl_enabled=bool(hitl),
                     )
 
                     success = pipeline_result.get("success", False)
@@ -592,6 +699,8 @@ class ResearchRunner:
             finally:
                 # GitHub integration and status updates
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                if hitl_host:
+                    hitl_host.stop()
 
             # Return result info
             result = {
@@ -1307,9 +1416,25 @@ def main():
         "bootstrap mode only)",
     )
     parser.add_argument(
-        "--hitl",
+        "--hitl-autoresearch",
+        choices=["web", "cli"],
+        help="Run fresh AutoResearch through the HITL frontier, manager, and audit workflow.",
+    )
+    parser.add_argument(
+        "--hitl-continue-autoresearch",
+        choices=["web", "cli"],
+        help="Continue an existing HITL AutoResearch workspace from its selected frontier node.",
+    )
+    parser.add_argument(
+        "--hitl-manager-port",
+        type=int,
+        default=7890,
+        help="Local browser port for HITL web mode (default: 7890).",
+    )
+    parser.add_argument(
+        "--hitl-manager-no-browser",
         action="store_true",
-        help="Enable plan-centered human-in-the-loop workflow (v1 supports resource_finder)",
+        help="Start HITL web mode without opening the browser automatically.",
     )
 
     args = parser.parse_args()
@@ -1318,6 +1443,8 @@ def main():
         for name, enabled in (
             ("--autoresearch", args.autoresearch),
             ("--continue-autoresearch", args.continue_autoresearch),
+            ("--hitl-autoresearch", bool(args.hitl_autoresearch)),
+            ("--hitl-continue-autoresearch", bool(args.hitl_continue_autoresearch)),
             ("--bootstrap-autoresearch-baseline", args.bootstrap_autoresearch_baseline),
         )
         if enabled
@@ -1385,7 +1512,10 @@ def main():
             bootstrap_autoresearch_baseline=args.bootstrap_autoresearch_baseline,
             proposer_timeout=args.proposer_timeout,
             compute_backend=args.compute_backend,
-            hitl=args.hitl,
+            hitl_autoresearch=args.hitl_autoresearch,
+            hitl_continue_autoresearch=args.hitl_continue_autoresearch,
+            hitl_manager_port=args.hitl_manager_port,
+            hitl_manager_no_browser=args.hitl_manager_no_browser,
         )
 
         print()

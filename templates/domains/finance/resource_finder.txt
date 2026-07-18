@@ -158,7 +158,9 @@ OUTPUT DELIVERABLES (all saved in current workspace):
 - data_docs/ directory with data documentation
 - literature_review.md (comprehensive synthesis: strategies, findings, gaps)
 - resources.md (catalog of all resources with locations and descriptions)
+{% if not hitl_runtime_completion %}
 - .resource_finder_complete (marker file indicating completion)
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                         PHASE 1: LITERATURE SEARCH
@@ -480,6 +482,7 @@ Before marking completion, verify:
 ✓ All downloads completed successfully
 ✓ Identification strategies are clearly documented
 
+{% if not hitl_runtime_completion %}
 COMPLETION MARKER:
 ─────────────────────────────────────────────────────────────────────────────
 
@@ -494,6 +497,7 @@ Data sources cataloged: [count]
 Identification strategies reviewed: [count]
 EOF
 ```
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                            BEST PRACTICES
@@ -509,7 +513,9 @@ EOF
 ✗ DON'T: Ignore data construction details (replication depends on them)
 ✗ DON'T: Skip user-specified resources in favor of alternatives
 ✗ DON'T: Forget to document data access requirements
+{% if not hitl_runtime_completion %}
 ✗ DON'T: Forget to create the completion marker file
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
 

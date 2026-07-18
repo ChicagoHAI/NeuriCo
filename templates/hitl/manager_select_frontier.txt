@@ -1,0 +1,12 @@
+Choose the active AutoResearch frontier node that should become the workspace
+for the next proposal. This is a runtime-managed boundary after the preceding
+candidate decision and before any new proposer begins.
+
+Call `list_frontier` first. Use `view_node` for any active node whose retained
+plan, score, acceptance rationale, or attempt history you need to compare.
+Then call `select_frontier` with exactly one active node SHA.
+
+`select_frontier` is the only legal completion action for this runtime boundary. Runtime
+will restore that node's workspace and persist the selection before allowing
+the next proposal to begin. If the command reports an error, use its guidance
+and retry; do not attempt to complete this boundary in any other way.

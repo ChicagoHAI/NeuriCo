@@ -16,7 +16,6 @@ import shlex
 import os
 import sys
 import time
-from datetime import datetime
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -43,7 +42,12 @@ TRANSCRIPT_FLAGS = {
 }
 
 
-def generate_resource_finder_prompt(idea: Dict[str, Any], templates_dir: Path) -> str:
+def generate_resource_finder_prompt(
+    idea: Dict[str, Any],
+    templates_dir: Path,
+    *,
+    hitl_runtime_completion: bool = False,
+) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
 
@@ -61,7 +65,10 @@ def generate_resource_finder_prompt(idea: Dict[str, Any], templates_dir: Path) -
 
     # templates_dir is typically project_root/templates, so parent is project_root
     generator = PromptGenerator(templates_dir)
-    return generator.generate_resource_finder_prompt(idea)
+    return generator.generate_resource_finder_prompt(
+        idea,
+        hitl_runtime_completion=hitl_runtime_completion,
+    )
 
 
 def run_resource_finder(
@@ -71,10 +78,12 @@ def run_resource_finder(
     templates_dir: Optional[Path] = None,
     timeout: int = 2700,  # 45 minutes default
     full_permissions: bool = True,
-    prompt_prefix: str = "",
+    hitl_prompt_suffix: str = "",
     completion_marker_name: str = ".resource_finder_complete",
+    completion_mode: str = "marker",
     log_prefix: str = "resource_finder",
     include_hitl_outputs: bool = False,
+    env_extra: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Launch resource finder agent to gather research resources.
@@ -86,15 +95,20 @@ def run_resource_finder(
         templates_dir: Path to templates directory (auto-detected if None)
         timeout: Maximum execution time in seconds (default: 45 min)
         full_permissions: Allow full permissions to CLI agents (default: True)
-        prompt_prefix: Optional instructions prepended to the generated prompt.
-            HITL uses this to put the agent in plan/execute/continue mode.
-        completion_marker_name: Marker expected for this invocation. Normal
-            resource finding uses .resource_finder_complete; HITL planning uses
-            .resource_finder_plan_complete.
+        hitl_prompt_suffix: Optional final HITL instructions appended to the
+            generated prompt. HITL uses this to put the agent in
+            plan/execute/continue mode after the normal prompt.
+        completion_marker_name: Marker expected for a normal, non-HITL
+            invocation. Normal resource finding uses .resource_finder_complete.
+        completion_mode: "marker" preserves normal NeuriCo marker-based
+            completion. HITL callers may use "hitl_runtime" so runtime command
+            approval/fallback is handled by the orchestrator.
         log_prefix: Prefix for prompt/log/transcript files. HITL uses unique
             prefixes because resource_finder can run multiple times in one stage.
-        include_hitl_outputs: Include HITL plan/checkpoint files in output
-            reporting. Normal non-HITL resource finding leaves this false.
+        include_hitl_outputs: Include the HITL plan in output reporting. Normal
+            non-HITL resource finding leaves this false.
+        env_extra: Optional environment overrides for this external agent
+            invocation. HITL uses this to expose scoped runtime commands.
 
     Returns:
         Dictionary with:
@@ -114,7 +128,7 @@ def run_resource_finder(
     if templates_dir is None:
         templates_dir = Path(__file__).parent.parent.parent / "templates"
 
-    print(f"🔍 Starting Resource Finder Agent")
+    print("🔍 Starting Resource Finder Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
     print(f"   Timeout: {timeout}s ({timeout//60} minutes)")
@@ -122,9 +136,13 @@ def run_resource_finder(
 
     # Generate prompt
     print("📝 Generating resource finder prompt...")
-    prompt = generate_resource_finder_prompt(idea, templates_dir)
-    if prompt_prefix:
-        prompt = prompt_prefix.strip() + "\n\n" + prompt
+    prompt = generate_resource_finder_prompt(
+        idea,
+        templates_dir,
+        hitl_runtime_completion=(completion_mode == "hitl_runtime"),
+    )
+    if hitl_prompt_suffix:
+        prompt = prompt.rstrip() + "\n\n" + hitl_prompt_suffix.strip() + "\n"
 
     # Save prompt for reference
     logs_dir = work_dir / "logs"
@@ -171,6 +189,8 @@ def run_resource_finder(
     # Set environment variables
     env = os.environ.copy()
     env['PYTHONUNBUFFERED'] = '1'
+    if env_extra:
+        env.update({str(k): str(v) for k, v in env_extra.items()})
 
     # Disable IDE integration for Gemini CLI to avoid directory mismatch errors
     # when running programmatically from different work directories
@@ -226,14 +246,18 @@ def run_resource_finder(
         else:
             print(f"⚠️  Agent execution finished with return code: {return_code}")
 
-        # Check for completion marker
-        if completion_marker.exists():
-            print(f"✅ Completion marker found: {completion_marker}")
-            success = True
+        if completion_mode == "hitl_runtime":
+            success = return_code == 0
+            print("ℹ️  HITL runtime completion mode; orchestrator will review finish state.")
         else:
-            print(f"⚠️  Completion marker NOT found: {completion_marker}")
-            print("   Agent may not have finished all tasks.")
-            success = False
+            # Check for completion marker
+            if completion_marker.exists():
+                print(f"✅ Completion marker found: {completion_marker}")
+                success = True
+            else:
+                print(f"⚠️  Completion marker NOT found: {completion_marker}")
+                print("   Agent may not have finished all tasks.")
+                success = False
 
     except subprocess.TimeoutExpired:
         print(f"\n⏱️  Resource finder timed out after {timeout} seconds")
@@ -259,7 +283,6 @@ def run_resource_finder(
     if include_hitl_outputs:
         outputs.update(
             {
-                'hitl_checkpoint': work_dir / ".neurico" / "hitl" / "checkpoints" / "pending_idea.json",
                 'hitl_plan': work_dir / "plans" / "resource_finder_plan.md",
             }
         )
@@ -313,7 +336,7 @@ def wait_for_completion(
     completion_marker = work_dir / ".resource_finder_complete"
     start_time = time.time()
 
-    print(f"⏳ Waiting for resource finder completion...")
+    print("⏳ Waiting for resource finder completion...")
     print(f"   Checking for: {completion_marker}")
     print(f"   Timeout: {timeout}s ({timeout//60} minutes)")
 

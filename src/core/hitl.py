@@ -8,15 +8,22 @@ updates the plan, and resumes from the current workspace state.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import json
+import logging
 import os
 import hashlib
-import shutil
-import subprocess
+import http.server
+import sys
+import threading
+import secrets
 from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
+
+LOGGER = logging.getLogger(__name__)
 
 
 PIPELINE_STAGES = {
@@ -28,7 +35,29 @@ PIPELINE_STAGES = {
 }
 HITL_STAGES = {"plan", "execution", "proposal", "review"}
 LEVELS = {"A", "B", "C"}
-IDEA_TYPES = {"decision", "evidence"}
+IDEA_TYPES = {"decision", "evidence", "proposal"}
+PROPOSAL_KINDS = {"exploitation", "exploration"}
+EVIDENCE_IDEA_CATEGORIES = {
+    "paper_finding",
+    "dataset_property",
+    "implementation_fact",
+    "experiment_result",
+    "constraint_or_risk",
+    "other",
+}
+DECISION_IDEA_CATEGORIES = {
+    "dataset_choice",
+    "search_strategy",
+    "method_choice",
+    "evaluation_choice",
+    "compute_resource_choice",
+    "artifact_boundary_choice",
+    "other",
+}
+IDEA_CATEGORIES_BY_TYPE = {
+    "evidence": EVIDENCE_IDEA_CATEGORIES,
+    "decision": DECISION_IDEA_CATEGORIES,
+}
 ROUTING_OPTION_MARKERS = (
     "ask human",
     "ask manager",
@@ -47,23 +76,28 @@ IDEA_RECORD_FIELD_ORDER = [
     "actor",
     "parent_node_id",
     "attempt_id",
+    "premises",
     "worker_context",
     "context",
     "related_artifacts",
+    "idea_category",
+    "proposal_type",
+    "proposal",
     "decision_needed",
     "evidence",
     "options",
     "decision",
     "human_feedback",
-    "basis",
     "manager_feedback",
     "raised",
     "worker_escalation_reason",
     "manager_escalation_reason",
 ]
+RUNTIME_PROVENANCE_FIELDS = ("parent_node_id", "attempt_id")
+
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _compact_json(obj: Any) -> str:
@@ -85,62 +119,80 @@ def _apply_runtime_provenance(
     record: Dict[str, Any],
     provenance: Optional[Dict[str, Any]],
 ) -> None:
-    for key, value in (provenance or {}).items():
+    for key in RUNTIME_PROVENANCE_FIELDS:
+        value = (provenance or {}).get(key)
         if value is not None and str(value).strip():
             record[key] = str(value)
 
 
-def hitl_log_dir(work_dir: Path) -> Path:
-    """Return the finalized HITL log directory for a research workspace."""
-    return Path(work_dir) / "logs" / "hitl"
+def _runtime_provenance(provenance: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Return only schema-approved runtime provenance fields."""
+    return {
+        key: str(value)
+        for key in RUNTIME_PROVENANCE_FIELDS
+        if (value := (provenance or {}).get(key)) is not None and str(value).strip()
+    }
 
 
-def snapshot_hitl_log_dir(work_dir: Path, snapshot_dir: Path) -> None:
-    """Snapshot the whole HITL log directory for rollback/recovery."""
-    source = hitl_log_dir(work_dir)
-    snapshot_dir = Path(snapshot_dir)
-    if snapshot_dir.exists():
-        shutil.rmtree(snapshot_dir)
-    if source.exists():
-        shutil.copytree(source, snapshot_dir)
-    else:
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
+def _with_runtime_premises(
+    premises: List[str],
+    provenance: Optional[Dict[str, Any]],
+) -> List[str]:
+    """Add runtime-known causal dependencies without exposing extra log fields."""
+    proposal_idea_id = str((provenance or {}).get("proposal_idea_id", "")).strip()
+    return _normalize_premises([*premises, *([proposal_idea_id] if proposal_idea_id else [])])
 
 
-def restore_hitl_log_dir_snapshot(work_dir: Path, snapshot_dir: Path) -> None:
-    """Restore the whole HITL log directory from a previous snapshot."""
-    snapshot_dir = Path(snapshot_dir)
-    if not snapshot_dir.is_dir():
-        raise RuntimeError(f"Cannot restore HITL log directory: missing {snapshot_dir}")
-    target = hitl_log_dir(work_dir)
-    if target.exists():
-        shutil.rmtree(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if any(snapshot_dir.iterdir()):
-        shutil.copytree(snapshot_dir, target)
-    else:
-        target.mkdir(parents=True, exist_ok=True)
+def hitl_state_dir(work_dir: Path) -> Path:
+    """Return the hidden HITL runtime directory that owns finalized ideas."""
+    return Path(work_dir) / ".neurico" / "hitl"
 
 
-def remove_hitl_log_dir_snapshot(snapshot_dir: Path) -> None:
-    """Remove a temporary HITL log directory snapshot if it exists."""
-    snapshot_dir = Path(snapshot_dir)
-    if snapshot_dir.exists():
-        shutil.rmtree(snapshot_dir)
+def hitl_research_state_path(work_dir: Path) -> Path:
+    """Return the interactive manager world-model path used by HITL."""
+    return Path(work_dir) / ".neurico" / "research_state.json"
 
 
 def _as_related_artifacts(value: Any) -> List[Dict[str, str]]:
-    artifacts: List[Dict[str, str]] = []
+    if value is None:
+        return []
     if not isinstance(value, list):
-        return artifacts
-    for item in value:
+        raise HitlValidationError(
+            "related_artifacts must be a list of workspace-relative artifact objects"
+        )
+    artifacts: List[Dict[str, str]] = []
+    for index, item in enumerate(value, start=1):
         if not isinstance(item, dict):
-            continue
+            raise HitlValidationError(
+                f"related_artifacts[{index}] must be an object with path and description"
+            )
         path = str(item.get("path", "")).strip()
         description = str(item.get("description", "")).strip()
-        if path:
-            artifacts.append({"path": path, "description": description})
+        if not path:
+            raise HitlValidationError(
+                f"related_artifacts[{index}].path must be a non-empty workspace-relative path"
+            )
+        if not description:
+            raise HitlValidationError(f"related_artifacts[{index}].description must be non-empty")
+        _validate_related_artifact_path(path)
+        artifacts.append({"path": path, "description": description})
     return artifacts
+
+
+def _validate_related_artifact_path(path: str) -> None:
+    """Validate NeuriCo's HITL artifact path convention."""
+    raw = str(path).strip()
+    if not raw:
+        raise HitlValidationError("related_artifacts[].path must be non-empty")
+    if raw.startswith("/") or "\\" in raw:
+        raise HitlValidationError(
+            "related_artifacts[].path must be a relative POSIX path under the workspace root"
+        )
+    parsed = PurePosixPath(raw)
+    if str(parsed) in {".", ""} or any(part in {"", ".", ".."} for part in parsed.parts):
+        raise HitlValidationError(
+            "related_artifacts[].path must not be empty, '.', or contain '..'"
+        )
 
 
 def _validate_substantive_options(
@@ -169,6 +221,70 @@ def _validate_substantive_options(
     return options
 
 
+def _normalize_premises(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        raise HitlValidationError(
+            "HITL_ERROR invalid_premises\n"
+            "`premises` must be a list of existing idea ids.\n"
+            "Retry with repeated `--premise I<N>` values, or omit premises if no prior idea is relevant."
+        )
+    premises: List[str] = []
+    seen = set()
+    for item in value:
+        premise = str(item).strip()
+        if not premise:
+            continue
+        if not premise.startswith("I") or not premise[1:].isdigit():
+            raise HitlValidationError(
+                "HITL_ERROR invalid_premise_id\n"
+                f"Invalid premise id: {premise}\n"
+                "Retry using finalized idea ids shown by `hitl-view-ideas`, such as `--premise I3`."
+            )
+        if premise in seen:
+            raise HitlValidationError(
+                "HITL_ERROR duplicate_premise\n"
+                f"Duplicate premise id: {premise}\n"
+                "Retry with each premise id at most once."
+            )
+        seen.add(premise)
+        premises.append(premise)
+    return premises
+
+
+def _validate_premises(premises: List[str], existing_ids: Optional[set[str]]) -> None:
+    if existing_ids is None:
+        return
+    missing = [premise for premise in premises if premise not in existing_ids]
+    if missing:
+        raise HitlValidationError(
+            "HITL_ERROR unknown_premise\n"
+            f"Unknown premise idea id(s): {', '.join(missing)}\n"
+            "Run `hitl-view-ideas`, then retry using only finalized idea ids that appear there."
+        )
+
+
+def _validate_idea_category(idea_type: str, idea_category: Any) -> str:
+    category = str(idea_category or "").strip()
+    allowed = IDEA_CATEGORIES_BY_TYPE.get(idea_type, set())
+    if not category:
+        raise HitlValidationError(
+            "HITL_ERROR missing_category\n"
+            f"{idea_type} ideas require `idea_category`.\n"
+            f"Retry with one category: {', '.join(sorted(allowed))}."
+        )
+    if category not in allowed:
+        raise HitlValidationError(
+            "HITL_ERROR invalid_category\n"
+            f"Invalid {idea_type} idea category: {category}\n"
+            f"Retry with one category: {', '.join(sorted(allowed))}."
+        )
+    return category
+
+
 def _normalize_options(value: Any) -> List[Dict[str, str]]:
     if not isinstance(value, list):
         return []
@@ -185,49 +301,6 @@ def _normalize_options(value: Any) -> List[Dict[str, str]]:
         if text:
             options.append({"option_id": f"O{idx}", "text": text})
     return options
-
-
-def _checkpoint_text(value: Any) -> str:
-    if isinstance(value, dict):
-        parts = []
-        for key in ("recommended_option", "recommendation", "evidence", "basis", "text"):
-            text = str(value.get(key, "")).strip()
-            if text:
-                parts.append(text)
-        return " ".join(parts)
-    return str(value or "").strip()
-
-
-def _canonicalize_checkpoint(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
-    canonical = dict(checkpoint)
-    if not str(canonical.get("context", "")).strip():
-        for key in ("worker_context", "raised_decision", "explicit_signoff_question", "title"):
-            value = _checkpoint_text(canonical.get(key))
-            if value:
-                canonical["context"] = value
-                break
-    if not str(canonical.get("basis", "")).strip():
-        for key in ("basis", "evidence_backed_recommendation", "recommendation"):
-            value = _checkpoint_text(canonical.get(key))
-            if value:
-                canonical["basis"] = value
-                break
-    if not str(canonical.get("reason_for_escalation", "")).strip():
-        for key in ("reason_for_escalation", "blocks", "explicit_signoff_question"):
-            value = _checkpoint_text(canonical.get(key))
-            if value:
-                canonical["reason_for_escalation"] = value
-                break
-    if canonical.get("idea_type") == "decision":
-        if not str(canonical.get("decision_needed", "")).strip():
-            for key in ("decision_needed", "raised_decision", "explicit_signoff_question"):
-                value = _checkpoint_text(canonical.get(key))
-                if value:
-                    canonical["decision_needed"] = value
-                    break
-        if "options" not in canonical and "options_considered" in canonical:
-            canonical["options"] = canonical["options_considered"]
-    return canonical
 
 
 def _option_texts(options: List[Dict[str, str]]) -> List[str]:
@@ -247,11 +320,7 @@ def _resolve_option_decision(response: str, options: List[Dict[str, str]]) -> Di
         option_aliases = {normalized_text}
         if normalized_text.endswith(" plan"):
             option_aliases.add(normalized_text.removesuffix(" plan").strip())
-        if (
-            raw == option["option_id"]
-            or raw == option["text"]
-            or normalized_raw in option_aliases
-        ):
+        if raw == option["option_id"] or raw == option["text"] or normalized_raw in option_aliases:
             return {"decision": option["option_id"], "feedback": option["text"]}
     return {"decision": "CUSTOM", "feedback": raw}
 
@@ -289,9 +358,7 @@ def render_hitl_template(name: str, **kwargs: Any) -> str:
 def _resolve_manager_option(response: str, options: List[Dict[str, str]]) -> Dict[str, str]:
     resolved = _resolve_option_decision(response, options)
     if resolved["decision"] == "CUSTOM":
-        raise HitlValidationError(
-            "Manager-resolved decision must match a substantive option"
-        )
+        raise HitlValidationError("Manager-resolved decision must match a substantive option")
     return resolved
 
 
@@ -314,47 +381,258 @@ def _decision_record_uses_option_id(record: Dict[str, Any]) -> bool:
 
 
 class HitlValidationError(ValueError):
-    """Raised when a HITL idea/checkpoint is malformed."""
+    """Raised when a HITL idea is malformed."""
+
+
+class HitlActiveWorkerRequestError(RuntimeError):
+    """Raised when another worker command arrives while one is unresolved."""
+
+    def __init__(self, request: Optional[Dict[str, Any]] = None):
+        request = request or {}
+        lines = [
+            "HITL_WORKER_REQUEST_ACTIVE",
+            "",
+            "Another blocking worker request is still unresolved.",
+        ]
+        for key in ("kind", "pipeline_stage", "hitl_stage"):
+            value = str(request.get(key, "")).strip()
+            if value:
+                lines.append(f"{key}: {value}")
+        lines.extend(
+            [
+                "",
+                "Keep the current workspace state unchanged.",
+                "Wait for runtime feedback, then continue in this same worker session.",
+            ]
+        )
+        super().__init__("\n".join(lines))
 
 
 class HitlIdeaLog:
-    """Append-only finalized HITL idea log stored at logs/hitl/idea.jsonl."""
+    """Append-only finalized HITL idea log stored under .neurico/hitl/idea/."""
 
     def __init__(self, work_dir: Path):
         self.work_dir = Path(work_dir)
-        self.hitl_dir = hitl_log_dir(self.work_dir)
+        self.hitl_dir = hitl_state_dir(self.work_dir)
         self.hitl_dir.mkdir(parents=True, exist_ok=True)
-        self.path = self.hitl_dir / "idea.jsonl"
+        self.path = self.hitl_dir / "idea" / "idea.jsonl"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def append(self, idea: Dict[str, Any]) -> Dict[str, Any]:
-        record = dict(idea)
-        record.setdefault("idea_id", self._next_id())
-        record.setdefault("timestamp", _now())
-        if record.get("idea_type") == "decision" and "options" in record:
-            record["options"] = _normalize_options(record.get("options"))
-        self.validate(record)
-        record = _ordered_idea_record(record)
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(_compact_json(record) + "\n")
-        return record
+    def append(self, idea: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+        """Finalize one idea, optionally treating an identical retry as a no-op.
 
-    def _next_id(self) -> str:
-        if not self.path.exists():
-            return "I1"
-        count = 0
-        with open(self.path, encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    count += 1
-        return f"I{count + 1}"
+        Runtime finalizers use ``idempotent=True`` because an interrupted process
+        can leave a worker request active after its audit record was already written.
+        Worker C-level reporting keeps its existing command-level semantics.
+        """
+        with self._locked_log():
+            existing_records = self.records()
+            known_ids = {
+                str(record.get("idea_id", "")).strip()
+                for record in existing_records
+                if str(record.get("idea_id", "")).strip()
+            }
+            record = dict(idea)
+            if idempotent:
+                expected = self.logical_payload(record)
+                for existing_record in reversed(existing_records):
+                    if self.logical_payload(existing_record) == expected:
+                        return existing_record
+            if not str(record.get("idea_id", "")).strip():
+                record["idea_id"] = f"I{self._next_number(existing_records)}"
+            elif str(record["idea_id"]).strip() in known_ids:
+                raise HitlValidationError(
+                    f"HITL idea_id already exists: {str(record['idea_id']).strip()}"
+                )
+            record.setdefault("timestamp", _now())
+            record.setdefault("premises", [])
+            record["premises"] = _normalize_premises(record["premises"])
+            if record.get("idea_type") == "decision" and "options" in record:
+                record["options"] = _normalize_options(record["options"])
+                if record.get("level") == "C":
+                    selected = _resolve_option_decision(
+                        str(record.get("decision", "")),
+                        record["options"],
+                    )
+                    if selected["decision"] == "CUSTOM":
+                        raise HitlValidationError(
+                            "C-level decision idea must select one of its declared options. "
+                            "Add the selected action as an option, then retry."
+                        )
+                    record["decision"] = selected["decision"]
+            self.validate(record, existing_ids=known_ids)
+            ordered = _ordered_idea_record(record)
+            existing = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+            addition = _compact_json(ordered) + "\n"
+            tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+            tmp_path.write_text(existing + addition, encoding="utf-8")
+            os.replace(tmp_path, self.path)
+        # The idea log is authoritative. Reconciliation is derived state, so a
+        # projection failure must not turn a successfully finalized idea into a
+        # failed worker command that an agent will retry and duplicate. A later
+        # manager turn can rebuild the projection from this durable log.
+        from core.hitl_world_model import HitlWorldModelSync
+
+        try:
+            HitlWorldModelSync(self.work_dir).reconcile()
+        except Exception:
+            LOGGER.warning(
+                "HITL world-model projection failed after idea %s was finalized; "
+                "the next manager reconciliation will retry it.",
+                ordered["idea_id"],
+                exc_info=True,
+            )
+        return ordered
+
+    def append_many(self, ideas: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        records = list(ideas)
+        if len(records) != 1:
+            raise HitlValidationError(
+                "HITL ideas must be finalized one at a time so every premise refers "
+                "to an earlier finalized record."
+            )
+        return [self.append(records[0])]
+
+    @staticmethod
+    def logical_payload(record: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize one command submission while ignoring runtime-assigned identity."""
+        payload = {
+            key: value for key, value in dict(record).items() if key not in {"idea_id", "timestamp"}
+        }
+        payload.setdefault("premises", [])
+        payload["premises"] = _normalize_premises(payload["premises"])
+        if payload.get("idea_type") == "decision" and "options" in payload:
+            payload["options"] = _normalize_options(payload["options"])
+        return payload
+
+    def find_equivalent(self, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return an identical already-finalized submission for a safe retry."""
+        expected = self.logical_payload(record)
+        for existing in reversed(self.records()):
+            if self.logical_payload(existing) == expected:
+                return existing
+        return None
+
+    @contextmanager
+    def _locked_log(self) -> Iterator[None]:
+        lock_path = self.path.with_suffix(".jsonl.lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _next_number(records: Iterable[Dict[str, Any]]) -> int:
+        numbers = []
+        for record in records:
+            idea_id = str(record.get("idea_id", "")).strip()
+            if idea_id.startswith("I") and idea_id[1:].isdigit():
+                numbers.append(int(idea_id[1:]))
+        return max(numbers, default=0) + 1
 
     def records(self) -> List[Dict[str, Any]]:
         if not self.path.exists():
             return []
         return read_jsonl(self.path)
 
+    def render_for_agent(self, *, idea_id: Optional[str] = None) -> str:
+        all_records = self.records()
+        if not all_records:
+            return "No finalized HITL ideas have been recorded yet."
+        records = all_records
+        if idea_id:
+            records = [record for record in all_records if record.get("idea_id") == idea_id]
+            if not records:
+                raise HitlValidationError(f"No finalized HITL idea exists with id {idea_id}.")
+        record_ids = [
+            str(record.get("idea_id", "")).strip()
+            for record in all_records
+            if str(record.get("idea_id", "")).strip()
+        ]
+        used_by: Dict[str, List[str]] = {idea_id: [] for idea_id in record_ids}
+        for record in all_records:
+            record_id = str(record.get("idea_id", "")).strip()
+            for premise in _normalize_premises(record.get("premises")):
+                used_by.setdefault(premise, []).append(record_id)
+
+        if idea_id:
+            blocks = [f"Finalized HITL idea: {idea_id}"]
+        else:
+            roots = [
+                record_id
+                for record_id, record in zip(record_ids, all_records)
+                if not _normalize_premises(record.get("premises"))
+            ]
+            leaves = [record_id for record_id in record_ids if not used_by.get(record_id)]
+            evidence_count = sum(
+                1 for record in all_records if record.get("idea_type") == "evidence"
+            )
+            decision_count = sum(
+                1 for record in all_records if record.get("idea_type") == "decision"
+            )
+            proposal_count = sum(
+                1 for record in all_records if record.get("idea_type") == "proposal"
+            )
+            blocks = [
+                f"Finalized HITL ideas: {len(all_records)}",
+                f"Evidence: {evidence_count}",
+                f"Decision: {decision_count}",
+                f"Proposal: {proposal_count}",
+                f"Roots: {', '.join(roots) if roots else 'none'}",
+                f"Leaves: {', '.join(leaves) if leaves else 'none'}",
+                "",
+                "Chronological ideas:",
+            ]
+        for record in records:
+            record_id = str(record.get("idea_id", "")).strip()
+            idea_type = str(record.get("idea_type", "")).strip()
+            category = str(record.get("idea_category", "")).strip()
+            level = str(record.get("level", "")).strip()
+            actor = str(record.get("actor", "")).strip()
+            stage = f"{record.get('pipeline_stage', '')}/{record.get('hitl_stage', '')}"
+            blocks.append("")
+            blocks.append(
+                f"{record_id} [{idea_type}/{category}] level={level} actor={actor} stage={stage}"
+            )
+            for key in (
+                "context",
+                "proposal_type",
+                "proposal",
+                "evidence",
+                "decision_needed",
+                "decision",
+                "manager_feedback",
+                "worker_context",
+                "worker_escalation_reason",
+            ):
+                value = record.get(key)
+                if value is not None and str(value).strip():
+                    blocks.append(f"{key}: {value}")
+            options = record.get("options")
+            if isinstance(options, list) and options:
+                blocks.append("options:")
+                for option in _normalize_options(options):
+                    blocks.append(f"  {option['option_id']}: {option['text']}")
+            premises = _normalize_premises(record.get("premises"))
+            blocks.append(f"premises: {', '.join(premises) if premises else 'none'}")
+            children = used_by.get(record_id, [])
+            blocks.append(f"used_by: {', '.join(children) if children else 'none'}")
+            artifacts = record.get("related_artifacts")
+            if isinstance(artifacts, list) and artifacts:
+                blocks.append("related_artifacts:")
+                for artifact in _as_related_artifacts(artifacts):
+                    description = artifact.get("description", "")
+                    blocks.append(f"  {artifact['path']}: {description}")
+        return "\n".join(blocks)
+
     @staticmethod
-    def validate(record: Dict[str, Any]) -> None:
+    def validate(
+        record: Dict[str, Any],
+        *,
+        existing_ids: Optional[set[str]] = None,
+    ) -> None:
         required = [
             "idea_id",
             "timestamp",
@@ -364,7 +642,6 @@ class HitlIdeaLog:
             "actor",
             "idea_type",
             "context",
-            "basis",
             "raised",
         ]
         missing = [k for k in required if k not in record]
@@ -378,12 +655,46 @@ class HitlIdeaLog:
             raise HitlValidationError(f"Invalid level: {record['level']}")
         if record["idea_type"] not in IDEA_TYPES:
             raise HitlValidationError(f"Invalid idea_type: {record['idea_type']}")
+        idea_id = str(record["idea_id"]).strip()
+        if not idea_id.startswith("I") or not idea_id[1:].isdigit():
+            raise HitlValidationError("HITL idea_id must use the runtime format I<N>")
+        if existing_ids is not None and idea_id in existing_ids:
+            raise HitlValidationError(f"HITL idea_id already exists: {idea_id}")
+        premises = _normalize_premises(record.get("premises"))
+        _validate_premises(premises, existing_ids)
         if not str(record["context"]).strip():
             raise HitlValidationError("HITL idea context must be non-empty")
-        if not str(record["basis"]).strip():
-            raise HitlValidationError("HITL basis must be non-empty")
+        actor = str(record["actor"]).strip()
+        if record["level"] == "A" and actor != "human":
+            raise HitlValidationError("A-level HITL ideas must be finalized by actor 'human'")
+        if record["level"] == "B" and actor != "manager":
+            raise HitlValidationError("B-level HITL ideas must be finalized by actor 'manager'")
+        if record["level"] == "C" and actor != record["pipeline_stage"]:
+            raise HitlValidationError(
+                "C-level HITL ideas must be finalized by the current pipeline-stage worker"
+            )
+        for field in ("basis", "human_basis"):
+            if field in record:
+                raise HitlValidationError(
+                    f"HITL idea records no longer support `{field}`; use finalized premises instead."
+                )
+        if "related_artifacts" in record:
+            _as_related_artifacts(record["related_artifacts"])
 
         if record["idea_type"] == "decision":
+            _validate_idea_category(record["idea_type"], record.get("idea_category"))
+            if "evidence" in record:
+                raise HitlValidationError("Decision idea must not include evidence")
+            if "proposal" in record:
+                raise HitlValidationError("Decision idea must not include proposal fields")
+            if not premises:
+                raise HitlValidationError("Decision idea requires at least one finalized premise")
+            if "decision_needed" not in record or not str(record["decision_needed"]).strip():
+                raise HitlValidationError("Decision idea requires non-empty decision_needed")
+            _validate_substantive_options(
+                record.get("options"),
+                error_prefix="Decision idea",
+            )
             if "decision" not in record or not str(record["decision"]).strip():
                 raise HitlValidationError("Decision idea requires non-empty decision")
             if _decision_record_requires_options(record):
@@ -397,18 +708,48 @@ class HitlIdeaLog:
                     error_prefix="C-level decision idea",
                     allow_empty=True,
                 )
-            if (
-                _decision_record_uses_option_id(record)
-                and record["decision"] != "CUSTOM"
-            ):
-                option_ids = {option["option_id"] for option in _normalize_options(record["options"])}
+            if _decision_record_uses_option_id(record) and record["decision"] != "CUSTOM":
+                option_ids = {
+                    option["option_id"] for option in _normalize_options(record["options"])
+                }
                 if record["decision"] not in option_ids:
                     raise HitlValidationError(
                         "A/B option-based decision must be an option id or CUSTOM"
                     )
-        else:
+        elif record["idea_type"] == "evidence":
+            _validate_idea_category(record["idea_type"], record.get("idea_category"))
+            if "proposal" in record:
+                raise HitlValidationError("Evidence idea must not include proposal fields")
+            forbidden = [
+                field
+                for field in ("decision_needed", "options", "decision")
+                if field in record and record.get(field) not in (None, "", [])
+            ]
+            if forbidden:
+                raise HitlValidationError(
+                    f"Evidence idea must not include decision field(s): {forbidden}"
+                )
             if "evidence" not in record or not str(record["evidence"]).strip():
                 raise HitlValidationError("Evidence idea requires non-empty evidence")
+        else:
+            forbidden = [
+                field
+                for field in ("idea_category", "decision_needed", "options", "decision", "evidence")
+                if field in record and record.get(field) not in (None, "", [])
+            ]
+            if forbidden:
+                raise HitlValidationError(
+                    f"Proposal idea must not include decision/evidence field(s): {forbidden}"
+                )
+            proposal_type = str(record.get("proposal_type", "")).strip()
+            if proposal_type not in PROPOSAL_KINDS:
+                raise HitlValidationError(
+                    "Proposal idea requires proposal_type 'exploitation' or 'exploration'"
+                )
+            if not premises:
+                raise HitlValidationError("Proposal idea requires at least one finalized premise")
+            if not str(record.get("proposal", "")).strip():
+                raise HitlValidationError("Proposal idea requires non-empty proposal content")
 
 
 @dataclass
@@ -421,24 +762,48 @@ class HitlPaths:
         return self.work_dir / "plans" / f"{self.pipeline_stage}_plan.md"
 
     @property
-    def checkpoints_dir(self) -> Path:
-        return self.work_dir / ".neurico" / "hitl" / "checkpoints"
+    def hitl_dir(self) -> Path:
+        return self.work_dir / ".neurico" / "hitl"
 
     @property
-    def current_checkpoint(self) -> Path:
-        return self.checkpoints_dir / "pending_idea.json"
+    def manager_dir(self) -> Path:
+        return self.hitl_dir / "manager"
 
     @property
-    def autonomous_ideas_path(self) -> Path:
-        return self.work_dir / ".neurico" / "hitl" / "autonomous_ideas.jsonl"
+    def manager_conversation_db_path(self) -> Path:
+        return self.manager_dir / "history.sqlite"
 
     @property
-    def plan_marker_name(self) -> str:
-        return f".{self.pipeline_stage}_plan_complete"
+    def tool_bin_dir(self) -> Path:
+        return self.hitl_dir / "bin"
 
     @property
-    def completion_marker_name(self) -> str:
-        return f".{self.pipeline_stage}_complete"
+    def report_idea_command(self) -> Path:
+        return self.tool_bin_dir / "hitl-report-idea"
+
+    @property
+    def raise_idea_command(self) -> Path:
+        return self.tool_bin_dir / "hitl-raise-idea"
+
+    @property
+    def finish_phase_command(self) -> Path:
+        return self.tool_bin_dir / "hitl-finish-phase"
+
+    @property
+    def resume_worker_request_command(self) -> Path:
+        return self.tool_bin_dir / "hitl-resume-worker-request"
+
+    @property
+    def view_ideas_command(self) -> Path:
+        return self.tool_bin_dir / "hitl-view-ideas"
+
+    @property
+    def submit_proposal_command(self) -> Path:
+        return self.tool_bin_dir / "hitl-submit-proposal"
+
+    @property
+    def view_current_frontier_command(self) -> Path:
+        return self.tool_bin_dir / "view_current_frontier"
 
 
 class HitlRuntime:
@@ -452,20 +817,39 @@ class HitlRuntime:
         channel: Optional[Any] = None,
         manager: Optional[Any] = None,
         config: Optional[Dict[str, Any]] = None,
+        use_hitl_autoresearch_whiteboard: bool = False,
     ):
         if pipeline_stage not in PIPELINE_STAGES:
             raise ValueError(f"Unsupported HITL pipeline stage: {pipeline_stage}")
         self.work_dir = Path(work_dir)
         self.pipeline_stage = pipeline_stage
+        self.use_hitl_autoresearch_whiteboard = use_hitl_autoresearch_whiteboard
         self.paths = HitlPaths(self.work_dir, pipeline_stage)
         self.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
-        self.paths.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-        self.paths.autonomous_ideas_path.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.hitl_dir.mkdir(parents=True, exist_ok=True)
         self.log = HitlIdeaLog(self.work_dir)
         self.channel = channel or self._default_channel()
-        self.manager = manager or self._default_manager(config or {})
+        self.manager = manager or self._default_manager(
+            config or {},
+            work_dir=self.work_dir,
+            channel=self.channel,
+        )
         self.current_hitl_stage = "execution"
-        self._loaded_checkpoint_path: Optional[Path] = None
+        self._tool_server: Optional[http.server.ThreadingHTTPServer] = None
+        self._tool_thread: Optional[threading.Thread] = None
+        self._tool_url: str = ""
+        self._tool_token: str = ""
+        self._tool_context: Dict[str, Any] = {}
+        self._phase_finish_result: Optional[Dict[str, Any]] = None
+        self._phase_finish_request_key: str = ""
+        self._phase_finish_response: Optional[Dict[str, Any]] = None
+        self._proposal_submit_result: Optional[Dict[str, Any]] = None
+        self._raised_idea_results: Dict[str, Dict[str, Any]] = {}
+        self._started_scoring_requests: set[str] = set()
+        self._tool_lock = threading.RLock()
+        # This only serializes concurrent HTTP command handlers inside this
+        # runtime process. Cross-process ownership lives in HitlRuntimeState.
+        self._worker_request_lock = threading.Lock()
 
     @staticmethod
     def _default_channel() -> Any:
@@ -474,612 +858,2212 @@ class HitlRuntime:
         return TerminalChannel()
 
     @staticmethod
-    def _default_manager(config: Dict[str, Any]) -> "LLMHitlManager":
-        return LLMHitlManager(config)
+    def _default_manager(
+        config: Dict[str, Any],
+        work_dir: Optional[Path] = None,
+        channel: Optional[Any] = None,
+    ) -> Any:
+        from core.hitl_manager_react import HitlManager
+
+        return HitlManager(config, work_dir=work_dir, channel=channel)
 
     def plan_prompt_block(
         self,
-        approved_proposal_path: Optional[Path] = None,
+        approved_proposal: str = "",
         *,
         requires_human_approval: bool = True,
     ) -> str:
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
-        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
-        proposal_path_text = ""
-        if approved_proposal_path is not None:
-            proposal_path_text = str(Path(approved_proposal_path).resolve())
         return _load_hitl_template(
             "worker_plan.txt",
             pipeline_stage=self.pipeline_stage,
             plan_path=rel_plan,
-            approved_proposal_path=proposal_path_text,
+            approved_proposal=approved_proposal,
             requires_human_approval=requires_human_approval,
-            plan_completion_marker=self.paths.plan_marker_name,
-            completion_marker=self.paths.completion_marker_name,
-            autonomous_ideas_path=rel_autonomous_ideas,
             hitl_stage="plan",
+            allow_raised_ideas=False,
         )
 
-    def execution_prompt_block(self, mode: str = "execute") -> str:
+    def execution_prompt_block(self, mode: str = "execute", feedback: str = "") -> str:
         self.current_hitl_stage = "execution"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
-        rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
-        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
         return _load_hitl_template(
             "worker_execution.txt",
             pipeline_stage=self.pipeline_stage,
             mode=mode,
             plan_path=rel_plan,
-            checkpoint_path=rel_checkpoint,
-            autonomous_ideas_path=rel_autonomous_ideas,
             hitl_stage="execution",
-            plan_completion_marker=self.paths.plan_marker_name,
-            completion_marker=self.paths.completion_marker_name,
+            allow_raised_ideas=True,
+            feedback=feedback,
         )
 
     def review_prompt_block(self, feedback: str = "") -> str:
         self.current_hitl_stage = "review"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
-        rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
-        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
         return _load_hitl_template(
             "worker_review_revision.txt",
             pipeline_stage=self.pipeline_stage,
             plan_path=rel_plan,
-            checkpoint_path=rel_checkpoint,
-            autonomous_ideas_path=rel_autonomous_ideas,
             hitl_stage="review",
+            allow_raised_ideas=True,
             feedback=feedback,
-            plan_completion_marker=self.paths.plan_marker_name,
-            completion_marker=self.paths.completion_marker_name,
         )
 
     def plan_revision_prompt_block(self, feedback: str) -> str:
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
-        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
         return _load_hitl_template(
             "worker_plan_revision.txt",
             pipeline_stage=self.pipeline_stage,
             plan_path=rel_plan,
-            autonomous_ideas_path=rel_autonomous_ideas,
             hitl_stage="plan",
+            allow_raised_ideas=False,
             feedback=feedback,
-            plan_completion_marker=self.paths.plan_marker_name,
-            completion_marker=self.paths.completion_marker_name,
         )
 
-    def feedback_continuation_prompt_block(self, feedback: str) -> str:
-        self.current_hitl_stage = "execution"
-        rel_plan = self.paths.plan_path.relative_to(self.work_dir)
-        rel_checkpoint = self.paths.current_checkpoint.relative_to(self.work_dir)
-        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
+    def proposal_replacement_prompt_block(self, feedback: str) -> str:
         return _load_hitl_template(
-            "worker_feedback_continuation.txt",
-            pipeline_stage=self.pipeline_stage,
-            plan_path=rel_plan,
-            checkpoint_path=rel_checkpoint,
-            autonomous_ideas_path=rel_autonomous_ideas,
-            hitl_stage="execution",
-            feedback=feedback,
-            plan_completion_marker=self.paths.plan_marker_name,
-            completion_marker=self.paths.completion_marker_name,
+            "worker_proposal_replacement.txt",
+            feedback=_require_text(feedback, "feedback", "Proposal continuation"),
         )
 
-    def autonomous_ideas_prompt_block(self, hitl_stage: str) -> str:
+    def idea_reporting_prompt_block(self, hitl_stage: str) -> str:
         if hitl_stage not in HITL_STAGES:
-            raise ValueError(f"Unsupported HITL stage for autonomous ideas: {hitl_stage}")
-        rel_autonomous_ideas = self.paths.autonomous_ideas_path.relative_to(self.work_dir)
+            raise ValueError(f"Unsupported HITL stage for C-level idea reporting: {hitl_stage}")
         return _load_hitl_template(
             "worker_autonomous_idea_contract.txt",
-            autonomous_ideas_path=rel_autonomous_ideas,
+            pipeline_stage=self.pipeline_stage,
             hitl_stage=hitl_stage,
+            allow_raised_ideas=hitl_stage in {"execution", "review"},
         )
-
-    def approve_plan_loop(
-        self,
-        max_rounds: int = 5,
-    ) -> Dict[str, Any]:
-        for round_idx in range(1, max_rounds + 1):
-            plan_text = self._read_required(self.paths.plan_path)
-            review = self.manager.review_plan(
-                pipeline_stage=self.pipeline_stage,
-                plan_path=self.paths.plan_path,
-                plan_text=plan_text,
-                workspace_summary=self.workspace_summary(),
-            )
-            if review.get("status") == "not_ready":
-                feedback = _require_text(
-                    review.get("manager_feedback"),
-                    "manager_feedback",
-                    "Manager plan review with status='not_ready'",
-                )
-                self.log.append(
-                    {
-                        "pipeline_stage": self.pipeline_stage,
-                        "hitl_stage": "plan",
-                        "level": "B",
-                        "actor": "manager",
-                        "idea_type": "decision",
-                        "context": str(review.get("context", "Manager reviewed the plan.")),
-                        "basis": "Manager review of the materialized plan showed missing or unclear execution details.",
-                        "options": [
-                            "Accept current plan as ready for execution approval.",
-                            "Revise current plan before execution approval.",
-                        ],
-                        "decision": "O2",
-                        "raised": True,
-                        "manager_feedback": feedback,
-                        "related_artifacts": self._plan_artifact(),
-                    }
-                )
-                return {
-                    "approved": False,
-                    "level": "B",
-                    "actor": "manager",
-                    "feedback": feedback,
-                }
-
-            request = self._plan_approval_message(review)
-            plan_options = _normalize_options(["Approve plan.", "Provide feedback."])
-            response = self.channel.prompt(
-                message=request,
-                options=_option_texts(plan_options),
-            )
-            if response is None:
-                raise RuntimeError("HITL plan approval ended without a response.")
-            human_decision = _resolve_human_decision(response, plan_options)
-            decision = human_decision["decision"]
-            human_feedback = human_decision["human_feedback"]
-            approved = decision == "O1"
-            manager_feedback = ""
-            if not approved:
-                if decision == "O2":
-                    feedback_response = self.channel.prompt(
-                        message=(
-                            "Please provide concrete feedback for revising "
-                            f"`{self.paths.plan_path.relative_to(self.work_dir)}`."
-                        )
-                    )
-                    if feedback_response is None:
-                        raise RuntimeError("HITL plan feedback ended without a response.")
-                    human_feedback = feedback_response.strip()
-                if _is_feedback_placeholder(human_feedback):
-                    raise RuntimeError(
-                        "HITL plan feedback must contain concrete revision instructions."
-                    )
-                manager_feedback = self.manager.feedback_from_human(
-                    pipeline_stage=self.pipeline_stage,
-                    hitl_stage="plan",
-                    human_response=human_feedback,
-                    context=str(review.get("context", "")),
-                    plan_text=plan_text,
-                )
-            self.log.append(
-                {
-                    "pipeline_stage": self.pipeline_stage,
-                    "hitl_stage": "plan",
-                    "level": "A",
-                    "actor": "human",
-                    "idea_type": "decision",
-                    "context": str(review.get("context", "Manager presented the plan for approval.")),
-                    "basis": "The human made this plan approval or feedback decision.",
-                    "options": plan_options,
-                    "decision": decision,
-                    "raised": True,
-                    "human_feedback": human_feedback,
-                    "manager_escalation_reason": "Human approval is required before worker execution begins.",
-                    "manager_feedback": manager_feedback,
-                    "related_artifacts": self._plan_artifact(),
-                }
-            )
-            if approved:
-                return {"approved": True, "level": "A", "actor": "human"}
-            return {
-                "approved": False,
-                "level": "A",
-                "actor": "human",
-                "feedback": manager_feedback or human_feedback,
-            }
-        raise RuntimeError("HITL plan approval did not converge within max rounds.")
 
     def plan_has_human_approval(self) -> bool:
         if not self.paths.plan_path.exists():
             return False
-        for record in reversed(self.log.records()):
-            if (
-                record.get("pipeline_stage") == self.pipeline_stage
-                and record.get("hitl_stage") == "plan"
-                and record.get("idea_type") == "decision"
-                and record.get("level") == "A"
-                and record.get("actor") == "human"
-                and record.get("decision") == "O1"
-            ):
-                return True
-        return False
+        from core.hitl_runtime_state import HitlRuntimeState
 
-    def resolve_checkpoint(
-        self,
-        hitl_stage: Optional[str] = None,
-        *,
-        require_pending: bool = False,
-        provenance: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        checkpoint = self.load_checkpoint(hitl_stage=hitl_stage, require_pending=require_pending)
-        if checkpoint is None:
-            return None
-        review = self.manager.review_checkpoint(
+        return HitlRuntimeState(self.work_dir).has_plan_approval(
             pipeline_stage=self.pipeline_stage,
-            checkpoint=checkpoint,
-            plan_text=self._read_optional(self.paths.plan_path),
-            workspace_summary=self.workspace_summary(),
+            plan_fingerprint=self._current_plan_fingerprint(),
         )
-        decision_options = self._checkpoint_decision_options(checkpoint, review)
-        if review.get("requires_human"):
-            response = self.channel.prompt(
-                message=self._human_checkpoint_message(checkpoint, review),
-                options=_option_texts(decision_options) or None,
+
+    def resolve_raised_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        provenance: Optional[Dict[str, Any]] = None,
+        already_validated: bool = False,
+    ) -> Dict[str, Any]:
+        raised_idea = dict(payload)
+        raised_idea["pipeline_stage"] = self.pipeline_stage
+        raised_idea["hitl_stage"] = str(raised_idea.get("hitl_stage") or self.current_hitl_stage)
+        if not already_validated:
+            self.validate_raised_idea(
+                raised_idea,
+                existing_ids={
+                    str(record.get("idea_id", "")).strip()
+                    for record in self.log.records()
+                    if str(record.get("idea_id", "")).strip()
+                },
             )
-            if response is None:
-                raise RuntimeError("HITL checkpoint resolution ended without a response.")
-            if checkpoint["idea_type"] == "decision":
-                human_decision = _resolve_human_decision(response, decision_options)
-                decision = human_decision["decision"]
-                human_feedback = human_decision["human_feedback"]
-            else:
-                decision = response.strip()
-                human_feedback = decision
-            feedback = self.manager.feedback_from_human(
-                pipeline_stage=self.pipeline_stage,
-                hitl_stage=str(checkpoint.get("hitl_stage", "execution")),
-                human_response=human_feedback,
-                context=str(review.get("context", checkpoint.get("context", ""))),
-                plan_text=self._read_optional(self.paths.plan_path),
-            )
-            level = "A"
-            actor = "human"
-            extra = {
-                "manager_escalation_reason": str(review.get("manager_escalation_reason", "")),
-                "manager_feedback": feedback,
-                "human_feedback": human_feedback,
-            }
-            if checkpoint["idea_type"] == "decision":
-                extra["options"] = decision_options
-        else:
+        finalized: Dict[str, Dict[str, Any]] = {}
+
+        def persist_resolution(review: Dict[str, Any]) -> Dict[str, Any]:
+            decision_options = self._raised_idea_decision_options(raised_idea, review)
+            level = str(review.get("level", "")).strip()
+            actor = str(review.get("actor", "")).strip()
+            if (level, actor) not in {("B", "manager"), ("A", "human")}:
+                raise HitlValidationError(
+                    "Manager raised-idea resolution must finalize as B/manager or A/human."
+                )
             feedback = _require_text(
                 review.get("manager_feedback"),
                 "manager_feedback",
-                "Manager checkpoint resolution",
+                "Manager raised-idea resolution",
             )
-            if checkpoint["idea_type"] == "decision":
+            if raised_idea["idea_type"] == "decision":
                 raw_decision = _require_text(
                     review.get("decision"),
                     "decision",
-                    "Manager-resolved decision checkpoint",
+                    "Finalized raised decision idea",
                 )
-                decision = _resolve_manager_option(raw_decision, decision_options)["decision"]
+                decision = (
+                    _resolve_option_decision(raw_decision, decision_options)["decision"]
+                    if actor == "human"
+                    else _resolve_manager_option(raw_decision, decision_options)["decision"]
+                )
             else:
-                raw_decision = str(review.get("decision", feedback)).strip()
-                decision = raw_decision
-            level = "B"
-            actor = "manager"
-            extra = {
-                "manager_feedback": feedback,
-                "basis": str(review.get("basis", "")).strip(),
-            }
-            if checkpoint["idea_type"] == "decision":
+                decision = str(review.get("decision", feedback)).strip()
+
+            extra: Dict[str, Any] = {"manager_feedback": feedback}
+            if actor == "human":
+                extra["human_feedback"] = _require_text(
+                    review.get("human_feedback"),
+                    "human_feedback",
+                    "Human-resolved raised idea",
+                )
+                extra["manager_escalation_reason"] = str(
+                    review.get("manager_escalation_reason", "")
+                ).strip()
+            if raised_idea["idea_type"] == "decision":
                 extra["options"] = decision_options
 
-        record = self._record_from_checkpoint(
-            checkpoint=checkpoint,
-            level=level,
-            actor=actor,
-            decision=decision,
-            manager_context=str(review.get("context", checkpoint.get("context", ""))),
-            extra=extra,
-        )
-        _apply_runtime_provenance(record, provenance)
-        logged = self.log.append(record)
-        self.archive_checkpoint(logged)
-        return logged
+            record = self._record_from_raised_idea(
+                raised_idea=raised_idea,
+                level=level,
+                actor=actor,
+                decision=decision,
+                manager_context=str(review.get("context", raised_idea.get("context", ""))),
+                extra=extra,
+            )
+            _apply_runtime_provenance(record, provenance)
+            finalized["record"] = self.log.append(record, idempotent=True)
+            return review
 
-    def log_review_feedback(
-        self,
-        feedback: str,
-        *,
-        provenance: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        record = {
-            "pipeline_stage": self.pipeline_stage,
-            "hitl_stage": "review",
-            "level": "B",
-            "actor": "manager",
-            "idea_type": "decision",
-            "context": "Manager reviewed stage artifacts against the living plan.",
-            "basis": "Manager artifact review found gaps between the completed artifacts and the living plan.",
-            "options": [
-                "Accept current artifacts as complete.",
-                "Revise artifacts to match the living plan.",
-            ],
-            "decision": "O2",
-            "raised": True,
-            "manager_feedback": feedback,
-            "related_artifacts": self._plan_artifact(),
-        }
-        _apply_runtime_provenance(record, provenance)
-        self.log.append(record)
-
-    def review_stage(self) -> Dict[str, Any]:
-        return self.manager.review_stage(
+        self.manager.review_raised_idea(
             pipeline_stage=self.pipeline_stage,
-            plan_path=self.paths.plan_path,
+            raised_idea=raised_idea,
             plan_text=self._read_optional(self.paths.plan_path),
-            workspace_summary=self.workspace_summary(),
+            on_finalize=persist_resolution,
         )
+        try:
+            return finalized["record"]
+        except KeyError as exc:
+            raise RuntimeError(
+                "Raised HITL worker request finalized without an audit record."
+            ) from exc
 
-    def log_stage_approval(
-        self,
-        context: str,
-        *,
-        provenance: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        record = {
-            "pipeline_stage": self.pipeline_stage,
-            "hitl_stage": "review",
-            "level": "B",
-            "actor": "manager",
-            "idea_type": "decision",
-            "context": context or "Manager approved completed stage artifacts.",
-            "basis": "Manager artifact review found the completed stage aligned with the living plan.",
-            "options": ["Approve stage completion.", "Request revision."],
-            "decision": "O1",
-            "raised": False,
-            "related_artifacts": self._plan_artifact(),
-        }
-        _apply_runtime_provenance(record, provenance)
-        self.log.append(record)
-
-    def prepare_checkpoint_target(self) -> None:
-        self._clear_checkpoint_dir()
-        self.paths.current_checkpoint.write_text("", encoding="utf-8")
-        self._loaded_checkpoint_path = None
-
-    def prepare_autonomous_idea_target(self) -> None:
-        self.paths.autonomous_ideas_path.parent.mkdir(parents=True, exist_ok=True)
-        self.paths.autonomous_ideas_path.write_text("", encoding="utf-8")
-
-    def consume_autonomous_ideas(
+    def prepare_idea_tool_context(
         self,
         *,
         hitl_stage: str,
         actor: Optional[str] = None,
         provenance: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
+        requires_human_approval: Optional[bool] = None,
+        allow_scoring_approval: bool = False,
+        phase_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
+        scoring_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
         if hitl_stage not in HITL_STAGES:
-            raise HitlValidationError(f"Invalid autonomous idea hitl_stage: {hitl_stage}")
-        path = self.paths.autonomous_ideas_path
-        if not path.exists() or path.stat().st_size == 0:
-            return []
+            raise HitlValidationError(f"Invalid HITL idea tool hitl_stage: {hitl_stage}")
+        self.stop_idea_tool_server()
+        self.paths.hitl_dir.mkdir(parents=True, exist_ok=True)
+        self.paths.tool_bin_dir.mkdir(parents=True, exist_ok=True)
+        self._tool_context = {
+            "work_dir": str(self.work_dir.resolve()),
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": hitl_stage,
+            "actor": actor or self.pipeline_stage,
+            "level": "C",
+            "provenance": provenance or {},
+            "requires_human_approval": requires_human_approval,
+            "allow_scoring_approval": allow_scoring_approval,
+            "phase_finish_validator": phase_finish_validator,
+            "scoring_handler": scoring_handler,
+        }
+        self._phase_finish_result = None
+        self._phase_finish_request_key = ""
+        self._phase_finish_response = None
+        self._proposal_submit_result = None
+        self._raised_idea_results = {}
+        self._started_scoring_requests = set()
+        self._start_idea_tool_server()
+        self._write_idea_tool_commands()
 
-        pending_records: List[Dict[str, Any]] = []
-        with open(path, encoding="utf-8") as f:
-            for line_number, line in enumerate(f, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    packet = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise HitlValidationError(
-                        "Invalid autonomous HITL idea JSONL at "
-                        f"{path.relative_to(self.work_dir)} line {line_number}: {exc}"
-                    ) from exc
-                if not isinstance(packet, dict):
-                    raise HitlValidationError(
-                        "Autonomous HITL idea packet must be a JSON object at "
-                        f"{path.relative_to(self.work_dir)} line {line_number}"
-                    )
-                pending_records.append(
-                    self._record_from_autonomous_idea(
-                        packet=packet,
-                        hitl_stage=hitl_stage,
-                        actor=actor or self.pipeline_stage,
-                        provenance=provenance,
-                    )
-                )
-        for record in pending_records:
-            validation_record = dict(record)
-            validation_record.setdefault("idea_id", "I0")
-            validation_record.setdefault("timestamp", _now())
-            if validation_record.get("idea_type") == "decision" and "options" in validation_record:
-                validation_record["options"] = _normalize_options(validation_record.get("options"))
-            self.log.validate(validation_record)
-        records = [self.log.append(record) for record in pending_records]
-        self.prepare_autonomous_idea_target()
-        return records
+    def register_worker_prompt(self, prompt_block: str) -> None:
+        """Persist the runtime-owned continuation point for the active worker.
 
-    def has_pending_checkpoint_payload(self, hitl_stage: Optional[str] = None) -> bool:
-        return self.load_checkpoint(hitl_stage=hitl_stage, require_pending=False) is not None
+        A provider process can exit after receiving feedback or phase approval.
+        The worker never owns this state: runtime records the exact already-rendered
+        prompt and may launch one replacement process against the same tool server.
+        """
+        prompt = _require_text(prompt_block, "prompt_block", "HITL worker continuation")
+        from core.hitl_runtime_state import HitlRuntimeState
 
-    def load_checkpoint(
+        HitlRuntimeState(self.work_dir).record_worker_continuation(
+            {
+                "pipeline_stage": self.pipeline_stage,
+                "hitl_stage": str(self._tool_context.get("hitl_stage", self.current_hitl_stage)),
+                "actor": str(self._tool_context.get("actor", self.pipeline_stage)),
+                "provenance": dict(self._tool_context.get("provenance") or {}),
+                "prompt_block": prompt,
+                "replacement_count": 0,
+                "status": "running",
+            }
+        )
+
+    def _update_worker_continuation(
         self,
-        hitl_stage: Optional[str] = None,
         *,
-        require_pending: bool = False,
-    ) -> Optional[Dict[str, Any]]:
-        path = self._pending_checkpoint_path(require_pending=require_pending)
-        if path is None:
+        prompt_block: Optional[str] = None,
+        hitl_stage: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> None:
+        updates: Dict[str, Any] = {}
+        if prompt_block:
+            updates["prompt_block"] = prompt_block
+        if hitl_stage:
+            updates["hitl_stage"] = hitl_stage
+        if status:
+            updates["status"] = status
+        if updates:
+            from core.hitl_runtime_state import HitlRuntimeState
+
+            HitlRuntimeState(self.work_dir).update_worker_continuation(**updates)
+
+    def _clear_worker_continuation(self) -> None:
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        HitlRuntimeState(self.work_dir).clear_worker_continuation()
+
+    def set_scoring_result(self, scorer_result: Dict[str, Any]) -> None:
+        """Attach a runtime-owned initial-stage scoring result to phase completion."""
+        if not isinstance(scorer_result, dict):
+            raise HitlValidationError("Runtime scorer result must be a JSON object.")
+        self._tool_context["scorer_result"] = dict(scorer_result)
+
+    def set_scored_candidate(self, candidate: Dict[str, Any]) -> None:
+        """Attach the finalized AutoResearch candidate to the held finish request."""
+        if not isinstance(candidate, dict):
+            raise HitlValidationError("Runtime scored candidate must be a JSON object.")
+        self._tool_context["scored_candidate"] = dict(candidate)
+
+    def worker_continuation(self) -> Optional[Dict[str, Any]]:
+        """Return the runtime-owned replacement-worker state, when present."""
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        continuation = HitlRuntimeState(self.work_dir).worker_continuation()
+        return dict(continuation) if isinstance(continuation, dict) else None
+
+    def resolved_worker_response(self) -> Optional[Dict[str, Any]]:
+        """Return the response retained for an idempotent worker-command retry."""
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        pending = HitlRuntimeState(self.work_dir).pending_worker_command()
+        if not isinstance(pending, dict) or pending.get("status") != "resolved":
             return None
-        with open(path, encoding="utf-8") as f:
+        response = pending.get("response")
+        return dict(response) if isinstance(response, dict) else None
+
+    def idea_tool_env(self, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        env = dict(base_env or os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        env["NEURICO_HITL_URL"] = self._tool_url
+        env["NEURICO_HITL_TOKEN"] = self._tool_token
+        env["NEURICO_PROJECT_ROOT"] = str(Path(__file__).resolve().parents[2])
+        env["NEURICO_PYTHON"] = sys.executable
+        env["PATH"] = f"{self.paths.tool_bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        if self.use_hitl_autoresearch_whiteboard:
+            from core.hitl_whiteboard import hitl_whiteboard_env
+
+            env.update(hitl_whiteboard_env())
+        return env
+
+    def clear_idea_tool_context(self) -> None:
+        self.stop_idea_tool_server()
+        self._tool_context = {}
+        self._phase_finish_result = None
+        self._phase_finish_request_key = ""
+        self._phase_finish_response = None
+        self._proposal_submit_result = None
+        self._raised_idea_results = {}
+
+    def reload_manager_after_state_restore(self) -> None:
+        """Refresh long-lived manager caches after private HITL rollback."""
+        reloader = getattr(self.manager, "reload_after_runtime_restore", None)
+        if callable(reloader):
+            reloader()
+
+    def abandon_pending_worker_request_for_rollback(self, reason: str) -> None:
+        """Cancel a held command before restoring its failed attempt boundary."""
+        canceller = getattr(self.manager, "abandon_worker_request_for_rollback", None)
+        if callable(canceller):
+            canceller(reason)
+
+    def stop_idea_tool_server(self) -> None:
+        server = self._tool_server
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        thread = self._tool_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1)
+        self._tool_server = None
+        self._tool_thread = None
+        self._tool_url = ""
+        self._tool_token = ""
+
+    def log_reported_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._tool_lock:
+            record = self._record_from_tool_payload(payload, raised=False)
+            existing = self.log.find_equivalent(record)
+            if existing is not None:
+                return existing
+            return self.log.append(record)
+
+    def submit_proposal_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._tool_lock:
+            record = self._record_from_proposal_tool_payload(payload)
+            submission_key = self._proposal_submission_key(record)
+            prior_result = self._proposal_submit_result
+            if isinstance(prior_result, dict):
+                prior_idea_id = str(prior_result.get("proposal_idea_id", "")).strip()
+                prior_record = self._proposal_record(prior_idea_id)
+                if (
+                    prior_record is not None
+                    and self._proposal_submission_key(prior_record) == submission_key
+                ):
+                    return dict(prior_result)
+            proposal_record = self.log.append(record, idempotent=True)
+            prior_admission = self._terminal_proposal_admission(proposal_record)
+            if prior_admission is not None:
+                self._proposal_submit_result = prior_admission
+                return dict(prior_admission)
+            finalized: Dict[str, Dict[str, Any]] = {}
+
+            def persist_admission(review: Dict[str, Any]) -> Dict[str, Any]:
+                manager_record = self._log_proposal_manager_review(
+                    proposal_record=proposal_record,
+                    review=review,
+                )
+                if review["status"] == "rejected_illegal":
+                    feedback = str(review["manager_feedback"]).strip()
+                    finalized["result"] = {
+                        "status": "feedback",
+                        "feedback": feedback,
+                        "instruction": (
+                            "This proposal is rejected. Do not edit or resubmit it. Create a "
+                            "new proposal that follows this feedback, then submit that new proposal "
+                            "with `hitl-submit-proposal` in this same proposer session."
+                        ),
+                        "proposal_idea_id": proposal_record["idea_id"],
+                        "manager_idea_id": manager_record["idea_id"],
+                    }
+                else:
+                    finalized["result"] = self._finalize_proposal_human_admission(
+                        proposal_record=proposal_record,
+                        manager_record=manager_record,
+                        review=review,
+                    )
+                return review
+
+            self.manager.review_proposal(
+                pipeline_stage=self.pipeline_stage,
+                proposal_text=str(proposal_record["proposal"]),
+                on_finalize=persist_admission,
+                request_context={
+                    "proposal_idea_id": proposal_record["idea_id"],
+                    "proposal_submission_key": submission_key,
+                    "proposal_payload": {
+                        "proposal_type": proposal_record["proposal_type"],
+                        "premises": proposal_record["premises"],
+                        "proposal": proposal_record["proposal"],
+                    },
+                },
+            )
             try:
-                checkpoint = _canonicalize_checkpoint(json.load(f))
-            except json.JSONDecodeError as exc:
-                raise HitlValidationError(
-                    f"Invalid HITL checkpoint JSON in {path.relative_to(self.work_dir)}: {exc}"
+                result = finalized["result"]
+            except KeyError as exc:
+                raise RuntimeError(
+                    "Proposal HITL worker request finalized without admission records."
                 ) from exc
-        effective_hitl_stage = hitl_stage or self.current_hitl_stage
-        self.current_hitl_stage = effective_hitl_stage
-        checkpoint["pipeline_stage"] = self.pipeline_stage
-        checkpoint["hitl_stage"] = effective_hitl_stage
-        self.validate_checkpoint(checkpoint)
-        self._loaded_checkpoint_path = path
-        return checkpoint
-
-    def archive_checkpoint(self, record: Dict[str, Any]) -> None:
-        path = self._loaded_checkpoint_path or self._pending_checkpoint_path()
-        if path is None:
-            return
-        hitl_stage = str(record.get("hitl_stage", "execution"))
-        idea_id = str(record.get("idea_id", "")).strip()
-        if not idea_id:
-            raise HitlValidationError("Cannot archive resolved checkpoint without idea_id")
-        archive_dir = (
-            self.work_dir
-            / "logs"
-            / "hitl"
-            / "resolve_checkpoint"
-            / self.pipeline_stage
-            / hitl_stage
-        )
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        dst = archive_dir / f"{idea_id}.json"
-        os.replace(path, dst)
-        self.prepare_checkpoint_target()
-
-    def _pending_checkpoint_path(self, *, require_pending: bool = False) -> Optional[Path]:
-        exact = self.paths.current_checkpoint
-        if exact.exists() and exact.stat().st_size > 0:
-            return exact
-
-        candidates = sorted(
-            p
-            for p in self.paths.checkpoints_dir.glob("*.json")
-            if p.is_file() and p.name != exact.name and p.stat().st_size > 0
-        )
-        if len(candidates) == 1:
-            return candidates[0]
-        if len(candidates) > 1:
-            rels = ", ".join(str(p.relative_to(self.work_dir)) for p in candidates)
-            raise HitlValidationError(
-                "Ambiguous HITL checkpoint files. Expected non-empty "
-                f"{exact.relative_to(self.work_dir)} or exactly one recoverable JSON file. "
-                f"Found: {rels}"
-            )
-        if require_pending:
-            raise HitlValidationError(
-                "HITL worker stopped without completion marker, but no pending idea was found. "
-                f"Expected non-empty {exact.relative_to(self.work_dir)} or exactly one "
-                f"recoverable JSON file in {self.paths.checkpoints_dir.relative_to(self.work_dir)}."
-            )
-        return None
-
-    def _clear_checkpoint_dir(self) -> None:
-        self.paths.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-        for path in self.paths.checkpoints_dir.iterdir():
-            if path.is_file():
-                path.unlink()
+            self._proposal_submit_result = result
+            if result.get("status") == "feedback":
+                self._update_worker_continuation(
+                    prompt_block=self.proposal_replacement_prompt_block(
+                        str(result.get("feedback", ""))
+                    ),
+                    hitl_stage="proposal",
+                    status="running",
+                )
+            return result
 
     @staticmethod
-    def validate_checkpoint(checkpoint: Dict[str, Any]) -> None:
-        checkpoint = _canonicalize_checkpoint(checkpoint)
+    def _proposal_submission_key(record: Dict[str, Any]) -> str:
+        """Identify one proposal command retry without exposing runtime request ids."""
+        return hashlib.sha256(
+            _compact_json(
+                {
+                    "proposal_type": record.get("proposal_type"),
+                    "premises": record.get("premises", []),
+                    "proposal": record.get("proposal"),
+                    "provenance": {
+                        key: record.get(key)
+                        for key in ("parent_node_id", "attempt_id")
+                        if str(record.get(key, "")).strip()
+                    },
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _raised_idea_request_key(record: Dict[str, Any]) -> str:
+        """Identify one blocking command retry within the current worker session."""
+        return hashlib.sha256(
+            _compact_json(HitlIdeaLog.logical_payload(record)).encode("utf-8")
+        ).hexdigest()
+
+    def _phase_finish_request_key_for(
+        self,
+        *,
+        hitl_stage: str,
+        plan_fingerprint: str,
+        summary: str,
+        related_artifacts: List[Dict[str, str]],
+    ) -> str:
+        return hashlib.sha256(
+            _compact_json(
+                {
+                    "pipeline_stage": self.pipeline_stage,
+                    "hitl_stage": hitl_stage,
+                    "plan_fingerprint": plan_fingerprint,
+                    "summary": summary,
+                    "related_artifacts": related_artifacts,
+                    "actor": self._tool_context.get("actor", self.pipeline_stage),
+                    "provenance": self._tool_context.get("provenance", {}),
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _current_plan_fingerprint(self) -> str:
+        """Fingerprint the worker-owned control artifact for finish-command retries."""
+        if not self.paths.plan_path.is_file():
+            return "missing"
+        return hashlib.sha256(self.paths.plan_path.read_bytes()).hexdigest()
+
+    def _proposal_record(self, idea_id: str) -> Optional[Dict[str, Any]]:
+        for candidate in reversed(self.log.records()):
+            if candidate.get("idea_id") != idea_id:
+                continue
+            if candidate.get("idea_type") != "proposal":
+                return None
+            return candidate
+        return None
+
+    def _terminal_proposal_admission(
+        self,
+        proposal_record: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Return the terminal admission already recorded for one proposal.
+
+        An exact retry after runtime has finalized an illegal or human-rejected
+        proposal must not reopen the proposal-review request. The worker must
+        create a new proposal instead. An approved retry is harmless and
+        returns the original approval.
+        """
+        proposal_id = str(proposal_record.get("idea_id", "")).strip()
+        if not proposal_id:
+            return None
+        for record in reversed(self.log.records()):
+            if record.get("idea_type") != "decision":
+                continue
+            premises = _normalize_premises(record.get("premises"))
+            if proposal_id not in premises:
+                continue
+            decision_needed = str(record.get("decision_needed", "")).strip()
+            if (
+                record.get("level") == "A"
+                and decision_needed
+                == "Should this AutoResearch proposal be admitted to experiment execution?"
+            ):
+                if record.get("decision") == "O1":
+                    return {
+                        "status": "approved",
+                        "instruction": "The proposal is already admitted. Stop proposal generation now.",
+                        "proposal_idea_id": proposal_id,
+                        "proposal": proposal_record.get("proposal", ""),
+                    }
+                return {
+                    "status": "feedback",
+                    "feedback": str(record.get("manager_feedback", "")).strip(),
+                    "human_feedback": str(record.get("human_feedback", "")).strip(),
+                    "instruction": (
+                        "This proposal was already rejected. Create a new proposal using "
+                        "the returned feedback, then submit that new proposal in this same session."
+                    ),
+                    "proposal_idea_id": proposal_id,
+                }
+            if (
+                record.get("level") == "B"
+                and record.get("actor") == "manager"
+                and decision_needed
+                == "Is this AutoResearch proposal legal to show to the human for approval?"
+                and record.get("decision") == "O2"
+            ):
+                return {
+                    "status": "feedback",
+                    "feedback": str(record.get("manager_feedback", "")).strip(),
+                    "instruction": (
+                        "This proposal was already rejected. Create a new proposal using "
+                        "the returned feedback, then submit that new proposal in this same session."
+                    ),
+                    "proposal_idea_id": proposal_id,
+                }
+        return None
+
+    def proposal_submit_result_after_worker_exit(
+        self,
+        result: Dict[str, Any],
+        *,
+        worker_name: str,
+    ) -> Dict[str, Any]:
+        submitted = self._proposal_submit_result
+        if submitted and submitted.get("status") == "approved":
+            self._clear_worker_continuation()
+            return {
+                **submitted,
+                "worker_exit_warning": (
+                    (
+                        f"{worker_name} exited with a provider error after runtime approved the proposal. "
+                        "Runtime retained the approved proposal because no proposer work remained."
+                    )
+                    if not result.get("success")
+                    else ""
+                ),
+            }
+        if submitted and submitted.get("status") == "feedback":
+            continuation = self.worker_continuation()
+            prompt_block = str((continuation or {}).get("prompt_block", "")).strip()
+            if prompt_block and int((continuation or {}).get("replacement_count", 0)) < 1:
+                self._update_worker_continuation(status="replacement_pending")
+                from core.hitl_runtime_state import HitlRuntimeState
+
+                HitlRuntimeState(self.work_dir).mark_worker_replacement()
+                return {
+                    **submitted,
+                    "replacement": True,
+                    "prompt_block": prompt_block,
+                    "worker_exit_warning": (
+                        f"{worker_name} exited after proposal feedback. Runtime will launch "
+                        "one proposer continuation with the same HITL state."
+                    ),
+                }
+            return {
+                **result,
+                "success": False,
+                "hitl": True,
+                "phase": "proposal",
+                "error": (
+                    f"{worker_name} exited after proposal feedback and the one permitted "
+                    "HITL proposer continuation was already used."
+                ),
+            }
+        continuation = HitlRuntime.worker_continuation(self)
+        prompt_block = str((continuation or {}).get("prompt_block", "")).strip()
+        if prompt_block and int((continuation or {}).get("replacement_count", 0)) < 1:
+            self._update_worker_continuation(status="replacement_pending")
+            from core.hitl_runtime_state import HitlRuntimeState
+
+            HitlRuntimeState(self.work_dir).mark_worker_replacement()
+            return {
+                "status": "replacement",
+                "replacement": True,
+                "prompt_block": prompt_block,
+                "worker_exit_warning": (
+                    f"{worker_name} exited before proposal admission. Runtime will launch "
+                    "one proposer continuation from the preserved HITL state."
+                ),
+            }
+        return {
+            **result,
+            "success": False,
+            "hitl": True,
+            "phase": "proposal",
+            "error": (
+                f"{worker_name} exited without an approved hitl-submit-proposal result. "
+                "AutoResearch proposal admission must be runtime-mediated through "
+                "hitl-submit-proposal."
+            ),
+        }
+
+    def view_ideas_for_tool(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        with self._tool_lock:
+            idea_id = str((payload or {}).get("idea_id", "")).strip()
+            if idea_id:
+                try:
+                    return {
+                        "ideas": [
+                            record
+                            for record in self.log.records()
+                            if record.get("idea_id") == idea_id
+                        ],
+                        "text": self.log.render_for_agent(idea_id=idea_id),
+                    }
+                except HitlValidationError as exc:
+                    raise HitlValidationError(
+                        "HITL_ERROR unknown_idea_id\n"
+                        f"{exc}\n"
+                        "Run `hitl-view-ideas` to inspect available finalized idea ids, then retry."
+                    ) from exc
+            return {
+                "ideas": self.log.records(),
+                "text": self.log.render_for_agent(),
+            }
+
+    def view_current_frontier_for_tool(self) -> Dict[str, Any]:
+        if (
+            self.pipeline_stage != "experiment_runner"
+            or self._tool_context.get("hitl_stage") != "proposal"
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR frontier_wrong_context\n"
+                "`view_current_frontier` is available only during AutoResearch HITL proposal generation.\n"
+                "Continue with the command appropriate for the current HITL phase."
+            )
+        from core.hitl_frontier import HitlFrontierStore
+
+        current = HitlFrontierStore(self.work_dir).current_for_worker()
+        return {"frontier": current, "text": json.dumps(current, ensure_ascii=False, indent=2)}
+
+    def resolve_tool_raised_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            with self._tool_lock:
+                raised_idea = self._record_from_tool_payload(payload, raised=True)
+                raised_idea["reason_for_escalation"] = _require_text(
+                    payload.get("reason_for_escalation"),
+                    "reason_for_escalation",
+                    "Raised HITL idea",
+                )
+                request_key = self._raised_idea_request_key(raised_idea)
+                prior = self._raised_idea_results.get(request_key)
+                if prior is not None:
+                    return dict(prior)
+                logged = self.resolve_raised_payload(
+                    raised_idea,
+                    provenance=self._tool_context.get("provenance"),
+                )
+                feedback = str(
+                    logged.get("manager_feedback")
+                    or logged.get("human_feedback")
+                    or logged.get("decision")
+                    or ""
+                ).strip()
+                hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
+                if hitl_stage == "review":
+                    prompt_block = self.review_prompt_block(feedback)
+                else:
+                    prompt_block = self.execution_prompt_block(
+                        mode="continue",
+                        feedback=feedback,
+                    )
+                self._update_worker_continuation(
+                    prompt_block=prompt_block,
+                    hitl_stage=hitl_stage,
+                    status="running",
+                )
+                result = {
+                    "idea_id": logged.get("idea_id"),
+                    "decision": logged.get("decision", ""),
+                    "feedback": feedback,
+                    "prompt_block": prompt_block,
+                }
+                self._raised_idea_results[request_key] = dict(result)
+                return result
+        finally:
+            self._worker_request_lock.release()
+
+    def log_frontier_decision(
+        self,
+        *,
+        proposal_idea_id: str,
+        accepted: bool,
+        reason: str,
+        provenance: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Finalize the manager's strategic scored-candidate decision."""
+        parent_node_id = str(provenance.get("parent_node_id", "")).strip()
+        attempt_id = str(provenance.get("attempt_id", "")).strip()
+        for existing in self.log.records():
+            if (
+                parent_node_id
+                and attempt_id
+                and existing.get("parent_node_id") == parent_node_id
+                and existing.get("attempt_id") == attempt_id
+                and existing.get("idea_type") == "decision"
+                and existing.get("actor") == "manager"
+                and existing.get("decision_needed")
+                == "Should the scored candidate be retained in the HITL research frontier?"
+            ):
+                return existing
+        premises = [proposal_idea_id]
+        pending_request = self._pending_worker_command()
+        scoring_review_idea_id = str(
+            (pending_request or {}).get("scoring_review_idea_id", "")
+        ).strip()
+        if scoring_review_idea_id and scoring_review_idea_id not in premises:
+            premises.append(scoring_review_idea_id)
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "decision",
+            "idea_category": "method_choice",
+            "level": "B",
+            "actor": "manager",
+            "premises": premises,
+            "context": "Manager reviewed the scored AutoResearch candidate against its active frontier direction.",
+            "related_artifacts": [],
+            "decision_needed": "Should the scored candidate be retained in the HITL research frontier?",
+            "options": [
+                "Accept candidate into the frontier.",
+                "Reject candidate and restore its parent frontier node.",
+            ],
+            "decision": "O1" if accepted else "O2",
+            "manager_feedback": str(reason).strip(),
+            "raised": False,
+        }
+        _apply_runtime_provenance(record, provenance)
+        return self.log.append(record, idempotent=True)
+
+    def log_scoring_recovery_decision(
+        self,
+        *,
+        scoring_review_idea_id: str,
+        context: str,
+        manager_feedback: str,
+        provenance: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Finalize manager scoring-repair feedback as one idempotent B-level idea."""
+        premise = _require_text(
+            scoring_review_idea_id,
+            "scoring_review_idea_id",
+            "AutoResearch scoring-recovery decision",
+        )
+        feedback = _require_text(
+            manager_feedback,
+            "manager_feedback",
+            "AutoResearch scoring-recovery decision",
+        )
+        for existing in reversed(self.log.records()):
+            if (
+                existing.get("pipeline_stage") == "experiment_runner"
+                and existing.get("hitl_stage") == "review"
+                and existing.get("idea_type") == "decision"
+                and existing.get("level") == "B"
+                and existing.get("actor") == "manager"
+                and existing.get("premises") == [premise]
+                and existing.get("decision_needed")
+                == "Must this candidate be repaired before objective scoring can continue?"
+            ):
+                return existing
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "decision",
+            "idea_category": "evaluation_choice",
+            "level": "B",
+            "actor": "manager",
+            "premises": [premise],
+            "context": _require_text(
+                context,
+                "context",
+                "AutoResearch scoring-recovery decision",
+            ),
+            "related_artifacts": [
+                {
+                    "path": "scoring/results.json",
+                    "description": "Runtime-derived scoring output that required repair.",
+                }
+            ],
+            "decision_needed": "Must this candidate be repaired before objective scoring can continue?",
+            "options": ["Return the candidate to the worker for repair and rescore."],
+            "decision": "O1",
+            "manager_feedback": feedback,
+            "raised": True,
+        }
+        _apply_runtime_provenance(record, provenance)
+        return self.log.append(record, idempotent=True)
+
+    def log_initial_scoring_decision(
+        self,
+        *,
+        scoring_review_idea_id: str,
+        approved: bool,
+        context: str,
+        manager_feedback: str,
+    ) -> Dict[str, Any]:
+        """Record the manager's final initial-score readiness decision."""
+        premise = _require_text(
+            scoring_review_idea_id,
+            "scoring_review_idea_id",
+            "Initial AutoResearch scoring decision",
+        )
+        feedback = str(manager_feedback).strip()
+        if not approved:
+            feedback = _require_text(
+                feedback,
+                "manager_feedback",
+                "Initial AutoResearch scoring repair decision",
+            )
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "decision",
+            "idea_category": "evaluation_choice",
+            "level": "B",
+            "actor": "manager",
+            "premises": [premise],
+            "context": _require_text(
+                context,
+                "context",
+                "Initial AutoResearch scoring decision",
+            ),
+            "related_artifacts": [
+                {
+                    "path": "scoring/results.json",
+                    "description": "Runtime-produced objective scoring result for the initial experiment.",
+                }
+            ],
+            "decision_needed": "Is the scored initial experiment ready to become the AutoResearch root node?",
+            "options": [
+                "Accept the error-free scored initial experiment as the root node.",
+                "Return repair feedback and score the initial experiment again.",
+            ],
+            "decision": "O1" if approved else "O2",
+            "manager_feedback": feedback,
+            "raised": not approved,
+        }
+        return self.log.append(record, idempotent=True)
+
+    def scoring_repair_response(
+        self,
+        *,
+        context: str,
+        manager_feedback: str,
+        record: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return one held finish request from scoring to review for repair."""
+        feedback = _require_text(
+            manager_feedback,
+            "manager_feedback",
+            "Runtime scoring repair response",
+        )
+        pending = self._pending_worker_command()
+        request_key = str((pending or {}).get("request_key", "")).strip()
+        if not request_key:
+            raise HitlValidationError(
+                "Runtime scoring repair has no pending phase-finish request to resume."
+            )
+        self._tool_context["hitl_stage"] = "review"
+        self.current_hitl_stage = "review"
+        self._phase_finish_result = {
+            "called": True,
+            "status": "feedback",
+            "hitl_stage": "review",
+            "manager_feedback": feedback,
+            "context": _require_text(context, "context", "Runtime scoring repair response"),
+            "record": dict(record),
+            "next_phase": "review",
+            "final": False,
+        }
+        return self._remember_phase_finish_response(
+            request_key,
+            {
+                "status": "feedback",
+                "feedback": feedback,
+                "next_phase": "review",
+                "instruction": (
+                    "Objective scoring found repairable issues. Apply the manager feedback, "
+                    "update the living plan and affected artifacts, then call "
+                    "hitl-finish-phase again."
+                ),
+                "prompt_block": self.review_prompt_block(feedback),
+                "final": False,
+                "record": dict(record),
+            },
+        )
+
+    def finish_tool_phase(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            return self._finish_tool_phase_locked(payload)
+        finally:
+            self._worker_request_lock.release()
+
+    def _phase_finish_response_for_retry(
+        self,
+        request_key: str,
+        *,
+        hitl_stage: str,
+        plan_fingerprint: str,
+        summary: str,
+        related_artifacts: List[Dict[str, str]],
+    ) -> Optional[Dict[str, Any]]:
+        if (
+            self._phase_finish_request_key == request_key
+            and self._phase_finish_response is not None
+        ):
+            return dict(self._phase_finish_response)
+        # A terminal response advances the live tool context to ``complete``
+        # (or ``scoring``).  An exact retry after the command response was
+        # lost must receive that terminal result, not initiate a fictional
+        # review of the terminal state.  Non-terminal feedback remains bound
+        # to the plan fingerprint below so a worker revision starts a new
+        # review as intended.
+        previous = self._phase_finish_result
+        if (
+            self._phase_finish_response is not None
+            and isinstance(previous, dict)
+            and bool(previous.get("final"))
+            and hitl_stage in {"complete", "scoring"}
+            and previous.get("plan_fingerprint") == plan_fingerprint
+            and previous.get("summary") == summary
+            and previous.get("related_artifacts") == related_artifacts
+        ):
+            return dict(self._phase_finish_response)
+        # A prior response may have advanced the runtime stage (for example,
+        # plan approval enters execution). The worker's exact retry must still
+        # receive that prior response rather than start another review.
+        if (
+            self._phase_finish_response is not None
+            and isinstance(previous, dict)
+            and previous.get("hitl_stage") == hitl_stage
+            and previous.get("plan_fingerprint") == plan_fingerprint
+            and previous.get("summary") == summary
+            and previous.get("related_artifacts") == related_artifacts
+        ):
+            return dict(self._phase_finish_response)
+        return None
+
+    def _remember_phase_finish_response(
+        self,
+        request_key: str,
+        response: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        self._phase_finish_request_key = request_key
+        self._phase_finish_response = dict(response)
+        prompt_block = str(response.get("prompt_block", "")).strip()
+        if prompt_block:
+            self._update_worker_continuation(
+                prompt_block=prompt_block,
+                hitl_stage=str(response.get("next_phase", "")).strip() or None,
+                status="running",
+            )
+        return response
+
+    def _pending_worker_command(self) -> Optional[Dict[str, Any]]:
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        return HitlRuntimeState(self.work_dir).pending_worker_command()
+
+    def resume_pending_worker_command(self) -> Dict[str, Any]:
+        """Reconnect a replacement worker to the one runtime-held command.
+
+        The worker provides no workflow data here. Runtime reuses the validated
+        request it persisted before the earlier worker process disappeared.
+        """
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        pending = HitlRuntimeState(self.work_dir).pending_worker_command()
+        if not isinstance(pending, dict):
+            raise HitlValidationError(
+                "HITL_ERROR no_pending_worker_request\n"
+                "There is no unresolved runtime worker request to resume. Continue with the current phase instructions."
+            )
+        request_key = str(pending.get("request_key", "")).strip()
+        if not request_key:
+            raise HitlValidationError("Pending HITL worker request has no request key.")
+        if pending.get("status") == "resolved":
+            response = pending.get("response")
+            if not isinstance(response, dict):
+                raise HitlValidationError("Resolved HITL worker request has no runtime response.")
+            return dict(response)
+        kind = str(pending.get("kind", "")).strip()
+        if kind == "phase_finish":
+            if pending.get("status") in {"scoring_approval_pending", "scoring"}:
+                handler = self._tool_context.get("scoring_handler")
+                if not callable(handler):
+                    raise HitlValidationError(
+                        "Runtime resumed a scoring handoff without its scoring handler. "
+                        "Keep the workspace unchanged and retry after the HITL controller restarts recovery."
+                    )
+                record = self._complete_pending_scoring_approval(
+                    request_key=request_key,
+                    pending=pending,
+                )
+                approval = {
+                    "status": "approved_for_scoring",
+                    "context": str(pending.get("scoring_context", "")).strip(),
+                    "scoring_review_idea_id": str(record["idea_id"]),
+                }
+                if request_key not in self._started_scoring_requests:
+                    self._started_scoring_requests.add(request_key)
+                    threading.Thread(
+                        target=handler,
+                        args=(approval,),
+                        daemon=True,
+                        name="neurico-hitl-resumed-scoring",
+                    ).start()
+                return self.manager.wait_for_worker_request(request_key)
+            return self.finish_tool_phase(
+                {
+                    "summary": pending.get("finish_summary", ""),
+                    "related_artifacts": pending.get("related_artifacts", []),
+                }
+            )
+        if kind == "raised_idea":
+            raised_idea = pending.get("raised_idea")
+            if not isinstance(raised_idea, dict):
+                raise HitlValidationError("Pending raised idea request has no worker payload.")
+            return self.resolve_tool_raised_payload(raised_idea)
+        if kind == "proposal":
+            proposal_payload = pending.get("proposal_payload")
+            if not isinstance(proposal_payload, dict):
+                raise HitlValidationError(
+                    "Pending proposal request has no submitted proposal payload."
+                )
+            return self.submit_proposal_payload(proposal_payload)
+        raise HitlValidationError(
+            f"Unsupported pending HITL worker request kind: {kind or '<missing>'}."
+        )
+
+    def _complete_pending_scoring_approval(
+        self,
+        *,
+        request_key: str,
+        pending: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Commit a persisted scoring approval into the idea log exactly once."""
+        review = pending.get("scoring_review")
+        if not isinstance(review, dict):
+            existing_id = str(pending.get("scoring_review_idea_id", "")).strip()
+            if existing_id:
+                record = next(
+                    (
+                        candidate
+                        for candidate in reversed(self.log.records())
+                        if candidate.get("idea_id") == existing_id
+                    ),
+                    None,
+                )
+                if isinstance(record, dict):
+                    return record
+            raise HitlValidationError(
+                "Runtime cannot resume scoring because its persisted manager approval is incomplete. "
+                "Keep the workspace unchanged and retry after HITL recovery."
+            )
+        hitl_stage = _require_text(
+            pending.get("hitl_stage"), "hitl_stage", "Persisted scoring approval"
+        )
+        summary = _require_text(
+            pending.get("finish_summary"), "finish_summary", "Persisted scoring approval"
+        )
+        related_artifacts = _as_related_artifacts(pending.get("related_artifacts"))
+        record = self.log.append(
+            self._finish_review_record(
+                hitl_stage=hitl_stage,
+                summary=summary,
+                related_artifacts=related_artifacts,
+                review=review,
+                decision="O1",
+                raised=False,
+                manager_feedback="",
+            ),
+            idempotent=True,
+        )
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        HitlRuntimeState(self.work_dir).complete_scoring_handoff(
+            request_key,
+            scoring_review_idea_id=str(record["idea_id"]),
+        )
+        return record
+
+    def _finish_tool_phase_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._tool_lock:
+            summary = _require_text(payload.get("summary"), "summary", "HITL phase finish")
+            related_artifacts = _as_related_artifacts(payload.get("related_artifacts"))
+            hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
+            plan_fingerprint = self._current_plan_fingerprint()
+            request_key = self._phase_finish_request_key_for(
+                hitl_stage=hitl_stage,
+                plan_fingerprint=plan_fingerprint,
+                summary=summary,
+                related_artifacts=related_artifacts,
+            )
+            prior_response = self._phase_finish_response_for_retry(
+                request_key,
+                hitl_stage=hitl_stage,
+                plan_fingerprint=plan_fingerprint,
+                summary=summary,
+                related_artifacts=related_artifacts,
+            )
+            if prior_response is not None:
+                return prior_response
+            if hitl_stage == "plan" and not self._latest_worker_plan_idea_id():
+                raise HitlValidationError(
+                    "HITL_ERROR plan_requires_c_level_idea\n"
+                    "Before requesting plan review, report at least one material C-level plan "
+                    "evidence or decision with `hitl-report-idea`.\n"
+                    "Use `hitl-view-ideas` if prior ideas inform it, then retry hitl-finish-phase."
+                )
+            validator = self._tool_context.get("phase_finish_validator")
+            if hitl_stage in {"execution", "review"} and callable(validator):
+                validation = validator()
+                if not bool(validation.get("valid")):
+                    issues = validation.get("issues", [])
+                    if not isinstance(issues, list):
+                        issues = [str(issues)]
+                    issue_text = "\n".join(
+                        f"- {str(issue)}" for issue in issues if str(issue).strip()
+                    )
+                    feedback = (
+                        "Runtime validation found repairable rule-maker output issues. "
+                        "Correct only these issues, update the living plan if needed, then call "
+                        "hitl-finish-phase again:\n"
+                        + (issue_text or "- Recheck the required rule-maker outputs.")
+                    )
+                    self._tool_context["hitl_stage"] = "review"
+                    self.current_hitl_stage = "review"
+                    self._phase_finish_result = {
+                        "called": True,
+                        "status": "feedback",
+                        "hitl_stage": "review",
+                        "plan_fingerprint": plan_fingerprint,
+                        "summary": summary,
+                        "related_artifacts": related_artifacts,
+                        "manager_feedback": feedback,
+                        "context": "Runtime validation found repairable output issues before manager review.",
+                        "next_phase": "review",
+                        "final": False,
+                    }
+                    return self._remember_phase_finish_response(
+                        request_key,
+                        {
+                            "status": "feedback",
+                            "feedback": feedback,
+                            "next_phase": "review",
+                            "instruction": (
+                                "Correct the listed output issues in this same worker session, then "
+                                "call hitl-finish-phase again."
+                            ),
+                            "prompt_block": self.review_prompt_block(feedback),
+                        },
+                    )
+            finalized: Dict[str, Dict[str, Any]] = {}
+
+            def persist_phase_review(review: Dict[str, Any]) -> Dict[str, Any]:
+                status = str(review.get("status", "")).strip()
+                human_resolved_plan = bool(
+                    hitl_stage == "plan"
+                    and self._tool_context.get("requires_human_approval")
+                    and str(review.get("human_feedback", "")).strip()
+                )
+                if status == "feedback" and human_resolved_plan:
+                    finalized["record"] = self._finish_human_plan_admission_from_review(review)[
+                        "record"
+                    ]
+                elif status == "feedback":
+                    feedback = _require_text(
+                        review.get("manager_feedback"),
+                        "manager_feedback",
+                        "Manager phase finish review with status='feedback'",
+                    )
+                    next_stage = "review" if hitl_stage == "execution" else hitl_stage
+                    finalized["record"] = self.log.append(
+                        self._finish_review_record(
+                            hitl_stage=next_stage,
+                            summary=summary,
+                            related_artifacts=related_artifacts,
+                            review=review,
+                            decision="O2",
+                            raised=True,
+                            manager_feedback=feedback,
+                        ),
+                        idempotent=True,
+                    )
+                elif (
+                    status == "approved"
+                    and hitl_stage == "plan"
+                    and self._tool_context.get("requires_human_approval")
+                ):
+                    finalized["record"] = self._finish_human_plan_admission_from_review(review)[
+                        "record"
+                    ]
+                elif status == "approved":
+                    finalized["record"] = self.log.append(
+                        self._finish_review_record(
+                            hitl_stage=hitl_stage,
+                            summary=summary,
+                            related_artifacts=related_artifacts,
+                            review=review,
+                            decision="O1",
+                            raised=False,
+                            manager_feedback="",
+                        ),
+                        idempotent=True,
+                    )
+                else:
+                    raise HitlValidationError(
+                        "Manager phase finish review must return status 'approved' or 'feedback'."
+                    )
+                return review
+
+            def persist_scoring_approval(review: Dict[str, Any]) -> Dict[str, Any]:
+                handler = self._tool_context.get("scoring_handler")
+                if not callable(handler):
+                    raise HitlValidationError(
+                        "AutoResearch HITL scoring approval has no runtime scoring handler. "
+                        "Preserve this review and retry approve_for_scoring after runtime recovers it."
+                    )
+                from core.hitl_runtime_state import HitlRuntimeState
+
+                state = HitlRuntimeState(self.work_dir)
+                pending = state.pending_worker_command()
+                if not isinstance(pending, dict) or not str(pending.get("request_key", "")).strip():
+                    raise HitlValidationError(
+                        "AutoResearch scoring approval has no held phase-finish request. "
+                        "Keep the workspace unchanged and retry approval after runtime recovery."
+                    )
+                request_key = str(pending["request_key"])
+                if pending.get("status") != "scoring_approval_pending":
+                    raise HitlValidationError(
+                        "AutoResearch scoring approval is missing its persisted handoff state. "
+                        "Keep the workspace unchanged and retry approval."
+                    )
+                record = self._complete_pending_scoring_approval(
+                    request_key=request_key,
+                    pending=pending,
+                )
+                finalized["record"] = record
+                payload = {**review, "scoring_review_idea_id": record["idea_id"]}
+
+                def run_scoring() -> None:
+                    try:
+                        handler(payload)
+                    except Exception as exc:
+                        # A scorer handoff must never leave the worker held with
+                        # no route back into the normal manager ReAct loop.
+                        # Runtime asks the manager for repair feedback on the
+                        # same command rather than treating this as terminal.
+                        def validate_scoring_failure(data: Dict[str, Any]) -> Dict[str, Any]:
+                            if str(data.get("status", "")).strip() != "feedback":
+                                raise HitlValidationError(
+                                    "A runtime scoring failure requires status='feedback'."
+                                )
+                            return {
+                                "status": "feedback",
+                                "context": _require_text(
+                                    data.get("context"),
+                                    "context",
+                                    "Runtime scoring failure",
+                                ),
+                                "manager_feedback": _require_text(
+                                    data.get("manager_feedback"),
+                                    "manager_feedback",
+                                    "Runtime scoring failure",
+                                ),
+                            }
+
+                        self.manager.resume_worker_request(
+                            prompt=_load_hitl_template(
+                                "manager_runtime_scoring_failure.txt",
+                                error=str(exc),
+                            ),
+                            validate=validate_scoring_failure,
+                            finalize=persist_phase_review,
+                        )
+
+                threading.Thread(
+                    target=run_scoring,
+                    daemon=True,
+                    name="neurico-hitl-scoring",
+                ).start()
+                self._started_scoring_requests.add(request_key)
+                return payload
+
+            review = self.manager.review_phase_finish(
+                pipeline_stage=self.pipeline_stage,
+                hitl_stage=hitl_stage,
+                plan_text=self._read_optional(self.paths.plan_path),
+                plan_fingerprint=plan_fingerprint,
+                finish_summary=summary,
+                related_artifacts=related_artifacts,
+                requires_human_approval=bool(self._tool_context.get("requires_human_approval")),
+                allow_scoring_approval=bool(self._tool_context.get("allow_scoring_approval"))
+                and hitl_stage in {"execution", "review"},
+                scoring_handoff_context=dict(self._tool_context.get("provenance") or {}),
+                on_finalize=persist_phase_review,
+                on_scoring_approval=persist_scoring_approval,
+            )
+            status = str(review.get("status", "")).strip()
+            if status == "feedback":
+                human_resolved_plan = bool(
+                    hitl_stage == "plan"
+                    and self._tool_context.get("requires_human_approval")
+                    and str(review.get("human_feedback", "")).strip()
+                )
+                if human_resolved_plan:
+                    feedback = _require_text(
+                        review.get("manager_feedback"),
+                        "manager_feedback",
+                        "Manager translation of human plan feedback",
+                    )
+                    logged = finalized.get("record")
+                    if not logged:
+                        raise RuntimeError(
+                            "Human plan feedback was finalized without an audit record."
+                        )
+                    self._phase_finish_result = {
+                        "called": True,
+                        "status": "feedback",
+                        "hitl_stage": hitl_stage,
+                        "plan_fingerprint": plan_fingerprint,
+                        "summary": summary,
+                        "related_artifacts": related_artifacts,
+                        "manager_feedback": feedback,
+                        "context": str(review.get("context", "")),
+                        "record": logged,
+                        "next_phase": "plan",
+                        "final": False,
+                    }
+                    return self._remember_phase_finish_response(
+                        request_key,
+                        {
+                            "status": "feedback",
+                            "feedback": feedback,
+                            "next_phase": "plan",
+                            "instruction": (
+                                "Apply this plan feedback, update the living plan, then "
+                                "call hitl-finish-phase again."
+                            ),
+                            "prompt_block": self.plan_revision_prompt_block(feedback),
+                            "record": logged,
+                        },
+                    )
+                feedback = _require_text(
+                    review.get("manager_feedback"),
+                    "manager_feedback",
+                    "Manager phase finish review with status='feedback'",
+                )
+                next_phase = "review" if hitl_stage == "execution" else hitl_stage
+                if next_phase != hitl_stage:
+                    self._tool_context["hitl_stage"] = next_phase
+                    self.current_hitl_stage = next_phase
+                logged = finalized.get("record")
+                if not logged:
+                    raise RuntimeError("Manager feedback was finalized without an audit record.")
+                self._phase_finish_result = {
+                    "called": True,
+                    "status": "feedback",
+                    "hitl_stage": next_phase,
+                    "plan_fingerprint": plan_fingerprint,
+                    "summary": summary,
+                    "related_artifacts": related_artifacts,
+                    "manager_feedback": feedback,
+                    "context": str(review.get("context", "")),
+                    "record": logged,
+                    "next_phase": next_phase,
+                    "final": False,
+                }
+                return self._remember_phase_finish_response(
+                    request_key,
+                    {
+                        "status": "feedback",
+                        "feedback": feedback,
+                        "next_phase": next_phase,
+                        "instruction": (
+                            "Apply this feedback in the current phase, update the living "
+                            "plan/current artifacts, then call hitl-finish-phase again."
+                        ),
+                        "prompt_block": self._finish_feedback_prompt_block(
+                            hitl_stage=next_phase,
+                            feedback=feedback,
+                        ),
+                        "record": logged,
+                    },
+                )
+
+            if status != "approved":
+                raise HitlValidationError(
+                    "Manager phase finish review must return status 'approved' or 'feedback'."
+                )
+
+            if hitl_stage == "plan" and self._tool_context.get("requires_human_approval"):
+                logged = finalized.get("record")
+                if not logged:
+                    raise RuntimeError("Human plan approval was finalized without an audit record.")
+            else:
+                logged = finalized.get("record")
+                if not logged:
+                    raise RuntimeError("Manager approval was finalized without an audit record.")
+
+            next_phase = "complete"
+            final = True
+            instruction = "Reviewer approved this stage. Stop this worker session now."
+            prompt_block = ""
+            if hitl_stage == "plan":
+                if bool(self._tool_context.get("requires_human_approval")):
+                    from core.hitl_runtime_state import HitlRuntimeState
+
+                    HitlRuntimeState(self.work_dir).mark_plan_approved(
+                        pipeline_stage=self.pipeline_stage,
+                        plan_fingerprint=plan_fingerprint,
+                    )
+                next_phase = "execution"
+                final = False
+                self._tool_context["hitl_stage"] = "execution"
+                self._tool_context["requires_human_approval"] = False
+                self.current_hitl_stage = "execution"
+                instruction = (
+                    "Plan approved. Do not stop. Continue into execution in this "
+                    "same worker session using the execution instructions below."
+                )
+                prompt_block = self.execution_prompt_block(mode="execute")
+            else:
+                self._tool_context["hitl_stage"] = "complete"
+                self.current_hitl_stage = "complete"
+
+            self._phase_finish_result = {
+                "called": True,
+                "status": "approved",
+                "hitl_stage": hitl_stage,
+                "plan_fingerprint": plan_fingerprint,
+                "summary": summary,
+                "related_artifacts": related_artifacts,
+                "manager_feedback": "",
+                "context": str(review.get("context", "")),
+                "record": logged,
+                "next_phase": next_phase,
+                "final": final,
+                **(
+                    {"scored_candidate": dict(self._tool_context["scored_candidate"])}
+                    if isinstance(self._tool_context.get("scored_candidate"), dict)
+                    else {}
+                ),
+                **(
+                    {"scorer_result": dict(self._tool_context["scorer_result"])}
+                    if isinstance(self._tool_context.get("scorer_result"), dict)
+                    else {}
+                ),
+            }
+            response = {
+                "status": "approved",
+                "feedback": "",
+                "next_phase": next_phase,
+                "instruction": instruction,
+                "prompt_block": prompt_block,
+                "final": final,
+                "record": logged,
+            }
+            if isinstance(self._tool_context.get("scored_candidate"), dict):
+                response["scored_candidate"] = dict(self._tool_context["scored_candidate"])
+            if isinstance(self._tool_context.get("scorer_result"), dict):
+                response["scorer_result"] = dict(self._tool_context["scorer_result"])
+            return self._remember_phase_finish_response(request_key, response)
+
+    def phase_finish_result(self) -> Optional[Dict[str, Any]]:
+        return dict(self._phase_finish_result) if self._phase_finish_result else None
+
+    def finish_was_approved(self) -> bool:
+        return bool(
+            self._phase_finish_result and self._phase_finish_result.get("status") == "approved"
+        )
+
+    def handle_worker_exit_after_finish(
+        self,
+        result: Dict[str, Any],
+        *,
+        phase: str,
+        worker_name: str,
+    ) -> Dict[str, Any]:
+        """Interpret a provider return and request one runtime-owned replacement.
+
+        The normal protocol remains one worker session. This recovery path only
+        activates after that external session exits unexpectedly. It preserves the
+        live tool-server and request state and gives exactly one replacement the runtime
+        prompt that the lost worker should have continued from.
+        """
+        finish = self.phase_finish_result()
+        resolved = self.resolved_worker_response()
+        if resolved and (
+            bool(resolved.get("final"))
+            or isinstance(resolved.get("scored_candidate"), dict)
+            or isinstance(resolved.get("scorer_result"), dict)
+        ):
+            self._clear_worker_continuation()
+            return {
+                "approved": True,
+                "worker_exit_warning": (
+                    f"{worker_name} exited after runtime finalized the held worker request."
+                    if not result.get("success")
+                    else ""
+                ),
+            }
+        if finish and finish.get("status") == "approved" and finish.get("final"):
+            self._clear_worker_continuation()
+            return {
+                "approved": True,
+                "worker_exit_warning": (
+                    (
+                        f"{worker_name} exited with a provider error after final HITL approval. "
+                        "Runtime retained the already-approved state because no worker action remained."
+                    )
+                    if not result.get("success")
+                    else ""
+                ),
+            }
+
+        continuation = self.worker_continuation()
+        if continuation is not None:
+            prompt_block = str(
+                (finish or {}).get("prompt_block") or continuation.get("prompt_block", "")
+            ).strip()
+            if prompt_block and int(continuation.get("replacement_count", 0)) < 1:
+                self._update_worker_continuation(
+                    prompt_block=prompt_block,
+                    hitl_stage=str(
+                        (finish or {}).get("next_phase") or continuation.get("hitl_stage", "")
+                    ).strip()
+                    or None,
+                    status="replacement_pending",
+                )
+                from core.hitl_runtime_state import HitlRuntimeState
+
+                HitlRuntimeState(self.work_dir).mark_worker_replacement()
+                return {
+                    "approved": False,
+                    "replacement": True,
+                    "prompt_block": prompt_block,
+                    "phase": phase,
+                    "worker_exit_warning": (
+                        f"{worker_name} exited before a final HITL result. Runtime will "
+                        "launch one continuation worker from the preserved HITL state."
+                    ),
+                }
+
+            if int(continuation.get("replacement_count", 0)) >= 1:
+                error = (
+                    f"{worker_name} exited after the one permitted HITL continuation "
+                    "worker was already launched. Runtime preserved the current workspace, "
+                    "manager conversation and continuation state for recovery."
+                )
+            else:
+                error = (
+                    f"{worker_name} exited before final HITL approval, but runtime has no "
+                    "continuation prompt to launch safely."
+                )
+        else:
+            if finish and finish.get("status") == "feedback":
+                error = (
+                    "HITL worker exited after reviewer feedback instead of "
+                    "continuing in the same session and calling hitl-finish-phase again."
+                )
+            elif not result.get("success"):
+                error = (
+                    f"{worker_name} failed before approved HITL finish. Raised HITL "
+                    "ideas must be resolved through hitl-raise-idea inside "
+                    "the same worker session."
+                )
+            else:
+                error = (
+                    f"{worker_name} exited during {phase} without an approved "
+                    "hitl-finish-phase result. HITL phase completion must be "
+                    "runtime-mediated through hitl-finish-phase."
+                )
+        return {**result, "success": False, "hitl": True, "phase": phase, "error": error}
+
+    def _finish_feedback_prompt_block(self, *, hitl_stage: str, feedback: str) -> str:
+        if hitl_stage == "plan":
+            return self.plan_revision_prompt_block(feedback)
+        return self.review_prompt_block(feedback)
+
+    def _record_from_tool_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        raised: bool,
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise HitlValidationError("HITL tool payload must be a JSON object.")
+        idea_type = _require_text(payload.get("idea_type"), "idea_type", "HITL tool idea")
+        if idea_type not in {"decision", "evidence"}:
+            raise HitlValidationError(f"Invalid HITL tool idea_type: {idea_type}")
+        hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
+        actor = str(self._tool_context.get("actor", self.pipeline_stage))
+        record: Dict[str, Any] = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": hitl_stage,
+            "idea_type": idea_type,
+            "idea_category": _validate_idea_category(
+                idea_type,
+                payload.get("idea_category"),
+            ),
+            "level": "C",
+            "actor": actor,
+            "premises": _with_runtime_premises(
+                _normalize_premises(payload.get("premises")),
+                self._tool_context.get("provenance"),
+            ),
+            "context": _require_text(payload.get("context"), "context", "HITL tool idea"),
+            "related_artifacts": _as_related_artifacts(payload.get("related_artifacts")),
+            "raised": raised,
+        }
+        _apply_runtime_provenance(record, self._tool_context.get("provenance"))
+        if idea_type == "decision":
+            record["decision_needed"] = _require_text(
+                payload.get("decision_needed"),
+                "decision_needed",
+                "HITL decision idea",
+            )
+            record["options"] = payload.get("options")
+            if raised:
+                _validate_substantive_options(
+                    record.get("options"),
+                    error_prefix="Raised HITL decision idea",
+                )
+            else:
+                _validate_substantive_options(
+                    record.get("options"),
+                    error_prefix="C-level HITL decision idea",
+                )
+                record["decision"] = _require_text(
+                    payload.get("decision"),
+                    "decision",
+                    "C-level HITL decision idea",
+                )
+        else:
+            record["evidence"] = _require_text(
+                payload.get("evidence"),
+                "evidence",
+                "HITL evidence idea",
+            )
+        return record
+
+    def _record_from_proposal_tool_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise HitlValidationError("HITL proposal tool payload must be a JSON object.")
+        hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
+        actor = str(self._tool_context.get("actor", self.pipeline_stage))
+        if self.pipeline_stage != "experiment_runner" or hitl_stage != "proposal":
+            raise HitlValidationError(
+                "HITL_ERROR proposal_wrong_context\n"
+                "`hitl-submit-proposal` can only be used during experiment_runner proposal generation.\n"
+                "Continue with the command appropriate for the current HITL phase."
+            )
+        proposal_type = _require_text(
+            payload.get("proposal_type"),
+            "proposal_type",
+            "HITL proposal idea",
+        )
+        if proposal_type not in PROPOSAL_KINDS:
+            raise HitlValidationError(
+                "HITL_ERROR invalid_proposal_type\n"
+                "Proposal type must be exactly `exploitation` or `exploration`.\n"
+                "Rerun `hitl-submit-proposal` with `--proposal-type exploitation` or `--proposal-type exploration`."
+            )
+        record: Dict[str, Any] = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": hitl_stage,
+            "idea_type": "proposal",
+            "proposal_type": proposal_type,
+            "level": "C",
+            "actor": actor,
+            "premises": _normalize_premises(payload.get("premises")),
+            "context": "AutoResearch proposer submitted the next experiment proposal.",
+            "related_artifacts": [],
+            "proposal": _require_text(payload.get("proposal"), "proposal", "HITL proposal idea"),
+            "raised": False,
+        }
+        _apply_runtime_provenance(record, self._tool_context.get("provenance"))
+        return record
+
+    def _log_proposal_manager_review(
+        self,
+        *,
+        proposal_record: Dict[str, Any],
+        review: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        options = _normalize_options(
+            [
+                "Approve proposal as legal.",
+                "Reject illegal proposal and request a new proposal.",
+            ]
+        )
+        legal = review["status"] != "rejected_illegal"
+        record = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": "proposal",
+            "idea_type": "decision",
+            "idea_category": "artifact_boundary_choice",
+            "level": "B",
+            "actor": "manager",
+            "premises": [proposal_record["idea_id"]],
+            "context": str(
+                review.get("context", "Manager reviewed AutoResearch proposal legality.")
+            ).strip(),
+            "related_artifacts": [],
+            "decision_needed": "Is this AutoResearch proposal legal to show to the human for approval?",
+            "options": options,
+            "decision": "O1" if legal else "O2",
+            "manager_feedback": "" if legal else str(review["manager_feedback"]).strip(),
+            "raised": False,
+        }
+        _apply_runtime_provenance(record, self._tool_context.get("provenance"))
+        return self.log.append(record, idempotent=True)
+
+    def _finalize_proposal_human_admission(
+        self,
+        *,
+        proposal_record: Dict[str, Any],
+        manager_record: Dict[str, Any],
+        review: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        options = _normalize_options(["Approve proposal.", "Provide feedback."])
+        human_feedback = _require_text(
+            review.get("human_feedback"),
+            "human_feedback",
+            "Human-resolved AutoResearch proposal admission",
+        )
+        human_decision = _resolve_human_decision(human_feedback, options)
+        decision = human_decision["decision"]
+        approved = decision == "O1"
+        if not approved and _is_feedback_placeholder(human_feedback):
+            raise RuntimeError(
+                "HITL proposal feedback must contain concrete instructions for the next proposal."
+            )
+        expected_status = "approved" if approved else "feedback"
+        if review.get("status") != expected_status:
+            raise HitlValidationError(
+                "Manager proposal admission status does not match the human response returned "
+                "through ask_human."
+            )
+        manager_feedback = ""
+        if not approved:
+            manager_feedback = _require_text(
+                review.get("manager_feedback"),
+                "manager_feedback",
+                "Manager translation of human proposal feedback",
+            )
+        record = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": "proposal",
+            "idea_type": "decision",
+            "idea_category": "artifact_boundary_choice",
+            "level": "A",
+            "actor": "human",
+            "premises": [proposal_record["idea_id"], manager_record["idea_id"]],
+            "context": str(
+                review.get("context", "Human reviewed a legal AutoResearch proposal.")
+            ).strip(),
+            "related_artifacts": [],
+            "decision_needed": "Should this AutoResearch proposal be admitted to experiment execution?",
+            "options": options,
+            "decision": decision,
+            "human_feedback": human_feedback,
+            "manager_feedback": manager_feedback,
+            "raised": True,
+            "manager_escalation_reason": str(review["manager_escalation_reason"]).strip(),
+        }
+        _apply_runtime_provenance(record, self._tool_context.get("provenance"))
+        human_record = self.log.append(record, idempotent=True)
+        if approved:
+            return {
+                "status": "approved",
+                "instruction": "The proposal is admitted. Stop proposal generation now.",
+                "proposal_idea_id": proposal_record["idea_id"],
+                "manager_idea_id": manager_record["idea_id"],
+                "human_idea_id": human_record["idea_id"],
+                "proposal": proposal_record["proposal"],
+            }
+        return {
+            "status": "feedback",
+            "feedback": manager_feedback,
+            "human_feedback": human_feedback,
+            "instruction": (
+                "This proposal is rejected. Create a new proposal using this feedback, "
+                "then submit the new proposal with `hitl-submit-proposal` in this same session."
+            ),
+            "proposal_idea_id": proposal_record["idea_id"],
+            "manager_idea_id": manager_record["idea_id"],
+            "human_idea_id": human_record["idea_id"],
+        }
+
+    def _finish_review_record(
+        self,
+        *,
+        hitl_stage: str,
+        summary: str,
+        related_artifacts: List[Dict[str, str]],
+        review: Dict[str, Any],
+        decision: str,
+        raised: bool,
+        manager_feedback: str,
+    ) -> Dict[str, Any]:
+        record = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": hitl_stage,
+            "level": "B",
+            "actor": "manager",
+            "idea_type": "decision",
+            "idea_category": "artifact_boundary_choice",
+            "context": str(
+                review.get(
+                    "context",
+                    f"Manager reviewed a {hitl_stage} finish request.",
+                )
+            ),
+            "premises": [self._manager_phase_premise_id(hitl_stage)],
+            "decision_needed": "Is this HITL phase ready to accept?",
+            "options": ["Approve phase.", "Return feedback."],
+            "decision": decision,
+            "manager_feedback": manager_feedback,
+            "raised": raised,
+            "worker_context": summary,
+            "related_artifacts": related_artifacts or self._plan_artifact(),
+        }
+        _apply_runtime_provenance(record, self._tool_context.get("provenance"))
+        return record
+
+    def _finish_human_plan_admission_from_review(self, review: Dict[str, Any]) -> Dict[str, Any]:
+        """Log a manager-mediated human plan decision from one finish request."""
+        manager_ready_record = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": "plan",
+            "level": "B",
+            "actor": "manager",
+            "idea_type": "decision",
+            "idea_category": "artifact_boundary_choice",
+            "context": str(review.get("context", "Manager reviewed the plan.")),
+            "premises": [self._manager_phase_premise_id("plan")],
+            "decision_needed": "Is this HITL plan ready for human approval?",
+            "options": [
+                "Accept current plan as ready for human approval.",
+                "Return feedback before human approval.",
+            ],
+            "decision": "O1",
+            "raised": False,
+            "manager_feedback": "",
+            "related_artifacts": self._plan_artifact(),
+        }
+        _apply_runtime_provenance(manager_ready_record, self._tool_context.get("provenance"))
+        manager_ready_record = self.log.append(manager_ready_record, idempotent=True)
+
+        plan_options = _normalize_options(["Approve plan.", "Provide feedback."])
+        human_feedback = _require_text(
+            review.get("human_feedback"),
+            "human_feedback",
+            "Human-resolved HITL plan finish",
+        )
+        human_decision = _resolve_human_decision(human_feedback, plan_options)
+        decision = human_decision["decision"]
+        approved = decision == "O1"
+        manager_feedback = (
+            ""
+            if approved
+            else _require_text(
+                review.get("manager_feedback"),
+                "manager_feedback",
+                "Manager translation of human plan feedback",
+            )
+        )
+        record = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": "plan",
+            "level": "A",
+            "actor": "human",
+            "idea_type": "decision",
+            "idea_category": "artifact_boundary_choice",
+            "context": str(review.get("context", "Manager presented the plan for approval.")),
+            "premises": [manager_ready_record["idea_id"]],
+            "decision_needed": "Should this HITL plan be approved for execution?",
+            "options": plan_options,
+            "decision": decision,
+            "raised": True,
+            "human_feedback": human_feedback,
+            "manager_escalation_reason": _require_text(
+                review.get("manager_escalation_reason"),
+                "manager_escalation_reason",
+                "Human-resolved HITL plan finish",
+            ),
+            "manager_feedback": manager_feedback,
+            "related_artifacts": self._plan_artifact(),
+        }
+        _apply_runtime_provenance(record, self._tool_context.get("provenance"))
+        logged = self.log.append(record, idempotent=True)
+        return {
+            "approved": approved,
+            "feedback": manager_feedback or human_feedback,
+            "record": logged,
+        }
+
+    def _latest_worker_plan_idea_id(self) -> str:
+        expected_provenance = _runtime_provenance(self._tool_context.get("provenance"))
+        for record in reversed(self.log.records()):
+            if (
+                record.get("pipeline_stage") == self.pipeline_stage
+                and record.get("hitl_stage") == "plan"
+                and record.get("level") == "C"
+                and record.get("actor") == self.pipeline_stage
+                and all(
+                    str(record.get(key, "")) == value for key, value in expected_provenance.items()
+                )
+            ):
+                return str(record.get("idea_id", "")).strip()
+        return ""
+
+    def _manager_phase_premise_id(self, hitl_stage: str) -> str:
+        if hitl_stage == "plan":
+            premise = self._latest_worker_plan_idea_id()
+            if premise:
+                return premise
+        expected_provenance = _runtime_provenance(self._tool_context.get("provenance"))
+        for record in reversed(self.log.records()):
+            idea_id = str(record.get("idea_id", "")).strip()
+            if (
+                idea_id
+                and record.get("pipeline_stage") == self.pipeline_stage
+                and all(
+                    str(record.get(key, "")) == value for key, value in expected_provenance.items()
+                )
+            ):
+                return idea_id
+        raise HitlValidationError(
+            "A manager decision requires an earlier finalized HITL idea premise from "
+            "this pipeline stage and runtime invocation."
+        )
+
+    def _start_idea_tool_server(self) -> None:
+        runtime = self
+        token = secrets.token_urlsafe(24)
+
+        class ToolHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+            def do_POST(self) -> None:
+                try:
+                    if self.headers.get("Authorization", "") != f"Bearer {token}":
+                        self._send_json(403, {"error": "Invalid HITL tool token."})
+                        return
+                    length = int(self.headers.get("Content-Length", "0"))
+                    raw = self.rfile.read(length)
+                    payload = json.loads(raw.decode("utf-8") or "{}")
+                    if self.path == "/idea/report":
+                        record = runtime.log_reported_payload(payload)
+                        self._send_json(
+                            200,
+                            {"ok": True, "idea_id": record["idea_id"]},
+                        )
+                        return
+                    if self.path == "/proposal/submit":
+                        result = runtime.submit_proposal_payload(payload)
+                        self._send_json(
+                            200,
+                            {
+                                "ok": True,
+                                "status": result.get("status"),
+                                "proposal_idea_id": result.get("proposal_idea_id", ""),
+                                "feedback": result.get("feedback", ""),
+                                "instruction": result.get("instruction", ""),
+                            },
+                        )
+                        return
+                    if self.path == "/idea/raise":
+                        result = runtime.resolve_tool_raised_payload(payload)
+                        self._send_json(
+                            200,
+                            {
+                                "ok": True,
+                                "idea_id": result.get("idea_id"),
+                                "decision": result.get("decision", ""),
+                                "feedback": result.get("feedback", ""),
+                            },
+                        )
+                        return
+                    if self.path == "/idea/view":
+                        result = runtime.view_ideas_for_tool(payload)
+                        self._send_json(200, {"ok": True, "text": result["text"]})
+                        return
+                    if self.path == "/frontier/current":
+                        result = runtime.view_current_frontier_for_tool()
+                        self._send_json(200, {"ok": True, "text": result["text"]})
+                        return
+                    if self.path == "/phase/finish":
+                        result = runtime.finish_tool_phase(payload)
+                        self._send_json(
+                            200,
+                            {
+                                "ok": True,
+                                "status": result.get("status"),
+                                "feedback": result.get("feedback", ""),
+                                "next_phase": result.get("next_phase", ""),
+                                "instruction": result.get("instruction", ""),
+                                "prompt_block": result.get("prompt_block", ""),
+                                "final": bool(result.get("final")),
+                            },
+                        )
+                        return
+                    if self.path == "/worker/resume":
+                        result = runtime.resume_pending_worker_command()
+                        self._send_json(
+                            200,
+                            {
+                                "ok": True,
+                                "status": result.get("status"),
+                                "feedback": result.get("feedback", ""),
+                                "next_phase": result.get("next_phase", ""),
+                                "instruction": result.get("instruction", ""),
+                                "prompt_block": result.get("prompt_block", ""),
+                                "final": bool(result.get("final")),
+                            },
+                        )
+                        return
+                    self._send_json(404, {"error": f"Unknown HITL endpoint: {self.path}"})
+                except HitlActiveWorkerRequestError as exc:
+                    self._send_json(
+                        409,
+                        {"error": str(exc)},
+                    )
+                except HitlValidationError as exc:
+                    self._send_json(
+                        400,
+                        {
+                            "error": (
+                                "HITL_ERROR command_rejected\n"
+                                f"{exc}\n"
+                                "Correct the command arguments and run the same command again "
+                                "in this worker session."
+                            )
+                        },
+                    )
+                except Exception:
+                    LOGGER.exception("HITL runtime tool request failed for %s", self.path)
+                    self._send_json(
+                        503,
+                        {
+                            "error": (
+                                "HITL_RUNTIME_ERROR runtime_request_failed\n"
+                                "Runtime could not process this command. Retry the same "
+                                "command in this worker session without changing the workspace."
+                            )
+                        },
+                    )
+
+            def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
+                encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ToolHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+        self._tool_server = server
+        self._tool_thread = thread
+        self._tool_url = f"http://{host}:{port}"
+        self._tool_token = token
+
+    def _write_idea_tool_commands(self) -> None:
+        self._write_tool_command("hitl-report-idea", "hitl_report_idea.py")
+        self._write_tool_command("hitl-raise-idea", "hitl_raise_idea.py")
+        self._write_tool_command("hitl-view-ideas", "hitl_view_ideas.py")
+        self._write_tool_command("hitl-finish-phase", "hitl_finish_phase.py")
+        self._write_tool_command("hitl-resume-worker-request", "hitl_resume_worker_request.py")
+        self._write_tool_command("hitl-submit-proposal", "hitl_submit_proposal.py")
+        self._write_tool_command("view_current_frontier", "hitl_view_current_frontier.py")
+
+    def _write_tool_command(self, command_name: str, module_file: str) -> None:
+        script = "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                'export PYTHONPATH="${NEURICO_PROJECT_ROOT}/src:${PYTHONPATH:-}"',
+                'exec "${NEURICO_PYTHON:-python}" '
+                f'"${{NEURICO_PROJECT_ROOT}}/src/core/{module_file}" "$@"',
+                "",
+            ]
+        )
+        command_path = self.paths.tool_bin_dir / command_name
+        command_path.write_text(script, encoding="utf-8")
+        command_path.chmod(0o755)
+
+    @staticmethod
+    def validate_raised_idea(
+        raised_idea: Dict[str, Any],
+        *,
+        existing_ids: Optional[set[str]] = None,
+    ) -> None:
         for field in [
             "pipeline_stage",
             "hitl_stage",
             "idea_type",
+            "idea_category",
             "context",
-            "basis",
             "reason_for_escalation",
         ]:
-            if not str(checkpoint.get(field, "")).strip():
-                raise HitlValidationError(f"Checkpoint missing required field: {field}")
-        if checkpoint["idea_type"] not in IDEA_TYPES:
-            raise HitlValidationError(f"Invalid checkpoint idea_type: {checkpoint['idea_type']}")
-        if checkpoint["hitl_stage"] not in HITL_STAGES:
-            raise HitlValidationError(f"Invalid checkpoint hitl_stage: {checkpoint['hitl_stage']}")
-        if checkpoint["pipeline_stage"] not in PIPELINE_STAGES:
+            if not str(raised_idea.get(field, "")).strip():
+                raise HitlValidationError(f"Raised idea missing required field: {field}")
+        if raised_idea["idea_type"] not in {"decision", "evidence"}:
+            raise HitlValidationError(f"Invalid raised idea_type: {raised_idea['idea_type']}")
+        _validate_idea_category(raised_idea["idea_type"], raised_idea.get("idea_category"))
+        if raised_idea["hitl_stage"] not in HITL_STAGES:
             raise HitlValidationError(
-                f"Invalid checkpoint pipeline_stage: {checkpoint['pipeline_stage']}"
+                f"Invalid raised idea hitl_stage: {raised_idea['hitl_stage']}"
             )
-        if checkpoint["idea_type"] == "decision":
-            if not str(checkpoint.get("decision_needed", "")).strip():
-                raise HitlValidationError("Raised decision checkpoint needs decision_needed")
+        if raised_idea["pipeline_stage"] not in PIPELINE_STAGES:
+            raise HitlValidationError(
+                f"Invalid raised idea pipeline_stage: {raised_idea['pipeline_stage']}"
+            )
+        _validate_premises(
+            _normalize_premises(raised_idea.get("premises")),
+            existing_ids,
+        )
+        if raised_idea["idea_type"] == "decision":
+            if not _normalize_premises(raised_idea.get("premises")):
+                raise HitlValidationError(
+                    "Raised decision idea requires at least one finalized premise. "
+                    "Use `hitl-view-ideas`, report missing supporting evidence first if needed, then retry."
+                )
+            if not str(raised_idea.get("decision_needed", "")).strip():
+                raise HitlValidationError("Raised decision idea needs decision_needed")
             _validate_substantive_options(
-                checkpoint.get("options"),
-                error_prefix="Raised decision checkpoint",
+                raised_idea.get("options"),
+                error_prefix="Raised decision idea",
             )
         else:
-            if not str(checkpoint.get("evidence", "")).strip():
-                raise HitlValidationError("Raised evidence checkpoint needs evidence")
+            if not str(raised_idea.get("evidence", "")).strip():
+                raise HitlValidationError("Raised evidence idea needs evidence")
 
-    def workspace_summary(self) -> str:
-        lines = [
-            f"Workspace root: {self.work_dir}",
-            "Read boundary: review only files under this workspace root. "
-            "Paths below are relative to the workspace root.",
-        ]
-        if not self.work_dir.exists():
-            lines.append("- workspace path does not exist")
-            return "\n".join(lines)
-
-        skipped_names = {".git", ".venv", "__pycache__"}
-        visible_paths = sorted(
-            p
-            for p in self.work_dir.rglob("*")
-            if not any(part in skipped_names for part in p.relative_to(self.work_dir).parts)
-        )
-        if not visible_paths:
-            lines.append("- workspace is empty")
-            return "\n".join(lines)
-
-        for path in visible_paths[:200]:
-            rel = path.relative_to(self.work_dir)
-            if path.is_dir():
-                lines.append(f"- {rel}/")
-            elif path.exists():
-                lines.append(f"- {rel} ({path.stat().st_size} bytes)")
-        if len(visible_paths) > 200:
-            lines.append(f"- ... {len(visible_paths) - 200} more workspace paths")
-        return "\n".join(lines)
-
-    def _record_from_checkpoint(
+    def _record_from_raised_idea(
         self,
         *,
-        checkpoint: Dict[str, Any],
+        raised_idea: Dict[str, Any],
         level: str,
         actor: str,
         decision: str,
         manager_context: str,
         extra: Dict[str, Any],
     ) -> Dict[str, Any]:
-        idea_type = checkpoint["idea_type"]
-        basis = self._checkpoint_basis(
-            checkpoint=checkpoint,
-            idea_type=idea_type,
-            actor=actor,
-            extra=extra,
-        )
+        idea_type = raised_idea["idea_type"]
         record_extra = dict(extra)
-        record_extra.pop("basis", None)
         record: Dict[str, Any] = {
             "pipeline_stage": self.pipeline_stage,
-            "hitl_stage": checkpoint.get("hitl_stage", "execution"),
+            "hitl_stage": raised_idea.get("hitl_stage", "execution"),
             "level": level,
             "actor": actor,
             "idea_type": idea_type,
+            "idea_category": raised_idea["idea_category"],
+            "premises": _normalize_premises(raised_idea.get("premises")),
             "context": manager_context,
-            "basis": basis,
             "raised": True,
-            "worker_context": checkpoint.get("context", ""),
-            "worker_escalation_reason": checkpoint.get("reason_for_escalation", ""),
-            "related_artifacts": _as_related_artifacts(checkpoint.get("related_artifacts")),
+            "worker_context": raised_idea.get("context", ""),
+            "worker_escalation_reason": raised_idea.get("reason_for_escalation", ""),
+            "related_artifacts": _as_related_artifacts(raised_idea.get("related_artifacts")),
             **record_extra,
         }
         if idea_type == "decision":
             options = record_extra.pop(
                 "options",
-                _normalize_options(checkpoint.get("options", [])),
+                _normalize_options(raised_idea.get("options", [])),
             )
             record.update(
                 {
-                    "decision_needed": checkpoint.get("decision_needed", ""),
+                    "decision_needed": raised_idea.get("decision_needed", ""),
                     "options": options,
                     "decision": decision,
                 }
@@ -1087,118 +3071,23 @@ class HitlRuntime:
         else:
             record.update(
                 {
-                    "evidence": checkpoint.get("evidence", ""),
+                    "evidence": raised_idea.get("evidence", ""),
                 }
-        )
-        return record
-
-    def _record_from_autonomous_idea(
-        self,
-        *,
-        packet: Dict[str, Any],
-        hitl_stage: str,
-        actor: str,
-        provenance: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        idea_type = _require_text(
-            packet.get("idea_type"),
-            "idea_type",
-            "Autonomous HITL idea",
-        )
-        if idea_type not in IDEA_TYPES:
-            raise HitlValidationError(f"Invalid autonomous idea_type: {idea_type}")
-        record: Dict[str, Any] = {
-            "pipeline_stage": self.pipeline_stage,
-            "hitl_stage": hitl_stage,
-            "idea_type": idea_type,
-            "level": "C",
-            "actor": actor,
-            "context": _require_text(packet.get("context"), "context", "Autonomous HITL idea"),
-            "related_artifacts": _as_related_artifacts(packet.get("related_artifacts")),
-            "basis": _require_text(packet.get("basis"), "basis", "Autonomous HITL idea"),
-            "raised": False,
-        }
-        _apply_runtime_provenance(record, provenance)
-        if idea_type == "decision":
-            if "decision_needed" in packet:
-                record["decision_needed"] = str(packet.get("decision_needed", "")).strip()
-            if "options" in packet:
-                record["options"] = packet.get("options")
-            record["decision"] = _require_text(
-                packet.get("decision"),
-                "decision",
-                "Autonomous decision idea",
-            )
-        else:
-            record["evidence"] = _require_text(
-                packet.get("evidence"),
-                "evidence",
-                "Autonomous evidence idea",
             )
         return record
 
-    def _checkpoint_basis(
+    def _raised_idea_decision_options(
         self,
-        *,
-        checkpoint: Dict[str, Any],
-        idea_type: str,
-        actor: str,
-        extra: Dict[str, Any],
-    ) -> str:
-        if actor == "human":
-            if idea_type == "decision":
-                return "The human made this decision."
-            return "The human made this evidence idea."
-        return (
-            str(extra.get("basis", "")).strip()
-            or str(checkpoint.get("basis", "")).strip()
-            or str(checkpoint.get("reason_for_escalation", "")).strip()
-        )
-
-    def _checkpoint_decision_options(
-        self,
-        checkpoint: Dict[str, Any],
+        raised_idea: Dict[str, Any],
         review: Dict[str, Any],
     ) -> List[str]:
-        if checkpoint["idea_type"] != "decision":
+        if raised_idea["idea_type"] != "decision":
             return []
-        raw_options = review.get("options", checkpoint.get("options"))
+        raw_options = review.get("options", raised_idea.get("options"))
         return _validate_substantive_options(
             raw_options,
             error_prefix="Manager-reviewed decision",
         )
-
-    def _plan_approval_message(self, review: Dict[str, Any]) -> str:
-        plan_rel = self.paths.plan_path.relative_to(self.work_dir)
-        context = str(review.get("context", "")).strip()
-        if not context:
-            context = f"Manager reviewed `{plan_rel}` and found it ready for human approval."
-        return (
-            f"HITL plan approval needed for `{self.pipeline_stage}`.\n\n"
-            f"{context}\n\n"
-            f"Plan artifact: {plan_rel}\n\n"
-            "Approve the plan to let the worker execute it, or provide feedback."
-        )
-
-    def _human_checkpoint_message(self, checkpoint: Dict[str, Any], review: Dict[str, Any]) -> str:
-        parts = [
-            f"HITL input needed for `{self.pipeline_stage}`.",
-            "",
-            str(review.get("context") or checkpoint.get("context", "")),
-            "",
-            f"Worker escalation reason: {checkpoint.get('reason_for_escalation', '')}",
-        ]
-        if checkpoint.get("idea_type") == "decision":
-            parts.extend(["", f"Decision needed: {checkpoint.get('decision_needed', '')}"])
-        else:
-            parts.extend(["", f"Evidence: {checkpoint.get('evidence', '')}"])
-        artifacts = _as_related_artifacts(checkpoint.get("related_artifacts"))
-        if artifacts:
-            parts.append("")
-            parts.append("Related artifacts:")
-            for artifact in artifacts:
-                parts.append(f"- {artifact['path']}: {artifact['description']}")
-        return "\n".join(parts)
 
     def _plan_artifact(self) -> List[Dict[str, str]]:
         rel = self.paths.plan_path.relative_to(self.work_dir)
@@ -1215,202 +3104,6 @@ class HitlRuntime:
         if not path.exists():
             return ""
         return path.read_text(encoding="utf-8", errors="replace")
-
-
-class LLMHitlManager:
-    """One-shot manager adapter using NeuriCo's existing manager LLM backend."""
-
-    def __init__(self, config: Dict[str, Any]):
-        from interactive.llm_backend import create_backend
-
-        self.backend = create_backend(config)
-
-    @staticmethod
-    def _json_output_contract() -> str:
-        return _load_hitl_template("json_output_contract.txt")
-
-    def review_plan(
-        self,
-        *,
-        pipeline_stage: str,
-        plan_path: Path,
-        plan_text: str,
-        workspace_summary: str,
-        requires_human_approval: bool = True,
-    ) -> Dict[str, Any]:
-        prompt = _load_hitl_template(
-            "manager_review_plan.txt",
-            json_output_contract=self._json_output_contract(),
-            pipeline_stage=pipeline_stage,
-            plan_path=plan_path,
-            workspace_summary=workspace_summary,
-            plan_text=plan_text,
-            requires_human_approval=requires_human_approval,
-        )
-        data = self._json_call(prompt)
-        status = data.get("status")
-        if status not in {"ready", "not_ready"}:
-            raise HitlValidationError(
-                "Manager plan review must return status 'ready' or 'not_ready'."
-            )
-        if status == "not_ready":
-            _require_text(
-                data.get("manager_feedback"),
-                "manager_feedback",
-                "Manager plan review with status='not_ready'",
-            )
-        return data
-
-    def review_checkpoint(
-        self,
-        *,
-        pipeline_stage: str,
-        checkpoint: Dict[str, Any],
-        plan_text: str,
-        workspace_summary: str,
-    ) -> Dict[str, Any]:
-        prompt = _load_hitl_template(
-            "manager_review_checkpoint.txt",
-            json_output_contract=self._json_output_contract(),
-            pipeline_stage=pipeline_stage,
-            workspace_summary=workspace_summary,
-            plan_text=plan_text,
-            checkpoint_json=json.dumps(checkpoint, indent=2, ensure_ascii=False),
-        )
-        data = self._json_call(prompt)
-        if not isinstance(data.get("requires_human"), bool):
-            raise HitlValidationError(
-                "Manager checkpoint review must return boolean `requires_human`."
-            )
-        if data["requires_human"]:
-            _require_text(
-                data.get("manager_escalation_reason"),
-                "manager_escalation_reason",
-                "Manager checkpoint escalation",
-            )
-        else:
-            _require_text(
-                data.get("manager_feedback"),
-                "manager_feedback",
-                "Manager checkpoint resolution",
-            )
-            if checkpoint.get("idea_type") == "decision":
-                _require_text(
-                    data.get("decision"),
-                    "decision",
-                    "Manager-resolved decision checkpoint",
-                )
-        return data
-
-    def feedback_from_human(
-        self,
-        *,
-        pipeline_stage: str,
-        hitl_stage: str,
-        human_response: str,
-        context: str,
-        plan_text: str,
-    ) -> str:
-        prompt = _load_hitl_template(
-            "manager_feedback_from_human.txt",
-            json_output_contract=self._json_output_contract(),
-            pipeline_stage=pipeline_stage,
-            hitl_stage=hitl_stage,
-            context=context,
-            human_response=human_response,
-            plan_text=plan_text,
-        )
-        data = self._json_call(prompt)
-        return _require_text(
-            data.get("manager_feedback"),
-            "manager_feedback",
-            "Manager translation of human HITL feedback",
-        )
-
-    def review_stage(
-        self,
-        *,
-        pipeline_stage: str,
-        plan_path: Path,
-        plan_text: str,
-        workspace_summary: str,
-    ) -> Dict[str, Any]:
-        prompt = _load_hitl_template(
-            "manager_review_stage.txt",
-            json_output_contract=self._json_output_contract(),
-            pipeline_stage=pipeline_stage,
-            plan_path=plan_path,
-            workspace_summary=workspace_summary,
-            plan_text=plan_text,
-        )
-        data = self._json_call(prompt)
-        if data.get("status") not in {"aligned", "not_aligned"}:
-            raise HitlValidationError(
-                "Manager stage review must return status 'aligned' or 'not_aligned'."
-            )
-        if data.get("status") == "not_aligned":
-            _require_text(
-                data.get("manager_feedback"),
-                "manager_feedback",
-                "Manager stage review with status='not_aligned'",
-            )
-        return data
-
-    def review_proposal(
-        self,
-        *,
-        pipeline_stage: str,
-        proposal_path: Path,
-        proposal_text: str,
-        workspace_summary: str,
-        attempt_id: str,
-    ) -> Dict[str, Any]:
-        prompt = _load_hitl_template(
-            "manager_review_proposal.txt",
-            json_output_contract=self._json_output_contract(),
-            pipeline_stage=pipeline_stage,
-            proposal_path=proposal_path,
-            proposal_text=proposal_text,
-            workspace_summary=workspace_summary,
-            attempt_id=attempt_id,
-        )
-        data = self._json_call(prompt)
-        status = data.get("status")
-        if status not in {"legal", "revise_illegal"}:
-            raise HitlValidationError(
-                "Manager proposal review must return status 'legal' or 'revise_illegal'."
-            )
-        if status == "revise_illegal":
-            _require_text(
-                data.get("feedback"),
-                "feedback",
-                "Manager proposal legality review with status='revise_illegal'",
-            )
-        violations = data.get("violations", [])
-        if violations is not None and not isinstance(violations, list):
-            raise HitlValidationError("Manager proposal review `violations` must be a list.")
-        return data
-
-    def _json_call(self, prompt: str) -> Dict[str, Any]:
-        response = self.backend.send(
-            [
-                {
-                    "role": "system",
-                    "content": _load_hitl_template("manager_system.txt"),
-                },
-                {"role": "user", "content": prompt},
-            ]
-        )
-        text = response.text.strip()
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            if start >= 0:
-                data, _ = json.JSONDecoder().raw_decode(text[start:])
-                if isinstance(data, dict):
-                    return data
-            raise
 
 
 def read_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -1448,7 +3141,9 @@ def parse_required_artifacts(interface_path: Path) -> List[RequiredArtifact]:
 
     header = _markdown_table_cells(lines[idx])
     if header != ["Path", "Purpose", "Required"]:
-        raise HitlValidationError("Files-to-produce header must be exactly `Path | Purpose | Required`.")
+        raise HitlValidationError(
+            "Files-to-produce header must be exactly `Path | Purpose | Required`."
+        )
     alignment = _markdown_table_cells(lines[idx + 1])
     if len(alignment) != 3 or any(not _is_alignment_cell(cell) for cell in alignment):
         raise HitlValidationError("Files-to-produce table has invalid alignment row.")
@@ -1477,7 +3172,9 @@ def parse_required_artifacts(interface_path: Path) -> List[RequiredArtifact]:
         row_idx += 1
 
     if not any(artifact.required for artifact in artifacts):
-        raise HitlValidationError("Files-to-produce table must include at least one required artifact.")
+        raise HitlValidationError(
+            "Files-to-produce table must include at least one required artifact."
+        )
     return artifacts
 
 
@@ -1490,7 +3187,9 @@ def verify_required_artifacts(work_dir: Path, artifacts: Iterable[RequiredArtifa
             raise HitlValidationError(f"Required artifact missing: {artifact.path}")
         if artifact.path.endswith("/"):
             if not path.is_dir():
-                raise HitlValidationError(f"Required artifact should be a directory: {artifact.path}")
+                raise HitlValidationError(
+                    f"Required artifact should be a directory: {artifact.path}"
+                )
             continue
         if not path.is_file():
             raise HitlValidationError(f"Required artifact should be a file: {artifact.path}")
@@ -1522,126 +3221,6 @@ def assert_path_state_unchanged(path: Path, expected: Dict[str, Any], label: str
         raise HitlValidationError(
             f"{label} changed unexpectedly: expected {expected}, got {actual}"
         )
-
-
-def public_workspace_inventory(work_dir: Path) -> Dict[str, Dict[str, str]]:
-    """Inventory tracked and untracked public files using git's exclude rules."""
-    work_dir = Path(work_dir)
-    result = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-        cwd=str(work_dir),
-        check=True,
-        capture_output=True,
-    )
-    inventory: Dict[str, Dict[str, str]] = {}
-    for raw in result.stdout.split(b"\0"):
-        if not raw:
-            continue
-        rel = raw.decode("utf-8")
-        path = (work_dir / rel).resolve()
-        try:
-            path.relative_to(work_dir.resolve())
-        except ValueError as exc:
-            raise HitlValidationError(f"Git inventory path escapes workspace: {rel}") from exc
-        if path.is_symlink():
-            inventory[rel] = {
-                "kind": "symlink",
-                "sha256": hashlib.sha256(os.readlink(path).encode("utf-8")).hexdigest(),
-            }
-        elif path.is_file():
-            inventory[rel] = {"kind": "regular_file", "sha256": _sha256_file(path)}
-        else:
-            inventory[rel] = {"kind": "other", "sha256": ""}
-    return inventory
-
-
-def changed_public_paths(
-    before: Dict[str, Dict[str, str]],
-    after: Dict[str, Dict[str, str]],
-) -> List[str]:
-    paths = set(before) | set(after)
-    return sorted(path for path in paths if before.get(path) != after.get(path))
-
-
-def assert_plan_only_public_changes(
-    *,
-    work_dir: Path,
-    before: Optional[Dict[str, Dict[str, str]]],
-    after: Optional[Dict[str, Dict[str, str]]],
-    plan_path: Path,
-    plan_marker_name: str,
-) -> None:
-    """Validate that a HITL planning run only changed planning/runtime artifacts."""
-    if before is None or after is None:
-        return
-    work_dir = Path(work_dir).resolve()
-    plan_path = Path(plan_path).resolve()
-    try:
-        plan_rel = str(plan_path.relative_to(work_dir))
-    except ValueError as exc:
-        raise HitlValidationError(f"HITL plan path escapes workspace: {plan_path}") from exc
-
-    allowed_exact = {plan_rel, plan_marker_name}
-    allowed_prefixes = (
-        "logs/hitl/",
-        ".neurico/hitl/",
-        ".neurico/runs/",
-    )
-    unexpected = [
-        path
-        for path in changed_public_paths(before, after)
-        if path not in allowed_exact
-        and not any(path.startswith(prefix) for prefix in allowed_prefixes)
-    ]
-    if unexpected:
-        raise HitlValidationError(
-            "HITL planning phase modified non-plan public artifact(s): "
-            + ", ".join(unexpected)
-        )
-
-
-def assert_meaningful_candidate_public_change(
-    *,
-    work_dir: Path,
-    before: Optional[Dict[str, Dict[str, str]]],
-    after: Optional[Dict[str, Dict[str, str]]],
-    plan_path: Path,
-    plan_marker_name: str,
-    completion_marker_name: str,
-) -> None:
-    """Require at least one candidate change beyond HITL control/runtime files."""
-    if before is None or after is None:
-        return
-    work_dir = Path(work_dir).resolve()
-    try:
-        plan_rel = str(Path(plan_path).resolve().relative_to(work_dir))
-    except ValueError as exc:
-        raise HitlValidationError(f"HITL plan path escapes workspace: {plan_path}") from exc
-
-    ignored_exact = {plan_rel, plan_marker_name, completion_marker_name}
-    ignored_prefixes = (
-        "logs/hitl/",
-        ".neurico/hitl/",
-        ".neurico/runs/",
-    )
-    meaningful = [
-        path
-        for path in changed_public_paths(before, after)
-        if path not in ignored_exact
-        and not any(path.startswith(prefix) for prefix in ignored_prefixes)
-    ]
-    if not meaningful:
-        raise HitlValidationError(
-            "AutoResearch HITL candidate produced no meaningful public workspace change before scoring."
-        )
-
-
-def maybe_public_workspace_inventory(work_dir: Path) -> Optional[Dict[str, Dict[str, str]]]:
-    """Return a public inventory when the workspace is a git worktree."""
-    work_dir = Path(work_dir)
-    if not (work_dir / ".git").exists():
-        return None
-    return public_workspace_inventory(work_dir)
 
 
 def _markdown_table_cells(line: str) -> List[str]:
@@ -1677,11 +3256,3 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def find_pending_checkpoints(work_dir: Path) -> Iterable[Path]:
-    checkpoint_dir = Path(work_dir) / ".neurico" / "hitl" / "checkpoints"
-    if not checkpoint_dir.exists():
-        return []
-    path = checkpoint_dir / "pending_idea.json"
-    return [path] if path.is_file() else []

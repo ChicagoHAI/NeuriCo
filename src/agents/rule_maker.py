@@ -222,6 +222,11 @@ def run_rule_maker(
     templates_dir: Optional[Path] = None,
     timeout: int = 1800,  # 30 min
     full_permissions: bool = True,
+    hitl_prompt_suffix: str = "",
+    completion_mode: str = "outputs",
+    log_prefix: str = "rule_maker",
+    include_hitl_outputs: bool = False,
+    env_extra: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Launch the rule_maker CLI agent.
@@ -245,7 +250,7 @@ def run_rule_maker(
     logs_dir = work_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"📐 Starting Rule Maker Agent")
+    print("📐 Starting Rule Maker Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
     print(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
@@ -253,7 +258,10 @@ def run_rule_maker(
 
     # Generate prompt and persist it for debugging
     prompt = generate_rule_maker_prompt(idea, work_dir, templates_dir)
-    prompt_file = logs_dir / "rule_maker_prompt.txt"
+    if hitl_prompt_suffix:
+        prompt = prompt.rstrip() + "\n\n" + hitl_prompt_suffix.strip() + "\n"
+    prompt_file = logs_dir / f"{log_prefix}_prompt.txt"
+    prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(prompt, encoding='utf-8')
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
@@ -272,8 +280,10 @@ def run_rule_maker(
     if transcript_flag:
         cmd += f" {transcript_flag}"
 
-    log_file = logs_dir / f"rule_maker_{provider}.log"
-    transcript_file = logs_dir / f"rule_maker_{provider}_transcript.jsonl"
+    log_file = logs_dir / f"{log_prefix}_{provider}.log"
+    transcript_file = logs_dir / f"{log_prefix}_{provider}_transcript.jsonl"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    transcript_file.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"▶️  Launching {provider} CLI agent...")
     print(f"   Command: {cmd}")
@@ -285,10 +295,13 @@ def run_rule_maker(
 
     env = os.environ.copy()
     env['PYTHONUNBUFFERED'] = '1'
+    if env_extra:
+        env.update({str(key): str(value) for key, value in env_extra.items()})
     if provider == "gemini":
         env['GEMINI_CLI_IDE_DISABLE'] = '1'
 
     start_time = time.time()
+    return_code: Optional[int] = None
 
     try:
         with open(log_file, 'w', encoding='utf-8') as log_f, \
@@ -341,17 +354,33 @@ def run_rule_maker(
     print()
     print("📦 Validating rule_maker outputs...")
     validation = validate_rule_maker_outputs(work_dir)
-    success = validation['valid']
-    if success:
+    validation_success = validation['valid']
+    if validation_success:
         print("✅ All required rule_maker outputs present and parseable.")
     else:
         print("⚠️  Rule maker outputs incomplete or invalid:")
         for issue in validation['issues']:
             print(f"     - {issue}")
 
+    if completion_mode == "hitl_runtime":
+        success = return_code == 0
+        print("ℹ️  HITL runtime completion mode; orchestrator will review finish state.")
+    elif completion_mode == "outputs":
+        success = validation_success
+    else:
+        raise ValueError(
+            "completion_mode must be 'outputs' or 'hitl_runtime' for rule_maker"
+        )
+
+    outputs = dict(validation['found'])
+    if include_hitl_outputs:
+        plan_path = work_dir / "plans" / "rule_maker_plan.md"
+        if plan_path.exists():
+            outputs['hitl_plan'] = str(plan_path)
+
     return {
         'success': success,
-        'outputs': validation['found'],
+        'outputs': outputs,
         'issues': validation['issues'],
         'log_file': str(log_file),
         'transcript_file': str(transcript_file),

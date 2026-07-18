@@ -150,7 +150,9 @@ OUTPUT DELIVERABLES (in workspace):
 - literature_review.md (BSM-focused synthesis)
 - resources.md (catalog of all resources)
 - constraints.md (structured summary of all constraints the model must satisfy)
+{% if not hitl_runtime_completion %}
 - .resource_finder_complete (marker)
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
              PHASE 1: BSM LITERATURE SURVEY
@@ -512,6 +514,7 @@ FINAL CHECKLIST:
 ✓ constraints.md (structured constraint summary)
 ✓ User-specified resources prioritized
 
+{% if not hitl_runtime_completion %}
 COMPLETION MARKER:
 ```bash
 cat > .resource_finder_complete << 'EOF'
@@ -523,6 +526,7 @@ Repositories cloned: [count]
 UFO models prepared: [count]
 EOF
 ```
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                        BEST PRACTICES

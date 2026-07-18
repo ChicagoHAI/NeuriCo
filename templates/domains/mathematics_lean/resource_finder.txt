@@ -112,7 +112,9 @@ OUTPUT DELIVERABLES (all saved in current workspace):
 - literature_review.md (comprehensive synthesis: definitions, theorems, techniques,
   AND Mathlib lemma catalog)
 - resources.md (catalog of all resources including Mathlib lemmas found)
+{% if not hitl_runtime_completion %}
 - .resource_finder_complete (marker file indicating completion)
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                         PHASE 1: LITERATURE SEARCH
@@ -365,6 +367,7 @@ FINAL CHECKLIST:
 ✓ Mathlib lemma names verified with #check via AXLE (or flagged as uncertain)
 ✓ Existing Lean formalizations searched for and documented
 
+{% if not hitl_runtime_completion %}
 COMPLETION MARKER:
 cat > .resource_finder_complete << 'EOF'
 Resource finding phase completed successfully.
@@ -373,6 +376,7 @@ Papers downloaded: [count]
 Prior results cataloged: [count]
 Mathlib lemmas identified: [count]
 EOF
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                            BEST PRACTICES
@@ -388,7 +392,9 @@ EOF
 ✗ DON'T: Paraphrase theorems loosely — precision matters in formal proofs
 ✗ DON'T: Construct proofs here — that's the experiment runner's job
 ✗ DON'T: Try to install Lean/elan/lake — verification is remote via AXLE
+{% if not hitl_runtime_completion %}
 ✗ DON'T: Forget the completion marker file
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
 

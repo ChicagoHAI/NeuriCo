@@ -5,10 +5,8 @@ Run: python -m pytest tests/test_whiteboard_integration.py
 """
 
 import json
-import shutil
 import sys
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
@@ -16,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from core.whiteboard import Whiteboard  # noqa: E402
 
-
 # ---------------------------------------------------- proposer public context
+
 
 def test_proposer_public_context_renders_whiteboard(tmp_path: Path):
     """`collect_public_proposal_context` includes the active tips rendering."""
@@ -56,6 +54,7 @@ def test_proposer_public_context_empty_whiteboard(tmp_path: Path):
 
 
 # ---------------------------------------------------- comment_handler prompt
+
 
 def test_comment_handler_prompt_includes_whiteboard(tmp_path: Path):
     from templates.prompt_generator import PromptGenerator
@@ -139,8 +138,32 @@ def test_comment_handler_launch_preserves_current_construction(tmp_path: Path):
     assert launch["env"]["NEURICO_DSI_RSYNC_REMOTE_ROOT"] == "login.ds:/remote/ws"
     assert launch["work_dir"] == tmp_path
     assert launch["log_file"] == tmp_path / "logs" / "comment_handler_gemini.log"
-    assert launch["transcript_file"] == tmp_path / "logs" / "comment_handler_gemini_transcript.jsonl"
-    assert (tmp_path / "logs" / "comment_handler_prompt.txt").read_text(encoding="utf-8") == launch["prompt"]
+    assert (
+        launch["transcript_file"] == tmp_path / "logs" / "comment_handler_gemini_transcript.jsonl"
+    )
+    assert (tmp_path / "logs" / "comment_handler_prompt.txt").read_text(encoding="utf-8") == launch[
+        "prompt"
+    ]
+
+
+def test_hitl_comment_handler_launch_uses_only_its_runtime_prompt(tmp_path: Path):
+    from agents.comment_handler import build_comment_handler_launch
+
+    hitl_prompt = "HITL PLAN MODE\nDo not modify the whiteboard."
+    launch = build_comment_handler_launch(
+        idea={"idea": {"comments": "This must not enter the HITL prompt."}},
+        work_dir=tmp_path,
+        provider="claude",
+        templates_dir=Path(__file__).resolve().parents[1] / "templates",
+        full_permissions=True,
+        dsi_remote_info=None,
+        prompt_override=hitl_prompt,
+        prompt_override_only=True,
+    )
+
+    assert launch["prompt"] == hitl_prompt + "\n"
+    assert "USER FEEDBACK / DIRECTIONS" not in launch["prompt"]
+    assert "add-tip" not in launch["prompt"]
 
 
 def test_run_comment_handler_uses_extracted_launch_without_changing_public_result(
@@ -198,6 +221,7 @@ def test_run_comment_handler_uses_extracted_launch_without_changing_public_resul
 
 # ---------------------------------------------------- attempt snapshot audit
 
+
 def test_complete_attempt_snapshots_whiteboard(tmp_path: Path):
     """When an attempt is finalized, we archive the whiteboard state."""
     from core.autoresearch import AttemptHistoryManager
@@ -205,16 +229,14 @@ def test_complete_attempt_snapshots_whiteboard(tmp_path: Path):
     history_root = tmp_path / "logs" / "experiment-autoresearch"
 
     # Populate the live whiteboard at the same directory
-    wb = Whiteboard(tmp_path).load()   # path resolves to history_root/whiteboard.json
+    wb = Whiteboard(tmp_path).load()  # path resolves to history_root/whiteboard.json
     wb.add_tip("something worth keeping", category="insight")
     wb.save()
 
     # Confirm the live file is under history_root (default whiteboard_path).
     assert (history_root / "whiteboard.json").exists()
 
-    mgr = AttemptHistoryManager(
-        history_root=history_root, idea_id="demo", work_dir=tmp_path
-    )
+    mgr = AttemptHistoryManager(history_root=history_root, idea_id="demo", work_dir=tmp_path)
     parent_sha = "a" * 40
     attempt_dir = mgr.next_attempt_dir(parent_sha)
     mgr.write_proposal(attempt_dir, "# Proposal\n\nsome text\n")
@@ -245,9 +267,7 @@ def test_complete_attempt_no_whiteboard_is_ok(tmp_path: Path):
     from core.autoresearch import AttemptHistoryManager
 
     history_root = tmp_path / "logs" / "experiment-autoresearch"
-    mgr = AttemptHistoryManager(
-        history_root=history_root, idea_id="demo", work_dir=tmp_path
-    )
+    mgr = AttemptHistoryManager(history_root=history_root, idea_id="demo", work_dir=tmp_path)
     parent_sha = "a" * 40
     attempt_dir = mgr.next_attempt_dir(parent_sha)
     mgr.write_proposal(attempt_dir, "# Proposal\n")
@@ -326,9 +346,7 @@ def test_snapshot_whiteboard_helper_is_reusable(tmp_path: Path):
     wb.save()
 
     history_root = tmp_path / "logs" / "experiment-autoresearch"
-    mgr = AttemptHistoryManager(
-        history_root=history_root, idea_id="demo", work_dir=tmp_path
-    )
+    mgr = AttemptHistoryManager(history_root=history_root, idea_id="demo", work_dir=tmp_path)
     attempt_dir = mgr.next_attempt_dir("a" * 40)
 
     mgr._snapshot_whiteboard(attempt_dir)
@@ -409,17 +427,9 @@ def test_controller_revert_whiteboard_undoes_clear(tmp_path: Path):
     assert reloaded.cleared_at_attempt == ""
 
 
-def test_hitl_proposal_admission_revises_manager_illegal_proposal(tmp_path: Path):
-    from core.autoresearch import AutoResearchController
-    from core.hitl import HitlIdeaLog
-
-    proposal_suffixes = []
-
-    def proposal_generator(_idea, _work_dir, _parent_sha, attempt_dir, _history, prompt_suffix=""):
-        proposal_suffixes.append(prompt_suffix)
-        path = Path(attempt_dir) / "proposal.md"
-        path.write_text(f"# Proposal\n\nsuffix={prompt_suffix}\n", encoding="utf-8")
-        return {"proposal_path": str(path)}
+def test_hitl_proposal_submission_creates_a_new_proposal_in_same_session(tmp_path: Path):
+    from core.hitl_autoresearch import HitlAutoResearchController
+    from core.hitl import HitlRuntime
 
     class Manager:
         def __init__(self):
@@ -428,467 +438,194 @@ def test_hitl_proposal_admission_revises_manager_illegal_proposal(tmp_path: Path
         def review_proposal(self, **kwargs):
             self.calls += 1
             if self.calls == 1:
-                return {
-                    "status": "revise_illegal",
+                result = {
+                    "status": "rejected_illegal",
                     "violations": ["too broad"],
-                    "feedback": "Narrow this to one concrete experiment-stage change.",
+                    "manager_feedback": "Narrow this to one concrete experiment-stage change.",
                     "context": "Proposal is too broad for one AutoResearch attempt.",
                 }
-            return {
-                "status": "legal",
-                "violations": [],
-                "feedback": "",
-                "context": "Proposal is legal.",
-            }
+            else:
+                result = {
+                    "status": "approved",
+                    "violations": [],
+                    "manager_feedback": "",
+                    "context": "Proposal is legal.",
+                    "human_feedback": "Approve proposal.",
+                    "manager_escalation_reason": (
+                        "Human approval is required before a proposal enters execution."
+                    ),
+                }
+            return kwargs["on_finalize"](result)
 
     class Channel:
-        def prompt(self, message=None, options=None):
+        def prompt(self, message=None, options=None, input_kind="event_reply"):
             return "Approve proposal."
 
-    class Runtime:
-        def __init__(self):
-            self.manager = Manager()
-            self.channel = Channel()
-            self.log = HitlIdeaLog(tmp_path)
-            self.paths = type(
-                "Paths",
-                (),
-                {
-                    "autonomous_ideas_path": tmp_path
-                    / ".neurico"
-                    / "hitl"
-                    / "autonomous_ideas.jsonl"
-                },
-            )()
+    runtime = HitlRuntime(tmp_path, "experiment_runner", manager=Manager(), channel=Channel())
 
-        def workspace_summary(self):
-            return "workspace summary"
+    def proposal_generator(_idea, _work_dir, _parent_sha, _attempt_dir, _history, **_kwargs):
+        evidence = runtime.log_reported_payload(
+            {
+                "idea_type": "evidence",
+                "idea_category": "experiment_result",
+                "context": "The selected direction has stopped improving.",
+                "evidence": "Recent attempts changed several assumptions at once.",
+            }
+        )
+        first = runtime.submit_proposal_payload(
+            {
+                "proposal_type": "exploration",
+                "premises": [evidence["idea_id"]],
+                "proposal": "# Proposal\n\nToo broad.\n",
+            }
+        )
+        assert first["status"] == "feedback"
+        second = runtime.submit_proposal_payload(
+            {
+                "proposal_type": "exploration",
+                "premises": [evidence["idea_id"]],
+                "proposal": "# Proposal\n\nOne targeted change.\n",
+            }
+        )
+        assert second["status"] == "approved"
+        return {"success": True}
 
-        def prepare_autonomous_idea_target(self):
-            pass
-
-        def consume_autonomous_ideas(self, *, hitl_stage, actor=None, **_kwargs):
-            return []
-
-    runtime = Runtime()
-    ctrl = AutoResearchController(
+    ctrl = HitlAutoResearchController(
         idea={"idea": {"title": "t", "domain": "d"}},
         idea_id="demo",
         work_dir=tmp_path,
         history_root=tmp_path / "logs" / "experiment-autoresearch",
         proposal_generator=proposal_generator,
-        comment_mode=lambda *_a, **_k: {"success": True},
         scorer=lambda *_a, **_k: {"success": True},
         checkpoint_manager=_bare_controller(tmp_path, tmp_path / "h").checkpoints,
-        hitl_enabled=True,
         hitl_runtime=runtime,
     )
     attempt_dir = ctrl.history.next_attempt_dir("a" * 40)
-    ctrl._ensure_whiteboard_before(attempt_dir)
 
-    proposal, proposal_path, proposal_snapshot = ctrl._run_proposal_admission_loop(
+    proposal, proposal_idea_id = ctrl._run_proposal_admission_loop(
         parent_sha="a" * 40,
         attempt_dir=attempt_dir,
         attempt_id=attempt_dir.name,
         attempt_history=[],
     )
 
-    assert "Narrow this to one concrete" in proposal
-    assert proposal_path == attempt_dir / "proposal.md"
-    assert proposal_snapshot["state"] == "file"
-    assert proposal_suffixes[0] == ""
-    assert "manager legality review" in proposal_suffixes[1]
-    assert str(attempt_dir / "proposal.md") in proposal_suffixes[1]
-    assert "Do not modify public research-workspace files" in proposal_suffixes[1]
-    assert "whiteboard prune-tip" in proposal_suffixes[1]
-    assert "autonomous_ideas.jsonl" in proposal_suffixes[1]
-    assert "Do not modify `logs/hitl/idea.jsonl` directly." in proposal_suffixes[1]
+    assert "One targeted change" in proposal
+    assert proposal_idea_id
     records = runtime.log.records()
-    assert [record["level"] for record in records] == ["B", "A"]
+    assert [record["level"] for record in records] == ["C", "C", "B", "C", "B", "A"]
     assert {record["parent_node_id"] for record in records} == {"a" * 40}
     assert {record["attempt_id"] for record in records} == {"attempt_1"}
-    assert records[0]["decision"] == "O2"
-    assert records[0]["manager_feedback"] == "Narrow this to one concrete experiment-stage change."
-    assert records[1]["decision"] == "O1"
-
-
-def test_hitl_proposal_admission_reruns_on_human_feedback(tmp_path: Path):
-    from core.autoresearch import AutoResearchController
-    from core.hitl import HitlIdeaLog
-
-    proposal_suffixes = []
-
-    def proposal_generator(_idea, _work_dir, _parent_sha, attempt_dir, _history, prompt_suffix=""):
-        proposal_suffixes.append(prompt_suffix)
-        path = Path(attempt_dir) / "proposal.md"
-        path.write_text(f"# Proposal\n\nsuffix={prompt_suffix}\n", encoding="utf-8")
-        return {"proposal_path": str(path)}
-
-    class Manager:
-        def review_proposal(self, **kwargs):
-            return {
-                "status": "legal",
-                "violations": [],
-                "feedback": "",
-                "context": "Proposal is legal.",
-            }
-
-    class Channel:
-        def __init__(self):
-            self.responses = [
-                "Provide feedback.",
-                "Make it evaluation-only.",
-                "Approve proposal.",
-            ]
-
-        def prompt(self, message=None, options=None):
-            return self.responses.pop(0)
-
-    class Runtime:
-        def __init__(self):
-            self.manager = Manager()
-            self.channel = Channel()
-            self.log = HitlIdeaLog(tmp_path)
-            self.paths = type(
-                "Paths",
-                (),
-                {
-                    "autonomous_ideas_path": tmp_path
-                    / ".neurico"
-                    / "hitl"
-                    / "autonomous_ideas.jsonl"
-                },
-            )()
-
-        def workspace_summary(self):
-            return "workspace summary"
-
-        def prepare_autonomous_idea_target(self):
-            pass
-
-        def consume_autonomous_ideas(self, *, hitl_stage, actor=None, **_kwargs):
-            return []
-
-    runtime = Runtime()
-    ctrl = AutoResearchController(
-        idea={"idea": {"title": "t", "domain": "d"}},
-        idea_id="demo",
-        work_dir=tmp_path,
-        history_root=tmp_path / "logs" / "experiment-autoresearch",
-        proposal_generator=proposal_generator,
-        comment_mode=lambda *_a, **_k: {"success": True},
-        scorer=lambda *_a, **_k: {"success": True},
-        checkpoint_manager=_bare_controller(tmp_path, tmp_path / "h2").checkpoints,
-        hitl_enabled=True,
-        hitl_runtime=runtime,
-    )
-    attempt_dir = ctrl.history.next_attempt_dir("b" * 40)
-    ctrl._ensure_whiteboard_before(attempt_dir)
-
-    ctrl._run_proposal_admission_loop(
-        parent_sha="b" * 40,
-        attempt_dir=attempt_dir,
-        attempt_id=attempt_dir.name,
-        attempt_history=[],
-    )
-
-    assert proposal_suffixes[0] == ""
-    assert "Make it evaluation-only." in proposal_suffixes[1]
-    assert "Revise proposal to be evaluation-only." not in proposal_suffixes[1]
-    assert str(attempt_dir / "proposal.md") in proposal_suffixes[1]
-    assert "Do not modify public research-workspace files" in proposal_suffixes[1]
-    assert "whiteboard prune-tip" in proposal_suffixes[1]
-    records = runtime.log.records()
-    assert [record["decision"] for record in records] == ["O2", "O1"]
-    assert {record["parent_node_id"] for record in records} == {"b" * 40}
-    assert {record["attempt_id"] for record in records} == {"attempt_1"}
-    assert records[0]["human_feedback"] == "Make it evaluation-only."
-    assert records[0]["manager_feedback"] == ""
+    assert records[2]["decision"] == "O2"
+    assert records[2]["manager_feedback"] == "Narrow this to one concrete experiment-stage change."
+    assert records[-1]["decision"] == "O1"
 
 
 def test_hitl_candidate_experiment_uses_plan_execute_review_loop(tmp_path: Path):
-    from core.autoresearch import AutoResearchController
-    from core.hitl import HitlIdeaLog
-
-    scoring_interface = tmp_path / "scoring" / "interface.md"
-    scoring_interface.parent.mkdir(parents=True)
-    scoring_interface.write_text(
-        "\n".join(
-            [
-                "## Files to produce",
-                "| Path | Purpose | Required |",
-                "| --- | --- | --- |",
-                "| results/metrics.json | metrics | yes |",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    metrics = tmp_path / "results" / "metrics.json"
-    metrics.parent.mkdir(parents=True)
-    metrics.write_text('{"score": 1}', encoding="utf-8")
+    from core.hitl_autoresearch import HitlAutoResearchController
 
     calls = []
 
     class Paths:
         plan_path = tmp_path / "plans" / "experiment_runner_plan.md"
-        plan_marker_name = ".experiment_runner_plan_complete"
-        completion_marker_name = ".experiment_runner_complete"
-        checkpoints_dir = tmp_path / ".neurico" / "hitl" / "checkpoints"
-        current_checkpoint = checkpoints_dir / "pending_idea.json"
-
-    class Manager:
-        def review_plan(self, **kwargs):
-            return {"status": "ready", "context": "Plan ready.", "manager_feedback": ""}
-
-        def review_stage(self, **kwargs):
-            return {"status": "aligned", "context": "Artifacts aligned.", "manager_feedback": ""}
 
     class Runtime:
         def __init__(self):
             self.paths = Paths()
-            self.manager = Manager()
-            self.channel = None
-            self.log = HitlIdeaLog(tmp_path)
+            self.finish = None
+            self.prepared_context = None
             self.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
-            self.paths.checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
-        def plan_prompt_block(self, approved_proposal_path=None, **kwargs):
-            assert approved_proposal_path == proposal_path
-            assert kwargs["requires_human_approval"] is False
+        def plan_prompt_block(self, approved_proposal=None, **kwargs):
+            assert approved_proposal == "# Approved proposal\n\nDo one controlled change."
+            assert kwargs["requires_human_approval"] is True
             return "PLAN"
 
-        def plan_revision_prompt_block(self, feedback):
-            return f"PLAN REVISION: {feedback}"
+        def prepare_idea_tool_context(self, **kwargs):
+            self.prepared_context = kwargs
+            self.finish = None
 
-        def execution_prompt_block(self, mode="execute"):
-            return f"EXECUTION: {mode}"
+        def idea_tool_env(self):
+            return {}
 
-        def feedback_continuation_prompt_block(self, feedback):
-            return f"FEEDBACK: {feedback}"
+        def register_worker_prompt(self, prompt):
+            self.prompt = prompt
 
-        def review_prompt_block(self):
-            return "REVIEW REVISION"
+        def handle_worker_exit_after_finish(self, _result, **_kwargs):
+            return self.finish
 
-        def prepare_checkpoint_target(self):
-            self.paths.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-            self.paths.current_checkpoint.write_text("", encoding="utf-8")
-
-        def prepare_autonomous_idea_target(self):
-            pass
-
-        def consume_autonomous_ideas(self, *, hitl_stage, actor=None, **_kwargs):
-            return []
-
-        def has_pending_checkpoint_payload(self, hitl_stage=None):
-            return self.paths.current_checkpoint.exists() and self.paths.current_checkpoint.stat().st_size > 0
-
-        def resolve_checkpoint(self, hitl_stage=None, require_pending=False, **_kwargs):
+        def clear_idea_tool_context(self):
             return None
 
-        def review_stage(self):
-            return self.manager.review_stage()
+        def phase_finish_result(self):
+            return self.finish
 
-        def log_stage_approval(self, context, **_kwargs):
-            self.log.append(
-                {
-                    "pipeline_stage": "experiment_runner",
-                    "hitl_stage": "review",
-                    "level": "B",
-                    "actor": "manager",
-                    "idea_type": "decision",
-                    "context": context,
-                    "basis": "Manager approved candidate artifacts.",
-                    "options": ["Approve stage completion.", "Request revision."],
-                    "decision": "O1",
-                    "raised": False,
-                }
-            )
-
-        def workspace_summary(self):
-            return "workspace"
-
-        @staticmethod
-        def _read_required(path):
-            return path.read_text(encoding="utf-8")
+        def resolved_worker_response(self):
+            return None
 
     runtime = Runtime()
 
-    proposal_path = tmp_path / "logs" / "experiment-autoresearch" / ("c" * 40) / "attempt_1" / "proposal.md"
-    proposal_path.parent.mkdir(parents=True)
-    proposal_path.write_text("# Approved proposal\n\nDo one controlled change.", encoding="utf-8")
-    proposal_snapshot = {"state": "file", "sha256": __import__("hashlib").sha256(proposal_path.read_bytes()).hexdigest()}
-
-    def hitl_comment_mode(idea, work_dir, prompt, log_prefix):
+    def hitl_comment_mode(idea, work_dir, prompt, log_prefix, env_extra=None, logs_dir=None):
+        assert logs_dir == tmp_path / "logs" / "experiment-autoresearch" / ("c" * 40) / "attempt_1"
         calls.append((idea["idea"]["comments"], prompt, log_prefix))
         if prompt == "PLAN":
             runtime.paths.plan_path.write_text("# Plan\n", encoding="utf-8")
-            (work_dir / ".experiment_runner_plan_complete").write_text("done")
-        elif prompt == "EXECUTION: execute":
-            (work_dir / ".experiment_runner_complete").write_text("done")
+            runtime.finish = {"approved": True}
         return {"success": True, "return_code": 0}
 
-    ctrl = AutoResearchController(
+    ctrl = HitlAutoResearchController(
         idea={"idea": {"title": "t", "domain": "d"}},
         idea_id="demo",
         work_dir=tmp_path,
         history_root=tmp_path / "logs" / "experiment-autoresearch",
         proposal_generator=lambda *_a, **_k: "proposal",
-        comment_mode=lambda *_a, **_k: {"success": True},
         scorer=lambda *_a, **_k: {"success": True},
         checkpoint_manager=_bare_controller(tmp_path, tmp_path / "h3").checkpoints,
-        hitl_enabled=True,
         hitl_runtime=runtime,
         hitl_comment_mode=hitl_comment_mode,
     )
 
     result = ctrl._run_candidate_experiment_hitl(
-        proposal_path=proposal_path,
-        proposal_snapshot=proposal_snapshot,
+        proposal="# Approved proposal\n\nDo one controlled change.",
+        proposal_idea_id="I1",
+        parent_node_id="c" * 40,
+        attempt_id="attempt_1",
+        attempt_dir=tmp_path / "logs" / "experiment-autoresearch" / ("c" * 40) / "attempt_1",
     )
 
     assert result["success"] is True
     assert result["phase"] == "complete"
+    assert runtime.prepared_context["requires_human_approval"] is True
     assert calls == [
         (
             (
-                f"Approved proposal path: {proposal_path}\n"
-                f"Control plan output path: {runtime.paths.plan_path}\n"
-                "Read the proposal. Write or update only the control plan at the output path. "
-                "Do not modify the proposal."
+                "Use the runtime-supplied approved proposal to write or update the living control plan. "
+                "After the plan is approved through hitl-finish-phase, continue execution in this same worker session "
+                "using the runtime-provided execution instructions."
             ),
             "PLAN",
             "autoresearch_hitl_experiment_plan",
         ),
-        (
-            "HITL execution phase. Follow the living control plan; do not restart completed work.",
-            "EXECUTION: execute",
-            "autoresearch_hitl_experiment_execute_1",
-        ),
     ]
-
-
-def test_hitl_candidate_experiment_rejects_modified_approved_proposal(tmp_path: Path):
-    from core.autoresearch import AutoResearchController
-    from core.hitl import HitlIdeaLog, snapshot_path_state
-
-    (tmp_path / "scoring").mkdir(parents=True)
-    (tmp_path / "scoring" / "interface.md").write_text(
-        "\n".join(
-            [
-                "## Files to produce",
-                "| Path | Purpose | Required |",
-                "| --- | --- | --- |",
-                "| results/metrics.json | metrics | yes |",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    metrics = tmp_path / "results" / "metrics.json"
-    metrics.parent.mkdir(parents=True)
-    metrics.write_text('{"score": 1}', encoding="utf-8")
-
-    proposal_path = tmp_path / "history" / ("d" * 40) / "attempt_1" / "proposal.md"
-    proposal_path.parent.mkdir(parents=True)
-    proposal_path.write_text("# Approved proposal\n", encoding="utf-8")
-    proposal_snapshot = snapshot_path_state(proposal_path)
-
-    class Paths:
-        plan_path = tmp_path / "plans" / "experiment_runner_plan.md"
-        plan_marker_name = ".experiment_runner_plan_complete"
-        completion_marker_name = ".experiment_runner_complete"
-        checkpoints_dir = tmp_path / ".neurico" / "hitl" / "checkpoints"
-        current_checkpoint = checkpoints_dir / "pending_idea.json"
-
-    class Manager:
-        def review_plan(self, **kwargs):
-            return {"status": "ready", "context": "Plan ready.", "manager_feedback": ""}
-
-    class Runtime:
-        def __init__(self):
-            self.paths = Paths()
-            self.manager = Manager()
-            self.log = HitlIdeaLog(tmp_path)
-            self.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
-            self.paths.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-
-        def plan_prompt_block(self, approved_proposal_path=None, **kwargs):
-            assert kwargs["requires_human_approval"] is False
-            return "PLAN"
-
-        def execution_prompt_block(self, mode="execute"):
-            return f"EXECUTION: {mode}"
-
-        def prepare_checkpoint_target(self):
-            self.paths.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-            self.paths.current_checkpoint.write_text("", encoding="utf-8")
-
-        def prepare_autonomous_idea_target(self):
-            pass
-
-        def consume_autonomous_ideas(self, *, hitl_stage, actor=None, **_kwargs):
-            return []
-
-        def has_pending_checkpoint_payload(self, hitl_stage=None):
-            return False
-
-        def resolve_checkpoint(self, hitl_stage=None, require_pending=False, **_kwargs):
-            return None
-
-        def workspace_summary(self):
-            return "workspace"
-
-        @staticmethod
-        def _read_required(path):
-            return path.read_text(encoding="utf-8")
-
-    runtime = Runtime()
-
-    def hitl_comment_mode(_idea, work_dir, prompt, _log_prefix):
-        if prompt == "PLAN":
-            runtime.paths.plan_path.write_text("# Plan\n", encoding="utf-8")
-            (work_dir / ".experiment_runner_plan_complete").write_text("done")
-        elif prompt == "EXECUTION: execute":
-            proposal_path.write_text("# Modified proposal\n", encoding="utf-8")
-            (work_dir / ".experiment_runner_complete").write_text("done")
-        return {"success": True, "return_code": 0}
-
-    ctrl = AutoResearchController(
-        idea={"idea": {"title": "t", "domain": "d"}},
-        idea_id="demo",
-        work_dir=tmp_path,
-        history_root=tmp_path / "logs" / "experiment-autoresearch",
-        proposal_generator=lambda *_a, **_k: "proposal",
-        comment_mode=lambda *_a, **_k: {"success": True},
-        scorer=lambda *_a, **_k: {"success": True},
-        checkpoint_manager=_bare_controller(tmp_path, tmp_path / "h4").checkpoints,
-        hitl_enabled=True,
-        hitl_runtime=runtime,
-        hitl_comment_mode=hitl_comment_mode,
-    )
-
-    result = ctrl._run_candidate_experiment_hitl(
-        proposal_path=proposal_path,
-        proposal_snapshot=proposal_snapshot,
-    )
-
-    assert result["success"] is False
-    assert "Approved AutoResearch proposal changed unexpectedly" in result["error"]
 
 
 def test_hitl_candidate_failure_closes_before_scorer_and_cleans_public_state(
     tmp_path: Path,
     monkeypatch,
 ):
-    from core.autoresearch import AutoResearchController, CheckpointManager
-    from core.hitl import snapshot_path_state
+    from core.autoresearch import (
+        AutoResearchRunResult,
+        CheckpointManager,
+        autoresearch_result_payload,
+    )
+    from core.hitl_autoresearch import HitlAutoResearchController
+    from core.hitl_frontier import HitlFrontierStore
 
     (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
-    idea_log = tmp_path / "logs" / "hitl" / "idea.jsonl"
+    idea_log = tmp_path / ".neurico" / "hitl" / "idea" / "idea.jsonl"
     idea_log.parent.mkdir(parents=True, exist_ok=True)
     idea_log.write_text('{"idea_id":"I1","context":"before"}\n', encoding="utf-8")
-    before_archive = tmp_path / "logs" / "hitl" / "resolve_checkpoint" / "before.json"
-    before_archive.parent.mkdir(parents=True, exist_ok=True)
-    before_archive.write_text('{"idea_id":"I1"}\n', encoding="utf-8")
+    before_state = tmp_path / ".neurico" / "hitl" / "before_state.json"
+    before_state.write_text('{"state":"before"}\n', encoding="utf-8")
     scoring_dir = tmp_path / "scoring"
     scoring_dir.mkdir()
     (scoring_dir / "results.json").write_text(
@@ -897,45 +634,43 @@ def test_hitl_candidate_failure_closes_before_scorer_and_cleans_public_state(
     )
     checkpoints = CheckpointManager(tmp_path)
     parent = checkpoints.create_checkpoint("parent")
+    HitlFrontierStore(tmp_path).initialize_root(
+        node_sha=parent.sha,
+        plan_text="# Initial plan\n",
+        objective_score={"results": {"properties": {}}},
+        reason_for_acceptance="Initial experiment completed without scoring error.",
+    )
 
     attempt_history_root = tmp_path / "logs" / "experiment-autoresearch"
-    proposal_path = attempt_history_root / parent.sha / "attempt_1" / "proposal.md"
-    proposal_path.parent.mkdir(parents=True)
-    proposal_path.write_text("# Proposal\n", encoding="utf-8")
     scorer_called = {"value": False}
 
-    ctrl = AutoResearchController(
+    ctrl = HitlAutoResearchController(
         idea={"idea": {"title": "t", "domain": "d"}},
         idea_id="demo",
         work_dir=tmp_path,
         history_root=attempt_history_root,
         proposal_generator=lambda *_a, **_k: "proposal",
-        comment_mode=lambda *_a, **_k: {"success": True},
         scorer=lambda *_a, **_k: scorer_called.__setitem__("value", True),
         checkpoint_manager=checkpoints,
-        hitl_enabled=True,
         hitl_comment_mode=lambda *_a, **_k: {"success": True},
     )
+    stale_runtime = object()
+    ctrl.hitl_runtime = stale_runtime
 
     monkeypatch.setattr(
         ctrl,
         "_run_proposal_admission_loop",
-        lambda **_kwargs: (
-            "# Proposal\n",
-            proposal_path,
-            snapshot_path_state(proposal_path),
-        ),
+        lambda **_kwargs: ("# Proposal\n", "I1"),
     )
 
     def failed_candidate(**_kwargs):
         (tmp_path / "stray_public_file.txt").write_text("dirty\n", encoding="utf-8")
         idea_log.write_text(
-            idea_log.read_text(encoding="utf-8")
-            + '{"idea_id":"I2","context":"failed attempt"}\n',
+            idea_log.read_text(encoding="utf-8") + '{"idea_id":"I2","context":"failed attempt"}\n',
             encoding="utf-8",
         )
-        failed_archive = tmp_path / "logs" / "hitl" / "resolve_checkpoint" / "failed.json"
-        failed_archive.write_text('{"idea_id":"I2"}\n', encoding="utf-8")
+        failed_state = tmp_path / ".neurico" / "hitl" / "failed_state.json"
+        failed_state.write_text('{"state":"failed"}\n', encoding="utf-8")
         return {
             "success": False,
             "hitl": True,
@@ -951,21 +686,36 @@ def test_hitl_candidate_failure_closes_before_scorer_and_cleans_public_state(
     assert "mechanical HITL failure" in result.reason
     assert not (tmp_path / "stray_public_file.txt").exists()
     assert idea_log.read_text(encoding="utf-8") == '{"idea_id":"I1","context":"before"}\n'
-    assert before_archive.read_text(encoding="utf-8") == '{"idea_id":"I1"}\n'
-    assert not (tmp_path / "logs" / "hitl" / "resolve_checkpoint" / "failed.json").exists()
+    assert before_state.read_text(encoding="utf-8") == '{"state":"before"}\n'
+    assert not (tmp_path / ".neurico" / "hitl" / "failed_state.json").exists()
+    assert ctrl.hitl_runtime is None
     assert not result.attempt_dir.exists()
+    assert result.attempt_dir_removed is True
+    payload = autoresearch_result_payload(
+        AutoResearchRunResult(
+            success=False,
+            initial_sha=parent.sha,
+            current_best_sha=parent.sha,
+            iterations=[result],
+        )
+    )
+    assert payload["iterations"][0]["attempt_dir_removed"] is True
 
 
 def test_recover_interrupted_hitl_attempt_uses_saved_external_history_root(tmp_path: Path):
     from core.autoresearch import (
         CheckpointManager,
-        recover_interrupted_hitl_attempt_if_needed,
         write_autoresearch_state,
     )
-    from core.whiteboard import (
-        read_current_attempt_marker,
-        whiteboard_path,
-        write_current_attempt_marker,
+    from core.hitl_autoresearch import (
+        _snapshot_hitl_state_before,
+        recover_interrupted_hitl_attempt_if_needed,
+    )
+    from core.hitl_whiteboard import (
+        HitlAutoResearchWhiteboard,
+        hitl_whiteboard_path,
+        read_hitl_current_attempt_marker,
+        write_hitl_current_attempt_marker,
     )
 
     work_dir = tmp_path / "workspace"
@@ -977,19 +727,22 @@ def test_recover_interrupted_hitl_attempt_uses_saved_external_history_root(tmp_p
     parent = "e" * 40
     attempt_dir = external_history / parent / "attempt_1"
     attempt_dir.mkdir(parents=True)
-    (attempt_dir / "whiteboard_before.json").write_text(
-        '{"version":1,"tips":[]}\n',
-        encoding="utf-8",
-    )
-    hitl_before = attempt_dir / "hitl_log_before"
-    hitl_before.mkdir()
-    (hitl_before / "idea.jsonl").write_text(
+    HitlAutoResearchWhiteboard(work_dir).load().save()
+    before_whiteboard = hitl_whiteboard_path(work_dir).read_text(encoding="utf-8")
+    idea_log = work_dir / ".neurico" / "hitl" / "idea" / "idea.jsonl"
+    idea_log.parent.mkdir(parents=True, exist_ok=True)
+    idea_log.write_text(
         '{"idea_id":"I1","context":"before"}\n',
         encoding="utf-8",
     )
-    before_archive = hitl_before / "resolve_checkpoint" / "before.json"
-    before_archive.parent.mkdir(parents=True)
-    before_archive.write_text('{"idea_id":"I1"}\n', encoding="utf-8")
+    before_state = work_dir / ".neurico" / "hitl" / "before_state.json"
+    before_state.write_text('{"state":"before"}\n', encoding="utf-8")
+    research_state = work_dir / ".neurico" / "research_state.json"
+    research_state.write_text(
+        '{"narrative":"before"}\n',
+        encoding="utf-8",
+    )
+    _snapshot_hitl_state_before(work_dir, attempt_dir)
     write_autoresearch_state(
         work_dir=work_dir,
         history_root=external_history,
@@ -997,39 +750,120 @@ def test_recover_interrupted_hitl_attempt_uses_saved_external_history_root(tmp_p
         current_best_sha=checkpoint.sha,
         last_iteration=0,
     )
-    write_current_attempt_marker(work_dir, f"{parent}/attempt_1")
+    write_hitl_current_attempt_marker(work_dir, f"{parent}/attempt_1")
 
-    whiteboard_path(work_dir).parent.mkdir(parents=True, exist_ok=True)
-    whiteboard_path(work_dir).write_text(
+    hitl_whiteboard_path(work_dir).write_text(
         '{"version":1,"tips":[{"id":"T1"}]}\n',
         encoding="utf-8",
     )
-    idea_log = work_dir / "logs" / "hitl" / "idea.jsonl"
-    idea_log.parent.mkdir(parents=True, exist_ok=True)
     idea_log.write_text(
         '{"idea_id":"I1","context":"before"}\n'
         '{"idea_id":"I2","context":"interrupted attempt"}\n',
         encoding="utf-8",
     )
-    failed_archive = work_dir / "logs" / "hitl" / "resolve_checkpoint" / "failed.json"
-    failed_archive.parent.mkdir(parents=True, exist_ok=True)
-    failed_archive.write_text('{"idea_id":"I2"}\n', encoding="utf-8")
+    failed_state = work_dir / ".neurico" / "hitl" / "failed_state.json"
+    failed_state.write_text('{"state":"failed"}\n', encoding="utf-8")
+    research_state.write_text('{"narrative":"interrupted attempt"}\n', encoding="utf-8")
     (work_dir / "README.md").write_text("dirty\n", encoding="utf-8")
     (work_dir / "plans").mkdir()
     (work_dir / "plans" / "experiment_runner_plan.md").write_text("# dirty\n", encoding="utf-8")
 
     recovered = recover_interrupted_hitl_attempt_if_needed(work_dir)
 
-    assert recovered == attempt_dir
+    assert recovered is not None
+    assert recovered.marker == f"{parent}/attempt_1"
+    assert recovered.removed_attempt_dir == attempt_dir
+    assert recovered.restored_checkpoint_sha == checkpoint.sha
     assert (work_dir / "README.md").read_text(encoding="utf-8") == "base\n"
     assert not (work_dir / "plans" / "experiment_runner_plan.md").exists()
-    assert whiteboard_path(work_dir).read_text(encoding="utf-8") == '{"version":1,"tips":[]}\n'
+    assert hitl_whiteboard_path(work_dir).read_text(encoding="utf-8") == before_whiteboard
     assert idea_log.read_text(encoding="utf-8") == '{"idea_id":"I1","context":"before"}\n'
-    restored_archive = work_dir / "logs" / "hitl" / "resolve_checkpoint" / "before.json"
-    assert restored_archive.read_text(encoding="utf-8") == '{"idea_id":"I1"}\n'
-    assert not failed_archive.exists()
+    restored_state = work_dir / ".neurico" / "hitl" / "before_state.json"
+    assert restored_state.read_text(encoding="utf-8") == '{"state":"before"}\n'
+    assert research_state.read_text(encoding="utf-8") == '{"narrative":"before"}\n'
+    assert not failed_state.exists()
     assert not attempt_dir.exists()
-    assert read_current_attempt_marker(work_dir) == ""
+    assert read_hitl_current_attempt_marker(work_dir) == ""
+
+
+def test_recover_interrupted_hitl_attempt_rejects_partial_snapshots(tmp_path: Path):
+    from core.autoresearch import (
+        CheckpointManager,
+        write_autoresearch_state,
+    )
+    from core.hitl_autoresearch import recover_interrupted_hitl_attempt_if_needed
+    from core.hitl_whiteboard import (
+        read_hitl_current_attempt_marker,
+        write_hitl_current_attempt_marker,
+    )
+
+    work_dir = tmp_path / "workspace"
+    work_dir.mkdir()
+    (work_dir / "README.md").write_text("base\n", encoding="utf-8")
+    checkpoint = CheckpointManager(work_dir).create_checkpoint("current best")
+
+    external_history = tmp_path / "external-history"
+    parent = "f" * 40
+    attempt_dir = external_history / parent / "attempt_1"
+    attempt_dir.mkdir(parents=True)
+    write_autoresearch_state(
+        work_dir=work_dir,
+        history_root=external_history,
+        lineage_source_sha=checkpoint.sha,
+        current_best_sha=checkpoint.sha,
+        last_iteration=0,
+    )
+    write_hitl_current_attempt_marker(work_dir, f"{parent}/attempt_1")
+
+    with pytest.raises(RuntimeError, match="missing_git_rollback_boundary"):
+        recover_interrupted_hitl_attempt_if_needed(work_dir)
+
+    assert attempt_dir.exists()
+    assert read_hitl_current_attempt_marker(work_dir) == f"{parent}/attempt_1"
+
+
+def test_recover_interrupted_hitl_attempt_rejects_missing_whiteboard_boundary(
+    tmp_path: Path,
+):
+    from core.autoresearch import (
+        CheckpointManager,
+        write_autoresearch_state,
+    )
+    from core.hitl_autoresearch import (
+        _snapshot_hitl_state_before,
+        recover_interrupted_hitl_attempt_if_needed,
+    )
+    from core.hitl_whiteboard import (
+        hitl_current_attempt_marker_path,
+        read_hitl_current_attempt_marker,
+    )
+
+    work_dir = tmp_path / "workspace"
+    work_dir.mkdir()
+    (work_dir / "README.md").write_text("base\n", encoding="utf-8")
+    checkpoint = CheckpointManager(work_dir).create_checkpoint("current best")
+    external_history = tmp_path / "external-history"
+    parent = "g" * 40
+    attempt_dir = external_history / parent / "attempt_1"
+    attempt_dir.mkdir(parents=True)
+    _snapshot_hitl_state_before(work_dir, attempt_dir)
+    write_autoresearch_state(
+        work_dir=work_dir,
+        history_root=external_history,
+        lineage_source_sha=checkpoint.sha,
+        current_best_sha=checkpoint.sha,
+        last_iteration=0,
+    )
+
+    marker = hitl_current_attempt_marker_path(work_dir)
+    marker.parent.mkdir(parents=True)
+    marker.write_text(f"{parent}/attempt_1\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="missing_whiteboard_rollback_boundary"):
+        recover_interrupted_hitl_attempt_if_needed(work_dir)
+
+    assert attempt_dir.exists()
+    assert read_hitl_current_attempt_marker(work_dir) == f"{parent}/attempt_1"
 
 
 # ------------------------------------------------- proposer prompt hardening
@@ -1038,7 +872,8 @@ def test_recover_interrupted_hitl_attempt_uses_saved_external_history_root(tmp_p
 def _render_proposer_prompt(
     work_dir: Path,
     *,
-    autonomous_ideas_path: Optional[Path] = None,
+    hitl_idea_reporting: bool = False,
+    hitl_submission: bool = False,
 ) -> str:
     from agents.autoresearch_proposer import generate_autoresearch_proposal_prompt
 
@@ -1051,7 +886,8 @@ def _render_proposer_prompt(
         templates_dir=templates_dir,
         provider="claude",
         attempt_history=[],
-        autonomous_ideas_path=autonomous_ideas_path,
+        hitl_idea_reporting=hitl_idea_reporting,
+        hitl_submission=hitl_submission,
     )
 
 
@@ -1069,30 +905,42 @@ def test_proposer_prompt_documents_prune_tip_carveout(tmp_path: Path):
 
 
 def test_proposer_prompt_documents_autonomous_idea_logging(tmp_path: Path):
-    autonomous_path = tmp_path / ".neurico" / "hitl" / "autonomous_ideas.jsonl"
     prompt = _render_proposer_prompt(
         tmp_path,
-        autonomous_ideas_path=autonomous_path,
+        hitl_idea_reporting=True,
+        hitl_submission=True,
     )
 
-    assert f"Autonomous HITL idea path: {autonomous_path}" in prompt
-    assert "Autonomous idea logging:" in prompt
-    assert "These are C-level ideas: record them and continue working." in prompt
-    assert "You MUST append one C-level record whenever" in prompt
-    assert "permitted in addition to the workspace" in prompt
-    assert "grants nor removes any other workspace permission" in prompt
-    assert "Every `related_artifacts[].path` must be a POSIX path" in prompt
-    assert "relative to the research\nworkspace root" in prompt
-    assert "Do not log received manager/human feedback" in prompt
-    assert '"idea_type": "decision | evidence"' in prompt
-    assert "`hitl_stage`" in prompt
+    assert "C-Level Idea Reporting" in prompt
+    assert "lightweight logic trail of consequential" in prompt
+    assert "Good moments to log:" in prompt
+    assert "would this matter to future you" in prompt
+    assert "hitl-report-idea evidence" in prompt
+    assert "hitl-report-idea decision" in prompt
+    assert "hitl-submit-proposal" in prompt
+    assert '--proposal-type "exploitation"' in prompt
+    assert "Do not create a proposal file" in prompt
+    assert "Wait for `hitl-submit-proposal` to finish" in prompt
+    assert "submit that new proposal in this same session" in prompt
+    assert "--option" in prompt
+    assert "--artifact" in prompt
+    assert "Experiment-runner reminders:" in prompt
+    assert "Resource-finder reminders:" not in prompt
+    assert "hitl-raise-idea" not in prompt
+    assert "Artifact paths must be POSIX paths relative to the research workspace root." in prompt
+    assert "Do not log manager/human feedback" in prompt
+    assert "Current HITL stage for these autonomous ideas: `proposal`." in prompt
+    assert "Parent node:" not in prompt
+    assert "Attempt directory:" not in prompt
+    assert '"attempt_history"' not in prompt
+    assert str(tmp_path / "logs" / "experiment-autoresearch" / "attempt_1") not in prompt
 
 
 def test_proposer_prompt_omits_hitl_autonomous_logging_when_disabled(tmp_path: Path):
     prompt = _render_proposer_prompt(tmp_path)
 
-    assert "Autonomous HITL idea path" not in prompt
-    assert "Autonomous idea logging:" not in prompt
+    assert "C-Level Idea Reporting" not in prompt
+    assert "hitl-report-idea" not in prompt
     assert "autonomous_ideas.jsonl" not in prompt
 
 
@@ -1133,6 +981,7 @@ def test_autoresearch_proposer_optional_prompt_suffix_is_appended(
 
     class FakeProcess:
         def __init__(self, *args, **kwargs):
+            sent["cwd"] = kwargs["cwd"]
             self.stdin = FakeStdin()
             self.stdout = FakeStdout()
 
@@ -1157,12 +1006,54 @@ def test_autoresearch_proposer_optional_prompt_suffix_is_appended(
     )
 
     assert result["success"] is True
-    assert sent["prompt"].rstrip().endswith(
-        "HITL FEEDBACK: revise the proposal boundary only."
-    )
+    assert sent["prompt"].rstrip().endswith("HITL FEEDBACK: revise the proposal boundary only.")
     assert "HITL FEEDBACK: revise the proposal boundary only." in (
         tmp_path / "attempt" / "proposer_prompt.txt"
     ).read_text(encoding="utf-8")
+    assert sent["cwd"] == str(tmp_path / "attempt")
+
+
+def test_hitl_proposer_runs_from_the_research_workspace(tmp_path: Path, monkeypatch):
+    from agents import autoresearch_proposer
+
+    launched = {}
+
+    class FakeStdin:
+        def write(self, _text):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeStdout:
+        def readline(self):
+            return ""
+
+    class FakeProcess:
+        def __init__(self, *args, **kwargs):
+            launched["cwd"] = kwargs["cwd"]
+            self.stdin = FakeStdin()
+            self.stdout = FakeStdout()
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(autoresearch_proposer.subprocess, "Popen", FakeProcess)
+
+    result = autoresearch_proposer.run_autoresearch_proposer(
+        idea={"idea": {"title": "T", "domain": "d"}},
+        work_dir=tmp_path,
+        parent_sha="a" * 40,
+        attempt_dir=tmp_path / "external-history" / "attempt_1",
+        provider="claude",
+        templates_dir=Path(__file__).resolve().parents[1] / "templates",
+        timeout=10,
+        full_permissions=False,
+        env_extra={"NEURICO_HITL_URL": "http://127.0.0.1:1"},
+    )
+
+    assert result["success"] is True
+    assert launched["cwd"] == str(tmp_path)
 
 
 def test_proposer_prompt_wraps_tips_in_untrusted_block(tmp_path: Path):

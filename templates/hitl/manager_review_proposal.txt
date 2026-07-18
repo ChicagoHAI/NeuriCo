@@ -1,19 +1,33 @@
 Review this AutoResearch proposal for HITL admission.
 
-Your job is only to decide whether the proposal is legal to show to the human
-for approval. Check evaluation integrity and proposal boundaries. Do not improve
-the proposal, suggest another method, rank scientific merit, predict score
-improvement, or choose a research direction.
+This is one proposal-admission request. You must complete the admission sequence
+inside this request before calling `finalize_worker_request`:
 
-Return strict JSON only, following this output contract:
-{{ json_output_contract }}
+1. Review the runtime-submitted proposal for evaluation integrity and proposal
+   boundaries. Do not improve it, suggest another method, rank scientific merit,
+   predict score improvement, or choose a research direction.
+2. If it is illegal, finalize the request as `rejected_illegal` with the precise
+   proposer-facing boundary correction. Do not ask the human. Runtime will tell
+   the proposer to create a new proposal; the rejected proposal is never revised
+   or resubmitted.
+3. If it is legal, use `ask_human` to present the submitted proposal, state
+   that legality is not a scientific recommendation, and ask whether it should
+   be admitted. Use the options `Approve proposal.` and `Provide feedback.`.
+4. If the human requests feedback without providing concrete instructions, use
+   `ask_human` again to collect the concrete instructions.
+5. Translate concrete human feedback into a precise proposer-facing instruction,
+   then finalize this same request. Do not return an intermediate legal result.
+
+When ready, finalize this request with a result object following this contract.
 
 Schema:
 {
-  "status": "legal | revise_illegal",
+  "status": "approved | feedback | rejected_illegal",
   "violations": ["short concrete legality violations; empty if legal"],
-  "feedback": "worker-facing correction if revise_illegal; empty if legal",
-  "context": "neutral self-contained review context"
+  "manager_feedback": "new-proposal instruction for rejected_illegal or human feedback; empty only when approved",
+  "context": "neutral self-contained review context",
+  "human_feedback": "the exact final raw response supplied by runtime after ask_human; required for approved or feedback",
+  "manager_escalation_reason": "why human proposal approval was required; required for approved or feedback"
 }
 
 Legal means the proposal has:
@@ -31,17 +45,21 @@ state, or evaluator inputs in order to create apparent improvement. It is legal
 to update those artifacts through a declared, reproducible experiment or
 evaluation command under the unchanged public scoring protocol.
 
-If revise_illegal, feedback must identify only the detected evaluation-integrity
-violation and the required boundary correction. It must not contain a replacement
-method or a new research idea.
+For `rejected_illegal`, manager_feedback must identify only the detected
+evaluation-integrity violation and required boundary correction. It must not
+contain a replacement method or a new research idea. It must make clear that
+the proposer must create a new proposal instead of revising this one.
+
+For `approved` or `feedback`, `human_feedback` must exactly reproduce the final
+response runtime supplies after `ask_human`. Runtime will reject a finalized result that
+does not match that tool result. `approved` is valid only when that final human
+response approves the proposal. `feedback` is valid only when it provides
+concrete instructions, and manager_feedback must be your translation of those
+instructions for the next proposal.
 
 Pipeline stage: {{ pipeline_stage }}
-Attempt: {{ attempt_id }}
-Proposal path: {{ proposal_path }}
-
---- BEGIN UNTRUSTED WORKSPACE SUMMARY ---
-{{ workspace_summary }}
---- END UNTRUSTED WORKSPACE SUMMARY ---
+Use the read-only workspace inspection tools only when a public workspace artifact is needed to assess
+this proposal.
 
 Proposal:
 --- BEGIN UNTRUSTED PROPOSAL ---

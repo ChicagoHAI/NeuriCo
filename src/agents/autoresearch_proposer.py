@@ -1,10 +1,11 @@
 """
 AutoResearch Proposal Generator Agent.
 
-This module launches a provider CLI agent to write one structured proposal for
-the next AutoResearch attempt. The agent is a planner only: it writes
-proposal.md into the attempt history directory and must not modify the research
-workspace.
+This module launches a provider CLI agent to prepare one structured proposal
+for the next AutoResearch attempt. The agent is a planner only: normal
+AutoResearch writes proposal.md into attempt history, while HITL submits the
+proposal directly to runtime and must not modify public research-workspace
+files.
 """
 
 from pathlib import Path
@@ -21,7 +22,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.compute_backend import get_runtime_compute_backend
 from core.security import sanitize_text
-
 
 CLI_COMMANDS = {
     "claude": "claude -p",
@@ -112,7 +112,9 @@ def generate_autoresearch_proposal_prompt(
     templates_dir: Path,
     provider: str = "claude",
     attempt_history: Optional[list[Dict[str, Any]]] = None,
-    autonomous_ideas_path: Optional[Path] = None,
+    hitl_idea_reporting: bool = False,
+    hitl_submission: bool = False,
+    hitl_autoresearch_whiteboard: bool = False,
 ) -> str:
     """
     Generate the AutoResearch proposer prompt from a curated public context.
@@ -141,7 +143,12 @@ def generate_autoresearch_proposal_prompt(
     idea_spec = idea.get("idea", idea)
     context = collect_public_proposal_context(
         work_dir=work_dir,
-        attempt_history=attempt_history or [],
+        # HITL exposes the selected direction's relevant attempt history only
+        # through view_current_frontier. Do not duplicate or leak runtime
+        # attempt provenance in the prompt's public context.
+        attempt_history=None if hitl_submission else attempt_history or [],
+        include_attempt_history=not hitl_submission,
+        hitl_autoresearch_whiteboard=hitl_autoresearch_whiteboard,
     )
 
     # Whiteboard tips get their own dedicated UNTRUSTED TIPS section in the
@@ -159,8 +166,11 @@ def generate_autoresearch_proposal_prompt(
         parent_sha=parent_sha,
         attempt_dir=str(attempt_dir),
         proposal_path=str(attempt_dir / "proposal.md"),
-        autonomous_ideas_path=str(autonomous_ideas_path or ""),
+        hitl_idea_reporting=hitl_idea_reporting,
+        hitl_submission=hitl_submission,
+        pipeline_stage="experiment_runner",
         hitl_stage="proposal",
+        allow_raised_ideas=False,
         public_context=context,
         whiteboard_active_tips_md=whiteboard_active_tips_md,
         compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
@@ -170,6 +180,9 @@ def generate_autoresearch_proposal_prompt(
 def collect_public_proposal_context(
     work_dir: Path,
     attempt_history: Optional[list[Dict[str, Any]]] = None,
+    *,
+    include_attempt_history: bool = True,
+    hitl_autoresearch_whiteboard: bool = False,
 ) -> Dict[str, Any]:
     """
     Build the public context for proposal generation.
@@ -188,16 +201,23 @@ def collect_public_proposal_context(
         "results_summary": _summarize_directory(work_dir / "results"),
         "results_metrics_json": _read_json_or_text(work_dir / "results" / "metrics.json"),
         "src_tree": _list_tree(work_dir / "src"),
-        "attempt_history": attempt_history or [],
-        "whiteboard_active_tips_md": _render_whiteboard(work_dir),
+        "whiteboard_active_tips_md": _render_whiteboard(
+            work_dir,
+            hitl_autoresearch=hitl_autoresearch_whiteboard,
+        ),
     }
+    if include_attempt_history:
+        context["attempt_history"] = attempt_history or []
     return context
 
 
-def _render_whiteboard(work_dir: Path) -> str:
+def _render_whiteboard(work_dir: Path, *, hitl_autoresearch: bool = False) -> str:
     """Render the AutoResearch cross-run whiteboard's active tips as markdown."""
     try:
-        from core.whiteboard import Whiteboard
+        if hitl_autoresearch:
+            from core.hitl_whiteboard import HitlAutoResearchWhiteboard as Whiteboard
+        else:
+            from core.whiteboard import Whiteboard
     except ImportError:  # pragma: no cover
         return ""
     try:
@@ -218,13 +238,14 @@ def run_autoresearch_proposer(
     full_permissions: bool = True,
     attempt_history: Optional[list[Dict[str, Any]]] = None,
     prompt_suffix: str = "",
-    autonomous_ideas_path: Optional[Path] = None,
+    env_extra: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Launch the AutoResearch proposer agent.
 
-    Returns a dict with success, proposal_path, prompt_file, transcript_file,
-    elapsed_time, and error when applicable.
+    Returns launch metadata and success status. Normal AutoResearch also
+    returns its materialized proposal path; HITL proposal content is submitted
+    directly to runtime and has no worker-owned proposal artifact.
     """
     if provider not in CLI_COMMANDS:
         raise ValueError(
@@ -238,8 +259,9 @@ def run_autoresearch_proposer(
     attempt_dir = Path(attempt_dir)
     attempt_dir.mkdir(parents=True, exist_ok=True)
     proposal_path = attempt_dir / "proposal.md"
+    hitl_submission = bool(env_extra and env_extra.get("NEURICO_HITL_URL"))
 
-    print(f"🧭 Starting AutoResearch Proposal Generator")
+    print("🧭 Starting AutoResearch Proposal Generator")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
     print(f"   Parent node: {parent_sha}")
@@ -255,7 +277,11 @@ def run_autoresearch_proposer(
         templates_dir=Path(templates_dir),
         provider=provider,
         attempt_history=attempt_history,
-        autonomous_ideas_path=autonomous_ideas_path,
+        hitl_idea_reporting=bool(env_extra and env_extra.get("NEURICO_HITL_URL")),
+        hitl_submission=hitl_submission,
+        hitl_autoresearch_whiteboard=bool(
+            env_extra and env_extra.get("NEURICO_HITL_AUTORESEARCH_WHITEBOARD") == "1"
+        ),
     )
     if prompt_suffix.strip():
         prompt = f"{prompt.rstrip()}\n\n{prompt_suffix.strip()}\n"
@@ -282,12 +308,17 @@ def run_autoresearch_proposer(
 
     print(f"▶️  Launching {provider} CLI proposer...")
     print(f"   Command: {cmd}")
-    print(f"   Proposal: {proposal_path}")
+    if not hitl_submission:
+        print(f"   Proposal: {proposal_path}")
+    else:
+        print("   Proposal: submitted directly to HITL runtime")
     print(f"   Transcript: {transcript_file}")
     print()
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    if env_extra:
+        env.update({str(k): str(v) for k, v in env_extra.items()})
     if provider == "gemini":
         env["GEMINI_CLI_IDE_DISABLE"] = "1"
 
@@ -306,7 +337,10 @@ def run_autoresearch_proposer(
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
-                cwd=str(attempt_dir),
+                # HITL proposal commands and the whiteboard tool are scoped to
+                # the live research workspace. Normal AutoResearch keeps its
+                # historical attempt-directory working directory unchanged.
+                cwd=str(work_dir if hitl_submission else attempt_dir),
             )
 
             process.stdin.write(prompt)
@@ -331,9 +365,9 @@ def run_autoresearch_proposer(
 
     elapsed = time.time() - start_time
     proposal_exists = proposal_path.exists() and proposal_path.stat().st_size > 0
-    success = return_code == 0 and proposal_exists and error is None
+    success = return_code == 0 and (hitl_submission or proposal_exists) and error is None
 
-    if not proposal_exists and error is None:
+    if not hitl_submission and not proposal_exists and error is None:
         error = f"proposal.md was not created at {proposal_path}"
 
     if success:

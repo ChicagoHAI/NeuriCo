@@ -1,22 +1,23 @@
 Terminal contract:
-Before exiting, exactly one of these states MUST hold:
+Before requesting finish review, COMPLETE should hold:
 
-1. COMPLETE
-   - Every approved plan step is complete.
-   - If `scoring/interface.md` exists, every required artifact listed there
-     exists locally.
-   - No required training, evaluation, job, or artifact-generation work remains
-     running.
-   - The plan progress section is current.
-   - `{{ completion_marker }}` exists.
-   - No non-empty pending checkpoint exists at `{{ checkpoint_path }}`.
+- Every approved plan step is complete.
+- If `scoring/interface.md` exists, every required artifact listed there exists
+  locally.
+- No required training, evaluation, job, or artifact-generation work remains
+  running.
+- The plan progress section is current.
 
-2. BLOCKED
-   - One valid pending checkpoint exists at `{{ checkpoint_path }}`.
-   - `{{ completion_marker }}` does not exist.
-   - The plan records current progress and the blocking issue.
+{% include "hitl/worker_finish_phase_contract.txt" %}
 
-Exiting with both states or neither state is invalid.
+If manager/human input is needed before completion, call `hitl-raise-idea` and
+wait for the returned feedback instead of requesting finish review. If a HITL
+command prints `HITL_COMMAND_ERROR` or `HITL_ERROR`, follow its printed
+instruction and retry it in this same worker session. If it prints
+`HITL_RUNTIME_ERROR`, preserve the current workspace and retry the same command
+in this worker session. Only if an external non-HITL blocker prevents that retry,
+record the current progress and blocker in the plan.
+
 Do not leave required work running unattended in the background.
 Do not state that you will return later.
 Do not create or modify `scoring/results.json`.

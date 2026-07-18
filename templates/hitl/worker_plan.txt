@@ -7,13 +7,15 @@ planning. The output is a living control artifact, not a final report.
 
 Write or update `{{ plan_path }}`. The plan must be concrete enough that a manager
 can decide whether execution should begin.
-{% if approved_proposal_path %}
+{% if approved_proposal %}
 
 Approved proposal:
-- Read the approved AutoResearch proposal from this exact path:
-  `{{ approved_proposal_path }}`
-- Use it only to write the HITL control plan.
-- Do not copy, move, edit, or summarize it into another proposal file.
+- The runtime supplied the approved AutoResearch proposal below. Use it only to
+  write the HITL control plan.
+
+--- BEGIN RUNTIME-APPROVED PROPOSAL ---
+{{ approved_proposal }}
+--- END RUNTIME-APPROVED PROPOSAL ---
 {% endif %}
 
 Required plan content:
@@ -29,22 +31,34 @@ Required plan content:
   depends on human intent
 - known risks, gaps, and stop conditions
 - current progress section, initially marking planning as complete
+{% if pipeline_stage == "rule_maker" %}
+
+Rule-maker plan requirements:
+- identify the proposed scoring properties, directions, and target policy
+- define the runner artifact contract that `scoring/interface.md` will expose
+- describe split, aggregation, determinism, and failure behavior where relevant
+- identify reward-hacking risks and how `scoring/eval.py` prevents trivial
+  outputs from satisfying the rule
+- explain which metric or interpretation choices would change research meaning
+  and therefore require escalation
+{% endif %}
+
+Before requesting plan review, report at least one material C-level evidence or
+decision idea created while planning. This gives the manager's plan decision a
+real finalized premise; do not invent a routine idea just to satisfy the rule.
 
 Hard constraints:
-- The only permitted public workspace writes in this invocation are
-  `{{ plan_path }}` and `{{ plan_completion_marker }}`. You may also append
-  non-blocking autonomous ideas to the hidden HITL runtime path described below.
+- The only permitted public workspace write in this invocation is
+  `{{ plan_path }}`.
 - You may read the whiteboard, but you MUST NOT add, clear, or prune tips.
 - Do not modify `planning.md`.
 - Do not modify the approved proposal.
 - Do not perform stage execution work or write stage deliverables in planning
   mode.
-- Do not create `{{ completion_marker }}`.
-- Do not create a pending execution checkpoint in plan mode.
-- Create `{{ plan_completion_marker }}` only after `{{ plan_path }}` is ready for
-  manager review.
 
 {% include "hitl/worker_autonomous_idea_contract.txt" %}
+
+{% include "hitl/worker_finish_phase_contract.txt" %}
 
 The manager will review this plan. If it is good enough,
 {% if requires_human_approval %}the human will approve or provide feedback before execution starts.{% else %}execution may begin without another human approval because the relevant proposal has already been approved.{% endif %}

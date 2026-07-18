@@ -783,7 +783,12 @@ and the general workflow, ALWAYS follow the user's instructions.
 
         return ""
 
-    def generate_resource_finder_prompt(self, idea: Dict[str, Any]) -> str:
+    def generate_resource_finder_prompt(
+        self,
+        idea: Dict[str, Any],
+        *,
+        hitl_runtime_completion: bool = False,
+    ) -> str:
         """
         Generate resource finder prompt from template.
 
@@ -885,6 +890,14 @@ RESEARCH DOMAIN:
                 research_context += f"Other: {constraints['other']}\n"
 
         research_context += "\n" + "="*79 + "\n"
+
+        # Render completion protocol explicitly. Normal NeuriCo keeps its
+        # marker-based contract; HITL receives its runtime-command contract
+        # from the caller's HITL suffix.
+        template = self.render_template(
+            template,
+            {"hitl_runtime_completion": hitl_runtime_completion},
+        )
 
         # Combine research context with template
         # Insert research context before the main template content

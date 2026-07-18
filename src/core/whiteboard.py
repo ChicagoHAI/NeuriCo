@@ -46,7 +46,7 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 SCHEMA_VERSION = 2
 WHITEBOARD_FILENAME = "whiteboard.json"
@@ -108,8 +108,11 @@ def write_current_attempt_marker(work_dir: Path, attempt_id: str) -> None:
     that comment_handler / proposer subprocesses running `whiteboard
     clear-tip` and `whiteboard prune-tip` can automatically tag their
     mutations. If the marker is missing, the CLI still works but the
-    mutation is unattributed and cannot be rolled back on rejection.
+    mutation is unattributed and cannot be rolled back if the attempt fails.
     """
+    # Establish the private rollback boundary first. A marker must never
+    # advertise a recoverable active attempt before that boundary exists.
+    _begin_autoresearch_whiteboard_attempt(Path(work_dir), attempt_id)
     marker = current_attempt_marker_path(work_dir)
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(attempt_id.strip() + "\n", encoding="utf-8")
@@ -128,6 +131,26 @@ def read_current_attempt_marker(work_dir: Path) -> str:
     if not marker.exists():
         return ""
     return marker.read_text(encoding="utf-8").strip()
+
+
+def _record_autoresearch_whiteboard_version(work_dir: Path) -> None:
+    """Append the live whiteboard to its private Git history during AutoResearch."""
+    work_dir = Path(work_dir)
+    if not (work_dir / ".git").exists() or not whiteboard_path(work_dir).is_file():
+        return
+    from core.hitl_git_state import HitlGitStateStore
+
+    HitlGitStateStore(work_dir).record_autoresearch_whiteboard()
+
+
+def _begin_autoresearch_whiteboard_attempt(work_dir: Path, attempt_id: str) -> None:
+    """Create the private Git boundary used only if this attempt fails."""
+    work_dir = Path(work_dir)
+    if not (work_dir / ".git").exists():
+        return
+    from core.hitl_git_state import HitlGitStateStore
+
+    HitlGitStateStore(work_dir).begin_autoresearch_whiteboard_attempt(attempt_id)
 
 
 # Directories that identify a NeuriCo AutoResearch workspace. Auto-detect
@@ -169,9 +192,24 @@ class Whiteboard:
     calling the CLI). Atomic save via temp-file + os.replace.
     """
 
-    def __init__(self, work_dir: Path):
+    def __init__(
+        self,
+        work_dir: Path,
+        *,
+        path: Optional[Path] = None,
+        attempt_marker_path: Optional[Path] = None,
+        record_version: Optional[Callable[[], None]] = None,
+    ):
         self.work_dir = Path(work_dir)
-        self.path = whiteboard_path(self.work_dir)
+        self.path = Path(path) if path is not None else whiteboard_path(self.work_dir)
+        self.attempt_marker_path = (
+            Path(attempt_marker_path)
+            if attempt_marker_path is not None
+            else current_attempt_marker_path(self.work_dir)
+        )
+        self._record_version = record_version or (
+            lambda: _record_autoresearch_whiteboard_version(self.work_dir)
+        )
         self.schema_version: int = SCHEMA_VERSION
         self._next_id_num: int = 1
         self.tips: list[Tip] = []
@@ -211,6 +249,8 @@ class Whiteboard:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_name, self.path)
+            if self.attempt_marker_path.exists():
+                self._record_version()
         except Exception:
             try:
                 os.unlink(tmp_name)
@@ -403,6 +443,12 @@ def _resolve_workspace(args: argparse.Namespace) -> Path:
 
 
 def _load(work_dir: Path) -> Whiteboard:
+    if os.environ.get("NEURICO_HITL_AUTORESEARCH_WHITEBOARD") == "1":
+        from core.hitl_whiteboard import HitlAutoResearchWhiteboard
+
+        wb = HitlAutoResearchWhiteboard(work_dir)
+        wb.load()
+        return wb
     wb = Whiteboard(work_dir)
     wb.load()
     return wb
@@ -451,6 +497,10 @@ def _resolve_attempt(args: argparse.Namespace, ws: Path) -> str:
     explicit = getattr(args, "attempt", None)
     if explicit:
         return explicit.strip()
+    if os.environ.get("NEURICO_HITL_AUTORESEARCH_WHITEBOARD") == "1":
+        from core.hitl_whiteboard import read_hitl_current_attempt_marker
+
+        return read_hitl_current_attempt_marker(ws)
     return read_current_attempt_marker(ws)
 
 

@@ -37,7 +37,8 @@ class UserChannel(ABC):
 
     @abstractmethod
     def prompt(self, message: Optional[str] = None,
-               options: Optional[List[str]] = None) -> Optional[str]:
+               options: Optional[List[str]] = None,
+               input_kind: str = "event_reply") -> Optional[str]:
         """Block until the human replies. Returns the reply, or None if the
         channel was closed (EOF / browser gone / shutdown)."""
 
@@ -72,7 +73,8 @@ class TerminalChannel(UserChannel):
             print(text)
 
     def prompt(self, message: Optional[str] = None,
-               options: Optional[List[str]] = None) -> Optional[str]:
+               options: Optional[List[str]] = None,
+               input_kind: str = "event_reply") -> Optional[str]:
         if message:
             print()
             print("=" * 70)
@@ -214,13 +216,14 @@ class WebChannel(UserChannel):
 
     # --- inbound (human -> manager) ---
 
-    def submit_input(self, text: str) -> None:
+    def submit_input(self, text: str, input_kind: str = "conversation") -> None:
         """Called by the web server when the browser POSTs input."""
         if not self._closed.is_set():
             self._inbound.put(text)
 
     def prompt(self, message: Optional[str] = None,
-               options: Optional[List[str]] = None) -> Optional[str]:
+               options: Optional[List[str]] = None,
+               input_kind: str = "event_reply") -> Optional[str]:
         if message:
             # Tag as a question so the UI renders it as a distinct "needs your
             # reply" card rather than a normal informational bubble.
@@ -228,9 +231,13 @@ class WebChannel(UserChannel):
                         "text": message, "meta": {"question": True}})
 
         self._waiting = True
-        self._pending_prompt = {"message": message, "options": options or []}
+        self._pending_prompt = {
+            "message": message,
+            "options": options or [],
+            "input_kind": input_kind,
+        }
         self._emit({"event": "prompt", "message": message,
-                    "options": options or []})
+                    "options": options or [], "input_kind": input_kind})
 
         while not self._closed.is_set():
             try:

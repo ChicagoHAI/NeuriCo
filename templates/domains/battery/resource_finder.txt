@@ -173,7 +173,9 @@ OUTPUT DELIVERABLES (all saved in current workspace):
 - code/ directory with cloned repositories
 - literature_review.md (comprehensive synthesis with battery-specific focus)
 - resources.md (catalog of all resources with locations and descriptions)
+{% if not hitl_runtime_completion %}
 - .resource_finder_complete (marker file indicating completion)
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                   PHASE 1: BATTERY LITERATURE SEARCH
@@ -603,6 +605,7 @@ Before marking completion, verify:
 ✓ All downloads completed successfully
 ✓ User-specified resources have been prioritized
 
+{% if not hitl_runtime_completion %}
 COMPLETION MARKER:
 ─────────────────────────────────────────────────────────────────────────────
 
@@ -617,6 +620,7 @@ Datasets downloaded: [count]
 Repositories cloned: [count]
 EOF
 ```
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                            BEST PRACTICES
@@ -633,7 +637,9 @@ EOF
 ✗ DON'T: Download massive datasets without checking size first
 ✗ DON'T: Ignore experimental conditions when summarizing computational papers
 ✗ DON'T: Get stuck on perfect resources — good enough is fine
+{% if not hitl_runtime_completion %}
 ✗ DON'T: Forget to create the completion marker file
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                          QUALITY OVER SPEED

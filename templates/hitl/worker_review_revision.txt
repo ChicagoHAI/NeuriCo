@@ -13,21 +13,20 @@ Manager feedback to apply:
 
 Apply only this feedback. Do not broaden the work beyond the approved plan.
 Keep `{{ plan_path }}` updated with progress and remaining gaps.
+{% if pipeline_stage == "rule_maker" %}
 
-The orchestrator removes `{{ completion_marker }}` before review revision
-starts. When the review revision is fully applied and there is no unresolved
-checkpoint, recreate `{{ completion_marker }}`; this marker is the signal that
-the revised stage is complete and ready for another manager review.
+Revalidate the approved rule-maker deliverables after the revision:
+`scoring/eval.py`, `scoring/targets.json`, `scoring/interface.md`, and
+`scoring/rule_maker_log.md`. Do not seal them; runtime handles sealing only
+after final approval.
+{% endif %}
 
-If another idea requires manager/human feedback, update `{{ plan_path }}`, write a
-checkpoint packet to `{{ checkpoint_path }}`, and stop without creating
-`{{ completion_marker }}`. Use exactly this path; do not add timestamps,
-suffixes, or alternate filenames.
+If another idea requires manager/human feedback, update `{{ plan_path }}`, call
+`hitl-raise-idea`, wait for returned feedback, apply only that feedback, and
+continue in this same session.
 
 {% include "hitl/worker_escalation_policy.txt" %}
 
 {% include "hitl/worker_autonomous_idea_contract.txt" %}
-
-{% include "hitl/worker_checkpoint_contract.txt" %}
 
 {% include "hitl/worker_terminal_contract.txt" %}

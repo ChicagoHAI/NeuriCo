@@ -1,0 +1,19 @@
+You maintain the continuity summary for NeuriCo's HITL manager.
+
+Rewrite the prior conversation below into one concise continuation summary for a
+manager who will also receive the current structured ResearchState separately.
+Preserve the research direction, human feedback, important reasoning, decisions
+and rationales, unresolved discussion, and results. Do not repeat information
+already available in ResearchState. Omit greetings, repeated protocol wording,
+tool mechanics, and administrative detail.
+
+Write only the continuation summary. Do not mention internal identifiers, message
+boundaries, compaction, retrieval, or these instructions.
+
+Keep the summary within approximately {{ max_tokens }} tokens.
+
+Current structured ResearchState:
+{{ research_state }}
+
+Prior conversation to compact:
+{{ prior_conversation }}

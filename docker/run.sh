@@ -673,6 +673,52 @@ cmd_submit() {
 # -----------------------------------------------------------------------------
 # Run research exploration
 # -----------------------------------------------------------------------------
+hitl_web_port_from_args() {
+    local mode=""
+    local port="7890"
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --hitl-autoresearch|--hitl-continue-autoresearch)
+                if [ "$#" -lt 2 ]; then
+                    echo -e "${RED}$1 requires web or cli.${NC}" >&2
+                    return 1
+                fi
+                mode="$2"
+                shift 2
+                ;;
+            --hitl-autoresearch=*|--hitl-continue-autoresearch=*)
+                mode="${1#*=}"
+                shift
+                ;;
+            --hitl-manager-port)
+                if [ "$#" -lt 2 ]; then
+                    echo -e "${RED}--hitl-manager-port requires a port number.${NC}" >&2
+                    return 1
+                fi
+                port="$2"
+                shift 2
+                ;;
+            --hitl-manager-port=*)
+                port="${1#*=}"
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    if [ "$mode" != "web" ]; then
+        return 0
+    fi
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        echo -e "${RED}--hitl-manager-port must be between 1 and 65535.${NC}" >&2
+        return 1
+    fi
+    printf '%s\n' "$port"
+}
+
 cmd_run() {
     if [ -z "$1" ]; then
         echo -e "${RED}Usage: $0 run <idea_id> [--provider claude|codex|gemini] [options]${NC}"
@@ -687,6 +733,12 @@ cmd_run() {
     local user_flags=$(get_user_flags)
     local credential_mounts=$(get_cli_credential_mounts)
     local workspace_dir=$(get_workspace_dir)
+    local hitl_web_port
+    hitl_web_port=$(hitl_web_port_from_args "$@") || exit 1
+    local hitl_web_flags=""
+    if [ -n "$hitl_web_port" ]; then
+        hitl_web_flags="-p 127.0.0.1:${hitl_web_port}:${hitl_web_port} -e NEURICO_HITL_WEB_HOST=0.0.0.0 -e NEURICO_HITL_BROWSER_URL=http://localhost:${hitl_web_port}"
+    fi
 
     local tty_flag=$(get_tty_flag)
 
@@ -704,6 +756,7 @@ cmd_run() {
         -v \"$PROJECT_ROOT/config:/app/config:ro\" \
         -v \"$PROJECT_ROOT/templates:/app/templates:ro\" \
         $credential_mounts \
+        $hitl_web_flags \
         -w /app \
         \"$IMAGE_NAME\" \
         python /app/src/core/runner.py $@"

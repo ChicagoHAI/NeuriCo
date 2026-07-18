@@ -74,7 +74,7 @@ def resolve_workspace(
             # Pull latest changes
             try:
                 github_manager.pull_latest(workspace_path)
-                print(f"   Pulled latest changes")
+                print("   Pulled latest changes")
             except Exception as e:
                 print(f"   Warning: Could not pull latest changes: {e}")
             return workspace_path
@@ -205,7 +205,7 @@ def run_comment_handler(
     title = idea_spec.get('title', 'Unknown')
 
     print(f"\n{'='*80}")
-    print(f"COMMENT MODE - Targeted Improvements")
+    print("COMMENT MODE - Targeted Improvements")
     print(f"{'='*80}")
     print(f"   Title: {title}")
     print(f"   Provider: {provider}")
@@ -323,13 +323,20 @@ def build_comment_handler_launch(
     full_permissions: bool,
     dsi_remote_info: Optional[Dict[str, str]],
     prompt_override: str = "",
+    prompt_override_only: bool = False,
     logs_dir: Optional[Path] = None,
     log_prefix: str = "comment_handler",
+    env_extra: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Construct the current comment-handler prompt, command, env, and paths."""
     print("Generating comment handler prompt...")
-    prompt = generate_comment_prompt(idea, work_dir, templates_dir, provider=provider)
-    if prompt_override.strip():
+    if prompt_override_only:
+        if not prompt_override.strip():
+            raise ValueError("prompt_override_only requires a non-empty prompt_override")
+        prompt = f"{prompt_override.strip()}\n"
+    else:
+        prompt = generate_comment_prompt(idea, work_dir, templates_dir, provider=provider)
+    if prompt_override.strip() and not prompt_override_only:
         prompt = f"{prompt.rstrip()}\n\n{prompt_override.strip()}\n"
 
     logs_dir = logs_dir or (work_dir / "logs")
@@ -354,6 +361,8 @@ def build_comment_handler_launch(
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    if env_extra:
+        env.update({str(k): str(v) for k, v in env_extra.items()})
     if dsi_remote_info is not None:
         env["NEURICO_DSI_REMOTE_ROOT"] = dsi_remote_info["remote_root"]
         env["NEURICO_DSI_RSYNC_REMOTE_ROOT"] = dsi_remote_info["rsync_remote_root"]
