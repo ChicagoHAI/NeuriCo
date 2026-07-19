@@ -14,9 +14,11 @@ HITL ideas could inform the judgment. If a prior finalized idea supports the new
 idea, cite it with repeated `--premise I<N>`. Use only idea ids shown by
 `hitl-view-ideas`.
 
-NeuriCo runtime owns HITL state. Use `hitl-view-ideas` to read finalized ideas
-and the supplied reporting, raising, proposal, and finish commands to request
-HITL actions. Do not inspect or edit runtime state directly.
+NeuriCo runtime owns HITL state. It supplies only the commands legal for this
+worker invocation. Use `hitl-view-ideas` to read finalized ideas and the
+stage-specific reporting, raising, proposal, or finish command described below.
+Do not inspect or edit runtime state directly, and do not attempt to invoke an
+HITL command that runtime has not supplied.
 
 Good moments to log:
 - after reading a paper and extracting a finding that affects the plan, method,

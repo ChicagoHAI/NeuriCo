@@ -6,7 +6,6 @@ conversation archive and recall index live in ``hitl_manager_history``.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -15,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Dict, Iterator, List
+
+from core.hitl_lock import exclusive_file_lock
 
 MICROCOMPACT_TRIGGER_RATIO = 0.55
 MICROCOMPACT_RECENT_TOOL_BUDGET_TOKENS = 5_000
@@ -61,14 +62,8 @@ class HitlManagerContext:
         self._lock = RLock()
         self._restore()
 
-    @contextmanager
     def _file_lock(self) -> Iterator[None]:
-        with self.lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return exclusive_file_lock(self.lock_path)
 
     def _restore(self) -> None:
         if not self.path.exists():

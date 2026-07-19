@@ -22,6 +22,20 @@ _HIDDEN_PATH_PARTS = {
     ".venv",
     "__pycache__",
 }
+_PROTECTED_RELATIVE_PATHS = {
+    "scoring/eval.py",
+    "scoring/rule_maker_log.md",
+    "scoring/targets.json",
+}
+_PROTECTED_PREFIXES = {"data/.test"}
+_SECRET_FILE_NAMES = {
+    "credentials",
+    "credentials.json",
+    "id_rsa",
+    "secrets.json",
+    "token",
+    "tokens.json",
+}
 _MAX_DIRECTORY_ENTRIES = 500
 _MAX_FILE_MATCHES = 1000
 _MAX_READ_BYTES = 400_000
@@ -46,7 +60,7 @@ class HitlWorkspaceInspector:
         for item in sorted(
             target.iterdir(), key=lambda candidate: (not candidate.is_dir(), candidate.name)
         ):
-            if self._is_hidden(item):
+            if self._is_protected(item):
                 continue
             entries.append(
                 {
@@ -74,7 +88,7 @@ class HitlWorkspaceInspector:
         root = self._resolve_path(path, expect="directory")
         matches = []
         for item in root.glob(normalized_pattern):
-            if item.is_file() and not self._is_hidden(item):
+            if item.is_file() and not self._is_protected(item):
                 matches.append(item)
         matches.sort(key=lambda item: item.stat().st_mtime, reverse=True)
         return self._render(
@@ -121,6 +135,20 @@ class HitlWorkspaceInspector:
         for hidden in sorted(_HIDDEN_PATH_PARTS):
             command.extend(["--glob", f"!**/{hidden}/**"])
             command.extend(["--glob", f"!**/{hidden}"])
+        for protected in sorted(_PROTECTED_RELATIVE_PATHS):
+            command.extend(["--glob", f"!{protected}"])
+        for protected in sorted(_PROTECTED_PREFIXES):
+            command.extend(["--glob", f"!{protected}/**"])
+            command.extend(["--glob", f"!{protected}"])
+        for secret_pattern in (
+            ".env",
+            ".env.*",
+            "credentials*",
+            "id_rsa*",
+            "secrets*",
+            "token*",
+        ):
+            command.extend(["--glob", f"!**/{secret_pattern}"])
         if case_insensitive:
             command.append("-i")
         if normalized_glob:
@@ -194,10 +222,10 @@ class HitlWorkspaceInspector:
             raise HitlWorkspaceInspectionError(
                 "path must remain inside the research workspace."
             ) from exc
-        if self._is_hidden(resolved):
+        if self._is_protected(resolved):
             raise HitlWorkspaceInspectionError(
-                "NeuriCo runtime and metadata paths are unavailable here. "
-                "Use HITL idea or frontier tools for hidden HITL state."
+                "This path is protected from HITL manager inspection. "
+                "Use public interfaces, runtime-derived results, or dedicated HITL tools instead."
             )
         if not resolved.exists():
             raise HitlWorkspaceInspectionError(
@@ -241,7 +269,7 @@ class HitlWorkspaceInspector:
             except ValueError:
                 continue
             path = Path(raw_path).resolve()
-            if self._is_hidden(path):
+            if self._is_protected(path):
                 continue
             try:
                 relative_path = self._relative_path(path)
@@ -262,6 +290,31 @@ class HitlWorkspaceInspector:
         except ValueError:
             return True
         return any(part in _HIDDEN_PATH_PARTS for part in relative_parts)
+
+    def _is_protected(self, path: Path) -> bool:
+        try:
+            relative = path.resolve().relative_to(self.work_dir)
+        except ValueError:
+            return True
+        if self._is_hidden(path):
+            return True
+        normalized = relative.as_posix()
+        if normalized in _PROTECTED_RELATIVE_PATHS:
+            return True
+        if any(
+            normalized == prefix or normalized.startswith(f"{prefix}/")
+            for prefix in _PROTECTED_PREFIXES
+        ):
+            return True
+        name = relative.name.lower()
+        return (
+            name == ".env"
+            or name.startswith(".env.")
+            or name in _SECRET_FILE_NAMES
+            or name.startswith("credentials")
+            or name.startswith("secrets")
+            or name.startswith("token")
+        )
 
     def _relative_path(self, path: Path) -> str:
         return path.resolve().relative_to(self.work_dir).as_posix()

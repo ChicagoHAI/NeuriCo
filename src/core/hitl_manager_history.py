@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import fcntl
 import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterator, List
+
+from core.hitl_lock import exclusive_file_lock
 
 
 def _estimate_tokens(text: str) -> int:
@@ -27,30 +28,20 @@ class HitlManagerHistory:
         self.lock_path = self.manager_dir / "conversation.lock"
         self._initialize()
 
-    @contextmanager
     def _lock(self) -> Iterator[None]:
-        with self.lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return exclusive_file_lock(self.lock_path)
 
     @classmethod
     @contextmanager
     def snapshot_lock(cls, manager_dir: Path) -> Iterator[None]:
         manager_dir = Path(manager_dir)
         lock_path = manager_dir / "conversation.lock"
-        with lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                database_path = manager_dir / "history.sqlite"
-                if database_path.exists():
-                    with sqlite3.connect(database_path, timeout=30) as connection:
-                        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with exclusive_file_lock(lock_path):
+            database_path = manager_dir / "history.sqlite"
+            if database_path.exists():
+                with sqlite3.connect(database_path, timeout=30) as connection:
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            yield
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -105,11 +96,13 @@ class HitlManagerHistory:
         created_at = str(record["timestamp"])
         with self._lock():
             with self._connect() as connection:
-                connection.execute(
+                inserted = connection.execute(
                     "INSERT OR IGNORE INTO conversation_records "
                     "(record_id, record_type, speaker, content, created_at) VALUES (?, ?, ?, ?, ?)",
                     (record_id, record_type, speaker, content, created_at),
                 )
+                if inserted.rowcount == 0:
+                    return
                 row = connection.execute(
                     "SELECT sequence FROM conversation_records WHERE record_id = ?", (record_id,)
                 ).fetchone()

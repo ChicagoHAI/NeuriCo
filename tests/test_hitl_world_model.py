@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from core.hitl import HitlIdeaLog  # noqa: E402
@@ -236,6 +238,24 @@ def test_manager_world_model_reads_hidden_hitl_whiteboard(
         "T1 [pitfall]: Retain the original evaluation split.",
         "T2 [design]: Record retrieval failures before changing rankers.",
     ]
+
+
+def test_corrupt_authoritative_frontier_fails_closed(tmp_path: Path) -> None:
+    state_path = tmp_path / ".neurico" / "hitl" / "autoresearch_state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text("not json", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Invalid HITL frontier JSON"):
+        HitlWorldModelSync(tmp_path).reconcile()
+
+
+def test_corrupt_authoritative_whiteboard_fails_closed(tmp_path: Path) -> None:
+    path = hitl_whiteboard_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="HITL whiteboard is unreadable"):
+        HitlWorldModelSync(tmp_path).reconcile()
 
 
 def test_selected_node_keeps_proposal_content_while_portfolio_hides_it(tmp_path: Path) -> None:

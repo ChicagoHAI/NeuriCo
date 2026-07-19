@@ -74,4 +74,5 @@ class HitlAutoResearchWhiteboard(Whiteboard):
             record_version=lambda: HitlGitStateStore(
                 work_dir
             ).record_hitl_autoresearch_whiteboard(),
+            restore_on_version_failure=True,
         )

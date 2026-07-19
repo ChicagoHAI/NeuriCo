@@ -14,6 +14,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from core.whiteboard import Whiteboard  # noqa: E402
 
+
+def _configure_hitl_frontier_state(work_dir: Path, checkpoint_sha: str, history_root: Path) -> None:
+    from core.hitl_frontier import HitlFrontierStore
+
+    frontier = HitlFrontierStore(work_dir)
+    frontier.initialize_root(
+        node_sha=checkpoint_sha,
+        plan_text="# HITL plan\n",
+        objective_score={"results": {}},
+        reason_for_acceptance="Test root frontier node.",
+    )
+    frontier.configure_autoresearch_run(
+        history_root=history_root,
+        lineage_source_sha=checkpoint_sha,
+        last_iteration=0,
+    )
+
 # ---------------------------------------------------- proposer public context
 
 
@@ -703,10 +720,7 @@ def test_hitl_candidate_failure_closes_before_scorer_and_cleans_public_state(
 
 
 def test_recover_interrupted_hitl_attempt_uses_saved_external_history_root(tmp_path: Path):
-    from core.autoresearch import (
-        CheckpointManager,
-        write_autoresearch_state,
-    )
+    from core.autoresearch import CheckpointManager
     from core.hitl_autoresearch import (
         _snapshot_hitl_state_before,
         recover_interrupted_hitl_attempt_if_needed,
@@ -743,13 +757,7 @@ def test_recover_interrupted_hitl_attempt_uses_saved_external_history_root(tmp_p
         encoding="utf-8",
     )
     _snapshot_hitl_state_before(work_dir, attempt_dir)
-    write_autoresearch_state(
-        work_dir=work_dir,
-        history_root=external_history,
-        lineage_source_sha=checkpoint.sha,
-        current_best_sha=checkpoint.sha,
-        last_iteration=0,
-    )
+    _configure_hitl_frontier_state(work_dir, checkpoint.sha, external_history)
     write_hitl_current_attempt_marker(work_dir, f"{parent}/attempt_1")
 
     hitl_whiteboard_path(work_dir).write_text(
@@ -786,11 +794,54 @@ def test_recover_interrupted_hitl_attempt_uses_saved_external_history_root(tmp_p
     assert read_hitl_current_attempt_marker(work_dir) == ""
 
 
-def test_recover_interrupted_hitl_attempt_rejects_partial_snapshots(tmp_path: Path):
-    from core.autoresearch import (
-        CheckpointManager,
-        write_autoresearch_state,
+def test_recover_rejected_attempt_finishes_only_whiteboard_reconciliation(tmp_path: Path):
+    from core.autoresearch import CheckpointManager
+    from core.hitl_autoresearch import (
+        _snapshot_hitl_state_before,
+        recover_interrupted_hitl_attempt_if_needed,
     )
+    from core.hitl_runtime_state import HitlRuntimeState
+    from core.hitl_whiteboard import (
+        HitlAutoResearchWhiteboard,
+        read_hitl_current_attempt_marker,
+        write_hitl_current_attempt_marker,
+    )
+
+    work_dir = tmp_path / "workspace"
+    work_dir.mkdir()
+    (work_dir / "README.md").write_text("parent\n", encoding="utf-8")
+    parent = CheckpointManager(work_dir).create_checkpoint("parent node")
+    parent_component = "h" * 40
+    attempt_dir = tmp_path / "history" / parent_component / "attempt_1"
+    attempt_dir.mkdir(parents=True)
+    marker = f"{parent_component}/attempt_1"
+    _configure_hitl_frontier_state(work_dir, parent.sha, attempt_dir.parents[1])
+    _snapshot_hitl_state_before(work_dir, attempt_dir)
+
+    board = HitlAutoResearchWhiteboard(work_dir).load()
+    retained = board.add_tip("Keep this diagnostic.", category="insight")
+    board.save()
+    write_hitl_current_attempt_marker(work_dir, marker)
+    board = HitlAutoResearchWhiteboard(work_dir).load()
+    board.clear_tip(retained.id, attempt=marker)
+    board.save()
+    HitlRuntimeState(work_dir).begin_rejected_whiteboard_cleanup(marker)
+    (work_dir / "README.md").write_text("rejected candidate\n", encoding="utf-8")
+
+    recovered = recover_interrupted_hitl_attempt_if_needed(work_dir)
+
+    assert recovered is not None
+    assert recovered.recovery_classification == "rejected_whiteboard_cleanup"
+    assert (work_dir / "README.md").read_text(encoding="utf-8") == "parent\n"
+    restored = HitlAutoResearchWhiteboard(work_dir).load()
+    assert next(tip for tip in restored.tips if tip.id == retained.id).status == "active"
+    assert HitlRuntimeState(work_dir).pending_rejected_whiteboard_cleanup() is None
+    assert read_hitl_current_attempt_marker(work_dir) == ""
+    assert attempt_dir.exists()
+
+
+def test_recover_interrupted_hitl_attempt_rejects_partial_snapshots(tmp_path: Path):
+    from core.autoresearch import CheckpointManager
     from core.hitl_autoresearch import recover_interrupted_hitl_attempt_if_needed
     from core.hitl_whiteboard import (
         read_hitl_current_attempt_marker,
@@ -806,13 +857,7 @@ def test_recover_interrupted_hitl_attempt_rejects_partial_snapshots(tmp_path: Pa
     parent = "f" * 40
     attempt_dir = external_history / parent / "attempt_1"
     attempt_dir.mkdir(parents=True)
-    write_autoresearch_state(
-        work_dir=work_dir,
-        history_root=external_history,
-        lineage_source_sha=checkpoint.sha,
-        current_best_sha=checkpoint.sha,
-        last_iteration=0,
-    )
+    _configure_hitl_frontier_state(work_dir, checkpoint.sha, external_history)
     write_hitl_current_attempt_marker(work_dir, f"{parent}/attempt_1")
 
     with pytest.raises(RuntimeError, match="missing_git_rollback_boundary"):
@@ -825,10 +870,7 @@ def test_recover_interrupted_hitl_attempt_rejects_partial_snapshots(tmp_path: Pa
 def test_recover_interrupted_hitl_attempt_rejects_missing_whiteboard_boundary(
     tmp_path: Path,
 ):
-    from core.autoresearch import (
-        CheckpointManager,
-        write_autoresearch_state,
-    )
+    from core.autoresearch import CheckpointManager
     from core.hitl_autoresearch import (
         _snapshot_hitl_state_before,
         recover_interrupted_hitl_attempt_if_needed,
@@ -847,13 +889,7 @@ def test_recover_interrupted_hitl_attempt_rejects_missing_whiteboard_boundary(
     attempt_dir = external_history / parent / "attempt_1"
     attempt_dir.mkdir(parents=True)
     _snapshot_hitl_state_before(work_dir, attempt_dir)
-    write_autoresearch_state(
-        work_dir=work_dir,
-        history_root=external_history,
-        lineage_source_sha=checkpoint.sha,
-        current_best_sha=checkpoint.sha,
-        last_iteration=0,
-    )
+    _configure_hitl_frontier_state(work_dir, checkpoint.sha, external_history)
 
     marker = hitl_current_attempt_marker_path(work_dir)
     marker.parent.mkdir(parents=True)

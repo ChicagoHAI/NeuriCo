@@ -7,13 +7,13 @@ manager process restart.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
+
+from core.hitl_lock import exclusive_file_lock
 
 
 class HitlRuntimeStateError(RuntimeError):
@@ -49,18 +49,13 @@ class HitlRuntimeState:
             "worker_continuation": None,
             "pending_worker_command": None,
             "next_autoresearch_action": None,
+            "rejected_whiteboard_cleanup": None,
+            "frontier_decision_transition": None,
             "approved_plans": {},
         }
 
-    @contextmanager
     def _locked(self) -> Iterator[None]:
-        self.hitl_dir.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return exclusive_file_lock(self.lock_path)
 
     @staticmethod
     def _copy(value: Any) -> Any:
@@ -340,13 +335,58 @@ class HitlRuntimeState:
             existing = self._state.get("next_autoresearch_action")
             if isinstance(existing, dict) and existing:
                 if existing.get("kind") == kind:
+                    if existing.get("status") == "cancelled":
+                        existing["status"] = "pending"
+                        existing.pop("cancellation_reason", None)
+                        existing["restarted_at"] = _now()
+                        self._state["next_autoresearch_action"] = existing
+                        self._save_unlocked()
                     return self._copy(existing)
                 raise HitlRuntimeStateError("Another AutoResearch action is already pending")
             record = self._copy(action)
+            record["status"] = "pending"
             record["created_at"] = _now()
             self._state["next_autoresearch_action"] = record
             self._save_unlocked()
             return self._copy(record)
+
+    def record_next_autoresearch_action_decision(
+        self,
+        kind: str,
+        decision: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Persist a manager's frontier choice before applying it.
+
+        A prune or selection changes more than one store.  Retaining the
+        command arguments in runtime state first makes the remaining log and
+        frontier updates restartable without asking the manager to decide a
+        second time.
+        """
+        normalized_kind = str(kind).strip()
+        if not normalized_kind:
+            raise HitlRuntimeStateError("AutoResearch action decision requires kind")
+        if not isinstance(decision, dict):
+            raise HitlRuntimeStateError("AutoResearch action decision must be an object")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if not isinstance(action, dict) or action.get("kind") != normalized_kind:
+                raise HitlRuntimeStateError("No matching pending AutoResearch action")
+            existing = action.get("decision")
+            if action.get("status") == "decision_recorded":
+                if existing == self._copy(decision):
+                    return self._copy(action)
+                raise HitlRuntimeStateError(
+                    "Runtime already recorded a different manager choice for this AutoResearch action"
+                )
+            if action.get("status") != "pending":
+                raise HitlRuntimeStateError("AutoResearch action is not available for a manager choice")
+            action["decision"] = self._copy(decision)
+            action["status"] = "decision_recorded"
+            action["decision_recorded_at"] = _now()
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(action)
 
     def complete_next_autoresearch_action(self, kind: str, result: Dict[str, Any]) -> None:
         with self._locked():
@@ -354,6 +394,10 @@ class HitlRuntimeState:
             action = self._state.get("next_autoresearch_action")
             if not isinstance(action, dict) or action.get("kind") != kind:
                 raise HitlRuntimeStateError("No matching pending AutoResearch action")
+            if action.get("status") != "decision_recorded":
+                raise HitlRuntimeStateError(
+                    "AutoResearch action cannot complete before runtime records the manager choice"
+                )
             action["status"] = "resolved"
             action["result"] = self._copy(result)
             action["resolved_at"] = _now()
@@ -371,3 +415,130 @@ class HitlRuntimeState:
             ):
                 self._state["next_autoresearch_action"] = None
                 self._save_unlocked()
+
+    def cancel_next_autoresearch_action(self, kind: str, *, reason: str) -> Dict[str, Any]:
+        message = str(reason).strip()
+        if not message:
+            raise HitlRuntimeStateError("Cancelled AutoResearch action requires a reason")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if not isinstance(action, dict) or action.get("kind") != kind:
+                raise HitlRuntimeStateError("No matching pending AutoResearch action")
+            if action.get("status") == "resolved":
+                return self._copy(action)
+            action["status"] = "cancelled"
+            action["cancellation_reason"] = message
+            action["cancelled_at"] = _now()
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(action)
+
+    def begin_rejected_whiteboard_cleanup(self, attempt_id: str) -> Dict[str, Any]:
+        """Persist the one remaining cleanup step for a rejected candidate.
+
+        A rejected candidate is valid completed research: its whiteboard adds
+        remain useful, while clear/prune mutations made for the rejected
+        workspace must be reverted.  This state makes that narrow cleanup
+        restartable without treating the whole attempt as failed.
+        """
+        normalized = str(attempt_id).strip()
+        if not normalized:
+            raise HitlRuntimeStateError("Rejected whiteboard cleanup requires attempt_id")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            existing = self._state.get("rejected_whiteboard_cleanup")
+            if isinstance(existing, dict) and existing:
+                if existing.get("attempt_id") == normalized:
+                    return self._copy(existing)
+                raise HitlRuntimeStateError(
+                    "Another rejected whiteboard cleanup is already pending"
+                )
+            record = {
+                "attempt_id": normalized,
+                "status": "pending",
+                "created_at": _now(),
+            }
+            self._state["rejected_whiteboard_cleanup"] = record
+            self._save_unlocked()
+            return self._copy(record)
+
+    def pending_rejected_whiteboard_cleanup(self) -> Optional[Dict[str, Any]]:
+        value = self.snapshot().get("rejected_whiteboard_cleanup")
+        return value if isinstance(value, dict) and value else None
+
+    def begin_frontier_decision_transition(
+        self,
+        transition: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Persist one scored-candidate commit before touching its stores.
+
+        The idea log, hidden frontier, public mirror, and worker response are
+        separate durable stores.  This record is their small write-ahead log:
+        each following step is idempotent and recovery resumes it in order.
+        """
+        attempt_id = str(transition.get("attempt_id", "")).strip()
+        candidate_sha = str(transition.get("candidate_node_sha", "")).strip()
+        if not attempt_id or not candidate_sha:
+            raise HitlRuntimeStateError(
+                "Frontier decision transition requires attempt_id and candidate_node_sha"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            existing = self._state.get("frontier_decision_transition")
+            if isinstance(existing, dict) and existing:
+                if (
+                    existing.get("attempt_id") == attempt_id
+                    and existing.get("candidate_node_sha") == candidate_sha
+                ):
+                    return self._copy(existing)
+                if existing.get("status") not in {"completed", "mirrored"}:
+                    raise HitlRuntimeStateError(
+                        "Another HITL frontier decision transition is still incomplete"
+                    )
+            record = self._copy(transition)
+            record["status"] = "prepared"
+            record["created_at"] = _now()
+            self._state["frontier_decision_transition"] = record
+            self._save_unlocked()
+            return self._copy(record)
+
+    def frontier_decision_transition(self) -> Optional[Dict[str, Any]]:
+        value = self.snapshot().get("frontier_decision_transition")
+        return value if isinstance(value, dict) and value else None
+
+    def advance_frontier_decision_transition(
+        self,
+        *,
+        attempt_id: str,
+        candidate_node_sha: str,
+        status: str,
+        **updates: Any,
+    ) -> Dict[str, Any]:
+        if status not in {"prepared", "idea_logged", "frontier_finalized", "mirrored", "completed"}:
+            raise HitlRuntimeStateError(f"Invalid frontier decision transition status: {status}")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            current = self._state.get("frontier_decision_transition")
+            if (
+                not isinstance(current, dict)
+                or current.get("attempt_id") != str(attempt_id).strip()
+                or current.get("candidate_node_sha") != str(candidate_node_sha).strip()
+            ):
+                raise HitlRuntimeStateError("No matching HITL frontier decision transition")
+            current.update(self._copy(updates))
+            current["status"] = status
+            current["updated_at"] = _now()
+            self._state["frontier_decision_transition"] = current
+            self._save_unlocked()
+            return self._copy(current)
+
+    def complete_rejected_whiteboard_cleanup(self, attempt_id: str) -> None:
+        normalized = str(attempt_id).strip()
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            existing = self._state.get("rejected_whiteboard_cleanup")
+            if not isinstance(existing, dict) or existing.get("attempt_id") != normalized:
+                raise HitlRuntimeStateError("No matching rejected whiteboard cleanup exists")
+            self._state["rejected_whiteboard_cleanup"] = None
+            self._save_unlocked()

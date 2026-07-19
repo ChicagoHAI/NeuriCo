@@ -21,24 +21,24 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.security import sanitize_text
-
+from core.agent_runner import run_prebuilt_cli_agent
 
 # CLI commands for different providers
 # Note: For codex, we use 'exec' subcommand for non-interactive mode (stdin pipe)
 # Note: For claude, we use '-p' (print mode) to enable streaming JSON output
 CLI_COMMANDS = {
-    'claude': 'claude -p',  # Print mode enables streaming JSON output with stdin
-    'codex': 'codex exec',  # Non-interactive mode: read from stdin
-    'gemini': 'gemini'
+    "claude": "claude -p",  # Print mode enables streaming JSON output with stdin
+    "codex": "codex exec",  # Non-interactive mode: read from stdin
+    "gemini": "gemini",
 }
 
 # CLI flags for verbose/structured transcript output
 # These enable capturing detailed conversation transcripts for logging
 # All providers now output streaming JSON for consistent transcript format
 TRANSCRIPT_FLAGS = {
-    'claude': '--verbose --output-format stream-json',  # Streaming JSON (requires -p and --verbose)
-    'codex': '--json',  # Outputs newline-delimited JSON events (works with codex exec)
-    'gemini': '--output-format stream-json'  # Outputs JSONL stream
+    "claude": "--verbose --output-format stream-json",  # Streaming JSON (requires -p and --verbose)
+    "codex": "--json",  # Outputs newline-delimited JSON events (works with codex exec)
+    "gemini": "--output-format stream-json",  # Outputs JSONL stream
 }
 
 
@@ -122,7 +122,9 @@ def run_resource_finder(
         FileNotFoundError: If completion marker not created
     """
     if provider not in CLI_COMMANDS:
-        raise ValueError(f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}")
+        raise ValueError(
+            f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}"
+        )
 
     # Auto-detect templates directory if not provided
     if templates_dir is None:
@@ -149,7 +151,7 @@ def run_resource_finder(
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     prompt_file = logs_dir / f"{log_prefix}_prompt.txt"
-    with open(prompt_file, 'w', encoding='utf-8') as f:
+    with open(prompt_file, "w", encoding="utf-8") as f:
         f.write(prompt)
 
     print(f"   Prompt saved to: {prompt_file}")
@@ -169,7 +171,7 @@ def run_resource_finder(
             cmd += " --yolo --skip-trust"
 
     # Add transcript/JSON output flags for structured logging
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
+    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
     if transcript_flag:
         cmd += f" {transcript_flag}"
 
@@ -188,14 +190,14 @@ def run_resource_finder(
 
     # Set environment variables
     env = os.environ.copy()
-    env['PYTHONUNBUFFERED'] = '1'
+    env["PYTHONUNBUFFERED"] = "1"
     if env_extra:
         env.update({str(k): str(v) for k, v in env_extra.items()})
 
     # Disable IDE integration for Gemini CLI to avoid directory mismatch errors
     # when running programmatically from different work directories
     if provider == "gemini":
-        env['GEMINI_CLI_IDE_DISABLE'] = '1'
+        env["GEMINI_CLI_IDE_DISABLE"] = "1"
 
     # Execute agent
     success = False
@@ -203,37 +205,55 @@ def run_resource_finder(
     start_time = time.time()
 
     try:
-        with open(log_file, 'w', encoding='utf-8') as log_f, \
-             open(transcript_file, 'w', encoding='utf-8') as transcript_f:
-            # Start process in workspace directory
-            process = subprocess.Popen(
-                shlex.split(cmd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+        if completion_mode == "hitl_runtime":
+            # HITL workers can remain active while emitting output, so use the
+            # shared deadline-aware runner instead of waiting on stdout EOF.
+            launch = run_prebuilt_cli_agent(
+                command_argv=shlex.split(cmd),
+                prompt=prompt,
+                work_dir=work_dir,
+                log_file=log_file,
+                transcript_file=transcript_file,
                 env=env,
-                text=True,
-                encoding='utf-8',
-                bufsize=1,
-                cwd=str(work_dir)
+                timeout=timeout,
             )
+            return_code = launch["return_code"]
+            if launch["timed_out"]:
+                print(f"\n⏱️  Resource finder timed out after {timeout} seconds")
+        else:
+            with (
+                open(log_file, "w", encoding="utf-8") as log_f,
+                open(transcript_file, "w", encoding="utf-8") as transcript_f,
+            ):
+                # Start process in workspace directory
+                process = subprocess.Popen(
+                    shlex.split(cmd),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    text=True,
+                    encoding="utf-8",
+                    bufsize=1,
+                    cwd=str(work_dir),
+                )
 
-            # Send prompt
-            process.stdin.write(prompt)
-            process.stdin.close()
+                # Send prompt
+                process.stdin.write(prompt)
+                process.stdin.close()
 
-            # Stream output to both log file and transcript file (sanitized for security)
-            # For Claude/Codex with JSON flags, the output IS the transcript
-            # For Gemini, the output is regular text but sessions are saved separately
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    sanitized_line = sanitize_text(line)
-                    print(sanitized_line, end='')
-                    log_f.write(sanitized_line)
-                    transcript_f.write(sanitized_line)
+                # Stream output to both log file and transcript file (sanitized for security)
+                # For Claude/Codex with JSON flags, the output IS the transcript
+                # For Gemini, the output is regular text but sessions are saved separately
+                for line in iter(process.stdout.readline, ""):
+                    if line:
+                        sanitized_line = sanitize_text(line)
+                        print(sanitized_line, end="")
+                        log_f.write(sanitized_line)
+                        transcript_f.write(sanitized_line)
 
-            # Wait for completion
-            return_code = process.wait(timeout=timeout)
+                # Wait for completion
+                return_code = process.wait(timeout=timeout)
 
         print()
         print("=" * 80)
@@ -247,7 +267,7 @@ def run_resource_finder(
             print(f"⚠️  Agent execution finished with return code: {return_code}")
 
         if completion_mode == "hitl_runtime":
-            success = return_code == 0
+            success = return_code == 0 and not launch["timed_out"]
             print("ℹ️  HITL runtime completion mode; orchestrator will review finish state.")
         else:
             # Check for completion marker
@@ -274,16 +294,16 @@ def run_resource_finder(
     print("📦 Checking for expected outputs...")
 
     outputs = {
-        'literature_review': work_dir / "literature_review.md",
-        'resources_catalog': work_dir / "resources.md",
-        'papers_dir': work_dir / "papers",
-        'datasets_dir': work_dir / "datasets",
-        'code_dir': work_dir / "code",
+        "literature_review": work_dir / "literature_review.md",
+        "resources_catalog": work_dir / "resources.md",
+        "papers_dir": work_dir / "papers",
+        "datasets_dir": work_dir / "datasets",
+        "code_dir": work_dir / "code",
     }
     if include_hitl_outputs:
         outputs.update(
             {
-                'hitl_plan': work_dir / "plans" / "resource_finder_plan.md",
+                "hitl_plan": work_dir / "plans" / "resource_finder_plan.md",
             }
         )
 
@@ -292,7 +312,7 @@ def run_resource_finder(
         if path.exists():
             if path.is_dir():
                 # Count files in directory
-                files = list(path.rglob('*'))
+                files = list(path.rglob("*"))
                 file_count = len([f for f in files if f.is_file()])
                 print(f"   ✅ {name}: {path} ({file_count} files)")
             else:
@@ -306,20 +326,16 @@ def run_resource_finder(
     print()
 
     return {
-        'success': success,
-        'completion_marker': str(completion_marker) if completion_marker.exists() else None,
-        'outputs': found_outputs,
-        'log_file': str(log_file),
-        'transcript_file': str(transcript_file),
-        'elapsed_time': time.time() - start_time
+        "success": success,
+        "completion_marker": str(completion_marker) if completion_marker.exists() else None,
+        "outputs": found_outputs,
+        "log_file": str(log_file),
+        "transcript_file": str(transcript_file),
+        "elapsed_time": time.time() - start_time,
     }
 
 
-def wait_for_completion(
-    work_dir: Path,
-    timeout: int = 3600,
-    check_interval: int = 5
-) -> bool:
+def wait_for_completion(work_dir: Path, timeout: int = 3600, check_interval: int = 5) -> bool:
     """
     Poll for completion marker file.
 

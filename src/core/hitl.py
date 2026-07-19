@@ -9,7 +9,6 @@ updates the plan, and resumes from the current workspace state.
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import json
 import logging
 import os
@@ -23,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
+from core.hitl_lock import exclusive_file_lock
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -33,9 +34,20 @@ PIPELINE_STAGES = {
     "scorer",
     "paper_writer",
 }
+HITL_WORKER_ACTORS = PIPELINE_STAGES | {"autoresearch_proposer", "comment_handler"}
 HITL_STAGES = {"plan", "execution", "proposal", "review"}
 LEVELS = {"A", "B", "C"}
 IDEA_TYPES = {"decision", "evidence", "proposal"}
+
+_WORKER_COMMAND_MODULES = {
+    "hitl-report-idea": "hitl_report_idea.py",
+    "hitl-raise-idea": "hitl_raise_idea.py",
+    "hitl-view-ideas": "hitl_view_ideas.py",
+    "hitl-finish-phase": "hitl_finish_phase.py",
+    "hitl-resume-worker-request": "hitl_resume_worker_request.py",
+    "hitl-submit-proposal": "hitl_submit_proposal.py",
+    "view_current_frontier": "hitl_view_current_frontier.py",
+}
 PROPOSAL_KINDS = {"exploitation", "exploration"}
 EVIDENCE_IDEA_CATEGORIES = {
     "paper_finding",
@@ -516,12 +528,8 @@ class HitlIdeaLog:
     @contextmanager
     def _locked_log(self) -> Iterator[None]:
         lock_path = self.path.with_suffix(".jsonl.lock")
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with exclusive_file_lock(lock_path):
+            yield
 
     @staticmethod
     def _next_number(records: Iterable[Dict[str, Any]]) -> int:
@@ -669,9 +677,9 @@ class HitlIdeaLog:
             raise HitlValidationError("A-level HITL ideas must be finalized by actor 'human'")
         if record["level"] == "B" and actor != "manager":
             raise HitlValidationError("B-level HITL ideas must be finalized by actor 'manager'")
-        if record["level"] == "C" and actor != record["pipeline_stage"]:
+        if record["level"] == "C" and actor not in HITL_WORKER_ACTORS:
             raise HitlValidationError(
-                "C-level HITL ideas must be finalized by the current pipeline-stage worker"
+                "C-level HITL ideas must be finalized by a recognized HITL worker actor"
             )
         for field in ("basis", "human_basis"):
             if field in record:
@@ -1040,6 +1048,8 @@ class HitlRuntime:
         provenance: Optional[Dict[str, Any]] = None,
         requires_human_approval: Optional[bool] = None,
         allow_scoring_approval: bool = False,
+        proposal_submission_validator: Optional[Callable[[], Dict[str, Any]]] = None,
+        plan_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
         phase_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
         scoring_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
@@ -1048,6 +1058,50 @@ class HitlRuntime:
         self.stop_idea_tool_server()
         self.paths.hitl_dir.mkdir(parents=True, exist_ok=True)
         self.paths.tool_bin_dir.mkdir(parents=True, exist_ok=True)
+        if hitl_stage == "proposal" and proposal_submission_validator is None:
+            from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+            proposal_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
+            proposal_submission_validator = proposal_guard.require_unchanged
+        if hitl_stage == "plan" and plan_finish_validator is None:
+            from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+            plan_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
+            plan_path = self.paths.plan_path.relative_to(self.work_dir).as_posix()
+            plan_finish_validator = lambda: plan_guard.allow_only([plan_path])
+        if hitl_stage in {"execution", "review"}:
+            from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+            protected_guard = HitlWorkspaceWriteGuard.capture_paths(
+                self.work_dir,
+                [
+                    "scoring/interface.md",
+                    "scoring/results.json",
+                    ".neurico/autoresearch_state.json",
+                ],
+            )
+            supplied_phase_validator = phase_finish_validator
+
+            def combined_phase_finish_validator() -> Dict[str, Any]:
+                protection = protected_guard.require_unchanged()
+                if not bool(protection.get("valid")):
+                    return protection
+                if callable(supplied_phase_validator):
+                    return supplied_phase_validator()
+                return {"valid": True, "issues": []}
+
+            phase_finish_validator = combined_phase_finish_validator
+        allowed_worker_commands = self._worker_commands_for_stage(hitl_stage)
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        pending_command = HitlRuntimeState(self.work_dir).pending_worker_command()
+        if isinstance(pending_command, dict) and pending_command.get("status") in {
+            "pending",
+            "scoring_approval_pending",
+            "scoring",
+        }:
+            allowed_worker_commands.add("hitl-resume-worker-request")
+
         self._tool_context = {
             "work_dir": str(self.work_dir.resolve()),
             "pipeline_stage": self.pipeline_stage,
@@ -1057,8 +1111,11 @@ class HitlRuntime:
             "provenance": provenance or {},
             "requires_human_approval": requires_human_approval,
             "allow_scoring_approval": allow_scoring_approval,
+            "proposal_submission_validator": proposal_submission_validator,
+            "plan_finish_validator": plan_finish_validator,
             "phase_finish_validator": phase_finish_validator,
             "scoring_handler": scoring_handler,
+            "allowed_worker_commands": allowed_worker_commands,
         }
         self._phase_finish_result = None
         self._phase_finish_request_key = ""
@@ -1068,6 +1125,48 @@ class HitlRuntime:
         self._started_scoring_requests = set()
         self._start_idea_tool_server()
         self._write_idea_tool_commands()
+
+    @staticmethod
+    def _worker_commands_for_stage(hitl_stage: str) -> set[str]:
+        """Return the command surface owned by one worker invocation.
+
+        The worker receives read/reporting commands plus the one workflow
+        transition appropriate to its stage.  Runtime can later add the resume
+        command only when it launches a replacement against a held request.
+        """
+        commands = {"hitl-report-idea", "hitl-view-ideas"}
+        if hitl_stage == "proposal":
+            commands.update({"hitl-submit-proposal", "view_current_frontier"})
+        elif hitl_stage in {"execution", "review"}:
+            commands.update({"hitl-raise-idea", "hitl-finish-phase"})
+        else:
+            commands.add("hitl-finish-phase")
+        return commands
+
+    def _enable_worker_command(self, command_name: str) -> None:
+        if command_name not in _WORKER_COMMAND_MODULES:
+            raise HitlValidationError(f"Unknown HITL worker command: {command_name}")
+        commands = self._tool_context.get("allowed_worker_commands")
+        if not isinstance(commands, set):
+            commands = set(commands or [])
+            self._tool_context["allowed_worker_commands"] = commands
+        if command_name not in commands:
+            commands.add(command_name)
+            self._write_idea_tool_commands()
+
+    def _require_worker_command(self, command_name: str) -> None:
+        commands = self._tool_context.get("allowed_worker_commands")
+        allowed = set(commands or [])
+        if command_name in allowed:
+            return
+        stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
+        available = ", ".join(f"`{name}`" for name in sorted(allowed)) or "none"
+        raise HitlValidationError(
+            "HITL_ERROR command_unavailable\n"
+            f"`{command_name}` is not available during the current {stage} worker invocation.\n"
+            f"Runtime currently allows: {available}.\n"
+            "Follow the current runtime instruction and retry only with an available command."
+        )
 
     def register_worker_prompt(self, prompt_block: str) -> None:
         """Persist the runtime-owned continuation point for the active worker.
@@ -1202,6 +1301,21 @@ class HitlRuntime:
 
     def submit_proposal_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
+            validator = self._tool_context.get("proposal_submission_validator")
+            if callable(validator):
+                validation = validator()
+                if not bool(validation.get("valid")):
+                    issues = validation.get("issues", [])
+                    if not isinstance(issues, list):
+                        issues = [str(issues)]
+                    raise HitlValidationError(
+                        "HITL_ERROR proposal_workspace_boundary\n"
+                        "Runtime rejected this proposal because proposal generation changed public "
+                        "workspace files before approval:\n"
+                        + "\n".join(f"- {str(issue)}" for issue in issues if str(issue).strip())
+                        + "\nDo not make further public workspace changes in this proposer session. "
+                        "Runtime will discard this invalid attempt."
+                    )
             record = self._record_from_proposal_tool_payload(payload)
             submission_key = self._proposal_submission_key(record)
             prior_result = self._proposal_submit_result
@@ -1615,6 +1729,82 @@ class HitlRuntime:
         _apply_runtime_provenance(record, provenance)
         return self.log.append(record, idempotent=True)
 
+    def log_frontier_maintenance_decision(
+        self,
+        *,
+        action: str,
+        node_sha: str,
+        active_node_shas: List[str],
+        reason: str,
+        premise_idea_id: str,
+    ) -> Dict[str, Any]:
+        """Log one runtime-constrained manager frontier decision.
+
+        The manager chooses a node SHA and supplies its rationale. Runtime owns
+        the complete option set and translates the selected SHA into the
+        schema's stable ``O<n>`` decision id.
+        """
+        if action not in {"prune", "select"}:
+            raise HitlValidationError("Frontier maintenance action must be prune or select")
+        chosen = str(node_sha).strip()
+        options = [
+            {"option_id": f"O{index}", "text": f"Frontier node {sha}"}
+            for index, sha in enumerate(active_node_shas, start=1)
+        ]
+        decision = next(
+            (option["option_id"] for option in options if option["text"] == f"Frontier node {chosen}"),
+            "",
+        )
+        if not decision:
+            raise HitlValidationError("Manager selected a node outside the runtime frontier options")
+        rationale = _require_text(reason, "reason", "Frontier maintenance decision")
+        premise = _require_text(
+            premise_idea_id, "premise_idea_id", "Frontier maintenance decision"
+        )
+        decision_needed = (
+            "Which active frontier node should be removed from the portfolio?"
+            if action == "prune"
+            else "Which remaining active frontier node should be the workspace basis for the next proposal?"
+        )
+        context = (
+            "Runtime enforced the active-frontier capacity before the next proposal."
+            if action == "prune"
+            else "Runtime requested the manager to choose the workspace basis for the next proposal."
+        )
+        for existing in reversed(self.log.records()):
+            if (
+                existing.get("idea_type") == "decision"
+                and existing.get("level") == "B"
+                and existing.get("actor") == "manager"
+                and existing.get("decision_needed") == decision_needed
+                and existing.get("premises") == [premise]
+                and existing.get("decision") == decision
+            ):
+                return existing
+        provenance: Dict[str, Any] = {}
+        for record in reversed(self.log.records()):
+            if str(record.get("idea_id", "")).strip() == premise:
+                provenance = _runtime_provenance(record)
+                break
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "decision",
+            "idea_category": "other",
+            "level": "B",
+            "actor": "manager",
+            "premises": [premise],
+            "context": context,
+            "related_artifacts": [],
+            "decision_needed": decision_needed,
+            "options": options,
+            "decision": decision,
+            "manager_feedback": rationale,
+            "raised": False,
+        }
+        _apply_runtime_provenance(record, provenance)
+        return self.log.append(record, idempotent=True)
+
     def log_scoring_recovery_decision(
         self,
         *,
@@ -1991,15 +2181,12 @@ class HitlRuntime:
             )
             if prior_response is not None:
                 return prior_response
-            if hitl_stage == "plan" and not self._latest_worker_plan_idea_id():
-                raise HitlValidationError(
-                    "HITL_ERROR plan_requires_c_level_idea\n"
-                    "Before requesting plan review, report at least one material C-level plan "
-                    "evidence or decision with `hitl-report-idea`.\n"
-                    "Use `hitl-view-ideas` if prior ideas inform it, then retry hitl-finish-phase."
-                )
-            validator = self._tool_context.get("phase_finish_validator")
-            if hitl_stage in {"execution", "review"} and callable(validator):
+            validator = (
+                self._tool_context.get("plan_finish_validator")
+                if hitl_stage == "plan"
+                else self._tool_context.get("phase_finish_validator")
+            )
+            if callable(validator):
                 validation = validator()
                 if not bool(validation.get("valid")):
                     issues = validation.get("issues", [])
@@ -2008,39 +2195,52 @@ class HitlRuntime:
                     issue_text = "\n".join(
                         f"- {str(issue)}" for issue in issues if str(issue).strip()
                     )
+                    next_stage = "plan" if hitl_stage == "plan" else "review"
                     feedback = (
-                        "Runtime validation found repairable rule-maker output issues. "
-                        "Correct only these issues, update the living plan if needed, then call "
+                        "Runtime validation found work outside the allowed HITL boundary. "
+                        "Correct only these issues, preserve completed permitted work, then call "
                         "hitl-finish-phase again:\n"
-                        + (issue_text or "- Recheck the required rule-maker outputs.")
+                        + (issue_text or "- Recheck the active HITL workspace boundary.")
                     )
-                    self._tool_context["hitl_stage"] = "review"
-                    self.current_hitl_stage = "review"
+                    self._tool_context["hitl_stage"] = next_stage
+                    self.current_hitl_stage = next_stage
                     self._phase_finish_result = {
                         "called": True,
                         "status": "feedback",
-                        "hitl_stage": "review",
+                        "hitl_stage": next_stage,
                         "plan_fingerprint": plan_fingerprint,
                         "summary": summary,
                         "related_artifacts": related_artifacts,
                         "manager_feedback": feedback,
-                        "context": "Runtime validation found repairable output issues before manager review.",
-                        "next_phase": "review",
+                        "context": "Runtime validation rejected the phase boundary before manager review.",
+                        "next_phase": next_stage,
                         "final": False,
                     }
+                    prompt_block = (
+                        self.plan_revision_prompt_block(feedback)
+                        if next_stage == "plan"
+                        else self.review_prompt_block(feedback)
+                    )
                     return self._remember_phase_finish_response(
                         request_key,
                         {
                             "status": "feedback",
                             "feedback": feedback,
-                            "next_phase": "review",
+                            "next_phase": next_stage,
                             "instruction": (
-                                "Correct the listed output issues in this same worker session, then "
-                                "call hitl-finish-phase again."
+                                "Correct the listed runtime validation issues in this same worker "
+                                "session, then call hitl-finish-phase again."
                             ),
-                            "prompt_block": self.review_prompt_block(feedback),
+                            "prompt_block": prompt_block,
                         },
                     )
+            if hitl_stage == "plan" and not self._latest_worker_plan_idea_id():
+                raise HitlValidationError(
+                    "HITL_ERROR plan_requires_c_level_idea\n"
+                    "Before requesting plan review, report at least one material C-level plan "
+                    "evidence or decision with `hitl-report-idea`.\n"
+                    "Use `hitl-view-ideas` if prior ideas inform it, then retry hitl-finish-phase."
+                )
             finalized: Dict[str, Dict[str, Any]] = {}
 
             def persist_phase_review(review: Dict[str, Any]) -> Dict[str, Any]:
@@ -2411,6 +2611,16 @@ class HitlRuntime:
                 (finish or {}).get("prompt_block") or continuation.get("prompt_block", "")
             ).strip()
             if prompt_block and int(continuation.get("replacement_count", 0)) < 1:
+                pending = self._pending_worker_command()
+                needs_resume = isinstance(pending, dict) and pending.get("status") in {
+                    "pending",
+                    "scoring_approval_pending",
+                    "scoring",
+                }
+                if needs_resume:
+                    # A held command is runtime state, not continuation text.
+                    # The replacement must reconnect before changing the workspace.
+                    prompt_block = _load_hitl_template("worker_resume_pending_request.txt")
                 self._update_worker_continuation(
                     prompt_block=prompt_block,
                     hitl_stage=str(
@@ -2422,6 +2632,11 @@ class HitlRuntime:
                 from core.hitl_runtime_state import HitlRuntimeState
 
                 HitlRuntimeState(self.work_dir).mark_worker_replacement()
+                if needs_resume:
+                    # A replacement is the only worker that may reconnect to
+                    # a runtime-held command. Expose it immediately before the
+                    # replacement launch, never to the original invocation.
+                    self._enable_worker_command("hitl-resume-worker-request")
                 return {
                     "approved": False,
                     "replacement": True,
@@ -2790,12 +3005,13 @@ class HitlRuntime:
 
     def _latest_worker_plan_idea_id(self) -> str:
         expected_provenance = _runtime_provenance(self._tool_context.get("provenance"))
+        expected_actor = str(self._tool_context.get("actor", self.pipeline_stage)).strip()
         for record in reversed(self.log.records()):
             if (
                 record.get("pipeline_stage") == self.pipeline_stage
                 and record.get("hitl_stage") == "plan"
                 and record.get("level") == "C"
-                and record.get("actor") == self.pipeline_stage
+                and record.get("actor") == expected_actor
                 and all(
                     str(record.get(key, "")) == value for key, value in expected_provenance.items()
                 )
@@ -2827,6 +3043,7 @@ class HitlRuntime:
     def _start_idea_tool_server(self) -> None:
         runtime = self
         token = secrets.token_urlsafe(24)
+        max_request_bytes = 1_000_000
 
         class ToolHandler(http.server.BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: Any) -> None:
@@ -2838,9 +3055,22 @@ class HitlRuntime:
                         self._send_json(403, {"error": "Invalid HITL tool token."})
                         return
                     length = int(self.headers.get("Content-Length", "0"))
+                    if length < 0 or length > max_request_bytes:
+                        self._send_json(
+                            413,
+                            {
+                                "error": (
+                                    "HITL_ERROR request_too_large\n"
+                                    "This HITL command payload exceeds the 1 MB runtime limit. "
+                                    "Provide the required information concisely and retry the same command."
+                                )
+                            },
+                        )
+                        return
                     raw = self.rfile.read(length)
                     payload = json.loads(raw.decode("utf-8") or "{}")
                     if self.path == "/idea/report":
+                        runtime._require_worker_command("hitl-report-idea")
                         record = runtime.log_reported_payload(payload)
                         self._send_json(
                             200,
@@ -2848,6 +3078,7 @@ class HitlRuntime:
                         )
                         return
                     if self.path == "/proposal/submit":
+                        runtime._require_worker_command("hitl-submit-proposal")
                         result = runtime.submit_proposal_payload(payload)
                         self._send_json(
                             200,
@@ -2861,6 +3092,7 @@ class HitlRuntime:
                         )
                         return
                     if self.path == "/idea/raise":
+                        runtime._require_worker_command("hitl-raise-idea")
                         result = runtime.resolve_tool_raised_payload(payload)
                         self._send_json(
                             200,
@@ -2873,14 +3105,17 @@ class HitlRuntime:
                         )
                         return
                     if self.path == "/idea/view":
+                        runtime._require_worker_command("hitl-view-ideas")
                         result = runtime.view_ideas_for_tool(payload)
                         self._send_json(200, {"ok": True, "text": result["text"]})
                         return
                     if self.path == "/frontier/current":
+                        runtime._require_worker_command("view_current_frontier")
                         result = runtime.view_current_frontier_for_tool()
                         self._send_json(200, {"ok": True, "text": result["text"]})
                         return
                     if self.path == "/phase/finish":
+                        runtime._require_worker_command("hitl-finish-phase")
                         result = runtime.finish_tool_phase(payload)
                         self._send_json(
                             200,
@@ -2896,6 +3131,7 @@ class HitlRuntime:
                         )
                         return
                     if self.path == "/worker/resume":
+                        runtime._require_worker_command("hitl-resume-worker-request")
                         result = runtime.resume_pending_worker_command()
                         self._send_json(
                             200,
@@ -2959,13 +3195,16 @@ class HitlRuntime:
         self._tool_token = token
 
     def _write_idea_tool_commands(self) -> None:
-        self._write_tool_command("hitl-report-idea", "hitl_report_idea.py")
-        self._write_tool_command("hitl-raise-idea", "hitl_raise_idea.py")
-        self._write_tool_command("hitl-view-ideas", "hitl_view_ideas.py")
-        self._write_tool_command("hitl-finish-phase", "hitl_finish_phase.py")
-        self._write_tool_command("hitl-resume-worker-request", "hitl_resume_worker_request.py")
-        self._write_tool_command("hitl-submit-proposal", "hitl_submit_proposal.py")
-        self._write_tool_command("view_current_frontier", "hitl_view_current_frontier.py")
+        commands = set(self._tool_context.get("allowed_worker_commands") or [])
+        for command_name in _WORKER_COMMAND_MODULES:
+            command_path = self.paths.tool_bin_dir / command_name
+            if command_path.exists():
+                command_path.unlink()
+        for command_name in sorted(commands):
+            module_file = _WORKER_COMMAND_MODULES.get(command_name)
+            if module_file is None:
+                raise HitlValidationError(f"Unknown HITL worker command: {command_name}")
+            self._write_tool_command(command_name, module_file)
 
     def _write_tool_command(self, command_name: str, module_file: str) -> None:
         script = "\n".join(

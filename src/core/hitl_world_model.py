@@ -9,11 +9,11 @@ manually reconstructing them every turn.
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
+from core.hitl_lock import exclusive_file_lock
 from core.hitl_frontier import HitlFrontierError, HitlFrontierStore
 from core.hitl_whiteboard import hitl_whiteboard_path
 from interactive.research_state import ResearchState
@@ -49,12 +49,8 @@ class HitlWorldModelSync:
         """
         self.hitl_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.hitl_dir / "research_state.lock"
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield ResearchState(self.work_dir)
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with exclusive_file_lock(lock_path):
+            yield ResearchState(self.work_dir)
 
     @contextmanager
     def synchronized_research_state(self) -> Iterator[ResearchState]:
@@ -211,31 +207,36 @@ class HitlWorldModelSync:
         store = HitlFrontierStore(self.work_dir)
         if not store.exists():
             return None
-        try:
-            state = store.state()
-            proposals = {
-                self._idea_id(record): str(record.get("proposal", "")).strip()
-                for record in ideas
-                if record.get("idea_type") == "proposal" and self._idea_id(record)
-            }
-            selected_sha = state["selected_frontier_node_sha"]
-            selected = self._manager_node_view(
+        # A frontier that does not yet exist is normal before the first scored
+        # AutoResearch root. Once it exists, however, it is authoritative
+        # runtime state: hiding corruption would let the manager reason from a
+        # false empty portfolio.
+        state = store.state(allow_unselected=True)
+        proposals = {
+            self._idea_id(record): str(record.get("proposal", "")).strip()
+            for record in ideas
+            if record.get("idea_type") == "proposal" and self._idea_id(record)
+        }
+        selected_sha = state["selected_frontier_node_sha"]
+        selected = (
+            self._manager_node_view(
                 store.node(selected_sha),
                 include_plan=True,
                 include_proposal_content=True,
                 proposals=proposals,
             )
-            portfolio = [
-                self._manager_node_view(
-                    store.node(node_sha),
-                    include_plan=False,
-                    include_proposal_content=False,
-                    proposals=proposals,
-                )
-                for node_sha in state["active_frontier_node_shas"]
-            ]
-        except HitlFrontierError:
-            return None
+            if selected_sha
+            else {"status": "runtime frontier selection is pending"}
+        )
+        portfolio = [
+            self._manager_node_view(
+                store.node(node_sha),
+                include_plan=False,
+                include_proposal_content=False,
+                proposals=proposals,
+            )
+            for node_sha in state["active_frontier_node_shas"]
+        ]
         return selected, portfolio
 
     def _manager_node_view(
@@ -286,13 +287,15 @@ class HitlWorldModelSync:
         )
 
     def _active_whiteboard_tips(self) -> List[Dict[str, str]]:
+        if not self.whiteboard_path.exists():
+            return []
         try:
             payload = json.loads(self.whiteboard_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("HITL whiteboard is unreadable or malformed.") from exc
         raw_tips = payload.get("tips") if isinstance(payload, dict) else None
         if not isinstance(raw_tips, list):
-            return []
+            raise RuntimeError("HITL whiteboard must contain a tips array.")
         return [
             {
                 "id": str(tip.get("id", "")).strip(),

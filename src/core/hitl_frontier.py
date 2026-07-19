@@ -102,11 +102,12 @@ class HitlFrontierStore:
     def exists(self) -> bool:
         return self.paths.state.is_file()
 
-    def state(self) -> Dict[str, Any]:
+    def state(self, *, allow_unselected: bool = False) -> Dict[str, Any]:
         payload = self._read_json(self.paths.state)
-        selected = self._require_sha(
-            payload.get("selected_frontier_node_sha", ""), "selected frontier node SHA"
-        )
+        raw_selected = payload.get("selected_frontier_node_sha")
+        selected = None
+        if raw_selected is not None and str(raw_selected).strip():
+            selected = self._require_sha(raw_selected, "selected frontier node SHA")
         active = payload.get("active_frontier_node_shas")
         if not isinstance(active, list) or not active:
             raise HitlFrontierError(
@@ -115,11 +116,44 @@ class HitlFrontierStore:
         active_shas = [self._require_sha(value, "active frontier node SHA") for value in active]
         if len(set(active_shas)) != len(active_shas):
             raise HitlFrontierError("HITL frontier state contains duplicate active node SHAs")
-        if selected not in active_shas:
+        if selected is None and not allow_unselected:
+            raise HitlFrontierError("HITL frontier requires a selected frontier node")
+        if selected is not None and selected not in active_shas:
             raise HitlFrontierError("Selected HITL frontier node must be active")
         return {
             "selected_frontier_node_sha": selected,
             "active_frontier_node_shas": active_shas,
+        }
+
+    def configure_autoresearch_run(
+        self,
+        *,
+        history_root: Path,
+        lineage_source_sha: str,
+        last_iteration: int,
+    ) -> None:
+        """Store HITL-only continuation metadata beside the frontier state."""
+        lineage = self._require_sha(lineage_source_sha, "lineage source SHA")
+        if last_iteration < 0:
+            raise HitlFrontierError("HITL AutoResearch last_iteration cannot be negative")
+        payload = self._read_json(self.paths.state)
+        payload["history_root"] = str(Path(history_root).resolve())
+        payload["lineage_source_sha"] = lineage
+        payload["last_iteration"] = int(last_iteration)
+        self._write_json(self.paths.state, payload)
+
+    def autoresearch_run(self) -> Dict[str, Any]:
+        """Return continuation metadata owned only by HITL AutoResearch."""
+        payload = self._read_json(self.paths.state)
+        history_root = str(payload.get("history_root", "")).strip()
+        lineage = self._require_sha(payload.get("lineage_source_sha", ""), "lineage source SHA")
+        last_iteration = payload.get("last_iteration")
+        if not history_root or not isinstance(last_iteration, int) or last_iteration < 0:
+            raise HitlFrontierError("HITL frontier is missing AutoResearch continuation metadata")
+        return {
+            "history_root": history_root,
+            "lineage_source_sha": lineage,
+            "last_iteration": last_iteration,
         }
 
     def initialize_root(
@@ -139,13 +173,16 @@ class HitlFrontierStore:
             objective_score=objective_score,
             reason_for_acceptance=reason_for_acceptance,
         )
-        self._write_json(
-            self.paths.state,
-            {
-                "selected_frontier_node_sha": self._require_sha(node_sha, "root node SHA"),
-                "active_frontier_node_shas": [self._require_sha(node_sha, "root node SHA")],
-            },
+        self._write_state(
+            selected=self._require_sha(node_sha, "root node SHA"),
+            active=[self._require_sha(node_sha, "root node SHA")],
         )
+
+    def _write_state(self, *, selected: str | None, active: List[str]) -> None:
+        payload = self._read_json(self.paths.state) if self.paths.state.exists() else {}
+        payload["selected_frontier_node_sha"] = selected
+        payload["active_frontier_node_shas"] = active
+        self._write_json(self.paths.state, payload)
 
     def _write_node(
         self,
@@ -227,13 +264,7 @@ class HitlFrontierStore:
                         active = [sha for sha in active if sha != parent]
                     if candidate not in active:
                         active.append(candidate)
-                    self._write_json(
-                        self.paths.state,
-                        {
-                            "selected_frontier_node_sha": candidate,
-                            "active_frontier_node_shas": active,
-                        },
-                    )
+                    self._write_state(selected=candidate, active=active)
                 return existing
             raise HitlFrontierError(
                 "A different finalized HITL attempt already exists for this candidate node"
@@ -264,22 +295,42 @@ class HitlFrontierStore:
                 active = [sha for sha in active if sha != parent]
             if candidate not in active:
                 active.append(candidate)
-            self._write_json(
-                self.paths.state,
-                {
-                    "selected_frontier_node_sha": candidate,
-                    "active_frontier_node_shas": active,
-                },
-            )
+            self._write_state(selected=candidate, active=active)
         return attempt
 
     def select(self, node_sha: str) -> Dict[str, Any]:
         node = self._require_sha(node_sha, "frontier node SHA")
-        current = self.state()
+        current = self.state(allow_unselected=True)
         if node not in current["active_frontier_node_shas"]:
             raise HitlFrontierError("Only an active frontier node can be selected")
-        updated = {**current, "selected_frontier_node_sha": node}
-        self._write_json(self.paths.state, updated)
+        self._write_state(selected=node, active=current["active_frontier_node_shas"])
+        return {**current, "selected_frontier_node_sha": node}
+
+    def prune(self, node_sha: str) -> Dict[str, Any]:
+        """Remove one active node from the retained frontier.
+
+        The node and its attempt history remain immutable audit records.  Only
+        its active-frontier membership changes, so it cannot be selected for a
+        later proposal unless a future design explicitly restores it.
+        """
+        node = self._require_sha(node_sha, "frontier node SHA")
+        current = self.state(allow_unselected=True)
+        active = list(current["active_frontier_node_shas"])
+        if node not in active:
+            raise HitlFrontierError("Only an active frontier node can be pruned")
+        if len(active) <= 1:
+            raise HitlFrontierError("The final active frontier node cannot be pruned")
+        active.remove(node)
+        updated = {
+            "selected_frontier_node_sha": (
+                None if node == current["selected_frontier_node_sha"] else current["selected_frontier_node_sha"]
+            ),
+            "active_frontier_node_shas": active,
+        }
+        self._write_state(
+            selected=updated["selected_frontier_node_sha"],
+            active=updated["active_frontier_node_shas"],
+        )
         return updated
 
     def mirror_nodes_to(self, audit_root: Path) -> None:

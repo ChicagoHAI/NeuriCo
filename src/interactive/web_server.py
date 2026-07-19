@@ -27,9 +27,11 @@ import json
 import mimetypes
 import re
 import threading
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlsplit
 
 from interactive.channel import WebChannel
 from interactive import agent_log
@@ -624,6 +626,7 @@ PAGE = r"""<!DOCTYPE html>
   }
 
   // --- dashboard ---
+  let resolutionRequestKey=null;
   let startedMs=null;
   function fmtElapsed(){
     if(!startedMs) return;
@@ -797,6 +800,7 @@ PAGE = r"""<!DOCTYPE html>
     setThinking(false);
     renderOptions(d.options);
     resolutionReplyPending=true;
+    resolutionRequestKey=d.request_key || null;
     replyRequest.hidden=false;
     composer.classList.add('awaiting');
     hint.textContent='A worker request needs a reply. You can still send ordinary messages to the manager.';
@@ -805,6 +809,7 @@ PAGE = r"""<!DOCTYPE html>
   });
   es.addEventListener('resolution_cleared',()=>{
     resolutionReplyPending=false;
+    resolutionRequestKey=null;
     replyRequest.hidden=true;
     composer.classList.remove('awaiting');
     optionsEl.innerHTML='';
@@ -817,13 +822,14 @@ PAGE = r"""<!DOCTYPE html>
   function submit(text,input_kind='conversation'){
     text=(text||'').trim();
     if(!text) return;
-    fetch('/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,input_kind})});
+    fetch('/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,input_kind,request_key:input_kind==='resolution_reply'?resolutionRequestKey:null})});
     if(input_kind==='conversation'){
       hint.textContent='✓ Message queued — the manager will see it at its next checkpoint.';
     }else{
       hint.textContent='Resolution reply received — the manager will continue the review.';
       setThinking(true);
       resolutionReplyPending=false;
+      resolutionRequestKey=null;
       replyRequest.hidden=true;
       composer.classList.remove('awaiting');
       optionsEl.innerHTML='';
@@ -865,15 +871,70 @@ def _brand_file(project_root: Path, key: str) -> Optional[Path]:
     return None
 
 
-def _make_handler(channel: WebChannel, workspace_name: str, title: str, project_root: Path):
+def _make_handler(
+    channel: WebChannel,
+    workspace_name: str,
+    title: str,
+    project_root: Path,
+    *,
+    access_token: Optional[str] = None,
+):
     page = PAGE.replace("{{WORKSPACE}}", workspace_name).replace("{{TITLE}}", title)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
+        def _has_access(self) -> bool:
+            if access_token is None:
+                return True
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+            except (KeyError, ValueError):
+                return False
+            value = cookie.get("neurico_hitl_session")
+            return value is not None and value.value == access_token
+
+        def _bootstrap_access(self) -> bool:
+            if access_token is None:
+                return False
+            parsed = urlsplit(self.path)
+            token = (parse_qs(parsed.query).get("token") or [""])[0]
+            if token != access_token:
+                return False
+            self.send_response(302)
+            self.send_header("Location", parsed.path or "/")
+            self.send_header(
+                "Set-Cookie",
+                f"neurico_hitl_session={access_token}; HttpOnly; SameSite=Strict; Path=/",
+            )
+            self.end_headers()
+            return True
+
+        def _deny_access(self) -> None:
+            body = b"HITL manager access denied."
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _same_origin_post(self) -> bool:
+            if access_token is None:
+                return True
+            origin = self.headers.get("Origin")
+            host = self.headers.get("Host", "")
+            return bool(origin and host and origin == f"http://{host}")
+
         def do_GET(self):
-            if self.path == "/":
+            if self._bootstrap_access():
+                return
+            if not self._has_access():
+                self._deny_access()
+                return
+            path = urlsplit(self.path).path
+            if path == "/":
                 body = page.encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -881,9 +942,9 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str, project_
                 self.end_headers()
                 self.wfile.write(body)
 
-            elif self.path.startswith("/brand/"):
+            elif path.startswith("/brand/"):
                 # Optional branding image; 404 (handled gracefully by the page) if absent.
-                f = _brand_file(project_root, self.path[len("/brand/") :])
+                f = _brand_file(project_root, path[len("/brand/") :])
                 if f is None:
                     self.send_response(404)
                     self.end_headers()
@@ -903,7 +964,7 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str, project_
                 self.end_headers()
                 self.wfile.write(data)
 
-            elif self.path == "/stream":
+            elif path == "/stream":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
@@ -934,19 +995,31 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str, project_
                 self.end_headers()
 
         def do_POST(self):
-            if self.path == "/input":
-                length = int(self.headers.get("Content-Length", 0))
+            if not self._has_access() or not self._same_origin_post():
+                self._deny_access()
+                return
+            if urlsplit(self.path).path == "/input":
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                except ValueError:
+                    length = 0
+                if length < 0 or length > 1_000_000:
+                    self.send_response(413)
+                    self.end_headers()
+                    return
                 raw = self.rfile.read(length) if length else b""
                 text = ""
                 try:
                     payload = json.loads(raw.decode("utf-8"))
                     text = payload.get("text", "")
                     input_kind = payload.get("input_kind", "conversation")
+                    request_key = payload.get("request_key")
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     text = raw.decode("utf-8", errors="replace")
                     input_kind = "conversation"
+                    request_key = None
                 if text:
-                    channel.submit_input(text, input_kind=input_kind)
+                    channel.submit_input(text, input_kind=input_kind, request_key=request_key)
                 self.send_response(204)
                 self.end_headers()
             else:
@@ -967,6 +1040,7 @@ class InteractiveWebServer:
         title: str,
         port: int = 7890,
         host: str = "localhost",
+        access_token: Optional[str] = None,
     ):
         self.channel = channel
         self.workspace = Path(workspace)
@@ -974,6 +1048,7 @@ class InteractiveWebServer:
         self.title = title
         self.host = host
         self.port = port
+        self.access_token = str(access_token).strip() if access_token else None
 
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._server_thread: Optional[threading.Thread] = None
@@ -984,16 +1059,23 @@ class InteractiveWebServer:
 
     @property
     def url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        url = f"http://{self.host}:{self.port}"
+        return f"{url}/?token={self.access_token}" if self.access_token else url
 
     def start(self) -> None:
-        handler = _make_handler(self.channel, self.workspace.name, self.title, self.project_root)
+        handler = _make_handler(
+            self.channel,
+            self.workspace.name,
+            self.title,
+            self.project_root,
+            access_token=self.access_token,
+        )
         # Try the requested port, then a few above it if taken.
         last_err = None
         for port in range(self.port, self.port + 10):
             try:
                 self._httpd = ThreadingHTTPServer((self.host, port), handler)
-                self.port = port
+                self.port = int(self._httpd.server_address[1])
                 break
             except OSError as e:
                 last_err = e

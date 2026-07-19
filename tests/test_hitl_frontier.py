@@ -12,8 +12,6 @@ from core.autoresearch import (
     AutoResearchIterationResult,
     CheckpointManager,
     ScoreSummary,
-    read_autoresearch_state,
-    write_autoresearch_state,
 )
 from core.hitl_autoresearch import (
     HitlAutoResearchController,
@@ -86,6 +84,34 @@ def test_current_frontier_worker_view_includes_selected_node_identity(tmp_path: 
 
     assert current["node_sha"] == "root"
     assert "plan" not in current
+
+
+def test_pruning_removes_only_active_membership_and_keeps_audit_node(tmp_path: Path) -> None:
+    store = HitlFrontierStore(tmp_path)
+    store.initialize_root(
+        node_sha="root",
+        plan_text="root plan",
+        objective_score={"results": {"score": 1}},
+        reason_for_acceptance="Initial experiment completed without scoring error.",
+    )
+    store.finalize_attempt(
+        parent_node_sha="root",
+        candidate_node_sha="explore",
+        attempt_id="attempt_1",
+        proposal_idea_id="I1",
+        proposal_type="exploration",
+        objective_score={"results": {"score": 2}},
+        accepted=True,
+        reason="The distinct direction deserves retention.",
+        plan_text="explore plan",
+    )
+
+    state = store.prune("root")
+
+    assert state["active_frontier_node_shas"] == ["explore"]
+    assert store.paths.node_json("root").is_file()
+    with pytest.raises(Exception, match="final active frontier node"):
+        store.prune("explore")
 
 
 def test_public_frontier_audit_is_an_exact_nodes_tree_mirror(tmp_path: Path) -> None:
@@ -366,13 +392,6 @@ def test_hitl_controller_uses_saved_initial_checkpoint_without_creating_another(
     )
     checkpoints = CheckpointManager(tmp_path)
     initial = checkpoints.create_checkpoint("initial")
-    write_autoresearch_state(
-        work_dir=tmp_path,
-        history_root=tmp_path / "history",
-        lineage_source_sha=initial.sha,
-        current_best_sha=initial.sha,
-        last_iteration=0,
-    )
     controller = HitlAutoResearchController(
         idea={},
         idea_id="idea",
@@ -426,14 +445,12 @@ def test_hitl_continuation_restores_runtime_selected_frontier_node(tmp_path: Pat
         reason="The distinct direction is worth retaining.",
         plan_text="selected plan",
     )
-    checkpoints.restore_checkpoint(root_sha, clean_untracked_public=True)
-    write_autoresearch_state(
-        work_dir=work_dir,
+    frontier.configure_autoresearch_run(
         history_root=work_dir / "logs" / "experiment-autoresearch",
         lineage_source_sha=root_sha,
-        current_best_sha=root_sha,
         last_iteration=2,
     )
+    checkpoints.restore_checkpoint(root_sha, clean_untracked_public=True)
 
     result = continue_hitl_autoresearch(
         idea={"idea": {"title": "Test"}},
@@ -451,10 +468,10 @@ def test_hitl_continuation_restores_runtime_selected_frontier_node(tmp_path: Pat
 
     assert result["autoresearch"]["current_best_sha"] == selected_sha
     assert checkpoints.current_sha() == selected_sha
-    assert read_autoresearch_state(work_dir)["current_best_sha"] == selected_sha
+    assert not (work_dir / ".neurico" / "autoresearch_state.json").exists()
 
 
-def test_hitl_run_does_not_open_frontier_selection_after_its_final_scored_decision(
+def test_hitl_run_selects_frontier_after_its_final_scored_decision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -509,12 +526,12 @@ def test_hitl_run_does_not_open_frontier_selection_after_its_final_scored_decisi
 
     result = controller.run(1)
 
-    assert selection_calls == []
+    assert selection_calls == [True]
     assert result.current_best_sha == root.sha
     assert result.iterations == [scored]
 
 
-def test_hitl_run_selects_frontier_only_between_scored_iterations(
+def test_hitl_run_selects_frontier_after_each_scored_iteration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -581,7 +598,7 @@ def test_hitl_run_selects_frontier_only_between_scored_iterations(
 
     result = controller.run(2)
 
-    assert selection_calls == [True]
+    assert selection_calls == [True, True]
     assert result.current_best_sha == root.sha
     assert result.iterations == [first, second]
 

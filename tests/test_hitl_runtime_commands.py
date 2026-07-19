@@ -52,6 +52,68 @@ def test_runtime_rejects_agent_supplied_runtime_provenance(tmp_path: Path) -> No
     runtime.manager.stop()
 
 
+def test_runtime_preserves_the_actual_runtime_owned_worker_actor(tmp_path: Path) -> None:
+    runtime = HitlRuntime(tmp_path, "experiment_runner")
+    runtime.prepare_idea_tool_context(hitl_stage="proposal", actor="autoresearch_proposer")
+
+    record = runtime.log_reported_payload(
+        {
+            "idea_type": "evidence",
+            "idea_category": "experiment_result",
+            "premises": [],
+            "context": "The proposer inspected the selected frontier direction.",
+            "evidence": "The direction has one unresolved evaluation bottleneck.",
+            "related_artifacts": [],
+        }
+    )
+
+    assert record["pipeline_stage"] == "experiment_runner"
+    assert record["actor"] == "autoresearch_proposer"
+    runtime.clear_idea_tool_context()
+    runtime.manager.stop()
+
+
+def test_runtime_installs_only_stage_legal_worker_commands(tmp_path: Path) -> None:
+    runtime = HitlRuntime(tmp_path, "experiment_runner")
+    runtime.prepare_idea_tool_context(hitl_stage="plan")
+
+    assert runtime.paths.report_idea_command.exists()
+    assert runtime.paths.view_ideas_command.exists()
+    assert runtime.paths.finish_phase_command.exists()
+    assert not runtime.paths.raise_idea_command.exists()
+    assert not runtime.paths.submit_proposal_command.exists()
+    assert not runtime.paths.view_current_frontier_command.exists()
+    assert not runtime.paths.resume_worker_request_command.exists()
+    with pytest.raises(HitlValidationError, match="command_unavailable"):
+        runtime._require_worker_command("hitl-submit-proposal")
+
+    runtime.prepare_idea_tool_context(
+        hitl_stage="proposal", actor="autoresearch_proposer"
+    )
+    assert runtime.paths.report_idea_command.exists()
+    assert runtime.paths.view_ideas_command.exists()
+    assert runtime.paths.submit_proposal_command.exists()
+    assert runtime.paths.view_current_frontier_command.exists()
+    assert not runtime.paths.raise_idea_command.exists()
+    assert not runtime.paths.finish_phase_command.exists()
+    runtime.clear_idea_tool_context()
+    runtime.manager.stop()
+
+
+def test_runtime_exposes_resume_only_for_a_held_worker_request(tmp_path: Path) -> None:
+    runtime = HitlRuntime(tmp_path, "resource_finder")
+    runtime.prepare_idea_tool_context(hitl_stage="execution")
+    assert not runtime.paths.resume_worker_request_command.exists()
+
+    HitlRuntimeState(tmp_path).begin_worker_command(
+        {"request_key": "held-request", "kind": "raised_idea"}
+    )
+    runtime.prepare_idea_tool_context(hitl_stage="execution")
+    assert runtime.paths.resume_worker_request_command.exists()
+    runtime.clear_idea_tool_context()
+    runtime.manager.stop()
+
+
 def test_decision_requires_existing_premise_and_options(tmp_path: Path) -> None:
     runtime = HitlRuntime(tmp_path, "resource_finder")
     runtime.prepare_idea_tool_context(hitl_stage="execution")
@@ -80,6 +142,24 @@ def test_runtime_state_allows_one_unresolved_worker_request(tmp_path: Path) -> N
         state.begin_worker_command({"request_key": "second", "kind": "raised_idea"})
 
 
+def test_frontier_action_persists_the_manager_choice_before_completion(tmp_path: Path) -> None:
+    state = HitlRuntimeState(tmp_path)
+    action = state.begin_next_autoresearch_action({"kind": "select_frontier"})
+
+    assert action["status"] == "pending"
+    with pytest.raises(Exception, match="before runtime records"):
+        state.complete_next_autoresearch_action("select_frontier", {})
+
+    persisted = state.record_next_autoresearch_action_decision(
+        "select_frontier", {"node_sha": "node-a", "reason": "Best trajectory."}
+    )
+    assert persisted["status"] == "decision_recorded"
+    assert persisted["decision"]["node_sha"] == "node-a"
+
+    state.complete_next_autoresearch_action("select_frontier", {"idea_id": "I9"})
+    assert state.snapshot()["next_autoresearch_action"]["status"] == "resolved"
+
+
 def test_finished_worker_response_is_available_for_exact_retry(tmp_path: Path) -> None:
     state = HitlRuntimeState(tmp_path)
     state.begin_worker_command({"request_key": "finish", "kind": "phase_finish"})
@@ -88,6 +168,104 @@ def test_finished_worker_response_is_available_for_exact_retry(tmp_path: Path) -
 
     retry = state.begin_worker_command({"request_key": "finish", "kind": "phase_finish"})
     assert retry["response"] == response
+
+
+def test_rejected_whiteboard_cleanup_is_durable_and_attempt_scoped(tmp_path: Path) -> None:
+    state = HitlRuntimeState(tmp_path)
+    pending = state.begin_rejected_whiteboard_cleanup("parent/attempt_1")
+
+    assert pending["attempt_id"] == "parent/attempt_1"
+    assert state.pending_rejected_whiteboard_cleanup() == pending
+
+    state.complete_rejected_whiteboard_cleanup("parent/attempt_1")
+    assert state.pending_rejected_whiteboard_cleanup() is None
+
+
+def test_frontier_transition_records_idempotent_commit_steps(tmp_path: Path) -> None:
+    state = HitlRuntimeState(tmp_path)
+    transition = state.begin_frontier_decision_transition(
+        {
+            "attempt_id": "parent/attempt_1",
+            "candidate_node_sha": "candidate",
+            "accepted": True,
+        }
+    )
+
+    retried = state.begin_frontier_decision_transition(
+        {
+            "attempt_id": "parent/attempt_1",
+            "candidate_node_sha": "candidate",
+            "accepted": True,
+        }
+    )
+    assert retried["created_at"] == transition["created_at"]
+
+    state.advance_frontier_decision_transition(
+        attempt_id="parent/attempt_1",
+        candidate_node_sha="candidate",
+        status="idea_logged",
+        frontier_decision_idea_id="I9",
+    )
+    persisted = state.frontier_decision_transition()
+    assert persisted["status"] == "idea_logged"
+    assert persisted["frontier_decision_idea_id"] == "I9"
+
+
+def test_runtime_owned_frontier_maintenance_decision_uses_the_standard_schema(tmp_path: Path) -> None:
+    runtime = HitlRuntime(tmp_path, "experiment_runner")
+    premise = runtime.log.append(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "evidence",
+            "idea_category": "experiment_result",
+            "level": "C",
+            "actor": "comment_handler",
+            "premises": [],
+            "context": "The candidate score is available for frontier management.",
+            "related_artifacts": [],
+            "evidence": "The candidate completed objective scoring.",
+            "raised": False,
+        }
+    )
+    manager_decision = runtime.log.append(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "decision",
+            "idea_category": "method_choice",
+            "level": "B",
+            "actor": "manager",
+            "premises": [premise["idea_id"]],
+            "context": "The manager completed the candidate frontier review.",
+            "related_artifacts": [],
+            "decision_needed": "Should the scored candidate be retained in the HITL research frontier?",
+            "options": ["Accept candidate.", "Reject candidate."],
+            "decision": "O1",
+            "manager_feedback": "Retain the distinct direction.",
+            "raised": False,
+        }
+    )
+
+    record = runtime.log_frontier_maintenance_decision(
+        action="prune",
+        node_sha="sha-b",
+        active_node_shas=["sha-a", "sha-b"],
+        reason="The second direction has the weaker trajectory.",
+        premise_idea_id=manager_decision["idea_id"],
+    )
+
+    assert record["idea_type"] == "decision"
+    assert record["level"] == "B"
+    assert record["actor"] == "manager"
+    assert record["premises"] == [manager_decision["idea_id"]]
+    assert record["options"] == [
+        {"option_id": "O1", "text": "Frontier node sha-a"},
+        {"option_id": "O2", "text": "Frontier node sha-b"},
+    ]
+    assert record["decision"] == "O2"
+    assert record["manager_feedback"] == "The second direction has the weaker trajectory."
+    runtime.manager.stop()
 
 
 def test_scoring_handoff_is_persisted_before_its_manager_idea_is_committed(tmp_path: Path) -> None:

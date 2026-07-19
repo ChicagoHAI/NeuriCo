@@ -31,28 +31,28 @@ import ast
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.security import sanitize_text
-
+from core.agent_runner import run_prebuilt_cli_agent
 
 # CLI commands for different providers (mirrors resource_finder.py)
 CLI_COMMANDS = {
-    'claude': 'claude -p',
-    'codex': 'codex exec',
-    'gemini': 'gemini',
+    "claude": "claude -p",
+    "codex": "codex exec",
+    "gemini": "gemini",
 }
 
 # Verbose / structured-transcript output flags per provider
 TRANSCRIPT_FLAGS = {
-    'claude': '--verbose --output-format stream-json',
-    'codex': '--json',
-    'gemini': '--output-format stream-json',
+    "claude": "--verbose --output-format stream-json",
+    "codex": "--json",
+    "gemini": "--output-format stream-json",
 }
 
 # Files the rule_maker is responsible for producing (relative to scoring/)
 RULE_MAKER_OUTPUT_FILES = {
-    'eval_script': 'eval.py',
-    'targets': 'targets.json',
-    'interface': 'interface.md',
-    'rationale_log': 'rule_maker_log.md',
+    "eval_script": "eval.py",
+    "targets": "targets.json",
+    "interface": "interface.md",
+    "rationale_log": "rule_maker_log.md",
 }
 
 
@@ -103,12 +103,10 @@ def generate_rule_maker_prompt(
             f"rule_maker base template not found at {base_path}. "
             "Create templates/agents/rule_maker.txt before running."
         )
-    base_template = base_path.read_text(encoding='utf-8')
+    base_template = base_path.read_text(encoding="utf-8")
 
     scoring_dir = work_dir / "scoring"
-    output_files = "\n".join(
-        f"  - scoring/{name}" for name in RULE_MAKER_OUTPUT_FILES.values()
-    )
+    output_files = "\n".join(f"  - scoring/{name}" for name in RULE_MAKER_OUTPUT_FILES.values())
     resource_listing = _summarize_resource_outputs(work_dir)
 
     try:
@@ -117,11 +115,11 @@ def generate_rule_maker_prompt(
         idea_repr = repr(idea)
 
     substitutions = {
-        '{idea_yaml}': idea_repr,
-        '{workspace}': str(work_dir),
-        '{scoring_dir}': str(scoring_dir),
-        '{output_files}': output_files,
-        '{resource_listing}': resource_listing,
+        "{idea_yaml}": idea_repr,
+        "{workspace}": str(work_dir),
+        "{scoring_dir}": str(scoring_dir),
+        "{output_files}": output_files,
+        "{resource_listing}": resource_listing,
     }
 
     prompt = base_template
@@ -133,7 +131,7 @@ def generate_rule_maker_prompt(
     supplement = _load_domain_supplement(templates_dir, resolved_domain)
     if supplement:
         banner = "=" * 80
-        domain_label = resolved_domain.upper().replace('_', ' ')
+        domain_label = resolved_domain.upper().replace("_", " ")
         prompt = (
             f"{prompt}\n\n"
             f"{banner}\n"
@@ -145,9 +143,7 @@ def generate_rule_maker_prompt(
     return prompt
 
 
-def _resolve_domain(
-    idea: Dict[str, Any], override: Optional[str]
-) -> str:
+def _resolve_domain(idea: Dict[str, Any], override: Optional[str]) -> str:
     """
     Pick the domain string used to locate the domain supplement.
 
@@ -159,12 +155,12 @@ def _resolve_domain(
     """
     if override:
         return override
-    nested = idea.get('idea', {}) if isinstance(idea, dict) else {}
-    if isinstance(nested, dict) and nested.get('domain'):
-        return nested['domain']
-    if isinstance(idea, dict) and idea.get('domain'):
-        return idea['domain']
-    return 'machine_learning'
+    nested = idea.get("idea", {}) if isinstance(idea, dict) else {}
+    if isinstance(nested, dict) and nested.get("domain"):
+        return nested["domain"]
+    if isinstance(idea, dict) and idea.get("domain"):
+        return idea["domain"]
+    return "machine_learning"
 
 
 def _load_domain_supplement(templates_dir: Path, domain: str) -> str:
@@ -178,7 +174,7 @@ def _load_domain_supplement(templates_dir: Path, domain: str) -> str:
     supplement_path = templates_dir / "domains" / domain / "rule_maker.txt"
     if not supplement_path.exists():
         return ""
-    return supplement_path.read_text(encoding='utf-8')
+    return supplement_path.read_text(encoding="utf-8")
 
 
 def _summarize_resource_outputs(work_dir: Path) -> str:
@@ -206,9 +202,7 @@ def _summarize_resource_outputs(work_dir: Path) -> str:
             entries = sorted(p.name for p in path.iterdir())
             preview = ", ".join(entries[:8])
             extra = "" if len(entries) <= 8 else f", +{len(entries) - 8} more"
-            lines.append(
-                f"  - {label}: {len(entries)} entries [{preview}{extra}]"
-            )
+            lines.append(f"  - {label}: {len(entries)} entries [{preview}{extra}]")
         else:
             size = path.stat().st_size
             lines.append(f"  - {label}: {size} bytes")
@@ -237,8 +231,7 @@ def run_rule_maker(
     """
     if provider not in CLI_COMMANDS:
         raise ValueError(
-            f"Unsupported provider: {provider}. "
-            f"Choose from: {list(CLI_COMMANDS.keys())}"
+            f"Unsupported provider: {provider}. " f"Choose from: {list(CLI_COMMANDS.keys())}"
         )
 
     if templates_dir is None:
@@ -262,7 +255,7 @@ def run_rule_maker(
         prompt = prompt.rstrip() + "\n\n" + hitl_prompt_suffix.strip() + "\n"
     prompt_file = logs_dir / f"{log_prefix}_prompt.txt"
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
-    prompt_file.write_text(prompt, encoding='utf-8')
+    prompt_file.write_text(prompt, encoding="utf-8")
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
 
@@ -276,7 +269,7 @@ def run_rule_maker(
         elif provider == "gemini":
             cmd += " --yolo --skip-trust"
 
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
+    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
     if transcript_flag:
         cmd += f" {transcript_flag}"
 
@@ -294,48 +287,63 @@ def run_rule_maker(
     print("=" * 80)
 
     env = os.environ.copy()
-    env['PYTHONUNBUFFERED'] = '1'
+    env["PYTHONUNBUFFERED"] = "1"
     if env_extra:
         env.update({str(key): str(value) for key, value in env_extra.items()})
     if provider == "gemini":
-        env['GEMINI_CLI_IDE_DISABLE'] = '1'
+        env["GEMINI_CLI_IDE_DISABLE"] = "1"
 
     start_time = time.time()
     return_code: Optional[int] = None
 
     try:
-        with open(log_file, 'w', encoding='utf-8') as log_f, \
-                open(transcript_file, 'w', encoding='utf-8') as transcript_f:
-            process = subprocess.Popen(
-                shlex.split(cmd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+        if completion_mode == "hitl_runtime":
+            # HITL workers can remain active while emitting output, so use the
+            # shared deadline-aware runner instead of waiting on stdout EOF.
+            launch = run_prebuilt_cli_agent(
+                command_argv=shlex.split(cmd),
+                prompt=prompt,
+                work_dir=work_dir,
+                log_file=log_file,
+                transcript_file=transcript_file,
                 env=env,
-                text=True,
-                encoding='utf-8',
-                bufsize=1,
-                cwd=str(work_dir),
+                timeout=timeout,
             )
-            process.stdin.write(prompt)
-            process.stdin.close()
+            return_code = launch["return_code"]
+            if launch["timed_out"]:
+                print(f"\n⏱️  Rule maker timed out after {timeout} seconds")
+        else:
+            with (
+                open(log_file, "w", encoding="utf-8") as log_f,
+                open(transcript_file, "w", encoding="utf-8") as transcript_f,
+            ):
+                process = subprocess.Popen(
+                    shlex.split(cmd),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    text=True,
+                    encoding="utf-8",
+                    bufsize=1,
+                    cwd=str(work_dir),
+                )
+                process.stdin.write(prompt)
+                process.stdin.close()
 
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    sanitized = sanitize_text(line)
-                    print(sanitized, end='')
-                    log_f.write(sanitized)
-                    transcript_f.write(sanitized)
+                for line in iter(process.stdout.readline, ""):
+                    if line:
+                        sanitized = sanitize_text(line)
+                        print(sanitized, end="")
+                        log_f.write(sanitized)
+                        transcript_f.write(sanitized)
 
-            return_code = process.wait(timeout=timeout)
+                return_code = process.wait(timeout=timeout)
 
         print()
         print("=" * 80)
         elapsed = time.time() - start_time
-        print(
-            f"⏱️  Rule maker completed in {elapsed:.1f}s "
-            f"({elapsed / 60:.1f} minutes)"
-        )
+        print(f"⏱️  Rule maker completed in {elapsed:.1f}s " f"({elapsed / 60:.1f} minutes)")
 
         if return_code == 0:
             print("✅ Agent process exited cleanly.")
@@ -354,37 +362,35 @@ def run_rule_maker(
     print()
     print("📦 Validating rule_maker outputs...")
     validation = validate_rule_maker_outputs(work_dir)
-    validation_success = validation['valid']
+    validation_success = validation["valid"]
     if validation_success:
         print("✅ All required rule_maker outputs present and parseable.")
     else:
         print("⚠️  Rule maker outputs incomplete or invalid:")
-        for issue in validation['issues']:
+        for issue in validation["issues"]:
             print(f"     - {issue}")
 
     if completion_mode == "hitl_runtime":
-        success = return_code == 0
+        success = return_code == 0 and not launch["timed_out"]
         print("ℹ️  HITL runtime completion mode; orchestrator will review finish state.")
     elif completion_mode == "outputs":
         success = validation_success
     else:
-        raise ValueError(
-            "completion_mode must be 'outputs' or 'hitl_runtime' for rule_maker"
-        )
+        raise ValueError("completion_mode must be 'outputs' or 'hitl_runtime' for rule_maker")
 
-    outputs = dict(validation['found'])
+    outputs = dict(validation["found"])
     if include_hitl_outputs:
         plan_path = work_dir / "plans" / "rule_maker_plan.md"
         if plan_path.exists():
-            outputs['hitl_plan'] = str(plan_path)
+            outputs["hitl_plan"] = str(plan_path)
 
     return {
-        'success': success,
-        'outputs': outputs,
-        'issues': validation['issues'],
-        'log_file': str(log_file),
-        'transcript_file': str(transcript_file),
-        'elapsed_time': time.time() - start_time,
+        "success": success,
+        "outputs": outputs,
+        "issues": validation["issues"],
+        "log_file": str(log_file),
+        "transcript_file": str(transcript_file),
+        "elapsed_time": time.time() - start_time,
     }
 
 
@@ -406,42 +412,42 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
     found: Dict[str, str] = {}
     issues = []
 
-    eval_path = scoring_dir / RULE_MAKER_OUTPUT_FILES['eval_script']
+    eval_path = scoring_dir / RULE_MAKER_OUTPUT_FILES["eval_script"]
     if not eval_path.exists():
         issues.append(f"missing: {eval_path}")
     else:
         try:
-            ast.parse(eval_path.read_text(encoding='utf-8'))
-            found['eval_script'] = str(eval_path)
+            ast.parse(eval_path.read_text(encoding="utf-8"))
+            found["eval_script"] = str(eval_path)
         except SyntaxError as e:
             issues.append(f"eval.py has syntax error: {e}")
 
-    targets_path = scoring_dir / RULE_MAKER_OUTPUT_FILES['targets']
+    targets_path = scoring_dir / RULE_MAKER_OUTPUT_FILES["targets"]
     if not targets_path.exists():
         issues.append(f"missing: {targets_path}")
     else:
         try:
-            json.loads(targets_path.read_text(encoding='utf-8'))
-            found['targets'] = str(targets_path)
+            json.loads(targets_path.read_text(encoding="utf-8"))
+            found["targets"] = str(targets_path)
         except json.JSONDecodeError as e:
             issues.append(f"targets.json is not valid JSON: {e}")
 
-    interface_path = scoring_dir / RULE_MAKER_OUTPUT_FILES['interface']
+    interface_path = scoring_dir / RULE_MAKER_OUTPUT_FILES["interface"]
     if not interface_path.exists():
         issues.append(f"missing: {interface_path}")
     elif interface_path.stat().st_size == 0:
         issues.append(f"empty: {interface_path}")
     else:
-        found['interface'] = str(interface_path)
+        found["interface"] = str(interface_path)
 
-    rationale_path = scoring_dir / RULE_MAKER_OUTPUT_FILES['rationale_log']
+    rationale_path = scoring_dir / RULE_MAKER_OUTPUT_FILES["rationale_log"]
     if rationale_path.exists():
-        found['rationale_log'] = str(rationale_path)
+        found["rationale_log"] = str(rationale_path)
 
     return {
-        'valid': len(issues) == 0,
-        'found': found,
-        'issues': issues,
+        "valid": len(issues) == 0,
+        "found": found,
+        "issues": issues,
     }
 
 
@@ -457,12 +463,10 @@ def load_interface_for_runner(work_dir: Path) -> str:
         FileNotFoundError: If interface.md is missing -- the pipeline should
         not proceed to experiment_runner without it.
     """
-    interface_path = (
-        Path(work_dir) / "scoring" / RULE_MAKER_OUTPUT_FILES['interface']
-    )
+    interface_path = Path(work_dir) / "scoring" / RULE_MAKER_OUTPUT_FILES["interface"]
     if not interface_path.exists():
         raise FileNotFoundError(
             f"scoring/interface.md not found at {interface_path}. "
             "rule_maker must run successfully before experiment_runner."
         )
-    return interface_path.read_text(encoding='utf-8')
+    return interface_path.read_text(encoding="utf-8")

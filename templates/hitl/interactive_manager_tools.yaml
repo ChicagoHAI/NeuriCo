@@ -128,7 +128,28 @@ tools:
         type: string
         description: Active frontier node SHA returned by list_frontier.
         required: true
+      reason:
+        type: string
+        description: Strategic rationale for choosing this retained direction.
+        required: true
     returns: Updated selected and active frontier state, or a retryable error.
+
+  - name: prune_frontier
+    description: |
+      Remove one active frontier node when runtime has opened the
+      frontier-pruning boundary. Use list_frontier and view_node to compare the
+      active portfolio first. The retained node record remains available for
+      audit; only its active-frontier membership is removed.
+    parameters:
+      node_sha:
+        type: string
+        description: Active frontier node SHA to remove from the portfolio.
+        required: true
+      reason:
+        type: string
+        description: Strategic rationale for removing this direction.
+        required: true
+    returns: Updated active frontier state, or a retryable error.
 
   - name: answer_to_human
     description: |

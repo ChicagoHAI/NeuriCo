@@ -216,8 +216,14 @@ class WebChannel(UserChannel):
 
     # --- inbound (human -> manager) ---
 
-    def submit_input(self, text: str, input_kind: str = "conversation") -> None:
+    def submit_input(
+        self,
+        text: str,
+        input_kind: str = "conversation",
+        request_key: Optional[str] = None,
+    ) -> None:
         """Called by the web server when the browser POSTs input."""
+        del input_kind, request_key
         if not self._closed.is_set():
             self._inbound.put(text)
 

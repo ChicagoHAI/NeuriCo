@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.compute_backend import get_runtime_compute_backend
 from core.security import sanitize_text
+from core.agent_runner import run_prebuilt_cli_agent
 
 CLI_COMMANDS = {
     "claude": "claude -p",
@@ -327,32 +328,47 @@ def run_autoresearch_proposer(
     error: Optional[str] = None
 
     try:
-        with open(transcript_file, "w", encoding="utf-8") as transcript_f:
-            process = subprocess.Popen(
-                shlex.split(cmd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+        if hitl_submission:
+            # HITL proposal submission is a live runtime interaction. Use the
+            # shared runner so the configured deadline applies even while the
+            # provider streams progress indefinitely.
+            launch = run_prebuilt_cli_agent(
+                command_argv=shlex.split(cmd),
+                prompt=prompt,
+                work_dir=work_dir,
+                log_file=attempt_dir / f"proposer_{provider}.log",
+                transcript_file=transcript_file,
                 env=env,
-                text=True,
-                encoding="utf-8",
-                bufsize=1,
-                # HITL proposal commands and the whiteboard tool are scoped to
-                # the live research workspace. Normal AutoResearch keeps its
-                # historical attempt-directory working directory unchanged.
-                cwd=str(work_dir if hitl_submission else attempt_dir),
+                timeout=timeout,
             )
+            return_code = launch["return_code"]
+            if launch["timed_out"]:
+                error = f"AutoResearch proposer timed out after {timeout}s"
+                print(f"\n⏱️  {error}")
+        else:
+            with open(transcript_file, "w", encoding="utf-8") as transcript_f:
+                process = subprocess.Popen(
+                    shlex.split(cmd),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    text=True,
+                    encoding="utf-8",
+                    bufsize=1,
+                    cwd=str(attempt_dir),
+                )
 
-            process.stdin.write(prompt)
-            process.stdin.close()
+                process.stdin.write(prompt)
+                process.stdin.close()
 
-            for line in iter(process.stdout.readline, ""):
-                if line:
-                    sanitized_line = sanitize_text(line)
-                    print(sanitized_line, end="")
-                    transcript_f.write(sanitized_line)
+                for line in iter(process.stdout.readline, ""):
+                    if line:
+                        sanitized_line = sanitize_text(line)
+                        print(sanitized_line, end="")
+                        transcript_f.write(sanitized_line)
 
-            return_code = process.wait(timeout=timeout)
+                return_code = process.wait(timeout=timeout)
 
     except subprocess.TimeoutExpired:
         process.kill()

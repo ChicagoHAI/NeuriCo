@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import queue
+import secrets
 import sys
 import threading
 import webbrowser
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from interactive.channel import UserChannel, WebChannel, _SHUTDOWN
 from interactive.web_server import InteractiveWebServer
@@ -17,6 +19,17 @@ from core.hitl_manager_react import HitlManager
 
 _RESOLUTION_REPLY = "resolution_reply"
 _CONVERSATION = "conversation"
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host.strip().lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def _with_access_token(url: str, token: str) -> str:
+    parsed = urlsplit(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["token"] = token
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", urlencode(query), ""))
 
 
 class HitlWebChannel(WebChannel):
@@ -31,11 +44,18 @@ class HitlWebChannel(WebChannel):
     def set_resolution_reply_handler(self, handler: Any) -> None:
         self._resolution_reply_handler = handler
 
-    def present_resolution_request(self, message: str, options: Optional[List[str]] = None) -> None:
+    def present_resolution_request(
+        self,
+        message: str,
+        options: Optional[List[str]] = None,
+        *,
+        request_key: str,
+    ) -> None:
         """Publish a runtime-owned resolution question without blocking the manager."""
         self._pending_resolution_request = {
             "message": message,
             "options": options or [],
+            "request_key": str(request_key),
         }
         self._emit(
             {
@@ -51,6 +71,7 @@ class HitlWebChannel(WebChannel):
                 "message": message,
                 "options": options or [],
                 "input_kind": _RESOLUTION_REPLY,
+                "request_key": str(request_key),
             }
         )
 
@@ -70,7 +91,12 @@ class HitlWebChannel(WebChannel):
             "for runtime-owned resolution input or normal conversation input."
         )
 
-    def submit_input(self, text: str, input_kind: str = _CONVERSATION) -> None:
+    def submit_input(
+        self,
+        text: str,
+        input_kind: str = _CONVERSATION,
+        request_key: Optional[str] = None,
+    ) -> None:
         if self._closed.is_set():
             return
         if input_kind == _RESOLUTION_REPLY:
@@ -78,6 +104,14 @@ class HitlWebChannel(WebChannel):
                 self.send(
                     "There is no pending HITL resolution request. "
                     "Your message was not used to resolve a worker request.",
+                    kind="system",
+                )
+                return
+            expected_key = str(self._pending_resolution_request["request_key"])
+            if str(request_key or "") != expected_key:
+                self.send(
+                    "This reply does not match the active HITL request. Please use the current "
+                    "resolution control.",
                     kind="system",
                 )
                 return
@@ -128,7 +162,7 @@ class HitlTerminalChannel(UserChannel):
         self._conversation_input: "queue.Queue[Any]" = queue.Queue()
         self._closed = threading.Event()
         self._resolution_reply_handler: Optional[Any] = None
-        self._pending_resolution_request = False
+        self._pending_resolution_request: Optional[str] = None
         self._reader: Optional[threading.Thread] = None
         self._state_lock = threading.Lock()
 
@@ -136,19 +170,25 @@ class HitlTerminalChannel(UserChannel):
         with self._state_lock:
             self._resolution_reply_handler = handler
 
-    def present_resolution_request(self, message: str, options: Optional[List[str]] = None) -> None:
+    def present_resolution_request(
+        self,
+        message: str,
+        options: Optional[List[str]] = None,
+        *,
+        request_key: str,
+    ) -> None:
         print(f"\n{'=' * 70}\n{message}\n{'=' * 70}")
         if options:
             for index, option in enumerate(options, 1):
                 print(f"  [{index}] {option}")
-        print("Reply to this HITL request with: /reply <your response>")
+        print(f"Reply to this HITL request with: /reply {request_key} <your response>")
         with self._state_lock:
-            self._pending_resolution_request = True
+            self._pending_resolution_request = str(request_key)
 
     def clear_resolution_request(self) -> None:
         """Remove a request invalidated by runtime recovery."""
         with self._state_lock:
-            self._pending_resolution_request = False
+            self._pending_resolution_request = None
 
     def prompt(
         self,
@@ -174,24 +214,42 @@ class HitlTerminalChannel(UserChannel):
                 return
             self.submit_input(line.rstrip("\n"))
 
-    def submit_input(self, text: str, input_kind: Optional[str] = None) -> None:
+    def submit_input(
+        self,
+        text: str,
+        input_kind: Optional[str] = None,
+        request_key: Optional[str] = None,
+    ) -> None:
         text = str(text).strip()
         if not text or self._closed.is_set():
             return
         if input_kind is None:
             if text.startswith("/reply "):
                 input_kind = _RESOLUTION_REPLY
-                text = text[len("/reply ") :].strip()
+                reply_parts = text[len("/reply ") :].strip().split(maxsplit=1)
+                if len(reply_parts) != 2:
+                    self.send("Reply with: /reply <request key> <your response>", kind="system")
+                    return
+                request_key, text = reply_parts
             else:
                 input_kind = _CONVERSATION
         if input_kind == _RESOLUTION_REPLY:
             with self._state_lock:
                 accepting = (
-                    self._pending_resolution_request and self._resolution_reply_handler is not None
+                    self._pending_resolution_request is not None
+                    and self._resolution_reply_handler is not None
                 )
+                expected_key = self._pending_resolution_request
             if not accepting:
                 self.send(
                     "No HITL request is awaiting a reply. Use ordinary text to talk to the manager.",
+                    kind="system",
+                )
+                return
+            if str(request_key or "") != str(expected_key):
+                self.send(
+                    "This reply does not match the active HITL request. Use the request key shown "
+                    "with the current prompt.",
                     kind="system",
                 )
                 return
@@ -205,7 +263,7 @@ class HitlTerminalChannel(UserChannel):
                 )
                 return
             with self._state_lock:
-                self._pending_resolution_request = False
+                self._pending_resolution_request = None
             return
         self._conversation_input.put(text)
 
@@ -265,7 +323,15 @@ class HitlManagerHost:
         if interface == "web":
             self.channel: UserChannel = HitlWebChannel()
             bind_host = os.environ.get("NEURICO_HITL_WEB_HOST", "localhost")
-            self._browser_url = os.environ.get("NEURICO_HITL_BROWSER_URL") or None
+            if not _is_loopback_host(bind_host):
+                raise ValueError("HITL web manager must bind to a loopback host.")
+            self._access_token = secrets.token_urlsafe(32)
+            configured_browser_url = os.environ.get("NEURICO_HITL_BROWSER_URL") or None
+            self._browser_url = (
+                _with_access_token(configured_browser_url, self._access_token)
+                if configured_browser_url is not None
+                else None
+            )
             self.web_server = InteractiveWebServer(
                 channel=self.channel,
                 workspace=self.work_dir,
@@ -273,10 +339,12 @@ class HitlManagerHost:
                 title=title,
                 port=port,
                 host=bind_host,
+                access_token=self._access_token,
             )
             self._open_browser = open_browser
         else:
             self.channel = HitlTerminalChannel()
+            self._access_token = None
             self._open_browser = False
         self.manager = HitlManager(config, work_dir=self.work_dir, channel=self.channel)
 
