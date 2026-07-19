@@ -33,11 +33,14 @@ from agents.resource_finder import run_resource_finder
 from agents.rule_maker import run_rule_maker, validate_rule_maker_outputs
 from agents.rule_maker_bootstrap import run_bootstrap_rule_maker
 from agents.manifest_trimmer import make_trimmer_callable
-from core.scorer import run_scorer
+from core.scorer import _resolve_python_executable, run_scorer
+from core.hitl_scoring_workspace import run_isolated_scorer
+from core.hitl_runtime_state import HitlRuntimeState
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
 from core.workspace_manifest import build_manifest, curate_manifest
 from core.hitl import (
     HitlRuntime,
+    validate_required_artifact_contract,
 )
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
 from templates.research_agent_instructions import generate_instructions
@@ -404,7 +407,7 @@ class ResearchPipelineOrchestrator:
                         scoring_enabled=scoring_enabled,
                     )
             finally:
-                if scoring_enabled:
+                if scoring_enabled and not hitl_enabled:
                     self._unseal_runner_inputs(sealed_dir)
 
             # STAGE 4 (scoring mode only): Scorer
@@ -691,6 +694,11 @@ class ResearchPipelineOrchestrator:
         )
         hitl_state_store = HitlGitStateStore(self.work_dir)
         hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
+        artifact_validator = (
+            (lambda: validate_required_artifact_contract(self.work_dir))
+            if scoring_enabled
+            else None
+        )
 
         def restore_failed_hitl_state() -> None:
             runtime.abandon_pending_worker_request_for_rollback(
@@ -710,10 +718,10 @@ class ResearchPipelineOrchestrator:
             self.state.complete_stage("resource_finder", False, failed)
             return failed
 
-        def run_worker_with_one_replacement(
+        def run_worker_with_replacements(
             *, suffix: str, log_prefix: str, phase: str
         ) -> tuple[Dict[str, Any], Dict[str, Any]]:
-            """Run one HITL worker and, after an unexpected exit, one replacement."""
+            """Run an HITL worker and any bounded runtime-owned replacements."""
 
             def run_worker(
                 worker_suffix: str,
@@ -741,10 +749,12 @@ class ResearchPipelineOrchestrator:
             finish = runtime.handle_worker_exit_after_finish(
                 result, phase=phase, worker_name="resource_finder"
             )
-            if finish.get("replacement"):
+            recovery_index = 0
+            while finish.get("replacement"):
+                recovery_index += 1
                 result = run_worker(
                     str(finish["prompt_block"]),
-                    f"{log_prefix}_recovery_1",
+                    f"{log_prefix}_recovery_{recovery_index}",
                     record_continuation=False,
                 )
                 finish = runtime.handle_worker_exit_after_finish(
@@ -761,7 +771,7 @@ class ResearchPipelineOrchestrator:
                     actor="resource_finder",
                     requires_human_approval=True,
                 )
-                result, finish = run_worker_with_one_replacement(
+                result, finish = run_worker_with_replacements(
                     suffix=runtime.plan_prompt_block(),
                     log_prefix="resource_finder_hitl_plan",
                     phase="stage",
@@ -787,7 +797,7 @@ class ResearchPipelineOrchestrator:
                 hitl_stage="execution",
                 actor="resource_finder",
             )
-            result, finish = run_worker_with_one_replacement(
+            result, finish = run_worker_with_replacements(
                 suffix=runtime.execution_prompt_block(mode="execute"),
                 log_prefix="resource_finder_hitl_execute_1",
                 phase="execute",
@@ -1080,6 +1090,7 @@ class ResearchPipelineOrchestrator:
         rollback_checkpoint = CheckpointManager(self.work_dir).create_checkpoint(
             "HITL experiment runner starting state"
         )
+        scored_checkpoint_sha: Optional[str] = None
         hitl_state_store = HitlGitStateStore(self.work_dir)
         hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
 
@@ -1104,7 +1115,7 @@ class ResearchPipelineOrchestrator:
             self.state.complete_stage("experiment_runner", False, failed)
             return failed
 
-        def run_worker_with_one_replacement(
+        def run_worker_with_replacements(
             *, suffix: str, log_prefix: str, phase: str
         ) -> tuple[Dict[str, Any], Dict[str, Any]]:
             def run_worker(
@@ -1132,10 +1143,12 @@ class ResearchPipelineOrchestrator:
             finish = runtime.handle_worker_exit_after_finish(
                 result, phase=phase, worker_name="experiment_runner"
             )
-            if finish.get("replacement"):
+            recovery_index = 0
+            while finish.get("replacement"):
+                recovery_index += 1
                 result = run_worker(
                     str(finish["prompt_block"]),
-                    f"{log_prefix}_recovery_1",
+                    f"{log_prefix}_recovery_{recovery_index}",
                     record_continuation=False,
                 )
                 finish = runtime.handle_worker_exit_after_finish(
@@ -1145,6 +1158,11 @@ class ResearchPipelineOrchestrator:
 
         def complete_approved_worker(worker_result: Dict[str, Any]) -> Dict[str, Any]:
             """Finish the stage after a worker has received runtime approval."""
+            if scored_checkpoint_sha:
+                CheckpointManager(self.work_dir).restore_checkpoint(
+                    scored_checkpoint_sha,
+                    clean_untracked_public=True,
+                )
             finish_result = runtime.phase_finish_result() or {}
             hitl_state_store.discard(hitl_rollback_snapshot)
             self.state.complete_stage("experiment_runner", True, worker_result)
@@ -1160,12 +1178,68 @@ class ResearchPipelineOrchestrator:
 
         def score_in_background(approval: Dict[str, Any]) -> None:
             """Run scoring while the finishing worker remains held in its command."""
+            nonlocal scored_checkpoint_sha
             scoring_review_idea_id = str(approval.get("scoring_review_idea_id", "")).strip()
-            try:
-                self._unseal_runner_inputs(sealed_dir)
-                scorer_result = self._run_scorer(timeout=scorer_timeout)
-            except Exception as exc:
-                scorer_result = {"success": False, "error": f"Runtime scorer failed: {exc}"}
+            runtime_state = HitlRuntimeState(self.work_dir)
+            pending = runtime_state.pending_worker_command() or {}
+            request_key = str(pending.get("request_key", "")).strip()
+            if not request_key:
+                raise RuntimeError("HITL initial scoring has no held runtime request.")
+            isolated = pending.get("isolated_scoring")
+            cached_score = isolated if isinstance(isolated, dict) else None
+            if cached_score and cached_score.get("status") == "scored":
+                scorer_result = dict(cached_score.get("scorer_result") or {})
+                scored_checkpoint_sha = str(cached_score.get("scored_checkpoint_sha", "")).strip() or None
+                if not scorer_result:
+                    raise RuntimeError("Persisted isolated initial scoring handoff is incomplete.")
+            else:
+                checkpoints = CheckpointManager(self.work_dir)
+                source_sha = str((cached_score or {}).get("source_checkpoint_sha", "")).strip()
+                if source_sha:
+                    if not checkpoints.checkpoint_exists(source_sha):
+                        raise RuntimeError(
+                            "Persisted isolated initial scoring source checkpoint no longer exists."
+                        )
+                else:
+                    source_sha = checkpoints.create_checkpoint(
+                        "HITL initial experiment before isolated scoring"
+                    ).sha
+                    runtime_state.update_pending_worker_command(
+                        request_key,
+                        isolated_scoring={
+                            "status": "prepared",
+                            "source_checkpoint_sha": source_sha,
+                        },
+                    )
+                try:
+                    self.state.start_stage(SCORER_STAGE)
+                    scorer_result = run_isolated_scorer(
+                        work_dir=self.work_dir,
+                        source_sha=source_sha,
+                        sealed_dir=sealed_dir,
+                        scorer=lambda scorer_work_dir: run_scorer(
+                            work_dir=scorer_work_dir,
+                            timeout=scorer_timeout,
+                            python_executable=_resolve_python_executable(self.work_dir),
+                        ),
+                    )
+                    self.state.complete_stage(SCORER_STAGE, bool(scorer_result.get("success")), scorer_result)
+                except Exception as exc:
+                    scorer_result = {"success": False, "error": f"Runtime isolated scorer failed: {exc}"}
+                    self.state.complete_stage(SCORER_STAGE, False, scorer_result)
+                if scorer_result.get("success"):
+                    scored_checkpoint_sha = CheckpointManager(self.work_dir).create_checkpoint(
+                        "HITL initial scored workspace"
+                    ).sha
+                runtime_state.update_pending_worker_command(
+                    request_key,
+                    isolated_scoring={
+                        "status": "scored",
+                        "source_checkpoint_sha": source_sha,
+                        "scored_checkpoint_sha": scored_checkpoint_sha,
+                        "scorer_result": scorer_result,
+                    },
+                )
 
             def persist_score_review(review: Dict[str, Any]) -> Dict[str, Any]:
                 record = runtime.log_initial_scoring_decision(
@@ -1201,9 +1275,10 @@ class ResearchPipelineOrchestrator:
                     actor="experiment_runner",
                     requires_human_approval=True,
                     allow_scoring_approval=scoring_enabled,
+                    phase_finish_validator=artifact_validator,
                     scoring_handler=score_in_background if scoring_enabled else None,
                 )
-                result, finish = run_worker_with_one_replacement(
+                result, finish = run_worker_with_replacements(
                     suffix=runtime.plan_prompt_block(),
                     log_prefix="hitl/experiment_runner_hitl_plan",
                     phase="stage",
@@ -1217,9 +1292,10 @@ class ResearchPipelineOrchestrator:
                 hitl_stage="execution",
                 actor="experiment_runner",
                 allow_scoring_approval=scoring_enabled,
+                phase_finish_validator=artifact_validator,
                 scoring_handler=score_in_background if scoring_enabled else None,
             )
-            result, finish = run_worker_with_one_replacement(
+            result, finish = run_worker_with_replacements(
                 suffix=runtime.execution_prompt_block(mode="execute"),
                 log_prefix="hitl/experiment_runner_hitl_execute_1",
                 phase="execute",
@@ -1332,17 +1408,19 @@ class ResearchPipelineOrchestrator:
                 env_extra=runtime.idea_tool_env(),
             )
 
-        def run_worker_with_one_replacement(
+        def run_worker_with_replacements(
             *, suffix: str, log_prefix: str, phase: str
         ) -> tuple[Dict[str, Any], Dict[str, Any]]:
             result = run_worker(suffix=suffix, log_prefix=log_prefix)
             finish = runtime.handle_worker_exit_after_finish(
                 result, phase=phase, worker_name=RULE_MAKER_STAGE
             )
-            if finish.get("replacement"):
+            recovery_index = 0
+            while finish.get("replacement"):
+                recovery_index += 1
                 result = run_worker(
                     suffix=str(finish["prompt_block"]),
-                    log_prefix=f"{log_prefix}_recovery_1",
+                    log_prefix=f"{log_prefix}_recovery_{recovery_index}",
                     record_continuation=False,
                 )
                 finish = runtime.handle_worker_exit_after_finish(
@@ -1358,7 +1436,7 @@ class ResearchPipelineOrchestrator:
                     requires_human_approval=True,
                     phase_finish_validator=lambda: validate_rule_maker_outputs(self.work_dir),
                 )
-                result, finish = run_worker_with_one_replacement(
+                result, finish = run_worker_with_replacements(
                     suffix=runtime.plan_prompt_block(),
                     log_prefix="hitl/rule_maker_hitl_plan",
                     phase="stage",
@@ -1384,7 +1462,7 @@ class ResearchPipelineOrchestrator:
                 actor=RULE_MAKER_STAGE,
                 phase_finish_validator=lambda: validate_rule_maker_outputs(self.work_dir),
             )
-            result, finish = run_worker_with_one_replacement(
+            result, finish = run_worker_with_replacements(
                 suffix=runtime.execution_prompt_block(mode="execute"),
                 log_prefix="hitl/rule_maker_hitl_execute_1",
                 phase="execute",

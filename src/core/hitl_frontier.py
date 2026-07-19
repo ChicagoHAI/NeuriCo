@@ -70,7 +70,10 @@ class HitlFrontierStore:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(tmp_name, path)
+            HitlFrontierStore._fsync_directory(path.parent)
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
@@ -82,10 +85,26 @@ class HitlFrontierStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(tmp_name, path)
+            HitlFrontierStore._fsync_directory(path.parent)
         finally:
             if os.path.exists(tmp_name):
                 os.unlink(tmp_name)
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        try:
+            descriptor = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def _read_json(path: Path) -> Dict[str, Any]:

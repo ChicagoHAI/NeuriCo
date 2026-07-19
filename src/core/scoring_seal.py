@@ -74,12 +74,18 @@ def seal_scoring_files(work_dir: Path) -> Optional[Path]:
     return sealed_dir
 
 
-def unseal_scoring_files(work_dir: Path, sealed_dir: Optional[Path]) -> None:
+def unseal_scoring_files(
+    work_dir: Path,
+    sealed_dir: Optional[Path],
+    *,
+    strict: bool = False,
+) -> None:
     """
     Move hidden scoring files back to the workspace.
 
-    Best-effort: logs failures but does not raise, so unseal problems do not
-    mask the original agent failure.
+    The normal pipeline cleanup path remains best-effort so it does not mask an
+    earlier worker failure. Runtime-owned scoring handoffs pass ``strict=True``
+    and fail closed rather than scoring against partially restored inputs.
     """
     if sealed_dir is None:
         return
@@ -88,7 +94,10 @@ def unseal_scoring_files(work_dir: Path, sealed_dir: Optional[Path]) -> None:
     sealed_dir = Path(sealed_dir)
 
     if not sealed_dir.exists():
-        print(f"⚠️  Sealed dir disappeared: {sealed_dir}")
+        message = f"Sealed dir disappeared: {sealed_dir}"
+        if strict:
+            raise RuntimeError(message)
+        print(f"⚠️  {message}")
         return
 
     restored = []
@@ -115,6 +124,8 @@ def unseal_scoring_files(work_dir: Path, sealed_dir: Optional[Path]) -> None:
         print(f"🔓 Restored {len(restored)} scoring files from {sealed_dir}")
 
     if errors:
+        if strict:
+            raise RuntimeError("Could not fully unseal scoring files: " + "; ".join(errors))
         print(f"⚠️  Unseal errors -- sealed dir kept at {sealed_dir} for manual recovery:")
         for error in errors:
             print(f"     - {error}")

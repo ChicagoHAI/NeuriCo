@@ -240,6 +240,7 @@ def run_prebuilt_cli_agent(
 
     start_time = time.time()
     timed_out = False
+    background_processes_terminated = False
     return_code: Optional[int] = None
 
     with (
@@ -256,8 +257,12 @@ def run_prebuilt_cli_agent(
             encoding="utf-8",
             bufsize=1,
             cwd=str(work_dir),
-            start_new_session=timeout is not None,
+            # Every external worker owns an isolated process group.  A clean
+            # provider exit is not a valid terminal result if it leaves a
+            # background child modifying the workspace.
+            start_new_session=os.name == "posix",
         )
+        process_group_id = getattr(process, "pid", None) if os.name == "posix" else None
         if tracker is not None:
             tracker.mark_running(process.pid)
 
@@ -315,11 +320,15 @@ def run_prebuilt_cli_agent(
                 return_code = process.wait()
         else:
             return_code = process.wait()
+            if process_group_id is not None:
+                background_processes_terminated = _terminate_lingering_process_group(
+                    process_group_id
+                )
         reader.join(timeout=5)
         _flush_output()
 
     elapsed = time.time() - start_time
-    success = (return_code == 0) and not timed_out
+    success = (return_code == 0) and not timed_out and not background_processes_terminated
     return {
         "success": success,
         "return_code": return_code,
@@ -327,6 +336,7 @@ def run_prebuilt_cli_agent(
         "log_file": str(log_file),
         "transcript_file": str(transcript_file),
         "timed_out": timed_out,
+        "background_processes_terminated": background_processes_terminated,
     }
 
 
@@ -342,6 +352,34 @@ def _kill_process_group(process: subprocess.Popen) -> None:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
     except Exception:
         process.kill()
+
+
+def _terminate_lingering_process_group(process_group_id: int) -> bool:
+    """Stop children left behind by a clean provider parent exit."""
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except OSError:
+        return False
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        try:
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return True
+        time.sleep(0.05)
+    try:
+        os.killpg(process_group_id, signal.SIGKILL)
+    except OSError:
+        pass
+    return True
 
 
 def run_resource_finder(

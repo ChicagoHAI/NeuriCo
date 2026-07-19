@@ -77,11 +77,33 @@ class HitlRuntimeState:
     def _save_unlocked(self) -> None:
         self._state["updated_at"] = _now()
         temporary = self.path.with_suffix(".json.tmp")
-        temporary.write_text(
-            json.dumps(self._state, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, self.path)
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(self._state, indent=2, ensure_ascii=False) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+            self._fsync_parent_directory()
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _fsync_parent_directory(self) -> None:
+        """Persist the replacement directory entry where the platform allows it."""
+        try:
+            descriptor = os.open(self.hitl_dir, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            # Some platforms do not permit directory fsync; the file itself is
+            # still flushed before replacement.
+            pass
+        finally:
+            os.close(descriptor)
 
     def snapshot(self) -> Dict[str, Any]:
         with self._locked():

@@ -65,6 +65,18 @@ class _BlockingBackend:
         return LLMResponse(text="This response belongs to the discarded attempt.")
 
 
+class _TimeoutAwareBackend:
+    def __init__(self):
+        self.kwargs = None
+
+    def send(self, _messages, _tools=None, *, timeout_seconds, disable_native_tools):
+        self.kwargs = {
+            "timeout_seconds": timeout_seconds,
+            "disable_native_tools": disable_native_tools,
+        }
+        return LLMResponse(text="manager response")
+
+
 def test_runtime_request_is_resolved_by_the_normal_react_tool_loop(tmp_path):
     channel = _Channel()
     manager = HitlManager({}, work_dir=tmp_path, channel=channel)
@@ -455,7 +467,7 @@ def test_web_channel_clears_a_resolution_request_cancelled_by_runtime():
     assert emitted[-1]["role"] == "system"
 
 
-def test_runtime_allows_only_one_replacement_worker(tmp_path):
+def test_runtime_allows_three_replacement_workers(tmp_path):
     runtime = HitlRuntime(tmp_path, "resource_finder")
     runtime.prepare_idea_tool_context(hitl_stage="execution")
     runtime.register_worker_prompt("Continue the current worker task.")
@@ -466,12 +478,20 @@ def test_runtime_allows_only_one_replacement_worker(tmp_path):
     second = runtime.handle_worker_exit_after_finish(
         {"success": False}, phase="execution", worker_name="test worker"
     )
+    third = runtime.handle_worker_exit_after_finish(
+        {"success": False}, phase="execution", worker_name="test worker"
+    )
+    fourth = runtime.handle_worker_exit_after_finish(
+        {"success": False}, phase="execution", worker_name="test worker"
+    )
     runtime.clear_idea_tool_context()
     runtime.manager.stop()
 
     assert first["replacement"] is True
-    assert "replacement" not in second
-    assert "one permitted HITL continuation" in second["error"]
+    assert second["replacement"] is True
+    assert third["replacement"] is True
+    assert "replacement" not in fourth
+    assert "3 permitted HITL continuations" in fourth["error"]
 
 
 def test_replacement_reconnects_to_a_held_runtime_command_before_working(tmp_path):
@@ -722,6 +742,22 @@ def test_manager_backend_timeout_is_bounded_and_retried(tmp_path):
 
     backend.release.set()
     manager.stop()
+
+
+def test_manager_uses_provider_adapter_timeout_and_restricted_cli_tools(tmp_path):
+    backend = _TimeoutAwareBackend()
+    manager = HitlManager(
+        {"manager": {"hitl_manager_backend_timeout_seconds": 7}},
+        work_dir=tmp_path,
+        channel=_Channel(),
+    )
+    manager.backend = backend
+
+    response = manager._send_once([{"role": "user", "content": "test"}], [])
+    manager.stop()
+
+    assert response.text == "manager response"
+    assert backend.kwargs == {"timeout_seconds": 7.0, "disable_native_tools": True}
 
 
 def test_plain_manager_text_cannot_abandon_a_runtime_held_worker_request(tmp_path):

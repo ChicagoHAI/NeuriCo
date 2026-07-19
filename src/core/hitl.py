@@ -49,6 +49,7 @@ _WORKER_COMMAND_MODULES = {
     "view_current_frontier": "hitl_view_current_frontier.py",
 }
 PROPOSAL_KINDS = {"exploitation", "exploration"}
+MAX_INCOMPLETE_WORKER_CONTINUATIONS = 3
 EVIDENCE_IDEA_CATEGORIES = {
     "paper_finding",
     "dataset_property",
@@ -893,7 +894,6 @@ class HitlRuntime:
         )
 
     def execution_prompt_block(self, mode: str = "execute", feedback: str = "") -> str:
-        self.current_hitl_stage = "execution"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         return _load_hitl_template(
             "worker_execution.txt",
@@ -906,7 +906,6 @@ class HitlRuntime:
         )
 
     def review_prompt_block(self, feedback: str = "") -> str:
-        self.current_hitl_stage = "review"
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         return _load_hitl_template(
             "worker_review_revision.txt",
@@ -1063,34 +1062,6 @@ class HitlRuntime:
 
             proposal_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
             proposal_submission_validator = proposal_guard.require_unchanged
-        if hitl_stage == "plan" and plan_finish_validator is None:
-            from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
-
-            plan_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
-            plan_path = self.paths.plan_path.relative_to(self.work_dir).as_posix()
-            plan_finish_validator = lambda: plan_guard.allow_only([plan_path])
-        if hitl_stage in {"execution", "review"}:
-            from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
-
-            protected_guard = HitlWorkspaceWriteGuard.capture_paths(
-                self.work_dir,
-                [
-                    "scoring/interface.md",
-                    "scoring/results.json",
-                    ".neurico/autoresearch_state.json",
-                ],
-            )
-            supplied_phase_validator = phase_finish_validator
-
-            def combined_phase_finish_validator() -> Dict[str, Any]:
-                protection = protected_guard.require_unchanged()
-                if not bool(protection.get("valid")):
-                    return protection
-                if callable(supplied_phase_validator):
-                    return supplied_phase_validator()
-                return {"valid": True, "issues": []}
-
-            phase_finish_validator = combined_phase_finish_validator
         allowed_worker_commands = self._worker_commands_for_stage(hitl_stage)
         from core.hitl_runtime_state import HitlRuntimeState
 
@@ -1112,11 +1083,12 @@ class HitlRuntime:
             "requires_human_approval": requires_human_approval,
             "allow_scoring_approval": allow_scoring_approval,
             "proposal_submission_validator": proposal_submission_validator,
-            "plan_finish_validator": plan_finish_validator,
-            "phase_finish_validator": phase_finish_validator,
+            "supplied_plan_finish_validator": plan_finish_validator,
+            "supplied_phase_finish_validator": phase_finish_validator,
             "scoring_handler": scoring_handler,
             "allowed_worker_commands": allowed_worker_commands,
         }
+        self._install_stage_guards(hitl_stage)
         self._phase_finish_result = None
         self._phase_finish_request_key = ""
         self._phase_finish_response = None
@@ -1125,6 +1097,74 @@ class HitlRuntime:
         self._started_scoring_requests = set()
         self._start_idea_tool_server()
         self._write_idea_tool_commands()
+
+    def _install_stage_guards(self, hitl_stage: str) -> None:
+        """Install the runtime-owned validation boundary for one worker stage."""
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        self._tool_context["plan_finish_validator"] = None
+        self._tool_context["phase_finish_validator"] = None
+        if hitl_stage == "plan":
+            supplied = self._tool_context.get("supplied_plan_finish_validator")
+            if callable(supplied):
+                self._tool_context["plan_finish_validator"] = supplied
+                return
+            plan_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
+            plan_path = self.paths.plan_path.relative_to(self.work_dir).as_posix()
+            self._tool_context["plan_finish_validator"] = lambda: plan_guard.allow_only(
+                [plan_path]
+            )
+            return
+        if hitl_stage not in {"execution", "review"}:
+            return
+
+        protected_guard = HitlWorkspaceWriteGuard.capture_paths(
+            self.work_dir,
+            [
+                "scoring/interface.md",
+                "scoring/results.json",
+                ".neurico/autoresearch_state.json",
+            ],
+        )
+        supplied = self._tool_context.get("supplied_phase_finish_validator")
+
+        def combined_phase_finish_validator() -> Dict[str, Any]:
+            protection = protected_guard.require_unchanged()
+            if not bool(protection.get("valid")):
+                return protection
+            if callable(supplied):
+                return supplied()
+            return {"valid": True, "issues": []}
+
+        self._tool_context["phase_finish_validator"] = combined_phase_finish_validator
+
+    def transition_worker_stage(self, to_stage: str, *, prompt_block: str = "") -> None:
+        """Move one live worker session to its next runtime-owned HITL stage.
+
+        A stage prompt and command surface are a single protocol boundary.  This
+        method is deliberately the only in-session transition path so a worker
+        cannot receive execution instructions while plan guards remain active.
+        """
+        from_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
+        allowed = {"plan": {"execution"}, "execution": {"review"}}
+        if to_stage not in allowed.get(from_stage, set()):
+            raise HitlValidationError(
+                f"Invalid HITL worker stage transition: {from_stage} -> {to_stage}."
+            )
+        self._tool_context["hitl_stage"] = to_stage
+        self.current_hitl_stage = to_stage
+        self._tool_context["requires_human_approval"] = False
+        self._tool_context["allowed_worker_commands"] = self._worker_commands_for_stage(to_stage)
+        self._install_stage_guards(to_stage)
+        self._write_idea_tool_commands()
+        if prompt_block:
+            from core.hitl_runtime_state import HitlRuntimeState
+
+            HitlRuntimeState(self.work_dir).update_worker_continuation(
+                hitl_stage=to_stage,
+                prompt_block=prompt_block,
+                status="running",
+            )
 
     @staticmethod
     def _worker_commands_for_stage(hitl_stage: str) -> set[str]:
@@ -1537,7 +1577,11 @@ class HitlRuntime:
         if submitted and submitted.get("status") == "feedback":
             continuation = self.worker_continuation()
             prompt_block = str((continuation or {}).get("prompt_block", "")).strip()
-            if prompt_block and int((continuation or {}).get("replacement_count", 0)) < 1:
+            if (
+                prompt_block
+                and int((continuation or {}).get("replacement_count", 0))
+                < MAX_INCOMPLETE_WORKER_CONTINUATIONS
+            ):
                 self._update_worker_continuation(status="replacement_pending")
                 from core.hitl_runtime_state import HitlRuntimeState
 
@@ -1548,7 +1592,7 @@ class HitlRuntime:
                     "prompt_block": prompt_block,
                     "worker_exit_warning": (
                         f"{worker_name} exited after proposal feedback. Runtime will launch "
-                        "one proposer continuation with the same HITL state."
+                        "a bounded proposer continuation with the same HITL state."
                     ),
                 }
             return {
@@ -1557,13 +1601,17 @@ class HitlRuntime:
                 "hitl": True,
                 "phase": "proposal",
                 "error": (
-                    f"{worker_name} exited after proposal feedback and the one permitted "
-                    "HITL proposer continuation was already used."
+                    f"{worker_name} exited after proposal feedback and all "
+                    f"{MAX_INCOMPLETE_WORKER_CONTINUATIONS} permitted HITL proposer continuations were used."
                 ),
             }
         continuation = HitlRuntime.worker_continuation(self)
         prompt_block = str((continuation or {}).get("prompt_block", "")).strip()
-        if prompt_block and int((continuation or {}).get("replacement_count", 0)) < 1:
+        if (
+            prompt_block
+            and int((continuation or {}).get("replacement_count", 0))
+            < MAX_INCOMPLETE_WORKER_CONTINUATIONS
+        ):
             self._update_worker_continuation(status="replacement_pending")
             from core.hitl_runtime_state import HitlRuntimeState
 
@@ -1574,7 +1622,7 @@ class HitlRuntime:
                 "prompt_block": prompt_block,
                 "worker_exit_warning": (
                     f"{worker_name} exited before proposal admission. Runtime will launch "
-                    "one proposer continuation from the preserved HITL state."
+                    "a bounded proposer continuation from the preserved HITL state."
                 ),
             }
         return {
@@ -1934,8 +1982,8 @@ class HitlRuntime:
             raise HitlValidationError(
                 "Runtime scoring repair has no pending phase-finish request to resume."
             )
-        self._tool_context["hitl_stage"] = "review"
-        self.current_hitl_stage = "review"
+        prompt_block = self.review_prompt_block(feedback)
+        self.transition_worker_stage("review", prompt_block=prompt_block)
         self._phase_finish_result = {
             "called": True,
             "status": "feedback",
@@ -1957,7 +2005,7 @@ class HitlRuntime:
                     "update the living plan and affected artifacts, then call "
                     "hitl-finish-phase again."
                 ),
-                "prompt_block": self.review_prompt_block(feedback),
+                "prompt_block": prompt_block,
                 "final": False,
                 "record": dict(record),
             },
@@ -2438,9 +2486,18 @@ class HitlRuntime:
                     "Manager phase finish review with status='feedback'",
                 )
                 next_phase = "review" if hitl_stage == "execution" else hitl_stage
+                prompt_block = self._finish_feedback_prompt_block(
+                    hitl_stage=next_phase,
+                    feedback=feedback,
+                )
                 if next_phase != hitl_stage:
-                    self._tool_context["hitl_stage"] = next_phase
-                    self.current_hitl_stage = next_phase
+                    self.transition_worker_stage(next_phase, prompt_block=prompt_block)
+                else:
+                    self._update_worker_continuation(
+                        prompt_block=prompt_block,
+                        hitl_stage=next_phase,
+                        status="running",
+                    )
                 logged = finalized.get("record")
                 if not logged:
                     raise RuntimeError("Manager feedback was finalized without an audit record.")
@@ -2467,10 +2524,7 @@ class HitlRuntime:
                             "Apply this feedback in the current phase, update the living "
                             "plan/current artifacts, then call hitl-finish-phase again."
                         ),
-                        "prompt_block": self._finish_feedback_prompt_block(
-                            hitl_stage=next_phase,
-                            feedback=feedback,
-                        ),
+                        "prompt_block": prompt_block,
                         "record": logged,
                     },
                 )
@@ -2503,14 +2557,12 @@ class HitlRuntime:
                     )
                 next_phase = "execution"
                 final = False
-                self._tool_context["hitl_stage"] = "execution"
-                self._tool_context["requires_human_approval"] = False
-                self.current_hitl_stage = "execution"
                 instruction = (
                     "Plan approved. Do not stop. Continue into execution in this "
                     "same worker session using the execution instructions below."
                 )
                 prompt_block = self.execution_prompt_block(mode="execute")
+                self.transition_worker_stage("execution", prompt_block=prompt_block)
             else:
                 self._tool_context["hitl_stage"] = "complete"
                 self.current_hitl_stage = "complete"
@@ -2610,7 +2662,11 @@ class HitlRuntime:
             prompt_block = str(
                 (finish or {}).get("prompt_block") or continuation.get("prompt_block", "")
             ).strip()
-            if prompt_block and int(continuation.get("replacement_count", 0)) < 1:
+            if (
+                prompt_block
+                and int(continuation.get("replacement_count", 0))
+                < MAX_INCOMPLETE_WORKER_CONTINUATIONS
+            ):
                 pending = self._pending_worker_command()
                 needs_resume = isinstance(pending, dict) and pending.get("status") in {
                     "pending",
@@ -2644,13 +2700,16 @@ class HitlRuntime:
                     "phase": phase,
                     "worker_exit_warning": (
                         f"{worker_name} exited before a final HITL result. Runtime will "
-                        "launch one continuation worker from the preserved HITL state."
+                        "launch a bounded continuation worker from the preserved HITL state."
                     ),
                 }
 
-            if int(continuation.get("replacement_count", 0)) >= 1:
+            if (
+                int(continuation.get("replacement_count", 0))
+                >= MAX_INCOMPLETE_WORKER_CONTINUATIONS
+            ):
                 error = (
-                    f"{worker_name} exited after the one permitted HITL continuation "
+                    f"{worker_name} exited after the {MAX_INCOMPLETE_WORKER_CONTINUATIONS} permitted HITL continuations "
                     "worker was already launched. Runtime preserved the current workspace, "
                     "manager conversation and continuation state for recovery."
                 )
@@ -3418,10 +3477,21 @@ def parse_required_artifacts(interface_path: Path) -> List[RequiredArtifact]:
 
 
 def verify_required_artifacts(work_dir: Path, artifacts: Iterable[RequiredArtifact]) -> None:
+    root = Path(work_dir).resolve()
     for artifact in artifacts:
         if not artifact.required:
             continue
-        path = Path(work_dir) / artifact.path
+        path = root / artifact.path
+        try:
+            path.resolve(strict=False).relative_to(root)
+        except ValueError as exc:
+            raise HitlValidationError(
+                f"Required artifact escapes the workspace: {artifact.path}"
+            ) from exc
+        if path.is_symlink():
+            raise HitlValidationError(
+                f"Required artifact cannot be a symlink: {artifact.path}"
+            )
         if not path.exists():
             raise HitlValidationError(f"Required artifact missing: {artifact.path}")
         if artifact.path.endswith("/"):
@@ -3429,6 +3499,8 @@ def verify_required_artifacts(work_dir: Path, artifacts: Iterable[RequiredArtifa
                 raise HitlValidationError(
                     f"Required artifact should be a directory: {artifact.path}"
                 )
+            if not any(path.iterdir()):
+                raise HitlValidationError(f"Required artifact directory is empty: {artifact.path}")
             continue
         if not path.is_file():
             raise HitlValidationError(f"Required artifact should be a file: {artifact.path}")
@@ -3441,6 +3513,16 @@ def verify_required_artifacts(work_dir: Path, artifacts: Iterable[RequiredArtifa
 
             with path.open(newline="", encoding="utf-8") as f:
                 next(csv.reader(f), None)
+
+
+def validate_required_artifact_contract(work_dir: Path) -> Dict[str, Any]:
+    """Return a worker-retryable validation result for the rule-maker contract."""
+    try:
+        artifacts = parse_required_artifacts(Path(work_dir) / "scoring" / "interface.md")
+        verify_required_artifacts(work_dir, artifacts)
+    except (OSError, ValueError, json.JSONDecodeError, HitlValidationError) as exc:
+        return {"valid": False, "issues": [str(exc)]}
+    return {"valid": True, "issues": []}
 
 
 def snapshot_path_state(path: Path) -> Dict[str, Any]:

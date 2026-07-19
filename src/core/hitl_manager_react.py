@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
 import queue
 import threading
 from dataclasses import dataclass
@@ -1107,7 +1108,7 @@ class HitlManager:
                     "available_node_shas": available_node_shas,
                 },
             )
-            result = self._complete_recorded_frontier_action("select_frontier", handler)
+            self._complete_recorded_frontier_action("select_frontier", handler)
         except Exception as exc:
             return (
                 f"Error: runtime could not select this frontier node: {exc}. "
@@ -1135,7 +1136,7 @@ class HitlManager:
                     "available_node_shas": available_node_shas,
                 },
             )
-            result = self._complete_recorded_frontier_action("prune_frontier", handler)
+            self._complete_recorded_frontier_action("prune_frontier", handler)
         except Exception as exc:
             return (
                 f"Error: runtime could not prune this frontier node: {exc}. "
@@ -1613,18 +1614,42 @@ class HitlManager:
         raise RuntimeError("Manager backend was unavailable") from last
 
     def _send_once(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Any:
-        """Bound one provider call without imposing a deadline on human input.
+        """Run one bounded manager provider turn.
 
-        Provider adapters do not share a cancellation API.  A daemon wrapper
-        therefore prevents a hung call from holding the HITL runtime forever;
-        any late provider result is discarded because only this method returns
-        a response into the manager loop.
+        ``LLMBackend`` receives the deadline directly and cancels its own CLI
+        process group or HTTP request. The short daemon wrapper remains only
+        for injected third-party/test backends that do not implement this
+        adapter contract.
         """
         result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
 
+        try:
+            parameters = inspect.signature(self.backend.send).parameters
+            supports_adapter_contract = (
+                (
+                    "timeout_seconds" in parameters
+                    and "disable_native_tools" in parameters
+                )
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
+            )
+        except (TypeError, ValueError):
+            supports_adapter_contract = False
+
         def call_backend() -> None:
             try:
-                result.put((True, self.backend.send(messages, tools)))
+                if supports_adapter_contract:
+                    response = self.backend.send(
+                        messages,
+                        tools,
+                        timeout_seconds=self.backend_timeout_seconds,
+                        disable_native_tools=True,
+                    )
+                else:
+                    response = self.backend.send(messages, tools)
+                result.put((True, response))
             except BaseException as exc:
                 result.put((False, exc))
 

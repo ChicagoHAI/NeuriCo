@@ -6,12 +6,11 @@ or API (Anthropic SDK / OpenRouter). The backend is configured by the user
 in config/manager.yaml or .env.
 """
 
-from pathlib import Path
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 import json
 import os
-import shlex
+import signal
 import subprocess
 
 
@@ -46,8 +45,14 @@ class LLMBackend:
         self.backend = backend
         self.model = model
 
-    def send(self, messages: List[Dict[str, Any]],
-             tools: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
+    def send(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        timeout_seconds: Optional[float] = None,
+        disable_native_tools: bool = False,
+    ) -> LLMResponse:
         """
         Send messages to the LLM and return the response.
 
@@ -55,21 +60,36 @@ class LLMBackend:
             messages: Conversation messages in OpenAI-style format
                       [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}, ...]
             tools: Optional tool definitions (for API backends with native tool support)
+            timeout_seconds: Optional provider deadline. ``None`` preserves the
+                backend default.
+            disable_native_tools: Disable the Claude CLI's built-in tools. This
+                is used by the HITL manager, whose tools are runtime-mediated.
 
         Returns:
             LLMResponse with text content and any tool calls
         """
         if self.backend == "cli":
-            return self._send_cli(messages, tools)
+            return self._send_cli(
+                messages,
+                tools,
+                timeout_seconds=timeout_seconds,
+                disable_native_tools=disable_native_tools,
+            )
         elif self.backend == "anthropic_api":
-            return self._send_anthropic_api(messages, tools)
+            return self._send_anthropic_api(messages, tools, timeout_seconds=timeout_seconds)
         elif self.backend == "openrouter":
-            return self._send_openrouter(messages, tools)
+            return self._send_openrouter(messages, tools, timeout_seconds=timeout_seconds)
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
 
-    def _send_cli(self, messages: List[Dict[str, Any]],
-                  tools: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
+    def _send_cli(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        timeout_seconds: Optional[float] = None,
+        disable_native_tools: bool = False,
+    ) -> LLMResponse:
         """
         Send via `claude -p` CLI. Constructs a single prompt from all messages
         and parses the streaming JSON response for tool_use blocks.
@@ -78,20 +98,34 @@ class LLMBackend:
         prompt = self._messages_to_prompt(messages, tools)
 
         # Build command
-        cmd = "claude -p --verbose --output-format stream-json"
+        cmd = ["claude", "-p", "--verbose", "--output-format", "stream-json"]
         if self.model:
-            cmd += f" --model {self.model}"
+            cmd.extend(["--model", self.model])
+        if disable_native_tools:
+            # HITL manager tools are parsed and executed by the runtime. Do
+            # not let the CLI agent gain a second, unmanaged tool surface.
+            cmd.extend(["--bare", "--tools", ""])
 
         process = subprocess.Popen(
-            shlex.split(cmd),
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            bufsize=1
+            bufsize=1,
+            # Only HITL manager calls request cancellation semantics. Keep
+            # ordinary interactive-manager launch behavior unchanged.
+            start_new_session=(disable_native_tools and os.name == "posix"),
         )
 
-        stdout, stderr = process.communicate(input=prompt)
+        try:
+            stdout, stderr = process.communicate(input=prompt, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            self._terminate_process_group(process)
+            raise TimeoutError(
+                "CLI backend timed out after "
+                f"{timeout_seconds:g} seconds"
+            ) from exc
 
         if process.returncode != 0:
             # Try to extract useful error info
@@ -99,6 +133,29 @@ class LLMBackend:
             raise RuntimeError(f"CLI backend error: {error_msg}")
 
         return self._parse_cli_response(stdout)
+
+    @staticmethod
+    def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+        """Terminate a timed-out CLI turn and any child processes it spawned."""
+        if process.poll() is not None:
+            return
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=2)
+                return
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        else:
+            process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
     def _messages_to_prompt(self, messages: List[Dict[str, Any]],
                             tools: Optional[List[Dict[str, Any]]] = None) -> str:
@@ -225,8 +282,13 @@ class LLMBackend:
             ))
         return tool_calls
 
-    def _send_anthropic_api(self, messages: List[Dict[str, Any]],
-                            tools: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
+    def _send_anthropic_api(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        timeout_seconds: Optional[float] = None,
+    ) -> LLMResponse:
         """Send via Anthropic Python SDK. Requires ANTHROPIC_API_KEY."""
         try:
             import anthropic
@@ -240,7 +302,10 @@ class LLMBackend:
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable required for anthropic_api backend")
 
-        client = anthropic.Anthropic(api_key=api_key)
+        client_kwargs: Dict[str, Any] = {"api_key": api_key}
+        if timeout_seconds is not None:
+            client_kwargs["timeout"] = timeout_seconds
+        client = anthropic.Anthropic(**client_kwargs)
 
         # Separate system message from conversation
         system_msg = ""
@@ -302,8 +367,13 @@ class LLMBackend:
             raw=response
         )
 
-    def _send_openrouter(self, messages: List[Dict[str, Any]],
-                         tools: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
+    def _send_openrouter(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        timeout_seconds: Optional[float] = None,
+    ) -> LLMResponse:
         """Send via OpenRouter API. Requires OPENROUTER_API_KEY."""
         try:
             import httpx
@@ -342,7 +412,7 @@ class LLMBackend:
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=120
+            timeout=timeout_seconds if timeout_seconds is not None else 120
         )
         response.raise_for_status()
         data = response.json()

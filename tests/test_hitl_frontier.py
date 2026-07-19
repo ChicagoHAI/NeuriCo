@@ -152,6 +152,26 @@ def test_public_frontier_audit_is_an_exact_nodes_tree_mirror(tmp_path: Path) -> 
         ).read_bytes()
 
 
+def test_hitl_controller_delegates_compute_artifact_archiving(tmp_path: Path) -> None:
+    archived = []
+    controller = HitlAutoResearchController(
+        idea={},
+        idea_id="idea",
+        work_dir=tmp_path,
+        history_root=tmp_path / "history",
+        proposal_generator=lambda *_args, **_kwargs: {},
+        scorer=lambda _work_dir: {"success": True},
+        archive_attempt_artifacts=lambda work_dir, attempt_dir: archived.append(
+            (work_dir, attempt_dir)
+        ),
+    )
+
+    attempt_dir = tmp_path / "history" / "parent" / "attempt_1"
+    controller._archive_attempt_artifacts(attempt_dir)
+
+    assert archived == [(tmp_path, attempt_dir)]
+
+
 def test_accepted_exploitation_inherits_direction_attempt_history_without_copying_it(
     tmp_path: Path,
 ) -> None:
@@ -471,7 +491,7 @@ def test_hitl_continuation_restores_runtime_selected_frontier_node(tmp_path: Pat
     assert not (work_dir / ".neurico" / "autoresearch_state.json").exists()
 
 
-def test_hitl_run_selects_frontier_after_its_final_scored_decision(
+def test_hitl_run_does_not_select_frontier_after_its_final_scored_decision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -526,12 +546,12 @@ def test_hitl_run_selects_frontier_after_its_final_scored_decision(
 
     result = controller.run(1)
 
-    assert selection_calls == [True]
+    assert selection_calls == []
     assert result.current_best_sha == root.sha
     assert result.iterations == [scored]
 
 
-def test_hitl_run_selects_frontier_after_each_scored_iteration(
+def test_hitl_run_selects_frontier_only_before_another_scored_iteration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -598,7 +618,7 @@ def test_hitl_run_selects_frontier_after_each_scored_iteration(
 
     result = controller.run(2)
 
-    assert selection_calls == [True, True]
+    assert selection_calls == [True]
     assert result.current_best_sha == root.sha
     assert result.iterations == [first, second]
 

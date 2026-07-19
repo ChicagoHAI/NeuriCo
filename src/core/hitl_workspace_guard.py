@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -20,8 +23,10 @@ _EXCLUDED_PUBLIC_PREFIXES = {
 
 @dataclass(frozen=True)
 class _FileState:
+    kind: str
     size: int
     modified_ns: int
+    sha256: str | None = None
 
 
 class HitlWorkspaceWriteGuard:
@@ -51,7 +56,11 @@ class HitlWorkspaceWriteGuard:
     def capture_paths(cls, work_dir: Path, paths: Iterable[str]) -> "HitlWorkspaceWriteGuard":
         root = Path(work_dir).resolve()
         normalized = tuple(cls._normalize_relative(path) for path in paths)
-        return cls(root, cls._snapshot_paths(root, normalized), tracked_paths=normalized)
+        return cls(
+            root,
+            cls._snapshot_paths(root, normalized, hash_content=True),
+            tracked_paths=normalized,
+        )
 
     def allow_only(self, paths: Iterable[str]) -> dict[str, object]:
         allowed = {self._normalize_relative(path) for path in paths}
@@ -76,7 +85,7 @@ class HitlWorkspaceWriteGuard:
 
     def _current_snapshot(self) -> dict[str, _FileState]:
         if self.tracked_paths is not None:
-            return self._snapshot_paths(self.work_dir, self.tracked_paths)
+            return self._snapshot_paths(self.work_dir, self.tracked_paths, hash_content=True)
         return self._snapshot(self.work_dir, include_hidden=False)
 
     @staticmethod
@@ -89,19 +98,57 @@ class HitlWorkspaceWriteGuard:
             if not include_hidden and HitlWorkspaceWriteGuard._is_excluded(relative):
                 continue
             stats = path.stat()
-            states[relative] = _FileState(size=stats.st_size, modified_ns=stats.st_mtime_ns)
+            states[relative] = _FileState(
+                kind="file",
+                size=stats.st_size,
+                modified_ns=stats.st_mtime_ns,
+            )
         return states
 
     @staticmethod
-    def _snapshot_paths(root: Path, paths: Iterable[str]) -> dict[str, _FileState]:
+    def _snapshot_paths(
+        root: Path,
+        paths: Iterable[str],
+        *,
+        hash_content: bool,
+    ) -> dict[str, _FileState]:
         states: dict[str, _FileState] = {}
         for raw_path in paths:
             relative = HitlWorkspaceWriteGuard._normalize_relative(raw_path)
             path = root / relative
-            if path.is_file() and not path.is_symlink():
-                stats = path.stat()
-                states[relative] = _FileState(size=stats.st_size, modified_ns=stats.st_mtime_ns)
+            try:
+                stats = path.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(stats.st_mode):
+                states[relative] = _FileState(
+                    kind="symlink",
+                    size=stats.st_size,
+                    modified_ns=stats.st_mtime_ns,
+                    sha256=os.readlink(path),
+                )
+            elif stat.S_ISREG(stats.st_mode):
+                states[relative] = _FileState(
+                    kind="file",
+                    size=stats.st_size,
+                    modified_ns=stats.st_mtime_ns,
+                    sha256=HitlWorkspaceWriteGuard._sha256(path) if hash_content else None,
+                )
+            else:
+                states[relative] = _FileState(
+                    kind="other",
+                    size=stats.st_size,
+                    modified_ns=stats.st_mtime_ns,
+                )
         return states
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     def _is_excluded(relative: str) -> bool:

@@ -100,6 +100,33 @@ def test_runtime_installs_only_stage_legal_worker_commands(tmp_path: Path) -> No
     runtime.manager.stop()
 
 
+def test_plan_to_execution_transition_replaces_guards_and_command_surface(tmp_path: Path) -> None:
+    runtime = HitlRuntime(tmp_path, "experiment_runner")
+    plan_path = runtime.paths.plan_path
+    plan_path.write_text("# Plan\n", encoding="utf-8")
+    protected_path = tmp_path / "scoring" / "interface.md"
+    protected_path.parent.mkdir(parents=True)
+    protected_path.write_text("required artifacts\n", encoding="utf-8")
+
+    runtime.prepare_idea_tool_context(hitl_stage="plan")
+    assert not runtime.paths.raise_idea_command.exists()
+    assert runtime._tool_context["plan_finish_validator"] is not None
+
+    runtime.transition_worker_stage("execution", prompt_block="Execute the approved plan.")
+
+    assert runtime.paths.raise_idea_command.exists()
+    assert runtime._tool_context["plan_finish_validator"] is None
+    assert runtime._tool_context["phase_finish_validator"] is not None
+    runtime._require_worker_command("hitl-raise-idea")
+
+    protected_path.write_text("rewritten evaluator contract\n", encoding="utf-8")
+    validation = runtime._tool_context["phase_finish_validator"]()
+    assert validation["valid"] is False
+    assert "scoring/interface.md" in validation["issues"][0]
+    runtime.clear_idea_tool_context()
+    runtime.manager.stop()
+
+
 def test_runtime_exposes_resume_only_for_a_held_worker_request(tmp_path: Path) -> None:
     runtime = HitlRuntime(tmp_path, "resource_finder")
     runtime.prepare_idea_tool_context(hitl_stage="execution")

@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -38,3 +39,15 @@ def test_proposal_context_always_installs_runtime_owned_write_gate(tmp_path: Pat
     assert "notes.md" in validation["issues"][0]
     runtime.clear_idea_tool_context()
     runtime.manager.stop()
+
+
+def test_protected_paths_use_content_fingerprints_and_reject_symlinks(tmp_path: Path) -> None:
+    protected = tmp_path / "scoring" / "interface.md"
+    protected.parent.mkdir()
+    protected.write_text("first value\n", encoding="utf-8")
+    original = protected.stat()
+    guard = HitlWorkspaceWriteGuard.capture_paths(tmp_path, ["scoring/interface.md"])
+
+    protected.write_text("other value\n", encoding="utf-8")
+    os.utime(protected, ns=(original.st_atime_ns, original.st_mtime_ns))
+    assert guard.require_unchanged()["valid"] is False

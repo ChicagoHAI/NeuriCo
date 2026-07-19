@@ -23,6 +23,7 @@ Routes:
 
 from __future__ import annotations
 
+import html
 import json
 import mimetypes
 import re
@@ -879,7 +880,9 @@ def _make_handler(
     *,
     access_token: Optional[str] = None,
 ):
-    page = PAGE.replace("{{WORKSPACE}}", workspace_name).replace("{{TITLE}}", title)
+    page = PAGE.replace("{{WORKSPACE}}", html.escape(workspace_name)).replace(
+        "{{TITLE}}", html.escape(title)
+    )
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -938,6 +941,12 @@ def _make_handler(
                 body = page.encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+                    "connect-src 'self'; img-src 'self' data:; "
+                    "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+                )
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)

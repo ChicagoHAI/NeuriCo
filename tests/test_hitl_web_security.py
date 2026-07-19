@@ -88,3 +88,28 @@ def test_ordinary_web_server_remains_compatible_without_access_token(tmp_path: P
     finally:
         connection.close()
         server.stop()
+
+
+def test_web_server_escapes_workspace_and_title(tmp_path: Path):
+    channel = WebChannel()
+    server = InteractiveWebServer(
+        channel=channel,
+        workspace=tmp_path,
+        project_root=tmp_path,
+        title='<img src=x onerror="alert(1)">',
+        port=0,
+        host="127.0.0.1",
+    )
+    server.start()
+    connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=3)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        body = response.read().decode("utf-8")
+        assert response.status == 200
+        assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in body
+        assert "<img src=x onerror" not in body
+        assert "Content-Security-Policy" in response.headers
+    finally:
+        connection.close()
+        server.stop()
