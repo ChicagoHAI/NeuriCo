@@ -737,7 +737,7 @@ cmd_run() {
     hitl_web_port=$(hitl_web_port_from_args "$@") || exit 1
     local hitl_web_flags=""
     if [ -n "$hitl_web_port" ]; then
-        hitl_web_flags="-p 127.0.0.1:${hitl_web_port}:${hitl_web_port} -e NEURICO_HITL_WEB_HOST=0.0.0.0 -e NEURICO_HITL_BROWSER_URL=http://localhost:${hitl_web_port}"
+        hitl_web_flags="-p 127.0.0.1:${hitl_web_port}:${hitl_web_port} -e NEURICO_HITL_WEB_HOST=0.0.0.0 -e NEURICO_HITL_WEB_CONTAINER_MODE=1 -e NEURICO_HITL_BROWSER_URL=http://localhost:${hitl_web_port}"
     fi
 
     local tty_flag=$(get_tty_flag)

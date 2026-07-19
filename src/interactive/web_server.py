@@ -823,17 +823,23 @@ PAGE = r"""<!DOCTYPE html>
   function submit(text,input_kind='conversation'){
     text=(text||'').trim();
     if(!text) return;
-    fetch('/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,input_kind,request_key:input_kind==='resolution_reply'?resolutionRequestKey:null})});
+    const request=fetch('/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,input_kind,request_key:input_kind==='resolution_reply'?resolutionRequestKey:null})});
     if(input_kind==='conversation'){
       hint.textContent='✓ Message queued — the manager will see it at its next checkpoint.';
     }else{
-      hint.textContent='Resolution reply received — the manager will continue the review.';
-      setThinking(true);
-      resolutionReplyPending=false;
-      resolutionRequestKey=null;
-      replyRequest.hidden=true;
-      composer.classList.remove('awaiting');
-      optionsEl.innerHTML='';
+      request.then(response=>{
+        if(!response.ok) throw new Error('runtime rejected the reply');
+        hint.textContent='Resolution reply received — the manager will continue the review.';
+        setThinking(true);
+        resolutionReplyPending=false;
+        resolutionRequestKey=null;
+        replyRequest.hidden=true;
+        composer.classList.remove('awaiting');
+        optionsEl.innerHTML='';
+      }).catch(()=>{
+        hint.textContent='Could not send the resolution reply. It is still active; retry.';
+        connEl.textContent='resolution reply failed';
+      });
     }
     msg.value=''; autosize();
   }
@@ -1119,4 +1125,13 @@ class InteractiveWebServer:
     def stop(self) -> None:
         self._stop.set()
         if self._httpd is not None:
-            threading.Thread(target=self._httpd.shutdown, daemon=True).start()
+            self._httpd.shutdown()
+            self._httpd.server_close()
+        for thread in (
+            self._server_thread,
+            self._tailer_thread,
+            self._dash_thread,
+            self._research_thread,
+        ):
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=2)

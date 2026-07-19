@@ -97,8 +97,12 @@ def post_to_runtime(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         },
         method="POST",
     )
+    # Read-only helpers must fail promptly if a stale runtime endpoint is left
+    # behind. Commands that deliberately wait for manager/human resolution keep
+    # their blocking protocol and therefore have no client-side deadline.
+    timeout = 15 if endpoint in {"/idea/view", "/frontier/current", "/worker/resume"} else None
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

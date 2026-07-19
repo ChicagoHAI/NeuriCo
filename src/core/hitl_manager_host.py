@@ -323,8 +323,14 @@ class HitlManagerHost:
         if interface == "web":
             self.channel: UserChannel = HitlWebChannel()
             bind_host = os.environ.get("NEURICO_HITL_WEB_HOST", "localhost")
-            if not _is_loopback_host(bind_host):
-                raise ValueError("HITL web manager must bind to a loopback host.")
+            container_mode = os.environ.get("NEURICO_HITL_WEB_CONTAINER_MODE") == "1"
+            if not _is_loopback_host(bind_host) and not (
+                container_mode and bind_host == "0.0.0.0"
+            ):
+                raise ValueError(
+                    "HITL web manager must bind to loopback, or use 0.0.0.0 only with "
+                    "NEURICO_HITL_WEB_CONTAINER_MODE=1 behind a loopback Docker publish."
+                )
             self._access_token = secrets.token_urlsafe(32)
             configured_browser_url = os.environ.get("NEURICO_HITL_BROWSER_URL") or None
             self._browser_url = (

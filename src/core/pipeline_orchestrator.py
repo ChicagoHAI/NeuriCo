@@ -23,6 +23,7 @@ and tracks pipeline state.
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,7 @@ from agents.resource_finder import run_resource_finder
 from agents.rule_maker import run_rule_maker, validate_rule_maker_outputs
 from agents.rule_maker_bootstrap import run_bootstrap_rule_maker
 from agents.manifest_trimmer import make_trimmer_callable
-from core.scorer import _resolve_python_executable, run_scorer
+from core.scorer import run_scorer
 from core.hitl_scoring_workspace import run_isolated_scorer
 from core.hitl_runtime_state import HitlRuntimeState
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
@@ -69,8 +70,19 @@ class PipelineState:
 
     def _save(self):
         """Save state to disk."""
-        with open(self.state_file, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, indent=2)
+        temporary = self.state_file.with_suffix(".json.tmp")
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(self.state, handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.state_file)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
     def start_stage(self, stage_name: str):
         """Mark a stage as started."""
@@ -694,11 +706,18 @@ class ResearchPipelineOrchestrator:
         )
         hitl_state_store = HitlGitStateStore(self.work_dir)
         hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
-        artifact_validator = (
-            (lambda: validate_required_artifact_contract(self.work_dir))
-            if scoring_enabled
-            else None
-        )
+        def resource_artifact_validator() -> Dict[str, Any]:
+            required = ("literature_review.md", "resources.md")
+            issues = []
+            for relative in required:
+                path = self.work_dir / relative
+                try:
+                    stats = path.lstat()
+                    if not path.is_file() or path.is_symlink() or stats.st_size == 0:
+                        issues.append(f"Required resource artifact is missing or empty: {relative}")
+                except FileNotFoundError:
+                    issues.append(f"Required resource artifact is missing or empty: {relative}")
+            return {"valid": not issues, "issues": issues}
 
         def restore_failed_hitl_state() -> None:
             runtime.abandon_pending_worker_request_for_rollback(
@@ -796,6 +815,7 @@ class ResearchPipelineOrchestrator:
             runtime.prepare_idea_tool_context(
                 hitl_stage="execution",
                 actor="resource_finder",
+                phase_finish_validator=resource_artifact_validator,
             )
             result, finish = run_worker_with_replacements(
                 suffix=runtime.execution_prompt_block(mode="execute"),
@@ -1024,7 +1044,10 @@ class ResearchPipelineOrchestrator:
             if run_result.get("timed_out"):
                 print(f"\n⏱️  Experiment runner timed out after {timeout} seconds")
                 success = False
-            elif return_code == 0:
+            elif run_result.get("background_processes_terminated"):
+                print("⚠️  Experiment runner left background processes; runtime terminated them.")
+                success = False
+            elif run_result.get("success"):
                 print("✅ Experiment execution completed successfully!")
                 success = True
             else:
@@ -1037,6 +1060,9 @@ class ResearchPipelineOrchestrator:
                 "elapsed_time": elapsed,
                 "log_file": str(log_file),
                 "transcript_file": str(transcript_file),
+                "background_processes_terminated": bool(
+                    run_result.get("background_processes_terminated")
+                ),
             }
             if success and dsi_remote_info is not None:
                 from core.dsi_slurm_artifacts import archive_dsi_slurm_artifacts
@@ -1093,6 +1119,11 @@ class ResearchPipelineOrchestrator:
         scored_checkpoint_sha: Optional[str] = None
         hitl_state_store = HitlGitStateStore(self.work_dir)
         hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
+        artifact_validator = (
+            (lambda: validate_required_artifact_contract(self.work_dir))
+            if scoring_enabled
+            else None
+        )
 
         def clear_hitl_runtime_context() -> None:
             runtime.clear_idea_tool_context()
@@ -1220,7 +1251,10 @@ class ResearchPipelineOrchestrator:
                         scorer=lambda scorer_work_dir: run_scorer(
                             work_dir=scorer_work_dir,
                             timeout=scorer_timeout,
-                            python_executable=_resolve_python_executable(self.work_dir),
+                            # HITL scoring runs under the interpreter that
+                            # launched runtime, never the mutable worker
+                            # workspace virtual environment.
+                            python_executable=sys.executable,
                         ),
                     )
                     self.state.complete_stage(SCORER_STAGE, bool(scorer_result.get("success")), scorer_result)
@@ -1228,9 +1262,13 @@ class ResearchPipelineOrchestrator:
                     scorer_result = {"success": False, "error": f"Runtime isolated scorer failed: {exc}"}
                     self.state.complete_stage(SCORER_STAGE, False, scorer_result)
                 if scorer_result.get("success"):
-                    scored_checkpoint_sha = CheckpointManager(self.work_dir).create_checkpoint(
-                        "HITL initial scored workspace"
-                    ).sha
+                    scored_checkpoint_sha = str(
+                        scorer_result.get("scored_checkpoint_sha", "")
+                    ).strip() or None
+                    if scored_checkpoint_sha is None:
+                        raise RuntimeError(
+                            "Runtime isolated scorer succeeded without an immutable scored checkpoint."
+                        )
                 runtime_state.update_pending_worker_command(
                     request_key,
                     isolated_scoring={

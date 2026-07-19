@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import json
 import logging
 import os
+import stat
 import hashlib
 import http.server
 import sys
@@ -478,8 +479,18 @@ class HitlIdeaLog:
             existing = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
             addition = _compact_json(ordered) + "\n"
             tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-            tmp_path.write_text(existing + addition, encoding="utf-8")
-            os.replace(tmp_path, self.path)
+            try:
+                with tmp_path.open("w", encoding="utf-8") as handle:
+                    handle.write(existing + addition)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, self.path)
+                self._fsync_log_directory()
+            finally:
+                try:
+                    tmp_path.unlink()
+                except FileNotFoundError:
+                    pass
         # The idea log is authoritative. Reconciliation is derived state, so a
         # projection failure must not turn a successfully finalized idea into a
         # failed worker command that an agent will retry and duplicate. A later
@@ -531,6 +542,18 @@ class HitlIdeaLog:
         lock_path = self.path.with_suffix(".jsonl.lock")
         with exclusive_file_lock(lock_path):
             yield
+
+    def _fsync_log_directory(self) -> None:
+        try:
+            descriptor = os.open(self.path.parent, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def _next_number(records: Iterable[Dict[str, Any]]) -> int:
@@ -1111,20 +1134,24 @@ class HitlRuntime:
                 return
             plan_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
             plan_path = self.paths.plan_path.relative_to(self.work_dir).as_posix()
-            self._tool_context["plan_finish_validator"] = lambda: plan_guard.allow_only(
-                [plan_path]
-            )
+
+            def validate_plan_finish() -> Dict[str, Any]:
+                guard_result = plan_guard.allow_only([plan_path])
+                if not bool(guard_result.get("valid")):
+                    return guard_result
+                return self._validate_living_plan_file()
+
+            self._tool_context["plan_finish_validator"] = validate_plan_finish
             return
         if hitl_stage not in {"execution", "review"}:
             return
 
+        protected_paths = ["scoring/results.json", ".neurico/autoresearch_state.json"]
+        if self.pipeline_stage != "rule_maker":
+            protected_paths.insert(0, "scoring/interface.md")
         protected_guard = HitlWorkspaceWriteGuard.capture_paths(
             self.work_dir,
-            [
-                "scoring/interface.md",
-                "scoring/results.json",
-                ".neurico/autoresearch_state.json",
-            ],
+            protected_paths,
         )
         supplied = self._tool_context.get("supplied_phase_finish_validator")
 
@@ -1137,6 +1164,22 @@ class HitlRuntime:
             return {"valid": True, "issues": []}
 
         self._tool_context["phase_finish_validator"] = combined_phase_finish_validator
+
+    def _validate_living_plan_file(self) -> Dict[str, Any]:
+        """Require the worker-owned plan to remain a regular workspace file."""
+        try:
+            plan = self.paths.plan_path
+            relative = plan.relative_to(self.work_dir.resolve())
+            if not relative.parts:
+                raise ValueError("missing workspace-relative plan path")
+            stats = plan.lstat()
+            if stat.S_ISLNK(stats.st_mode) or not stat.S_ISREG(stats.st_mode):
+                raise ValueError("living plan must be a regular file")
+            if not plan.read_text(encoding="utf-8").strip():
+                raise ValueError("living plan must not be empty")
+        except (OSError, ValueError) as exc:
+            return {"valid": False, "issues": [f"Invalid living plan: {exc}"]}
+        return {"valid": True, "issues": []}
 
     def transition_worker_stage(self, to_stage: str, *, prompt_block: str = "") -> None:
         """Move one live worker session to its next runtime-owned HITL stage.
@@ -1461,6 +1504,7 @@ class HitlRuntime:
         *,
         hitl_stage: str,
         plan_fingerprint: str,
+        workspace_fingerprint: str,
         summary: str,
         related_artifacts: List[Dict[str, str]],
     ) -> str:
@@ -1470,6 +1514,7 @@ class HitlRuntime:
                     "pipeline_stage": self.pipeline_stage,
                     "hitl_stage": hitl_stage,
                     "plan_fingerprint": plan_fingerprint,
+                    "workspace_fingerprint": workspace_fingerprint,
                     "summary": summary,
                     "related_artifacts": related_artifacts,
                     "actor": self._tool_context.get("actor", self.pipeline_stage),
@@ -1480,8 +1525,12 @@ class HitlRuntime:
 
     def _current_plan_fingerprint(self) -> str:
         """Fingerprint the worker-owned control artifact for finish-command retries."""
-        if not self.paths.plan_path.is_file():
+        try:
+            stats = self.paths.plan_path.lstat()
+        except FileNotFoundError:
             return "missing"
+        if stat.S_ISLNK(stats.st_mode) or not stat.S_ISREG(stats.st_mode):
+            return "invalid"
         return hashlib.sha256(self.paths.plan_path.read_bytes()).hexdigest()
 
     def _proposal_record(self, idea_id: str) -> Optional[Dict[str, Any]]:
@@ -1983,7 +2032,23 @@ class HitlRuntime:
                 "Runtime scoring repair has no pending phase-finish request to resume."
             )
         prompt_block = self.review_prompt_block(feedback)
-        self.transition_worker_stage("review", prompt_block=prompt_block)
+        current_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
+        if current_stage == "execution":
+            self.transition_worker_stage("review", prompt_block=prompt_block)
+        elif current_stage == "review":
+            # A second scoring repair is a new review revision, not an invalid
+            # execution-to-review transition.
+            self._install_stage_guards("review")
+            self._write_idea_tool_commands()
+            self._update_worker_continuation(
+                prompt_block=prompt_block,
+                hitl_stage="review",
+                status="running",
+            )
+        else:
+            raise HitlValidationError(
+                f"Runtime scoring repair is invalid during HITL stage {current_stage!r}."
+            )
         self._phase_finish_result = {
             "called": True,
             "status": "feedback",
@@ -2025,6 +2090,7 @@ class HitlRuntime:
         *,
         hitl_stage: str,
         plan_fingerprint: str,
+        workspace_fingerprint: str,
         summary: str,
         related_artifacts: List[Dict[str, str]],
     ) -> Optional[Dict[str, Any]]:
@@ -2046,6 +2112,7 @@ class HitlRuntime:
             and bool(previous.get("final"))
             and hitl_stage in {"complete", "scoring"}
             and previous.get("plan_fingerprint") == plan_fingerprint
+            and previous.get("workspace_fingerprint") == workspace_fingerprint
             and previous.get("summary") == summary
             and previous.get("related_artifacts") == related_artifacts
         ):
@@ -2058,6 +2125,7 @@ class HitlRuntime:
             and isinstance(previous, dict)
             and previous.get("hitl_stage") == hitl_stage
             and previous.get("plan_fingerprint") == plan_fingerprint
+            and previous.get("workspace_fingerprint") == workspace_fingerprint
             and previous.get("summary") == summary
             and previous.get("related_artifacts") == related_artifacts
         ):
@@ -2214,9 +2282,13 @@ class HitlRuntime:
             related_artifacts = _as_related_artifacts(payload.get("related_artifacts"))
             hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
             plan_fingerprint = self._current_plan_fingerprint()
+            from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+            workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
             request_key = self._phase_finish_request_key_for(
                 hitl_stage=hitl_stage,
                 plan_fingerprint=plan_fingerprint,
+                workspace_fingerprint=workspace_fingerprint,
                 summary=summary,
                 related_artifacts=related_artifacts,
             )
@@ -2224,6 +2296,7 @@ class HitlRuntime:
                 request_key,
                 hitl_stage=hitl_stage,
                 plan_fingerprint=plan_fingerprint,
+                workspace_fingerprint=workspace_fingerprint,
                 summary=summary,
                 related_artifacts=related_artifacts,
             )
@@ -2257,6 +2330,7 @@ class HitlRuntime:
                         "status": "feedback",
                         "hitl_stage": next_stage,
                         "plan_fingerprint": plan_fingerprint,
+                        "workspace_fingerprint": workspace_fingerprint,
                         "summary": summary,
                         "related_artifacts": related_artifacts,
                         "manager_feedback": feedback,
@@ -2458,6 +2532,7 @@ class HitlRuntime:
                         "status": "feedback",
                         "hitl_stage": hitl_stage,
                         "plan_fingerprint": plan_fingerprint,
+                        "workspace_fingerprint": workspace_fingerprint,
                         "summary": summary,
                         "related_artifacts": related_artifacts,
                         "manager_feedback": feedback,
@@ -2506,6 +2581,7 @@ class HitlRuntime:
                     "status": "feedback",
                     "hitl_stage": next_phase,
                     "plan_fingerprint": plan_fingerprint,
+                    "workspace_fingerprint": workspace_fingerprint,
                     "summary": summary,
                     "related_artifacts": related_artifacts,
                     "manager_feedback": feedback,
@@ -2572,6 +2648,7 @@ class HitlRuntime:
                 "status": "approved",
                 "hitl_stage": hitl_stage,
                 "plan_fingerprint": plan_fingerprint,
+                "workspace_fingerprint": workspace_fingerprint,
                 "summary": summary,
                 "related_artifacts": related_artifacts,
                 "manager_feedback": "",
@@ -2627,6 +2704,14 @@ class HitlRuntime:
         live tool-server and request state and gives exactly one replacement the runtime
         prompt that the lost worker should have continued from.
         """
+        if result.get("background_processes_terminated"):
+            return {
+                "approved": False,
+                "error": (
+                    f"{worker_name} left background processes after its provider exited. "
+                    "Runtime terminated them and will not accept or score this workspace."
+                ),
+            }
         finish = self.phase_finish_result()
         resolved = self.resolved_worker_response()
         if resolved and (

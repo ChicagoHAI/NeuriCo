@@ -9,18 +9,27 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 import json
+import hashlib
 import os
 import shutil
 import subprocess
 import tempfile
 
-from core.scoring_seal import SEALED_PATHS
+from core.scoring_seal import SEALED_PATHS, verify_sealed_scoring_manifest
 
 
 class HitlScoringWorkspaceError(RuntimeError):
     """Raised when runtime cannot prepare an isolated HITL scorer workspace."""
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _copy_path(source: Path, destination: Path) -> None:
@@ -37,7 +46,7 @@ def isolated_scoring_workspace(
     work_dir: Path,
     source_sha: str,
     sealed_dir: Optional[Path],
-) -> Iterator[Path]:
+) -> Iterator[Tuple[Path, str]]:
     """Yield a temporary evaluator-complete worktree owned by runtime.
 
     ``source_sha`` must be a public checkpoint created after the worker has
@@ -55,6 +64,12 @@ def isolated_scoring_workspace(
         raise HitlScoringWorkspaceError(
             "Isolated HITL scoring requires the runtime-owned sealed evaluator payload."
         )
+    try:
+        evaluator_manifest_sha256 = verify_sealed_scoring_manifest(sealed_root)
+    except RuntimeError as exc:
+        raise HitlScoringWorkspaceError(
+            f"Runtime rejected the sealed evaluator payload: {exc}"
+        ) from exc
 
     temporary_parent = Path(tempfile.mkdtemp(prefix="neurico-hitl-scorer-"))
     os.chmod(temporary_parent, 0o700)
@@ -87,7 +102,7 @@ def isolated_scoring_workspace(
             raise HitlScoringWorkspaceError(
                 "The sealed evaluator payload contains none of the required scoring inputs."
             )
-        yield scorer_dir
+        yield scorer_dir, evaluator_manifest_sha256
     finally:
         if created:
             subprocess.run(
@@ -112,31 +127,71 @@ def run_isolated_scorer(
     sealed_dir: Optional[Path],
     scorer: Callable[[Path], Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Run a HITL scorer privately and materialize only ``results.json`` publicly.
+    """Run a scorer privately and commit its result from the immutable source tree.
 
-    Evaluator logs and paths remain private to the runtime workspace.  The
-    returned payload points at the public results artifact and is therefore
-    safe to pass to the manager and downstream HITL state.
+    The public workspace receives a review copy of ``results.json`` only. The
+    retained checkpoint is committed inside the detached source worktree, so
+    provider-side writes to the live workspace cannot change the scored tree.
     """
     public_work_dir = Path(work_dir).resolve()
     with isolated_scoring_workspace(
         work_dir=public_work_dir,
         source_sha=source_sha,
         sealed_dir=sealed_dir,
-    ) as scorer_work_dir:
+    ) as (scorer_work_dir, evaluator_manifest_sha256):
         raw_result = scorer(scorer_work_dir)
         if not isinstance(raw_result, dict):
             raise HitlScoringWorkspaceError("Runtime scorer must return an object.")
         result = dict(raw_result)
         results = result.get("results")
-        if isinstance(results, dict):
-            public_results = public_work_dir / "scoring" / "results.json"
-            public_results.parent.mkdir(parents=True, exist_ok=True)
-            public_results.write_text(
-                json.dumps(results, indent=2, ensure_ascii=False) + "\n",
+        if not isinstance(results, dict):
+            raise HitlScoringWorkspaceError("Runtime scorer returned no structured results.")
+        scorer_results = scorer_work_dir / "scoring" / "results.json"
+        scorer_results.parent.mkdir(parents=True, exist_ok=True)
+        scorer_results.write_text(
+            json.dumps(results, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        commit = subprocess.run(
+            ["git", "-C", str(scorer_work_dir), "add", "--", "scoring/results.json"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if commit.returncode == 0:
+            commit = subprocess.run(
+                ["git", "-C", str(scorer_work_dir), "commit", "-m", "HITL runtime scored result"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
                 encoding="utf-8",
+                check=False,
             )
-            result["results_path"] = str(public_results)
+        if commit.returncode != 0:
+            detail = (commit.stderr or commit.stdout or "unknown Git error").strip()
+            raise HitlScoringWorkspaceError(
+                f"Runtime could not commit the isolated scored result: {detail}"
+            )
+        resolved = subprocess.run(
+            ["git", "-C", str(scorer_work_dir), "rev-parse", "HEAD"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if resolved.returncode != 0:
+            raise HitlScoringWorkspaceError("Runtime could not resolve the scored checkpoint.")
+        public_results = public_work_dir / "scoring" / "results.json"
+        public_results.parent.mkdir(parents=True, exist_ok=True)
+        public_results.write_text(scorer_results.read_text(encoding="utf-8"), encoding="utf-8")
+        result["results_path"] = str(public_results)
+        result["source_checkpoint_sha"] = source_sha
+        result["scored_checkpoint_sha"] = resolved.stdout.strip()
+        result["results_sha256"] = _sha256_file(scorer_results)
+        result["evaluator_manifest_sha256"] = evaluator_manifest_sha256
         result.pop("log_path", None)
         result["isolated"] = True
         return result

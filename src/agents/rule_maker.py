@@ -371,7 +371,7 @@ def run_rule_maker(
             print(f"     - {issue}")
 
     if completion_mode == "hitl_runtime":
-        success = return_code == 0 and not launch["timed_out"]
+        success = bool(launch.get("success"))
         print("ℹ️  HITL runtime completion mode; orchestrator will review finish state.")
     elif completion_mode == "outputs":
         success = validation_success
@@ -391,6 +391,9 @@ def run_rule_maker(
         "log_file": str(log_file),
         "transcript_file": str(transcript_file),
         "elapsed_time": time.time() - start_time,
+        "background_processes_terminated": bool(launch.get("background_processes_terminated"))
+        if completion_mode == "hitl_runtime"
+        else False,
     }
 
 

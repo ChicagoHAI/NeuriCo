@@ -67,9 +67,11 @@ AutoResearch proposer has a complete proposal
   -> hitl-submit-proposal
 ```
 
-Workers never write `.neurico/hitl/` state directly. Runtime commands validate
-worker-provided fields, add runtime-owned fields, finalize official records,
-and return complete retry instructions on command errors.
+Workers are instructed not to write `.neurico/hitl/` state directly. Runtime
+commands validate worker-provided fields, add runtime-owned fields, finalize
+official records, and return complete retry instructions on command errors.
+Under local `--full-permissions`, this is a runtime protocol rather than an
+operating-system filesystem security boundary.
 
 ## Active Manager Contracts
 

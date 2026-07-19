@@ -217,8 +217,30 @@ class HitlManagerContext:
         payload = self._render(self._records)
         with self._file_lock():
             tmp_path = self.path.with_suffix(".jsonl.tmp")
-            tmp_path.write_text(payload, encoding="utf-8")
-            os.replace(tmp_path, self.path)
+            try:
+                with tmp_path.open("w", encoding="utf-8") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, self.path)
+                self._fsync_parent_directory()
+            finally:
+                try:
+                    tmp_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _fsync_parent_directory(self) -> None:
+        try:
+            descriptor = os.open(self.manager_dir, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def _render(records: List[Dict[str, Any]]) -> str:

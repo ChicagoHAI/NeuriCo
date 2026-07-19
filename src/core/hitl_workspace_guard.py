@@ -32,9 +32,10 @@ class _FileState:
 class HitlWorkspaceWriteGuard:
     """Compare a bounded workspace view at one runtime-owned phase boundary.
 
-    The guard deliberately uses file metadata rather than copying research data.
-    HITL workers are expected to follow the runtime protocol; this mechanical
-    gate catches accidental or unauthorized public writes before progression.
+    The guard records file type and content hashes rather than copying research
+    data. HITL workers are expected to follow the runtime protocol; this
+    mechanical gate catches accidental or unauthorized public writes before
+    progression.
     """
 
     def __init__(
@@ -51,6 +52,17 @@ class HitlWorkspaceWriteGuard:
     def capture_public(cls, work_dir: Path) -> "HitlWorkspaceWriteGuard":
         root = Path(work_dir).resolve()
         return cls(root, cls._snapshot(root, include_hidden=False))
+
+    @classmethod
+    def public_fingerprint(cls, work_dir: Path) -> str:
+        """Return a stable digest of the public workspace at one boundary."""
+        root = Path(work_dir).resolve()
+        states = cls._snapshot(root, include_hidden=False)
+        digest = hashlib.sha256()
+        for path, state in sorted(states.items()):
+            digest.update(path.encode("utf-8"))
+            digest.update(repr(state).encode("utf-8"))
+        return digest.hexdigest()
 
     @classmethod
     def capture_paths(cls, work_dir: Path, paths: Iterable[str]) -> "HitlWorkspaceWriteGuard":
@@ -74,7 +86,8 @@ class HitlWorkspaceWriteGuard:
         changed = sorted(
             path
             for path in set(self.baseline) | set(current)
-            if self.baseline.get(path) != current.get(path) and path not in allowed
+            if self.baseline.get(path) != current.get(path)
+            and not self._path_is_allowed(path, allowed)
         )
         if not changed:
             return {"valid": True, "issues": []}
@@ -82,6 +95,11 @@ class HitlWorkspaceWriteGuard:
             "valid": False,
             "issues": ["Runtime detected writes outside this HITL boundary: " + ", ".join(changed)],
         }
+
+    @staticmethod
+    def _path_is_allowed(path: str, allowed: set[str]) -> bool:
+        """Allow an explicitly permitted path and its required parent directories."""
+        return path in allowed or any(allowed_path.startswith(path + "/") for allowed_path in allowed)
 
     def _current_snapshot(self) -> dict[str, _FileState]:
         if self.tracked_paths is not None:
@@ -92,17 +110,41 @@ class HitlWorkspaceWriteGuard:
     def _snapshot(root: Path, *, include_hidden: bool) -> dict[str, _FileState]:
         states: dict[str, _FileState] = {}
         for path in root.rglob("*"):
-            if not path.is_file() or path.is_symlink():
-                continue
             relative = path.relative_to(root).as_posix()
             if not include_hidden and HitlWorkspaceWriteGuard._is_excluded(relative):
                 continue
-            stats = path.stat()
-            states[relative] = _FileState(
-                kind="file",
-                size=stats.st_size,
-                modified_ns=stats.st_mtime_ns,
-            )
+            try:
+                stats = path.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(stats.st_mode):
+                states[relative] = _FileState(
+                    kind="symlink",
+                    size=stats.st_size,
+                    modified_ns=stats.st_mtime_ns,
+                    sha256=os.readlink(path),
+                )
+            elif stat.S_ISREG(stats.st_mode):
+                states[relative] = _FileState(
+                    kind="file",
+                    size=stats.st_size,
+                    modified_ns=stats.st_mtime_ns,
+                    sha256=HitlWorkspaceWriteGuard._sha256(path),
+                )
+            elif stat.S_ISDIR(stats.st_mode):
+                # Directory entries make empty-directory creation/removal
+                # visible without recursively copying workspace contents.
+                states[relative] = _FileState(
+                    kind="directory",
+                    size=stats.st_size,
+                    modified_ns=stats.st_mtime_ns,
+                )
+            else:
+                states[relative] = _FileState(
+                    kind="other",
+                    size=stats.st_size,
+                    modified_ns=stats.st_mtime_ns,
+                )
         return states
 
     @staticmethod

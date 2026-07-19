@@ -52,6 +52,8 @@ class LLMBackend:
         *,
         timeout_seconds: Optional[float] = None,
         disable_native_tools: bool = False,
+        mcp_config_path: Optional[str] = None,
+        allowed_mcp_tools: Optional[List[str]] = None,
     ) -> LLMResponse:
         """
         Send messages to the LLM and return the response.
@@ -74,6 +76,8 @@ class LLMBackend:
                 tools,
                 timeout_seconds=timeout_seconds,
                 disable_native_tools=disable_native_tools,
+                mcp_config_path=mcp_config_path,
+                allowed_mcp_tools=allowed_mcp_tools,
             )
         elif self.backend == "anthropic_api":
             return self._send_anthropic_api(messages, tools, timeout_seconds=timeout_seconds)
@@ -89,19 +93,27 @@ class LLMBackend:
         *,
         timeout_seconds: Optional[float] = None,
         disable_native_tools: bool = False,
+        mcp_config_path: Optional[str] = None,
+        allowed_mcp_tools: Optional[List[str]] = None,
     ) -> LLMResponse:
         """
         Send via `claude -p` CLI. Constructs a single prompt from all messages
         and parses the streaming JSON response for tool_use blocks.
         """
         # Build prompt from messages
-        prompt = self._messages_to_prompt(messages, tools)
+        # When HITL supplies a real MCP surface, the CLI receives its tools
+        # natively. Do not also emit the legacy XML tool convention in text.
+        prompt = self._messages_to_prompt(messages, None if mcp_config_path else tools)
 
         # Build command
         cmd = ["claude", "-p", "--verbose", "--output-format", "stream-json"]
         if self.model:
             cmd.extend(["--model", self.model])
-        if disable_native_tools:
+        if mcp_config_path:
+            names = [str(name).strip() for name in allowed_mcp_tools or [] if str(name).strip()]
+            cmd.extend(["--mcp-config", str(mcp_config_path), "--strict-mcp-config"])
+            cmd.extend(["--tools", ",".join(names), "--dangerously-skip-permissions"])
+        elif disable_native_tools:
             # HITL manager tools are parsed and executed by the runtime. Do
             # not let the CLI agent gain a second, unmanaged tool surface.
             cmd.extend(["--bare", "--tools", ""])
@@ -132,7 +144,13 @@ class LLMBackend:
             error_msg = stderr.strip() if stderr else f"claude -p exited with code {process.returncode}"
             raise RuntimeError(f"CLI backend error: {error_msg}")
 
-        return self._parse_cli_response(stdout)
+        response = self._parse_cli_response(stdout)
+        if mcp_config_path:
+            # Claude executed these MCP calls inside its provider turn. The
+            # HITL bridge already recorded and validated them, so the outer
+            # ReAct loop must not replay them as legacy XML tool calls.
+            response.tool_calls = []
+        return response
 
     @staticmethod
     def _terminate_process_group(process: subprocess.Popen[str]) -> None:
@@ -165,6 +183,15 @@ class LLMBackend:
         """
         parts = []
 
+        def render_untrusted(payload: Dict[str, Any]) -> str:
+            """Encode transcript data so it cannot close the CLI prompt tags."""
+            encoded = json.dumps(payload, ensure_ascii=False)
+            return (
+                encoded.replace("<", "\\u003c")
+                .replace(">", "\\u003e")
+                .replace("&", "\\u0026")
+            )
+
         for msg in messages:
             role = msg["role"]
             content = msg.get("content", "")
@@ -172,12 +199,18 @@ class LLMBackend:
             if role == "system":
                 parts.append(content)
             elif role == "user":
-                parts.append(f"\n<user>\n{content}\n</user>")
+                parts.append(f"\n<user_data>\n{render_untrusted({'content': content})}\n</user_data>")
             elif role == "assistant":
-                parts.append(f"\n<assistant>\n{content}\n</assistant>")
+                parts.append(
+                    f"\n<assistant_data>\n{render_untrusted({'content': content})}\n</assistant_data>"
+                )
             elif role == "tool_result":
                 tool_call_id = msg.get("tool_call_id", "")
-                parts.append(f"\n<tool_result tool_call_id=\"{tool_call_id}\">\n{content}\n</tool_result>")
+                parts.append(
+                    "\n<tool_result_data>\n"
+                    f"{render_untrusted({'tool_call_id': tool_call_id, 'content': content})}"
+                    "\n</tool_result_data>"
+                )
 
         # Append tool definitions if provided
         if tools:

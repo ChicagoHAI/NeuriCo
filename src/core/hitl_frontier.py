@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -196,6 +197,34 @@ class HitlFrontierStore:
             selected=self._require_sha(node_sha, "root node SHA"),
             active=[self._require_sha(node_sha, "root node SHA")],
         )
+        self._retain_git_object("frontier", self._require_sha(node_sha, "root node SHA"))
+
+    def _retain_git_object(self, kind: str, name: str, node_sha: str | None = None) -> None:
+        """Keep runtime-owned frontier objects reachable across Git maintenance.
+
+        Unit-level frontier stores are intentionally usable without a Git
+        repository. In a real workspace, failure to create the private ref is
+        a durability failure, not something to silently ignore.
+        """
+        git_dir = self.paths.work_dir / ".git"
+        if not git_dir.exists():
+            return
+        if kind not in {"frontier", "attempt"}:
+            raise HitlFrontierError(f"Invalid private HITL ref kind: {kind}")
+        ref_name = self._require_sha(name, "private HITL ref name")
+        target = self._require_sha(node_sha or name, "private HITL ref target SHA")
+        ref = f"refs/neurico/hitl/{kind}s/{ref_name}"
+        completed = subprocess.run(
+            ["git", "-C", str(self.paths.work_dir), "update-ref", ref, target],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "unknown Git error").strip()
+            raise HitlFrontierError(f"Could not retain HITL {kind} Git ref: {detail}")
 
     def _write_state(self, *, selected: str | None, active: List[str]) -> None:
         payload = self._read_json(self.paths.state) if self.paths.state.exists() else {}
@@ -284,6 +313,8 @@ class HitlFrontierStore:
                     if candidate not in active:
                         active.append(candidate)
                     self._write_state(selected=candidate, active=active)
+                    self._retain_git_object("frontier", candidate)
+                self._retain_git_object("attempt", f"{parent}-{attempt_id}", candidate)
                 return existing
             raise HitlFrontierError(
                 "A different finalized HITL attempt already exists for this candidate node"
@@ -300,6 +331,7 @@ class HitlFrontierStore:
             reason_key: str(reason).strip(),
         }
         self._write_json(attempt_path, attempt)
+        self._retain_git_object("attempt", f"{parent}-{attempt_id}", candidate)
 
         if accepted:
             self._write_node(
@@ -315,6 +347,7 @@ class HitlFrontierStore:
             if candidate not in active:
                 active.append(candidate)
             self._write_state(selected=candidate, active=active)
+            self._retain_git_object("frontier", candidate)
         return attempt
 
     def select(self, node_sha: str) -> Dict[str, Any]:

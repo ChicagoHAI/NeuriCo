@@ -193,9 +193,15 @@ class ResearchState:
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.state, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.state_file)
-        except OSError:
-            pass
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
 
     # -------------------------------------------------------------- mutate
     def _next_id(self, key: str, prefix: str) -> str:

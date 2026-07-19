@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import inspect
+import subprocess
 
 import pytest
 
@@ -86,6 +87,55 @@ def test_current_frontier_worker_view_includes_selected_node_identity(tmp_path: 
     assert "plan" not in current
 
 
+def test_frontier_retains_root_and_attempt_commits_with_private_git_refs(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "config", "user.name", "NeuriCo Test"], cwd=tmp_path, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"], cwd=tmp_path, check=True
+    )
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("root\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "root"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+    root = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+    tracked.write_text("candidate\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "candidate"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+    candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+
+    store = HitlFrontierStore(tmp_path)
+    store.initialize_root(
+        node_sha=root,
+        plan_text="root plan",
+        objective_score={"results": {"score": 1}},
+        reason_for_acceptance="Initial experiment completed without scoring error.",
+    )
+    store.finalize_attempt(
+        parent_node_sha=root,
+        candidate_node_sha=candidate,
+        attempt_id="attempt_1",
+        proposal_idea_id="I1",
+        proposal_type="exploration",
+        objective_score={"results": {"score": 2}},
+        accepted=True,
+        reason="This is a distinct direction worth retaining.",
+        plan_text="candidate plan",
+    )
+
+    assert subprocess.check_output(
+        ["git", "rev-parse", "refs/neurico/hitl/frontiers/" + root], cwd=tmp_path, text=True
+    ).strip() == root
+    assert subprocess.check_output(
+        ["git", "rev-parse", "refs/neurico/hitl/frontiers/" + candidate], cwd=tmp_path, text=True
+    ).strip() == candidate
+    assert subprocess.check_output(
+        ["git", "rev-parse", f"refs/neurico/hitl/attempts/{root}-attempt_1"],
+        cwd=tmp_path,
+        text=True,
+    ).strip() == candidate
+
+
 def test_pruning_removes_only_active_membership_and_keeps_audit_node(tmp_path: Path) -> None:
     store = HitlFrontierStore(tmp_path)
     store.initialize_root(
@@ -150,26 +200,6 @@ def test_public_frontier_audit_is_an_exact_nodes_tree_mirror(tmp_path: Path) -> 
         assert (audit_nodes / relative_path).read_bytes() == (
             store.paths.nodes / relative_path
         ).read_bytes()
-
-
-def test_hitl_controller_delegates_compute_artifact_archiving(tmp_path: Path) -> None:
-    archived = []
-    controller = HitlAutoResearchController(
-        idea={},
-        idea_id="idea",
-        work_dir=tmp_path,
-        history_root=tmp_path / "history",
-        proposal_generator=lambda *_args, **_kwargs: {},
-        scorer=lambda _work_dir: {"success": True},
-        archive_attempt_artifacts=lambda work_dir, attempt_dir: archived.append(
-            (work_dir, attempt_dir)
-        ),
-    )
-
-    attempt_dir = tmp_path / "history" / "parent" / "attempt_1"
-    controller._archive_attempt_artifacts(attempt_dir)
-
-    assert archived == [(tmp_path, attempt_dir)]
 
 
 def test_accepted_exploitation_inherits_direction_attempt_history_without_copying_it(

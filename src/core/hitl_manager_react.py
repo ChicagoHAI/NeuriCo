@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import json
 import hashlib
+import http.server
 import inspect
+import os
 import queue
+import secrets
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -301,6 +305,11 @@ class HitlManager:
         self._generation_lock = threading.Lock()
         self._generation = 0
         self._defer_current_turn = False
+        self._mcp_server: Optional[http.server.ThreadingHTTPServer] = None
+        self._mcp_thread: Optional[threading.Thread] = None
+        self._mcp_url = ""
+        self._mcp_token = ""
+        self._mcp_config_path = self.conversation.context.manager_dir / "manager_mcp.json"
         register = getattr(self.channel, "set_resolution_reply_handler", None)
         if callable(register):
             register(self.submit_resolution_reply)
@@ -374,6 +383,126 @@ class HitlManager:
     def _tools_for_current_runtime_boundary(self) -> List[Dict[str, Any]]:
         allowed = self._available_tool_names()
         return [tool for tool in self.tool_definitions if tool["name"] in allowed]
+
+    @staticmethod
+    def _mcp_tool_name(tool_name: str) -> str:
+        return f"mcp__neurico_hitl_manager__{tool_name}"
+
+    def _uses_cli_mcp_bridge(self) -> bool:
+        return getattr(self.backend, "backend", None) == "cli"
+
+    def _ensure_cli_mcp_bridge(self) -> None:
+        """Start the private manager bridge used only by HITL CLI turns."""
+        if self._mcp_server is not None:
+            return
+        manager = self
+        token = secrets.token_urlsafe(24)
+
+        class ManagerMcpHandler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: Any) -> None:
+                return
+
+            def do_POST(self) -> None:
+                if self.headers.get("Authorization", "") != f"Bearer {token}":
+                    self._send(403, {"error": "Invalid HITL manager MCP token."})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length < 0 or length > 1_000_000:
+                        raise ValueError("MCP request exceeds the runtime size limit.")
+                    payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+                    if not isinstance(payload, dict):
+                        raise ValueError("MCP request payload must be an object.")
+                    if self.path == "/mcp/tools":
+                        self._send(200, {"ok": True, "tools": manager._mcp_tools()})
+                        return
+                    if self.path == "/mcp/call":
+                        content, is_error = manager._execute_mcp_tool(
+                            str(payload.get("name", "")), payload.get("arguments") or {}
+                        )
+                        self._send(200, {"ok": True, "content": content, "is_error": is_error})
+                        return
+                    self._send(404, {"error": "Unknown HITL manager MCP endpoint."})
+                except (ValueError, json.JSONDecodeError) as exc:
+                    self._send(400, {"error": str(exc)})
+                except Exception as exc:
+                    self._send(503, {"error": f"HITL manager MCP request failed: {exc}"})
+
+            def _send(self, status: int, payload: Dict[str, Any]) -> None:
+                encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ManagerMcpHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+        self._mcp_server = server
+        self._mcp_thread = thread
+        self._mcp_url = f"http://{host}:{port}"
+        self._mcp_token = token
+        adapter = Path(__file__).with_name("hitl_manager_mcp.py")
+        config = {
+            "mcpServers": {
+                "neurico_hitl_manager": {
+                    "command": sys.executable,
+                    "args": [str(adapter)],
+                    "env": {
+                        "NEURICO_HITL_MANAGER_URL": self._mcp_url,
+                        "NEURICO_HITL_MANAGER_TOKEN": token,
+                    },
+                }
+            }
+        }
+        self._mcp_config_path.write_text(json.dumps(config), encoding="utf-8")
+        os.chmod(self._mcp_config_path, 0o600)
+
+    def _mcp_tools(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "name": self._mcp_tool_name(str(tool["name"])),
+                "description": str(tool.get("description", "")),
+                "inputSchema": dict(tool.get("parameters") or {}),
+            }
+            for tool in self._tools_for_current_runtime_boundary()
+        ]
+
+    def _execute_mcp_tool(self, name: str, arguments: Any) -> tuple[str, bool]:
+        prefix = "mcp__neurico_hitl_manager__"
+        if not name.startswith(prefix):
+            return "Error: unknown HITL manager MCP tool. Inspect the available tools and retry.", True
+        tool_name = name.removeprefix(prefix)
+        if not isinstance(arguments, dict):
+            return "Error: MCP tool arguments must be an object. Correct the call and retry.", True
+        call_id = f"mcp_{secrets.token_hex(12)}"
+        with self._turn_lock:
+            self.conversation.append_tool_call(
+                call_id=call_id, name=tool_name, arguments=dict(arguments)
+            )
+            result = HitlManagerToolExecutor(self).execute(tool_name, dict(arguments))
+            self.conversation.append_tool_result(
+                call_id=call_id, tool_name=tool_name, content=result
+            )
+        return result, result.startswith("Error:")
+
+    def _stop_cli_mcp_bridge(self) -> None:
+        server = self._mcp_server
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if self._mcp_thread is not None and self._mcp_thread.is_alive():
+            self._mcp_thread.join(timeout=1)
+        self._mcp_server = None
+        self._mcp_thread = None
+        self._mcp_url = ""
+        self._mcp_token = ""
+        try:
+            self._mcp_config_path.unlink()
+        except FileNotFoundError:
+            pass
 
     def is_tool_available(self, tool_name: str) -> bool:
         return tool_name in self._available_tool_names()
@@ -450,6 +579,7 @@ class HitlManager:
         self._turns.put(_Turn("runtime", ""))
         if self._thread is not None:
             self._thread.join(timeout=1)
+        self._stop_cli_mcp_bridge()
 
     def reload_after_runtime_restore(self) -> None:
         """Discard failed-attempt manager caches after private Git rollback."""
@@ -1623,6 +1753,7 @@ class HitlManager:
         """
         result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
 
+        parameters: Dict[str, inspect.Parameter] = {}
         try:
             parameters = inspect.signature(self.backend.send).parameters
             supports_adapter_contract = (
@@ -1637,16 +1768,28 @@ class HitlManager:
             )
         except (TypeError, ValueError):
             supports_adapter_contract = False
+        use_cli_mcp = self._uses_cli_mcp_bridge() and (
+            "mcp_config_path" in parameters
+            or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+        )
+        if use_cli_mcp:
+            self._ensure_cli_mcp_bridge()
 
         def call_backend() -> None:
             try:
                 if supports_adapter_contract:
-                    response = self.backend.send(
-                        messages,
-                        tools,
-                        timeout_seconds=self.backend_timeout_seconds,
-                        disable_native_tools=True,
-                    )
+                    kwargs: Dict[str, Any] = {
+                        "timeout_seconds": self.backend_timeout_seconds,
+                        "disable_native_tools": True,
+                    }
+                    provider_tools: List[Dict[str, Any]] = tools
+                    if use_cli_mcp:
+                        kwargs["mcp_config_path"] = str(self._mcp_config_path)
+                        kwargs["allowed_mcp_tools"] = [
+                            self._mcp_tool_name(str(tool["name"])) for tool in tools
+                        ]
+                        provider_tools = []
+                    response = self.backend.send(messages, provider_tools, **kwargs)
                 else:
                     response = self.backend.send(messages, tools)
                 result.put((True, response))

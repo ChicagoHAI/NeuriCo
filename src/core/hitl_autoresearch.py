@@ -14,6 +14,8 @@ import inspect
 import json
 import re
 import shutil
+import subprocess
+import sys
 from datetime import datetime
 
 from core.autoresearch import (
@@ -41,7 +43,6 @@ from core.hitl_frontier import HitlFrontierStore
 from core.hitl_git_state import HitlGitStateStore
 from core.hitl_runtime_state import HitlRuntimeState
 from core.hitl_scoring_workspace import run_isolated_scorer
-from core.hitl_compute_hooks import archive_hitl_compute_artifacts, hitl_compute_workspace
 from core.hitl_whiteboard import (
     HitlAutoResearchWhiteboard,
     clear_hitl_current_attempt_marker,
@@ -54,7 +55,6 @@ from core.scoring_seal import (
 )
 
 HitlCommentModeHook = Callable[..., Dict[str, Any]]
-HitlArtifactArchiveHook = Callable[[Path, Path], Optional[Path]]
 MAX_ACTIVE_HITL_FRONTIER_NODES = 10
 
 
@@ -558,7 +558,6 @@ class HitlAutoResearchController:
         comparator: Optional[ScoringResultComparator] = None,
         hitl_runtime: Optional[HitlRuntime] = None,
         hitl_comment_mode: Optional[HitlCommentModeHook] = None,
-        archive_attempt_artifacts: Optional[HitlArtifactArchiveHook] = None,
         pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
     ):
         self.idea = idea
@@ -571,7 +570,6 @@ class HitlAutoResearchController:
         self.scorer = scorer
         self.hitl_runtime = hitl_runtime
         self.hitl_comment_mode = hitl_comment_mode
-        self.archive_attempt_artifacts = archive_attempt_artifacts or (lambda _work_dir, _attempt_dir: None)
         self.hitl_frontier = HitlFrontierStore(self.work_dir)
         self.pending_hitl_recovery = pending_hitl_recovery
 
@@ -1221,7 +1219,6 @@ class HitlAutoResearchController:
                 "error": f"AutoResearch proposal/comment stage failed: {e}",
             }
         if pre_scoring_error is not None:
-            self._archive_attempt_artifacts(attempt_dir)
             candidate_summary = ScoreSummary(
                 valid=False,
                 source="candidate",
@@ -1423,8 +1420,13 @@ class HitlAutoResearchController:
             if cached_score and cached_score.get("status") == "scored":
                 scorer_result = dict(cached_score.get("scorer_result") or {})
                 candidate_sha = str(cached_score.get("scored_checkpoint_sha", "")).strip()
-                if not scorer_result or not candidate_sha:
+                source_sha = str(cached_score.get("source_checkpoint_sha", "")).strip()
+                if not scorer_result or not source_sha:
                     raise RuntimeError("Persisted isolated scoring handoff is incomplete.")
+                if scorer_result.get("success") and not candidate_sha:
+                    raise RuntimeError(
+                        "Persisted successful isolated scoring handoff is missing its scored checkpoint."
+                    )
             else:
                 source_sha = str((cached_score or {}).get("source_checkpoint_sha", "")).strip()
                 if source_sha:
@@ -1455,10 +1457,11 @@ class HitlAutoResearchController:
                         "error": f"AutoResearch isolated scorer raised an exception: {exc}",
                     }
                 results_path = self._ensure_results_json(stage="candidate", scorer_result=scorer_result)
-                self._archive_attempt_artifacts(attempt_dir)
-                candidate_sha = self.checkpoints.create_checkpoint(
-                    "HITL AutoResearch candidate scored workspace"
-                ).sha
+                candidate_sha = str(scorer_result.get("scored_checkpoint_sha", "")).strip()
+                if scorer_result.get("success") and not candidate_sha:
+                    raise RuntimeError(
+                        "Runtime isolated scorer succeeded without an immutable scored checkpoint."
+                    )
                 runtime_state.update_pending_worker_command(
                     request_key,
                     isolated_scoring={
@@ -1503,7 +1506,7 @@ class HitlAutoResearchController:
                 )
                 return
 
-            if candidate_sha == parent_node_id:
+            if not self._candidate_changes_parent(parent_node_id, source_sha):
                 score_validation = candidate_summary.as_dict()
                 score_validation["valid"] = False
                 score_validation["error"] = (
@@ -1690,6 +1693,41 @@ class HitlAutoResearchController:
             scorer=self.scorer,
         )
 
+    def _candidate_changes_parent(self, parent_sha: str, source_sha: str) -> bool:
+        """Return whether the pre-score candidate changed public research files.
+
+        The isolated scorer adds ``scoring/results.json`` in its own detached
+        worktree. Comparing the scored commit with its parent would therefore
+        always see a change even when the worker submitted a no-op experiment.
+        Compare the runtime-owned source checkpoint instead, excluding only the
+        scorer output that can be present in resumed workspaces.
+        """
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.work_dir),
+                "diff",
+                "--name-only",
+                str(parent_sha),
+                str(source_sha),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "unknown Git error").strip()
+            raise RuntimeError(f"Runtime could not compare candidate and parent trees: {detail}")
+        changed = {
+            path.strip()
+            for path in completed.stdout.splitlines()
+            if path.strip() and path.strip() != "scoring/results.json"
+        }
+        return bool(changed)
+
     def _call_proposal_generator(
         self,
         *,
@@ -1872,11 +1910,6 @@ class HitlAutoResearchController:
         self._revert_whiteboard_for(attempt_id)
         runtime_state.complete_rejected_whiteboard_cleanup(attempt_id)
 
-    def _archive_attempt_artifacts(self, attempt_dir: Path) -> None:
-        """Delegate backend-specific artifact handling to the runtime adapter."""
-        self.archive_attempt_artifacts(self.work_dir, Path(attempt_dir))
-
-
 def run_hitl_autoresearch_loop(
     idea: Dict[str, Any],
     idea_id: str,
@@ -1902,7 +1935,7 @@ def run_hitl_autoresearch_loop(
     from agents.autoresearch_proposer import run_autoresearch_proposer
     from agents.comment_handler import build_comment_handler_launch
     from core.agent_runner import run_prebuilt_cli_agent
-    from core.scorer import _resolve_python_executable, run_scorer
+    from core.scorer import run_scorer
 
     work_dir = Path(work_dir)
     if templates_dir is None:
@@ -1943,40 +1976,41 @@ def run_hitl_autoresearch_loop(
             raise RuntimeError(
                 "HITL comment-handler logs require a runtime-owned attempt directory."
             )
-        with hitl_compute_workspace(comment_idea, comment_work_dir) as dsi_remote_info:
-            launch = build_comment_handler_launch(
-                idea=comment_idea,
-                work_dir=comment_work_dir,
-                provider=provider,
-                templates_dir=templates_dir,
-                full_permissions=full_permissions,
-                dsi_remote_info=dsi_remote_info,
-                prompt_override=prompt_override,
-                prompt_override_only=True,
-                logs_dir=Path(logs_dir),
-                log_prefix=log_prefix,
-                env_extra=env_extra,
+        launch = build_comment_handler_launch(
+            idea=comment_idea,
+            work_dir=comment_work_dir,
+            provider=provider,
+            templates_dir=templates_dir,
+            full_permissions=full_permissions,
+            dsi_remote_info=None,
+            prompt_override=prompt_override,
+            prompt_override_only=True,
+            logs_dir=Path(logs_dir),
+            log_prefix=log_prefix,
+            env_extra=env_extra,
+        )
+        result = run_prebuilt_cli_agent(
+            command_argv=launch["command_argv"],
+            prompt=launch["prompt"],
+            work_dir=launch["work_dir"],
+            log_file=launch["log_file"],
+            transcript_file=launch["transcript_file"],
+            env=launch["env"],
+            timeout=comment_timeout,
+        )
+        if result.get("timed_out"):
+            result["error"] = (
+                f"AutoResearch HITL comment handler timed out after {comment_timeout}s"
             )
-            result = run_prebuilt_cli_agent(
-                command_argv=launch["command_argv"],
-                prompt=launch["prompt"],
-                work_dir=launch["work_dir"],
-                log_file=launch["log_file"],
-                transcript_file=launch["transcript_file"],
-                env=launch["env"],
-                timeout=comment_timeout,
-            )
-            if result.get("timed_out"):
-                result["error"] = (
-                    f"AutoResearch HITL comment handler timed out after {comment_timeout}s"
-                )
-            return result
+        return result
 
     def scorer(score_work_dir: Path) -> Dict[str, Any]:
         return run_scorer(
             work_dir=score_work_dir,
             timeout=scorer_timeout,
-            python_executable=_resolve_python_executable(work_dir),
+            # HITL scoring is a runtime action, so use the interpreter that
+            # launched NeuriCo rather than a worker-controlled .venv.
+            python_executable=sys.executable,
         )
 
     controller = HitlAutoResearchController(
@@ -1997,11 +2031,6 @@ def run_hitl_autoresearch_loop(
             )
         ),
         hitl_comment_mode=hitl_comment_mode,
-        archive_attempt_artifacts=lambda archive_work_dir, attempt_dir: archive_hitl_compute_artifacts(
-            idea,
-            archive_work_dir,
-            attempt_dir,
-        ),
         pending_hitl_recovery=pending_hitl_recovery,
     )
     return controller.run(iterations=iterations)

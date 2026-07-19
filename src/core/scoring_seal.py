@@ -6,7 +6,9 @@ internals out of the workspace while an agent is modifying experiment artifacts.
 """
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+import hashlib
+import json
 import shutil
 
 
@@ -16,6 +18,74 @@ SEALED_PATHS: list[str] = [
     "scoring/rule_maker_log.md",
     "data/.test/",
 ]
+SEALED_REQUIRED_PATHS = ("scoring/eval.py", "scoring/targets.json")
+SEALED_MANIFEST_NAME = "evaluator_manifest.json"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_entry(path: Path) -> dict[str, Any]:
+    stats = path.lstat()
+    if path.is_symlink():
+        raise RuntimeError(f"Sealed evaluator payload cannot contain symlink: {path}")
+    if path.is_file():
+        return {"kind": "file", "sha256": _sha256_file(path), "size": stats.st_size}
+    if path.is_dir():
+        files: list[tuple[str, str]] = []
+        for child in sorted(path.rglob("*")):
+            if child.is_symlink():
+                raise RuntimeError(f"Sealed evaluator payload cannot contain symlink: {child}")
+            if child.is_file():
+                files.append((child.relative_to(path).as_posix(), _sha256_file(child)))
+        digest = hashlib.sha256(
+            json.dumps(files, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()
+        return {"kind": "directory", "sha256": digest, "files": len(files)}
+    raise RuntimeError(f"Unsupported sealed evaluator payload entry: {path}")
+
+
+def _write_manifest(sealed_dir: Path, moved: list[str]) -> None:
+    entries = {
+        relative.rstrip("/"): _manifest_entry(sealed_dir / relative.rstrip("/"))
+        for relative in moved
+    }
+    payload = {"version": 1, "required": list(SEALED_REQUIRED_PATHS), "entries": entries}
+    (sealed_dir / SEALED_MANIFEST_NAME).write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def verify_sealed_scoring_manifest(sealed_dir: Path) -> str:
+    """Validate the complete immutable evaluator payload and return its digest."""
+    sealed_dir = Path(sealed_dir)
+    manifest_path = sealed_dir / SEALED_MANIFEST_NAME
+    try:
+        raw = manifest_path.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Missing or unreadable sealed evaluator manifest.") from exc
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise RuntimeError("Invalid sealed evaluator manifest version.")
+    entries = payload.get("entries")
+    required = payload.get("required")
+    if not isinstance(entries, dict) or required != list(SEALED_REQUIRED_PATHS):
+        raise RuntimeError("Invalid sealed evaluator manifest structure.")
+    for relative in SEALED_REQUIRED_PATHS:
+        if relative not in entries:
+            raise RuntimeError(f"Sealed evaluator manifest is missing required {relative}.")
+    for relative, expected in entries.items():
+        if not isinstance(relative, str) or not isinstance(expected, dict):
+            raise RuntimeError("Invalid sealed evaluator manifest entry.")
+        actual = _manifest_entry(sealed_dir / relative)
+        if actual != expected:
+            raise RuntimeError(f"Sealed evaluator payload changed: {relative}")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def sealed_dir_for(work_dir: Path) -> Path:
@@ -63,6 +133,8 @@ def seal_scoring_files(work_dir: Path) -> Optional[Path]:
             pass
         print("🔒 Nothing to seal (rule_maker outputs not found).")
         return None
+
+    _write_manifest(sealed_dir, moved)
 
     print(f"🔒 Sealed {len(moved)} scoring files to {sealed_dir}:")
     for rel in moved:
@@ -132,6 +204,7 @@ def unseal_scoring_files(
         return
 
     try:
+        (sealed_dir / SEALED_MANIFEST_NAME).unlink(missing_ok=True)
         has_files = (
             any(path.is_file() for path in sealed_dir.rglob("*")) if sealed_dir.exists() else False
         )

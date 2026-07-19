@@ -267,7 +267,7 @@ def run_resource_finder(
             print(f"⚠️  Agent execution finished with return code: {return_code}")
 
         if completion_mode == "hitl_runtime":
-            success = return_code == 0 and not launch["timed_out"]
+            success = bool(launch.get("success"))
             print("ℹ️  HITL runtime completion mode; orchestrator will review finish state.")
         else:
             # Check for completion marker
@@ -332,6 +332,9 @@ def run_resource_finder(
         "log_file": str(log_file),
         "transcript_file": str(transcript_file),
         "elapsed_time": time.time() - start_time,
+        "background_processes_terminated": bool(launch.get("background_processes_terminated"))
+        if completion_mode == "hitl_runtime"
+        else False,
     }
 
 
