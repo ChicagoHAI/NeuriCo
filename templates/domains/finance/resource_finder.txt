@@ -7,8 +7,8 @@ papers, catalog empirical strategies and data sources used in prior work, and
 prepare all resources needed for empirical analysis.
 
 This prompt guides you through a systematic resource gathering workflow for
-empirical finance research. Complete all tasks and create a completion marker
-when finished.
+empirical finance research. Complete all tasks{% if not hitl_runtime_completion %} and create a completion marker
+when finished{% else %} and request completion through the HITL runtime when finished{% endif %}.
 
 CRITICAL: WORKSPACE SETUP AND DIRECTORY SAFETY
 ────────────────────────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ STEP 1: SPLIT PDF INTO CHUNKS
 
 For papers you want to read in detail, run the chunker:
 ```bash
-python .claude/skills/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
+python {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
 ```
 
 Options:
@@ -172,7 +172,7 @@ PAPER FINDER (Primary Method - Use First)
 For quality literature review and proper academic citations, ALWAYS try the
 paper-finder service first.
 
-    python .claude/skills/paper-finder/scripts/find_papers.py "your research topic"
+    python {{ skill_root }}/paper-finder/scripts/find_papers.py "your research topic"
 
 Options:
     --mode fast      Quick search (default)

@@ -119,7 +119,7 @@ STEP 1: SPLIT PDF INTO CHUNKS
 
 For papers you want to read in detail, run the chunker:
 ```bash
-python .claude/skills/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
+python {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
 ```
 
 Options:
@@ -193,10 +193,10 @@ For quality literature review and proper academic citations, ALWAYS try the
 paper-finder service first. It provides relevance-ranked results that manual
 search cannot match.
 
-    python .claude/skills/paper-finder/scripts/find_papers.py "your research topic"
+    python {{ skill_root }}/paper-finder/scripts/find_papers.py "your research topic"
 
 Example:
-    python .claude/skills/paper-finder/scripts/find_papers.py "hypothesis generation with large language models"
+    python {{ skill_root }}/paper-finder/scripts/find_papers.py "hypothesis generation with large language models"
 
 Options:
     --mode fast      Quick search (default)

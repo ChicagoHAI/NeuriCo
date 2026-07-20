@@ -61,6 +61,8 @@ def generate_rule_maker_prompt(
     work_dir: Path,
     templates_dir: Path,
     domain: Optional[str] = None,
+    *,
+    hitl_phase: Optional[str] = None,
 ) -> str:
     """
     Build the rule_maker agent's prompt.
@@ -94,10 +96,16 @@ def generate_rule_maker_prompt(
     work_dir = Path(work_dir)
     templates_dir = Path(templates_dir)
 
-    # Load the general body. It lives at templates/agents/rule_maker.txt,
-    # alongside the other per-run agents (resource_finder.txt, paper_writer.txt).
-    # Per-domain supplements live separately at templates/domains/<d>/rule_maker.txt.
-    base_path = templates_dir / "agents" / "rule_maker.txt"
+    if hitl_phase not in {None, "plan", "execution", "review"}:
+        raise ValueError(f"Unsupported HITL rule-maker phase: {hitl_phase}")
+
+    # Planning/review receive research context only. The evaluator-authoring
+    # procedure and domain supplement are execution-only in HITL mode.
+    base_path = (
+        templates_dir / "hitl" / "rule_maker_context.txt"
+        if hitl_phase in {"plan", "review"}
+        else templates_dir / "agents" / "rule_maker.txt"
+    )
     if not base_path.exists():
         raise FileNotFoundError(
             f"rule_maker base template not found at {base_path}. "
@@ -126,19 +134,22 @@ def generate_rule_maker_prompt(
     for placeholder, value in substitutions.items():
         prompt = prompt.replace(placeholder, value)
 
-    # Append per-domain supplement (if any) with a banner.
-    resolved_domain = _resolve_domain(idea, domain)
-    supplement = _load_domain_supplement(templates_dir, resolved_domain)
-    if supplement:
-        banner = "=" * 80
-        domain_label = resolved_domain.upper().replace("_", " ")
-        prompt = (
-            f"{prompt}\n\n"
-            f"{banner}\n"
-            f"           RULE MAKER DOMAIN GUIDELINES: {domain_label}\n"
-            f"{banner}\n\n"
-            f"{supplement}\n"
-        )
+    if hitl_phase in {"plan", "review"}:
+        prompt = prompt.replace("{hitl_phase}", hitl_phase)
+    else:
+        # Append per-domain supplement (if any) with a banner.
+        resolved_domain = _resolve_domain(idea, domain)
+        supplement = _load_domain_supplement(templates_dir, resolved_domain)
+        if supplement:
+            banner = "=" * 80
+            domain_label = resolved_domain.upper().replace("_", " ")
+            prompt = (
+                f"{prompt}\n\n"
+                f"{banner}\n"
+                f"           RULE MAKER DOMAIN GUIDELINES: {domain_label}\n"
+                f"{banner}\n\n"
+                f"{supplement}\n"
+            )
 
     return prompt
 
@@ -216,11 +227,11 @@ def run_rule_maker(
     templates_dir: Optional[Path] = None,
     timeout: int = 1800,  # 30 min
     full_permissions: bool = True,
-    hitl_prompt_suffix: str = "",
     completion_mode: str = "outputs",
     log_prefix: str = "rule_maker",
     include_hitl_outputs: bool = False,
     env_extra: Optional[Dict[str, str]] = None,
+    prompt_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Launch the rule_maker CLI agent.
@@ -250,9 +261,10 @@ def run_rule_maker(
     print("=" * 80)
 
     # Generate prompt and persist it for debugging
-    prompt = generate_rule_maker_prompt(idea, work_dir, templates_dir)
-    if hitl_prompt_suffix:
-        prompt = prompt.rstrip() + "\n\n" + hitl_prompt_suffix.strip() + "\n"
+    if prompt_override is not None:
+        prompt = prompt_override
+    else:
+        prompt = generate_rule_maker_prompt(idea, work_dir, templates_dir)
     prompt_file = logs_dir / f"{log_prefix}_prompt.txt"
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(prompt, encoding="utf-8")

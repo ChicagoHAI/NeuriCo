@@ -788,6 +788,8 @@ and the general workflow, ALWAYS follow the user's instructions.
         idea: Dict[str, Any],
         *,
         hitl_runtime_completion: bool = False,
+        provider: str = "claude",
+        hitl_phase: Optional[str] = None,
     ) -> str:
         """
         Generate resource finder prompt from template.
@@ -798,11 +800,19 @@ and the general workflow, ALWAYS follow the user's instructions.
         Returns:
             Complete prompt string for resource finder agent
         """
+        if hitl_phase not in {None, "plan", "execution", "review"}:
+            raise ValueError(f"Unsupported HITL resource-finder phase: {hitl_phase}")
+        if hitl_phase is not None and not hitl_runtime_completion:
+            raise ValueError("HITL resource-finder phases require HITL runtime completion mode.")
+
         idea_spec = idea.get('idea', {})
         domain = idea_spec.get('domain', 'general')
 
-        # Load template (with domain override if available)
-        template = self._load_template_with_domain_override('agents/resource_finder.txt', domain)
+        # Plan and review receive research context only. The full ordinary
+        # resource-finder procedure is execution-only in HITL mode.
+        template = ""
+        if hitl_phase in {None, "execution"}:
+            template = self._load_template_with_domain_override('agents/resource_finder.txt', domain)
 
         # Extract key information
         title = idea_spec.get('title', 'Untitled Research')
@@ -865,10 +875,22 @@ RESEARCH DOMAIN:
                         desc = repo.get('description', 'Code repository')
                         research_context += f"- {desc}\n"
                         research_context += f"  URL: {repo_url}\n"
-                        research_context += f"  → You MUST clone this repository to code/ directory\n"
+                        if hitl_phase in {"plan", "review"}:
+                            research_context += (
+                                "  → Account for this repository in the living plan; "
+                                "do not clone it in this phase.\n"
+                            )
+                        else:
+                            research_context += "  → You MUST clone this repository to code/ directory\n"
                     else:
                         research_context += f"- {repo}\n"
-                research_context += "\nThese are NOT optional - they are specified by the research author.\n"
+                if hitl_phase in {"plan", "review"}:
+                    research_context += (
+                        "\nThese repositories are required research inputs. Record their "
+                        "execution treatment in the living plan.\n"
+                    )
+                else:
+                    research_context += "\nThese are NOT optional - they are specified by the research author.\n"
 
             if 'related_work' in background:
                 research_context += f"\nRelated work:\n{background['related_work']}\n"
@@ -891,13 +913,22 @@ RESEARCH DOMAIN:
 
         research_context += "\n" + "="*79 + "\n"
 
-        # Render completion protocol explicitly. Normal NeuriCo keeps its
-        # marker-based contract; HITL receives its runtime-command contract
-        # from the caller's HITL suffix.
-        template = self.render_template(
-            template,
-            {"hitl_runtime_completion": hitl_runtime_completion},
-        )
+        if hitl_phase in {"plan", "review"}:
+            template = self.render_template(
+                self.load_template("hitl/resource_finder_context.txt"),
+                {"hitl_phase": hitl_phase},
+            )
+        else:
+            # Render completion protocol explicitly. Normal NeuriCo keeps its
+            # marker-based contract; HITL receives its runtime-command contract
+            # from the caller's HITL suffix.
+            template = self.render_template(
+                template,
+                {
+                    "hitl_runtime_completion": hitl_runtime_completion,
+                    "skill_root": f".{provider}/skills",
+                },
+            )
 
         # Combine research context with template
         # Insert research context before the main template content

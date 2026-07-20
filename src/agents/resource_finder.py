@@ -47,6 +47,8 @@ def generate_resource_finder_prompt(
     templates_dir: Path,
     *,
     hitl_runtime_completion: bool = False,
+    provider: str = "claude",
+    hitl_phase: Optional[str] = None,
 ) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
@@ -57,6 +59,8 @@ def generate_resource_finder_prompt(
     Args:
         idea: Full idea specification (YAML dict)
         templates_dir: Path to templates directory
+        provider: Provider whose workspace skill directory is referenced
+            by the rendered prompt.
 
     Returns:
         Complete prompt string for resource finder agent
@@ -68,6 +72,8 @@ def generate_resource_finder_prompt(
     return generator.generate_resource_finder_prompt(
         idea,
         hitl_runtime_completion=hitl_runtime_completion,
+        provider=provider,
+        hitl_phase=hitl_phase,
     )
 
 
@@ -78,12 +84,12 @@ def run_resource_finder(
     templates_dir: Optional[Path] = None,
     timeout: int = 2700,  # 45 minutes default
     full_permissions: bool = True,
-    hitl_prompt_suffix: str = "",
     completion_marker_name: str = ".resource_finder_complete",
     completion_mode: str = "marker",
     log_prefix: str = "resource_finder",
     include_hitl_outputs: bool = False,
     env_extra: Optional[Dict[str, str]] = None,
+    prompt_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Launch resource finder agent to gather research resources.
@@ -95,9 +101,6 @@ def run_resource_finder(
         templates_dir: Path to templates directory (auto-detected if None)
         timeout: Maximum execution time in seconds (default: 45 min)
         full_permissions: Allow full permissions to CLI agents (default: True)
-        hitl_prompt_suffix: Optional final HITL instructions appended to the
-            generated prompt. HITL uses this to put the agent in
-            plan/execute/continue mode after the normal prompt.
         completion_marker_name: Marker expected for a normal, non-HITL
             invocation. Normal resource finding uses .resource_finder_complete.
         completion_mode: "marker" preserves normal NeuriCo marker-based
@@ -138,14 +141,15 @@ def run_resource_finder(
 
     # Generate prompt
     print("📝 Generating resource finder prompt...")
-    prompt = generate_resource_finder_prompt(
-        idea,
-        templates_dir,
-        hitl_runtime_completion=(completion_mode == "hitl_runtime"),
-    )
-    if hitl_prompt_suffix:
-        prompt = prompt.rstrip() + "\n\n" + hitl_prompt_suffix.strip() + "\n"
-
+    if prompt_override is not None:
+        prompt = prompt_override
+    else:
+        prompt = generate_resource_finder_prompt(
+            idea,
+            templates_dir,
+            hitl_runtime_completion=(completion_mode == "hitl_runtime"),
+            provider=provider,
+        )
     # Save prompt for reference
     logs_dir = work_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)

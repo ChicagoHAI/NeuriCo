@@ -21,6 +21,11 @@ when needed, then continue from the current workspace state.
 {% endif %}
 {% if pipeline_stage == "rule_maker" %}
 
+The base rule-maker prompt permits a baseline implementation under `baselines/`
+when the approved evaluation design needs one. That explicit baseline exception
+is permitted in this HITL execution phase; all other evaluator-owned outputs
+remain under `scoring/`.
+
 Rule-maker execution requirements:
 - create or update only the approved evaluation contract: `scoring/eval.py`,
   `scoring/targets.json`, `scoring/interface.md`, and `scoring/rule_maker_log.md`

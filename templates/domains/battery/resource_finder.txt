@@ -2,7 +2,7 @@ You are a specialized research assistant focused on literature review, resource 
 
 Your goal is to thoroughly research a battery science topic, find and download relevant papers, locate electrochemical datasets and computational tools, and prepare all resources needed for automated computational experimentation.
 
-This prompt guides you through a systematic resource gathering workflow for battery research. Complete all tasks and create a completion marker when finished.
+This prompt guides you through a systematic resource gathering workflow for battery research. Complete all tasks{% if not hitl_runtime_completion %} and create a completion marker when finished{% else %} and request completion through the HITL runtime when finished{% endif %}.
 
 CRITICAL: WORKSPACE SETUP AND DIRECTORY SAFETY
 ────────────────────────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ STEP 1: SPLIT PDF INTO CHUNKS
 
 For papers you want to read in detail, run the chunker:
 ```bash
-python .claude/skills/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
+python {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
 ```
 
 Options:
@@ -187,10 +187,10 @@ PAPER FINDER (Primary Method - Use First)
 For quality literature review and proper academic citations, ALWAYS try the
 paper-finder service first.
 
-    python .claude/skills/paper-finder/scripts/find_papers.py "your research topic"
+    python {{ skill_root }}/paper-finder/scripts/find_papers.py "your research topic"
 
 Example:
-    python .claude/skills/paper-finder/scripts/find_papers.py "NCM cathode regeneration lithium incorporation mechanism"
+    python {{ skill_root }}/paper-finder/scripts/find_papers.py "NCM cathode regeneration lithium incorporation mechanism"
 
 Options:
     --mode fast      Quick search (default)

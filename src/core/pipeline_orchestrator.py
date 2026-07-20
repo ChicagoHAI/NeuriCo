@@ -30,8 +30,12 @@ import sys
 from datetime import datetime
 import time
 
-from agents.resource_finder import run_resource_finder
-from agents.rule_maker import run_rule_maker, validate_rule_maker_outputs
+from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
+from agents.rule_maker import (
+    generate_rule_maker_prompt,
+    run_rule_maker,
+    validate_rule_maker_outputs,
+)
 from agents.rule_maker_bootstrap import run_bootstrap_rule_maker
 from agents.manifest_trimmer import make_trimmer_callable
 from core.scorer import run_scorer
@@ -708,6 +712,16 @@ class ResearchPipelineOrchestrator:
         )
         hitl_state_store = HitlGitStateStore(self.work_dir)
         hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
+        worker_prompt_contexts = {
+            phase: generate_resource_finder_prompt(
+                idea,
+                self.templates_dir,
+                hitl_runtime_completion=True,
+                provider=provider,
+                hitl_phase=phase,
+            )
+            for phase in ("plan", "execution", "review")
+        }
 
         def resource_artifact_validator() -> Dict[str, Any]:
             required = ("literature_review.md", "resources.md")
@@ -741,18 +755,18 @@ class ResearchPipelineOrchestrator:
             return failed
 
         def run_worker_with_replacements(
-            *, suffix: str, log_prefix: str, phase: str
+            *, prompt: str, log_prefix: str, phase: str
         ) -> tuple[Dict[str, Any], Dict[str, Any]]:
             """Run an HITL worker and any bounded runtime-owned replacements."""
 
             def run_worker(
-                worker_suffix: str,
+                worker_prompt: str,
                 worker_log_prefix: str,
                 *,
                 record_continuation: bool = True,
             ) -> Dict[str, Any]:
                 if record_continuation:
-                    runtime.register_worker_prompt(worker_suffix)
+                    runtime.register_worker_prompt(worker_prompt)
                 return run_resource_finder(
                     idea=idea,
                     work_dir=self.work_dir,
@@ -760,14 +774,14 @@ class ResearchPipelineOrchestrator:
                     templates_dir=self.templates_dir,
                     timeout=timeout,
                     full_permissions=full_permissions,
-                    hitl_prompt_suffix=worker_suffix,
                     completion_mode="hitl_runtime",
                     log_prefix=worker_log_prefix,
                     include_hitl_outputs=True,
                     env_extra=runtime.idea_tool_env(),
+                    prompt_override=worker_prompt,
                 )
 
-            result = run_worker(suffix, log_prefix)
+            result = run_worker(prompt, log_prefix)
             finish = runtime.handle_worker_exit_after_finish(
                 result, phase=phase, worker_name="resource_finder"
             )
@@ -795,9 +809,13 @@ class ResearchPipelineOrchestrator:
                     # The same validator is retained when runtime transitions
                     # this live worker from plan to execution.
                     phase_finish_validator=resource_artifact_validator,
+                    worker_prompt_contexts=worker_prompt_contexts,
                 )
                 result, finish = run_worker_with_replacements(
-                    suffix=runtime.plan_prompt_block(),
+                    prompt=runtime.compose_worker_prompt(
+                        hitl_stage="plan",
+                        phase_prompt=runtime.plan_prompt_block(),
+                    ),
                     log_prefix="resource_finder_hitl_plan",
                     phase="stage",
                 )
@@ -822,9 +840,13 @@ class ResearchPipelineOrchestrator:
                 hitl_stage="execution",
                 actor="resource_finder",
                 phase_finish_validator=resource_artifact_validator,
+                worker_prompt_contexts=worker_prompt_contexts,
             )
             result, finish = run_worker_with_replacements(
-                suffix=runtime.execution_prompt_block(mode="execute"),
+                prompt=runtime.compose_worker_prompt(
+                    hitl_stage="execution",
+                    phase_prompt=runtime.execution_prompt_block(mode="execute"),
+                ),
                 log_prefix="resource_finder_hitl_execute_1",
                 phase="execute",
             )
@@ -900,7 +922,7 @@ class ResearchPipelineOrchestrator:
         full_permissions: bool,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
-        hitl_prompt_suffix: str = "",
+        runtime_prompt: Optional[str] = None,
         log_prefix: str = "execution",
         track_pipeline_state: bool = True,
         env_extra: Optional[Dict[str, str]] = None,
@@ -934,13 +956,28 @@ class ResearchPipelineOrchestrator:
                 dsi_remote_info = create_remote_workspace(self.work_dir)
                 print(f"DSI remote workspace: {dsi_remote_info['remote_root']}")
 
-            # Generate prompt (without Phase 0, resource-aware)
-            from templates.prompt_generator import PromptGenerator
+            # Ordinary runs build their standard task prompt here. HITL passes
+            # one runtime-composed phase prompt and never appends a second,
+            # conflicting instruction layer.
+            if runtime_prompt is None:
+                from templates.prompt_generator import PromptGenerator
 
-            prompt_generator = PromptGenerator(self.templates_dir)
-            prompt = prompt_generator.generate_research_prompt(
-                idea, root_dir=self.work_dir, scoring_enabled=scoring_enabled
-            )
+                prompt_generator = PromptGenerator(self.templates_dir)
+                prompt = prompt_generator.generate_research_prompt(
+                    idea, root_dir=self.work_dir, scoring_enabled=scoring_enabled
+                )
+                domain = idea.get("idea", {}).get("domain", "general")
+                session_instructions = generate_instructions(
+                    prompt=prompt,
+                    work_dir=str(self.work_dir),
+                    use_scribe=use_scribe,
+                    domain=domain,
+                    idea_spec=idea.get("idea", {}),
+                    provider=provider,
+                )
+            else:
+                prompt = runtime_prompt
+                session_instructions = runtime_prompt
 
             # Save prompt
             if log_prefix == "execution":
@@ -956,21 +993,6 @@ class ResearchPipelineOrchestrator:
             print(f"📝 Research prompt generated ({len(prompt)} chars)")
             print(f"   Saved to: {prompt_file}")
             print()
-
-            # Generate session instructions (resource-aware version)
-            domain = idea.get("idea", {}).get("domain", "general")
-            session_instructions = generate_instructions(
-                prompt=prompt,
-                work_dir=str(self.work_dir),
-                use_scribe=use_scribe,
-                domain=domain,
-                idea_spec=idea.get("idea", {}),
-                provider=provider,
-            )
-            if hitl_prompt_suffix.strip():
-                session_instructions = (
-                    f"{session_instructions.rstrip()}\n\n{hitl_prompt_suffix.strip()}\n"
-                )
 
             # Save session instructions
             session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1095,6 +1117,49 @@ class ResearchPipelineOrchestrator:
                 except Exception as cleanup_error:
                     print("⚠️  Failed to remove dsi-cluster remote workspace: " f"{cleanup_error}")
 
+    def _hitl_experiment_runner_source_prompt(
+        self,
+        *,
+        idea: Dict[str, Any],
+        provider: str,
+        use_scribe: bool,
+        scoring_enabled: bool,
+        hitl_phase: str,
+    ) -> str:
+        """Render exactly one source context for an experiment-runner HITL phase."""
+        from templates.prompt_generator import PromptGenerator
+
+        generator = PromptGenerator(self.templates_dir)
+        if hitl_phase == "execution":
+            ordinary_prompt = generator.generate_research_prompt(
+                idea,
+                root_dir=self.work_dir,
+                scoring_enabled=scoring_enabled,
+            )
+            return generate_instructions(
+                prompt=ordinary_prompt,
+                work_dir=str(self.work_dir),
+                use_scribe=use_scribe,
+                domain=idea.get("idea", {}).get("domain", "general"),
+                idea_spec=idea.get("idea", {}),
+                provider=provider,
+            )
+        if hitl_phase not in {"plan", "review"}:
+            raise ValueError(f"Unsupported HITL experiment-runner phase: {hitl_phase}")
+        interface_path = self.work_dir / "scoring" / "interface.md"
+        return generator.render_template(
+            generator.load_template("hitl/experiment_runner_context.txt"),
+            {
+                "hitl_phase": hitl_phase,
+                "idea_json": json.dumps(idea, indent=2, default=str),
+                "scoring_interface": (
+                    interface_path.read_text(encoding="utf-8")
+                    if interface_path.is_file()
+                    else ""
+                ),
+            },
+        )
+
     def _run_experiment_runner_hitl(
         self,
         idea: Dict[str, Any],
@@ -1125,6 +1190,16 @@ class ResearchPipelineOrchestrator:
         scored_checkpoint_sha: Optional[str] = None
         hitl_state_store = HitlGitStateStore(self.work_dir)
         hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
+        worker_prompt_contexts = {
+            phase: self._hitl_experiment_runner_source_prompt(
+                idea=idea,
+                provider=provider,
+                use_scribe=use_scribe,
+                scoring_enabled=scoring_enabled,
+                hitl_phase=phase,
+            )
+            for phase in ("plan", "execution", "review")
+        }
 
         artifact_validator = (
             (lambda: validate_required_artifact_contract(self.work_dir))
@@ -1154,16 +1229,16 @@ class ResearchPipelineOrchestrator:
             return failed
 
         def run_worker_with_replacements(
-            *, suffix: str, log_prefix: str, phase: str
+            *, prompt: str, log_prefix: str, phase: str
         ) -> tuple[Dict[str, Any], Dict[str, Any]]:
             def run_worker(
-                worker_suffix: str,
+                worker_prompt: str,
                 worker_log_prefix: str,
                 *,
                 record_continuation: bool = True,
             ) -> Dict[str, Any]:
                 if record_continuation:
-                    runtime.register_worker_prompt(worker_suffix)
+                    runtime.register_worker_prompt(worker_prompt)
                 return self._run_experiment_runner(
                     idea=idea,
                     provider=provider,
@@ -1171,13 +1246,13 @@ class ResearchPipelineOrchestrator:
                     full_permissions=full_permissions,
                     use_scribe=use_scribe,
                     scoring_enabled=scoring_enabled,
-                    hitl_prompt_suffix=worker_suffix,
+                    runtime_prompt=worker_prompt,
                     log_prefix=worker_log_prefix,
                     track_pipeline_state=False,
                     env_extra=runtime.idea_tool_env(),
                 )
 
-            result = run_worker(suffix, log_prefix)
+            result = run_worker(prompt, log_prefix)
             finish = runtime.handle_worker_exit_after_finish(
                 result, phase=phase, worker_name="experiment_runner"
             )
@@ -1354,9 +1429,13 @@ class ResearchPipelineOrchestrator:
                     allow_scoring_approval=scoring_enabled,
                     phase_finish_validator=artifact_validator,
                     scoring_handler=score_in_background if scoring_enabled else None,
+                    worker_prompt_contexts=worker_prompt_contexts,
                 )
                 result, finish = run_worker_with_replacements(
-                    suffix=runtime.plan_prompt_block(),
+                    prompt=runtime.compose_worker_prompt(
+                        hitl_stage="plan",
+                        phase_prompt=runtime.plan_prompt_block(),
+                    ),
                     log_prefix="hitl/experiment_runner_hitl_plan",
                     phase="stage",
                 )
@@ -1371,9 +1450,13 @@ class ResearchPipelineOrchestrator:
                 allow_scoring_approval=scoring_enabled,
                 phase_finish_validator=artifact_validator,
                 scoring_handler=score_in_background if scoring_enabled else None,
+                worker_prompt_contexts=worker_prompt_contexts,
             )
             result, finish = run_worker_with_replacements(
-                suffix=runtime.execution_prompt_block(mode="execute"),
+                prompt=runtime.compose_worker_prompt(
+                    hitl_stage="execution",
+                    phase_prompt=runtime.execution_prompt_block(mode="execute"),
+                ),
                 log_prefix="hitl/experiment_runner_hitl_execute_1",
                 phase="execute",
             )
@@ -1444,6 +1527,15 @@ class ResearchPipelineOrchestrator:
         )
         hitl_state_store = HitlGitStateStore(self.work_dir)
         hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
+        worker_prompt_contexts = {
+            phase: generate_rule_maker_prompt(
+                idea,
+                self.work_dir,
+                self.templates_dir,
+                hitl_phase=phase,
+            )
+            for phase in ("plan", "execution", "review")
+        }
 
         def rule_maker_artifact_validator() -> Dict[str, Any]:
             validation = validate_rule_maker_outputs(self.work_dir)
@@ -1475,12 +1567,12 @@ class ResearchPipelineOrchestrator:
 
         def run_worker(
             *,
-            suffix: str,
+            prompt: str,
             log_prefix: str,
             record_continuation: bool = True,
         ) -> Dict[str, Any]:
             if record_continuation:
-                runtime.register_worker_prompt(suffix)
+                runtime.register_worker_prompt(prompt)
             return run_rule_maker(
                 idea=idea,
                 work_dir=self.work_dir,
@@ -1488,17 +1580,17 @@ class ResearchPipelineOrchestrator:
                 templates_dir=self.templates_dir,
                 timeout=timeout,
                 full_permissions=full_permissions,
-                hitl_prompt_suffix=suffix,
                 completion_mode="hitl_runtime",
                 log_prefix=log_prefix,
                 include_hitl_outputs=True,
                 env_extra=runtime.idea_tool_env(),
+                prompt_override=prompt,
             )
 
         def run_worker_with_replacements(
-            *, suffix: str, log_prefix: str, phase: str
+            *, prompt: str, log_prefix: str, phase: str
         ) -> tuple[Dict[str, Any], Dict[str, Any]]:
-            result = run_worker(suffix=suffix, log_prefix=log_prefix)
+            result = run_worker(prompt=prompt, log_prefix=log_prefix)
             finish = runtime.handle_worker_exit_after_finish(
                 result, phase=phase, worker_name=RULE_MAKER_STAGE
             )
@@ -1506,7 +1598,7 @@ class ResearchPipelineOrchestrator:
             while finish.get("replacement"):
                 recovery_index += 1
                 result = run_worker(
-                    suffix=str(finish["prompt_block"]),
+                    prompt=str(finish["prompt_block"]),
                     log_prefix=f"{log_prefix}_recovery_{recovery_index}",
                     record_continuation=False,
                 )
@@ -1522,9 +1614,13 @@ class ResearchPipelineOrchestrator:
                     actor=RULE_MAKER_STAGE,
                     requires_human_approval=True,
                     phase_finish_validator=rule_maker_artifact_validator,
+                    worker_prompt_contexts=worker_prompt_contexts,
                 )
                 result, finish = run_worker_with_replacements(
-                    suffix=runtime.plan_prompt_block(),
+                    prompt=runtime.compose_worker_prompt(
+                        hitl_stage="plan",
+                        phase_prompt=runtime.plan_prompt_block(),
+                    ),
                     log_prefix="hitl/rule_maker_hitl_plan",
                     phase="stage",
                 )
@@ -1548,9 +1644,13 @@ class ResearchPipelineOrchestrator:
                 hitl_stage="execution",
                 actor=RULE_MAKER_STAGE,
                 phase_finish_validator=rule_maker_artifact_validator,
+                worker_prompt_contexts=worker_prompt_contexts,
             )
             result, finish = run_worker_with_replacements(
-                suffix=runtime.execution_prompt_block(mode="execute"),
+                prompt=runtime.compose_worker_prompt(
+                    hitl_stage="execution",
+                    phase_prompt=runtime.execution_prompt_block(mode="execute"),
+                ),
                 log_prefix="hitl/rule_maker_hitl_execute_1",
                 phase="execute",
             )

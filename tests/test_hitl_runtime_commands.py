@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from core.hitl import HitlIdeaLog, HitlRuntime, HitlValidationError
 from core.hitl_runtime_state import HitlRuntimeState
 from agents.autoresearch_proposer import generate_autoresearch_proposal_prompt
+from agents.rule_maker import generate_rule_maker_prompt
 from templates.prompt_generator import PromptGenerator
 
 
@@ -389,6 +390,160 @@ def test_resource_finder_prompt_has_one_completion_protocol_per_mode() -> None:
     )
     assert ".resource_finder_complete (marker file indicating completion)" in normal
     assert ".resource_finder_complete (marker file indicating completion)" not in hitl
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ["battery", "finance", "mathematics", "mathematics_lean", "particle_physics"],
+)
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini"])
+def test_domain_resource_finder_hitl_prompt_has_no_marker_or_wrong_skill_root(
+    domain: str, provider: str
+) -> None:
+    generator = PromptGenerator(Path(__file__).resolve().parents[1] / "templates")
+    idea = {"idea": {"title": "Test", "hypothesis": "Test", "domain": domain}}
+
+    prompt = generator.generate_resource_finder_prompt(
+        idea,
+        hitl_runtime_completion=True,
+        provider=provider,
+    )
+
+    assert "completion marker" not in prompt.lower()
+    assert ".resource_finder_complete" not in prompt
+    assert f".{provider}/skills/" in prompt
+    if provider != "claude":
+        assert ".claude/skills/" not in prompt
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "gemini"])
+def test_resource_finder_launcher_forwards_provider_and_hitl_mode(
+    provider: str,
+) -> None:
+    """The external worker must receive the same control surface runtime selects."""
+    from agents.resource_finder import generate_resource_finder_prompt
+
+    idea = {"idea": {"domain": "battery", "title": "Test"}}
+    prompt = generate_resource_finder_prompt(
+        idea,
+        Path(__file__).resolve().parents[1] / "templates",
+        hitl_runtime_completion=True,
+        provider=provider,
+    )
+
+    assert "completion marker" not in prompt.lower()
+    assert f".{provider}/skills/" in prompt
+
+
+def test_rule_maker_hitl_prompts_explain_the_baseline_write_exception(tmp_path: Path) -> None:
+    runtime = HitlRuntime(tmp_path, "rule_maker")
+    try:
+        execution = runtime.execution_prompt_block()
+        revision = runtime.review_prompt_block("Repair the evaluator.")
+
+        assert "baseline implementation" in execution
+        assert "baselines/" in execution
+        assert "baseline implementation" in revision
+        assert "baselines/" in revision
+    finally:
+        runtime.manager.stop()
+
+
+def test_phase_aware_resource_finder_source_prompts_do_not_leak_execution_rules() -> None:
+    templates_dir = Path(__file__).resolve().parents[1] / "templates"
+    generator = PromptGenerator(templates_dir)
+    idea = {
+        "idea": {
+            "title": "Test",
+            "hypothesis": "Test the proposed claim.",
+            "domain": "battery",
+            "background": {
+                "code_references": [
+                    {"repo": "https://example.invalid/project.git", "description": "Required code"}
+                ]
+            },
+        }
+    }
+
+    plan = generator.generate_resource_finder_prompt(
+        idea,
+        hitl_runtime_completion=True,
+        provider="codex",
+        hitl_phase="plan",
+    )
+    review = generator.generate_resource_finder_prompt(
+        idea,
+        hitl_runtime_completion=True,
+        provider="codex",
+        hitl_phase="review",
+    )
+    execution = generator.generate_resource_finder_prompt(
+        idea,
+        hitl_runtime_completion=True,
+        provider="codex",
+        hitl_phase="execution",
+    )
+
+    for prompt in (plan, review):
+        assert "RESOURCE FINDER RESEARCH CONTEXT" in prompt
+        assert "PAPER FINDER" not in prompt
+        assert "do not clone it in this phase" in prompt
+        assert ".resource_finder_complete" not in prompt
+    assert "PAPER FINDER" in execution
+    assert ".codex/skills/" in execution
+
+
+def test_phase_aware_rule_maker_source_prompts_do_not_leak_evaluator_authoring(
+    tmp_path: Path,
+) -> None:
+    templates_dir = Path(__file__).resolve().parents[1] / "templates"
+    idea = {"idea": {"title": "Test", "hypothesis": "Test the claim.", "domain": "general"}}
+
+    plan = generate_rule_maker_prompt(idea, tmp_path, templates_dir, hitl_phase="plan")
+    review = generate_rule_maker_prompt(idea, tmp_path, templates_dir, hitl_phase="review")
+    execution = generate_rule_maker_prompt(idea, tmp_path, templates_dir, hitl_phase="execution")
+
+    for prompt in (plan, review):
+        assert "RULE MAKER RESEARCH CONTEXT" in prompt
+        assert "PHASE 1: TASK ANALYSIS" not in prompt
+        assert "scoring/eval.py" not in prompt
+    assert "PHASE 1: TASK ANALYSIS" in execution
+
+
+def test_runtime_keeps_phase_source_context_in_transition_and_review_prompts(
+    tmp_path: Path,
+) -> None:
+    runtime = HitlRuntime(tmp_path, "resource_finder")
+    contexts = {
+        "plan": "PLAN SOURCE CONTEXT",
+        "execution": "EXECUTION SOURCE CONTEXT",
+        "review": "REVIEW SOURCE CONTEXT",
+    }
+    try:
+        runtime.prepare_idea_tool_context(
+            hitl_stage="plan",
+            worker_prompt_contexts=contexts,
+        )
+        plan_prompt = runtime.compose_worker_prompt(
+            hitl_stage="plan",
+            phase_prompt=runtime.plan_prompt_block(),
+        )
+        assert plan_prompt.startswith("PLAN SOURCE CONTEXT")
+
+        execution_prompt = runtime.compose_worker_prompt(
+            hitl_stage="execution",
+            phase_prompt=runtime.execution_prompt_block(),
+        )
+        review_prompt = runtime.compose_worker_prompt(
+            hitl_stage="review",
+            phase_prompt=runtime.review_prompt_block("Repair this artifact."),
+        )
+        assert execution_prompt.startswith("EXECUTION SOURCE CONTEXT")
+        assert review_prompt.startswith("REVIEW SOURCE CONTEXT")
+        assert "Repair this artifact." in review_prompt
+    finally:
+        runtime.clear_idea_tool_context()
+        runtime.manager.stop()
 
 
 def test_hitl_proposer_uses_submission_not_a_worker_owned_proposal_file(tmp_path: Path) -> None:

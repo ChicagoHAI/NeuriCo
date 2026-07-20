@@ -950,6 +950,25 @@ class HitlRuntime:
             feedback=feedback,
         )
 
+    def compose_worker_prompt(self, *, hitl_stage: str, phase_prompt: str) -> str:
+        """Join a stage-specific source context with one HITL phase contract.
+
+        Ordinary-stage workers register all three source contexts when they
+        enter HITL. Runtime then returns the same complete prompt to the live
+        worker and to any runtime-owned replacement worker. Other HITL callers
+        that do not have an external stage-worker source prompt keep their
+        dedicated prompt contract unchanged.
+        """
+        contexts = self._tool_context.get("worker_prompt_contexts")
+        if not contexts:
+            return phase_prompt
+        source_context = str(contexts.get(hitl_stage, "")).strip()
+        if not source_context:
+            raise HitlValidationError(
+                f"HITL worker prompt context is missing for phase {hitl_stage!r}."
+            )
+        return f"{source_context}\n\n{phase_prompt.strip()}\n"
+
     def proposal_replacement_prompt_block(self, feedback: str) -> str:
         return _load_hitl_template(
             "worker_proposal_replacement.txt",
@@ -1075,9 +1094,22 @@ class HitlRuntime:
         plan_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
         phase_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
         scoring_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
+        worker_prompt_contexts: Optional[Dict[str, str]] = None,
     ) -> None:
         if hitl_stage not in HITL_STAGES:
             raise HitlValidationError(f"Invalid HITL idea tool hitl_stage: {hitl_stage}")
+        if worker_prompt_contexts is not None:
+            required_context_phases = {"plan", "execution", "review"}
+            missing_contexts = sorted(
+                phase
+                for phase in required_context_phases
+                if not str(worker_prompt_contexts.get(phase, "")).strip()
+            )
+            if missing_contexts:
+                raise HitlValidationError(
+                    "HITL worker prompt contexts must define plan, execution, and review; "
+                    f"missing: {', '.join(missing_contexts)}."
+                )
         self.stop_idea_tool_server()
         self.paths.hitl_dir.mkdir(parents=True, exist_ok=True)
         self.paths.tool_bin_dir.mkdir(parents=True, exist_ok=True)
@@ -1113,6 +1145,7 @@ class HitlRuntime:
             "supplied_plan_finish_validator": plan_finish_validator,
             "supplied_phase_finish_validator": phase_finish_validator,
             "scoring_handler": scoring_handler,
+            "worker_prompt_contexts": dict(worker_prompt_contexts or {}),
             "allowed_worker_commands": allowed_worker_commands,
         }
         self._install_stage_guards(hitl_stage)
@@ -1839,11 +1872,17 @@ class HitlRuntime:
                 ).strip()
                 hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
                 if hitl_stage == "review":
-                    prompt_block = self.review_prompt_block(feedback)
+                    prompt_block = self.compose_worker_prompt(
+                        hitl_stage="review",
+                        phase_prompt=self.review_prompt_block(feedback),
+                    )
                 else:
-                    prompt_block = self.execution_prompt_block(
-                        mode="continue",
-                        feedback=feedback,
+                    prompt_block = self.compose_worker_prompt(
+                        hitl_stage="execution",
+                        phase_prompt=self.execution_prompt_block(
+                            mode="continue",
+                            feedback=feedback,
+                        ),
                     )
                 self._update_worker_continuation(
                     prompt_block=prompt_block,
@@ -2118,7 +2157,10 @@ class HitlRuntime:
             raise HitlValidationError(
                 "Runtime scoring repair has no pending phase-finish request to resume."
             )
-        prompt_block = self.review_prompt_block(feedback)
+        prompt_block = self.compose_worker_prompt(
+            hitl_stage="review",
+            phase_prompt=self.review_prompt_block(feedback),
+        )
         current_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
         if current_stage == "execution":
             self.transition_worker_stage("review", prompt_block=prompt_block)
@@ -2425,10 +2467,13 @@ class HitlRuntime:
                         "next_phase": next_stage,
                         "final": False,
                     }
-                    prompt_block = (
-                        self.plan_revision_prompt_block(feedback)
-                        if next_stage == "plan"
-                        else self.review_prompt_block(feedback)
+                    prompt_block = self.compose_worker_prompt(
+                        hitl_stage=next_stage,
+                        phase_prompt=(
+                            self.plan_revision_prompt_block(feedback)
+                            if next_stage == "plan"
+                            else self.review_prompt_block(feedback)
+                        ),
                     )
                     return self._remember_phase_finish_response(
                         request_key,
@@ -2639,7 +2684,10 @@ class HitlRuntime:
                                 "Apply this plan feedback, update the living plan, then "
                                 "call hitl-finish-phase again."
                             ),
-                            "prompt_block": self.plan_revision_prompt_block(feedback),
+                            "prompt_block": self.compose_worker_prompt(
+                                hitl_stage="plan",
+                                phase_prompt=self.plan_revision_prompt_block(feedback),
+                            ),
                             "record": logged,
                         },
                     )
@@ -2725,7 +2773,10 @@ class HitlRuntime:
                     "Plan approved. Do not stop. Continue into execution in this "
                     "same worker session using the execution instructions below."
                 )
-                prompt_block = self.execution_prompt_block(mode="execute")
+                prompt_block = self.compose_worker_prompt(
+                    hitl_stage="execution",
+                    phase_prompt=self.execution_prompt_block(mode="execute"),
+                )
                 self.transition_worker_stage("execution", prompt_block=prompt_block)
             else:
                 self._tool_context["hitl_stage"] = "complete"
@@ -2939,8 +2990,10 @@ class HitlRuntime:
 
     def _finish_feedback_prompt_block(self, *, hitl_stage: str, feedback: str) -> str:
         if hitl_stage == "plan":
-            return self.plan_revision_prompt_block(feedback)
-        return self.review_prompt_block(feedback)
+            phase_prompt = self.plan_revision_prompt_block(feedback)
+        else:
+            phase_prompt = self.review_prompt_block(feedback)
+        return self.compose_worker_prompt(hitl_stage=hitl_stage, phase_prompt=phase_prompt)
 
     def _record_from_tool_payload(
         self,
