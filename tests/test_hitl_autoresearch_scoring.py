@@ -162,6 +162,26 @@ def test_immutable_hitl_seal_rejects_worker_created_evaluator_replacements(tmp_p
     assert (sealed / "scoring" / "eval.py").read_text(encoding="utf-8") == "print('trusted')\n"
 
 
+def test_immutable_seal_recovers_matching_public_remnants_after_interruption(tmp_path: Path) -> None:
+    scoring = tmp_path / "scoring"
+    scoring.mkdir()
+    trusted_eval = "print('trusted')\n"
+    trusted_targets = "{}\n"
+    (scoring / "eval.py").write_text(trusted_eval, encoding="utf-8")
+    (scoring / "targets.json").write_text(trusted_targets, encoding="utf-8")
+    sealed = seal_scoring_files(tmp_path, immutable=True)
+    assert sealed is not None
+
+    # Model an interruption after the sealed generation was atomically
+    # published but before runtime removed the public source files.
+    (scoring / "eval.py").write_text(trusted_eval, encoding="utf-8")
+    (scoring / "targets.json").write_text(trusted_targets, encoding="utf-8")
+
+    assert seal_scoring_files(tmp_path, immutable=True) == sealed
+    assert not (scoring / "eval.py").exists()
+    assert not (scoring / "targets.json").exists()
+
+
 def test_ordinary_scorer_does_not_use_hitl_private_workspace(
     tmp_path: Path, monkeypatch
 ) -> None:

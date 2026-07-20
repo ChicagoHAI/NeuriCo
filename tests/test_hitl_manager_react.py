@@ -655,6 +655,36 @@ def test_runtime_manager_backend_exhaustion_cancels_the_held_worker_request(tmp_
     assert any("rolling back" in item["text"] for item in channel.messages)
 
 
+def test_nonfinalizing_manager_exhausts_the_held_request_turn_budget(tmp_path):
+    manager = HitlManager(
+        {
+            "manager": {
+                "hitl_manager_max_request_provider_turns": 1,
+                "hitl_manager_retry_delay_seconds": 0.01,
+            }
+        },
+        work_dir=tmp_path,
+        channel=_Channel(),
+    )
+    manager.backend = _Backend(
+        [LLMResponse(text="I will inspect this later."), LLMResponse(text="Still not finalizing.")]
+    )
+
+    with pytest.raises(RuntimeError, match="cancelled the held worker command"):
+        manager.request_worker_resolution(
+            command={"request_key": "turn-budget", "kind": "phase_finish"},
+            prompt="Runtime request: resolve the completed phase.",
+            validate=lambda payload: payload,
+        )
+
+    pending = manager.runtime_state.pending_worker_command()
+    manager.stop()
+    assert pending is not None
+    assert pending["status"] == "cancelled"
+    assert pending["manager_provider_turns"] == 1
+    assert "provider budget" in pending["cancellation_reason"]
+
+
 def test_manager_backend_exhaustion_after_human_reply_cancels_the_held_request(tmp_path):
     channel = _Channel()
     manager = HitlManager(

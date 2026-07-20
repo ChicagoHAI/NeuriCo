@@ -32,10 +32,17 @@ _SECRET_FILE_NAMES = {
     "credentials",
     "credentials.json",
     "id_rsa",
+    "id_ed25519",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
     "secrets.json",
+    "service-account.json",
+    "service_account.json",
     "token",
     "tokens.json",
 }
+_SECRET_FILE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".kubeconfig")
 _MAX_DIRECTORY_ENTRIES = 500
 _MAX_FILE_MATCHES = 1000
 _MAX_READ_BYTES = 400_000
@@ -314,6 +321,9 @@ class HitlWorkspaceInspector:
             or name.startswith("credentials")
             or name.startswith("secrets")
             or name.startswith("token")
+            or name.startswith("service-account")
+            or name.startswith("service_account")
+            or name.endswith(_SECRET_FILE_SUFFIXES)
         )
 
     def _relative_path(self, path: Path) -> str:

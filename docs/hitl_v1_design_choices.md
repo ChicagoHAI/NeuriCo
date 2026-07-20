@@ -35,8 +35,9 @@ intentional for v1 and should frame review discussion.
   HITL-specific.
 - For native API manager backends, runtime supplies the current structured tool
   schema. For the existing CLI backend, runtime supplies the same current tool
-  surface through a private local MCP bridge. The HITL CLI manager does not rely
-  on XML pseudo-tool calls.
+  surface through a private local MCP bridge, a dedicated manager system prompt,
+  and a runtime-owned allowlist. The HITL CLI manager does not rely on XML
+  pseudo-tool calls or ordinary coding-agent tools.
 - Runtime exposes only the tools allowed at the current boundary and validates
   every invocation. General read-only inspection/conversation tools remain
   available; finalization, pruning, selection, and scoring actions are exposed
@@ -46,6 +47,8 @@ intentional for v1 and should frame review discussion.
   manager feedback, and finalizes the same held request.
 - Only one runtime-held worker request may be unresolved per workspace. Ordinary
   human-manager conversation remains separate from that resolution control.
+- Provider calls and manager ReAct turns are bounded by runtime configuration.
+  Human reply time is not treated as a provider timeout.
 
 ## Plans, Ideas, and Proposals
 
@@ -80,9 +83,34 @@ intentional for v1 and should frame review discussion.
 
 - HITL private state lives under `.neurico/hitl/`; public AutoResearch logs are
   retained as review artifacts and mirror the hidden HITL attempt/node schema.
-- Failed attempts are rolled back and removed from final HITL state. Private Git
-  refs preserve runtime recovery boundaries; runtime resumes scored decisions
-  rather than asking workers to repeat completed scoring.
+- Rule maker establishes the evaluator authority once. Runtime seals that
+  evaluator payload immutably, rejects worker-created public replacements, and
+  scores candidates in a runtime-private worktree. The manager receives the
+  runtime-owned scorer result; `scoring/results.json` is a public review copy,
+  not scoring authority.
+- Sealed evaluator publication uses a staged generation: runtime copies,
+  hashes, flushes, verifies, and atomically publishes the sealed payload before
+  removing public evaluator inputs. Matching public remnants from an
+  interrupted publish are cleaned by runtime; changed remnants are an
+  invalid-attempt integrity violation.
+- A reviewed workspace fingerprint is rechecked immediately before runtime
+  checkpoints and scores an initial experiment or candidate. Runtime retains a
+  temporary private score ref until the associated root/frontier outcome is
+  durable, and initializes root/frontier objective state from the trusted
+  scorer result rather than rereading the public score copy. The manager's
+  accept/reject decision is prepared durably first, but the idea record,
+  frontier state, Git refs, and public mirror are published only after the
+  worker and its children exit cleanly. A partial publication is preserved for
+  idempotent HITL continuation instead of being sent through generic rollback.
+- Failed attempts are rolled back and removed from final HITL state. Runtime
+  writes a separate `failed_attempts/.../runtime_incident.json` review record
+  containing runtime-failure metadata only; it does not preserve partial work as
+  canonical research history. A prepared frontier decision without a clean
+  worker exit is rolled back through this path.
+- Private Git refs preserve runtime recovery boundaries and retain temporary
+  scored candidates until a frontier outcome is finalized. Runtime can resume
+  scoring or manager resolution that was safely persisted, without asking a
+  worker to repeat completed scoring.
 - Those private recovery refs are repository-local runtime state. They are not
   an export or cross-machine recovery mechanism, and ordinary Git push/clone
   does not carry them.
@@ -93,6 +121,10 @@ intentional for v1 and should frame review discussion.
 - Runtime failures return retryable command guidance where the worker can safely
   continue. Manager backend exhaustion cancels the held request and rolls back
   the affected HITL AutoResearch attempt.
+- v1 does not assign `must_create`, `must_change`, or `may_reuse` freshness
+  policies to individual required artifacts. Required-artifact validation
+  remains a runtime boundary check, while complete rollback is the cleanup
+  mechanism for attempts runtime classifies as invalid.
 
 ## Deliberate v1 Limits
 

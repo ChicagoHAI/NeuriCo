@@ -360,7 +360,13 @@ def test_fresh_hitl_initial_node_uses_the_initial_checkpoint_as_the_frontier_roo
             )
             return {
                 "success": True,
-                "stages": {"scorer": {"success": True, "elapsed_time": 1.0}},
+                "stages": {
+                    "scorer": {
+                        "success": True,
+                        "elapsed_time": 1.0,
+                        "results": {"overall_satisfied": True},
+                    }
+                },
             }
 
     monkeypatch.setattr("core.pipeline_orchestrator.ResearchPipelineOrchestrator", FakeOrchestrator)

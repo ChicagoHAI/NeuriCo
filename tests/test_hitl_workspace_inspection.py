@@ -62,10 +62,21 @@ def test_workspace_inspection_rejects_hidden_or_escaping_paths(tmp_path, path):
 
 @pytest.mark.parametrize(
     "path",
-    [".env", "scoring/eval.py", "data/.test/held_out.txt"],
+    [
+        ".env",
+        ".netrc",
+        "scoring/eval.py",
+        "data/.test/held_out.txt",
+        "keys/deploy.pem",
+        "keys/service-account.json",
+    ],
 )
 def test_workspace_inspection_rejects_evaluator_test_and_secret_paths(tmp_path, path):
     inspector = _inspector_with_workspace(tmp_path)
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        target.write_text("secret\n", encoding="utf-8")
 
     with pytest.raises(HitlWorkspaceInspectionError, match="protected"):
         inspector.read_workspace_file(path)

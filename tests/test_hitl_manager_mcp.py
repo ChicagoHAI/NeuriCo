@@ -23,8 +23,8 @@ def test_cli_mcp_bridge_exposes_only_current_runtime_tool_surface(tmp_path: Path
         tools = manager._mcp_tools()
         names = {tool["name"] for tool in tools}
 
-        assert "mcp__neurico_hitl_manager__list_workspace" in names
-        assert "mcp__neurico_hitl_manager__prune_frontier" not in names
+        assert "list_workspace" in names
+        assert "prune_frontier" not in names
         assert manager._mcp_config_path.exists()
         assert json.loads(manager._mcp_config_path.read_text())["mcpServers"]
     finally:
@@ -37,7 +37,7 @@ def test_cli_mcp_bridge_revalidates_a_tool_at_execution_time(tmp_path: Path) -> 
     manager = HitlManager({"manager": {"llm_backend": "cli"}}, work_dir=tmp_path, channel=_Channel())
     try:
         content, is_error = manager._execute_mcp_tool(
-            "mcp__neurico_hitl_manager__prune_frontier", {"node_sha": "abc", "reason": "test"}
+            "prune_frontier", {"node_sha": "abc", "reason": "test"}
         )
     finally:
         manager.stop()
@@ -46,13 +46,31 @@ def test_cli_mcp_bridge_revalidates_a_tool_at_execution_time(tmp_path: Path) -> 
     assert "unavailable" in content
 
 
+def test_cli_mcp_bridge_is_recreated_after_private_state_restore(tmp_path: Path) -> None:
+    manager = HitlManager({"manager": {"llm_backend": "cli"}}, work_dir=tmp_path, channel=_Channel())
+    try:
+        manager._ensure_cli_mcp_bridge()
+        original = json.loads(manager._mcp_config_path.read_text(encoding="utf-8"))
+
+        manager.reload_after_runtime_restore()
+
+        assert manager._mcp_server is None
+        assert not manager._mcp_config_path.exists()
+
+        manager._ensure_cli_mcp_bridge()
+        recreated = json.loads(manager._mcp_config_path.read_text(encoding="utf-8"))
+        assert recreated != original
+    finally:
+        manager.stop()
+
+
 def test_mcp_adapter_translates_tools_list_and_call(monkeypatch) -> None:
     calls = []
 
     def fake_runtime_request(path, payload):
         calls.append((path, payload))
         if path == "/mcp/tools":
-            return {"tools": [{"name": "mcp__neurico_hitl_manager__list_workspace"}]}
+            return {"tools": [{"name": "list_workspace"}]}
         return {"content": "workspace listed", "is_error": False}
 
     monkeypatch.setattr("core.hitl_manager_mcp._runtime_request", fake_runtime_request)
@@ -64,7 +82,7 @@ def test_mcp_adapter_translates_tools_list_and_call(monkeypatch) -> None:
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "mcp__neurico_hitl_manager__list_workspace",
+                "name": "list_workspace",
                 "arguments": {"path": "."},
             },
         }
@@ -76,6 +94,6 @@ def test_mcp_adapter_translates_tools_list_and_call(monkeypatch) -> None:
         ("/mcp/tools", {}),
         (
             "/mcp/call",
-            {"name": "mcp__neurico_hitl_manager__list_workspace", "arguments": {"path": "."}},
+            {"name": "list_workspace", "arguments": {"path": "."}},
         ),
     ]

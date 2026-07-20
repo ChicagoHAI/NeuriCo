@@ -28,5 +28,9 @@ manager:
   # How often to proactively show progress summaries during long runs (seconds)
   engagement_interval: 1800  # 30 minutes
 
+  # HITL only: one unresolved worker request cannot spend unlimited manager
+  # provider turns across reminder rounds. Human response time is not counted.
+  hitl_manager_max_request_provider_turns: 48
+
   # Default AI provider for research agents
   default_provider: claude

@@ -326,6 +326,11 @@ def run_autoresearch_proposer(
     start_time = time.time()
     return_code: Optional[int] = None
     error: Optional[str] = None
+    launch: Dict[str, Any] = {
+        "success": False,
+        "timed_out": False,
+        "background_processes_terminated": False,
+    }
 
     try:
         if hitl_submission:
@@ -381,7 +386,12 @@ def run_autoresearch_proposer(
 
     elapsed = time.time() - start_time
     proposal_exists = proposal_path.exists() and proposal_path.stat().st_size > 0
-    success = return_code == 0 and (hitl_submission or proposal_exists) and error is None
+    success = (
+        return_code == 0
+        and (hitl_submission or proposal_exists)
+        and error is None
+        and not bool(launch.get("background_processes_terminated"))
+    )
 
     if not hitl_submission and not proposal_exists and error is None:
         error = f"proposal.md was not created at {proposal_path}"
@@ -402,6 +412,10 @@ def run_autoresearch_proposer(
         "transcript_file": str(transcript_file),
         "elapsed_time": elapsed,
         "error": error,
+        "timed_out": bool(launch.get("timed_out")),
+        "background_processes_terminated": bool(
+            launch.get("background_processes_terminated")
+        ),
     }
 
 

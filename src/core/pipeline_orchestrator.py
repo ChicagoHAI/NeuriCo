@@ -45,6 +45,7 @@ from core.hitl import (
     validate_required_artifact_contract,
 )
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
+from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 from templates.research_agent_instructions import generate_instructions
 
 
@@ -1222,6 +1223,21 @@ class ResearchPipelineOrchestrator:
             request_key = str(pending.get("request_key", "")).strip()
             if not request_key:
                 raise RuntimeError("HITL initial scoring has no held runtime request.")
+
+            def discard_repairable_scoring_handoff(result: Dict[str, Any]) -> None:
+                """Ensure a repair scores revised work rather than a cached failure."""
+                scoring_ref = str(result.get("scoring_ref", "")).strip()
+                if scoring_ref:
+                    subprocess.run(
+                        ["git", "-C", str(self.work_dir), "update-ref", "-d", scoring_ref],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                runtime_state.update_pending_worker_command(
+                    request_key,
+                    isolated_scoring=None,
+                )
             isolated = pending.get("isolated_scoring")
             cached_score = isolated if isinstance(isolated, dict) else None
             if cached_score and cached_score.get("status") == "scored":
@@ -1231,6 +1247,17 @@ class ResearchPipelineOrchestrator:
                     raise RuntimeError("Persisted isolated initial scoring handoff is incomplete.")
             else:
                 checkpoints = CheckpointManager(self.work_dir)
+                reviewed_fingerprint = str(pending.get("workspace_fingerprint", "")).strip()
+                if not reviewed_fingerprint:
+                    raise RuntimeError(
+                        "HITL initial scoring is missing its reviewed workspace fingerprint."
+                    )
+                current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
+                if current_fingerprint != reviewed_fingerprint:
+                    raise RuntimeError(
+                        "The public workspace changed after the worker submitted its reviewed finish "
+                        "boundary. Runtime will not score an unreviewed initial experiment."
+                    )
                 source_sha = str((cached_score or {}).get("source_checkpoint_sha", "")).strip()
                 if source_sha:
                     if not checkpoints.checkpoint_exists(source_sha):
@@ -1238,6 +1265,10 @@ class ResearchPipelineOrchestrator:
                             "Persisted isolated initial scoring source checkpoint no longer exists."
                         )
                 else:
+                    # A public score is a review copy, never part of the next
+                    # immutable source tree.
+                    stale_results = self.work_dir / "scoring" / "results.json"
+                    stale_results.unlink(missing_ok=True)
                     source_sha = checkpoints.create_checkpoint(
                         "HITL initial experiment before isolated scoring"
                     ).sha
@@ -1262,6 +1293,7 @@ class ResearchPipelineOrchestrator:
                             # workspace virtual environment.
                             python_executable=sys.executable,
                         ),
+                        temporary_ref=f"refs/neurico/hitl/scoring/{request_key}",
                     )
                     self.state.complete_stage(SCORER_STAGE, bool(scorer_result.get("success")), scorer_result)
                 except Exception as exc:
@@ -1299,6 +1331,7 @@ class ResearchPipelineOrchestrator:
                         "final": True,
                         "scorer_result": dict(scorer_result),
                     }
+                discard_repairable_scoring_handoff(scorer_result)
                 return runtime.scoring_repair_response(
                     context=str(review["context"]),
                     manager_feedback=str(review["manager_feedback"]),

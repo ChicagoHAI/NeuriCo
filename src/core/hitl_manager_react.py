@@ -281,6 +281,15 @@ class HitlManager:
         self.world_model.reconcile(self.research)
         self.tool_definitions = self._load_tools()
         self.max_react_turns = int(config.get("manager", {}).get("hitl_manager_max_turns", 12))
+        self.max_request_provider_turns = max(
+            1,
+            int(
+                config.get("manager", {}).get(
+                    "hitl_manager_max_request_provider_turns",
+                    self.max_react_turns * 4,
+                )
+            ),
+        )
         self.max_backend_retries = max(
             1, int(config.get("manager", {}).get("hitl_manager_backend_retries", 3))
         )
@@ -385,7 +394,8 @@ class HitlManager:
         return [tool for tool in self.tool_definitions if tool["name"] in allowed]
 
     @staticmethod
-    def _mcp_tool_name(tool_name: str) -> str:
+    def _mcp_allowed_tool_name(tool_name: str) -> str:
+        """Return Claude Code's global name for one server-local MCP tool."""
         return f"mcp__neurico_hitl_manager__{tool_name}"
 
     def _uses_cli_mcp_bridge(self) -> bool:
@@ -457,13 +467,16 @@ class HitlManager:
                 }
             }
         }
+        self._mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
         self._mcp_config_path.write_text(json.dumps(config), encoding="utf-8")
         os.chmod(self._mcp_config_path, 0o600)
 
     def _mcp_tools(self) -> List[Dict[str, Any]]:
         return [
             {
-                "name": self._mcp_tool_name(str(tool["name"])),
+                # MCP servers advertise local tool names. Claude Code adds the
+                # mcp__<server>__ namespace when it exposes them to the model.
+                "name": str(tool["name"]),
                 "description": str(tool.get("description", "")),
                 "inputSchema": dict(tool.get("parameters") or {}),
             }
@@ -471,10 +484,10 @@ class HitlManager:
         ]
 
     def _execute_mcp_tool(self, name: str, arguments: Any) -> tuple[str, bool]:
-        prefix = "mcp__neurico_hitl_manager__"
-        if not name.startswith(prefix):
+        tool_name = str(name).strip()
+        known_tools = {str(tool["name"]) for tool in self.tool_definitions}
+        if not tool_name or tool_name not in known_tools:
             return "Error: unknown HITL manager MCP tool. Inspect the available tools and retry.", True
-        tool_name = name.removeprefix(prefix)
         if not isinstance(arguments, dict):
             return "Error: MCP tool arguments must be an object. Correct the call and retry.", True
         call_id = f"mcp_{secrets.token_hex(12)}"
@@ -586,6 +599,10 @@ class HitlManager:
         from interactive.research_state import ResearchState
 
         self._invalidate_turns()
+        # manager_mcp.json is intentionally excluded from private-state
+        # snapshots because it contains a live loopback token. Drop the old
+        # bridge too, so the next CLI turn writes a matching config/token pair.
+        self._stop_cli_mcp_bridge()
         with self._turn_lock:
             self.conversation.reload()
             self.research = ResearchState(self.work_dir)
@@ -1549,6 +1566,8 @@ class HitlManager:
                     turn.content,
                     record_input=not turn.input_recorded,
                     generation=turn.generation,
+                    request_key=turn.request_key,
+                    requires_worker_resolution=turn.requires_worker_resolution,
                 )
                 pending_action = self.runtime_state.snapshot().get("next_autoresearch_action")
                 action_is_pending = (
@@ -1598,7 +1617,13 @@ class HitlManager:
         """Release the runtime action whose manager provider retries exhausted."""
         request_key = turn.request_key.strip()
         pending = self.runtime_state.pending_worker_command()
-        failure = "The HITL manager backend remained unavailable after its bounded retry budget."
+        detail = str(exc).strip()
+        if "provider budget" in detail:
+            failure = detail
+        else:
+            failure = "The HITL manager backend remained unavailable after its bounded retry budget."
+            if detail:
+                failure = f"{failure} Detail: {detail}"
         if (
             request_key
             and isinstance(pending, dict)
@@ -1631,6 +1656,8 @@ class HitlManager:
         *,
         record_input: bool = True,
         generation: int,
+        request_key: str = "",
+        requires_worker_resolution: bool = False,
     ) -> str:
         with self._turn_lock:
             if not self._generation_is_current(generation):
@@ -1649,6 +1676,11 @@ class HitlManager:
                     messages = self._messages(generation)
                 except _StaleManagerTurn:
                     return ""
+            if requires_worker_resolution and request_key:
+                self.runtime_state.consume_manager_provider_turn(
+                    request_key,
+                    limit=self.max_request_provider_turns,
+                )
             response = self._send(messages, self._tools_for_current_runtime_boundary())
             with self._turn_lock:
                 if not self._generation_is_current(generation):
@@ -1796,7 +1828,7 @@ class HitlManager:
                     if use_cli_mcp:
                         kwargs["mcp_config_path"] = str(self._mcp_config_path)
                         kwargs["allowed_mcp_tools"] = [
-                            self._mcp_tool_name(str(tool["name"])) for tool in tools
+                            self._mcp_allowed_tool_name(str(tool["name"])) for tool in tools
                         ]
                         provider_tools = []
                     response = self.backend.send(messages, provider_tools, **kwargs)

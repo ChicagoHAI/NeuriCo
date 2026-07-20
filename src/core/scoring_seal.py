@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Any, Optional
 import hashlib
 import json
+import os
 import shutil
+import uuid
 
 
 SEALED_PATHS: list[str] = [
@@ -56,9 +58,39 @@ def _write_manifest(sealed_dir: Path, moved: list[str]) -> None:
         for relative in moved
     }
     payload = {"version": 1, "required": list(SEALED_REQUIRED_PATHS), "entries": entries}
-    (sealed_dir / SEALED_MANIFEST_NAME).write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    manifest_path = sealed_dir / SEALED_MANIFEST_NAME
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist a directory entry where the current platform permits it."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_tree(path: Path) -> None:
+    """Flush the staged evaluator payload before publishing its generation."""
+    for item in path.rglob("*"):
+        if not item.is_file() or item.is_symlink():
+            continue
+        try:
+            with item.open("rb") as handle:
+                os.fsync(handle.fileno())
+        except OSError:
+            # The subsequent manifest verification remains authoritative on
+            # platforms that do not permit syncing this file type.
+            continue
 
 
 def verify_sealed_scoring_manifest(sealed_dir: Path) -> str:
@@ -118,6 +150,30 @@ def remove_public_sealed_paths(work_dir: Path) -> None:
             path.unlink()
 
 
+def _public_payload_matches_sealed_manifest(work_dir: Path, sealed_dir: Path) -> bool:
+    """Return whether public evaluator remnants exactly match the sealed payload.
+
+    A matching public payload can only arise when runtime was interrupted after
+    publishing the sealed generation but before deleting the originals.  It is
+    safe to remove those remnants; any mismatch remains an integrity violation.
+    """
+    try:
+        manifest = json.loads((sealed_dir / SEALED_MANIFEST_NAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    entries = manifest.get("entries") if isinstance(manifest, dict) else None
+    if not isinstance(entries, dict):
+        return False
+    public_paths = _public_sealed_paths(work_dir)
+    if not public_paths:
+        return False
+    return all(
+        relative in entries
+        and _manifest_entry(Path(work_dir) / relative) == entries[relative]
+        for relative in public_paths
+    )
+
+
 def seal_scoring_files(work_dir: Path, *, immutable: bool = False) -> Optional[Path]:
     """
     Move hidden scoring files out of the workspace.
@@ -132,6 +188,14 @@ def seal_scoring_files(work_dir: Path, *, immutable: bool = False) -> Optional[P
     """
     work_dir = Path(work_dir)
     sealed_dir = sealed_dir_for(work_dir)
+    sealed_parent = sealed_dir.parent
+    sealed_parent.mkdir(parents=True, exist_ok=True)
+
+    # A process can die before a staged generation becomes active.  Staging is
+    # never authoritative, so it is always safe to discard on the next call.
+    for staging in sealed_parent.glob(f".{sealed_dir.name}.staging-*"):
+        if staging.is_dir():
+            shutil.rmtree(staging, ignore_errors=True)
 
     manifest_path = sealed_dir / SEALED_MANIFEST_NAME
     if immutable and sealed_dir.exists():
@@ -143,43 +207,61 @@ def seal_scoring_files(work_dir: Path, *, immutable: bool = False) -> Optional[P
         verify_sealed_scoring_manifest(sealed_dir)
         leaked = _public_sealed_paths(work_dir)
         if leaked:
+            if _public_payload_matches_sealed_manifest(work_dir, sealed_dir):
+                remove_public_sealed_paths(work_dir)
+                return sealed_dir
             raise RuntimeError(
                 "HITL evaluator integrity violation: public worker workspace contains "
                 "sealed evaluator path(s): " + ", ".join(leaked)
             )
         return sealed_dir
 
-    sealed_dir.mkdir(parents=True, exist_ok=True)
-
-    moved = []
+    staging_dir = sealed_parent / f".{sealed_dir.name}.staging-{uuid.uuid4().hex}"
+    staging_dir.mkdir(parents=True, exist_ok=False)
+    copied: list[str] = []
     for rel in SEALED_PATHS:
         normalized_rel = rel.rstrip("/")
         src = work_dir / normalized_rel
         if not src.exists():
             continue
-        dst = sealed_dir / normalized_rel
-        if dst.exists():
-            if dst.is_dir():
-                shutil.rmtree(dst)
-            else:
-                dst.unlink()
+        dst = staging_dir / normalized_rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst))
-        moved.append(rel)
+        if src.is_dir() and not src.is_symlink():
+            shutil.copytree(src, dst, symlinks=True)
+        else:
+            shutil.copy2(src, dst, follow_symlinks=False)
+        copied.append(rel)
 
-    if not moved:
+    if not copied:
         try:
-            sealed_dir.rmdir()
-            sealed_dir.parent.rmdir()
+            staging_dir.rmdir()
         except OSError:
             pass
         print("🔒 Nothing to seal (rule_maker outputs not found).")
         return None
 
-    _write_manifest(sealed_dir, moved)
+    _fsync_tree(staging_dir)
+    _write_manifest(staging_dir, copied)
+    verify_sealed_scoring_manifest(staging_dir)
+    _fsync_directory(staging_dir)
 
-    print(f"🔒 Sealed {len(moved)} scoring files to {sealed_dir}:")
-    for rel in moved:
+    if sealed_dir.exists():
+        # Non-HITL callers retain the historic reseal behavior. HITL immutable
+        # callers returned above after validating the active generation.
+        shutil.rmtree(sealed_dir)
+    os.replace(staging_dir, sealed_dir)
+    _fsync_directory(sealed_parent)
+
+    # The active generation is durable before public evaluator inputs vanish.
+    for rel in copied:
+        source = work_dir / rel.rstrip("/")
+        if source.is_dir() and not source.is_symlink():
+            shutil.rmtree(source)
+        else:
+            source.unlink()
+
+    print(f"🔒 Sealed {len(copied)} scoring files to {sealed_dir}:")
+    for rel in copied:
         print(f"     - {rel}")
     print(
         f"   (manual recovery if orchestrator crashes: "
