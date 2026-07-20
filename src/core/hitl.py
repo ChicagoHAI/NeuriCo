@@ -1071,6 +1071,7 @@ class HitlRuntime:
         requires_human_approval: Optional[bool] = None,
         allow_scoring_approval: bool = False,
         proposal_submission_validator: Optional[Callable[[], Dict[str, Any]]] = None,
+        proposal_review_path: Optional[Path] = None,
         plan_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
         phase_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
         scoring_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -1106,6 +1107,9 @@ class HitlRuntime:
             "requires_human_approval": requires_human_approval,
             "allow_scoring_approval": allow_scoring_approval,
             "proposal_submission_validator": proposal_submission_validator,
+            "proposal_review_path": str(Path(proposal_review_path).resolve())
+            if proposal_review_path is not None
+            else "",
             "supplied_plan_finish_validator": plan_finish_validator,
             "supplied_phase_finish_validator": phase_finish_validator,
             "scoring_handler": scoring_handler,
@@ -1148,7 +1152,17 @@ class HitlRuntime:
 
         protected_paths = ["scoring/results.json", ".neurico/autoresearch_state.json"]
         if self.pipeline_stage != "rule_maker":
-            protected_paths.insert(0, "scoring/interface.md")
+            # Evaluator internals are runtime/rule-maker owned. Their absence
+            # from a worker workspace is part of the protected boundary too,
+            # so a worker-created replacement is retryable at finish time and
+            # can never become the evaluator for a later attempt.
+            from core.scoring_seal import SEALED_PATHS
+
+            protected_paths = [
+                "scoring/interface.md",
+                *(relative.rstrip("/") for relative in SEALED_PATHS),
+                *protected_paths,
+            ]
         protected_guard = HitlWorkspaceWriteGuard.capture_paths(
             self.work_dir,
             protected_paths,
@@ -1441,6 +1455,11 @@ class HitlRuntime:
                         manager_record=manager_record,
                         review=review,
                     )
+                self._write_proposal_review_artifact(
+                    proposal_record=proposal_record,
+                    manager_record=manager_record,
+                    admission=finalized["result"],
+                )
                 return review
 
             self.manager.review_proposal(
@@ -1491,6 +1510,42 @@ class HitlRuntime:
                 }
             ).encode("utf-8")
         ).hexdigest()
+
+    def _write_proposal_review_artifact(
+        self,
+        *,
+        proposal_record: Dict[str, Any],
+        manager_record: Dict[str, Any],
+        admission: Dict[str, Any],
+    ) -> None:
+        """Materialize the runtime-owned public review trace for one proposal."""
+        raw_path = str(self._tool_context.get("proposal_review_path", "")).strip()
+        if not raw_path:
+            return
+        path = Path(raw_path)
+        payload = {
+            "proposal_idea_id": proposal_record["idea_id"],
+            "proposal_type": proposal_record["proposal_type"],
+            "proposal": proposal_record["proposal"],
+            "premises": proposal_record["premises"],
+            "parent_node_sha": proposal_record.get("parent_node_id", ""),
+            "attempt_id": proposal_record.get("attempt_id", ""),
+            "manager_legality_decision_idea_id": manager_record["idea_id"],
+            "admission_status": admission.get("status", ""),
+            "human_admission_decision_idea_id": admission.get("human_idea_id", ""),
+            "manager_feedback": admission.get("feedback", ""),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _raised_idea_request_key(record: Dict[str, Any]) -> str:
@@ -1611,17 +1666,49 @@ class HitlRuntime:
     ) -> Dict[str, Any]:
         submitted = self._proposal_submit_result
         if submitted and submitted.get("status") == "approved":
+            if result.get("background_processes_terminated"):
+                return {
+                    "success": False,
+                    "hitl": True,
+                    "phase": "proposal",
+                    "error": (
+                        f"{worker_name} left background processes after proposal admission. "
+                        "Runtime terminated them and discarded the proposal admission."
+                    ),
+                }
+            if not result.get("success"):
+                return {
+                    "success": False,
+                    "hitl": True,
+                    "phase": "proposal",
+                    "error": (
+                        f"{worker_name} exited unsuccessfully after proposal admission. "
+                        "Runtime discarded the proposal because its post-process boundary is not valid."
+                    ),
+                }
+            validator = self._tool_context.get("proposal_submission_validator")
+            if callable(validator):
+                validation = validator()
+                if not bool(validation.get("valid")):
+                    issues = validation.get("issues", [])
+                    if not isinstance(issues, list):
+                        issues = [str(issues)]
+                    return {
+                        "success": False,
+                        "hitl": True,
+                        "phase": "proposal",
+                        "error": (
+                            f"{worker_name} changed the public workspace after proposal admission. "
+                            "Runtime discarded the proposal:\n"
+                            + "\n".join(
+                                f"- {str(issue)}" for issue in issues if str(issue).strip()
+                            )
+                        ),
+                    }
             self._clear_worker_continuation()
             return {
                 **submitted,
-                "worker_exit_warning": (
-                    (
-                        f"{worker_name} exited with a provider error after runtime approved the proposal. "
-                        "Runtime retained the approved proposal because no proposer work remained."
-                    )
-                    if not result.get("success")
-                    else ""
-                ),
+                "worker_exit_warning": "",
             }
         if submitted and submitted.get("status") == "feedback":
             continuation = self.worker_continuation()
@@ -2500,6 +2587,7 @@ class HitlRuntime:
                 hitl_stage=hitl_stage,
                 plan_text=self._read_optional(self.paths.plan_path),
                 plan_fingerprint=plan_fingerprint,
+                workspace_fingerprint=workspace_fingerprint,
                 finish_summary=summary,
                 related_artifacts=related_artifacts,
                 requires_human_approval=bool(self._tool_context.get("requires_human_approval")),
@@ -2685,6 +2773,16 @@ class HitlRuntime:
     def phase_finish_result(self) -> Optional[Dict[str, Any]]:
         return dict(self._phase_finish_result) if self._phase_finish_result else None
 
+    def mark_frontier_decision_deferred(self) -> None:
+        """Record that the manager decided, but publication awaits clean worker exit."""
+        self._phase_finish_result = {
+            "called": True,
+            "status": "approved",
+            "next_phase": "complete",
+            "final": True,
+            "frontier_decision_deferred": True,
+        }
+
     def finish_was_approved(self) -> bool:
         return bool(
             self._phase_finish_result and self._phase_finish_result.get("status") == "approved"
@@ -2719,6 +2817,14 @@ class HitlRuntime:
             or isinstance(resolved.get("scored_candidate"), dict)
             or isinstance(resolved.get("scorer_result"), dict)
         ):
+            if not result.get("success"):
+                return {
+                    "approved": False,
+                    "error": (
+                        f"{worker_name} exited unsuccessfully after runtime approval. "
+                        "Runtime will not publish the deferred frontier decision."
+                    ),
+                }
             self._clear_worker_continuation()
             return {
                 "approved": True,
@@ -2729,6 +2835,14 @@ class HitlRuntime:
                 ),
             }
         if finish and finish.get("status") == "approved" and finish.get("final"):
+            if not result.get("success"):
+                return {
+                    "approved": False,
+                    "error": (
+                        f"{worker_name} exited unsuccessfully after final HITL approval. "
+                        "Runtime will not publish the deferred frontier decision."
+                    ),
+                }
             self._clear_worker_continuation()
             return {
                 "approved": True,
@@ -3603,11 +3717,79 @@ def verify_required_artifacts(work_dir: Path, artifacts: Iterable[RequiredArtifa
 def validate_required_artifact_contract(work_dir: Path) -> Dict[str, Any]:
     """Return a worker-retryable validation result for the rule-maker contract."""
     try:
-        artifacts = parse_required_artifacts(Path(work_dir) / "scoring" / "interface.md")
+        artifacts = load_hitl_required_artifact_contract(work_dir)
         verify_required_artifacts(work_dir, artifacts)
     except (OSError, ValueError, json.JSONDecodeError, HitlValidationError) as exc:
         return {"valid": False, "issues": [str(exc)]}
     return {"valid": True, "issues": []}
+
+
+def _artifact_contract_path(work_dir: Path) -> Path:
+    return Path(work_dir) / ".neurico" / "hitl" / "artifact_contract.json"
+
+
+def persist_hitl_required_artifact_contract(work_dir: Path) -> List[RequiredArtifact]:
+    """Freeze the evaluator-owned required-artifact grammar for HITL execution."""
+    root = Path(work_dir)
+    interface_path = root / "scoring" / "interface.md"
+    artifacts = parse_required_artifacts(interface_path)
+    payload = {
+        "version": 1,
+        "interface_sha256": _sha256_file(interface_path),
+        "artifacts": [
+            {"path": artifact.path, "purpose": artifact.purpose, "required": artifact.required}
+            for artifact in artifacts
+        ],
+    }
+    path = _artifact_contract_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return artifacts
+
+
+def load_hitl_required_artifact_contract(work_dir: Path) -> List[RequiredArtifact]:
+    """Load the runtime-frozen contract, verifying its evaluator source did not change."""
+    root = Path(work_dir)
+    path = _artifact_contract_path(root)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HitlValidationError(
+            "Runtime-required artifact contract is missing or unreadable; rerun rule-maker HITL."
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise HitlValidationError("Runtime-required artifact contract has an invalid version.")
+    interface_path = root / "scoring" / "interface.md"
+    if _sha256_file(interface_path) != payload.get("interface_sha256"):
+        raise HitlValidationError(
+            "scoring/interface.md changed after runtime froze the rule-maker contract."
+        )
+    entries = payload.get("artifacts")
+    if not isinstance(entries, list):
+        raise HitlValidationError("Runtime-required artifact contract has no artifact list.")
+    artifacts: List[RequiredArtifact] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("required"), bool):
+            raise HitlValidationError("Runtime-required artifact contract has an invalid entry.")
+        artifacts.append(
+            RequiredArtifact(
+                path=_normalize_required_artifact_path(str(entry.get("path", ""))),
+                purpose=str(entry.get("purpose", "")).strip(),
+                required=entry["required"],
+            )
+        )
+    if not artifacts:
+        raise HitlValidationError("Runtime-required artifact contract is empty.")
+    return artifacts
 
 
 def snapshot_path_state(path: Path) -> Dict[str, Any]:

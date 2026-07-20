@@ -83,6 +83,9 @@ intentional for v1 and should frame review discussion.
 - Failed attempts are rolled back and removed from final HITL state. Private Git
   refs preserve runtime recovery boundaries; runtime resumes scored decisions
   rather than asking workers to repeat completed scoring.
+- Those private recovery refs are repository-local runtime state. They are not
+  an export or cross-machine recovery mechanism, and ordinary Git push/clone
+  does not carry them.
 - HITL scoring uses a runtime-private scorer worktree. The public worker
   workspace receives only permitted score output. With `--full-permissions`,
   this is a correctness and exposure reduction boundary, not an OS security

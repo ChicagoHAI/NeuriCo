@@ -41,6 +41,7 @@ from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring
 from core.workspace_manifest import build_manifest, curate_manifest
 from core.hitl import (
     HitlRuntime,
+    persist_hitl_required_artifact_contract,
     validate_required_artifact_contract,
 )
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
@@ -706,6 +707,7 @@ class ResearchPipelineOrchestrator:
         )
         hitl_state_store = HitlGitStateStore(self.work_dir)
         hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
+
         def resource_artifact_validator() -> Dict[str, Any]:
             required = ("literature_review.md", "resources.md")
             issues = []
@@ -789,6 +791,9 @@ class ResearchPipelineOrchestrator:
                     hitl_stage="plan",
                     actor="resource_finder",
                     requires_human_approval=True,
+                    # The same validator is retained when runtime transitions
+                    # this live worker from plan to execution.
+                    phase_finish_validator=resource_artifact_validator,
                 )
                 result, finish = run_worker_with_replacements(
                     suffix=runtime.plan_prompt_block(),
@@ -1119,6 +1124,7 @@ class ResearchPipelineOrchestrator:
         scored_checkpoint_sha: Optional[str] = None
         hitl_state_store = HitlGitStateStore(self.work_dir)
         hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
+
         artifact_validator = (
             (lambda: validate_required_artifact_contract(self.work_dir))
             if scoring_enabled
@@ -1406,6 +1412,16 @@ class ResearchPipelineOrchestrator:
         hitl_state_store = HitlGitStateStore(self.work_dir)
         hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
 
+        def rule_maker_artifact_validator() -> Dict[str, Any]:
+            validation = validate_rule_maker_outputs(self.work_dir)
+            if not validation.get("valid"):
+                return validation
+            try:
+                persist_hitl_required_artifact_contract(self.work_dir)
+            except Exception as exc:
+                return {"valid": False, "issues": [str(exc)]}
+            return validation
+
         def restore_failed_hitl_state() -> None:
             runtime.abandon_pending_worker_request_for_rollback(
                 "The rule-maker HITL stage failed and runtime is restoring its prior state."
@@ -1472,7 +1488,7 @@ class ResearchPipelineOrchestrator:
                     hitl_stage="plan",
                     actor=RULE_MAKER_STAGE,
                     requires_human_approval=True,
-                    phase_finish_validator=lambda: validate_rule_maker_outputs(self.work_dir),
+                    phase_finish_validator=rule_maker_artifact_validator,
                 )
                 result, finish = run_worker_with_replacements(
                     suffix=runtime.plan_prompt_block(),
@@ -1498,7 +1514,7 @@ class ResearchPipelineOrchestrator:
             runtime.prepare_idea_tool_context(
                 hitl_stage="execution",
                 actor=RULE_MAKER_STAGE,
-                phase_finish_validator=lambda: validate_rule_maker_outputs(self.work_dir),
+                phase_finish_validator=rule_maker_artifact_validator,
             )
             result, finish = run_worker_with_replacements(
                 suffix=runtime.execution_prompt_block(mode="execute"),

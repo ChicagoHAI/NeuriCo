@@ -40,6 +40,26 @@ def _copy_path(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def _write_public_results(path: Path, source: Path) -> str:
+    """Publish a scorer review copy atomically, without making it authoritative."""
+    payload = source.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+    os.replace(temporary, path)
+    if _sha256_file(path) != digest:
+        raise HitlScoringWorkspaceError("Runtime could not verify the public scoring review copy.")
+    return digest
+
+
 @contextmanager
 def isolated_scoring_workspace(
     *,
@@ -126,6 +146,7 @@ def run_isolated_scorer(
     source_sha: str,
     sealed_dir: Optional[Path],
     scorer: Callable[[Path], Dict[str, Any]],
+    temporary_ref: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run a scorer privately and commit its result from the immutable source tree.
 
@@ -184,13 +205,29 @@ def run_isolated_scorer(
         )
         if resolved.returncode != 0:
             raise HitlScoringWorkspaceError("Runtime could not resolve the scored checkpoint.")
+        scored_checkpoint_sha = resolved.stdout.strip()
+        if temporary_ref:
+            retained = subprocess.run(
+                ["git", "-C", str(scorer_work_dir), "update-ref", temporary_ref, scored_checkpoint_sha],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            if retained.returncode != 0:
+                detail = (retained.stderr or retained.stdout or "unknown Git error").strip()
+                raise HitlScoringWorkspaceError(
+                    f"Runtime could not retain the isolated scored checkpoint: {detail}"
+                )
         public_results = public_work_dir / "scoring" / "results.json"
-        public_results.parent.mkdir(parents=True, exist_ok=True)
-        public_results.write_text(scorer_results.read_text(encoding="utf-8"), encoding="utf-8")
+        results_sha256 = _write_public_results(public_results, scorer_results)
         result["results_path"] = str(public_results)
         result["source_checkpoint_sha"] = source_sha
-        result["scored_checkpoint_sha"] = resolved.stdout.strip()
-        result["results_sha256"] = _sha256_file(scorer_results)
+        result["scored_checkpoint_sha"] = scored_checkpoint_sha
+        if temporary_ref:
+            result["scoring_ref"] = temporary_ref
+        result["results_sha256"] = results_sha256
         result["evaluator_manifest_sha256"] = evaluator_manifest_sha256
         result.pop("log_path", None)
         result["isolated"] = True

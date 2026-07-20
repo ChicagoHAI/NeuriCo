@@ -11,7 +11,7 @@ manager:
 
   # Model to use for manager reasoning (null = default for backend)
   # For cli: uses whatever claude version is installed
-  # For anthropic_api: e.g., "claude-sonnet-4-20250514"
+  # For anthropic_api: e.g., "claude-sonnet-4-6"
   # For openrouter: e.g., "anthropic/claude-sonnet-4"
   # Can also be set via NEURICO_MANAGER_MODEL env var
   llm_model: null

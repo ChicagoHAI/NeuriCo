@@ -296,7 +296,7 @@ class HitlGitStateStore:
             suffix[0] == "bin"
             or name.endswith(".lock")
             or name.endswith(".tmp")
-            or name in {"history.sqlite-wal", "history.sqlite-shm"}
+            or name in {"history.sqlite-wal", "history.sqlite-shm", "manager_mcp.json"}
         )
 
     def _clear_durable_hitl_directory(self, hitl_dir: Path) -> None:
@@ -306,6 +306,7 @@ class HitlGitStateStore:
             if path.name in {
                 "history.sqlite-wal",
                 "history.sqlite-shm",
+                "manager_mcp.json",
             } or path.name.endswith(".tmp"):
                 if path.is_file():
                     path.unlink()

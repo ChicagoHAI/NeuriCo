@@ -99,14 +99,56 @@ def sealed_dir_for(work_dir: Path) -> Path:
     return work_dir.parent / ".scoring_sealed" / work_dir.name
 
 
-def seal_scoring_files(work_dir: Path) -> Optional[Path]:
+def _public_sealed_paths(work_dir: Path) -> list[str]:
+    """Return evaluator paths that must never reappear in a worker workspace."""
+    return [
+        relative.rstrip("/")
+        for relative in SEALED_PATHS
+        if (Path(work_dir) / relative.rstrip("/")).exists()
+    ]
+
+
+def remove_public_sealed_paths(work_dir: Path) -> None:
+    """Remove evaluator internals that leaked into a public worker workspace."""
+    for relative in _public_sealed_paths(work_dir):
+        path = Path(work_dir) / relative
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+
+def seal_scoring_files(work_dir: Path, *, immutable: bool = False) -> Optional[Path]:
     """
     Move hidden scoring files out of the workspace.
 
     Returns the sealed directory path when files were moved, otherwise None.
+
+    ``immutable=True`` is the HITL AutoResearch handoff.  After rule maker
+    has produced and sealed an evaluator, later experiment workers must never
+    be able to replace it through a subsequent seal operation.  In that mode a
+    valid existing manifest is reused only when every evaluator path remains
+    absent from the public workspace.
     """
     work_dir = Path(work_dir)
     sealed_dir = sealed_dir_for(work_dir)
+
+    manifest_path = sealed_dir / SEALED_MANIFEST_NAME
+    if immutable and sealed_dir.exists():
+        if not manifest_path.is_file():
+            raise RuntimeError(
+                "HITL evaluator integrity violation: runtime found an incomplete sealed evaluator "
+                "store. Restore or rerun rule maker instead of resealing public workspace files."
+            )
+        verify_sealed_scoring_manifest(sealed_dir)
+        leaked = _public_sealed_paths(work_dir)
+        if leaked:
+            raise RuntimeError(
+                "HITL evaluator integrity violation: public worker workspace contains "
+                "sealed evaluator path(s): " + ", ".join(leaked)
+            )
+        return sealed_dir
+
     sealed_dir.mkdir(parents=True, exist_ok=True)
 
     moved = []

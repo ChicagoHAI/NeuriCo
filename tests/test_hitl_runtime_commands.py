@@ -197,6 +197,27 @@ def test_finished_worker_response_is_available_for_exact_retry(tmp_path: Path) -
     assert retry["response"] == response
 
 
+def test_failed_worker_exit_does_not_publish_a_deferred_frontier_decision(tmp_path: Path) -> None:
+    runtime = HitlRuntime(tmp_path, "experiment_runner")
+    state = HitlRuntimeState(tmp_path)
+    state.begin_worker_command({"request_key": "finish", "kind": "phase_finish"})
+    state.complete_worker_command(
+        "finish",
+        {"status": "approved", "final": True, "frontier_decision_deferred": True},
+    )
+    runtime.mark_frontier_decision_deferred()
+
+    result = runtime.handle_worker_exit_after_finish(
+        {"success": False},
+        phase="stage",
+        worker_name="candidate worker",
+    )
+
+    assert result["approved"] is False
+    assert "will not publish" in result["error"]
+    runtime.manager.stop()
+
+
 def test_rejected_whiteboard_cleanup_is_durable_and_attempt_scoped(tmp_path: Path) -> None:
     state = HitlRuntimeState(tmp_path)
     pending = state.begin_rejected_whiteboard_cleanup("parent/attempt_1")

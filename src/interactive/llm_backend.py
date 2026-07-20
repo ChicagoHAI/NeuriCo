@@ -54,6 +54,7 @@ class LLMBackend:
         disable_native_tools: bool = False,
         mcp_config_path: Optional[str] = None,
         allowed_mcp_tools: Optional[List[str]] = None,
+        use_dedicated_system_prompt: bool = False,
     ) -> LLMResponse:
         """
         Send messages to the LLM and return the response.
@@ -78,6 +79,7 @@ class LLMBackend:
                 disable_native_tools=disable_native_tools,
                 mcp_config_path=mcp_config_path,
                 allowed_mcp_tools=allowed_mcp_tools,
+                use_dedicated_system_prompt=use_dedicated_system_prompt,
             )
         elif self.backend == "anthropic_api":
             return self._send_anthropic_api(messages, tools, timeout_seconds=timeout_seconds)
@@ -95,6 +97,7 @@ class LLMBackend:
         disable_native_tools: bool = False,
         mcp_config_path: Optional[str] = None,
         allowed_mcp_tools: Optional[List[str]] = None,
+        use_dedicated_system_prompt: bool = False,
     ) -> LLMResponse:
         """
         Send via `claude -p` CLI. Constructs a single prompt from all messages
@@ -103,16 +106,32 @@ class LLMBackend:
         # Build prompt from messages
         # When HITL supplies a real MCP surface, the CLI receives its tools
         # natively. Do not also emit the legacy XML tool convention in text.
-        prompt = self._messages_to_prompt(messages, None if mcp_config_path else tools)
+        system_prompt = "\n\n".join(
+            str(message.get("content", "")).strip()
+            for message in messages
+            if message.get("role") == "system" and str(message.get("content", "")).strip()
+        )
+        prompt_messages = (
+            [message for message in messages if message.get("role") != "system"]
+            if use_dedicated_system_prompt
+            else messages
+        )
+        prompt = self._messages_to_prompt(
+            prompt_messages,
+            None if mcp_config_path else tools,
+        )
 
         # Build command
         cmd = ["claude", "-p", "--verbose", "--output-format", "stream-json"]
         if self.model:
             cmd.extend(["--model", self.model])
+        if use_dedicated_system_prompt and system_prompt:
+            cmd.extend(["--system-prompt", system_prompt])
         if mcp_config_path:
             names = [str(name).strip() for name in allowed_mcp_tools or [] if str(name).strip()]
             cmd.extend(["--mcp-config", str(mcp_config_path), "--strict-mcp-config"])
-            cmd.extend(["--tools", ",".join(names), "--dangerously-skip-permissions"])
+            cmd.extend(["--tools", "", "--allowedTools", ",".join(names)])
+            cmd.append("--dangerously-skip-permissions")
         elif disable_native_tools:
             # HITL manager tools are parsed and executed by the runtime. Do
             # not let the CLI agent gain a second, unmanaged tool surface.
@@ -367,7 +386,7 @@ class LLMBackend:
                     "input_schema": tool.get("parameters", {"type": "object", "properties": {}})
                 })
 
-        model = self.model or "claude-sonnet-4-20250514"
+        model = self.model or "claude-sonnet-4-6"
 
         kwargs = {
             "model": model,

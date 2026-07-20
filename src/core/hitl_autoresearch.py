@@ -50,6 +50,7 @@ from core.hitl_whiteboard import (
     write_hitl_current_attempt_marker,
 )
 from core.scoring_seal import (
+    remove_public_sealed_paths,
     seal_scoring_files,
     sealed_dir_for,
 )
@@ -191,6 +192,45 @@ def _initial_frontier_acceptance_reason(work_dir: Path) -> str:
     return "Initial experiment stage completed and scoring returned without error."
 
 
+def _archive_failed_hitl_attempt(
+    *,
+    history_root: Path,
+    parent_sha: str,
+    attempt_id: str,
+    phase: str,
+    reason: str,
+) -> Path:
+    """Preserve a small, noncanonical runtime incident record before cleanup.
+
+    Failed attempts never enter the frontier or ordinary attempt history.  This
+    archive intentionally contains runtime diagnostics only, rather than a
+    partial research workspace that could be mistaken for a real attempt.
+    """
+    parent_component = re.sub(r"[^A-Za-z0-9_.-]", "_", parent_sha) or "unknown-parent"
+    attempt_component = re.sub(r"[^A-Za-z0-9_.-]", "_", attempt_id) or "unknown-attempt"
+    archive_dir = (
+        Path(history_root)
+        / "failed_attempts"
+        / parent_component
+        / attempt_component
+    )
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "kind": "hitl_runtime_failure",
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "parent_node_sha": parent_sha,
+        "attempt_id": attempt_id,
+        "phase": phase,
+        "reason": reason,
+        "attempt_directory_removed": True,
+    }
+    incident_path = archive_dir / "runtime_incident.json"
+    temporary_path = incident_path.with_suffix(".json.tmp")
+    temporary_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    temporary_path.replace(incident_path)
+    return archive_dir
+
+
 def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlRecoveryResult]:
     """Recover a leftover HITL AutoResearch attempt before clean-workspace validation."""
     work_dir = Path(work_dir)
@@ -283,6 +323,16 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
     _rollback_failed_hitl_whiteboard_attempt(work_dir, marker)
     clear_hitl_current_attempt_marker(work_dir)
     _best_effort_remove_hitl_state_snapshot(work_dir, attempt_dir)
+    _archive_failed_hitl_attempt(
+        history_root=history_root,
+        parent_sha=current_best_sha,
+        attempt_id=marker,
+        phase="interrupted_recovery",
+        reason=(
+            "Runtime recovered an interrupted HITL attempt before it reached a "
+            "frontier decision."
+        ),
+    )
     shutil.rmtree(attempt_dir, ignore_errors=True)
     return HitlRecoveryResult(
         marker=marker,
@@ -756,7 +806,7 @@ class HitlAutoResearchController:
         self,
         recovery: HitlRecoveryResult,
     ) -> AutoResearchIterationResult:
-        """Finish a manager decision interrupted between durable commit steps."""
+        """Recover a frontier decision without publishing an unclean worker exit."""
         from core.hitl_runtime_state import HitlRuntimeState
 
         transition = recovery.frontier_transition or HitlRuntimeState(
@@ -766,6 +816,35 @@ class HitlAutoResearchController:
             raise RuntimeError("Recovered frontier decision has no durable transition record.")
         if str(transition.get("attempt_id", "")).strip() != recovery.marker:
             raise RuntimeError("Recovered frontier decision does not match the active attempt.")
+        candidate_summary_data = transition.get("candidate_summary")
+        if not isinstance(candidate_summary_data, dict):
+            raise RuntimeError("Recovered frontier decision has no candidate score summary.")
+        candidate_summary = ScoreSummary(**candidate_summary_data)
+        if str(transition.get("status", "prepared")) == "prepared":
+            # The manager chose an outcome, but runtime never observed the worker
+            # exit cleanly. Do not turn an unverified terminal state into frontier
+            # history; rollback it as a runtime failure instead.
+            return self._discard_unscored_hitl_attempt(
+                parent_sha=str(transition["parent_node_sha"]),
+                attempt_dir=recovery.removed_attempt_dir,
+                proposal=self._proposal_text_for(str(transition["proposal_idea_id"])),
+                comment_result={
+                    "success": False,
+                    "error": (
+                        "Runtime recovered a prepared frontier decision without a clean "
+                        "worker exit, so it rolled the candidate back."
+                    ),
+                },
+                scorer_result=dict(transition.get("scorer_result") or {}),
+                parent_summary=self._frontier_parent_summary(
+                    str(transition["parent_node_sha"])
+                ),
+                candidate_summary=candidate_summary,
+                failure_phase="frontier_publication",
+                failure_reason=(
+                    "Runtime recovered a prepared frontier decision without a clean worker exit."
+                ),
+            )
         runtime = self._proposal_hitl_runtime()
         response = self._commit_frontier_decision(runtime=runtime, transition=transition)
         request_key = str(transition.get("request_key", "")).strip()
@@ -773,10 +852,6 @@ class HitlAutoResearchController:
             pending = HitlRuntimeState(self.work_dir).pending_worker_command()
             if isinstance(pending, dict) and pending.get("request_key") == request_key:
                 HitlRuntimeState(self.work_dir).complete_worker_command(request_key, response)
-        candidate_summary_data = transition.get("candidate_summary")
-        if not isinstance(candidate_summary_data, dict):
-            raise RuntimeError("Recovered frontier decision has no candidate score summary.")
-        candidate_summary = ScoreSummary(**candidate_summary_data)
         return self._complete_scored_hitl_attempt(
             iteration=0,
             parent_sha=str(transition["parent_node_sha"]),
@@ -821,6 +896,7 @@ class HitlAutoResearchController:
                 hitl_stage="proposal",
                 actor="autoresearch_proposer",
                 provenance={"parent_node_id": parent_sha, "attempt_id": attempt_id},
+                proposal_review_path=recovery.removed_attempt_dir / "proposal_review.json",
             )
             try:
                 proposal_result = self._call_proposal_generator(
@@ -885,8 +961,10 @@ class HitlAutoResearchController:
                 ),
             )
         scorer_result = dict(scored_candidate.get("scorer_result") or {})
-        candidate_summary = self.comparator.load_summary(
-            self.work_dir / "scoring" / "results.json", source="candidate"
+        trusted_results = scorer_result.get("results") if isinstance(scorer_result, dict) else None
+        candidate_summary = self.comparator.summarize(
+            trusted_results if isinstance(trusted_results, dict) else {},
+            source="candidate",
         )
         child_sha = str(scored_candidate.get("node_sha", "")).strip()
         reason = str(scored_candidate.get("reason", "")).strip()
@@ -946,12 +1024,17 @@ class HitlAutoResearchController:
         scorer_result: Dict[str, Any],
         parent_summary: ScoreSummary,
         candidate_summary: ScoreSummary,
+        failure_phase: str = "scoring_recovery",
+        failure_reason: Optional[str] = None,
     ) -> AutoResearchIterationResult:
         """Restore the parent only after scoring recovery has exhausted its retries."""
         self._abandon_pending_worker_request_for_rollback(
             "The AutoResearch candidate could not be scored and runtime is restoring its parent."
         )
+        self._retire_temporary_scoring_ref(scorer_result, strict=False)
+        self._retire_pending_scoring_ref()
         self.checkpoints.restore_checkpoint(parent_sha, clean_untracked_public=True)
+        remove_public_sealed_paths(self.work_dir)
         _restore_hitl_state_snapshot(self.work_dir, attempt_dir)
         self._reload_manager_after_hitl_restore()
         _rollback_failed_hitl_whiteboard_attempt(
@@ -961,6 +1044,17 @@ class HitlAutoResearchController:
         self.hitl_runtime = None
         clear_hitl_current_attempt_marker(self.work_dir)
         _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
+        _archive_failed_hitl_attempt(
+            history_root=self.history.history_root,
+            parent_sha=parent_sha,
+            attempt_id=self._attempt_id(attempt_dir),
+            phase=failure_phase,
+            reason=(
+                failure_reason
+                or candidate_summary.error
+                or "Runtime could not obtain a valid objective score."
+            ),
+        )
         shutil.rmtree(attempt_dir, ignore_errors=True)
         return AutoResearchIterationResult(
             iteration=0,
@@ -968,7 +1062,11 @@ class HitlAutoResearchController:
             child_sha=None,
             attempt_dir=attempt_dir,
             accepted=False,
-            reason=candidate_summary.error or "Recovered HITL candidate remained unscorable.",
+            reason=(
+                failure_reason
+                or candidate_summary.error
+                or "Recovered HITL candidate remained unscorable."
+            ),
             proposal=proposal,
             comment_result=comment_result,
             scorer_result=scorer_result,
@@ -1049,43 +1147,21 @@ class HitlAutoResearchController:
         transition: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Commit one manager frontier decision through a durable step record."""
-        from core.hitl_runtime_state import HitlRuntimeState
-
-        state = HitlRuntimeState(self.work_dir)
         if transition is None:
-            pending = state.pending_worker_command() or {}
-            if not all(
-                [
-                    parent_node_sha,
-                    attempt_id,
-                    candidate_node_sha,
-                    proposal_idea_id,
-                    proposal_type,
-                    isinstance(objective_score, dict),
-                    isinstance(scorer_result, dict),
-                    candidate_summary is not None,
-                    accepted is not None,
-                    reason,
-                ]
-            ):
-                raise RuntimeError("Frontier decision is missing runtime-owned candidate data.")
-            transition = state.begin_frontier_decision_transition(
-                {
-                    "request_key": str(pending.get("request_key", "")).strip(),
-                    "parent_node_sha": str(parent_node_sha),
-                    "attempt_id": str(attempt_id),
-                    "candidate_node_sha": str(candidate_node_sha),
-                    "proposal_idea_id": str(proposal_idea_id),
-                    "proposal_type": str(proposal_type),
-                    "objective_score": objective_score,
-                    "scorer_result": scorer_result,
-                    "candidate_summary": candidate_summary.as_dict(),
-                    "accepted": bool(accepted),
-                    "reason": str(reason),
-                    "plan_text": self._read_experiment_plan(),
-                }
+            transition = self._prepare_frontier_decision(
+                parent_node_sha=parent_node_sha,
+                attempt_id=attempt_id,
+                candidate_node_sha=candidate_node_sha,
+                proposal_idea_id=proposal_idea_id,
+                proposal_type=proposal_type,
+                objective_score=objective_score,
+                scorer_result=scorer_result,
+                candidate_summary=candidate_summary,
+                accepted=accepted,
+                reason=reason,
             )
 
+        state = HitlRuntimeState(self.work_dir)
         parent = str(transition.get("parent_node_sha", "")).strip()
         attempt = str(transition.get("attempt_id", "")).strip()
         candidate = str(transition.get("candidate_node_sha", "")).strip()
@@ -1147,6 +1223,11 @@ class HitlAutoResearchController:
                 status="mirrored",
             )
 
+        self._retire_temporary_scoring_ref(
+            dict(transition.get("scorer_result") or {}),
+            strict=True,
+        )
+
         scored_candidate = {
             "node_sha": candidate,
             "objective_score": score,
@@ -1163,6 +1244,89 @@ class HitlAutoResearchController:
             "final": True,
             "scored_candidate": scored_candidate,
         }
+
+    def _retire_temporary_scoring_ref(
+        self,
+        scorer_result: Dict[str, Any],
+        *,
+        strict: bool,
+    ) -> None:
+        """Remove the runtime-only ref retaining an isolated scoring checkpoint."""
+        scoring_ref = str(scorer_result.get("scoring_ref", "")).strip()
+        if not scoring_ref:
+            return
+        removed = subprocess.run(
+            ["git", "-C", str(self.work_dir), "update-ref", "-d", scoring_ref],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if removed.returncode == 0 or not strict:
+            return
+        detail = (removed.stderr or removed.stdout or "unknown Git error").strip()
+        raise RuntimeError(
+            f"Runtime finalized the frontier but could not retire its temporary scoring ref: {detail}"
+        )
+
+    def _retire_pending_scoring_ref(self) -> None:
+        """Best-effort cleanup for a scored candidate that never reached publication."""
+        transition = HitlRuntimeState(self.work_dir).frontier_decision_transition()
+        if isinstance(transition, dict):
+            self._retire_temporary_scoring_ref(
+                dict(transition.get("scorer_result") or {}),
+                strict=False,
+            )
+
+    def _prepare_frontier_decision(
+        self,
+        *,
+        parent_node_sha: Optional[str],
+        attempt_id: Optional[str],
+        candidate_node_sha: Optional[str],
+        proposal_idea_id: Optional[str],
+        proposal_type: Optional[str],
+        objective_score: Optional[Dict[str, Any]],
+        scorer_result: Optional[Dict[str, Any]],
+        candidate_summary: Optional[ScoreSummary],
+        accepted: Optional[bool],
+        reason: Optional[str],
+    ) -> Dict[str, Any]:
+        """Persist a manager decision before the worker exits, without publishing it."""
+        if not all(
+            [
+                parent_node_sha,
+                attempt_id,
+                candidate_node_sha,
+                proposal_idea_id,
+                proposal_type,
+                isinstance(objective_score, dict),
+                isinstance(scorer_result, dict),
+                candidate_summary is not None,
+                accepted is not None,
+                reason,
+            ]
+        ):
+            raise RuntimeError("Frontier decision is missing runtime-owned candidate data.")
+        state = HitlRuntimeState(self.work_dir)
+        pending = state.pending_worker_command() or {}
+        return state.begin_frontier_decision_transition(
+            {
+                "request_key": str(pending.get("request_key", "")).strip(),
+                "parent_node_sha": str(parent_node_sha),
+                "attempt_id": str(attempt_id),
+                "candidate_node_sha": str(candidate_node_sha),
+                "proposal_idea_id": str(proposal_idea_id),
+                "proposal_type": str(proposal_type),
+                "objective_score": objective_score,
+                "scorer_result": scorer_result,
+                "candidate_summary": candidate_summary.as_dict(),
+                "accepted": bool(accepted),
+                "reason": str(reason),
+                "plan_text": self._read_experiment_plan(),
+            }
+        )
 
     def run_iteration(
         self,
@@ -1183,7 +1347,10 @@ class HitlAutoResearchController:
         _snapshot_hitl_state_before(self.work_dir, attempt_dir)
         write_hitl_current_attempt_marker(self.work_dir, attempt_marker)
 
-        sealed_path = seal_scoring_files(self.work_dir)
+        # Rule maker establishes the evaluator authority.  Every later HITL
+        # attempt must reuse that sealed payload, never replace it with files a
+        # worker happened to create in the public workspace.
+        sealed_path = seal_scoring_files(self.work_dir, immutable=True)
         if sealed_path is None:
             existing_sealed_path = sealed_dir_for(self.work_dir)
             sealed_path = existing_sealed_path if existing_sealed_path.is_dir() else None
@@ -1227,6 +1394,7 @@ class HitlAutoResearchController:
             self._abandon_pending_worker_request_for_rollback(
                 "The AutoResearch attempt failed before scoring and runtime is restoring its parent."
             )
+            self._retire_pending_scoring_ref()
             self.checkpoints.restore_checkpoint(parent_sha, clean_untracked_public=True)
             _restore_hitl_state_snapshot(self.work_dir, attempt_dir)
             self._reload_manager_after_hitl_restore()
@@ -1234,6 +1402,13 @@ class HitlAutoResearchController:
             self.hitl_runtime = None
             clear_hitl_current_attempt_marker(self.work_dir)
             _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
+            _archive_failed_hitl_attempt(
+                history_root=self.history.history_root,
+                parent_sha=parent_sha,
+                attempt_id=attempt_marker,
+                phase="proposal_or_execution",
+                reason=candidate_summary.error or "HITL attempt failed before scoring.",
+            )
             shutil.rmtree(attempt_dir, ignore_errors=True)
             return AutoResearchIterationResult(
                 iteration=iteration,
@@ -1284,6 +1459,8 @@ class HitlAutoResearchController:
             self._abandon_pending_worker_request_for_rollback(
                 "The AutoResearch candidate did not finalize and runtime is restoring its parent."
             )
+            self._retire_temporary_scoring_ref(scorer_result, strict=False)
+            self._retire_pending_scoring_ref()
             self.checkpoints.restore_checkpoint(
                 parent_sha,
                 clean_untracked_public=True,
@@ -1297,6 +1474,13 @@ class HitlAutoResearchController:
             self.hitl_runtime = None
             clear_hitl_current_attempt_marker(self.work_dir)
             _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
+            _archive_failed_hitl_attempt(
+                history_root=self.history.history_root,
+                parent_sha=parent_sha,
+                attempt_id=attempt_marker,
+                phase="frontier_publication",
+                reason=reason or "Runtime could not publish a scored HITL candidate.",
+            )
             shutil.rmtree(attempt_dir, ignore_errors=True)
             attempt_dir_removed = True
         else:
@@ -1349,6 +1533,7 @@ class HitlAutoResearchController:
                 "parent_node_id": parent_sha,
                 "attempt_id": attempt_id,
             },
+            proposal_review_path=attempt_dir / "proposal_review.json",
         )
         try:
             runtime.register_worker_prompt(
@@ -1428,6 +1613,19 @@ class HitlAutoResearchController:
                         "Persisted successful isolated scoring handoff is missing its scored checkpoint."
                     )
             else:
+                reviewed_fingerprint = str(pending.get("workspace_fingerprint", "")).strip()
+                from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+                if not reviewed_fingerprint:
+                    raise RuntimeError(
+                        "HITL candidate scoring is missing its reviewed workspace fingerprint."
+                    )
+                current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
+                if current_fingerprint != reviewed_fingerprint:
+                    raise RuntimeError(
+                        "The public workspace changed after the worker submitted its reviewed finish "
+                        "boundary. Runtime will not score or retain an unreviewed candidate."
+                    )
                 source_sha = str((cached_score or {}).get("source_checkpoint_sha", "")).strip()
                 if source_sha:
                     if not self.checkpoints.checkpoint_exists(source_sha):
@@ -1450,6 +1648,7 @@ class HitlAutoResearchController:
                     scorer_result = self._score_candidate_in_private_workspace(
                         source_sha=source_sha,
                         sealed_scoring=sealed_scoring,
+                        temporary_ref=f"refs/neurico/hitl/scoring/{request_key}",
                     )
                 except Exception as exc:
                     scorer_result = {
@@ -1472,8 +1671,14 @@ class HitlAutoResearchController:
                     },
                 )
 
-            results_path = self._ensure_results_json(stage="candidate", scorer_result=scorer_result)
-            candidate_summary = self.comparator.load_summary(results_path, source="candidate")
+            # The isolated scorer result is the scoring authority.  The public
+            # results file is a review artifact only and may not be reread to
+            # reconstruct a frontier decision.
+            trusted_results = scorer_result.get("results")
+            candidate_summary = self.comparator.summarize(
+                trusted_results if isinstance(trusted_results, dict) else {},
+                source="candidate",
+            )
 
             scorer_succeeded = bool(scorer_result.get("success"))
             if not scorer_succeeded or not candidate_summary.valid:
@@ -1537,8 +1742,7 @@ class HitlAutoResearchController:
             proposal_type = self._proposal_type_for(proposal_idea_id)
 
             def finalize_frontier(decision: Dict[str, Any]) -> Dict[str, Any]:
-                return self._commit_frontier_decision(
-                    runtime=runtime,
+                self._prepare_frontier_decision(
                     parent_node_sha=parent_node_id,
                     attempt_id=attempt_id,
                     candidate_node_sha=candidate_sha,
@@ -1550,6 +1754,17 @@ class HitlAutoResearchController:
                     accepted=decision["action"] == "accept",
                     reason=decision["reason"],
                 )
+                runtime.mark_frontier_decision_deferred()
+                return {
+                    "status": "approved",
+                    "context": (
+                        "Runtime recorded the manager frontier decision and will publish it "
+                        "after this worker exits cleanly."
+                    ),
+                    "manager_feedback": "",
+                    "final": True,
+                    "frontier_decision_deferred": True,
+                }
 
             runtime.manager.review_frontier_candidate(
                 parent_node_sha=parent_node_id,
@@ -1667,6 +1882,29 @@ class HitlAutoResearchController:
         if not finish or not finish.get("approved"):
             return finish or result
 
+        if phase_result.get("frontier_decision_deferred"):
+            transition = HitlRuntimeState(self.work_dir).frontier_decision_transition()
+            if not isinstance(transition, dict):
+                return {
+                    "success": False,
+                    "hitl": True,
+                    "phase": "frontier_decision",
+                    "error": "Runtime lost the prepared frontier decision after worker exit.",
+                }
+            candidate_sha = str(transition.get("candidate_node_sha", "")).strip()
+            if not candidate_sha:
+                return {
+                    "success": False,
+                    "hitl": True,
+                    "phase": "frontier_decision",
+                    "error": "Prepared frontier decision has no candidate checkpoint.",
+                }
+            self.checkpoints.restore_checkpoint(candidate_sha, clean_untracked_public=True)
+            phase_result = self._commit_frontier_decision(
+                runtime=runtime,
+                transition=transition,
+            )
+
         return {
             **result,
             "success": True,
@@ -1684,6 +1922,7 @@ class HitlAutoResearchController:
         *,
         source_sha: str,
         sealed_scoring: Optional[Dict[str, Optional[Path]]],
+        temporary_ref: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run the scorer without restoring evaluator inputs to the worker workspace."""
         return run_isolated_scorer(
@@ -1691,6 +1930,7 @@ class HitlAutoResearchController:
             source_sha=source_sha,
             sealed_dir=(sealed_scoring or {}).get("path"),
             scorer=self.scorer,
+            temporary_ref=temporary_ref,
         )
 
     def _candidate_changes_parent(self, parent_sha: str, source_sha: str) -> bool:
@@ -1831,11 +2071,6 @@ class HitlAutoResearchController:
         scorer_result: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Keep the complete runtime-derived scoring payload for HITL frontier review."""
-        results_path = self.work_dir / "scoring" / "results.json"
-        try:
-            results: Any = json.loads(results_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            results = {"error": "scoring/results.json could not be read"}
         if scorer_result is None:
             scorer_result = {}
             pipeline_results_path = self.work_dir / ".neurico" / "pipeline_results.json"
@@ -1847,7 +2082,22 @@ class HitlAutoResearchController:
                     scorer_result = stage_result
             except (OSError, json.JSONDecodeError):
                 pass
-        return {"scorer_result": scorer_result, "results": results}
+            # Initial frontier creation follows the completed pipeline scorer,
+            # before a worker can resume against this AutoResearch workspace.
+            # Its runtime result is represented by the pipeline artifact.
+            results_path = self.work_dir / "scoring" / "results.json"
+            try:
+                initial_results: Any = json.loads(results_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                initial_results = {"error": "scoring/results.json could not be read"}
+            return {"scorer_result": scorer_result, "results": initial_results}
+        trusted_results = scorer_result.get("results") if isinstance(scorer_result, dict) else None
+        if not isinstance(trusted_results, dict):
+            raise RuntimeError(
+                "HITL frontier review requires the runtime-owned structured scorer result; "
+                "scoring/results.json is a public review artifact, not scoring authority."
+            )
+        return {"scorer_result": scorer_result, "results": trusted_results}
 
     def _initial_frontier_acceptance_reason(self) -> str:
         return _initial_frontier_acceptance_reason(self.work_dir)
@@ -1907,6 +2157,7 @@ class HitlAutoResearchController:
             parent_sha,
             clean_untracked_public=clean_untracked_public,
         )
+        remove_public_sealed_paths(self.work_dir)
         self._revert_whiteboard_for(attempt_id)
         runtime_state.complete_rejected_whiteboard_cleanup(attempt_id)
 

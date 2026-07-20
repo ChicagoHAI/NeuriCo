@@ -441,7 +441,15 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
     elif interface_path.stat().st_size == 0:
         issues.append(f"empty: {interface_path}")
     else:
-        found["interface"] = str(interface_path)
+        # The experiment runner cannot repair this evaluator-owned contract.
+        # Validate the exact grammar while the rule maker still owns it.
+        try:
+            from core.hitl import HitlValidationError, parse_required_artifacts
+
+            parse_required_artifacts(interface_path)
+            found["interface"] = str(interface_path)
+        except (OSError, HitlValidationError) as exc:
+            issues.append(f"invalid artifact contract in {interface_path}: {exc}")
 
     rationale_path = scoring_dir / RULE_MAKER_OUTPUT_FILES["rationale_log"]
     if rationale_path.exists():

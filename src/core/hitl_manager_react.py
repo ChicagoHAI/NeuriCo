@@ -805,6 +805,7 @@ class HitlManager:
         related_artifacts: List[Dict[str, str]],
         requires_human_approval: bool,
         plan_fingerprint: str = "",
+        workspace_fingerprint: str = "",
         allow_scoring_approval: bool = False,
         scoring_handoff_context: Optional[Dict[str, Any]] = None,
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -871,6 +872,7 @@ class HitlManager:
             "pipeline_stage": pipeline_stage,
             "hitl_stage": hitl_stage,
             "plan_fingerprint": plan_fingerprint,
+            "workspace_fingerprint": workspace_fingerprint,
             "finish_summary": finish_summary,
             "related_artifacts": related_artifacts,
             "provenance": dict(scoring_handoff_context or {}),
@@ -1782,6 +1784,14 @@ class HitlManager:
                         "timeout_seconds": self.backend_timeout_seconds,
                         "disable_native_tools": True,
                     }
+                    if (
+                        "use_dedicated_system_prompt" in parameters
+                        or any(
+                            parameter.kind is inspect.Parameter.VAR_KEYWORD
+                            for parameter in parameters.values()
+                        )
+                    ):
+                        kwargs["use_dedicated_system_prompt"] = True
                     provider_tools: List[Dict[str, Any]] = tools
                     if use_cli_mcp:
                         kwargs["mcp_config_path"] = str(self._mcp_config_path)
