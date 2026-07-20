@@ -474,6 +474,9 @@ class GitHubManager:
         """
         Generate a concise repository name using GPT-4o-mini.
 
+        Uses OpenRouter when OPENROUTER_KEY is set (the default key for
+        experiments), otherwise falls back to a direct OpenAI call.
+
         Args:
             title: Research title
             domain: Research domain (optional)
@@ -496,12 +499,20 @@ class GitHubManager:
             import openai
             import os
 
-            api_key = os.getenv('OPENAI_API_KEY')
-            if not api_key:
-                print("   ⚠️  OPENAI_API_KEY not set, using fallback naming")
+            # Prefer OpenRouter (OpenAI-compatible API, same SDK) over a direct
+            # OpenAI call, matching the default key setup for experiments
+            openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
+            openai_key = os.getenv('OPENAI_API_KEY')
+            if openrouter_key:
+                client = openai.OpenAI(api_key=openrouter_key,
+                                       base_url="https://openrouter.ai/api/v1")
+                model_name = "openai/gpt-4o-mini"
+            elif openai_key:
+                client = openai.OpenAI(api_key=openai_key)
+                model_name = "gpt-4o-mini"
+            else:
+                print("   ⚠️  Neither OPENROUTER_KEY nor OPENAI_API_KEY set, using fallback naming")
                 return self._sanitize_repo_name(idea_id)
-
-            client = openai.OpenAI(api_key=api_key)
 
             # Build prompt - ask for shorter names
             prompt = f"""Generate a very concise GitHub repository name for this research project.
@@ -530,7 +541,7 @@ Examples:
 Output ONLY the repository name, nothing else."""
 
             response = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=model_name,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=30

@@ -139,17 +139,19 @@ When automated metrics insufficient:
 **Setup**
 ```python
 import openai
-import anthropic
 import os
 from tenacity import retry, wait_exponential, stop_after_attempt
 
-# Load API keys from environment
-openai.api_key = os.getenv("OPENAI_API_KEY")
-anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# Default: OpenRouter serves GPT, Claude, Gemini, and open models through
+# one OpenAI-compatible endpoint. The key is provided as OPENROUTER_KEY.
+client = openai.OpenAI(
+    api_key=os.getenv("OPENROUTER_KEY"),
+    base_url="https://openrouter.ai/api/v1",
+)
 
 # Rate limiting and retry logic
 @retry(wait=wait_exponential(min=1, max=60), stop=stop_after_attempt(5))
-def call_api_with_retry(prompt, model="gpt-4"):
+def call_api_with_retry(prompt, model="openai/gpt-4.1"):
     """Robust API calling with exponential backoff."""
     # Implementation here
     pass
@@ -323,22 +325,26 @@ IMPORTANT: Use state-of-the-art models for credible research results.
 CRITICAL: For LLM research, use REAL models (APIs or downloads) and run them with experiments, do not simulate fake models!
 
 **Recommended Models (as of 2025):**
+
+Access all of these through OpenRouter by DEFAULT (key in OPENROUTER_KEY,
+base_url https://openrouter.ai/api/v1). You can search the full catalog at
+https://openrouter.ai/models.
+
 - **GPT-4.1 or GPT-5** (OpenAI, August 2025) - Best for everyday reasoning, coding, reliability
-  - API: `gpt-4.1`, `gpt-5`, `gpt-5-codex` (for coding tasks)
+  - OpenRouter IDs: `openai/gpt-4.1`, `openai/gpt-5`, `openai/gpt-5-codex` (for coding tasks)
   - Pricing: ~$1.25/M input tokens, ~$10/M output tokens
   - Context: Standard context window
 
 - **Claude Sonnet 4.5** (Anthropic, September 2025) - Best for coding, agents, polished writing
-  - API: `claude-sonnet-4-5`
+  - OpenRouter ID: `anthropic/claude-sonnet-4.5`
   - Context: 1,000,000 tokens
   - Excels at: Complex B2B workflows, multi-file reasoning, autonomous agents
 
 - **Gemini 2.5 Pro** (Google, June 2025) - Best for long context, visual reasoning
-  - API: `gemini-2-5-pro`
+  - OpenRouter ID: `google/gemini-2.5-pro`
   - Context: 1,000,000 tokens
   - Features: Computer Use for browser control, excellent multimodal
 
-You may also search models on openrouter. You can assume that we have the api keys available as environment variables
 **When to use older/smaller models:**
 - Historical baselines: Compare new methods against prior SOTA
 - Ablation studies: Test how model size affects phenomenon

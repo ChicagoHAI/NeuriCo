@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -128,8 +130,36 @@ class LangChainModelFactory(Protocol):
     def __call__(self, model: LLMModel, timeout: MaboolTimeout, api_key: SecretStr | None = None) -> BaseChatModel: ...
 
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _openrouter_key_from_env() -> str | None:
+    return os.environ.get("OPENROUTER_KEY") or os.environ.get("OPENROUTER_API_KEY")
+
+
+def _openrouter_model_name(name: str) -> str:
+    # OpenRouter model IDs are provider-prefixed and generally undated,
+    # e.g. "gpt-4.1-2025-04-14" becomes "openai/gpt-4.1".
+    if "/" in name:
+        return name
+    return f"openai/{re.sub(r'-\d{4}-\d{2}-\d{2}$', '', name)}"
+
+
 def _openai_chat_factory(model: LLMModel, timeout: MaboolTimeout, api_key: SecretStr | None = None) -> BaseChatModel:
     params = openai_model_params(model.params)
+
+    # Route "openai" family models through OpenRouter when its key is
+    # configured, so paper-finder works without a direct OpenAI key.
+    openrouter_key = _openrouter_key_from_env()
+    if openrouter_key is not None:
+        return ChatOpenAI(
+            api_key=SecretStr(openrouter_key),
+            base_url=OPENROUTER_BASE_URL,
+            model=_openrouter_model_name(model.name),
+            model_kwargs={"response_format": {"type": "json_object"}},
+            timeout=timeout.httpx_timeout,
+            **params,
+        )
 
     return ChatOpenAI(
         api_key=api_key,
