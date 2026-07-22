@@ -1,0 +1,83 @@
+tools:
+  - name: list_workspace
+    description: List a public workspace directory.
+    parameters:
+      path: {type: string, required: false}
+  - name: find_workspace_files
+    description: Find public workspace files by glob pattern.
+    parameters:
+      pattern: {type: string, required: true}
+      path: {type: string, required: false}
+  - name: search_workspace
+    description: Search public workspace text.
+    parameters:
+      pattern: {type: string, required: true}
+      path: {type: string, required: false}
+      glob: {type: string, required: false}
+      case_insensitive: {type: boolean, required: false}
+  - name: read_workspace_file
+    description: Read a line-numbered public workspace text file.
+    parameters:
+      path: {type: string, required: true}
+      offset: {type: integer, required: false}
+      limit: {type: integer, required: false}
+  - name: recall_manager_conversation
+    description: Recall relevant older manager conversation.
+    parameters:
+      query: {type: string, required: true}
+      limit: {type: integer, required: false}
+  - name: update_research_state
+    description: Update manager-maintained research synthesis.
+    parameters:
+      narrative: {type: string, required: false}
+      crux: {type: string, required: false}
+      hypotheses: {type: array, items: {type: object}, required: false}
+      open_questions: {type: array, items: {type: string}, required: false}
+      resolved_questions: {type: array, items: {type: string}, required: false}
+  - name: design_panel
+    description: Maintain presentation-oriented ResearchState sections for the manager UI.
+    parameters:
+      layout: {type: array, items: {type: string}, required: false}
+      sections: {type: array, items: {type: object}, required: false}
+  - name: answer_to_human
+    description: Prepare a complete ordinary reply before returning it as final text.
+    parameters:
+      message: {type: string, required: true}
+  - name: hitl-view-ideas
+    description: Inspect finalized HITL evidence, decisions, proposals, and premises.
+    parameters:
+      idea_id: {type: string, required: false}
+  - name: list_frontier
+    description: Inspect selected and active HITL AutoResearch frontier nodes.
+    parameters: {}
+  - name: view_node
+    description: Inspect one retained frontier node and its attempt history.
+    parameters:
+      node_sha: {type: string, required: true}
+  - name: ask_human
+    description: Ask the human for input required by the current runtime-held request.
+    parameters:
+      message: {type: string, required: true}
+      options: {type: array, items: {type: string}, required: false}
+  - name: finalize_worker_request
+    description: Finalize the current runtime-held worker request with a validated result.
+    parameters:
+      result: {type: object, required: true}
+  - name: approve_for_scoring
+    description: Approve a completed candidate for runtime-owned objective scoring.
+    parameters:
+      context: {type: string, required: false}
+  - name: finalize_frontier_decision
+    description: Record the manager's accept or reject decision for a scored candidate.
+    parameters:
+      result: {type: object, required: true}
+  - name: select_frontier
+    description: Select the active frontier node that should become the next proposal basis.
+    parameters:
+      node_sha: {type: string, required: true}
+      reason: {type: string, required: true}
+  - name: prune_frontier
+    description: Prune one active frontier node at the runtime-owned pruning boundary.
+    parameters:
+      node_sha: {type: string, required: true}
+      reason: {type: string, required: true}
