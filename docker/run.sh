@@ -580,6 +580,60 @@ cmd_fetch() {
 }
 
 # -----------------------------------------------------------------------------
+# Submit a local idea file (markdown or plain text)
+# -----------------------------------------------------------------------------
+cmd_submit_local() {
+    if [ -z "$1" ]; then
+        echo -e "${RED}Usage: $0 submit-local <idea.md> [--submit]${NC}"
+        exit 1
+    fi
+
+    ensure_directories
+    check_env_file
+    warn_if_outdated
+
+    local idea_file="$1"
+    shift
+
+    local gpu_flags=$(get_gpu_flags)
+    local user_flags=$(get_user_flags)
+    local credential_mounts=$(get_cli_credential_mounts)
+    local workspace_dir=$(get_workspace_dir)
+
+    # Handle relative vs absolute paths for idea file
+    local idea_path mount_flag=""
+    if [[ "$idea_file" = /* ]]; then
+        local idea_dir=$(dirname "$idea_file")
+        local idea_name=$(basename "$idea_file")
+        mount_flag="-v \"$idea_dir:/input:ro\""
+        idea_path="/input/$idea_name"
+    else
+        idea_path="/app/$idea_file"
+    fi
+
+    local tty_flag=$(get_tty_flag)
+
+    echo -e "${BLUE}Converting local idea file...${NC}"
+    echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
+
+    eval "docker run $tty_flag --rm \
+        $gpu_flags \
+        $user_flags \
+        --env-file \"$PROJECT_ROOT/.env\" \
+        -e NEURICO_WORKSPACE=/workspaces \
+        -v \"$workspace_dir:/workspaces\" \
+        -v \"$PROJECT_ROOT/ideas:/app/ideas\" \
+        -v \"$PROJECT_ROOT/logs:/app/logs\" \
+        -v \"$PROJECT_ROOT/config:/app/config:ro\" \
+        -v \"$PROJECT_ROOT/templates:/app/templates:ro\" \
+        $credential_mounts \
+        $mount_flag \
+        -w /app \
+        \"$IMAGE_NAME\" \
+        python /app/src/cli/submit_local.py \"$idea_path\" $@"
+}
+
+# -----------------------------------------------------------------------------
 # Submit a research idea
 # -----------------------------------------------------------------------------
 cmd_submit() {
@@ -1786,6 +1840,7 @@ cmd_help() {
     echo "  login [provider]          Login to CLI tools (claude/codex/gemini)"
     echo "  shell                     Start an interactive shell"
     echo "  fetch <url> [--submit]    Fetch idea from IdeaHub"
+    echo "  submit-local <idea.md> [--submit]  Convert a local idea file (markdown/text)"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
     echo "  interactive <id>          Interactive mode (browser UI; --cli for terminal)"
@@ -1802,6 +1857,7 @@ cmd_help() {
     echo ""
     echo "Daily usage:"
     echo "  $0 fetch https://ideahub.example.com/idea/123 --submit --run --provider claude --full-permissions"
+    echo "  $0 submit-local my_idea.md --submit --run --provider claude --full-permissions"
     echo "  $0 run my-idea-id --provider claude --full-permissions"
     echo "  $0 interactive my-idea-id --provider claude"
     echo "  $0 shell"
@@ -1842,6 +1898,9 @@ case "$ACTION" in
         ;;
     fetch)
         cmd_fetch "$@"
+        ;;
+    submit-local)
+        cmd_submit_local "$@"
         ;;
     submit)
         cmd_submit "$@"

@@ -1,18 +1,18 @@
 """
-Fetch research ideas from IdeaHub and convert to NeuriCo YAML format.
+Convert local research idea files (markdown or plain text) to NeuriCo YAML format.
+
+Local counterpart of fetch_from_ideahub.py: same conversion, submission, and
+run flow, but the idea comes from a file on disk instead of an IdeaHub URL.
 
 Usage:
-    python fetch_from_ideahub.py <ideahub_url>
-    python fetch_from_ideahub.py https://hypogenic.ai/ideahub/idea/HGVv4Z0ALWVHZ9YsstWT
+    python submit_local.py path/to/idea.md
+    python submit_local.py path/to/idea.md --submit --run --provider claude
 """
 
 import sys
 import os
 import re
-import json
 from pathlib import Path
-import requests
-from bs4 import BeautifulSoup
 import yaml
 from dotenv import load_dotenv
 
@@ -35,116 +35,80 @@ try:
 except ImportError:
     GITHUB_AVAILABLE = False
 
+SUPPORTED_SUFFIXES = {'.md', '.markdown', '.txt'}
 
-def fetch_ideahub_content(url: str) -> dict:
+
+def read_local_idea(file_path: Path) -> dict:
     """
-    Fetch content from IdeaHub URL.
+    Read an idea from a local markdown or text file.
+
+    Supports optional YAML frontmatter (delimited by ---) for title, tags,
+    and author. Falls back to the first markdown heading for the title, then
+    to the filename.
 
     Args:
-        url: IdeaHub idea URL (e.g., https://hypogenic.ai/ideahub/idea/...)
+        file_path: Path to the local idea file
 
     Returns:
-        Dictionary with extracted content
+        Dictionary with extracted content (same shape as fetch_ideahub_content)
     """
-    print(f"📥 Fetching idea from IdeaHub...")
-    print(f"   URL: {url}")
+    print(f"📥 Reading idea from local file...")
+    print(f"   Path: {file_path}")
 
     try:
-        # Fetch page
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-
-        # Parse HTML
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Extract content (this may need adjustment based on actual HTML structure)
-        # Try to find title
-        title = None
-        title_elem = soup.find('h1') or soup.find('h2')
-        if title_elem:
-            title = title_elem.get_text(strip=True)
-
-        # Try to find description/content - specifically target the prose div for IdeaHub
-        description = None
-
-        # First try IdeaHub-specific selector (the prose div contains everything)
-        prose_elem = soup.select_one('div.prose')
-        if prose_elem:
-            description = prose_elem.get_text(separator='\n', strip=True)
-
-        # Fallback to other selectors if prose not found
-        if not description:
-            content_selectors = [
-                'div.description',
-                'div.content',
-                'div.idea-content',
-                'article',
-                'main'
-            ]
-            for selector in content_selectors:
-                content_elem = soup.select_one(selector)
-                if content_elem:
-                    description = content_elem.get_text(separator='\n', strip=True)
-                    break
-
-        # If still no description, try to get all paragraphs
-        if not description:
-            paragraphs = soup.find_all('p')
-            if paragraphs:
-                description = '\n\n'.join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
-
-        # Extract tags
-        tags = []
-        tag_elems = soup.find_all(class_=re.compile(r'tag|label|badge', re.I))
-        for tag_elem in tag_elems:
-            tag_text = tag_elem.get_text(strip=True)
-            if tag_text and len(tag_text) < 50:  # Reasonable tag length
-                tags.append(tag_text)
-
-        # Extract author
-        author = None
-
-        # Method 1: Look for authorName in embedded JSON/script data
-        for script in soup.find_all('script'):
-            if script.string and 'authorName' in script.string:
-                author_match = re.search(r'"authorName"\s*:\s*"([^"]+)"', script.string)
-                if author_match:
-                    author = author_match.group(1)
-                    break
-
-        # Method 2: Look for IdeaHub author link pattern
-        if not author:
-            author_link = soup.find('a', href=re.compile(r'/ideahub/author/'))
-            if author_link:
-                author = author_link.get_text(strip=True)
-
-        # Method 3: Fallback to class-based search
-        if not author:
-            author_elem = soup.find(class_=re.compile(r'author|posted-by', re.I))
-            if author_elem:
-                author = author_elem.get_text(strip=True)
-
-        # Get all text as fallback
-        all_text = soup.get_text(separator='\n', strip=True)
-
-        return {
-            'url': url,
-            'title': title,
-            'description': description or all_text,
-            'tags': tags,
-            'author': author,
-            'raw_html': response.text
-        }
-
-    except requests.RequestException as e:
-        print(f"❌ Error fetching URL: {e}")
+        raw_text = file_path.read_text(encoding='utf-8')
+    except OSError as e:
+        print(f"❌ Error reading file: {e}")
         sys.exit(1)
-    except Exception as e:
-        print(f"❌ Error parsing content: {e}")
+
+    body = raw_text
+    title = None
+    tags = []
+    author = None
+
+    # Parse optional YAML frontmatter
+    frontmatter_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', raw_text, re.DOTALL)
+    if frontmatter_match:
+        try:
+            frontmatter = yaml.safe_load(frontmatter_match.group(1)) or {}
+        except yaml.YAMLError:
+            frontmatter = {}
+        if isinstance(frontmatter, dict):
+            title = frontmatter.get('title')
+            author = frontmatter.get('author')
+            fm_tags = frontmatter.get('tags')
+            if isinstance(fm_tags, list):
+                tags = [str(t) for t in fm_tags]
+            elif isinstance(fm_tags, str):
+                tags = [t.strip() for t in fm_tags.split(',') if t.strip()]
+        body = raw_text[frontmatter_match.end():]
+
+    # Fall back to the first markdown heading for the title
+    heading_match = re.search(r'^#{1,3}\s+(.+?)\s*$', body, re.MULTILINE)
+    if not title and heading_match:
+        title = heading_match.group(1).strip()
+
+    # Drop the heading line from the description when it duplicates the title
+    if title and heading_match and heading_match.group(1).strip() == title.strip():
+        body = body[:heading_match.start()] + body[heading_match.end():]
+
+    # Last resort: derive the title from the filename
+    if not title:
+        title = file_path.stem.replace('_', ' ').replace('-', ' ').strip().title()
+
+    description = body.strip()
+    if not description:
+        print(f"❌ Error: file has no content beyond the title")
         sys.exit(1)
+
+    return {
+        'path': str(file_path),
+        'title': title,
+        'description': description,
+        'tags': tags,
+        'author': author,
+        'raw_text': raw_text
+    }
 
 
 def _infer_domain(title: str, description: str, tags: list) -> str:
@@ -168,24 +132,24 @@ def _infer_domain(title: str, description: str, tags: list) -> str:
     return best_domain
 
 
-def _convert_without_llm(ideahub_content: dict) -> dict:
+def _convert_without_llm(local_content: dict) -> dict:
     """
-    Convert IdeaHub content to NeuriCo YAML format without using an LLM.
+    Convert local idea content to NeuriCo YAML format without using an LLM.
 
-    Produces a minimal but valid YAML structure using the scraped content directly.
+    Produces a minimal but valid YAML structure using the file content directly.
     The result will have title, domain, hypothesis (required fields) plus background
     and metadata.
 
     Args:
-        ideahub_content: Dictionary with IdeaHub content from fetch_ideahub_content()
+        local_content: Dictionary with local idea content from read_local_idea()
 
     Returns:
         Dictionary with 'parsed' and 'yaml_string' keys
     """
-    title = ideahub_content.get('title') or 'Untitled IdeaHub Idea'
-    description = ideahub_content.get('description', '')
-    tags = ideahub_content.get('tags', [])
-    url = ideahub_content.get('url', '')
+    title = local_content.get('title') or 'Untitled Local Idea'
+    description = local_content.get('description', '')
+    tags = local_content.get('tags', [])
+    source_path = local_content.get('path', '')
 
     # Infer domain from content
     domain = _infer_domain(title, description, tags)
@@ -208,8 +172,8 @@ def _convert_without_llm(ideahub_content: dict) -> dict:
                 'description': description,
             },
             'metadata': {
-                'source': 'IdeaHub',
-                'source_url': url,
+                'source': 'local',
+                'source_path': source_path,
             },
         }
     }
@@ -217,7 +181,7 @@ def _convert_without_llm(ideahub_content: dict) -> dict:
     if tags:
         idea_data['idea']['metadata']['tags'] = tags
 
-    author = ideahub_content.get('author')
+    author = local_content.get('author')
     if author:
         idea_data['idea']['metadata']['author'] = author
 
@@ -230,12 +194,12 @@ def _convert_without_llm(ideahub_content: dict) -> dict:
     return {'parsed': idea_data, 'yaml_string': yaml_string}
 
 
-def convert_to_yaml(ideahub_content: dict) -> dict:
+def convert_to_yaml(local_content: dict) -> dict:
     """
-    Use GPT to convert IdeaHub content to NeuriCo YAML format.
+    Use GPT to convert local idea content to NeuriCo YAML format.
 
     Args:
-        ideahub_content: Dictionary with IdeaHub content
+        local_content: Dictionary with local idea content
 
     Returns:
         Dictionary in NeuriCo format
@@ -248,13 +212,13 @@ def convert_to_yaml(ideahub_content: dict) -> dict:
     api_key = openrouter_key or os.getenv('OPENAI_API_KEY')
     if not api_key:
         print("ℹ️  No OPENROUTER_KEY or OPENAI_API_KEY set — using template-based conversion instead.")
-        return _convert_without_llm(ideahub_content)
+        return _convert_without_llm(local_content)
 
     try:
         from openai import OpenAI
     except ImportError:
         print("ℹ️  openai package not installed — using template-based conversion instead.")
-        return _convert_without_llm(ideahub_content)
+        return _convert_without_llm(local_content)
 
     if openrouter_key:
         client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
@@ -284,16 +248,16 @@ def convert_to_yaml(ideahub_content: dict) -> dict:
     domain_reference = "\n".join(domain_lines)
 
     # Create prompt for GPT - minimal formatting only
-    prompt = f"""You are converting a research idea from IdeaHub to a simple YAML format.
+    prompt = f"""You are converting a research idea from a local file to a simple YAML format.
 
-# IdeaHub Content
+# Idea Content
 
-Title: {ideahub_content.get('title', 'No title')}
-Tags: {', '.join(ideahub_content.get('tags', []))}
-Author: {ideahub_content.get('author', 'Unknown')}
+Title: {local_content.get('title', 'No title')}
+Tags: {', '.join(local_content.get('tags', []))}
+Author: {local_content.get('author') or 'Unknown'}
 
 Description/Content:
-{ideahub_content.get('description', 'No description')}
+{local_content.get('description', 'No description')}
 
 # Task
 
@@ -318,7 +282,7 @@ The AI research agent will handle finding datasets, designing experiments, and i
    - hypothesis: Extract the research question or reformulate the idea as a testable hypothesis
 
 2. **Optional fields** (only include if present in the content):
-   - background.description: Use the description from IdeaHub
+   - background.description: Use the description from the file
    - background.papers: **CRITICAL** - For each paper in the content, you MUST copy the FULL citation verbatim.
      Include the complete paper title in quotes, ALL author names, year, and venue/source.
      Example format:
@@ -327,13 +291,35 @@ The AI research agent will handle finding datasets, designing experiments, and i
      DO NOT abbreviate titles.
      DO NOT summarize - copy the EXACT reference text from the content.
    - background.datasets: Only include if specific datasets are mentioned
+   - background.code_references: Only include if specific repositories are mentioned
    - metadata.author: If an Author is provided above and is not "Unknown", include it as metadata.author
    - constraints: Only include if specified in the content (do NOT default to cpu_only, let users specify their own compute constraints)
 
-3. **DO NOT include**:
+3. **Local resources**: The idea comes from a local file, so it may declare
+   datasets or functions that already exist on this machine.
+   - Copy every local path VERBATIM. Do NOT rewrite, resolve, or drop local paths.
+   - If the content states what a local dataset or function is FOR (its usage),
+     put it under local_resources:
+       datasets: path + usage (+ name)
+       functions: path + entrypoint + usage
+     If the content says evaluation must run through a function, also set
+     required_for_evaluation: true on that function.
+   - Local paths whose usage is NOT stated stay in the matching background
+     field instead (datasets source, code_references repo, papers path).
+
+4. **Evaluation spec**: Only if the content gives explicit metric names,
+   success thresholds, or an expected results format, transcribe them
+   VERBATIM into the evaluation block (metrics: name + definition + target;
+   results_format). Do not reinterpret numbers and do not invent metrics
+   that are not stated. Include results_format ONLY if the content itself
+   describes an output artifact or file format; never copy one from the
+   schema examples.
+
+5. **DO NOT include**:
    - methodology (agent will design this)
    - expected_outputs (agent will determine)
-   - evaluation_criteria (agent will establish based on field)
+   - evaluation_criteria (use the evaluation block for explicitly stated
+     metrics; otherwise the agent will establish criteria based on field)
    - Any made-up datasets, baselines, or metrics
 
 Keep it minimal. The agent does the research.
@@ -404,7 +390,7 @@ idea:
     except Exception as e:
         print(f"⚠️  GPT API call failed: {e}")
         print("   Falling back to template-based conversion.")
-        return _convert_without_llm(ideahub_content)
+        return _convert_without_llm(local_content)
 
 
 def _drop_placeholder_author(parsed: dict, yaml_string: str) -> tuple:
@@ -428,14 +414,14 @@ def _drop_placeholder_author(parsed: dict, yaml_string: str) -> tuple:
     return parsed, yaml_string
 
 
-def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
+def save_yaml_file(result: dict, source_path: str, author: str = None) -> Path:
     """
     Save the idea as a YAML file.
 
     Args:
         result: Dictionary with 'parsed' and 'yaml_string' keys
-        url: Original IdeaHub URL
-        author: Optional author name from IdeaHub
+        source_path: Original local file path
+        author: Optional author name from the file
 
     Returns:
         Path to saved file
@@ -443,7 +429,7 @@ def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
     idea_data = result['parsed']
     yaml_string = result['yaml_string']
 
-    # Generate filename from title or URL
+    # Generate filename from title or source file
     if 'idea' in idea_data and 'title' in idea_data['idea']:
         title = idea_data['idea']['title']
         # Sanitize title for filename
@@ -451,12 +437,7 @@ def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
         filename = re.sub(r'[-\s]+', '_', filename)
         filename = filename[:50]  # Limit length
     else:
-        # Extract ID from URL
-        match = re.search(r'/idea/([A-Za-z0-9]+)', url)
-        if match:
-            filename = f"ideahub_{match.group(1)}"
-        else:
-            filename = "ideahub_idea"
+        filename = f"local_{Path(source_path).stem}"
 
     # Add metadata about source to the parsed data (for submission later)
     if 'idea' not in idea_data:
@@ -465,8 +446,8 @@ def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
     if 'metadata' not in idea_data['idea']:
         idea_data['idea']['metadata'] = {}
 
-    idea_data['idea']['metadata']['source'] = 'IdeaHub'
-    idea_data['idea']['metadata']['source_url'] = url
+    idea_data['idea']['metadata']['source'] = 'local'
+    idea_data['idea']['metadata']['source_path'] = source_path
 
     if author and 'author' not in idea_data['idea']['metadata']:
         idea_data['idea']['metadata']['author'] = author
@@ -498,11 +479,11 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Fetch research ideas from IdeaHub and convert to NeuriCo YAML format"
+        description="Convert local research idea files (markdown or plain text) to NeuriCo YAML format"
     )
     parser.add_argument(
-        "url",
-        help="IdeaHub idea URL (e.g., https://hypogenic.ai/ideahub/idea/...)"
+        "idea_file",
+        help="Path to local idea file (.md, .markdown, or .txt)"
     )
     parser.add_argument(
         "--output",
@@ -582,24 +563,41 @@ def main():
     if not args.run:
         args.write_paper = False
 
-    # Validate URL
-    if not args.url.startswith('http'):
-        print(f"❌ Error: Invalid URL: {args.url}")
-        print("   URL should start with http:// or https://")
+    # Validate input file
+    idea_file = Path(args.idea_file)
+    if not idea_file.exists():
+        print(f"❌ Error: File not found: {idea_file}")
+        sys.exit(1)
+    if idea_file.suffix.lower() not in SUPPORTED_SUFFIXES:
+        print(f"❌ Error: Unsupported file type: {idea_file.suffix}")
+        print(f"   Supported types: {', '.join(sorted(SUPPORTED_SUFFIXES))}")
         sys.exit(1)
 
     print("=" * 80)
-    print("IdeaHub to NeuriCo Converter")
+    print("Local Idea to NeuriCo Converter")
     print("=" * 80)
 
-    # Step 1: Fetch content
-    ideahub_content = fetch_ideahub_content(args.url)
+    # Step 1: Read content
+    local_content = read_local_idea(idea_file)
 
-    if ideahub_content.get('title'):
-        print(f"\n✓ Found idea: {ideahub_content['title']}")
+    if local_content.get('title'):
+        print(f"\n✓ Found idea: {local_content['title']}")
 
     # Step 2: Convert with GPT
-    result = convert_to_yaml(ideahub_content)
+    result = convert_to_yaml(local_content)
+
+    # Faithfulness check: every local path mentioned in the source file must
+    # survive conversion verbatim. A dropped path means the agent would never
+    # learn the resource exists, so this is a hard failure.
+    from core.local_resources import missing_paths_in_idea
+    dropped = missing_paths_in_idea(local_content['raw_text'], result['parsed'])
+    if dropped:
+        print("\n❌ Error: conversion dropped local paths mentioned in the idea:")
+        for token in dropped:
+            print(f"   - {token}")
+        print("   Re-run the conversion, or state each path's usage more explicitly")
+        print("   in the idea file so it lands in local_resources.")
+        sys.exit(1)
 
     # Step 3: Save file
     if args.output:
@@ -609,7 +607,7 @@ def main():
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(result['yaml_string'])
     else:
-        output_path = save_yaml_file(result, args.url, author=ideahub_content.get('author'))
+        output_path = save_yaml_file(result, str(idea_file), author=local_content.get('author'))
 
     print(f"\n✅ Idea saved to: {output_path}")
 

@@ -87,6 +87,24 @@ def run_scorer(
             'error': f"scoring/eval.py not found at {eval_script}",
         }
 
+    # Integrity guard for user-mandated evaluation functions: eval.py may
+    # call code staged under code/local/, so a run that edited those files
+    # after staging must not be scored as-is. Purely a file check; ideas
+    # without staged functions pass trivially.
+    from core.local_resources import staged_function_mismatches
+    mismatches = staged_function_mismatches(work_dir)
+    if mismatches:
+        return {
+            'success': False,
+            'return_code': None,
+            'results': None,
+            'results_path': str(results_path),
+            'log_path': str(log_path),
+            'elapsed_time': 0.0,
+            'error': "staged evaluation functions failed integrity check: "
+                     + "; ".join(mismatches),
+        }
+
     # Clear stale results so we never read leftover values from a prior run
     if results_path.exists():
         results_path.unlink()

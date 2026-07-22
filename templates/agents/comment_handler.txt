@@ -78,4 +78,10 @@ Current active tips (empty if none):
 
 If a virtual environment exists (.venv/), activate it. If you need new packages, use `uv add`.
 
+If .neurico/idea.yaml declares local_resources, those remain binding during
+iterations: staged datasets (datasets/local/) are the mandated data, and any
+function marked required_for_evaluation must keep handling all evaluation.
+Never edit files under code/local/ -- they are fingerprinted at staging and
+the scorer rejects the run if they change.
+
 Start by exploring the workspace, then proceed with the user's directions.

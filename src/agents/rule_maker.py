@@ -222,9 +222,15 @@ def run_rule_maker(
     templates_dir: Optional[Path] = None,
     timeout: int = 1800,  # 30 min
     full_permissions: bool = True,
+    prompt_suffix: str = "",
 ) -> Dict[str, Any]:
     """
     Launch the rule_maker CLI agent.
+
+    Args:
+        prompt_suffix: Extra text appended to the generated prompt. Used by
+            the eval-verifier retry loop to feed violations back into the
+            rule_maker's second attempt.
 
     Returns:
         Dict with: success, outputs (paths of generated files), issues,
@@ -253,6 +259,8 @@ def run_rule_maker(
 
     # Generate prompt and persist it for debugging
     prompt = generate_rule_maker_prompt(idea, work_dir, templates_dir)
+    if prompt_suffix:
+        prompt += prompt_suffix
     prompt_file = logs_dir / "rule_maker_prompt.txt"
     prompt_file.write_text(prompt, encoding='utf-8')
     print(f"   Prompt saved to: {prompt_file}")

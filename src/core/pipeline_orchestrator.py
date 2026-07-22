@@ -30,6 +30,11 @@ from datetime import datetime
 import time
 
 from agents.resource_finder import run_resource_finder
+from agents.eval_verifier import (
+    format_violations_for_retry,
+    has_user_eval_contract,
+    run_eval_verifier,
+)
 from agents.rule_maker import run_rule_maker
 from agents.rule_maker_bootstrap import run_bootstrap_rule_maker
 from agents.manifest_trimmer import make_trimmer_callable
@@ -761,12 +766,86 @@ class ResearchPipelineOrchestrator:
                 timeout=timeout,
                 full_permissions=full_permissions,
             )
+            if result["success"]:
+                result = self._verify_eval_contract(
+                    idea=idea,
+                    rule_maker_result=result,
+                    provider=provider,
+                    timeout=timeout,
+                    full_permissions=full_permissions,
+                )
             self.state.complete_stage(RULE_MAKER_STAGE, result["success"], result.get("outputs"))
             return result
         except Exception as e:
             print(f"❌ Rule maker stage failed: {e}")
             self.state.complete_stage(RULE_MAKER_STAGE, False)
             raise
+
+    def _verify_eval_contract(
+        self,
+        idea: Dict[str, Any],
+        rule_maker_result: Dict[str, Any],
+        provider: str,
+        timeout: int,
+        full_permissions: bool,
+    ) -> Dict[str, Any]:
+        """
+        Verify the rule_maker's scoring/ outputs against the user's declared
+        evaluation contract (idea.evaluation, mandated local functions).
+
+        Only runs when the idea actually declares a contract. On a failed
+        verdict the rule_maker is re-run ONCE with the verifier's findings
+        appended to its prompt, then re-verified; if it still fails, the
+        rule_maker stage fails. This runs before sealing, so a rejected
+        harness never reaches the experiment_runner.
+        """
+        if not has_user_eval_contract(idea):
+            return rule_maker_result
+
+        print()
+        print("─" * 80)
+        print("STAGE: EVAL VERIFIER (user evaluation contract declared)")
+        print("─" * 80)
+        print()
+
+        verdict = run_eval_verifier(
+            idea=idea,
+            work_dir=self.work_dir,
+            provider=provider,
+            templates_dir=self.templates_dir,
+            full_permissions=full_permissions,
+        )
+        if verdict["success"] and verdict["passed"]:
+            rule_maker_result["verification"] = verdict
+            return rule_maker_result
+
+        print()
+        print("↻ Verifier rejected the scoring contract -- re-running rule maker "
+              "once with the findings appended.")
+        retry = run_rule_maker(
+            idea=idea,
+            work_dir=self.work_dir,
+            provider=provider,
+            templates_dir=self.templates_dir,
+            timeout=timeout,
+            full_permissions=full_permissions,
+            prompt_suffix=format_violations_for_retry(verdict.get("violations")),
+        )
+        if retry["success"]:
+            verdict = run_eval_verifier(
+                idea=idea,
+                work_dir=self.work_dir,
+                provider=provider,
+                templates_dir=self.templates_dir,
+                full_permissions=full_permissions,
+            )
+            retry["verification"] = verdict
+            retry["success"] = verdict["success"] and verdict["passed"]
+
+        if not retry["success"]:
+            print("⚠️  Scoring contract still violates the user's declarations "
+                  "after one retry -- failing the rule maker stage.")
+        return retry
 
     def _run_scorer(self, timeout: int) -> Dict[str, Any]:
         """

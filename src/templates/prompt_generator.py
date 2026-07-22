@@ -377,6 +377,32 @@ Location: {run_dir}
                         lines.append(f"- {repo}")
                 lines.append("")
 
+        # Local resources (staged into the workspace before any agent runs)
+        local_resources = idea_spec.get('local_resources', {})
+        if local_resources:
+            lines.append("## LOCAL RESOURCES (STAGED IN WORKSPACE)\n")
+            lines.append("The submitter declared resources that already exist in this workspace.")
+            lines.append("Their stated usage is BINDING: use them exactly as described, and do")
+            lines.append("NOT download, re-collect, or reimplement substitutes.\n")
+
+            for dataset in local_resources.get('datasets') or []:
+                if not isinstance(dataset, dict):
+                    continue
+                lines.append(f"### Dataset: {dataset.get('path', 'unknown')}")
+                lines.append(f"- **Usage**: {dataset.get('usage', 'not stated')}")
+                lines.append("")
+
+            for func in local_resources.get('functions') or []:
+                if not isinstance(func, dict):
+                    continue
+                entrypoint = func.get('entrypoint', 'unknown')
+                lines.append(f"### Function: {entrypoint}() in {func.get('path', 'unknown')}")
+                lines.append(f"- **Usage**: {func.get('usage', 'not stated')}")
+                if func.get('required_for_evaluation'):
+                    lines.append("- **MANDATORY FOR EVALUATION**: all evaluation MUST call this "
+                                 "function; do not reimplement its metric")
+                lines.append("")
+
         # Methodology (if provided)
         methodology = idea_spec.get('methodology', {})
         if methodology:
@@ -451,6 +477,25 @@ Location: {run_dir}
             lines.append("Your research will be evaluated on:\n")
             for criterion in eval_criteria:
                 lines.append(f"- {criterion}")
+            lines.append("")
+
+        # Structured user evaluation spec (applied verbatim by the rule maker)
+        evaluation = idea_spec.get('evaluation', {})
+        if evaluation:
+            lines.append("## USER EVALUATION SPEC (APPLY FAITHFULLY)\n")
+            lines.append("The submitter stated these metrics explicitly. They are transcribed")
+            lines.append("verbatim into the scoring contract; produce results in these exact terms:\n")
+
+            for metric in evaluation.get('metrics') or []:
+                if not isinstance(metric, dict):
+                    continue
+                entry = f"- **{metric.get('name', 'unnamed')}**: {metric.get('definition', '')}"
+                if metric.get('target'):
+                    entry += f" | Target: {metric['target']}"
+                lines.append(entry)
+
+            if evaluation.get('results_format'):
+                lines.append(f"- **Results format**: {evaluation['results_format']}")
             lines.append("")
 
         return "\n".join(lines)
@@ -719,6 +764,10 @@ and the general workflow, ALWAYS follow the user's instructions.
 
 '''
 
+        # Local resource contract: read from the structured idea fields, not
+        # from the rendered prompt, so it cannot be lost to regex extraction
+        priority_section += self._generate_local_resource_contract(idea_spec or {})
+
         # Code workflow instructions depend on whether we're using notebooks or scripts
         if use_scribe:
             session_start = "Start a new session for research execution."
@@ -745,6 +794,57 @@ and the general workflow, ALWAYS follow the user's instructions.
         }
 
         return self.render_template(template, variables)
+
+    def _generate_local_resource_contract(self, idea_spec: Dict[str, Any]) -> str:
+        """
+        Build the binding local-resource banner for session instructions.
+
+        Reads idea.local_resources directly (the staged, workspace-relative
+        paths) and renders a HIGHEST PRIORITY block so the contract survives
+        even when no free-text user instructions were extracted.
+
+        Args:
+            idea_spec: Inner idea dictionary (idea['idea'])
+
+        Returns:
+            Banner string, or empty string when no local resources declared
+        """
+        resources = idea_spec.get('local_resources')
+        if not isinstance(resources, dict):
+            return ""
+
+        lines = []
+        for dataset in resources.get('datasets') or []:
+            if isinstance(dataset, dict) and dataset.get('path'):
+                lines.append(f"- Dataset {dataset['path']}: {dataset.get('usage', 'usage not stated')}")
+
+        for func in resources.get('functions') or []:
+            if isinstance(func, dict) and func.get('path'):
+                entrypoint = func.get('entrypoint', 'unknown')
+                line = f"- Function {entrypoint}() in {func['path']}: {func.get('usage', 'usage not stated')}"
+                if func.get('required_for_evaluation'):
+                    line += "\n  MANDATORY: all evaluation must call this function; never reimplement its metric."
+                lines.append(line)
+
+        if not lines:
+            return ""
+
+        listing = "\n".join(lines)
+        return f'''
+════════════════════════════════════════════════════════════════════════════════
+⚠️  BINDING LOCAL RESOURCES (STAGED IN THIS WORKSPACE)
+════════════════════════════════════════════════════════════════════════════════
+
+The submitter declared these resources. They are already staged at the paths
+below (relative to the workspace root). Their stated usage is binding: use
+them exactly as described, and do NOT download, re-collect, or reimplement
+substitutes.
+
+{listing}
+
+────────────────────────────────────────────────────────────────────────────────
+
+'''
 
     def _extract_user_instructions(self, prompt: str) -> str:
         """
@@ -867,6 +967,27 @@ RESEARCH DOMAIN:
 
             if 'related_work' in background:
                 research_context += f"\nRelated work:\n{background['related_work']}\n"
+
+        # Add staged local resources if declared (already copied into the
+        # workspace by the runner; the finder must not fetch substitutes)
+        local_resources = idea_spec.get('local_resources', {})
+        if isinstance(local_resources, dict) and local_resources:
+            research_context += "\n**LOCAL RESOURCES - ALREADY STAGED IN THIS WORKSPACE**:\n"
+            research_context += ("The following resources were declared by the submitter and are "
+                                 "already present\nat the paths below. Do NOT search for, download, "
+                                 "or clone substitutes for them.\nVerify each exists and record it "
+                                 "in your resources summary with its usage.\n")
+            for dataset in local_resources.get('datasets') or []:
+                if isinstance(dataset, dict):
+                    research_context += f"- Dataset: {dataset.get('path', 'unknown')}\n"
+                    research_context += f"  Usage: {dataset.get('usage', 'not stated')}\n"
+            for func in local_resources.get('functions') or []:
+                if isinstance(func, dict):
+                    research_context += (f"- Function: {func.get('entrypoint', 'unknown')}() "
+                                         f"in {func.get('path', 'unknown')}\n")
+                    research_context += f"  Usage: {func.get('usage', 'not stated')}\n"
+                    if func.get('required_for_evaluation'):
+                        research_context += "  MANDATORY: all evaluation must run through this function\n"
 
         # Add constraints if provided
         if constraints:

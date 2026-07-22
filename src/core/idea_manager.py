@@ -20,6 +20,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config_loader import ConfigLoader
+from core.local_resources import validate_evaluation_spec, validate_local_resources
 
 
 class IdeaManager:
@@ -194,6 +195,17 @@ class IdeaManager:
                 errors.append("evaluation_criteria must be a list")
             elif len(idea['evaluation_criteria']) == 0:
                 warnings.append("No evaluation criteria specified")
+
+        # Validate local resources (contractual: path + usage required,
+        # missing paths are warnings until staging)
+        lr_errors, lr_warnings = validate_local_resources(idea)
+        errors.extend(lr_errors)
+        warnings.extend(lr_warnings)
+
+        # Validate structured evaluation spec
+        ev_errors, ev_warnings = validate_evaluation_spec(idea)
+        errors.extend(ev_errors)
+        warnings.extend(ev_warnings)
 
         valid = len(errors) == 0
 

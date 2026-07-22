@@ -34,6 +34,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from core.idea_manager import IdeaManager
 from core.config_loader import ConfigLoader
+from core.local_resources import stage_local_resources
 from core.security import sanitize_text
 from core.compute_backend import (
     attach_runtime_compute_backend,
@@ -360,6 +361,11 @@ class ResearchRunner:
 
         # Copy helper scripts and backend-selected skills to workspace.
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
+
+        # Stage user-declared local resources (datasets, functions) into the
+        # workspace and rewrite their paths workspace-relative, so no agent
+        # ever depends on host paths. Hard error if a declared path is gone.
+        stage_local_resources(work_dir, idea)
 
         if continue_autoresearch:
             success = False
@@ -843,6 +849,7 @@ https://github.com/ChicagoHAI/neurico
         print(f"   Work dir: {work_dir}")
         print()
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
+        stage_local_resources(work_dir, idea)
 
         # Get GitHub URL if available
         github_url = None

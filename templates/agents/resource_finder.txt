@@ -554,6 +554,23 @@ Do NOT skip user-specified resources even if you find similar alternatives.
 
 ───────────────────────────────────────────────────────────────────────────────
 
+STAGED LOCAL RESOURCES (if listed in the research topic specification)
+─────────────────────────────────────────────────────────────────────────────
+
+Resources under "LOCAL RESOURCES - ALREADY STAGED" are NOT downloads: they
+were copied into this workspace before you started (datasets/local/,
+code/local/). For each one:
+
+1. Verify the path exists and the contents look sane (row counts, file
+   sizes, function signature)
+2. Record it in the Resources Catalog with its stated usage
+3. Do NOT search for, download, or clone a substitute; the staged copy is
+   the mandated version even if you find something newer
+4. If a staged path is missing or unreadable, STOP and report it in
+   resources.md; do not silently fall back to a downloaded alternative
+
+───────────────────────────────────────────────────────────────────────────────
+
 STEP 0: Clone User-Specified Repositories FIRST
 ─────────────────────────────────────────────────────────────────────────────
 
