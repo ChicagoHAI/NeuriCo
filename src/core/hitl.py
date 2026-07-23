@@ -50,7 +50,6 @@ _WORKER_COMMAND_MODULES = {
     "view_current_frontier": "hitl_view_current_frontier.py",
 }
 PROPOSAL_KINDS = {"exploitation", "exploration"}
-MAX_INCOMPLETE_WORKER_CONTINUATIONS = 3
 EVIDENCE_IDEA_CATEGORIES = {
     "paper_finding",
     "dataset_property",
@@ -1303,7 +1302,7 @@ class HitlRuntime:
 
         A provider process can exit after receiving feedback or phase approval.
         The worker never owns this state: runtime records the exact already-rendered
-        prompt and may launch one replacement process against the same tool server.
+        prompt and may launch a continuation worker against the same tool server.
         """
         prompt = _require_text(prompt_block, "prompt_block", "HITL worker continuation")
         from core.hitl_runtime_state import HitlRuntimeState
@@ -1709,16 +1708,6 @@ class HitlRuntime:
                         "Runtime terminated them and discarded the proposal admission."
                     ),
                 }
-            if not result.get("success"):
-                return {
-                    "success": False,
-                    "hitl": True,
-                    "phase": "proposal",
-                    "error": (
-                        f"{worker_name} exited unsuccessfully after proposal admission. "
-                        "Runtime discarded the proposal because its post-process boundary is not valid."
-                    ),
-                }
             validator = self._tool_context.get("proposal_submission_validator")
             if callable(validator):
                 validation = validator()
@@ -1741,16 +1730,17 @@ class HitlRuntime:
             self._clear_worker_continuation()
             return {
                 **submitted,
-                "worker_exit_warning": "",
+                "worker_exit_warning": (
+                    f"{worker_name} exited after runtime admitted the proposal. "
+                    "Runtime retained the admitted proposal because no proposer action remained."
+                    if not result.get("success")
+                    else ""
+                ),
             }
         if submitted and submitted.get("status") == "feedback":
             continuation = self.worker_continuation()
             prompt_block = str((continuation or {}).get("prompt_block", "")).strip()
-            if (
-                prompt_block
-                and int((continuation or {}).get("replacement_count", 0))
-                < MAX_INCOMPLETE_WORKER_CONTINUATIONS
-            ):
+            if prompt_block:
                 self._update_worker_continuation(status="replacement_pending")
                 from core.hitl_runtime_state import HitlRuntimeState
 
@@ -1761,7 +1751,7 @@ class HitlRuntime:
                     "prompt_block": prompt_block,
                     "worker_exit_warning": (
                         f"{worker_name} exited after proposal feedback. Runtime will launch "
-                        "a bounded proposer continuation with the same HITL state."
+                        "a proposer continuation with the same HITL state."
                     ),
                 }
             return {
@@ -1770,17 +1760,13 @@ class HitlRuntime:
                 "hitl": True,
                 "phase": "proposal",
                 "error": (
-                    f"{worker_name} exited after proposal feedback and all "
-                    f"{MAX_INCOMPLETE_WORKER_CONTINUATIONS} permitted HITL proposer continuations were used."
+                    f"{worker_name} exited after proposal feedback, but runtime has no "
+                    "continuation prompt to launch safely."
                 ),
             }
         continuation = HitlRuntime.worker_continuation(self)
         prompt_block = str((continuation or {}).get("prompt_block", "")).strip()
-        if (
-            prompt_block
-            and int((continuation or {}).get("replacement_count", 0))
-            < MAX_INCOMPLETE_WORKER_CONTINUATIONS
-        ):
+        if prompt_block:
             self._update_worker_continuation(status="replacement_pending")
             from core.hitl_runtime_state import HitlRuntimeState
 
@@ -1791,7 +1777,7 @@ class HitlRuntime:
                 "prompt_block": prompt_block,
                 "worker_exit_warning": (
                     f"{worker_name} exited before proposal admission. Runtime will launch "
-                    "a bounded proposer continuation from the preserved HITL state."
+                    "a proposer continuation from the preserved HITL state."
                 ),
             }
         return {
@@ -2850,7 +2836,7 @@ class HitlRuntime:
 
         The normal protocol remains one worker session. This recovery path only
         activates after that external session exits unexpectedly. It preserves the
-        live tool-server and request state and gives exactly one replacement the runtime
+        live tool-server and request state and gives a continuation worker the runtime
         prompt that the lost worker should have continued from.
         """
         if result.get("background_processes_terminated"):
@@ -2868,32 +2854,17 @@ class HitlRuntime:
             or isinstance(resolved.get("scored_candidate"), dict)
             or isinstance(resolved.get("scorer_result"), dict)
         ):
-            if not result.get("success"):
-                return {
-                    "approved": False,
-                    "error": (
-                        f"{worker_name} exited unsuccessfully after runtime approval. "
-                        "Runtime will not publish the deferred frontier decision."
-                    ),
-                }
             self._clear_worker_continuation()
             return {
                 "approved": True,
                 "worker_exit_warning": (
-                    f"{worker_name} exited after runtime finalized the held worker request."
+                    f"{worker_name} exited after runtime finalized the held worker request. "
+                    "Runtime retained the finalized state because no worker action remained."
                     if not result.get("success")
                     else ""
                 ),
             }
         if finish and finish.get("status") == "approved" and finish.get("final"):
-            if not result.get("success"):
-                return {
-                    "approved": False,
-                    "error": (
-                        f"{worker_name} exited unsuccessfully after final HITL approval. "
-                        "Runtime will not publish the deferred frontier decision."
-                    ),
-                }
             self._clear_worker_continuation()
             return {
                 "approved": True,
@@ -2912,11 +2883,7 @@ class HitlRuntime:
             prompt_block = str(
                 (finish or {}).get("prompt_block") or continuation.get("prompt_block", "")
             ).strip()
-            if (
-                prompt_block
-                and int(continuation.get("replacement_count", 0))
-                < MAX_INCOMPLETE_WORKER_CONTINUATIONS
-            ):
+            if prompt_block:
                 pending = self._pending_worker_command()
                 needs_resume = isinstance(pending, dict) and pending.get("status") in {
                     "pending",
@@ -2950,24 +2917,14 @@ class HitlRuntime:
                     "phase": phase,
                     "worker_exit_warning": (
                         f"{worker_name} exited before a final HITL result. Runtime will "
-                        "launch a bounded continuation worker from the preserved HITL state."
+                        "launch a continuation worker from the preserved HITL state."
                     ),
                 }
 
-            if (
-                int(continuation.get("replacement_count", 0))
-                >= MAX_INCOMPLETE_WORKER_CONTINUATIONS
-            ):
-                error = (
-                    f"{worker_name} exited after the {MAX_INCOMPLETE_WORKER_CONTINUATIONS} permitted HITL continuations "
-                    "worker was already launched. Runtime preserved the current workspace, "
-                    "manager conversation and continuation state for recovery."
-                )
-            else:
-                error = (
-                    f"{worker_name} exited before final HITL approval, but runtime has no "
-                    "continuation prompt to launch safely."
-                )
+            error = (
+                f"{worker_name} exited before final HITL approval, but runtime has no "
+                "continuation prompt to launch safely."
+            )
         else:
             if finish and finish.get("status") == "feedback":
                 error = (

@@ -21,7 +21,7 @@ and tracks pipeline state.
 """
 
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Callable, Optional, List, Dict, Any
 import json
 import os
 import shutil
@@ -243,6 +243,24 @@ class ResearchPipelineOrchestrator:
             **whiteboard_mode,
         )
 
+    def _run_hitl_stage_until_complete(
+        self,
+        *,
+        stage_name: str,
+        run_stage: Callable[[], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Relaunch a HITL stage only after its runtime rollback completed."""
+        restart_count = 0
+        while True:
+            result = run_stage()
+            if result.get("success") or not result.get("hitl_rollback_completed"):
+                return result
+            restart_count += 1
+            print(
+                f"↻ HITL {stage_name} rollback completed; "
+                f"relaunching from its clean stage boundary (restart {restart_count})."
+            )
+
     def run_pipeline(
         self,
         idea: Dict[str, Any],
@@ -329,11 +347,14 @@ class ResearchPipelineOrchestrator:
             # STAGE 1: Resource Finder
             if not skip_resource_finder:
                 if hitl_enabled:
-                    results["stages"]["resource_finder"] = self._run_resource_finder_hitl(
-                        idea=idea,
-                        provider=provider,
-                        timeout=resource_finder_timeout,
-                        full_permissions=full_permissions,
+                    results["stages"]["resource_finder"] = self._run_hitl_stage_until_complete(
+                        stage_name="resource_finder",
+                        run_stage=lambda: self._run_resource_finder_hitl(
+                            idea=idea,
+                            provider=provider,
+                            timeout=resource_finder_timeout,
+                            full_permissions=full_permissions,
+                        ),
                     )
                 else:
                     results["stages"]["resource_finder"] = self._run_resource_finder(
@@ -374,11 +395,14 @@ class ResearchPipelineOrchestrator:
             # scoring/rule_maker_log.md before the runner sees the workspace.
             if scoring_enabled:
                 if hitl_enabled:
-                    results["stages"][RULE_MAKER_STAGE] = self._run_rule_maker_hitl(
-                        idea=idea,
-                        provider=provider,
-                        timeout=rule_maker_timeout,
-                        full_permissions=full_permissions,
+                    results["stages"][RULE_MAKER_STAGE] = self._run_hitl_stage_until_complete(
+                        stage_name=RULE_MAKER_STAGE,
+                        run_stage=lambda: self._run_rule_maker_hitl(
+                            idea=idea,
+                            provider=provider,
+                            timeout=rule_maker_timeout,
+                            full_permissions=full_permissions,
+                        ),
                     )
                 else:
                     results["stages"][RULE_MAKER_STAGE] = self._run_rule_maker(
@@ -405,15 +429,18 @@ class ResearchPipelineOrchestrator:
             sealed_dir = self._seal_runner_inputs() if scoring_enabled else None
             try:
                 if hitl_enabled:
-                    results["stages"]["experiment_runner"] = self._run_experiment_runner_hitl(
-                        idea=idea,
-                        provider=provider,
-                        timeout=experiment_runner_timeout,
-                        full_permissions=full_permissions,
-                        use_scribe=use_scribe,
-                        scoring_enabled=scoring_enabled,
-                        scorer_timeout=scorer_timeout,
-                        sealed_dir=sealed_dir,
+                    results["stages"]["experiment_runner"] = self._run_hitl_stage_until_complete(
+                        stage_name="experiment_runner",
+                        run_stage=lambda: self._run_experiment_runner_hitl(
+                            idea=idea,
+                            provider=provider,
+                            timeout=experiment_runner_timeout,
+                            full_permissions=full_permissions,
+                            use_scribe=use_scribe,
+                            scoring_enabled=scoring_enabled,
+                            scorer_timeout=scorer_timeout,
+                            sealed_dir=sealed_dir,
+                        ),
                     )
                 else:
                     results["stages"]["experiment_runner"] = self._run_experiment_runner(
@@ -559,16 +586,19 @@ class ResearchPipelineOrchestrator:
                     paths=state_store.rollback_paths(),
                 )
             )
-            state_store.discard(snapshot_ref)
         except Exception as exc:
             raise RuntimeError(
                 "Could not restore the armed HITL private-state recovery boundary."
             ) from exc
-        self.state.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self.state.clear_runtime_recovery("experiment_runner")
         reloader = getattr(self.hitl_manager, "reload_after_runtime_restore", None)
         if callable(reloader):
             reloader()
+        self.state.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state.clear_runtime_recovery("experiment_runner")
+        try:
+            state_store.discard(snapshot_ref)
+        except Exception as cleanup_error:
+            print(f"⚠️  Could not clean restored HITL recovery snapshot: {cleanup_error}")
 
     # Provider → top-level skills directory inside the workspace. runner.py
     # copies templates/skills/* to every provider's directory so skills work
@@ -703,15 +733,6 @@ class ResearchPipelineOrchestrator:
 
         self.state.start_stage("resource_finder")
         runtime = self._create_hitl_runtime("resource_finder")
-        # Keep ordinary-stage HITL failure semantics consistent: a failed
-        # resource run must not leave public artifacts or private idea state.
-        from core.autoresearch import CheckpointManager
-
-        rollback_checkpoint = CheckpointManager(self.work_dir).create_checkpoint(
-            "HITL resource finder starting state"
-        )
-        hitl_state_store = HitlGitStateStore(self.work_dir)
-        hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
         worker_prompt_contexts = {
             phase: generate_resource_finder_prompt(
                 idea,
@@ -722,6 +743,15 @@ class ResearchPipelineOrchestrator:
             )
             for phase in ("plan", "execution", "review")
         }
+        # Keep ordinary-stage HITL failure semantics consistent: a failed
+        # resource run must not leave public artifacts or private idea state.
+        from core.autoresearch import CheckpointManager
+
+        rollback_checkpoint = CheckpointManager(self.work_dir).create_checkpoint(
+            "HITL resource finder starting state"
+        )
+        hitl_state_store = HitlGitStateStore(self.work_dir)
+        hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
 
         def resource_artifact_validator() -> Dict[str, Any]:
             required = ("literature_review.md", "resources.md")
@@ -745,14 +775,27 @@ class ResearchPipelineOrchestrator:
                 clean_untracked_public=True,
             )
             hitl_state_store.restore(hitl_rollback_snapshot)
-            hitl_state_store.discard(hitl_rollback_snapshot)
             runtime.reload_manager_after_state_restore()
             runtime.clear_idea_tool_context()
+            try:
+                hitl_state_store.discard(hitl_rollback_snapshot)
+            except Exception as cleanup_error:
+                print(f"⚠️  Could not clean restored HITL rollback snapshot: {cleanup_error}")
 
         def finalize_failed(failed: Dict[str, Any]) -> Dict[str, Any]:
             restore_failed_hitl_state()
-            self.state.complete_stage("resource_finder", False, failed)
-            return failed
+            return {
+                **failed,
+                "success": False,
+                "hitl": True,
+                "hitl_rollback_completed": True,
+            }
+
+        def discard_completed_rollback_snapshot() -> None:
+            try:
+                hitl_state_store.discard(hitl_rollback_snapshot)
+            except Exception as cleanup_error:
+                print(f"⚠️  Could not clean completed HITL rollback snapshot: {cleanup_error}")
 
         def run_worker_with_replacements(
             *, prompt: str, log_prefix: str, phase: str
@@ -820,8 +863,8 @@ class ResearchPipelineOrchestrator:
                     phase="stage",
                 )
                 if finish and finish.get("approved"):
-                    hitl_state_store.discard(hitl_rollback_snapshot)
                     self.state.complete_stage("resource_finder", True, result.get("outputs"))
+                    discard_completed_rollback_snapshot()
                     return {
                         **result,
                         "success": True,
@@ -851,8 +894,8 @@ class ResearchPipelineOrchestrator:
                 phase="execute",
             )
             if finish and finish.get("approved"):
-                hitl_state_store.discard(hitl_rollback_snapshot)
                 self.state.complete_stage("resource_finder", True, result.get("outputs"))
+                discard_completed_rollback_snapshot()
                 return {
                     **result,
                     "success": True,
@@ -873,8 +916,15 @@ class ResearchPipelineOrchestrator:
                 restore_failed_hitl_state()
             except Exception as restore_error:
                 print(f"⚠️  Failed to restore HITL resource finder state: {restore_error}")
-            self.state.complete_stage("resource_finder", False, {"error": str(e)})
-            raise
+                failure = {"success": False, "error": str(e), "rollback_error": str(restore_error)}
+                self.state.complete_stage("resource_finder", False, failure)
+                return failure
+            return {
+                "success": False,
+                "hitl": True,
+                "error": str(e),
+                "hitl_rollback_completed": True,
+            }
         finally:
             runtime.clear_idea_tool_context()
 
@@ -1180,16 +1230,6 @@ class ResearchPipelineOrchestrator:
 
         self.state.start_stage("experiment_runner")
         runtime = self._create_hitl_runtime("experiment_runner")
-        # HITL must be able to restore the public workspace after any failed
-        # plan/execution/review invocation, including non-scoring runs.
-        from core.autoresearch import CheckpointManager
-
-        rollback_checkpoint = CheckpointManager(self.work_dir).create_checkpoint(
-            "HITL experiment runner starting state"
-        )
-        scored_checkpoint_sha: Optional[str] = None
-        hitl_state_store = HitlGitStateStore(self.work_dir)
-        hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
         worker_prompt_contexts = {
             phase: self._hitl_experiment_runner_source_prompt(
                 idea=idea,
@@ -1200,6 +1240,16 @@ class ResearchPipelineOrchestrator:
             )
             for phase in ("plan", "execution", "review")
         }
+        # HITL must be able to restore the public workspace after any failed
+        # plan/execution/review invocation, including non-scoring runs.
+        from core.autoresearch import CheckpointManager
+
+        rollback_checkpoint = CheckpointManager(self.work_dir).create_checkpoint(
+            "HITL experiment runner starting state"
+        )
+        scored_checkpoint_sha: Optional[str] = None
+        hitl_state_store = HitlGitStateStore(self.work_dir)
+        hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
 
         artifact_validator = (
             (lambda: validate_required_artifact_contract(self.work_dir))
@@ -1219,14 +1269,27 @@ class ResearchPipelineOrchestrator:
                 clean_untracked_public=True,
             )
             hitl_state_store.restore(hitl_rollback_snapshot)
-            hitl_state_store.discard(hitl_rollback_snapshot)
             runtime.reload_manager_after_state_restore()
             clear_hitl_runtime_context()
+            try:
+                hitl_state_store.discard(hitl_rollback_snapshot)
+            except Exception as cleanup_error:
+                print(f"⚠️  Could not clean restored HITL rollback snapshot: {cleanup_error}")
 
         def finalize_failed(failed: Dict[str, Any]) -> Dict[str, Any]:
             restore_failed_hitl_state()
-            self.state.complete_stage("experiment_runner", False, failed)
-            return failed
+            return {
+                **failed,
+                "success": False,
+                "hitl": True,
+                "hitl_rollback_completed": True,
+            }
+
+        def discard_completed_rollback_snapshot() -> None:
+            try:
+                hitl_state_store.discard(hitl_rollback_snapshot)
+            except Exception as cleanup_error:
+                print(f"⚠️  Could not clean completed HITL rollback snapshot: {cleanup_error}")
 
         def run_worker_with_replacements(
             *, prompt: str, log_prefix: str, phase: str
@@ -1277,8 +1340,8 @@ class ResearchPipelineOrchestrator:
                     clean_untracked_public=True,
                 )
             finish_result = runtime.phase_finish_result() or {}
-            hitl_state_store.discard(hitl_rollback_snapshot)
             self.state.complete_stage("experiment_runner", True, worker_result)
+            discard_completed_rollback_snapshot()
             completed = {
                 **worker_result,
                 "success": True,
@@ -1471,8 +1534,15 @@ class ResearchPipelineOrchestrator:
                 restore_failed_hitl_state()
             except Exception as restore_error:
                 print(f"⚠️  Failed to restore HITL experiment runner state: {restore_error}")
-            self.state.complete_stage("experiment_runner", False, {"error": str(e)})
-            raise
+                failure = {"success": False, "error": str(e), "rollback_error": str(restore_error)}
+                self.state.complete_stage("experiment_runner", False, failure)
+                return failure
+            return {
+                "success": False,
+                "hitl": True,
+                "error": str(e),
+                "hitl_rollback_completed": True,
+            }
         finally:
             runtime.clear_idea_tool_context()
 
@@ -1520,13 +1590,6 @@ class ResearchPipelineOrchestrator:
 
         self.state.start_stage(RULE_MAKER_STAGE)
         runtime = self._create_hitl_runtime(RULE_MAKER_STAGE)
-        from core.autoresearch import CheckpointManager
-
-        rollback_checkpoint = CheckpointManager(self.work_dir).create_checkpoint(
-            "HITL rule maker starting state"
-        )
-        hitl_state_store = HitlGitStateStore(self.work_dir)
-        hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
         worker_prompt_contexts = {
             phase: generate_rule_maker_prompt(
                 idea,
@@ -1536,6 +1599,13 @@ class ResearchPipelineOrchestrator:
             )
             for phase in ("plan", "execution", "review")
         }
+        from core.autoresearch import CheckpointManager
+
+        rollback_checkpoint = CheckpointManager(self.work_dir).create_checkpoint(
+            "HITL rule maker starting state"
+        )
+        hitl_state_store = HitlGitStateStore(self.work_dir)
+        hitl_rollback_snapshot = hitl_state_store.create_rollback_snapshot()
 
         def rule_maker_artifact_validator() -> Dict[str, Any]:
             validation = validate_rule_maker_outputs(self.work_dir)
@@ -1556,14 +1626,27 @@ class ResearchPipelineOrchestrator:
                 clean_untracked_public=True,
             )
             hitl_state_store.restore(hitl_rollback_snapshot)
-            hitl_state_store.discard(hitl_rollback_snapshot)
             runtime.reload_manager_after_state_restore()
             runtime.clear_idea_tool_context()
+            try:
+                hitl_state_store.discard(hitl_rollback_snapshot)
+            except Exception as cleanup_error:
+                print(f"⚠️  Could not clean restored HITL rollback snapshot: {cleanup_error}")
 
         def finalize_failed(failed: Dict[str, Any]) -> Dict[str, Any]:
             restore_failed_hitl_state()
-            self.state.complete_stage(RULE_MAKER_STAGE, False, failed)
-            return failed
+            return {
+                **failed,
+                "success": False,
+                "hitl": True,
+                "hitl_rollback_completed": True,
+            }
+
+        def discard_completed_rollback_snapshot() -> None:
+            try:
+                hitl_state_store.discard(hitl_rollback_snapshot)
+            except Exception as cleanup_error:
+                print(f"⚠️  Could not clean completed HITL rollback snapshot: {cleanup_error}")
 
         def run_worker(
             *,
@@ -1625,8 +1708,8 @@ class ResearchPipelineOrchestrator:
                     phase="stage",
                 )
                 if finish and finish.get("approved"):
-                    hitl_state_store.discard(hitl_rollback_snapshot)
                     self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
+                    discard_completed_rollback_snapshot()
                     return {
                         **result,
                         "success": True,
@@ -1655,8 +1738,8 @@ class ResearchPipelineOrchestrator:
                 phase="execute",
             )
             if finish and finish.get("approved"):
-                hitl_state_store.discard(hitl_rollback_snapshot)
                 self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
+                discard_completed_rollback_snapshot()
                 return {
                     **result,
                     "success": True,
@@ -1676,8 +1759,19 @@ class ResearchPipelineOrchestrator:
                 restore_failed_hitl_state()
             except Exception as restore_error:
                 print(f"⚠️  Failed to restore HITL rule maker state: {restore_error}")
-            self.state.complete_stage(RULE_MAKER_STAGE, False, {"error": str(exc)})
-            raise
+                failure = {
+                    "success": False,
+                    "error": str(exc),
+                    "rollback_error": str(restore_error),
+                }
+                self.state.complete_stage(RULE_MAKER_STAGE, False, failure)
+                return failure
+            return {
+                "success": False,
+                "hitl": True,
+                "error": str(exc),
+                "hitl_rollback_completed": True,
+            }
         finally:
             runtime.clear_idea_tool_context()
 

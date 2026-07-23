@@ -26,7 +26,6 @@ from core.autoresearch import (
     Checkpoint,
     CheckpointManager,
     InitialAutoResearchNodeResult,
-    MAX_INVALID_ATTEMPTS_PER_VALID_ITERATION,
     ProposalGeneratorHook,
     ScoreSummary,
     ScorerHook,
@@ -275,6 +274,14 @@ def _archive_failed_hitl_attempt(
     return archive_dir
 
 
+def _best_effort_archive_failed_hitl_attempt(**kwargs: Any) -> None:
+    """Keep diagnostic archival from interrupting an already-restored attempt."""
+    try:
+        _archive_failed_hitl_attempt(**kwargs)
+    except Exception as exc:
+        print(f"⚠️  Could not archive HITL runtime failure diagnostics: {exc}")
+
+
 def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlRecoveryResult]:
     """Recover a leftover HITL AutoResearch attempt before clean-workspace validation."""
     work_dir = Path(work_dir)
@@ -367,7 +374,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
     _rollback_failed_hitl_whiteboard_attempt(work_dir, marker)
     clear_hitl_current_attempt_marker(work_dir)
     _best_effort_remove_hitl_state_snapshot(work_dir, attempt_dir)
-    _archive_failed_hitl_attempt(
+    _best_effort_archive_failed_hitl_attempt(
         history_root=history_root,
         parent_sha=current_best_sha,
         attempt_id=marker,
@@ -448,6 +455,21 @@ def _snapshot_hitl_state_before(work_dir: Path, attempt_dir: Path) -> None:
     HitlGitStateStore(work_dir).begin_autoresearch_hitl_attempt(
         _attempt_marker_for_dir(attempt_dir)
     )
+
+
+def _begin_hitl_autoresearch_attempt_state(work_dir: Path, attempt_dir: Path) -> str:
+    """Create both rollback boundaries before marking an attempt active."""
+    marker = _attempt_marker_for_dir(attempt_dir)
+    snapshot_created = False
+    try:
+        _snapshot_hitl_state_before(work_dir, attempt_dir)
+        snapshot_created = True
+        write_hitl_current_attempt_marker(work_dir, marker)
+        return marker
+    except Exception:
+        if snapshot_created:
+            _best_effort_remove_hitl_state_snapshot(work_dir, attempt_dir)
+        raise
 
 
 def _restore_hitl_state_snapshot(work_dir: Path, attempt_dir: Path) -> None:
@@ -727,23 +749,11 @@ class HitlAutoResearchController:
 
         first_iteration = len(resumed_results) + 1
         for iteration in range(first_iteration, iterations + 1):
-            invalid_attempts = 0
-            while True:
-                result = self.run_iteration(iteration, current_best_sha)
-                if self._is_normal_scored_iteration(result):
-                    iteration_results.append(result)
-                    if iteration < iterations:
-                        self._prune_frontier_before_next_proposal()
-                        current_best_sha = self._select_frontier_before_next_proposal()
-                    break
-                invalid_attempts += 1
-                if invalid_attempts >= MAX_INVALID_ATTEMPTS_PER_VALID_ITERATION:
-                    return AutoResearchRunResult(
-                        success=False,
-                        initial_sha=initial.sha,
-                        current_best_sha=current_best_sha,
-                        iterations=iteration_results,
-                    )
+            result = self._run_iteration_until_scored(iteration, current_best_sha)
+            iteration_results.append(result)
+            if iteration < iterations:
+                self._prune_frontier_before_next_proposal()
+                current_best_sha = self._select_frontier_before_next_proposal()
 
         return AutoResearchRunResult(
             success=True,
@@ -751,6 +761,21 @@ class HitlAutoResearchController:
             current_best_sha=current_best_sha,
             iterations=iteration_results,
         )
+
+    def _run_iteration_until_scored(
+        self,
+        iteration: int,
+        parent_sha: str,
+    ) -> AutoResearchIterationResult:
+        """Relaunch a rolled-back HITL iteration from its selected parent."""
+        while True:
+            result = self.run_iteration(iteration, parent_sha)
+            if self._is_normal_scored_iteration(result):
+                return result
+            print(
+                "↻ HITL AutoResearch attempt rollback completed; "
+                "relaunching from the selected parent frontier node."
+            )
 
     def _select_frontier_before_next_proposal(self) -> str:
         """Require a manager-selected active node before launching a proposer."""
@@ -1088,7 +1113,7 @@ class HitlAutoResearchController:
         self.hitl_runtime = None
         clear_hitl_current_attempt_marker(self.work_dir)
         _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
-        _archive_failed_hitl_attempt(
+        _best_effort_archive_failed_hitl_attempt(
             history_root=self.history.history_root,
             parent_sha=parent_sha,
             attempt_id=self._attempt_id(attempt_dir),
@@ -1398,8 +1423,7 @@ class HitlAutoResearchController:
         attempt_dir = self.history.next_attempt_dir(parent_sha)
         attempt_marker = self._attempt_id(attempt_dir)
         attempt_id = attempt_dir.name
-        _snapshot_hitl_state_before(self.work_dir, attempt_dir)
-        write_hitl_current_attempt_marker(self.work_dir, attempt_marker)
+        attempt_marker = _begin_hitl_autoresearch_attempt_state(self.work_dir, attempt_dir)
 
         sealed_scoring: Dict[str, Optional[Path]] = {"path": None}
         proposal = ""
@@ -1471,7 +1495,7 @@ class HitlAutoResearchController:
             self.hitl_runtime = None
             clear_hitl_current_attempt_marker(self.work_dir)
             _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
-            _archive_failed_hitl_attempt(
+            _best_effort_archive_failed_hitl_attempt(
                 history_root=self.history.history_root,
                 parent_sha=parent_sha,
                 attempt_id=attempt_marker,
@@ -1544,7 +1568,7 @@ class HitlAutoResearchController:
             self.hitl_runtime = None
             clear_hitl_current_attempt_marker(self.work_dir)
             _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
-            _archive_failed_hitl_attempt(
+            _best_effort_archive_failed_hitl_attempt(
                 history_root=self.history.history_root,
                 parent_sha=parent_sha,
                 attempt_id=attempt_marker,

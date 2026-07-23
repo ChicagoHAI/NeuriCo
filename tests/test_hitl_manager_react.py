@@ -467,31 +467,21 @@ def test_web_channel_clears_a_resolution_request_cancelled_by_runtime():
     assert emitted[-1]["role"] == "system"
 
 
-def test_runtime_allows_three_replacement_workers(tmp_path):
+def test_runtime_replaces_incomplete_workers_without_a_fixed_cap(tmp_path):
     runtime = HitlRuntime(tmp_path, "resource_finder")
     runtime.prepare_idea_tool_context(hitl_stage="execution")
     runtime.register_worker_prompt("Continue the current worker task.")
 
-    first = runtime.handle_worker_exit_after_finish(
-        {"success": False}, phase="execution", worker_name="test worker"
-    )
-    second = runtime.handle_worker_exit_after_finish(
-        {"success": False}, phase="execution", worker_name="test worker"
-    )
-    third = runtime.handle_worker_exit_after_finish(
-        {"success": False}, phase="execution", worker_name="test worker"
-    )
-    fourth = runtime.handle_worker_exit_after_finish(
-        {"success": False}, phase="execution", worker_name="test worker"
-    )
+    replacements = [
+        runtime.handle_worker_exit_after_finish(
+            {"success": False}, phase="execution", worker_name="test worker"
+        )
+        for _ in range(12)
+    ]
     runtime.clear_idea_tool_context()
     runtime.manager.stop()
 
-    assert first["replacement"] is True
-    assert second["replacement"] is True
-    assert third["replacement"] is True
-    assert "replacement" not in fourth
-    assert "3 permitted HITL continuations" in fourth["error"]
+    assert all(result["replacement"] is True for result in replacements)
 
 
 def test_replacement_reconnects_to_a_held_runtime_command_before_working(tmp_path):

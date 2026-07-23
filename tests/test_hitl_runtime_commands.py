@@ -198,7 +198,27 @@ def test_finished_worker_response_is_available_for_exact_retry(tmp_path: Path) -
     assert retry["response"] == response
 
 
-def test_failed_worker_exit_does_not_publish_a_deferred_frontier_decision(tmp_path: Path) -> None:
+def test_admitted_proposal_survives_provider_exit_after_runtime_approval(tmp_path: Path) -> None:
+    runtime = HitlRuntime(tmp_path, "experiment_runner")
+    runtime._proposal_submit_result = {
+        "status": "approved",
+        "proposal_idea_id": "I12",
+        "proposal": "Test one clearly specified experiment change.",
+    }
+
+    result = runtime.proposal_submit_result_after_worker_exit(
+        {"success": False}, worker_name="proposal generator"
+    )
+
+    assert result["status"] == "approved"
+    assert result["proposal_idea_id"] == "I12"
+    assert "retained the admitted proposal" in result["worker_exit_warning"]
+    runtime.manager.stop()
+
+
+def test_failed_worker_exit_after_final_approval_preserves_deferred_frontier_decision(
+    tmp_path: Path,
+) -> None:
     runtime = HitlRuntime(tmp_path, "experiment_runner")
     state = HitlRuntimeState(tmp_path)
     state.begin_worker_command({"request_key": "finish", "kind": "phase_finish"})
@@ -214,8 +234,8 @@ def test_failed_worker_exit_does_not_publish_a_deferred_frontier_decision(tmp_pa
         worker_name="candidate worker",
     )
 
-    assert result["approved"] is False
-    assert "will not publish" in result["error"]
+    assert result["approved"] is True
+    assert "retained the finalized state" in result["worker_exit_warning"]
     runtime.manager.stop()
 
 
