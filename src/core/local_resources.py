@@ -347,6 +347,53 @@ def _ignore_staged_datasets(work_dir: Path) -> None:
                          encoding='utf-8')
 
 
+def collect_host_paths(idea: Dict[str, Any]) -> List[str]:
+    """
+    Collect the absolute host paths an idea depends on before staging.
+
+    Written to ideas/mounts/<idea_id>.txt at submit time so docker/run.sh can
+    mount each path read-only at its identical in-container location (bash
+    reads the sidecar line by line; it cannot parse the idea YAML itself).
+
+    Covers unstaged local_resources entries and local paper paths. Entries
+    that already carry source_path were staged into the workspace and need
+    no mount. Relative paths are skipped: they cannot be mounted
+    meaningfully on another machine.
+
+    Args:
+        idea: The inner idea dictionary (idea_spec['idea'])
+
+    Returns:
+        Deduplicated list of absolute host paths in declaration order
+    """
+    paths = []
+
+    def add(path_str):
+        if not path_str:
+            return
+        path_str = str(path_str)
+        if path_str.startswith(('http://', 'https://', 'git@')):
+            return
+        expanded = str(Path(path_str).expanduser())
+        if Path(expanded).is_absolute() and expanded not in paths:
+            paths.append(expanded)
+
+    resources = idea.get('local_resources')
+    if isinstance(resources, dict):
+        for kind in ('datasets', 'functions'):
+            for entry in resources.get(kind) or []:
+                if isinstance(entry, dict):
+                    add(entry.get('source_path') or entry.get('path'))
+
+    background = idea.get('background')
+    if isinstance(background, dict):
+        for paper in background.get('papers') or []:
+            if isinstance(paper, dict):
+                add(paper.get('path'))
+
+    return paths
+
+
 def validate_evaluation_spec(idea: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     """
     Validate the idea.evaluation section (structured metrics and format).

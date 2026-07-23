@@ -297,6 +297,47 @@ def test_prompts_unchanged_without_local_resources():
     assert "BINDING LOCAL RESOURCES" not in instructions
 
 
+# ---------------------------------------------------------------- host paths
+
+def test_collect_host_paths_covers_resources_and_papers():
+    from core.local_resources import collect_host_paths
+    idea = _idea(
+        local_resources={'datasets': [{'path': '/data/bench', 'usage': 'eval'}],
+                         'functions': [{'path': 'code/local/e.py', 'usage': 'eval',
+                                        'source_path': '/tools/e.py'}]},
+        background={'papers': [{'path': '/papers/ref.pdf', 'description': 'ref'}]},
+    )
+    assert collect_host_paths(idea) == ['/data/bench', '/tools/e.py', '/papers/ref.pdf']
+
+
+def test_collect_host_paths_skips_urls_and_relative():
+    from core.local_resources import collect_host_paths
+    idea = _idea(local_resources={'datasets': [
+        {'path': 'datasets/local/x', 'usage': 'staged'},
+        {'path': 'https://example.com/data.csv', 'usage': 'remote'},
+    ]})
+    assert collect_host_paths(idea) == []
+
+
+def test_submit_idea_writes_mounts_sidecar(tmp_path):
+    from core.idea_manager import IdeaManager
+    manager = IdeaManager(ideas_dir=tmp_path)
+    (tmp_path / 'data').mkdir()
+    idea_spec = {'idea': _idea(local_resources={'datasets': [
+        {'path': str(tmp_path / 'data'), 'usage': 'training data'}]})}
+    idea_id = manager.submit_idea(idea_spec)
+    sidecar = tmp_path / "mounts" / f"{idea_id}.txt"
+    assert sidecar.exists()
+    assert str(tmp_path / 'data') in sidecar.read_text()
+
+
+def test_submit_idea_writes_no_sidecar_without_local_paths(tmp_path):
+    from core.idea_manager import IdeaManager
+    manager = IdeaManager(ideas_dir=tmp_path)
+    idea_id = manager.submit_idea({'idea': _idea()})
+    assert not (tmp_path / "mounts" / f"{idea_id}.txt").exists()
+
+
 # ---------------------------------------------------------------- idea manager
 
 def test_validate_idea_surfaces_local_resource_errors():

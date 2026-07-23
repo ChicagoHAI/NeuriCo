@@ -20,7 +20,11 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config_loader import ConfigLoader
-from core.local_resources import validate_evaluation_spec, validate_local_resources
+from core.local_resources import (
+    collect_host_paths,
+    validate_evaluation_spec,
+    validate_local_resources,
+)
 
 
 class IdeaManager:
@@ -98,6 +102,16 @@ class IdeaManager:
         idea_path = self.submitted_dir / f"{idea_id}.yaml"
         with open(idea_path, 'w', encoding='utf-8') as f:
             yaml.dump(idea_spec, f, default_flow_style=False, sort_keys=False)
+
+        # Sidecar for docker/run.sh: host paths this idea depends on, one per
+        # line, so cmd_run can mount them (bash cannot parse the idea YAML)
+        host_paths = collect_host_paths(idea_spec.get('idea', {}))
+        if host_paths:
+            mounts_dir = self.ideas_dir / "mounts"
+            mounts_dir.mkdir(parents=True, exist_ok=True)
+            (mounts_dir / f"{idea_id}.txt").write_text(
+                "\n".join(host_paths) + "\n", encoding='utf-8')
+            print(f"  Local paths recorded for docker mounts: {len(host_paths)}")
 
         print(f"✓ Idea submitted successfully: {idea_id}")
         print(f"  Title: {idea_spec['idea'].get('title', 'Untitled')}")

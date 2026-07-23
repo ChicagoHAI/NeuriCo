@@ -744,6 +744,26 @@ cmd_run() {
 
     local tty_flag=$(get_tty_flag)
 
+    # Ideas that declare host-local resources (local_resources paths, local
+    # papers) get a sidecar written at submit time: ideas/mounts/<idea_id>.txt,
+    # one absolute host path per line. Mount each existing path read-only at
+    # its identical in-container location so staging works unmodified inside
+    # Docker.
+    local idea_id="$1"
+    local host_mounts=""
+    local mounts_file="$PROJECT_ROOT/ideas/mounts/${idea_id}.txt"
+    if [ -f "$mounts_file" ]; then
+        while IFS= read -r host_path; do
+            [ -z "$host_path" ] && continue
+            if [ -e "$host_path" ]; then
+                host_mounts="$host_mounts -v \"$host_path:$host_path:ro\""
+                echo -e "${BLUE}Mounting local resource:${NC} $host_path"
+            else
+                echo -e "${YELLOW}[SKIP]${NC} declared local path not found on this machine: $host_path"
+            fi
+        done < "$mounts_file"
+    fi
+
     echo -e "${BLUE}Running research exploration...${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
 
@@ -758,6 +778,7 @@ cmd_run() {
         -v \"$PROJECT_ROOT/config:/app/config:ro\" \
         -v \"$PROJECT_ROOT/templates:/app/templates:ro\" \
         $credential_mounts \
+        $host_mounts \
         -w /app \
         \"$IMAGE_NAME\" \
         python /app/src/core/runner.py $@"
