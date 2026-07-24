@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NeuriCo Run Visualizer</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <img class="mark" src="/avatar.jpg" alt="NeuriCo logo" />
+          <div>
+            <h1>NeuriCo</h1>
+            <p>Run Visualizer</p>
+          </div>
+        </div>
+        <nav class="nav" aria-label="Views">
+          <button class="nav-item active" data-view="overview">Whiteboard</button>
+          <button class="nav-item" data-view="flow">Flow</button>
+          <button class="nav-item" data-view="decisions">Decisions</button>
+          <button class="nav-item" data-view="search">Search</button>
+        </nav>
+        <div class="sidebar-foot">
+          <button id="reviewer-toggle" class="reviewer-toggle" type="button" aria-pressed="false">
+            <span class="reviewer-toggle-state">Off</span>
+            <span class="reviewer-toggle-label">Reviewer's take</span>
+          </button>
+          <p class="reviewer-toggle-hint">Show the AI reviewer's judgments (trust, should-pause, critique, flagged issues).</p>
+        </div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-left">
+            <button id="back-to-list" class="back-to-list" type="button" hidden>← All logs</button>
+            <div>
+              <p class="eyebrow" id="run-eyebrow">NeuriCo study</p>
+              <h2 id="run-title">Loading...</h2>
+            </div>
+          </div>
+          <div class="topbar-right">
+            <button id="user-chip" class="user-chip" type="button" hidden></button>
+            <div class="status-pill" id="run-status">Loading</div>
+          </div>
+        </header>
+        <section id="view-root" class="view"></section>
+      </main>
+    </div>
+    <!-- pdf.js (UMD global `pdfjsLib`) for the per-decision paper highlight pane.
+         Loaded before app.js; the app degrades to an "open paper" link if it's absent. -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="/app.js" type="module"></script>
+    <script src="/events-tab-plugin.js?v=hard-canvas-20260630-1629"></script>
+</body>
+</html>

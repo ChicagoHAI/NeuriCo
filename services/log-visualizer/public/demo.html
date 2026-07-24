@@ -1,0 +1,286 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>NeuriCo Critical Decision Annotation Demo</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #f7f7f8; color: #111; }
+    header { padding: 18px 24px; background: #111827; color: white; }
+    header h1 { margin: 0 0 6px; font-size: 22px; }
+    header div { color: #d1d5db; }
+    .tabs { display: flex; gap: 8px; padding: 12px 24px; background: white; border-bottom: 1px solid #ddd; position: sticky; top: 0; z-index: 2; }
+    .tabs button { padding: 8px 14px; border: 1px solid #ccc; background: white; border-radius: 8px; cursor: pointer; }
+    .tabs button.active { background: #111827; color: white; }
+    main { padding: 20px 24px; }
+    .grid { display: grid; grid-template-columns: 1fr 360px; gap: 18px; }
+    .card { background: white; border: 1px solid #ddd; border-radius: 12px; padding: 16px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    .muted { color: #6b7280; font-size: 13px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eef2ff; color: #3730a3; font-size: 12px; margin-right: 6px; }
+    .decision h3 { margin-bottom: 4px; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .controls button { border: 1px solid #ccc; border-radius: 8px; background: #fafafa; padding: 6px 10px; cursor: pointer; }
+    textarea { width: 100%; min-height: 70px; margin-top: 8px; border-radius: 8px; border: 1px solid #ccc; padding: 8px; }
+    table { width: 100%; border-collapse: collapse; background: white; }
+    th, td { border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; font-size: 13px; }
+    th { text-align: left; background: #f3f4f6; position: sticky; top: 54px; }
+    tr:hover { background: #fafafa; cursor: pointer; }
+    select, input { padding: 7px; border-radius: 8px; border: 1px solid #ccc; margin-right: 8px; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 10px; max-height: 480px; overflow: auto; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>NeuriCo Critical Decision Annotation Demo</h1>
+  <div id="subtitle">Loading...</div>
+</header>
+
+<div class="tabs">
+  <button id="tab-whiteboard" class="active" onclick="showTab('whiteboard')">Whiteboard</button>
+  <button id="tab-events" onclick="showTab('events')">Events</button>
+  <button id="tab-annotations" onclick="showTab('annotations')">Annotations</button>
+</div>
+
+<main>
+  <section id="whiteboard"></section>
+  <section id="events" class="hidden"></section>
+  <section id="annotations" class="hidden"></section>
+</main>
+
+<script>
+const params = new URLSearchParams(location.search);
+const runId = params.get("runId") || "logit-lens-implicit-fbb4-codex";
+const annotator = params.get("user") || "bella-demo";
+
+let whiteboard = null;
+let canonical = null;
+let annotations = [];
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+  }[c]));
+}
+
+function showTab(name) {
+  for (const id of ["whiteboard", "events", "annotations"]) {
+    document.getElementById(id).classList.toggle("hidden", id !== name);
+    document.getElementById("tab-" + id).classList.toggle("active", id === name);
+  }
+  if (name === "annotations") renderAnnotations();
+}
+
+async function saveAnnotation(payload) {
+  const res = await fetch("/api/annotations", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      runId,
+      annotator,
+      ...payload
+    })
+  });
+  const data = await res.json();
+  alert(data.ok ? "Annotation saved" : "Save failed");
+  await loadAnnotations();
+}
+
+async function loadAnnotations() {
+  const res = await fetch(`/api/annotations?runId=${encodeURIComponent(runId)}&user=${encodeURIComponent(annotator)}`);
+  const data = await res.json();
+  annotations = data.annotations || [];
+}
+
+function renderWhiteboard() {
+  const decisions = whiteboard.criticalDecisions || [];
+  document.getElementById("whiteboard").innerHTML = `
+    <div class="grid">
+      <div>
+        <div class="card">
+          <h2>Abstract / Run Summary</h2>
+          <p>${esc(whiteboard.abstract)}</p>
+        </div>
+
+        <div class="card">
+          <h2>Key Findings</h2>
+          <ul>${(whiteboard.keyFindings || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+        </div>
+
+        <div class="card">
+          <h2>Key Implications</h2>
+          <ul>${(whiteboard.keyImplications || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+        </div>
+
+        ${decisions.map(d => `
+          <div class="card decision">
+            <span class="pill">${esc(d.stageLabel || d.stage)}</span>
+            <h3>${esc(d.decisionId)} — ${esc(d.decision)}</h3>
+            <p><b>Why critical:</b> ${esc(d.whyCritical)}</p>
+            <p><b>Alternative:</b> ${esc(d.alternativeDecision)}</p>
+            <p><b>Potential impact:</b> ${esc(d.potentialImpactOnFindings)}</p>
+            <p class="muted"><b>Evidence:</b> ${(d.evidence || []).map(e => `event ${esc(e.eventIndex)} · ${esc(e.phase)} · ${esc(e.text)}`).join("<br>")}</p>
+
+            <textarea id="rationale-${esc(d.decisionId)}" placeholder="Annotator rationale..."></textarea>
+            <div class="controls">
+              <button onclick="annotateDecision('${esc(d.decisionId)}', true, true)">Accept critical</button>
+              <button onclick="annotateDecision('${esc(d.decisionId)}', true, false)">Valid but not critical</button>
+              <button onclick="annotateDecision('${esc(d.decisionId)}', false, false)">Reject</button>
+              <button onclick="annotateFeedback('${esc(d.decisionId)}', true, false)">Should update user</button>
+              <button onclick="annotateFeedback('${esc(d.decisionId)}', true, true)">Should interrupt</button>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+
+      <aside>
+        <div class="card">
+          <h2>Demo Goal</h2>
+          <p>This turns historical research-agent traces into human-validated benchmark data.</p>
+          <p class="muted">Generated decisions are candidates, not ground truth. Human annotations become labels.</p>
+        </div>
+        <div class="card">
+          <h2>Canonical Data</h2>
+          <p><b>Events:</b> ${esc(canonical.summary?.eventCount)}</p>
+          <p><b>Artifacts:</b> ${esc(canonical.summary?.artifactCount)}</p>
+          <p><b>Annotation candidates:</b> ${esc(canonical.summary?.annotationCandidateCount)}</p>
+          <pre>${esc(JSON.stringify(canonical.summary, null, 2))}</pre>
+        </div>
+      </aside>
+    </div>
+  `;
+}
+
+async function annotateDecision(decisionId, isValid, isCritical) {
+  const rationale = document.getElementById(`rationale-${decisionId}`)?.value || "";
+  await saveAnnotation({
+    annotationType: "critical_decision",
+    decisionId,
+    labels: {
+      is_valid_decision: isValid,
+      is_critical: isCritical,
+      annotator_rationale: rationale
+    }
+  });
+}
+
+async function annotateFeedback(decisionId, shouldUpdate, shouldInterrupt) {
+  const rationale = document.getElementById(`rationale-${decisionId}`)?.value || "";
+  await saveAnnotation({
+    annotationType: "critical_decision_feedback",
+    decisionId,
+    labels: {
+      should_update_user: shouldUpdate,
+      interrupt_next_action: shouldInterrupt,
+      annotator_rationale: rationale
+    }
+  });
+}
+
+function renderEvents() {
+  const events = canonical.events || [];
+  const phases = [...new Set(events.map(e => e.phase || "unknown"))].sort();
+  const agents = [...new Set(events.map(e => e.agent || "unknown"))].sort();
+
+  document.getElementById("events").innerHTML = `
+    <div class="card">
+      <h2>Canonical Events</h2>
+      <p class="muted">All events are available. The table shows filtered results for inspection and annotation.</p>
+      <select id="phaseFilter" onchange="renderEventTable()">
+        <option value="">All phases</option>
+        ${phases.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join("")}
+      </select>
+      <select id="agentFilter" onchange="renderEventTable()">
+        <option value="">All agents</option>
+        ${agents.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join("")}
+      </select>
+      <input id="searchFilter" placeholder="Search events..." oninput="renderEventTable()" />
+    </div>
+    <div id="eventTable"></div>
+  `;
+  renderEventTable();
+}
+
+function renderEventTable() {
+  const phase = document.getElementById("phaseFilter")?.value || "";
+  const agent = document.getElementById("agentFilter")?.value || "";
+  const q = (document.getElementById("searchFilter")?.value || "").toLowerCase();
+
+  let rows = (canonical.events || []).filter(e => {
+    const text = `${e.eventIndex} ${e.phase} ${e.agent} ${e.eventType} ${e.summary} ${e.rawPreview}`.toLowerCase();
+    return (!phase || e.phase === phase) && (!agent || e.agent === agent) && (!q || text.includes(q));
+  });
+
+  document.getElementById("eventTable").innerHTML = `
+    <div class="card">
+      <p><b>${rows.length}</b> matching events. Showing first 200 for browser performance.</p>
+      <table>
+        <thead>
+          <tr><th>#</th><th>Phase</th><th>Agent</th><th>Type</th><th>Summary</th><th>Annotate</th></tr>
+        </thead>
+        <tbody>
+          ${rows.slice(0, 200).map(e => `
+            <tr>
+              <td>${esc(e.eventIndex)}</td>
+              <td>${esc(e.phase)}</td>
+              <td>${esc(e.agent)}</td>
+              <td>${esc(e.eventType)}</td>
+              <td>${esc(e.summary || e.rawPreview || "").slice(0, 260)}</td>
+              <td>
+                <button onclick="annotateEvent('${esc(e.eventId)}', ${Number(e.eventIndex)}, true, false)">Update</button>
+                <button onclick="annotateEvent('${esc(e.eventId)}', ${Number(e.eventIndex)}, true, true)">Interrupt</button>
+              </td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+async function annotateEvent(eventId, eventIndex, shouldUpdate, shouldInterrupt) {
+  await saveAnnotation({
+    annotationType: "canonical_event",
+    eventId,
+    eventIndex,
+    labels: {
+      should_update_user: shouldUpdate,
+      interrupt_next_action: shouldInterrupt,
+      confidence: 3
+    }
+  });
+}
+
+function renderAnnotations() {
+  document.getElementById("annotations").innerHTML = `
+    <div class="card">
+      <h2>Saved Annotations</h2>
+      <p class="muted">Saved to data/runs/${esc(runId)}/annotations/${esc(annotator)}.jsonl</p>
+      <pre>${esc(JSON.stringify(annotations, null, 2))}</pre>
+    </div>
+  `;
+}
+
+async function init() {
+  const [wbRes, canRes] = await Promise.all([
+    fetch(`/api/whiteboard-run?runId=${encodeURIComponent(runId)}`),
+    fetch(`/api/canonical-run?runId=${encodeURIComponent(runId)}`)
+  ]);
+
+  whiteboard = await wbRes.json();
+  canonical = await canRes.json();
+
+  await loadAnnotations();
+
+  document.getElementById("subtitle").textContent =
+    `${runId} · ${canonical.summary?.eventCount || 0} events · ${canonical.summary?.artifactCount || 0} artifacts`;
+
+  renderWhiteboard();
+  renderEvents();
+}
+
+init().catch(err => {
+  document.body.innerHTML = `<pre>${esc(err.stack || err)}</pre>`;
+});
+</script>
+</body>
+</html>

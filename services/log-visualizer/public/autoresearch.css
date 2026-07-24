@@ -1,0 +1,54 @@
+.autoresearch-page { padding: 20px 28px 40px; max-width: 1400px; margin: 0 auto; }
+.ar-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr); gap: 24px; margin-top: 16px; align-items: start; }
+@media (max-width: 1100px) { .ar-grid { grid-template-columns: 1fr; } }
+
+.ar-col { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
+.ar-col-head h4 { margin: 0 0 4px; font-size: 15px; }
+.ar-col-head p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+.ar-untrusted { background: #fff8e1; border: 1px solid #f0d97a; border-radius: 6px; padding: 8px 10px; color: #6b530f; font-size: 12.5px; margin: 0 0 12px; }
+
+.ar-attempts { display: flex; flex-direction: column; gap: 10px; }
+.ar-attempt { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--surface); }
+.ar-attempt.accepted { border-left: 4px solid var(--ok); }
+.ar-attempt.rejected { border-left: 4px solid var(--danger); }
+.ar-attempt-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.ar-ord { font-weight: 700; color: var(--muted); }
+.ar-verdict { font-size: 11px; letter-spacing: 0.5px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+.ar-verdict.accepted { background: #e5f4ec; color: var(--ok); }
+.ar-verdict.rejected { background: #fbe6e4; color: var(--danger); }
+.ar-shas { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ar-shas code { background: transparent; padding: 0; color: var(--code); font-weight: 600; }
+.ar-arrow { color: var(--muted); font-weight: 400; }
+.ar-attempt-num { color: var(--muted); font-size: 12px; margin-left: auto; }
+.ar-reason { margin: 8px 0; color: var(--ink); font-size: 13.5px; line-height: 1.4; }
+
+.ar-deltas { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 12.5px; }
+.ar-deltas th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11.5px; padding: 3px 6px; border-bottom: 1px solid var(--line); }
+.ar-deltas td { padding: 3px 6px; border-bottom: 1px dashed #eef2f4; }
+.ar-deltas td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ar-deltas td.ar-arrow { text-align: center; color: var(--muted); }
+.ar-deltas tr.delta-up td.num:nth-child(4) { color: var(--ok); font-weight: 600; }
+.ar-deltas tr.delta-down td.num:nth-child(4) { color: var(--danger); font-weight: 600; }
+
+.ar-artifacts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ar-art-btn { background: #fff; border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; font-size: 11.5px; color: var(--accent); cursor: pointer; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ar-art-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+
+.ar-tips { display: flex; flex-direction: column; gap: 8px; }
+.ar-tip { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; background: var(--surface); }
+.ar-tip.cleared { opacity: 0.75; }
+.ar-tip.pruned { opacity: 0.55; background: #faf6f6; }
+.ar-tip-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; margin-bottom: 6px; }
+.ar-tip-id { font-weight: 700; color: var(--code); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ar-tip-cat { background: var(--accent-soft); color: var(--accent); padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+.ar-tip-status { padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+.ar-tip-status.cleared { background: #eef2f4; color: var(--muted); }
+.ar-tip-status.pruned { background: #f5e0dc; color: var(--danger); }
+.ar-tip-affects { color: var(--muted); font-size: 11.5px; }
+.ar-tip-affects code { background: #eef2f4; padding: 1px 4px; border-radius: 3px; margin: 0 2px; font-size: 11px; }
+.ar-tip-author { color: var(--muted); font-size: 11px; margin-left: auto; }
+.ar-tip-body { margin: 0; font-size: 13px; line-height: 1.45; color: var(--ink); white-space: pre-wrap; }
+.ar-tip-prune-reason { margin: 6px 0 0; font-size: 12px; }
+.ar-tip-toggle { display: flex; align-items: center; gap: 6px; margin: 14px 0 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; user-select: none; }
+.ar-tips-resolved { margin-top: 4px; }
+.ar-tips-resolved[hidden] { display: none; }
