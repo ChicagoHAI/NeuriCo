@@ -732,6 +732,15 @@ and the general workflow, ALWAYS follow the user's instructions.
         compute_backend_section = self._generate_compute_backend_section(
             idea_spec or {}, mode="experiment", provider=provider
         )
+        try:
+            max_directions = int((idea_spec or {}).get('max_directions', 3))
+        except (TypeError, ValueError):
+            max_directions = 3
+        max_directions = max(1, min(max_directions, 10))
+        state_contract = self.render_template(
+            self.load_template('agents/state_contract.txt'),
+            {'max_directions': max_directions},
+        )
 
         # Prepare variables
         variables = {
@@ -742,9 +751,16 @@ and the general workflow, ALWAYS follow the user's instructions.
             'code_reminder': code_reminder,
             'prompt': prompt,
             'work_dir': work_dir,
+            'max_directions': max_directions,
+            'state_contract': state_contract,
         }
 
-        return self.render_template(template, variables)
+        rendered = self.render_template(template, variables)
+        # Domain overrides predate the shared state contract and may not have
+        # the placeholder. Ensure every experiment runner receives it.
+        if 'RESEARCH STATE CONTRACT' not in rendered:
+            rendered = state_contract + "\n" + rendered
+        return rendered
 
     def _extract_user_instructions(self, prompt: str) -> str:
         """

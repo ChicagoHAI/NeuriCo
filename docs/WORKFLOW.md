@@ -164,6 +164,26 @@ cd ../..
 
 The AI agent will have access to all these resources when it runs.
 
+### Phase Handoffs and STATE.md
+
+Multi-agent runs maintain a human-readable `STATE.md` in the workspace. The
+pipeline-generated sections record the current phase, prior phase summary,
+workspace check, and expected-output validation. The research agent should
+update only the marked agent-notes block after each phase:
+
+```markdown
+<!-- NEURICO_AGENT_NOTES_START -->
+Phase 1 complete: selected the top three directions.
+Key finding: ...
+Next: implement the strongest direction and validate ...
+<!-- NEURICO_AGENT_NOTES_END -->
+```
+
+Keep the handoff concise and evidence-based. If a phase is missing an expected
+artifact, the pipeline records the phase as failed rather than starting the
+next phase with an incomplete workspace. The default direction budget is
+three; set `idea.max_directions` to change it for a particular run.
+
 ### Step 5: Run Research
 
 ```bash

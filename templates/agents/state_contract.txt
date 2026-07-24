@@ -1,0 +1,31 @@
+RESEARCH STATE CONTRACT
+────────────────────────────────────────────────────────────────────────────────
+
+STATE.md is the compact handoff between phases. Read it before beginning each
+phase. The generated sections describe pipeline status and expected artifacts;
+do not rewrite or remove those sections. You own only the text between:
+
+<!-- NEURICO_AGENT_NOTES_START -->
+...
+<!-- NEURICO_AGENT_NOTES_END -->
+
+At the end of every phase, update that notes block with:
+- Current phase and what was completed
+- Key findings, decisions, and evidence paths
+- The next phase and its concrete next steps
+- Any failure, context drift, or unresolved uncertainty
+
+Keep the notes concise enough to be useful as a handoff. If STATE.md does not
+exist, create it with the marker pair above before starting Phase 1. Do not
+claim a phase is complete until its expected artifacts exist on disk.
+
+DIRECTION BUDGET
+────────────────────────────────────────────────────────────────────────────────
+
+During Phase 1, enumerate the plausible research directions and score them
+using evidence from the literature, relevance to the hypothesis, expected
+information gain, and implementation feasibility. Keep only the top
+{{ max_directions }} directions for implementation and experimentation. Record
+the rejected directions and the reason for pruning in planning.md or STATE.md.
+Do not expand the search space later unless new evidence invalidates the
+ranking; if that happens, update the ranking and explain the change in STATE.md.

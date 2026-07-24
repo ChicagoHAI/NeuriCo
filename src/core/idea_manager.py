@@ -156,6 +156,13 @@ class IdeaManager:
             warnings.append("Hypothesis is very short (< 20 characters). "
                           "Consider providing more detail.")
 
+        if 'max_directions' in idea:
+            max_directions = idea['max_directions']
+            if not isinstance(max_directions, int) or isinstance(max_directions, bool):
+                errors.append("max_directions must be an integer")
+            elif not 1 <= max_directions <= 10:
+                errors.append("max_directions must be between 1 and 10")
+
         # Validate expected outputs (optional in v1.1)
         if 'expected_outputs' in idea:
             if not isinstance(idea['expected_outputs'], list):
