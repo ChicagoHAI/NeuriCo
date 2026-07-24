@@ -8,3 +8,9 @@ __pycache__/
 
 # Generated run outputs and reviewer annotations (built locally, not versioned)
 data/
+
+# Local historical backups
+public/*.bak*
+public/*~
+*.bak*
+*~
