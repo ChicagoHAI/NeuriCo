@@ -15,6 +15,7 @@ from core.autoresearch import (
     ScoreSummary,
 )
 from core.hitl_autoresearch import (
+    MAX_ACTIVE_HITL_FRONTIER_NODES,
     HitlAutoResearchController,
     _initial_frontier_acceptance_reason,
     continue_hitl_autoresearch,
@@ -136,6 +137,102 @@ def test_frontier_retains_root_and_attempt_commits_with_private_git_refs(tmp_pat
     ).strip() == candidate
 
 
+def test_candidate_completion_replays_durable_frontier_transition(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "user.name", "NeuriCo Test"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"], cwd=tmp_path, check=True
+    )
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("root\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "root"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+    root = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True).strip()
+    tracked.write_text("candidate\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "commit", "-am", "candidate"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL
+    )
+    candidate = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
+    ).strip()
+
+    class Runtime:
+        def plan_prompt_block(self, **_kwargs):
+            return "PLAN"
+
+        def prepare_idea_tool_context(self, **_kwargs):
+            return None
+
+        def idea_tool_env(self):
+            return {}
+
+        def register_worker_prompt(self, _prompt):
+            return None
+
+        def handle_worker_exit_after_finish(self, _result, **_kwargs):
+            return {"approved": True}
+
+        def clear_idea_tool_context(self):
+            return None
+
+        def log_frontier_decision(self, **_kwargs):
+            return {"idea_id": "I2"}
+
+        def set_scored_candidate(self, scored_candidate):
+            self.scored_candidate = scored_candidate
+
+    runtime = Runtime()
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    controller = HitlAutoResearchController(
+        idea={"idea": {"title": "t", "domain": "d"}},
+        idea_id="demo",
+        work_dir=tmp_path,
+        history_root=history_root,
+        proposal_generator=lambda *_a, **_k: "proposal",
+        scorer=lambda *_a, **_k: {"success": True},
+        checkpoint_manager=CheckpointManager(tmp_path),
+        hitl_runtime=runtime,
+        hitl_comment_mode=lambda *_a, **_k: {"success": True},
+    )
+    controller.hitl_frontier.initialize_root(
+        node_sha=root,
+        plan_text="root plan",
+        objective_score={"results": {"score": 1}},
+        reason_for_acceptance="Initial experiment is the root.",
+    )
+    from core.hitl_runtime_state import HitlRuntimeState
+
+    attempt_dir = history_root / root / "attempt_1"
+    HitlRuntimeState(tmp_path).begin_frontier_decision_transition(
+        {
+            "attempt_id": "attempt_1",
+            "candidate_node_sha": candidate,
+            "parent_node_sha": root,
+            "proposal_idea_id": "I1",
+            "proposal_type": "exploitation",
+            "objective_score": {"results": {"score": 2}},
+            "scorer_result": {"success": True, "results": {"score": 2}},
+            "candidate_summary": ScoreSummary(valid=True, source="candidate").as_dict(),
+            "accepted": True,
+            "reason": "Manager accepted the scored candidate.",
+            "plan_text": "candidate plan",
+        }
+    )
+
+    result = controller._run_candidate_experiment_hitl(
+        proposal="proposal",
+        proposal_idea_id="I1",
+        parent_node_id=root,
+        attempt_id="attempt_1",
+        attempt_dir=attempt_dir,
+    )
+
+    assert result["success"] is True
+    assert result["scored_candidate"]["node_sha"] == candidate
+    assert controller.hitl_frontier.state()["selected_frontier_node_sha"] == candidate
+    assert runtime.scored_candidate["node_sha"] == candidate
+
+
 def test_pruning_removes_only_active_membership_and_keeps_audit_node(tmp_path: Path) -> None:
     store = HitlFrontierStore(tmp_path)
     store.initialize_root(
@@ -162,6 +259,46 @@ def test_pruning_removes_only_active_membership_and_keeps_audit_node(tmp_path: P
     assert store.paths.node_json("root").is_file()
     with pytest.raises(Exception, match="final active frontier node"):
         store.prune("explore")
+
+
+def test_active_frontier_is_pruned_only_after_it_exceeds_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ten retained nodes are allowed; accepting an eleventh triggers one prune."""
+    controller = HitlAutoResearchController(
+        idea={},
+        idea_id="idea",
+        work_dir=tmp_path,
+        history_root=tmp_path / "history",
+        proposal_generator=lambda *_args, **_kwargs: {},
+        scorer=lambda *_args, **_kwargs: {"success": True},
+    )
+
+    class Frontier:
+        def __init__(self, count: int) -> None:
+            self.active = [f"node-{index}" for index in range(count)]
+
+        def state(self) -> dict[str, list[str]]:
+            return {"active_frontier_node_shas": self.active}
+
+    frontier = Frontier(MAX_ACTIVE_HITL_FRONTIER_NODES)
+    controller.hitl_frontier = frontier  # type: ignore[assignment]
+    pruned: list[str] = []
+
+    def prune_one() -> None:
+        pruned.append(frontier.active.pop())
+
+    monkeypatch.setattr(controller, "_run_frontier_pruning_boundary", prune_one)
+
+    controller._prune_frontier_before_next_proposal()
+    assert pruned == []
+
+    frontier.active.append("node-eleven")
+    controller._prune_frontier_before_next_proposal()
+
+    assert pruned == ["node-eleven"]
+    assert len(frontier.active) == MAX_ACTIVE_HITL_FRONTIER_NODES
 
 
 def test_public_frontier_audit_is_an_exact_nodes_tree_mirror(tmp_path: Path) -> None:
@@ -361,6 +498,7 @@ def test_fresh_hitl_initial_node_uses_the_initial_checkpoint_as_the_frontier_roo
             return {
                 "success": True,
                 "stages": {
+                    "experiment_runner": {"success": True},
                     "scorer": {
                         "success": True,
                         "elapsed_time": 1.0,
@@ -393,6 +531,58 @@ def test_fresh_hitl_initial_node_uses_the_initial_checkpoint_as_the_frontier_roo
     frontier = HitlFrontierStore(tmp_path)
     assert frontier.state()["selected_frontier_node_sha"] == result.initial_sha
     assert CheckpointManager(tmp_path).current_sha() == result.initial_sha
+
+
+def test_fresh_hitl_initial_node_accepts_score_evidence_despite_evaluator_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeOrchestrator:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run_pipeline(self, **_kwargs):
+            (tmp_path / "plans").mkdir()
+            (tmp_path / "plans" / "experiment_runner_plan.md").write_text(
+                "# Initial plan\n", encoding="utf-8"
+            )
+            (tmp_path / "scoring").mkdir()
+            (tmp_path / "scoring" / "results.json").write_text(
+                '{"overall_satisfied": false, "macro_f1": 0.44}', encoding="utf-8"
+            )
+            return {
+                "success": False,
+                "stages": {
+                    "experiment_runner": {"success": True},
+                    "scorer": {
+                        "success": False,
+                        "return_code": 1,
+                        "results": {"overall_satisfied": False, "macro_f1": 0.44},
+                    }
+                },
+            }
+
+    monkeypatch.setattr("core.pipeline_orchestrator.ResearchPipelineOrchestrator", FakeOrchestrator)
+
+    result = run_fresh_hitl_autoresearch_initial_node(
+        idea={"idea": {"title": "Test"}},
+        work_dir=tmp_path,
+        templates_dir=tmp_path,
+        provider="claude",
+        pause_after_resources=False,
+        skip_resource_finder=False,
+        resource_finder_timeout=1,
+        experiment_runner_timeout=1,
+        full_permissions=True,
+        use_scribe=False,
+        rule_maker_timeout=1,
+        scorer_timeout=1,
+        manifest_trimmer_timeout=1,
+        autoresearch_history_dir=None,
+    )
+
+    assert result.success
+    assert HitlFrontierStore(tmp_path).state()["selected_frontier_node_sha"] == result.initial_sha
 
 
 def test_initial_frontier_reason_uses_manager_score_review(tmp_path: Path) -> None:

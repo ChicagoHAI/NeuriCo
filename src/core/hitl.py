@@ -2810,16 +2810,6 @@ class HitlRuntime:
     def phase_finish_result(self) -> Optional[Dict[str, Any]]:
         return dict(self._phase_finish_result) if self._phase_finish_result else None
 
-    def mark_frontier_decision_deferred(self) -> None:
-        """Record that the manager decided, but publication awaits clean worker exit."""
-        self._phase_finish_result = {
-            "called": True,
-            "status": "approved",
-            "next_phase": "complete",
-            "final": True,
-            "frontier_decision_deferred": True,
-        }
-
     def finish_was_approved(self) -> bool:
         return bool(
             self._phase_finish_result and self._phase_finish_result.get("status") == "approved"

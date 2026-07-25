@@ -537,8 +537,12 @@ def test_hitl_proposal_submission_creates_a_new_proposal_in_same_session(tmp_pat
     assert records[-1]["decision"] == "O1"
 
 
-def test_hitl_candidate_experiment_uses_plan_execute_review_loop(tmp_path: Path):
+def test_hitl_candidate_experiment_requires_durable_frontier_decision(
+    tmp_path: Path,
+    monkeypatch,
+):
     from core.hitl_autoresearch import HitlAutoResearchController
+    from core.hitl_runtime_state import HitlRuntimeState
 
     calls = []
 
@@ -609,8 +613,9 @@ def test_hitl_candidate_experiment_uses_plan_execute_review_loop(tmp_path: Path)
         attempt_dir=tmp_path / "logs" / "experiment-autoresearch" / ("c" * 40) / "attempt_1",
     )
 
-    assert result["success"] is True
-    assert result["phase"] == "complete"
+    assert result["success"] is False
+    assert result["phase"] == "frontier_decision"
+    assert "durable frontier decision" in result["error"]
     assert runtime.prepared_context["requires_human_approval"] is True
     assert calls == [
         (
@@ -623,6 +628,116 @@ def test_hitl_candidate_experiment_uses_plan_execute_review_loop(tmp_path: Path)
             "autoresearch_hitl_experiment_plan",
         ),
     ]
+
+    state = HitlRuntimeState(tmp_path)
+    state.begin_frontier_decision_transition(
+        {
+            "attempt_id": "attempt_1",
+            "candidate_node_sha": "d" * 40,
+            "parent_node_sha": "c" * 40,
+            "proposal_idea_id": "I1",
+        }
+    )
+    restored = []
+    committed = []
+    monkeypatch.setattr(
+        ctrl.checkpoints,
+        "restore_checkpoint",
+        lambda sha, **_kwargs: restored.append(sha),
+    )
+
+    def commit_frontier(*, runtime, transition):
+        committed.append((runtime, transition))
+        return {
+            "status": "approved",
+            "scored_candidate": {
+                "node_sha": "d" * 40,
+                "accepted": True,
+                "reason": "Manager accepted the candidate.",
+            },
+        }
+
+    monkeypatch.setattr(ctrl, "_commit_frontier_decision", commit_frontier)
+
+    completed = ctrl._run_candidate_experiment_hitl(
+        proposal="# Approved proposal\n\nDo one controlled change.",
+        proposal_idea_id="I1",
+        parent_node_id="c" * 40,
+        attempt_id="attempt_1",
+        attempt_dir=tmp_path / "logs" / "experiment-autoresearch" / ("c" * 40) / "attempt_1",
+    )
+
+    assert completed["success"] is True
+    assert completed["phase"] == "complete"
+    assert completed["scored_candidate"]["node_sha"] == "d" * 40
+    assert restored == ["d" * 40]
+    assert committed[0][1]["attempt_id"] == "attempt_1"
+
+
+def test_hitl_recovery_commits_prepared_frontier_decision_without_worker_exit(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from core.autoresearch import ScoreSummary
+    from core.hitl_autoresearch import HitlAutoResearchController, HitlRecoveryResult
+
+    ctrl = HitlAutoResearchController(
+        idea={"idea": {"title": "t", "domain": "d"}},
+        idea_id="demo",
+        work_dir=tmp_path,
+        history_root=tmp_path / "logs" / "experiment-autoresearch",
+        proposal_generator=lambda *_a, **_k: "proposal",
+        scorer=lambda *_a, **_k: {"success": True},
+        checkpoint_manager=_bare_controller(tmp_path, tmp_path / "h4").checkpoints,
+    )
+    transition = {
+        "status": "prepared",
+        "attempt_id": "attempt_1",
+        "parent_node_sha": "c" * 40,
+        "candidate_node_sha": "d" * 40,
+        "proposal_idea_id": "I1",
+        "candidate_summary": ScoreSummary(
+            valid=False,
+            source="candidate",
+            error="Scorer transport failed.",
+        ).as_dict(),
+        "scorer_result": {"success": False, "error": "Scorer transport failed."},
+        "accepted": False,
+        "reason": "Manager rejected the candidate after reviewing the scorer error.",
+    }
+    recovered = HitlRecoveryResult(
+        marker="attempt_1",
+        restored_checkpoint_sha="c" * 40,
+        removed_attempt_dir=tmp_path / "logs" / "experiment-autoresearch" / ("c" * 40) / "attempt_1",
+        attempt_dir_removed=False,
+        recovery_classification="frontier_decision_transition",
+        frontier_transition=transition,
+    )
+    committed = []
+    completed = []
+    monkeypatch.setattr(ctrl, "_proposal_hitl_runtime", lambda: object())
+    monkeypatch.setattr(
+        ctrl,
+        "_commit_frontier_decision",
+        lambda *, runtime, transition: committed.append((runtime, transition))
+        or {"status": "approved", "scored_candidate": {"node_sha": "d" * 40}},
+    )
+    monkeypatch.setattr(ctrl, "_proposal_text_for", lambda _idea_id: "proposal")
+    monkeypatch.setattr(
+        ctrl,
+        "_frontier_parent_summary",
+        lambda _parent: ScoreSummary(valid=True, source="parent"),
+    )
+    monkeypatch.setattr(
+        ctrl,
+        "_complete_scored_hitl_attempt",
+        lambda **kwargs: completed.append(kwargs) or "completed",
+    )
+
+    assert ctrl._resume_frontier_decision_transition(recovered) == "completed"
+    assert committed[0][1]["status"] == "prepared"
+    assert completed[0]["accepted"] is False
+    assert completed[0]["candidate_summary"].valid is False
 
 
 def test_hitl_candidate_failure_closes_before_scorer_and_cleans_public_state(

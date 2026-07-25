@@ -262,7 +262,7 @@ tools:
 
   - name: finalize_frontier_decision
     description: |
-      Persist the manager's accept/reject decision for a scored AutoResearch
+      Persist the manager's accept/reject/repair decision for a scored AutoResearch
       candidate. Use only when runtime has provided a scored-candidate request.
       Runtime records the attempt and updates the frontier only after that
       succeeds. If it reports an error, correct nothing in the
@@ -270,6 +270,6 @@ tools:
     parameters:
       result:
         type: object
-        description: '{"action":"accept|reject","reason":"strategic rationale"}'
+        description: '{"action":"accept|reject|repair","reason":"strategic rationale"}'
         required: true
     returns: Confirmation that runtime persisted the frontier decision.

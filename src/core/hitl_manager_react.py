@@ -278,15 +278,6 @@ class HitlManager:
         self.world_model.reconcile(self.research)
         self.tool_definitions = self._load_tools()
         self.max_react_turns = int(config.get("manager", {}).get("hitl_manager_max_turns", 12))
-        self.max_request_provider_turns = max(
-            1,
-            int(
-                config.get("manager", {}).get(
-                    "hitl_manager_max_request_provider_turns",
-                    self.max_react_turns * 4,
-                )
-            ),
-        )
         self.max_backend_retries = max(
             1, int(config.get("manager", {}).get("hitl_manager_backend_retries", 3))
         )
@@ -400,6 +391,10 @@ class HitlManager:
 
         pending = snapshot.get("pending_worker_command")
         if not isinstance(pending, dict) or pending.get("status") != "pending":
+            return names
+
+        if pending.get("scoring_review_idea_id"):
+            names.add("finalize_frontier_decision")
             return names
 
         names.add("ask_human")
@@ -1088,8 +1083,8 @@ class HitlManager:
 
         def validate(data: Dict[str, Any]) -> Dict[str, Any]:
             action = str(data.get("action", "")).strip()
-            if action not in {"accept", "reject"}:
-                raise ValueError("Frontier action must be accept or reject.")
+            if action not in {"accept", "reject", "repair"}:
+                raise ValueError("Scored-candidate action must be accept, reject, or repair.")
             return {
                 "action": action,
                 "reason": self._require_text(data.get("reason"), "reason", "Frontier decision"),
@@ -1103,36 +1098,6 @@ class HitlManager:
         )
         return self.resume_worker_request(prompt=prompt, validate=validate, finalize=on_finalize)
 
-    def review_scoring_failure(
-        self,
-        *,
-        scorer_result: Dict[str, Any],
-        score_validation: Dict[str, Any],
-        on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-        from core.hitl import _load_hitl_template
-
-        def validate(data: Dict[str, Any]) -> Dict[str, Any]:
-            if str(data.get("status", "")).strip() != "feedback":
-                raise ValueError("An invalid objective score requires status='feedback'.")
-            return {
-                "status": "feedback",
-                "context": self._require_text(data.get("context"), "context", "Scoring repair"),
-                "manager_feedback": self._require_text(
-                    data.get("manager_feedback"), "manager_feedback", "Scoring repair"
-                ),
-            }
-
-        return self.resume_worker_request(
-            prompt=_load_hitl_template(
-                "manager_review_scoring_failure.txt",
-                scorer_result_json=json.dumps(scorer_result, ensure_ascii=False, indent=2),
-                score_validation_json=json.dumps(score_validation, ensure_ascii=False, indent=2),
-            ),
-            validate=validate,
-            finalize=on_finalize,
-        )
-
     def review_initial_scoring_result(
         self,
         *,
@@ -1145,14 +1110,6 @@ class HitlManager:
             status = str(data.get("status", "")).strip()
             if status not in {"approved", "feedback"}:
                 raise ValueError("Initial score review status must be approved or feedback.")
-            scorer_succeeded = bool(scorer_result.get("success"))
-            if scorer_succeeded and status != "approved":
-                raise ValueError(
-                    "A valid initial objective score becomes the root automatically; "
-                    "feedback is only available for a runtime scoring error."
-                )
-            if not scorer_succeeded and status != "feedback":
-                raise ValueError("Runtime scorer is invalid; return repair feedback instead.")
             result = {
                 "status": status,
                 "context": self._require_text(
@@ -1390,14 +1347,13 @@ class HitlManager:
                     "available_node_shas": available_node_shas,
                 },
             )
-            self._complete_recorded_frontier_action("select_frontier", handler)
         except Exception as exc:
             return (
                 f"Error: runtime could not select this frontier node: {exc}. "
                 "Inspect the frontier and retry. If runtime already recorded the choice, "
                 "retry that same node and rationale."
             )
-        return "Runtime persisted the selected frontier node. The next proposal may begin."
+        return "Runtime recorded the selected frontier node. The waiting controller will apply it."
 
     def prune_frontier(self, node_sha: str, reason: str) -> str:
         if not reason:
@@ -1418,14 +1374,13 @@ class HitlManager:
                     "available_node_shas": available_node_shas,
                 },
             )
-            self._complete_recorded_frontier_action("prune_frontier", handler)
         except Exception as exc:
             return (
                 f"Error: runtime could not prune this frontier node: {exc}. "
                 "Inspect the frontier and retry. If runtime already recorded the choice, "
                 "retry that same node and rationale."
             )
-        return "Runtime pruned the chosen frontier node from the active portfolio."
+        return "Runtime recorded the frontier pruning choice. The waiting controller will apply it."
 
     def _validate_frontier_choice(self, kind: str, node_sha: str) -> List[str]:
         from core.hitl_frontier import HitlFrontierStore
@@ -1479,7 +1434,7 @@ class HitlManager:
             self.runtime_state.clear_completed_next_autoresearch_action("select_frontier")
             return result
         self.notify_runtime(prompt, runtime_action_kind="select_frontier")
-        # The controller waits until select_frontier clears the action.
+        # The controller is the sole executor of the recorded manager choice.
         while True:
             current = self.runtime_state.snapshot().get("next_autoresearch_action")
             if (
@@ -1522,6 +1477,7 @@ class HitlManager:
             self.runtime_state.clear_completed_next_autoresearch_action("prune_frontier")
             return result
         self.notify_runtime(prompt, runtime_action_kind="prune_frontier")
+        # The controller is the sole executor of the recorded manager choice.
         while True:
             current = self.runtime_state.snapshot().get("next_autoresearch_action")
             if (
@@ -1821,11 +1777,6 @@ class HitlManager:
                     messages = self._messages(generation)
                 except _StaleManagerTurn:
                     return ""
-            if requires_worker_resolution and request_key:
-                self.runtime_state.consume_manager_provider_turn(
-                    request_key,
-                    limit=self.max_request_provider_turns,
-                )
             tools = self._tools_for_current_runtime_boundary()
             response = self._send(messages, tools)
             with self._turn_lock:

@@ -1429,18 +1429,20 @@ class ResearchPipelineOrchestrator:
                         ),
                         temporary_ref=f"refs/neurico/hitl/scoring/{request_key}",
                     )
-                    self.state.complete_stage(SCORER_STAGE, bool(scorer_result.get("success")), scorer_result)
+                    score_evidence_available = isinstance(scorer_result.get("results"), dict) and bool(
+                        scorer_result.get("scored_checkpoint_sha")
+                    )
+                    self.state.complete_stage(SCORER_STAGE, score_evidence_available, scorer_result)
                 except Exception as exc:
                     scorer_result = {"success": False, "error": f"Runtime isolated scorer failed: {exc}"}
                     self.state.complete_stage(SCORER_STAGE, False, scorer_result)
-                if scorer_result.get("success"):
-                    scored_checkpoint_sha = str(
-                        scorer_result.get("scored_checkpoint_sha", "")
-                    ).strip() or None
-                    if scored_checkpoint_sha is None:
-                        raise RuntimeError(
-                            "Runtime isolated scorer succeeded without an immutable scored checkpoint."
-                        )
+                scored_checkpoint_sha = str(
+                    scorer_result.get("scored_checkpoint_sha", "")
+                ).strip() or None
+                if isinstance(scorer_result.get("results"), dict) and scored_checkpoint_sha is None:
+                    raise RuntimeError(
+                        "Runtime isolated scorer produced score evidence without an immutable scored checkpoint."
+                    )
                 runtime_state.update_pending_worker_command(
                     request_key,
                     isolated_scoring={

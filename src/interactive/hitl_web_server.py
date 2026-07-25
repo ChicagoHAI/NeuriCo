@@ -207,7 +207,7 @@ class HitlWebServer:
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._run_launcher: Callable[[dict[str, Any]], dict[str, Any]] = self._run_unavailable
-        self._run_status: Callable[[], dict[str, Any]] = lambda: {"status": "idle"}
+        self._run_status: Callable[[], dict[str, Any]] = lambda: {"status": "unavailable"}
 
     @staticmethod
     def _run_unavailable(_payload: dict[str, Any]) -> dict[str, Any]:

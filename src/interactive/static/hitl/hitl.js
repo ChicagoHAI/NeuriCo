@@ -83,10 +83,13 @@
 
   function topbar() {
     const workspace = state.snapshot?.workspace || "HITL workspace";
-    const runIsActive = state.snapshot?.run?.status === "running";
+    const runStatus = state.snapshot?.run?.status || "unavailable";
+    const runIsActive = runStatus === "running";
     const runControl = runIsActive
       ? q("button", { class: "icon-button toolbar-action run-active", title: "AutoResearch is running", "aria-label": "AutoResearch is running", disabled: "disabled", text: "■" })
-      : icon("▶", "Start AutoResearch", () => { state.runPanel = !state.runPanel; render(); }, "toolbar-action");
+      : runStatus === "idle"
+        ? icon("▶", "Start AutoResearch", () => { state.runPanel = !state.runPanel; render(); }, "toolbar-action")
+        : null;
     return q("header", { class: "topbar" }, [
       q("div", { class: "brand" }, [q("span", { class: "workspace-mark", text: "▱" }), q("span", { class: "workspace-title", text: workspace }), q("span", { class: "page-label", text: state.route === "conversation" ? "Conversation" : "Research" })]),
       q("div", { class: "topbar-spacer" }),
@@ -96,10 +99,39 @@
     ]);
   }
 
-  function message(record) {
+  function requestControls(request) {
+    const draft = loadRequestDraft(request);
+    const selectedOption = state.selectedOption || draft.selectedOption || "";
+    const requestFeedback = state.requestFeedback || draft.requestFeedback || "";
+    const controls = q("div", { class: "resolution-controls" });
+    const options = q("div", { class: "resolution-options" });
+    (request.options || []).forEach((option) => options.append(q("button", {
+      class: `resolution-option ${selectedOption === option.id ? "selected" : ""}`,
+      "aria-pressed": selectedOption === option.id ? "true" : "false",
+      onclick: () => {
+        state.selectedOption = option.id;
+        saveRequestDraft(request, { selectedOption: option.id });
+        render({ preserveScroll: true });
+      },
+    }, [q("span", { class: "option-mark", text: selectedOption === option.id ? "✓" : "" }), q("span", { text: option.text })])));
+    const feedback = q("textarea", { class: "resolution-feedback", placeholder: "Add feedback for the manager" });
+    feedback.value = requestFeedback;
+    feedback.oninput = () => {
+      state.requestFeedback = feedback.value;
+      saveRequestDraft(request, { requestFeedback: feedback.value });
+    };
+    const feedbackRow = q("div", { class: "resolution-feedback-row" }, [
+      feedback,
+      icon("↑", "Submit request reply", () => submitRequest(request, feedback.value), "send"),
+    ]);
+    controls.append(options, feedbackRow);
+    return controls;
+  }
+  function message(record, request = null) {
     const human = record.speaker === "human";
     const article = q("article", { class: `message ${human ? "human" : "manager"}` });
     article.append(human ? q("div", { class: "bubble", text: record.content }) : md(record.content, "bubble"));
+    if (request) article.append(requestControls(request));
     article.append(icon("⧉", "Copy message", () => copy(record.content), "message-copy"));
     return article;
   }
@@ -108,20 +140,6 @@
       const text = String(record.content || "").trim();
       return text && text.toLowerCase() !== "null";
     });
-  }
-  function pendingRequest() {
-    const request = state.snapshot?.inbox?.pending_request;
-    if (!request) return null;
-    const draft = loadRequestDraft(request);
-    const selectedOption = state.selectedOption || draft.selectedOption || "";
-    const requestFeedback = state.requestFeedback || draft.requestFeedback || "";
-    const box = q("section", { class: "request" }, [q("div", { class: "request-eyebrow", text: "Pending request" }), md(request.message, "request-message")]);
-    const options = q("div", { class: "request-options" });
-    (request.options || []).forEach((option) => options.append(q("button", { class: `request-option ${selectedOption === option.id ? "selected" : ""}`, onclick: () => { state.selectedOption = option.id; saveRequestDraft(request, { selectedOption: option.id }); render(); } }, [q("span", { class: "option-mark", text: selectedOption === option.id ? "✓" : "" }), q("span", { text: option.text })])));
-    const feedback = q("textarea", { class: "request-feedback", placeholder: "Add feedback for the manager" });
-    feedback.value = requestFeedback; feedback.oninput = () => { state.requestFeedback = feedback.value; saveRequestDraft(request, { requestFeedback: feedback.value }); };
-    box.append(options, feedback, q("div", { class: "request-actions" }, [icon("↑", "Submit request reply", () => submitRequest(request, feedback.value), "send")]));
-    return box;
   }
   function queueView() {
     const queue = state.snapshot?.inbox?.queue || [];
@@ -159,10 +177,10 @@
     return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close AutoResearch setup", () => { state.runPanel = false; render(); })]), row("Worker", provider), row("Iterations", iterations), q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", `Start ${title}`, () => launchRun({ provider: provider.value, iterations: Number(iterations.value), write_paper: paper.checked, paper_style: style.value, github: github.checked }), "run-start")])]);
   }
   function conversation() {
-    const shell = q("main", { class: "conversation-shell" }); const thread = q("div", { class: "thread" }); const requestId = String(state.snapshot?.inbox?.pending_request?.conversation_record_id || "");
-    visibleConversation(state.snapshot?.conversation).filter((record) => !requestId || String(record.record_id || record.id || "") !== requestId).forEach((record) => thread.append(message(record)));
+    const shell = q("main", { class: "conversation-shell" }); const thread = q("div", { class: "thread" }); const request = state.snapshot?.inbox?.pending_request; const requestId = String(request?.conversation_record_id || "");
+    visibleConversation(state.snapshot?.conversation).forEach((record) => thread.append(message(record, requestId && String(record.record_id || record.id || "") === requestId ? request : null)));
     if (state.thinking) thread.append(q("div", { class: "thinking", text: "Manager is thinking " }, [q("i"), q("i"), q("i")]));
-    shell.append(thread); const request = pendingRequest(); if (request) shell.append(request); if (state.notice) shell.append(q("p", { class: "notice", text: state.notice }));
+    shell.append(thread); if (state.notice) shell.append(q("p", { class: "notice", text: state.notice }));
     return q("div", { class: `conversation-page ${state.runPanel ? "run-open" : ""}` }, [shell, runPanel(), composer()]);
   }
 
@@ -237,10 +255,10 @@
   function tabs(drawer, values) { drawer.append(q("div", { class: "tabbar" }, values.map((value) => q("button", { class: `tab ${state.tab === value ? "active" : ""}`, text: humanize(value), onclick: () => { state.tab = value; render(); } })))); }
   function links(ids) { const row = q("div", { class: "link-row" }); ids.forEach((id) => row.append(q("button", { class: "idea-link", text: id, onclick: () => { const idea = ideaById(id); if (idea) openDrawer("idea", idea); } }))); return row; }
   function artifactList(items) { return q("div", { class: "artifact-list" }, (items || []).map((item) => q("div", { class: "artifact-item" }, [q("code", { class: "artifact-path", text: item.path || String(item) }), item.description ? q("span", { class: "artifact-desc", text: item.description }) : null]))); }
-  function renderIdeaDrawer(drawer, idea) { const actor = humanize(idea.actor || "unknown"); const phase = humanize(idea.hitl_stage); const stage = humanize(idea.pipeline_stage); const verb = idea.idea_type === "decision" ? "Resolved" : "Recorded"; drawer.append(q("h1", { text: `${idea.idea_id} · ${idea.level || "?"} ${idea.idea_type}` }), q("p", { class: "detail-meta", text: `${verb} by ${actor} during ${phase} of the ${stage} stage.` })); const selectedDecision = idea.idea_type === "decision" ? optionText(idea) || idea.decision : ""; const content = idea.idea_type === "decision" ? selectedDecision || idea.decision_needed || idea.context || "" : idea.evidence || idea.proposal || idea.context || ""; drawer.append(detail(idea.idea_type === "decision" ? "Decision" : "Content", content)); if (idea.idea_type === "decision" && idea.decision_needed && content !== idea.decision_needed) drawer.append(detail("Question", idea.decision_needed)); if (idea.context && content !== idea.context) drawer.append(detail("Context", idea.context)); if (idea.options?.length) { const options = q("div", { class: "option-list" }); idea.options.forEach((option) => { const text = typeof option === "string" ? option : option.text || option.option_id || ""; const id = typeof option === "string" ? option : option.option_id; options.append(q("div", { class: `option-card ${idea.decision === id || idea.decision === text ? "selected" : ""}`, text })); }); drawer.append(detail("Options", options)); } if (idea.premises?.length) drawer.append(detail("Premises", links(idea.premises))); if (idea.related_artifacts?.length) drawer.append(detail("Artifacts", artifactList(idea.related_artifacts))); }
+  function renderIdeaDrawer(drawer, idea) { const actor = humanize(idea.actor || "unknown"); const phase = humanize(idea.hitl_stage); const stage = humanize(idea.pipeline_stage); const verb = idea.idea_type === "decision" ? "Resolved" : "Recorded"; drawer.append(q("h1", { text: `${idea.idea_id} · ${idea.level || "?"} ${idea.idea_type}` }), q("p", { class: "detail-meta", text: `${verb} by ${actor} during ${phase} of the ${stage} stage.` })); const selectedDecision = idea.idea_type === "decision" ? optionText(idea) || idea.decision : ""; const content = idea.idea_type === "decision" ? selectedDecision || idea.decision_needed || idea.context || "" : idea.idea_type === "proposal" ? displayProposal(idea.proposal || idea.context) : idea.evidence || idea.proposal || idea.context || ""; drawer.append(detail(idea.idea_type === "decision" ? "Decision" : "Content", content)); if (idea.idea_type === "decision" && idea.decision_needed && content !== idea.decision_needed) drawer.append(detail("Question", idea.decision_needed)); if (idea.context && content !== idea.context) drawer.append(detail("Context", idea.context)); if (idea.options?.length) { const options = q("div", { class: "option-list" }); idea.options.forEach((option) => { const text = typeof option === "string" ? option : option.text || option.option_id || ""; const id = typeof option === "string" ? option : option.option_id; options.append(q("div", { class: `option-card ${idea.decision === id || idea.decision === text ? "selected" : ""}`, text })); }); drawer.append(detail("Options", options)); } if (idea.premises?.length) drawer.append(detail("Premises", links(idea.premises))); if (idea.related_artifacts?.length) drawer.append(detail("Artifacts", artifactList(idea.related_artifacts))); }
   function scoreRows(score) { const root = score?.results || score?.scorer_result?.results || score || {}; if (root.properties && typeof root.properties === "object") return Object.entries(root.properties).map(([metric, value]) => ({ metric, ...(value || {}) })); if (Array.isArray(root.metrics)) return root.metrics; return Object.entries(root).filter(([, value]) => value && typeof value === "object" && !Array.isArray(value)).map(([metric, value]) => ({ metric, ...value })); }
   function scoreTable(score) { const rows = scoreRows(score); if (!rows.length) return md("No structured objective score is available."); const table = q("table", { class: "score-table" }); table.append(q("thead", {}, [q("tr", {}, ["Metric", "Value", "Target", "Direction", "Result"].map((name) => q("th", { text: name })))])); const body = q("tbody"); rows.forEach((row) => { const result = row.result ?? row.passed ?? row.satisfied ?? row.status ?? ""; const pass = result === true || ["pass", "passed", "met", "true"].includes(String(result).toLowerCase()); const fail = result === false || ["fail", "failed", "not met", "false"].includes(String(result).toLowerCase()); body.append(q("tr", {}, [q("td", { text: row.metric || row.name || "metric" }), q("td", { text: String(row.value ?? row.score ?? row.actual ?? "") }), q("td", { text: String(row.target ?? row.threshold ?? "") }), q("td", { text: String(row.direction || "") }), q("td", { class: pass ? "score-good" : fail ? "score-bad" : "", text: typeof result === "boolean" ? (result ? "Met" : "Not met") : String(result) })])); }); table.append(body); return table; }
-  function displayPlan(plan) { return String(plan || "").replace(/^\s*#?\s*EXPERIMENT RUNNER PLAN\s+[—-]\s+SCIFACT CLAIM\/EVIDENCE CLASSIFICATION\s*\n+/i, "").trim() || "No saved plan."; }
+  function displayPlan(plan) { return String(plan || "").replace(/^\s*#?\s*EXPERIMENT RUNNER PLAN(?:\s*(?::|[—-])\s*[^\n]*)?\s*\n+/i, "").trim() || "No saved plan."; }
   function displayProposal(proposal) { return String(proposal || "").replace(/^\s*#?\s*AUTORESEARCH PROPOSAL\s*\n+/i, "").trim() || "Proposal record unavailable."; }
   function renderNodeDrawer(drawer, item, attempt) { const accepted = attempt ? item.accepted : true; drawer.append(q("h1", { text: attempt ? `${accepted ? "Accepted" : "Rejected"} ${item.proposal_type || "research"}` : item.selected ? "Selected research node" : "Research node" }), q("p", { class: "detail-meta", text: attempt ? `Candidate ${shortSha(item.node_sha)} from ${shortSha(item.parent_node_sha)}` : `${item.active ? "Active frontier" : "Retained"} · ${shortSha(item.node_sha)}${item.parent_node_sha ? ` · from ${shortSha(item.parent_node_sha)}` : ""}` })); tabs(drawer, attempt ? ["overview", "proposal", "score"] : ["overview", "plan", "score"]); if (state.tab === "overview") { const reason = item.reason_for_acceptance || item.reason_for_rejection; if (reason) drawer.append(detail(item.accepted === false ? "Reason for rejection" : "Reason for acceptance", reason)); if (attempt && item.proposal_idea_id) drawer.append(detail("Proposal", links([item.proposal_idea_id]))); if (!attempt) { const attempts = (state.snapshot?.attempts || []).filter((a) => a.parent_node_sha === item.node_sha); if (attempts.length) drawer.append(detail("Attempts from this node", q("div", { class: "attempt-list" }, attempts.map((a) => q("button", { class: "attempt-link", text: `${a.accepted ? "Accepted" : "Rejected"} ${a.proposal_type || "research"}${a.proposal_idea_id ? ` · ${a.proposal_idea_id}` : ""}`, onclick: () => openDrawer("attempt", a) }))))); } } else if (state.tab === "plan") drawer.append(detail("Experiment plan", displayPlan(item.plan))); else if (state.tab === "proposal") { const proposal = ideaById(item.proposal_idea_id); drawer.append(detail("Proposal", displayProposal(proposal?.proposal || proposal?.content))); } else drawer.append(detail("Objective score", scoreTable(item.objective_score))); }
   function renderWhiteboardDrawer(drawer, tip) { drawer.append(q("h1", { text: `${tip.id} ${tip.category || "note"}` }), q("p", { class: "detail-meta", text: `${tip.status || "active"} · recorded by ${tip.author || "worker"}` }), detail("Note", tip.content)); if (tip.affects?.length) drawer.append(detail("Artifacts", artifactList(tip.affects))); }

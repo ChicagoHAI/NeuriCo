@@ -239,7 +239,7 @@ def test_manager_exposes_selection_only_at_the_selection_boundary(tmp_path):
     manager.stop()
 
 
-def test_manager_exposes_worker_finalizer_for_scoring_review(tmp_path):
+def test_manager_exposes_frontier_finalizer_for_scoring_review(tmp_path):
     manager = HitlManager({}, work_dir=tmp_path, channel=_Channel())
     manager.runtime_state.begin_worker_command(
         {
@@ -251,8 +251,9 @@ def test_manager_exposes_worker_finalizer_for_scoring_review(tmp_path):
 
     names = {tool["name"] for tool in manager._tools_for_current_runtime_boundary()}
 
-    assert "finalize_worker_request" in names
-    assert "finalize_frontier_decision" not in names
+    assert "finalize_frontier_decision" in names
+    assert "finalize_worker_request" not in names
+    assert "ask_human" not in names
     manager.stop()
 
 
@@ -299,6 +300,62 @@ def test_manager_recovers_a_recorded_frontier_choice_without_another_turn(tmp_pa
 
     assert calls == [("node-a", "Best trajectory.")]
     assert result["idea_id"] == "I9"
+    assert manager.runtime_state.snapshot()["next_autoresearch_action"] is None
+    manager.stop()
+
+
+@pytest.mark.parametrize(
+    ("kind", "tool_name", "begin_name"),
+    [
+        ("select_frontier", "select_frontier", "begin_frontier_selection"),
+        ("prune_frontier", "prune_frontier", "begin_frontier_pruning"),
+    ],
+)
+def test_frontier_tool_records_once_and_controller_applies_once(
+    tmp_path, kind, tool_name, begin_name
+):
+    manager = HitlManager({}, work_dir=tmp_path, channel=_Channel())
+    manager.notify_runtime = lambda *_args, **_kwargs: None
+    manager._validate_frontier_choice = lambda _kind, node_sha: [node_sha]
+    release_selector = threading.Event()
+    selector_calls = []
+    controller_result = {}
+    controller_error = {}
+
+    def apply_choice(node_sha, reason):
+        selector_calls.append((node_sha, reason))
+        assert release_selector.wait(timeout=2)
+        return {"node_sha": node_sha, "reason": reason}
+
+    def run_controller():
+        try:
+            controller_result["value"] = getattr(manager, begin_name)("Choose a node.", apply_choice)
+        except BaseException as exc:
+            controller_error["value"] = exc
+
+    controller = threading.Thread(target=run_controller)
+    controller.start()
+    for _ in range(20):
+        if getattr(manager, f"_frontier_{'selector' if kind == 'select_frontier' else 'pruner'}", None):
+            break
+        threading.Event().wait(0.01)
+
+    tool_result = {}
+    tool = threading.Thread(
+        target=lambda: tool_result.setdefault("value", getattr(manager, tool_name)("node-a", "best"))
+    )
+    tool.start()
+    tool.join(timeout=0.5)
+    release_selector.set()
+    controller.join(timeout=2)
+    tool.join(timeout=2)
+
+    assert not tool.is_alive()
+    assert not controller.is_alive()
+    assert "Error:" not in tool_result["value"]
+    assert controller_error == {}
+    assert controller_result["value"] == {"node_sha": "node-a", "reason": "best"}
+    assert selector_calls == [("node-a", "best")]
     assert manager.runtime_state.snapshot()["next_autoresearch_action"] is None
     manager.stop()
 
@@ -596,6 +653,29 @@ def test_scoring_resume_keeps_one_worker_request_until_runtime_returns(tmp_path)
     assert manager.runtime_state.snapshot()["pending_worker_command"]["scoring_context"] == "Ready."
 
 
+def test_initial_score_review_allows_manager_feedback_after_successful_scorer(
+    tmp_path, monkeypatch
+):
+    manager = HitlManager({}, work_dir=tmp_path, channel=_Channel())
+    payload = {
+        "status": "feedback",
+        "context": "The scorer completed, but the result needs revision.",
+        "manager_feedback": "Revise the experiment and rerun the execution phase.",
+    }
+
+    def resume_worker_request(*, prompt, validate, finalize):
+        return finalize(validate(payload))
+
+    monkeypatch.setattr(manager, "resume_worker_request", resume_worker_request)
+    result = manager.review_initial_scoring_result(
+        scorer_result={"success": True, "results": {"score": 0.5}},
+        on_finalize=lambda review: review,
+    )
+    manager.stop()
+
+    assert result == payload
+
+
 def test_web_channel_exposes_a_distinct_resolution_reply_control():
     channel = HitlWebChannel()
     emitted = []
@@ -813,7 +893,7 @@ def test_runtime_manager_backend_exhaustion_cancels_the_held_worker_request(tmp_
     assert any("rolling back" in item["text"] for item in channel.messages)
 
 
-def test_nonfinalizing_manager_exhausts_the_held_request_turn_budget(tmp_path):
+def test_manager_does_not_persist_a_held_request_turn_cap(tmp_path):
     manager = HitlManager(
         {
             "manager": {
@@ -824,23 +904,13 @@ def test_nonfinalizing_manager_exhausts_the_held_request_turn_budget(tmp_path):
         work_dir=tmp_path,
         channel=_Channel(),
     )
-    manager.backend = _Backend(
-        [LLMResponse(text="I will inspect this later."), LLMResponse(text="Still not finalizing.")]
+    pending = manager.runtime_state.begin_worker_command(
+        {"request_key": "turn-budget", "kind": "phase_finish"}
     )
-
-    with pytest.raises(RuntimeError, match="cancelled the held worker command"):
-        manager.request_worker_resolution(
-            command={"request_key": "turn-budget", "kind": "phase_finish"},
-            prompt="Runtime request: resolve the completed phase.",
-            validate=lambda payload: payload,
-        )
-
-    pending = manager.runtime_state.pending_worker_command()
     manager.stop()
-    assert pending is not None
-    assert pending["status"] == "cancelled"
-    assert pending["manager_provider_turns"] == 1
-    assert "provider budget" in pending["cancellation_reason"]
+    assert pending["status"] == "pending"
+    assert "manager_provider_turns" not in pending
+    assert not hasattr(manager.runtime_state, "consume_manager_provider_turn")
 
 
 def test_manager_backend_exhaustion_after_human_reply_cancels_the_held_request(tmp_path):

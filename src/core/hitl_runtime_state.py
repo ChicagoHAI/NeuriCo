@@ -198,37 +198,10 @@ class HitlRuntimeState:
             record.setdefault("status", "pending")
             record.setdefault("human_request_record_id", None)
             record.setdefault("human_reply_record_ids", [])
-            record.setdefault("manager_provider_turns", 0)
             record["created_at"] = _now()
             self._state["pending_worker_command"] = record
             self._save_unlocked()
             return self._copy(record)
-
-    def consume_manager_provider_turn(self, request_key: str, *, limit: int) -> int:
-        """Atomically charge one provider turn to a held worker request.
-
-        Human waiting is not a provider turn. The count survives reminders and
-        manager restarts, so a request cannot receive an unbounded sequence of
-        fresh ReAct budgets.
-        """
-        if limit < 1:
-            raise HitlRuntimeStateError("HITL manager provider-turn limit must be positive")
-        with self._locked():
-            self._state = self._load_unlocked() or self._default()
-            command = self._state.get("pending_worker_command")
-            if not isinstance(command, dict) or command.get("request_key") != request_key:
-                raise HitlRuntimeStateError("No matching pending HITL worker command")
-            used = int(command.get("manager_provider_turns", 0))
-            if used >= limit:
-                raise HitlRuntimeStateError(
-                    f"HITL manager exhausted its {limit}-turn provider budget for this worker request."
-                )
-            command["manager_provider_turns"] = used + 1
-            command["manager_provider_turn_limit"] = limit
-            command["updated_at"] = _now()
-            self._state["pending_worker_command"] = command
-            self._save_unlocked()
-            return used + 1
 
     def update_pending_worker_command(self, request_key: str, **updates: Any) -> Dict[str, Any]:
         with self._locked():

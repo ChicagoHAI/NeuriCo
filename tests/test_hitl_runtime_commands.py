@@ -216,7 +216,7 @@ def test_admitted_proposal_survives_provider_exit_after_runtime_approval(tmp_pat
     runtime.manager.stop()
 
 
-def test_failed_worker_exit_after_final_approval_preserves_deferred_frontier_decision(
+def test_failed_worker_exit_after_final_approval_preserves_final_worker_response(
     tmp_path: Path,
 ) -> None:
     runtime = HitlRuntime(tmp_path, "experiment_runner")
@@ -224,9 +224,8 @@ def test_failed_worker_exit_after_final_approval_preserves_deferred_frontier_dec
     state.begin_worker_command({"request_key": "finish", "kind": "phase_finish"})
     state.complete_worker_command(
         "finish",
-        {"status": "approved", "final": True, "frontier_decision_deferred": True},
+        {"status": "approved", "final": True},
     )
-    runtime.mark_frontier_decision_deferred()
 
     result = runtime.handle_worker_exit_after_finish(
         {"success": False},

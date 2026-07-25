@@ -9,6 +9,8 @@ import threading
 import time
 from pathlib import Path
 
+import yaml
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -22,7 +24,8 @@ from interactive.manager import load_config
 
 
 def _workspace_for_idea(project_root: Path, idea_id: str) -> Path:
-    idea = IdeaManager(project_root / "ideas").get_idea(idea_id)
+    idea_manager = IdeaManager(project_root / "ideas")
+    idea = idea_manager.get_idea(idea_id)
     if idea is None:
         raise ValueError(f"Idea not found: {idea_id}")
 
@@ -40,11 +43,13 @@ def _workspace_for_idea(project_root: Path, idea_id: str) -> Path:
     for candidate in candidates:
         if candidate.is_dir():
             return candidate.resolve()
-    checked = ", ".join(str(path) for path in candidates)
-    raise ValueError(
-        f"No workspace exists for {idea_id}. Checked: {checked}. "
-        "Run the idea first so NeuriCo can create its workspace."
-    )
+
+    workspace = (workspace_root / idea_id).resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    idea.setdefault("idea", {}).setdefault("metadata", {})["local_workspace"] = str(workspace)
+    with idea_manager.get_idea_path(idea_id).open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(idea, handle, default_flow_style=False, sort_keys=False)
+    return workspace
 
 
 def main() -> int:
