@@ -2,7 +2,7 @@
 
 This module owns the manager-mediated AutoResearch lifecycle.  Ordinary
 AutoResearch remains in :mod:`core.autoresearch`; this module imports only its
-neutral checkpoint, history, and score-comparison primitives.
+neutral checkpoint, history, and iteration-result primitives.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from datetime import datetime
 
 from core.autoresearch import (
@@ -29,7 +28,6 @@ from core.autoresearch import (
     ProposalGeneratorHook,
     ScoreSummary,
     ScorerHook,
-    ScoringResultComparator,
     autoresearch_result_payload,
     resolve_autoresearch_history_root,
 )
@@ -671,7 +669,6 @@ class HitlAutoResearchController:
         scorer: ScorerHook,
         checkpoint_manager: Optional[CheckpointManager] = None,
         history_manager: Optional[AttemptHistoryManager] = None,
-        comparator: Optional[ScoringResultComparator] = None,
         hitl_runtime: Optional[HitlRuntime] = None,
         hitl_comment_mode: Optional[HitlCommentModeHook] = None,
         pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
@@ -681,7 +678,6 @@ class HitlAutoResearchController:
         self.work_dir = Path(work_dir)
         self.checkpoints = checkpoint_manager or CheckpointManager(self.work_dir)
         self.history = history_manager or AttemptHistoryManager(history_root, idea_id)
-        self.comparator = comparator or ScoringResultComparator()
         self.proposal_generator = proposal_generator
         self.scorer = scorer
         self.hitl_runtime = hitl_runtime
@@ -1031,10 +1027,7 @@ class HitlAutoResearchController:
             )
         scorer_result = dict(scored_candidate.get("scorer_result") or {})
         trusted_results = scorer_result.get("results") if isinstance(scorer_result, dict) else None
-        candidate_summary = self.comparator.summarize(
-            trusted_results if isinstance(trusted_results, dict) else {},
-            source="candidate",
-        )
+        candidate_summary = self._runtime_score_summary(trusted_results, source="candidate")
         child_sha = str(scored_candidate.get("node_sha", "")).strip()
         reason = str(scored_candidate.get("reason", "")).strip()
         if not child_sha or not candidate_summary.valid or not reason:
@@ -1064,9 +1057,22 @@ class HitlAutoResearchController:
     def _frontier_parent_summary(self, parent_sha: str) -> ScoreSummary:
         objective_score = self.hitl_frontier.node(parent_sha).get("objective_score")
         results = objective_score.get("results") if isinstance(objective_score, dict) else None
-        return self.comparator.summarize(
-            results if isinstance(results, dict) else {},
-            source="parent",
+        return self._runtime_score_summary(results, source="parent")
+
+    @staticmethod
+    def _runtime_score_summary(results: Any, *, source: str) -> ScoreSummary:
+        """Keep the legacy result shape without interpreting scorer metrics.
+
+        Runtime owns scorer transport and checkpoint integrity. The manager owns
+        the research decision, so HITL only requires an object-shaped scorer
+        result before forwarding the complete payload for frontier review.
+        """
+        if isinstance(results, dict):
+            return ScoreSummary(valid=True, source=source)
+        return ScoreSummary(
+            valid=False,
+            source=source,
+            error="Runtime scorer returned no structured results.",
         )
 
     def _attempt_history_for(self, parent_sha: str) -> list[Dict[str, Any]]:
@@ -1414,10 +1420,11 @@ class HitlAutoResearchController:
     ) -> AutoResearchIterationResult:
         """Run one proposal/comment/scorer/checkpoint/compare attempt."""
         parent_results_path = self.work_dir / "scoring" / "results.json"
-        parent_summary = self.comparator.load_summary(
-            parent_results_path,
-            source="parent",
-        )
+        try:
+            parent_results = json.loads(parent_results_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            parent_results = None
+        parent_summary = self._runtime_score_summary(parent_results, source="parent")
 
         attempt_history = self._attempt_history_for(parent_sha)
         attempt_dir = self.history.next_attempt_dir(parent_sha)
@@ -1779,10 +1786,7 @@ class HitlAutoResearchController:
             # results file is a review artifact only and may not be reread to
             # reconstruct a frontier decision.
             trusted_results = scorer_result.get("results")
-            candidate_summary = self.comparator.summarize(
-                trusted_results if isinstance(trusted_results, dict) else {},
-                source="candidate",
-            )
+            candidate_summary = self._runtime_score_summary(trusted_results, source="candidate")
 
             scorer_succeeded = bool(scorer_result.get("success"))
             if not scorer_succeeded or not candidate_summary.valid:
@@ -1819,37 +1823,6 @@ class HitlAutoResearchController:
                 )
                 return
 
-            if not self._candidate_changes_parent(parent_node_id, source_sha):
-                score_validation = candidate_summary.as_dict()
-                score_validation["valid"] = False
-                score_validation["error"] = (
-                    "The candidate produced no public workspace change relative to its parent. "
-                    "Revise the experiment rather than submitting a no-op candidate."
-                )
-
-                def persist_noop_repair(review: Dict[str, Any]) -> Dict[str, Any]:
-                    record = runtime.log_scoring_recovery_decision(
-                        scoring_review_idea_id=scoring_review_idea_id,
-                        context=str(review["context"]),
-                        manager_feedback=str(review["manager_feedback"]),
-                        provenance=attempt_provenance,
-                    )
-                    clear_repairable_scoring_handoff(
-                        request_key=request_key,
-                        scorer_result=scorer_result,
-                    )
-                    return runtime.scoring_repair_response(
-                        context=str(review["context"]),
-                        manager_feedback=str(review["manager_feedback"]),
-                        record=record,
-                    )
-
-                runtime.manager.review_scoring_failure(
-                    scorer_result=scorer_result,
-                    score_validation=score_validation,
-                    on_finalize=persist_noop_repair,
-                )
-                return
             objective_score = self._complete_objective_score(scorer_result)
             proposal_type = self._proposal_type_for(proposal_idea_id)
 
@@ -2044,41 +2017,6 @@ class HitlAutoResearchController:
             scorer=self.scorer,
             temporary_ref=temporary_ref,
         )
-
-    def _candidate_changes_parent(self, parent_sha: str, source_sha: str) -> bool:
-        """Return whether the pre-score candidate changed public research files.
-
-        The isolated scorer adds ``scoring/results.json`` in its own detached
-        worktree. Comparing the scored commit with its parent would therefore
-        always see a change even when the worker submitted a no-op experiment.
-        Compare the runtime-owned source checkpoint instead, excluding only the
-        scorer output that can be present in resumed workspaces.
-        """
-        completed = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(self.work_dir),
-                "diff",
-                "--name-only",
-                str(parent_sha),
-                str(source_sha),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            check=False,
-        )
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "unknown Git error").strip()
-            raise RuntimeError(f"Runtime could not compare candidate and parent trees: {detail}")
-        changed = {
-            path.strip()
-            for path in completed.stdout.splitlines()
-            if path.strip() and path.strip() != "scoring/results.json"
-        }
-        return bool(changed)
 
     def _call_proposal_generator(
         self,
@@ -2371,9 +2309,6 @@ def run_hitl_autoresearch_loop(
         return run_scorer(
             work_dir=score_work_dir,
             timeout=scorer_timeout,
-            # HITL scoring is a runtime action, so use the interpreter that
-            # launched NeuriCo rather than a worker-controlled .venv.
-            python_executable=sys.executable,
         )
 
     controller = HitlAutoResearchController(

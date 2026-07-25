@@ -57,7 +57,10 @@ class HitlManagerToolExecutor:
 
     def __init__(self, manager: "HitlManager") -> None:
         self.manager = manager
-        self.workspace = HitlWorkspaceInspector(manager.work_dir)
+        self.workspace = HitlWorkspaceInspector(
+            manager.work_dir,
+            listed_protected_paths=manager.listed_workspace_artifacts(),
+        )
 
     def execute(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         handlers = {
@@ -71,7 +74,6 @@ class HitlManagerToolExecutor:
             "view_node": self._view_node,
             "select_frontier": self._select_frontier,
             "prune_frontier": self._prune_frontier,
-            "answer_to_human": self._answer_to_human,
             "ask_human": self._ask_human,
             "update_research_state": self._update_research_state,
             "design_panel": self._design_panel,
@@ -157,14 +159,6 @@ class HitlManagerToolExecutor:
         if not node_sha:
             return "Error: prune_frontier requires node_sha. Call list_frontier, then retry."
         return self.manager.prune_frontier(node_sha, str(args.get("reason", "")).strip())
-
-    def _answer_to_human(self, args: Dict[str, Any]) -> str:
-        message = str(args.get("message", "")).strip()
-        if not message:
-            return "Error: answer_to_human requires a non-empty message. Retry with the message to send."
-        self.manager.channel.send(message, kind="manager")
-        self.manager.conversation.append("manager", message)
-        return "Manager message delivered. A later human message will begin a normal manager turn."
 
     def _ask_human(self, args: Dict[str, Any]) -> str:
         message = str(args.get("message", "")).strip()
@@ -258,7 +252,7 @@ class HitlManager:
         channel: Optional[Any] = None,
     ):
         from interactive.channel import TerminalChannel
-        from interactive.llm_backend import create_backend
+        from interactive.llm_backend import LLMBackend
         from interactive.research_state import ResearchState
         from core.hitl_manager_context import HitlManagerTranscript
         from core.hitl_world_model import HitlWorldModelSync
@@ -267,13 +261,16 @@ class HitlManager:
             raise ValueError("HITL manager requires a workspace")
         self.config = config
         self.work_dir = Path(work_dir)
-        self.backend = create_backend(config)
+        manager_config = config.get("manager", {}) if isinstance(config.get("manager", {}), dict) else {}
+        self._manager_config = manager_config
+        self._provider = str(manager_config.get("hitl_manager_provider", "codex")).strip().lower()
+        self.backend = self._backend_for_provider(self._provider)
         self.channel = channel or TerminalChannel()
         self.runtime_state = HitlRuntimeState(self.work_dir)
         self.conversation = HitlManagerTranscript(
             self.work_dir / ".neurico" / "hitl" / "manager",
             context_tokens=int(
-                config.get("manager", {}).get("hitl_manager_conversation_tokens", 16000)
+                config.get("manager", {}).get("hitl_manager_conversation_tokens", 300_000)
             ),
         )
         self.research = ResearchState(self.work_dir)
@@ -323,6 +320,36 @@ class HitlManager:
         if callable(register):
             register(self.submit_resolution_reply)
 
+    def _backend_for_provider(self, provider: str) -> Any:
+        from interactive.llm_backend import LLMBackend
+
+        provider = str(provider or "codex").strip().lower()
+        if provider == "claude":
+            return LLMBackend(
+                backend="cli",
+                model=self._manager_config.get("hitl_manager_llm_model")
+                or self._manager_config.get("llm_model")
+                or None,
+            )
+        if provider != "codex":
+            raise ValueError("HITL manager provider must be codex or claude.")
+        return LLMBackend(
+            backend="codex_cli",
+            model=self._manager_config.get("hitl_manager_llm_model")
+            or self._manager_config.get("codex_model")
+            or None,
+        )
+
+    def set_provider(self, provider: str) -> None:
+        provider = str(provider or "").strip().lower()
+        if not provider or provider == self._provider:
+            return
+        backend = self._backend_for_provider(provider)
+        with self._turn_lock:
+            self._stop_cli_mcp_bridge()
+            self._provider = provider
+            self.backend = backend
+
     @staticmethod
     def _load_tools() -> List[Dict[str, Any]]:
         import yaml
@@ -348,7 +375,6 @@ class HitlManager:
             "recall_manager_conversation",
             "list_frontier",
             "view_node",
-            "answer_to_human",
             "update_research_state",
             "design_panel",
         }
@@ -377,10 +403,6 @@ class HitlManager:
             return names
 
         names.add("ask_human")
-        if pending.get("scoring_review_idea_id"):
-            names.add("finalize_frontier_decision")
-            return names
-
         names.add("finalize_worker_request")
         request_key = str(pending.get("request_key", "")).strip()
         with self._resolution_lock:
@@ -393,13 +415,36 @@ class HitlManager:
         allowed = self._available_tool_names()
         return [tool for tool in self.tool_definitions if tool["name"] in allowed]
 
+    def listed_workspace_artifacts(self) -> set[str]:
+        """Return declared sealed evaluator files visible as metadata for review."""
+        from core.scoring_seal import SEALED_PATHS
+
+        snapshot = self.runtime_state.snapshot()
+        pending = snapshot.get("pending_worker_command")
+        if (
+            not isinstance(pending, dict)
+            or pending.get("status") != "pending"
+            or pending.get("pipeline_stage") != "rule_maker"
+        ):
+            return set()
+        declared = {
+            str(artifact.get("path", "")).strip().replace("\\", "/")
+            for artifact in pending.get("related_artifacts", [])
+            if isinstance(artifact, dict)
+        }
+        return {
+            path
+            for path in SEALED_PATHS
+            if path.startswith("scoring/") and path in declared
+        }
+
     @staticmethod
     def _mcp_allowed_tool_name(tool_name: str) -> str:
         """Return Claude Code's global name for one server-local MCP tool."""
         return f"mcp__neurico_hitl_manager__{tool_name}"
 
     def _uses_cli_mcp_bridge(self) -> bool:
-        return getattr(self.backend, "backend", None) == "cli"
+        return getattr(self.backend, "backend", None) in {"cli", "codex_cli", "codex"}
 
     def _ensure_cli_mcp_bridge(self) -> None:
         """Start the private manager bridge used only by HITL CLI turns."""
@@ -629,8 +674,15 @@ class HitlManager:
             if resolution is not None:
                 resolution.completed.set()
 
-    def chat(self, message: str) -> str:
-        turn = self._new_turn("human", str(message), done=threading.Event())
+    def chat(self, message: str, *, input_recorded: bool = False) -> str:
+        """Run one ordinary human conversation turn.
+
+        Web input is recorded before it enters the durable inbox so refreshes
+        never lose it. Terminal input still uses the normal record-on-turn path.
+        """
+        turn = self._new_turn(
+            "human", str(message), done=threading.Event(), input_recorded=input_recorded
+        )
         self.start()
         self._turns.put(turn)
         turn.done.wait()
@@ -671,8 +723,8 @@ class HitlManager:
         if pending.get("status") == "resolved" and isinstance(pending.get("response"), dict):
             return dict(pending["response"])
         with self._resolution_lock:
-            if human_inputs is not None and pending.get("human_replies"):
-                human_inputs[:] = list(pending.get("human_replies") or [])
+            if human_inputs is not None:
+                human_inputs[:] = self._human_inputs_from_pending(pending)
             self._resolutions[request_key] = _Resolution(
                 validate=validate,
                 finalize=finalize,
@@ -680,8 +732,32 @@ class HitlManager:
                 human_inputs=human_inputs,
                 completed=threading.Event(),
             )
-        human_question = pending.get("human_question")
-        if isinstance(human_question, dict):
+        request_record_id = str(pending.get("human_request_record_id") or "").strip()
+        legacy_question = pending.get("human_question")
+        if not request_record_id and isinstance(legacy_question, dict):
+            message = str(legacy_question.get("message", "")).strip()
+            options = [str(option) for option in legacy_question.get("options") or [] if str(option).strip()]
+            if not message:
+                raise HitlRuntimeStateError("Runtime human request is missing its message")
+            request_record_id = f"human-request:{request_key}"
+            self.conversation.append(
+                "manager",
+                message,
+                record_id=request_record_id,
+                metadata={
+                    "visibility": "human",
+                    "kind": "human_request",
+                    "request_key": request_key,
+                    "options": options,
+                },
+            )
+            pending = self.runtime_state.update_pending_worker_command(
+                request_key,
+                human_request_record_id=request_record_id,
+                human_question=None,
+            )
+        if request_record_id:
+            human_question = self._human_request_from_record(request_record_id, request_key)
             presenter = getattr(self.channel, "present_resolution_request", None)
             if callable(presenter):
                 presenter(
@@ -1100,18 +1176,34 @@ class HitlManager:
         )
 
     def submit_resolution_reply(self, response: str) -> None:
-        pending = self.runtime_state.record_human_reply(response)
-        request_key = str(pending["request_key"])
+        response = str(response).strip()
+        if not response:
+            raise HitlRuntimeStateError("A human resolution reply must not be empty.")
+        command = self.runtime_state.pending_worker_command()
+        if not isinstance(command, dict):
+            raise HitlRuntimeStateError("No pending HITL worker command needs a human reply")
+        request_key = str(command["request_key"])
+        reply_record = self.conversation.append(
+            "human",
+            response,
+            metadata={
+                "visibility": "human",
+                "kind": "human_reply",
+                "request_key": request_key,
+            },
+        )
+        pending = self.runtime_state.record_human_reply(str(reply_record["id"]))
         with self._resolution_lock:
             resolution = self._resolutions.get(request_key)
             if resolution and resolution.human_inputs is not None:
-                resolution.human_inputs[:] = list(pending.get("human_replies") or [])
+                resolution.human_inputs[:] = self._human_inputs_from_pending(pending)
         self.start()
         self._turns.put(
             self._new_turn(
                 "human",
-                str(response).strip(),
+                response,
                 requires_worker_resolution=True,
+                input_recorded=True,
                 request_key=request_key,
             )
         )
@@ -1143,7 +1235,7 @@ class HitlManager:
                     validate=validate,
                     finalize=finalize,
                     approve_scoring=None,
-                    human_inputs=list(pending.get("human_replies") or []),
+                    human_inputs=self._human_inputs_from_pending(pending),
                     completed=threading.Event(),
                 )
                 self._resolutions[request_key] = resolution
@@ -1171,14 +1263,55 @@ class HitlManager:
         if not isinstance(pending, dict) or pending.get("status") != "pending":
             return "Error: ask_human is available only while runtime has a pending worker command."
         request_key = str(pending["request_key"])
-        self.runtime_state.request_human_reply(request_key, message=message, options=options)
+        request_record_id = f"human-request:{request_key}"
+        self.conversation.append(
+            "manager",
+            message,
+            record_id=request_record_id,
+            metadata={
+                "visibility": "human",
+                "kind": "human_request",
+                "request_key": request_key,
+                "options": [str(option) for option in options if str(option).strip()],
+            },
+        )
+        self.runtime_state.request_human_reply(request_key, record_id=request_record_id)
         presenter = getattr(self.channel, "present_resolution_request", None)
         if not callable(presenter):
             return "Error: the current manager interface cannot present an explicit resolution request."
         presenter(message, options or None, request_key=request_key)
-        self.conversation.append("manager", message)
         self._defer_current_turn = True
         return "The explicit human-resolution request was displayed. Continue ordinary conversation; the worker remains held by runtime."
+
+    def _human_request_from_record(self, record_id: str, request_key: str) -> Dict[str, Any]:
+        record = self.conversation.record(record_id)
+        metadata = record.get("metadata") if isinstance(record, dict) else None
+        if (
+            not isinstance(record, dict)
+            or not isinstance(metadata, dict)
+            or metadata.get("kind") != "human_request"
+            or str(metadata.get("request_key", "")) != request_key
+        ):
+            raise HitlRuntimeStateError("Runtime human request is missing its transcript record")
+        return {
+            "message": str(record.get("content", "")).strip(),
+            "options": list(metadata.get("options") or []),
+        }
+
+    def _human_inputs_from_pending(self, pending: Dict[str, Any]) -> List[Dict[str, Any]]:
+        request_key = str(pending.get("request_key", "")).strip()
+        inputs: List[Dict[str, Any]] = []
+        for record_id in pending.get("human_reply_record_ids") or []:
+            record = self.conversation.record(str(record_id))
+            metadata = record.get("metadata") if isinstance(record, dict) else None
+            if not isinstance(record, dict) or not isinstance(metadata, dict):
+                continue
+            if metadata.get("kind") != "human_reply" or str(metadata.get("request_key", "")) != request_key:
+                continue
+            response = str(record.get("content", "")).strip()
+            if response:
+                inputs.append({"response": response})
+        return inputs
 
     def finalize_worker_request(self, result: Dict[str, Any]) -> str:
         pending = self.runtime_state.pending_worker_command()
@@ -1540,6 +1673,7 @@ class HitlManager:
         done: Optional[threading.Event] = None,
         request_key: str = "",
         runtime_action_kind: str = "",
+        input_recorded: bool = False,
     ) -> _Turn:
         return _Turn(
             speaker,
@@ -1549,6 +1683,7 @@ class HitlManager:
             generation=self._current_generation(),
             request_key=request_key,
             runtime_action_kind=runtime_action_kind,
+            input_recorded=input_recorded,
         )
 
     def _run(self) -> None:
@@ -1574,13 +1709,13 @@ class HitlManager:
                     bool(turn.runtime_action_kind)
                     and isinstance(pending_action, dict)
                     and pending_action.get("kind") == turn.runtime_action_kind
-                    and pending_action.get("status") != "resolved"
+                    and pending_action.get("status") == "pending"
                 )
                 if (
                     self._generation_is_current(turn.generation)
                     and turn.requires_worker_resolution
                     and not self._defer_current_turn
-                    and (self.runtime_state.pending_worker_command() is not None or action_is_pending)
+                    and (self._worker_request_is_pending(turn.request_key) or action_is_pending)
                 ):
                     # The manager remains a normal interactive agent, but a
                     # runtime-held worker request cannot be resolved by prose
@@ -1612,6 +1747,16 @@ class HitlManager:
             finally:
                 if turn.done is not None:
                     turn.done.set()
+
+    def _worker_request_is_pending(self, request_key: str) -> bool:
+        """Whether this turn still owns an unresolved runtime-held command."""
+        pending = self.runtime_state.pending_worker_command()
+        return (
+            bool(request_key)
+            and isinstance(pending, dict)
+            and pending.get("request_key") == request_key
+            and pending.get("status") == "pending"
+        )
 
     def _cancel_backend_failed_runtime_request(self, turn: _Turn, exc: BaseException) -> None:
         """Release the runtime action whose manager provider retries exhausted."""
@@ -1667,7 +1812,7 @@ class HitlManager:
             if record_input:
                 self.conversation.append(speaker, content)
         executor = HitlManagerToolExecutor(self)
-        final_text = ""
+        fragments: List[str] = []
         for _ in range(self.max_react_turns):
             with self._turn_lock:
                 if not self._generation_is_current(generation):
@@ -1681,16 +1826,22 @@ class HitlManager:
                     request_key,
                     limit=self.max_request_provider_turns,
                 )
-            response = self._send(messages, self._tools_for_current_runtime_boundary())
+            tools = self._tools_for_current_runtime_boundary()
+            response = self._send(messages, tools)
             with self._turn_lock:
                 if not self._generation_is_current(generation):
                     return ""
                 text = str(getattr(response, "text", "")).strip()
                 if text:
-                    self.conversation.append("manager", text)
-                    final_text = text
+                    fragments.append(text)
                 calls = list(getattr(response, "tool_calls", []) or [])
                 if not calls:
+                    final_text = "\n\n".join(fragments).strip()
+                    if final_text:
+                        metadata = None
+                        if speaker == "human" and not requires_worker_resolution:
+                            metadata = {"visibility": "human", "kind": "manager_reply"}
+                        self.conversation.append("manager", final_text, metadata=metadata)
                     return final_text
                 for call in calls:
                     if not self._generation_is_current(generation):
@@ -1705,8 +1856,8 @@ class HitlManager:
                         call_id=call.id, tool_name=call.name, content=result
                     )
                     if self._defer_current_turn:
-                        return final_text
-        return final_text
+                        return ""
+        return ""
 
     def _messages(self, generation: int) -> List[Dict[str, Any]]:
         from core.hitl import _load_hitl_template
@@ -1766,18 +1917,18 @@ class HitlManager:
             raise RuntimeError("Manager returned an empty conversation summary")
         return text
 
-    def _send(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Any:
+    def _send(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None) -> Any:
         last: Optional[Exception] = None
         for attempt in range(self.max_backend_retries):
             try:
-                return self._send_once(messages, tools)
+                return self._send_once(messages, tools, backend=backend)
             except Exception as exc:
                 last = exc
                 if attempt + 1 < self.max_backend_retries:
                     threading.Event().wait(self.backend_retry_delay_seconds)
         raise RuntimeError("Manager backend was unavailable") from last
 
-    def _send_once(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Any:
+    def _send_once(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None) -> Any:
         """Run one bounded manager provider turn.
 
         ``LLMBackend`` receives the deadline directly and cancels its own CLI
@@ -1789,7 +1940,8 @@ class HitlManager:
 
         parameters: Dict[str, inspect.Parameter] = {}
         try:
-            parameters = inspect.signature(self.backend.send).parameters
+            active_backend = backend or self.backend
+            parameters = inspect.signature(active_backend.send).parameters
             supports_adapter_contract = (
                 (
                     "timeout_seconds" in parameters
@@ -1802,7 +1954,7 @@ class HitlManager:
             )
         except (TypeError, ValueError):
             supports_adapter_contract = False
-        use_cli_mcp = self._uses_cli_mcp_bridge() and (
+        use_cli_mcp = bool(tools) and self._uses_cli_mcp_bridge() and (
             "mcp_config_path" in parameters
             or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
         )
@@ -1831,9 +1983,9 @@ class HitlManager:
                             self._mcp_allowed_tool_name(str(tool["name"])) for tool in tools
                         ]
                         provider_tools = []
-                    response = self.backend.send(messages, provider_tools, **kwargs)
+                    response = active_backend.send(messages, provider_tools, **kwargs)
                 else:
-                    response = self.backend.send(messages, tools)
+                    response = active_backend.send(messages, tools)
                 result.put((True, response))
             except BaseException as exc:
                 result.put((False, exc))

@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 import json
 import os
+from pathlib import Path
 import signal
 import subprocess
 
@@ -81,12 +82,104 @@ class LLMBackend:
                 allowed_mcp_tools=allowed_mcp_tools,
                 use_dedicated_system_prompt=use_dedicated_system_prompt,
             )
+        elif self.backend in {"codex", "codex_cli"}:
+            return self._send_codex_cli(
+                messages,
+                tools,
+                timeout_seconds=timeout_seconds,
+                mcp_config_path=mcp_config_path,
+            )
         elif self.backend == "anthropic_api":
             return self._send_anthropic_api(messages, tools, timeout_seconds=timeout_seconds)
         elif self.backend == "openrouter":
             return self._send_openrouter(messages, tools, timeout_seconds=timeout_seconds)
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
+
+    def _send_codex_cli(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        timeout_seconds: Optional[float] = None,
+        mcp_config_path: Optional[str] = None,
+    ) -> LLMResponse:
+        """Send a manager turn through `codex exec`."""
+        prompt = self._messages_to_prompt(messages, None if mcp_config_path else tools)
+        cmd = [
+            "codex",
+            "exec",
+            "-c",
+            'approval_policy="never"',
+            "--json",
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "-",
+        ]
+        if self.model:
+            cmd[2:2] = ["--model", self.model]
+        if mcp_config_path:
+            cmd[2:2] = self._codex_mcp_config_args(mcp_config_path)
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=(os.name == "posix"),
+        )
+        try:
+            stdout, stderr = process.communicate(input=prompt, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            self._terminate_process_group(process)
+            raise TimeoutError(
+                "Codex CLI backend timed out after "
+                f"{timeout_seconds:g} seconds"
+            ) from exc
+        if process.returncode != 0:
+            error_msg = stderr.strip() if stderr else f"codex exec exited with code {process.returncode}"
+            raise RuntimeError(f"Codex CLI backend error: {error_msg}")
+        return self._parse_codex_cli_response(stdout)
+
+    @staticmethod
+    def _codex_config_value(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return json.dumps(value, ensure_ascii=False)
+
+    @classmethod
+    def _codex_mcp_config_args(cls, mcp_config_path: str) -> List[str]:
+        payload = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
+        servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
+        if not isinstance(servers, dict) or not servers:
+            return []
+        args: List[str] = []
+        for name, server in servers.items():
+            if not isinstance(server, dict):
+                continue
+            prefix = f"mcp_servers.{name}"
+            for key in ("command", "args", "cwd", "url", "enabled"):
+                if key in server:
+                    args.extend(["-c", f"{prefix}.{key}={cls._codex_config_value(server[key])}"])
+            if "default_tools_approval_mode" in server:
+                args.extend([
+                    "-c",
+                    f"{prefix}.default_tools_approval_mode={cls._codex_config_value(server['default_tools_approval_mode'])}",
+                ])
+            else:
+                args.extend(["-c", f'{prefix}.default_tools_approval_mode="approve"'])
+            env = server.get("env")
+            if isinstance(env, dict):
+                for env_key, env_value in env.items():
+                    args.extend([
+                        "-c",
+                        f"{prefix}.env.{env_key}={cls._codex_config_value(str(env_value))}",
+                    ])
+            if "enabled" not in server:
+                args.extend(["-c", f"{prefix}.enabled=true"])
+        return args
 
     def _send_cli(
         self,
@@ -314,6 +407,58 @@ class LLMBackend:
             tool_calls=tool_calls,
             raw=raw_events
         )
+
+    def _parse_codex_cli_response(self, stdout: str) -> LLMResponse:
+        """Parse `codex exec --json` output, falling back to plain text lines."""
+        text_parts = []
+        raw_events = []
+        final_text = ""
+
+        def collect(value: Any) -> None:
+            if isinstance(value, str) and value.strip():
+                text_parts.append(value)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        collect(item.get("text") or item.get("content"))
+                    else:
+                        collect(item)
+
+        for line in stdout.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                raw_events.append(event)
+            except json.JSONDecodeError:
+                text_parts.append(line)
+                continue
+            event_type = str(event.get("type", "")).lower()
+            if isinstance(event.get("message"), dict):
+                collect(event["message"].get("content"))
+            item = event.get("item")
+            if isinstance(item, dict) and str(item.get("type", "")) == "agent_message":
+                collect(item.get("text") or item.get("content"))
+            collect(event.get("content"))
+            collect(event.get("text"))
+            collect(event.get("delta"))
+            if event_type in {"result", "final", "completed"}:
+                value = event.get("result") or event.get("output")
+                if isinstance(value, str) and value.strip():
+                    final_text = value
+                elif isinstance(value, dict):
+                    nested = value.get("text") or value.get("content") or value.get("message")
+                    if isinstance(nested, str) and nested.strip():
+                        final_text = nested
+
+        text = final_text.strip() or "".join(text_parts).strip()
+        tool_calls = []
+        if "<tool_call" in text:
+            tool_calls = self._parse_xml_tool_calls(text)
+            import re
+            text = re.sub(r'<tool_call[^>]*>.*?</tool_call>', '', text, flags=re.DOTALL).strip()
+        return LLMResponse(text=text, tool_calls=tool_calls, raw=raw_events)
 
     def _parse_xml_tool_calls(self, text: str) -> List[ToolCall]:
         """Parse <tool_call> XML blocks from text output."""

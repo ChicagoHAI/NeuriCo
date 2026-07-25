@@ -1824,6 +1824,26 @@ cmd_interactive() {
         $python_cmd "$PROJECT_ROOT/src/interactive/manager.py" "$@"
 }
 
+# -----------------------------------------------------------------------------
+# HITL workspace page: launch the local manager host for an existing idea.
+# -----------------------------------------------------------------------------
+cmd_hitl_web() {
+    if [ -z "$1" ]; then
+        echo -e "${RED}Usage: $0 hitl-web <idea_id> [--port N] [--no-browser]${NC}"
+        exit 1
+    fi
+
+    local python_cmd="${NEURICO_PYTHON:-python3}"
+    if ! command -v "$python_cmd" &> /dev/null && [ ! -x "$python_cmd" ]; then
+        echo -e "${RED}Python is required to open the local HITL page.${NC}"
+        exit 1
+    fi
+
+    NEURICO_PROJECT_ROOT="$PROJECT_ROOT" \
+    NEURICO_WORKSPACE_DIR="$(get_workspace_dir)" \
+    "$python_cmd" "$PROJECT_ROOT/src/cli/hitl_web.py" "$@"
+}
+
 cmd_help() {
     show_banner
     show_status
@@ -1842,6 +1862,7 @@ cmd_help() {
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
     echo "  interactive <id>          Interactive mode (browser UI; --cli for terminal)"
+    echo "  hitl-web <id>             Open the local HITL workspace page"
     echo "  update-tools              Update Claude/Codex/Gemini to latest versions"
     echo "  bump-version <version>    Bump version across all files (e.g., 0.3.0)"
     echo "  up                        Start container in background (compose)"
@@ -1870,7 +1891,7 @@ ACTION="${1:-help}"
 shift 2>/dev/null || true
 
 # Check Docker is available (skip for commands that don't need it)
-if [ "$ACTION" != "config" ] && [ "$ACTION" != "help" ] && [ "$ACTION" != "--help" ] && [ "$ACTION" != "-h" ]; then
+if [ "$ACTION" != "config" ] && [ "$ACTION" != "help" ] && [ "$ACTION" != "--help" ] && [ "$ACTION" != "-h" ] && [ "$ACTION" != "hitl-web" ]; then
     check_docker
 fi
 
@@ -1907,6 +1928,9 @@ case "$ACTION" in
         ;;
     interactive)
         cmd_interactive "$@"
+        ;;
+    hitl-web)
+        cmd_hitl_web "$@"
         ;;
     update-tools)
         cmd_update_tools

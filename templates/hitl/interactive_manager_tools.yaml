@@ -151,25 +151,6 @@ tools:
         required: true
     returns: Updated active frontier state, or a retryable error.
 
-  - name: answer_to_human
-    description: |
-      Send an ordinary free-form manager message to the human. This supports
-      ordinary conversation whether or not a worker request is pending, but
-      it does not resolve that request and does not wait for a reply. The next
-      normal human message starts a later manager conversation turn.
-    parameters:
-      message:
-        type: string
-        description: Concise ordinary conversation reply or follow-up for the human.
-        required: true
-      options:
-        type: array
-        items:
-          type: string
-        description: Optional response options.
-        required: false
-    returns: Confirmation that the ordinary manager message was delivered.
-
   - name: ask_human
     description: |
       Ask the human researcher for input required to resolve the pending worker

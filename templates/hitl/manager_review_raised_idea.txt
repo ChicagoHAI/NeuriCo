@@ -15,7 +15,7 @@ You must finalize exactly one of these outcomes:
    approved plan, use `ask_human` inside this same request. Runtime keeps the
    worker paused and later appends the human's explicit reply;
    then translate that response into worker-facing instructions
-   and finalize this same request as A-level. Do not use ordinary `answer_to_human` for
+   and finalize this same request as A-level. Do not use ordinary direct chat for
    request resolution. Do not return an intermediate "requires_human" result.
 
 When ready, call `finalize_worker_request` with a result object following this

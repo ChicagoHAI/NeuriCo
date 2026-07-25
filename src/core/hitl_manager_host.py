@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import queue
-import secrets
 import sys
 import threading
 import webbrowser
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from interactive.channel import UserChannel, WebChannel, _SHUTDOWN
-from interactive.web_server import InteractiveWebServer
+from interactive.hitl_web_server import HitlWebServer
 
+from core.hitl_manager_inbox import HitlManagerInbox, HitlWebInputError
+from core.hitl_manager_context import HitlManagerTranscript
 from core.hitl_manager_react import HitlManager
 
 _RESOLUTION_REPLY = "resolution_reply"
@@ -25,24 +25,40 @@ def _is_loopback_host(host: str) -> bool:
     return host.strip().lower() in {"localhost", "127.0.0.1", "::1"}
 
 
-def _with_access_token(url: str, token: str) -> str:
-    parsed = urlsplit(url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query["token"] = token
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", urlencode(query), ""))
-
-
 class HitlWebChannel(WebChannel):
     """Web channel with normal conversation and one runtime-owned resolution reply."""
 
-    def __init__(self) -> None:
+    def __init__(self, work_dir: Optional[Path] = None) -> None:
         super().__init__()
-        self._conversation_input: "queue.Queue[Any]" = queue.Queue()
+        self._inbox = HitlManagerInbox(work_dir) if work_dir is not None else None
+        self._memory_input: "queue.Queue[Any]" = queue.Queue()
+        self._conversation: Optional[HitlManagerTranscript] = None
+        self._last_polled_input_recorded = False
+        self._last_polled_provider = ""
         self._resolution_reply_handler: Optional[Any] = None
         self._pending_resolution_request: Optional[Dict[str, Any]] = None
 
     def set_resolution_reply_handler(self, handler: Any) -> None:
         self._resolution_reply_handler = handler
+
+    def bind_conversation(self, conversation: HitlManagerTranscript) -> None:
+        """Bind the durable transcript after the manager has been constructed."""
+        self._conversation = conversation
+
+    def subscribe(self) -> "queue.Queue[Dict[str, Any]]":
+        """SSE is a refresh signal, never a replayed conversation transcript."""
+        subscriber: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+        with self._lock:
+            self._subscribers.append(subscriber)
+        return subscriber
+
+    def _emit(self, event: Dict[str, Any]) -> None:
+        """Notify live browsers without creating a second history store."""
+        with self._lock:
+            self._seq += 1
+            event["seq"] = self._seq
+            for subscriber in self._subscribers:
+                subscriber.put(event)
 
     def present_resolution_request(
         self,
@@ -52,11 +68,16 @@ class HitlWebChannel(WebChannel):
         request_key: str,
     ) -> None:
         """Publish a runtime-owned resolution question without blocking the manager."""
-        self._pending_resolution_request = {
-            "message": message,
-            "options": options or [],
+        request = {
+            "message": str(message),
+            "options": [
+                {"id": f"option_{index + 1}", "text": str(option)}
+                for index, option in enumerate(options or [])
+                if str(option).strip()
+            ],
             "request_key": str(request_key),
         }
+        self._pending_resolution_request = request
         self._emit(
             {
                 "event": "message",
@@ -69,7 +90,7 @@ class HitlWebChannel(WebChannel):
             {
                 "event": "prompt",
                 "message": message,
-                "options": options or [],
+                "options": request["options"],
                 "input_kind": _RESOLUTION_REPLY,
                 "request_key": str(request_key),
             }
@@ -79,6 +100,7 @@ class HitlWebChannel(WebChannel):
         """Remove a request invalidated by runtime recovery."""
         self._pending_resolution_request = None
         self._emit({"event": "resolution_cleared"})
+        self._emit({"event": "workspace_changed", "section": "inbox"})
 
     def prompt(
         self,
@@ -96,33 +118,37 @@ class HitlWebChannel(WebChannel):
         text: str,
         input_kind: str = _CONVERSATION,
         request_key: Optional[str] = None,
-    ) -> None:
+        option_id: Optional[str] = None,
+        provider: str = "",
+        client_turn_id: str = "",
+    ) -> Dict[str, Any]:
         if self._closed.is_set():
-            return
+            raise HitlWebInputError("invalid", "The HITL manager host is no longer available.")
         if input_kind == _RESOLUTION_REPLY:
-            if self._pending_resolution_request is None or self._resolution_reply_handler is None:
-                self.send(
-                    "There is no pending HITL resolution request. "
-                    "Your message was not used to resolve a worker request.",
-                    kind="system",
+            if self._pending_resolution_request is None:
+                raise HitlWebInputError("already_resolved", "This HITL request has already been resolved.")
+            if self._resolution_reply_handler is None:
+                raise HitlWebInputError(
+                    "stale", "This request is waiting for its manager session to resume."
                 )
-                return
             expected_key = str(self._pending_resolution_request["request_key"])
             if str(request_key or "") != expected_key:
-                self.send(
-                    "This reply does not match the active HITL request. Please use the current "
-                    "resolution control.",
-                    kind="system",
-                )
-                return
+                raise HitlWebInputError("stale", "This reply does not match the active HITL request.")
             try:
-                self._resolution_reply_handler(str(text).strip())
-            except Exception as exc:
-                self.send(
-                    f"The resolution reply could not be recorded: {exc}. Please retry it.",
-                    kind="system",
+                selected = next(
+                    (choice for choice in self._pending_resolution_request["options"] if choice["id"] == str(option_id or "")),
+                    None,
                 )
-                return
+                response = str(text).strip() or (str(selected["text"]) if selected else "")
+                if not response:
+                    raise ValueError("Select an option or provide feedback before submitting.")
+                self._resolution_reply_handler(response)
+            except HitlWebInputError:
+                raise
+            except Exception as exc:
+                raise HitlWebInputError(
+                    "invalid", f"The resolution reply could not be recorded: {exc}"
+                ) from exc
             self._pending_resolution_request = None
             self._emit(
                 {
@@ -133,25 +159,73 @@ class HitlWebChannel(WebChannel):
                 }
             )
             self._emit({"event": "status", "waiting": False})
-            return
-        self._conversation_input.put(text)
+            self._emit({"event": "workspace_changed", "section": "inbox"})
+            return {"status": "accepted", "request_key": expected_key}
+        if self._inbox is None:
+            self._memory_input.put(text)
+            return {"status": "accepted"}
+        record = self._inbox.enqueue(
+            text, provider=provider, client_turn_id=client_turn_id
+        )
+        if self._conversation is None:
+            raise RuntimeError("The HITL manager conversation is not initialized.")
+        # Record before queueing: this is the durable source the browser reloads.
+        transcript_record = self._conversation.append("human", record["text"])
+        self._emit({"event": "workspace_changed", "section": "conversation"})
+        return {
+            "status": "accepted",
+            "message_id": str(transcript_record["id"]),
+            "client_turn_id": record["id"],
+        }
 
     def poll_input(self, timeout: float = 0.0) -> Optional[str]:
+        del timeout
+        if self._inbox is None:
+            try:
+                value = self._memory_input.get_nowait()
+            except queue.Empty:
+                self._last_polled_input_recorded = False
+                self._last_polled_provider = ""
+                return None
+            self._last_polled_input_recorded = False
+            self._last_polled_provider = ""
+            return str(value).strip()
+        value = self._inbox.pop()
+        if value is None:
+            self._last_polled_input_recorded = False
+            self._last_polled_provider = ""
+            return None
+        self._last_polled_input_recorded = True
+        self._last_polled_provider = str(value.get("provider", "")).strip().lower()
+        self._emit({"event": "workspace_changed", "section": "conversation"})
+        return str(value["text"]).strip()
+
+    def last_polled_input_was_recorded(self) -> bool:
+        return self._last_polled_input_recorded
+
+    def last_polled_provider(self) -> str:
+        return self._last_polled_provider
+
+    def update_queued_input(self, item_id: str, text: str) -> Dict[str, str]:
+        if self._inbox is None:
+            raise HitlWebInputError("invalid", "Queued-message editing is only available in the web manager.")
         try:
-            value = (
-                self._conversation_input.get(timeout=timeout)
-                if timeout
-                else self._conversation_input.get_nowait()
-            )
-        except queue.Empty:
-            return None
-        if value is _SHUTDOWN:
-            return None
-        self._emit({"event": "message", "role": "user", "text": value, "meta": {}})
-        return str(value).strip()
+            updated = self._inbox.update(item_id, text)
+        except ValueError as exc:
+            raise HitlWebInputError("stale", str(exc)) from exc
+        self._emit({"event": "workspace_changed", "section": "inbox"})
+        return updated
+
+    def remove_queued_input(self, item_id: str) -> None:
+        if self._inbox is None:
+            raise HitlWebInputError("invalid", "Queued-message editing is only available in the web manager.")
+        try:
+            self._inbox.remove(item_id)
+        except ValueError as exc:
+            raise HitlWebInputError("stale", str(exc)) from exc
+        self._emit({"event": "workspace_changed", "section": "inbox"})
 
     def close(self) -> None:
-        self._conversation_input.put(_SHUTDOWN)
         super().close()
 
 
@@ -317,11 +391,11 @@ class HitlManagerHost:
         self.interface = interface
         self._stop = threading.Event()
         self._conversation_thread: Optional[threading.Thread] = None
-        self.web_server: Optional[InteractiveWebServer] = None
+        self.web_server: Optional[HitlWebServer] = None
         self._browser_url: Optional[str] = None
         self._requested_port = port
         if interface == "web":
-            self.channel: UserChannel = HitlWebChannel()
+            self.channel: UserChannel = HitlWebChannel(self.work_dir)
             bind_host = os.environ.get("NEURICO_HITL_WEB_HOST", "localhost")
             container_mode = os.environ.get("NEURICO_HITL_WEB_CONTAINER_MODE") == "1"
             if not _is_loopback_host(bind_host) and not (
@@ -331,28 +405,23 @@ class HitlManagerHost:
                     "HITL web manager must bind to loopback, or use 0.0.0.0 only with "
                     "NEURICO_HITL_WEB_CONTAINER_MODE=1 behind a loopback Docker publish."
                 )
-            self._access_token = secrets.token_urlsafe(32)
             configured_browser_url = os.environ.get("NEURICO_HITL_BROWSER_URL") or None
-            self._browser_url = (
-                _with_access_token(configured_browser_url, self._access_token)
-                if configured_browser_url is not None
-                else None
-            )
-            self.web_server = InteractiveWebServer(
+            self._browser_url = configured_browser_url
+            self.web_server = HitlWebServer(
                 channel=self.channel,
                 workspace=self.work_dir,
                 project_root=project_root,
                 title=title,
                 port=port,
                 host=bind_host,
-                access_token=self._access_token,
             )
             self._open_browser = open_browser
         else:
             self.channel = HitlTerminalChannel()
-            self._access_token = None
             self._open_browser = False
         self.manager = HitlManager(config, work_dir=self.work_dir, channel=self.channel)
+        if isinstance(self.channel, HitlWebChannel):
+            self.channel.bind_conversation(self.manager.conversation)
 
     def start(self) -> None:
         if self.web_server is not None:
@@ -364,7 +433,7 @@ class HitlManagerHost:
                     f"{self._requested_port}. Choose a different --hitl-manager-port."
                 )
             browser_url = self._browser_url or self.web_server.url
-            print(f"\nHITL manager web interface: {browser_url}")
+            print(f"\nHITL manager web interface: {browser_url}", flush=True)
             if self._open_browser and self._browser_url is None:
                 threading.Timer(0.8, lambda: webbrowser.open(self.web_server.url)).start()
         else:
@@ -389,17 +458,38 @@ class HitlManagerHost:
             self.web_server.stop()
 
     def _run_conversation_loop(self) -> None:
+        def durable_notice(text: str) -> None:
+            conversation = getattr(self.manager, "conversation", None)
+            append = getattr(conversation, "append", None)
+            if callable(append):
+                try:
+                    append("manager", text)
+                except Exception:
+                    pass
+            self.channel.send(text, kind="system")
+
         while not self._stop.is_set():
             message = self.channel.poll_input(timeout=0.25)
             if not message:
                 continue
             try:
                 self.channel.status("Manager thinking…", thinking=True)
-                reply = self.manager.chat(message)
+                recorded = getattr(self.channel, "last_polled_input_was_recorded", lambda: False)()
+                provider = getattr(self.channel, "last_polled_provider", lambda: "")()
+                set_provider = getattr(self.manager, "set_provider", None)
+                if callable(set_provider) and provider:
+                    set_provider(str(provider))
+                reply = self.manager.chat(message, input_recorded=bool(recorded))
                 if reply:
                     self.channel.send(reply, kind="manager")
+                else:
+                    durable_notice(
+                        "Manager conversation finished without a reply. Your message was recorded; "
+                        "send another message or restart the HITL manager if this repeats.",
+                    )
             except Exception as exc:
-                self.channel.send(
+                durable_notice(
                     f"Manager conversation could not complete: {exc}. You can retry your message.",
-                    kind="system",
                 )
+            finally:
+                self.channel.status("Manager idle", thinking=False)

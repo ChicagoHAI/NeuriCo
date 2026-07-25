@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterator, List
@@ -59,7 +60,8 @@ class HitlManagerHistory:
                         record_type TEXT NOT NULL,
                         speaker TEXT NOT NULL,
                         content TEXT NOT NULL,
-                        created_at TEXT NOT NULL
+                        created_at TEXT NOT NULL,
+                        metadata_json TEXT NOT NULL DEFAULT '{}'
                     );
                     CREATE TABLE IF NOT EXISTS conversation_chunks (
                         chunk_id INTEGER PRIMARY KEY,
@@ -68,6 +70,11 @@ class HitlManagerHistory:
                         content TEXT NOT NULL
                     );
                     """)
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(conversation_records)")}
+                if "metadata_json" not in columns:
+                    connection.execute(
+                        "ALTER TABLE conversation_records ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+                    )
                 try:
                     connection.execute(
                         "CREATE VIRTUAL TABLE IF NOT EXISTS conversation_chunks_fts USING fts5(content)"
@@ -75,11 +82,11 @@ class HitlManagerHistory:
                 except sqlite3.OperationalError as exc:
                     raise RuntimeError("SQLite FTS5 is required for HITL manager recall.") from exc
 
-    def append(self, record: Dict[str, object]) -> None:
+    def append(self, record: Dict[str, object]) -> str:
         """Archive one raw conversation/tool record without affecting active context."""
         record_type = str(record.get("type", ""))
         if record_type in {"summary", "function_call_output_placeholder"}:
-            return
+            return str(record.get("id", ""))
         record_id = str(record["id"])
         speaker = str(record.get("speaker", record.get("role", "runtime")))
         if record_type == "message":
@@ -94,21 +101,23 @@ class HitlManagerHistory:
         else:
             raise ValueError(f"Unsupported manager archive record type: {record_type}")
         created_at = str(record["timestamp"])
+        metadata_json = json.dumps(record.get("metadata", {}), ensure_ascii=True, separators=(",", ":"))
         with self._lock():
             with self._connect() as connection:
                 inserted = connection.execute(
                     "INSERT OR IGNORE INTO conversation_records "
-                    "(record_id, record_type, speaker, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (record_id, record_type, speaker, content, created_at),
+                    "(record_id, record_type, speaker, content, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+                    (record_id, record_type, speaker, content, created_at, metadata_json),
                 )
                 if inserted.rowcount == 0:
-                    return
+                    return record_id
                 row = connection.execute(
                     "SELECT sequence FROM conversation_records WHERE record_id = ?", (record_id,)
                 ).fetchone()
                 if row is None:
                     raise RuntimeError("HITL manager archive did not retain a conversation record.")
                 self._append_chunk(connection, int(row["sequence"]), speaker, content)
+        return record_id
 
     @staticmethod
     def _append_chunk(
@@ -169,10 +178,41 @@ class HitlManagerHistory:
             str(row["content"]) for row in rows
         )
 
+    @classmethod
+    def read_messages(cls, manager_dir: Path) -> List[Dict[str, str]]:
+        """Read the durable transcript without creating or migrating any state."""
+        manager_dir = Path(manager_dir)
+        path = manager_dir / "history.sqlite"
+        if not path.exists():
+            return []
+        with exclusive_file_lock(manager_dir / "conversation.lock"):
+            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+            try:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    "SELECT record_id, speaker, content, created_at, metadata_json FROM conversation_records "
+                    "WHERE record_type = 'message' ORDER BY sequence"
+                ).fetchall()
+            finally:
+                connection.close()
+        return [cls._message_row(row) for row in rows]
+
     def messages(self) -> List[Dict[str, str]]:
         with self._lock():
             with self._connect() as connection:
                 rows = connection.execute(
-                    "SELECT speaker, content, created_at FROM conversation_records ORDER BY sequence"
+                    "SELECT record_id, speaker, content, created_at, metadata_json FROM conversation_records "
+                    "WHERE record_type = 'message' ORDER BY sequence"
                 ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._message_row(row) for row in rows]
+
+    @staticmethod
+    def _message_row(row: sqlite3.Row) -> Dict[str, object]:
+        record = dict(row)
+        raw_metadata = record.pop("metadata_json", "{}")
+        try:
+            metadata = json.loads(str(raw_metadata))
+        except json.JSONDecodeError:
+            metadata = {}
+        record["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return record

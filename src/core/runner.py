@@ -149,6 +149,7 @@ class ResearchRunner:
         hitl_continue_autoresearch: Optional[str] = None,
         hitl_manager_port: int = 7890,
         hitl_manager_no_browser: bool = False,
+        hitl_host: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -405,23 +406,25 @@ class ResearchRunner:
 
             recovered_hitl_attempt = recover_interrupted_hitl_autoresearch_attempt(work_dir)
 
-        hitl_host = None
+        owns_hitl_host = False
         if hitl:
             if not multi_agent:
                 raise ValueError("HITL AutoResearch requires the multi-agent pipeline.")
-            from core.hitl_manager_host import HitlManagerHost
-            from interactive.manager import load_config as load_manager_config
+            if hitl_host is None:
+                from core.hitl_manager_host import HitlManagerHost
+                from interactive.manager import load_config as load_manager_config
 
-            hitl_host = HitlManagerHost(
-                work_dir=work_dir,
-                config=load_manager_config(),
-                interface=hitl,
-                project_root=self.project_root,
-                title=title,
-                port=hitl_manager_port,
-                open_browser=not hitl_manager_no_browser,
-            )
-            hitl_host.start()
+                hitl_host = HitlManagerHost(
+                    work_dir=work_dir,
+                    config=load_manager_config(),
+                    interface=hitl,
+                    project_root=self.project_root,
+                    title=title,
+                    port=hitl_manager_port,
+                    open_browser=not hitl_manager_no_browser,
+                )
+                hitl_host.start()
+                owns_hitl_host = True
 
         if continue_autoresearch:
             success = False
@@ -479,7 +482,7 @@ class ResearchRunner:
                 success = False
             finally:
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
-                if hitl_host:
+                if owns_hitl_host:
                     hitl_host.stop()
 
             return {
@@ -517,7 +520,7 @@ class ResearchRunner:
                 success = False
             finally:
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
-                if hitl_host:
+                if owns_hitl_host:
                     hitl_host.stop()
 
             return {
@@ -699,7 +702,7 @@ class ResearchRunner:
             finally:
                 # GitHub integration and status updates
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
-                if hitl_host:
+                if owns_hitl_host:
                     hitl_host.stop()
 
             # Return result info

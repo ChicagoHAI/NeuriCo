@@ -131,20 +131,6 @@ class HitlWorkspaceWriteGuard:
                     modified_ns=stats.st_mtime_ns,
                     sha256=HitlWorkspaceWriteGuard._sha256(path),
                 )
-            elif stat.S_ISDIR(stats.st_mode):
-                # Directory entries make empty-directory creation/removal
-                # visible without recursively copying workspace contents.
-                states[relative] = _FileState(
-                    kind="directory",
-                    size=stats.st_size,
-                    modified_ns=stats.st_mtime_ns,
-                )
-            else:
-                states[relative] = _FileState(
-                    kind="other",
-                    size=stats.st_size,
-                    modified_ns=stats.st_mtime_ns,
-                )
         return states
 
     @staticmethod
@@ -194,7 +180,8 @@ class HitlWorkspaceWriteGuard:
 
     @staticmethod
     def _is_excluded(relative: str) -> bool:
-        return bool(Path(relative).parts and Path(relative).parts[0] in _EXCLUDED_PUBLIC_PREFIXES)
+        parts = Path(relative).parts
+        return bool(parts and (parts[0] in _EXCLUDED_PUBLIC_PREFIXES or ".git" in parts))
 
     @staticmethod
     def _normalize_relative(path: str) -> str:

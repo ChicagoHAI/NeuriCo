@@ -98,3 +98,29 @@ def test_workspace_inspection_rejects_symlinks_to_protected_or_external_paths(tm
         inspector.read_workspace_file("evaluator_link.py")
     with pytest.raises(HitlWorkspaceInspectionError, match="inside the research workspace"):
         inspector.read_workspace_file("outside_link.txt")
+
+
+def test_workspace_inspection_lists_but_never_reads_runtime_declared_evaluator_files(tmp_path):
+    inspector = _inspector_with_workspace(tmp_path)
+    (tmp_path / "scoring" / "targets.json").write_text('{"target": 0.4}\n', encoding="utf-8")
+    (tmp_path / "scoring" / "rule_maker_log.md").write_text("rationale\n", encoding="utf-8")
+    review_inspector = HitlWorkspaceInspector(
+        tmp_path,
+        listed_protected_paths={"scoring/eval.py", "scoring/targets.json"},
+    )
+
+    listed = json.loads(review_inspector.list_workspace("scoring"))
+    assert [entry["name"] for entry in listed["entries"]] == ["eval.py", "interface.md", "targets.json"]
+    assert listed["entries"][0]["integrity"]["sha256"]
+    assert json.loads(review_inspector.find_workspace_files("scoring/*"))["matches"] == [
+        "scoring/targets.json",
+        "scoring/eval.py",
+        "scoring/interface.md",
+    ]
+    with pytest.raises(HitlWorkspaceInspectionError, match="protected"):
+        review_inspector.read_workspace_file("scoring/eval.py")
+    assert json.loads(review_inspector.search_workspace("secret"))["matches"] == []
+    with pytest.raises(HitlWorkspaceInspectionError, match="protected"):
+        review_inspector.read_workspace_file("scoring/rule_maker_log.md")
+    with pytest.raises(HitlWorkspaceInspectionError, match="protected"):
+        review_inspector.read_workspace_file("data/.test/held_out.txt")

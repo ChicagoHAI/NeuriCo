@@ -52,7 +52,7 @@ class HitlManagerContext:
     normal source for the manager's conversational prompt context.
     """
 
-    def __init__(self, manager_dir: Path, *, context_tokens: int = 16_000):
+    def __init__(self, manager_dir: Path, *, context_tokens: int = 300_000):
         self.manager_dir = Path(manager_dir)
         self.manager_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.manager_dir / "context.jsonl"
@@ -102,6 +102,8 @@ class HitlManagerContext:
                 raise ValueError("Manager message record has an invalid role.")
             if not isinstance(record.get("content"), str):
                 raise ValueError("Manager message record requires string content.")
+            if "metadata" in record and not isinstance(record.get("metadata"), dict):
+                raise ValueError("Manager message metadata must be an object.")
         elif record_type == "function_call":
             if not isinstance(record.get("call_id"), str) or not record["call_id"].strip():
                 raise ValueError("Manager tool-call record requires call_id.")
@@ -136,21 +138,30 @@ class HitlManagerContext:
             self._records.append(record)
         return record
 
-    def append_message(self, *, role: str, content: str, speaker: str) -> Dict[str, Any]:
+    def append_message(
+        self,
+        *,
+        role: str,
+        content: str,
+        speaker: str,
+        record_id: str = "",
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         content = str(content).strip()
         if not content:
             raise ValueError("Manager conversation content must be non-empty.")
         timestamp = _now()
-        return self._append(
-            {
-                "id": _record_id("message", role, speaker, timestamp, content),
+        record = {
+                "id": record_id or _record_id("message", role, speaker, timestamp, content),
                 "timestamp": timestamp,
                 "type": "message",
                 "role": role,
                 "speaker": speaker,
                 "content": content,
-            }
-        )
+        }
+        if metadata:
+            record["metadata"] = dict(metadata)
+        return self._append(record)
 
     def append_tool_call(
         self, *, call_id: str, name: str, arguments: Dict[str, Any]
@@ -182,6 +193,16 @@ class HitlManagerContext:
     def records(self) -> List[Dict[str, Any]]:
         with self._lock:
             return [dict(record) for record in self._records]
+
+    def usage(self) -> Dict[str, int]:
+        """Return the current prompt projection size without mutating it."""
+        with self._lock:
+            used = _estimate_tokens(self._records)
+        return {
+            "used_tokens": used,
+            "limit_tokens": self.context_tokens,
+            "percent": min(100, round((used / self.context_tokens) * 100)),
+        }
 
     def messages(self) -> List[Dict[str, str]]:
         with self._lock:
@@ -403,20 +424,40 @@ class HitlManagerTranscript:
         "runtime": "system",
     }
 
-    def __init__(self, manager_dir: Path, *, context_tokens: int = 16_000):
+    def __init__(self, manager_dir: Path, *, context_tokens: int = 300_000):
         from core.hitl_manager_history import HitlManagerHistory
 
         self.context = HitlManagerContext(manager_dir, context_tokens=context_tokens)
         self.history = HitlManagerHistory(manager_dir)
 
-    def append(self, speaker: str, content: str) -> None:
+    def append(
+        self,
+        speaker: str,
+        content: str,
+        *,
+        record_id: str = "",
+        metadata: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         normalized = str(speaker).strip().lower()
         role = self._ROLES.get(normalized)
         if role is None:
             raise ValueError(f"Unsupported HITL conversation speaker: {speaker}")
-        record = self.context.append_message(role=role, content=content, speaker=normalized)
+        if normalized == "human" and metadata is None:
+            metadata = {"visibility": "human", "kind": "human_message"}
+        if record_id:
+            for existing in self.context.records():
+                if str(existing.get("id", "")) == record_id:
+                    return existing
+        record = self.context.append_message(
+            role=role,
+            content=content,
+            speaker=normalized,
+            record_id=record_id,
+            metadata=metadata,
+        )
         self.history.append(record)
         self.context.persist()
+        return record
 
     def append_tool_call(self, *, call_id: str, name: str, arguments: Dict[str, Any]) -> None:
         record = self.context.append_tool_call(call_id=call_id, name=name, arguments=arguments)
@@ -442,3 +483,15 @@ class HitlManagerTranscript:
 
     def messages(self) -> List[Dict[str, str]]:
         return self.context.messages()
+
+    def record(self, record_id: str) -> Dict[str, Any] | None:
+        wanted = str(record_id).strip()
+        if not wanted:
+            return None
+        for record in self.context.records():
+            if str(record.get("id", "")) == wanted:
+                return dict(record)
+        return None
+
+    def usage(self) -> Dict[str, int]:
+        return self.context.usage()

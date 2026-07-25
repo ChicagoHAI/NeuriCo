@@ -587,6 +587,17 @@ def test_hitl_run_does_not_select_frontier_after_its_final_scored_decision(
     assert result.iterations == [scored]
 
 
+def test_hitl_runtime_score_summary_does_not_apply_ordinary_comparator_rules(
+    tmp_path: Path,
+) -> None:
+    # A structured scorer payload reaches the manager even when it does not use
+    # ordinary AutoResearch's properties/target comparator schema.
+    assert HitlAutoResearchController._runtime_score_summary(
+        {"metric": 0.0045}, source="candidate"
+    ).valid
+    assert not HitlAutoResearchController._runtime_score_summary(None, source="candidate").valid
+
+
 def test_hitl_run_selects_frontier_only_before_another_scored_iteration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

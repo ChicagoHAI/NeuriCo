@@ -41,6 +41,50 @@ def test_plan_guard_allows_creating_the_living_plan_and_parent_directory(tmp_pat
     assert "plans/unapproved.md" in validation["issues"][0]
 
 
+def test_plan_guard_ignores_runtime_owned_empty_directories(tmp_path: Path) -> None:
+    guard = HitlWorkspaceWriteGuard.capture_public(tmp_path)
+    (tmp_path / "artifacts").mkdir()
+    (tmp_path / "results").mkdir()
+    plan = tmp_path / "plans" / "resource_finder_plan.md"
+    plan.parent.mkdir()
+    plan.write_text("new plan\n", encoding="utf-8")
+
+    assert guard.allow_only(["plans/resource_finder_plan.md"])["valid"] is True
+
+
+def test_plan_guard_rejects_public_file_inside_runtime_directory(tmp_path: Path) -> None:
+    guard = HitlWorkspaceWriteGuard.capture_public(tmp_path)
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "worker_output.json").write_text("{}\n", encoding="utf-8")
+    plan = tmp_path / "plans" / "resource_finder_plan.md"
+    plan.parent.mkdir()
+    plan.write_text("new plan\n", encoding="utf-8")
+
+    validation = guard.allow_only(["plans/resource_finder_plan.md"])
+
+    assert validation["valid"] is False
+    assert "results/worker_output.json" in validation["issues"][0]
+
+
+def test_public_guard_ignores_nested_git_bookkeeping_but_not_nested_research_files(
+    tmp_path: Path,
+) -> None:
+    nested_git = tmp_path / "code" / "reference" / ".git"
+    nested_git.mkdir(parents=True)
+    (nested_git / "index").write_text("before\n", encoding="utf-8")
+    source = tmp_path / "code" / "reference" / "model.py"
+    source.write_text("before\n", encoding="utf-8")
+
+    guard = HitlWorkspaceWriteGuard.capture_public(tmp_path)
+    (nested_git / "index").write_text("after\n", encoding="utf-8")
+    assert guard.require_unchanged()["valid"] is True
+
+    source.write_text("after\n", encoding="utf-8")
+    validation = guard.require_unchanged()
+    assert validation["valid"] is False
+    assert "code/reference/model.py" in validation["issues"][0]
+
+
 def test_proposal_context_always_installs_runtime_owned_write_gate(tmp_path: Path) -> None:
     public_file = tmp_path / "notes.md"
     public_file.write_text("unchanged\n", encoding="utf-8")

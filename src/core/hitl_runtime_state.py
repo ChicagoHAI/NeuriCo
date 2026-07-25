@@ -196,8 +196,8 @@ class HitlRuntimeState:
                     )
             record = self._copy(command)
             record.setdefault("status", "pending")
-            record.setdefault("human_question", None)
-            record.setdefault("human_replies", [])
+            record.setdefault("human_request_record_id", None)
+            record.setdefault("human_reply_record_ids", [])
             record.setdefault("manager_provider_turns", 0)
             record["created_at"] = _now()
             self._state["pending_worker_command"] = record
@@ -272,7 +272,7 @@ class HitlRuntimeState:
             command["status"] = "cancelled"
             command["cancellation_reason"] = message
             command["cancelled_at"] = _now()
-            command["human_question"] = None
+            command["human_request_record_id"] = None
             self._state["pending_worker_command"] = command
             self._save_unlocked()
             return self._copy(command)
@@ -335,42 +335,30 @@ class HitlRuntimeState:
                 self._state["pending_worker_command"] = None
                 self._save_unlocked()
 
-    def request_human_reply(
-        self, request_key: str, *, message: str, options: list[str]
-    ) -> Dict[str, Any]:
-        if not message.strip():
-            raise HitlRuntimeStateError("Human resolution question cannot be empty")
+    def request_human_reply(self, request_key: str, *, record_id: str) -> Dict[str, Any]:
+        record_id = str(record_id).strip()
+        if not record_id:
+            raise HitlRuntimeStateError("Human resolution question requires a transcript record")
         return self.update_pending_worker_command(
             request_key,
-            human_question={
-                "message": message,
-                "options": self._copy(options),
-                "requested_at": _now(),
-            },
+            human_request_record_id=record_id,
         )
 
-    def record_human_reply(self, response: str) -> Dict[str, Any]:
-        reply = str(response).strip()
-        if not reply:
-            raise HitlRuntimeStateError("Human resolution reply cannot be empty")
+    def record_human_reply(self, record_id: str) -> Dict[str, Any]:
+        record_id = str(record_id).strip()
+        if not record_id:
+            raise HitlRuntimeStateError("Human resolution reply requires a transcript record")
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             command = self._state.get("pending_worker_command")
             if not isinstance(command, dict):
                 raise HitlRuntimeStateError("No pending HITL worker command needs a human reply")
-            question = command.get("human_question")
-            if not isinstance(question, dict):
+            if not str(command.get("human_request_record_id", "")).strip():
                 raise HitlRuntimeStateError(
                     "The pending HITL worker command has no open human question"
                 )
-            command.setdefault("human_replies", []).append(
-                {
-                    "message": question.get("message", ""),
-                    "options": question.get("options", []),
-                    "response": reply,
-                }
-            )
-            command["human_question"] = None
+            command.setdefault("human_reply_record_ids", []).append(record_id)
+            command["human_request_record_id"] = None
             command["updated_at"] = _now()
             self._save_unlocked()
             return self._copy(command)

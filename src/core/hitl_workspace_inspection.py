@@ -8,10 +8,11 @@ HITL tools.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import subprocess
-from typing import Any
+from typing import Any, Iterable
 
 _HIDDEN_PATH_PARTS = {
     ".claude",
@@ -57,8 +58,18 @@ class HitlWorkspaceInspectionError(ValueError):
 class HitlWorkspaceInspector:
     """Read public workspace files through bounded, manager-safe operations."""
 
-    def __init__(self, work_dir: Path) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        *,
+        listed_protected_paths: Iterable[str] = (),
+    ) -> None:
         self.work_dir = work_dir.resolve()
+        self.listed_protected_paths = frozenset(
+            str(path).strip().replace("\\", "/")
+            for path in listed_protected_paths
+            if str(path).strip().replace("\\", "/") in _PROTECTED_RELATIVE_PATHS
+        )
 
     def list_workspace(self, path: str = ".") -> str:
         """Return one public directory listing."""
@@ -67,13 +78,17 @@ class HitlWorkspaceInspector:
         for item in sorted(
             target.iterdir(), key=lambda candidate: (not candidate.is_dir(), candidate.name)
         ):
-            if self._is_protected(item):
+            if self._is_hidden(item) or self._is_secret(item) or self._is_protected_prefix(item):
                 continue
+            if self._is_protected(item) and self._relative_path(item) not in self.listed_protected_paths:
+                continue
+            protected_listing = self._is_protected(item)
             entries.append(
                 {
                     "name": item.name + ("/" if item.is_dir() else ""),
                     "kind": "directory" if item.is_dir() else "file",
                     "size": item.stat().st_size if item.is_file() else None,
+                    **({"integrity": self._integrity_metadata(item)} if protected_listing else {}),
                 }
             )
         return self._render(
@@ -95,7 +110,10 @@ class HitlWorkspaceInspector:
         root = self._resolve_path(path, expect="directory")
         matches = []
         for item in root.glob(normalized_pattern):
-            if item.is_file() and not self._is_protected(item):
+            if item.is_file() and (
+                not self._is_protected(item)
+                or self._relative_path(item) in self.listed_protected_paths
+            ):
                 matches.append(item)
         matches.sort(key=lambda item: item.stat().st_mtime, reverse=True)
         return self._render(
@@ -325,6 +343,41 @@ class HitlWorkspaceInspector:
             or name.startswith("service_account")
             or name.endswith(_SECRET_FILE_SUFFIXES)
         )
+
+    def _is_protected_prefix(self, path: Path) -> bool:
+        try:
+            normalized = path.resolve().relative_to(self.work_dir).as_posix()
+        except ValueError:
+            return True
+        return any(
+            normalized == prefix or normalized.startswith(f"{prefix}/")
+            for prefix in _PROTECTED_PREFIXES
+        )
+
+    def _is_secret(self, path: Path) -> bool:
+        try:
+            name = path.resolve().relative_to(self.work_dir).name.lower()
+        except ValueError:
+            return True
+        return (
+            name == ".env"
+            or name.startswith(".env.")
+            or name in _SECRET_FILE_NAMES
+            or name.startswith("credentials")
+            or name.startswith("secrets")
+            or name.startswith("token")
+            or name.startswith("service-account")
+            or name.startswith("service_account")
+            or name.endswith(_SECRET_FILE_SUFFIXES)
+        )
+
+    @staticmethod
+    def _integrity_metadata(path: Path) -> dict[str, Any]:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return {"sha256": digest.hexdigest()}
 
     def _relative_path(self, path: Path) -> str:
         return path.resolve().relative_to(self.work_dir).as_posix()

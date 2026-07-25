@@ -1,0 +1,49 @@
+.graph {
+  position: relative;
+}
+
+.graph-legend {
+  position: static;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 22px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 34px 0 0 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(48, 65, 61, 0.85);
+  border-radius: 6px;
+  background: rgba(13, 18, 17, 0.94);
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+.graph-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  white-space: nowrap;
+}
+
+.graph-legend-dot {
+  display: block;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(238, 243, 241, 0.4);
+}
+
+.graph-legend-arrow {
+  color: #65756f;
+  font-size: 22px;
+  font-style: normal;
+  line-height: 13px;
+}
+
+.graph-node-meta {
+  fill: var(--muted);
+  font: 14px var(--mono);
+  pointer-events: none;
+}

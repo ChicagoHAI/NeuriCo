@@ -122,6 +122,20 @@ def isolated_scoring_workspace(
             raise HitlScoringWorkspaceError(
                 "The sealed evaluator payload contains none of the required scoring inputs."
             )
+
+        # Prepared datasets are public research inputs. They can be ignored by
+        # Git, so the detached candidate tree may not contain them even though
+        # the worker used them to produce the candidate being scored.
+        public_datasets = work_dir / "datasets"
+        if public_datasets.is_dir():
+            _copy_path(public_datasets, scorer_dir / "datasets")
+
+        # The experiment's configured environment is untracked, but ordinary
+        # scoring uses it for task dependencies. Make it available only inside
+        # this private scorer worktree; the scored source remains immutable.
+        candidate_venv = work_dir / ".venv"
+        if candidate_venv.is_dir():
+            (scorer_dir / ".venv").symlink_to(candidate_venv, target_is_directory=True)
         yield scorer_dir, evaluator_manifest_sha256
     finally:
         if created:

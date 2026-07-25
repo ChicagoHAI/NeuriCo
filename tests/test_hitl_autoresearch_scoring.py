@@ -59,6 +59,35 @@ def test_candidate_scorer_keeps_evaluator_outside_public_workspace(tmp_path):
     assert (sealed["path"] / "scoring" / "eval.py").is_file()
 
 
+def test_candidate_scorer_receives_prepared_public_datasets(tmp_path: Path) -> None:
+    evaluator = tmp_path / "scoring" / "eval.py"
+    evaluator.parent.mkdir()
+    evaluator.write_text("print('score')\n", encoding="utf-8")
+    (tmp_path / "scoring" / "targets.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "datasets").mkdir()
+    prepared = tmp_path / "datasets" / "prepared.json"
+    prepared.write_text('{"prepared": true}\n', encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("datasets/\n", encoding="utf-8")
+    _commit_public_workspace(tmp_path, "before sealing")
+    sealed = seal_scoring_files(tmp_path)
+    source_sha = _commit_public_workspace(tmp_path, "candidate before scoring")
+
+    result = run_isolated_scorer(
+        work_dir=tmp_path,
+        source_sha=source_sha,
+        sealed_dir=sealed,
+        scorer=lambda scorer_dir: {
+            "success": True,
+            "results": {"metric": 0.91},
+            "prepared_dataset": (scorer_dir / "datasets" / "prepared.json").read_text(
+                encoding="utf-8"
+            ),
+        },
+    )
+
+    assert result["prepared_dataset"] == '{"prepared": true}\n'
+
+
 def test_candidate_scoring_runs_real_evaluator_in_private_worktree(tmp_path):
     evaluator = tmp_path / "scoring" / "eval.py"
     evaluator.parent.mkdir()
@@ -90,6 +119,38 @@ Path('scoring/results.json').write_text(json.dumps({'metric': 0.91}), encoding='
     assert result["results_path"] == str(tmp_path / "scoring" / "results.json")
     assert not evaluator.exists()
     assert sealed["path"] is not None
+
+
+def test_isolated_scorer_uses_candidate_workspace_python(tmp_path: Path) -> None:
+    evaluator = tmp_path / "scoring" / "eval.py"
+    evaluator.parent.mkdir()
+    evaluator.write_text(
+        "import json\nfrom pathlib import Path\n"
+        "Path('scoring/results.json').write_text(json.dumps({'metric': 0.91}))\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "scoring" / "targets.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("workspace\n", encoding="utf-8")
+    _commit_public_workspace(tmp_path, "before sealing")
+    sealed = {"path": seal_scoring_files(tmp_path)}
+    source_sha = _commit_public_workspace(tmp_path, "public candidate before scoring")
+    candidate_python = tmp_path / ".venv" / "bin" / "python"
+    candidate_python.parent.mkdir(parents=True)
+    candidate_python.symlink_to(Path(sys.executable))
+
+    def scorer(work_dir: Path):
+        assert (work_dir / ".venv" / "bin" / "python").resolve() == candidate_python.resolve()
+        return run_scorer(work_dir, timeout=5)
+
+    result = run_isolated_scorer(
+        work_dir=tmp_path,
+        source_sha=source_sha,
+        sealed_dir=sealed["path"],
+        scorer=scorer,
+    )
+
+    assert result["success"] is True
+    assert result["results"] == {"metric": 0.91}
 
 
 def test_isolated_scorer_retains_scored_commit_until_frontier_finalization(tmp_path: Path) -> None:

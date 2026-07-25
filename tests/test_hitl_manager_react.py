@@ -36,9 +36,11 @@ class _Backend:
     def __init__(self, responses):
         self.responses = list(responses)
         self.messages = []
+        self.tools = []
 
     def send(self, messages, _tools=None):
         self.messages.append(messages)
+        self.tools.append(list(_tools or []))
         response = self.responses.pop(0)
         if isinstance(response, BaseException):
             raise response
@@ -73,6 +75,34 @@ class _TimeoutAwareBackend:
         self.kwargs = {
             "timeout_seconds": timeout_seconds,
             "disable_native_tools": disable_native_tools,
+        }
+        return LLMResponse(text="manager response")
+
+
+class _McpAwareBackend:
+    def __init__(self, backend="cli"):
+        self.backend = backend
+        self.tools = None
+        self.kwargs = None
+
+    def send(
+        self,
+        _messages,
+        tools=None,
+        *,
+        timeout_seconds,
+        disable_native_tools,
+        mcp_config_path=None,
+        allowed_mcp_tools=None,
+        use_dedicated_system_prompt=False,
+    ):
+        self.tools = list(tools or [])
+        self.kwargs = {
+            "timeout_seconds": timeout_seconds,
+            "disable_native_tools": disable_native_tools,
+            "mcp_config_path": mcp_config_path,
+            "allowed_mcp_tools": list(allowed_mcp_tools or []),
+            "use_dedicated_system_prompt": use_dedicated_system_prompt,
         }
         return LLMResponse(text="manager response")
 
@@ -119,6 +149,42 @@ def test_runtime_request_is_resolved_by_the_normal_react_tool_loop(tmp_path):
         "Runtime request: review the completed plan."
         in manager.conversation.messages()[-2]["content"]
     )
+    assert any(
+        tool.get("name") == "finalize_worker_request"
+        for tool in manager.backend.tools[0]
+    )
+
+
+def test_resolved_worker_request_is_not_eligible_for_another_manager_turn(tmp_path):
+    manager = HitlManager({}, work_dir=tmp_path, channel=_Channel())
+    manager.runtime_state.begin_worker_command(
+        {"request_key": "resolved-request", "kind": "phase_finish"}
+    )
+
+    assert manager._worker_request_is_pending("resolved-request")
+
+    manager.runtime_state.complete_worker_command(
+        "resolved-request", {"status": "approved", "context": "Plan is ready."}
+    )
+
+    assert not manager._worker_request_is_pending("resolved-request")
+    manager.stop()
+
+
+def test_ordinary_human_chat_replies_directly_without_answer_tool(tmp_path):
+    channel = _Channel()
+    manager = HitlManager({}, work_dir=tmp_path, channel=channel)
+    manager.backend = _Backend([LLMResponse(text="Hello - I am here.")])
+
+    reply = manager.chat("hello")
+    manager.stop()
+
+    assert reply == "Hello - I am here."
+    manager_reply = manager.conversation.context.records()[-1]
+    assert manager_reply["metadata"] == {"visibility": "human", "kind": "manager_reply"}
+    tool_names = {tool["name"] for tool in manager.backend.tools[0]}
+    assert "hitl-view-ideas" in tool_names
+    assert "answer_to_human" not in tool_names
 
 
 def test_hitl_manager_tools_use_provider_valid_json_schema(tmp_path):
@@ -170,6 +236,50 @@ def test_manager_exposes_selection_only_at_the_selection_boundary(tmp_path):
     names = {tool["name"] for tool in manager._tools_for_current_runtime_boundary()}
     assert "select_frontier" in names
     assert "prune_frontier" not in names
+    manager.stop()
+
+
+def test_manager_exposes_worker_finalizer_for_scoring_review(tmp_path):
+    manager = HitlManager({}, work_dir=tmp_path, channel=_Channel())
+    manager.runtime_state.begin_worker_command(
+        {
+            "request_key": "scoring-review",
+            "kind": "phase_finish",
+            "scoring_review_idea_id": "I23",
+        }
+    )
+
+    names = {tool["name"] for tool in manager._tools_for_current_runtime_boundary()}
+
+    assert "finalize_worker_request" in names
+    assert "finalize_frontier_decision" not in names
+    manager.stop()
+
+
+def test_manager_lists_only_declared_sealed_artifacts_during_rule_maker_review(tmp_path):
+    manager = HitlManager({}, work_dir=tmp_path, channel=_Channel())
+    manager.runtime_state.begin_worker_command(
+        {
+            "request_key": "rule-maker-review",
+            "kind": "phase_finish",
+            "pipeline_stage": "rule_maker",
+            "hitl_stage": "execution",
+            "related_artifacts": [
+                {"path": "scoring/eval.py", "description": "Evaluator."},
+                {"path": "scoring/targets.json", "description": "Targets."},
+                {"path": "scoring/interface.md", "description": "Public interface."},
+            ],
+        }
+    )
+
+    assert manager.listed_workspace_artifacts() == {
+        "scoring/eval.py",
+        "scoring/targets.json",
+    }
+
+    manager.runtime_state.complete_worker_command("rule-maker-review", {"status": "approved"})
+
+    assert manager.listed_workspace_artifacts() == set()
     manager.stop()
 
 
@@ -317,10 +427,20 @@ def test_manager_republishes_a_recovered_human_question_with_its_request_key(tmp
     manager.runtime_state.begin_worker_command(
         {"request_key": "recovered-human-question", "kind": "raised_idea"}
     )
+    record = manager.conversation.append(
+        "manager",
+        "Which scope should the worker use?",
+        record_id="human-request:recovered-human-question",
+        metadata={
+            "visibility": "human",
+            "kind": "human_request",
+            "request_key": "recovered-human-question",
+            "options": ["Narrow", "Broad"],
+        },
+    )
     manager.runtime_state.request_human_reply(
         "recovered-human-question",
-        message="Which scope should the worker use?",
-        options=["Narrow", "Broad"],
+        record_id=record["id"],
     )
     result = {}
 
@@ -347,11 +467,55 @@ def test_manager_republishes_a_recovered_human_question_with_its_request_key(tmp
             "request_key": "recovered-human-question",
         }
     ]
+    assert [
+        record["content"]
+        for record in manager.conversation.context.records()
+        if record.get("type") == "message" and record.get("speaker") == "manager"
+    ] == ["Which scope should the worker use?"]
 
     manager.abandon_worker_request_for_rollback("End the recovered test request.")
     worker.join(timeout=3)
     manager.stop()
 
+    assert not worker.is_alive()
+    assert "cancelled the held worker command" in str(result["error"])
+
+
+def test_manager_migrates_a_legacy_pending_human_question_to_one_transcript_record(tmp_path):
+    channel = _Channel()
+    manager = HitlManager({}, work_dir=tmp_path, channel=channel)
+    manager.runtime_state.begin_worker_command({"request_key": "legacy-question", "kind": "raised_idea"})
+    manager.runtime_state.update_pending_worker_command(
+        "legacy-question",
+        human_question={"message": "Which scope should the worker use?", "options": ["Narrow", "Broad"]},
+    )
+    result = {}
+
+    def attach_request():
+        try:
+            manager.request_worker_resolution(
+                command={"request_key": "legacy-question", "kind": "raised_idea"},
+                prompt="This should not be sent while a human question is already open.",
+            )
+        except BaseException as exc:
+            result["error"] = exc
+
+    worker = threading.Thread(target=attach_request)
+    worker.start()
+    for _ in range(30):
+        if channel.requests:
+            break
+        threading.Event().wait(0.05)
+
+    assert channel.requests[0]["request_key"] == "legacy-question"
+    pending = manager.runtime_state.pending_worker_command()
+    assert pending is not None
+    assert pending["human_request_record_id"] == "human-request:legacy-question"
+    assert pending.get("human_question") is None
+
+    manager.abandon_worker_request_for_rollback("End the legacy request test.")
+    worker.join(timeout=3)
+    manager.stop()
     assert not worker.is_alive()
     assert "cancelled the held worker command" in str(result["error"])
 
@@ -445,7 +609,10 @@ def test_web_channel_exposes_a_distinct_resolution_reply_control():
     assert emitted[1] == {
         "event": "prompt",
         "message": "Choose the evaluation scope.",
-        "options": ["Narrow", "Broad"],
+        "options": [
+            {"id": "option_1", "text": "Narrow"},
+            {"id": "option_2", "text": "Broad"},
+        ],
         "input_kind": "resolution_reply",
         "request_key": "request-1",
     }
@@ -460,11 +627,12 @@ def test_web_channel_clears_a_resolution_request_cancelled_by_runtime():
     channel.present_resolution_request("Choose the evaluation scope.", request_key="request-1")
 
     channel.clear_resolution_request()
-    channel.submit_input("Narrow", input_kind="resolution_reply")
+    with pytest.raises(ValueError, match="already been resolved"):
+        channel.submit_input("Narrow", input_kind="resolution_reply")
 
     assert replies == []
     assert emitted[-2] == {"event": "resolution_cleared"}
-    assert emitted[-1]["role"] == "system"
+    assert emitted[-1] == {"event": "workspace_changed", "section": "inbox"}
 
 
 def test_runtime_replaces_incomplete_workers_without_a_fixed_cap(tmp_path):
@@ -780,6 +948,90 @@ def test_manager_uses_provider_adapter_timeout_and_restricted_cli_tools(tmp_path
     assert backend.kwargs == {"timeout_seconds": 7.0, "disable_native_tools": True}
 
 
+def test_claude_runtime_tool_turn_uses_mcp_bridge_not_legacy_tools(tmp_path):
+    backend = _McpAwareBackend()
+    manager = HitlManager(
+        {"manager": {"hitl_manager_backend_timeout_seconds": 7}},
+        work_dir=tmp_path,
+        channel=_Channel(),
+    )
+    manager.backend = backend
+    manager._mcp_config_path.write_text("{}", encoding="utf-8")
+    manager._ensure_cli_mcp_bridge = lambda: None
+
+    response = manager._send_once(
+        [{"role": "user", "content": "resolve runtime request"}],
+        [{"name": "finalize_worker_request", "description": "Finalize", "parameters": {}}],
+    )
+    manager.stop()
+
+    assert response.text == "manager response"
+    assert backend.tools == []
+    assert backend.kwargs["timeout_seconds"] == 7.0
+    assert backend.kwargs["disable_native_tools"] is True
+    assert backend.kwargs["mcp_config_path"]
+    assert backend.kwargs["allowed_mcp_tools"] == [
+        "mcp__neurico_hitl_manager__finalize_worker_request"
+    ]
+
+
+def test_codex_runtime_tool_turn_uses_mcp_bridge_not_legacy_tools(tmp_path):
+    backend = _McpAwareBackend(backend="codex_cli")
+    manager = HitlManager(
+        {"manager": {"hitl_manager_backend_timeout_seconds": 7}},
+        work_dir=tmp_path,
+        channel=_Channel(),
+    )
+    manager.backend = backend
+    manager._mcp_config_path.write_text("{}", encoding="utf-8")
+    manager._ensure_cli_mcp_bridge = lambda: None
+
+    response = manager._send_once(
+        [{"role": "user", "content": "resolve runtime request"}],
+        [{"name": "finalize_worker_request", "description": "Finalize", "parameters": {}}],
+    )
+    manager.stop()
+
+    assert response.text == "manager response"
+    assert backend.tools == []
+    assert backend.kwargs["timeout_seconds"] == 7.0
+    assert backend.kwargs["disable_native_tools"] is True
+    assert backend.kwargs["mcp_config_path"]
+    assert backend.kwargs["allowed_mcp_tools"] == [
+        "mcp__neurico_hitl_manager__finalize_worker_request"
+    ]
+
+
+def test_hitl_manager_defaults_to_codex_backend(tmp_path):
+    manager = HitlManager(
+        {"manager": {}},
+        work_dir=tmp_path,
+        channel=_Channel(),
+    )
+
+    try:
+        assert getattr(manager.backend, "backend", "") == "codex_cli"
+    finally:
+        manager.stop()
+
+
+def test_hitl_manager_switches_between_codex_and_claude_backbones(tmp_path):
+    manager = HitlManager(
+        {"manager": {}},
+        work_dir=tmp_path,
+        channel=_Channel(),
+    )
+
+    try:
+        assert getattr(manager.backend, "backend", "") == "codex_cli"
+        manager.set_provider("claude")
+        assert getattr(manager.backend, "backend", "") == "cli"
+        manager.set_provider("codex")
+        assert getattr(manager.backend, "backend", "") == "codex_cli"
+    finally:
+        manager.stop()
+
+
 def test_plain_manager_text_cannot_abandon_a_runtime_held_worker_request(tmp_path):
     manager = HitlManager(
         {"manager": {"hitl_manager_retry_delay_seconds": 0.01}},
@@ -890,6 +1142,11 @@ def test_only_an_explicit_resolution_reply_releases_the_worker_request(tmp_path)
             "request_key": "human-resolution",
         }
     ]
+    assert any(
+        record.get("type") == "message"
+        and record.get("content") == "Which research scope should we use?"
+        for record in manager.conversation.context.records()
+    )
 
     assert (
         manager.chat("Why does the scope matter?")
@@ -902,6 +1159,11 @@ def test_only_an_explicit_resolution_reply_releases_the_worker_request(tmp_path)
     manager.stop()
 
     assert not worker.is_alive()
+    assert [
+        record["content"]
+        for record in manager.conversation.context.records()
+        if record.get("type") == "message" and record.get("speaker") == "human"
+    ] == ["Why does the scope matter?", "Use the broader scope."]
     assert result["value"]["human_feedback"] == "Use the broader scope."
     assert result["value"]["manager_feedback"] == "Revise the plan for the broader scope."
 
@@ -912,11 +1174,12 @@ def test_web_channel_rejects_a_resolution_reply_for_a_stale_request_key():
     channel.set_resolution_reply_handler(replies.append)
     channel.present_resolution_request("Choose scope.", request_key="current-request")
 
-    channel.submit_input(
-        "Use the broader scope.",
-        input_kind="resolution_reply",
-        request_key="stale-request",
-    )
+    with pytest.raises(ValueError, match="does not match the active"):
+        channel.submit_input(
+            "Use the broader scope.",
+            input_kind="resolution_reply",
+            request_key="stale-request",
+        )
 
     assert replies == []
     assert channel._pending_resolution_request["request_key"] == "current-request"

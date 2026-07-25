@@ -1426,10 +1426,6 @@ class ResearchPipelineOrchestrator:
                         scorer=lambda scorer_work_dir: run_scorer(
                             work_dir=scorer_work_dir,
                             timeout=scorer_timeout,
-                            # HITL scoring runs under the interpreter that
-                            # launched runtime, never the mutable worker
-                            # workspace virtual environment.
-                            python_executable=sys.executable,
                         ),
                         temporary_ref=f"refs/neurico/hitl/scoring/{request_key}",
                     )
