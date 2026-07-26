@@ -806,13 +806,15 @@ body.sidebar-collapsed .sidebar-collapse-toggle { display: grid; place-items: ce
 .trajectory-canvas.compact { padding: 14px; }
 .phase-overview {
   min-height: 430px;
-  display: grid;
-  grid-template-columns: repeat(15, minmax(0, 1fr));
+  display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  width: max-content;
+  min-width: 100%;
 }
 .phase-node {
-  min-height: 168px;
+  min-height: 190px;
+  flex: 0 0 190px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fbfcfc;
@@ -849,21 +851,24 @@ body.sidebar-collapsed .sidebar-collapse-toggle { display: grid; place-items: ce
 .phase-metrics {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 4px;
+  gap: 5px;
 }
 .phase-metrics span {
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 3px 4px;
+  min-width: 0;
+  padding: 4px 5px;
   font-size: 10px;
+  line-height: 1.2;
   font-weight: 800;
   color: var(--muted);
   background: var(--panel);
+  overflow-wrap: anywhere;
 }
 .phase-edge {
   height: 2px;
   background: var(--line);
-  min-width: 18px;
+  width: 34px;
 }
 .phase-context-strip {
   display: flex;

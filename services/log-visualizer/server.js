@@ -77,7 +77,7 @@ const RUN_ID = path.basename(RUN_DIR);
 const PORT = Number(process.env.PORT || 5173);
 // Bind to loopback by default so local dev works in restricted environments. Set
 // NEURICO_HOST=0.0.0.0 only when intentionally exposing the server to the network.
-const HOST = process.env.NEURICO_HOST || "127.0.0.1";
+const HOST = process.env.NEURICO_HOST || process.env.HOST || "127.0.0.1";
 
 // Multi-run platform: every run-scoped helper takes a `run = { id, dir }` context.
 // It defaults to the single run picked at startup so `node server.js <run>` (dev)
@@ -98,22 +98,34 @@ function safeFilePart(value) {
 }
 
 
+function uniquePaths(paths) {
+  const seen = new Set();
+  return paths.filter((item) => {
+    const resolved = path.resolve(item);
+    if (seen.has(resolved)) return false;
+    seen.add(resolved);
+    return true;
+  });
+}
+
+function runCandidateDirs(runId) {
+  const id = assertRunId(runId || DEFAULT_RUN.id);
+  return uniquePaths([
+    id === DEFAULT_RUN.id ? DEFAULT_RUN.dir : "",
+    path.resolve(RUNS_ROOT, id),
+    path.resolve(RUNS_ROOT, "hypogenic-runs", id),
+    path.resolve(path.dirname(DEFAULT_RUN.dir), id),
+    path.resolve(DATA_DIR, "runs", id),
+    path.resolve(DATA_DIR, id),
+  ].filter(Boolean));
+}
+
 function resolveRun(runId) {
   if (!runId) return DEFAULT_RUN;
 
   runId = assertRunId(runId);
 
-  // If the requested run is the one selected at server startup,
-  // use the exact absolute RUN_DIR passed to node server.js.
-  if (runId === DEFAULT_RUN.id) {
-    return DEFAULT_RUN;
-  }
-
-  const candidateDirs = [
-    path.resolve(RUNS_ROOT, runId),
-    path.resolve(RUNS_ROOT, "hypogenic-runs", runId),
-    path.resolve(path.dirname(DEFAULT_RUN.dir), runId),
-  ];
+  const candidateDirs = runCandidateDirs(runId);
 
   for (const dir of candidateDirs) {
     if (existsSync(dir)) {
@@ -316,6 +328,18 @@ function safeRunPath(relativePath = "", run = DEFAULT_RUN) {
     throw Object.assign(new Error("Path outside run directory"), { status: 400 });
   }
   return full;
+}
+
+function resolveRunForArtifact(runId, relativePath) {
+  const requested = runId ? assertRunId(runId) : DEFAULT_RUN.id;
+  const normalized = safeArtifactPath(relativePath);
+  const candidates = runCandidateDirs(requested);
+  for (const dir of candidates) {
+    const run = { id: requested, dir };
+    const full = safeRunPath(normalized, run);
+    if (existsSync(full)) return run;
+  }
+  return resolveRun(requested);
 }
 
 async function readJson(relativePath, fallback = null, run = DEFAULT_RUN) {
@@ -2242,6 +2266,7 @@ async function serveStatic(req, res) {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -2458,9 +2483,9 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === "/api/artifact") {
-      const run = resolveRun(url.searchParams.get("runId"));
-      const runQuery = run === DEFAULT_RUN ? "" : `&runId=${encodeURIComponent(run.id)}`;
       const relativePath = url.searchParams.get("path") || "";
+      const run = resolveRunForArtifact(url.searchParams.get("runId"), relativePath);
+      const runQuery = run === DEFAULT_RUN ? "" : `&runId=${encodeURIComponent(run.id)}`;
       const full = safeRunPath(relativePath, run);
       const info = await stat(full);
       const extension = path.extname(full).toLowerCase();
@@ -2485,7 +2510,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === "/api/file") {
       const relativePath = url.searchParams.get("path") || "";
-      const full = safeRunPath(relativePath, resolveRun(url.searchParams.get("runId")));
+      const full = safeRunPath(relativePath, resolveRunForArtifact(url.searchParams.get("runId"), relativePath));
       const data = await readFile(full);
       const extension = path.extname(full).toLowerCase();
       const type =

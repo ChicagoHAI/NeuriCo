@@ -1479,7 +1479,7 @@ function renderSteering() {
         <p class="muted">This run loaded, but no reviewable decisions were reconstructed. You can return to the Whiteboard or inspect available reports.</p>
         <div class="form-actions">
           <button type="button" data-back-whiteboard>Back to Whiteboard</button>
-          <button type="button" data-open-reports-empty>Reports & Evidence</button>
+          <button type="button" data-open-reports-empty>Evidence</button>
         </div>
       </section>`;
     root.querySelector("[data-back-whiteboard]")?.addEventListener("click", () => {
@@ -2097,8 +2097,8 @@ function renderAllReviewIssuesPanel(candidate) {
 
 async function ensurePdfJs() {
   if (pdfjsReady) return pdfjsReady;
-  pdfjsReady = import("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs").then((mod) => {
-    mod.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
+  pdfjsReady = import("/vendor/pdfjs/pdf.min.mjs").then((mod) => {
+    mod.GlobalWorkerOptions.workerSrc = "/vendor/pdfjs/pdf.worker.min.mjs";
     return mod;
   });
   return pdfjsReady;
@@ -3564,8 +3564,8 @@ function renderReports() {
     <div class="reports-page">
       <section class="reports-head">
         <div>
-          <span class="eyebrow">Reports & Evidence</span>
-          <h2>Research outputs and evidence</h2>
+          <span class="eyebrow">Evidence</span>
+          <h2>Evidence</h2>
         </div>
         <input id="report-search" type="search" placeholder="Filter outputs" value="${escapeHtml(reportQuery)}">
       </section>

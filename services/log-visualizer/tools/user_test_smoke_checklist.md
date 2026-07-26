@@ -1,18 +1,21 @@
-# User-test smoke checklist
+# Indigo one-case user-test smoke checklist
 
 Start the app with:
 
 ```sh
-NEURICO_AUTOBUILD=0 NEURICO_AUTOSPAWN_WORKER=0 npm start
+ssh bellahe@indigo.cs.uchicago.edu '~/start-neurico-user-test.sh'
+ssh -N -L 5200:127.0.0.1:5174 bellahe@indigo.cs.uchicago.edu
 ```
 
 Verify:
 
-- Run list loads without a visible error.
-- Next priority issue opens the first reviewable run, preferring completed, annotation_ready, fallback_review_ready, canonical_ready, literature_ready, then world_model_ready.
-- Open on a run card opens that run exactly once.
-- Completed and annotation_ready runs do not show an active retry control.
-- Whiteboard Review on each card opens Steering with a valid issue or a paper fallback.
-- Whiteboard Review on each top-global-crux item opens Steering for that issue.
-- View all decisions opens Steering with the all-issues panel visible, or an empty state if no issues exist.
-- Read paper opens Reports & Evidence, or shows a clear unavailable/failure state if no paper artifact is present.
+- `http://localhost:5200/api/runs` returns `logit-lens-implicit-fbb4-codex`.
+- The run appears in the queue/list and opens exactly once.
+- The status pill shows `completed`.
+- Steering opens with a valid review issue.
+- The left Paper pane renders `paper_draft/main.pdf`, not only reconstructed Abstract/Method cards.
+- A highlight/comment annotation can be loaded, edited, saved, and seen again after refresh.
+- Journey loads the expected event/log-derived trajectory for the run.
+- Journey phase cards are readable on a laptop viewport, including `Literature / evidence`, `Hypothesis generation`, and `Experiment design`.
+- Evidence loads the Main Paper and other artifacts without `/api/file` failures.
+- Refreshing `localhost:5200` preserves saved annotations for the same reviewer.
