@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neurico/world_model.schema.json",
+  "title": "NeuriCo reconstructed world model (v3 — findings as spine, everything is a decision)",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "narrative", "current_best", "crux", "hypotheses", "findings", "decisions"],
+  "properties": {
+    "schemaVersion": { "const": 3 },
+    "runId": { "type": "string", "minLength": 1 },
+    "reconstructed": { "type": "boolean" },
+    "reconstruction": {
+      "type": "object",
+      "properties": {
+        "promptVersion": { "type": "string" },
+        "model": { "type": ["string", "null"] },
+        "generatedAt": { "type": ["string", "null"] },
+        "note": { "type": "string" }
+      }
+    },
+    "updated_at": { "type": "string" },
+    "narrative": { "type": "string", "minLength": 1 },
+    "abstract": { "type": "string" },
+    "headline": { "type": "string" },
+    "keyFacts": { "type": "array", "items": { "type": "string" } },
+    "methodology": { "type": "array", "items": { "type": "string" } },
+    "future_work": { "type": "array", "items": { "type": "string" } },
+    "current_best": { "type": "string", "minLength": 1 },
+    "crux": { "type": "string", "minLength": 1 },
+    "cruxEvidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "id"],
+        "properties": {
+          "type": { "enum": ["finding", "decision", "incident"] },
+          "id": { "type": "string" }
+        }
+      }
+    },
+
+    "hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "statement", "status", "evidence"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^H" },
+          "type": { "const": "hypothesis" },
+          "statement": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["supported", "uncertain", "refuted", "alive", "dead"] },
+          "affects": { "$ref": "#/$defs/fileList" },
+          "basedOn": { "$ref": "#/$defs/fileList" },
+          "evidence": { "$ref": "#/$defs/evidenceArray" },
+          "links": { "$ref": "#/$defs/entityLinks" },
+          "updated_at": { "type": "string" }
+        }
+      }
+    },
+
+    "experiments": {
+      "description": "Domain-general INVESTIGATIONS — the structured activities the run performed to gather evidence for a hypothesis/question. NOT pipeline agent stages: one node per distinct test/analysis/derivation actually carried out (a benchmark eval, an activation-patching analysis, a formal proof, a thematic coding). The pipeline stage that executed it is provenance (`ranBy`), not the identity. Kept under the `experiments` key and `E` id prefix for back-compat.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^E" },
+          "type": { "const": "experiment" },
+          "mode": {
+            "enum": ["empirical_experiment", "computational_analysis", "formal_derivation", "literature_synthesis", "qualitative_analysis", "simulation", "observation", "other"],
+            "description": "How this investigation gathered evidence — the domain discriminator. Optional for back-compat; required by the v3 prompts for new builds."
+          },
+          "name": { "type": "string", "description": "What the investigation IS, in the run's own terms (e.g. 'GSM8K grounding eval', 'head 9.6 activation patching', 'O(n log n) tightness proof'). The node's identity for display." },
+          "design": { "type": "string", "description": "Domain-neutral: what was varied / examined / derived, and at what scope." },
+          "ranBy": { "type": "string", "description": "Provenance: which NeuriCo pipeline stage executed it (e.g. experiment_runner). Optional — NOT the identity." },
+          "agent": { "type": "string", "description": "DEPRECATED legacy pipeline-stage label (resource_finder/experiment_runner/paper_writer). Superseded by `ranBy`; retained so pre-v3 models still validate." },
+          "run_id": { "type": "string" },
+          "rationale": { "type": "string" },
+          "hypothesis": { "type": "string", "description": "The H-id(s) this investigation addresses (comma-separated for several), or '' for none." },
+          "status": { "enum": ["done", "failed", "running"] },
+          "result": { "type": "string" },
+          "affects": { "$ref": "#/$defs/fileList" },
+          "basedOn": { "$ref": "#/$defs/fileList" },
+          "links": { "$ref": "#/$defs/entityLinks" },
+          "ts": { "type": "string" }
+        }
+      }
+    },
+
+    "findings": {
+      "description": "The SPINE of the world model. Each finding is the unit of insight the run produced (or failed to produce) — and is itself gradeable: a reviewer may judge that a finding is meaningless and should not have been a finding at all. The decisions that produced a finding hang off it via decision.finding, ordered by layer (hypothesis -> method -> experiment_design -> interpretation).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "text", "kind", "evidence"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^F" },
+          "type": { "const": "finding" },
+          "text": { "type": "string", "minLength": 1 },
+          "insight": { "type": ["string", "null"], "description": "The implication / so-what — the most ultimate unit above the raw result. Optional; null when the finding carries no claim beyond the number." },
+          "kind": { "enum": ["result", "dead_end", "note"] },
+          "category": { "type": ["string", "null"] },
+          "affects": { "$ref": "#/$defs/fileList" },
+          "basedOn": { "$ref": "#/$defs/fileList" },
+          "evidence": { "$ref": "#/$defs/evidenceArray" },
+          "links": { "$ref": "#/$defs/entityLinks" },
+          "ts": { "type": "string" }
+        }
+      }
+    },
+
+    "open_questions": { "type": "array", "items": { "type": "string" } },
+
+    "decisions": {
+      "description": "Everything is a decision: a hypothesis chosen, a method picked, an experiment designed, a result interpreted, a finding accepted as a finding. Every decision belongs to exactly one finding (decision.finding = an F-id) or to the project as a whole (decision.finding = 'global'), and sits in one of four layers. importance ranks decisions WITHIN a finding so a reviewer can skip the routine tail.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "finding", "layer", "question", "options", "chosen", "shouldEngage", "shouldEngageReason", "evidence"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^D" },
+          "type": { "const": "decision" },
+          "finding": { "type": "string", "minLength": 1, "description": "The finding this fork belongs to (an F-id present in findings[]), or the literal 'global' for a project-wide fork tied to no single finding." },
+          "layer": { "enum": ["hypothesis", "method", "experiment_design", "interpretation"], "description": "Where in a finding's lifecycle the fork sits. hypothesis = what to test; method = the way (scrutinized when a result looks wrong); experiment_design = how the experiment was scoped/run; interpretation = what the result means, incl. whether it counts as a finding." },
+          "phase": { "enum": ["planning", "environment", "implementation", "experimentation", "analysis", "documentation", "resource_finding"], "description": "Legacy pipeline phase. Optional in v3 — `layer` is the primary axis. Kept for back-compat and timeline ordering." },
+          "affects": { "$ref": "#/$defs/fileList" },
+          "basedOn": { "$ref": "#/$defs/fileList" },
+          "question": { "type": "string", "minLength": 1 },
+          "options": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["text", "status", "source"],
+              "properties": {
+                "text": { "type": "string", "minLength": 1 },
+                "status": { "enum": ["chosen", "alternative"] },
+                "source": { "enum": ["artifact", "transcript", "transcript_item", "inferred"] },
+                "path": { "type": "string" }
+              }
+            }
+          },
+          "chosen": { "type": "string", "minLength": 1 },
+          "statedRationale": { "type": ["string", "null"] },
+          "inferredRationale": { "type": ["string", "null"] },
+          "by": { "const": "agent" },
+          "importance": { "enum": ["low", "medium", "high", "critical"], "description": "OPTIONAL in the world model — assigned by the Pass-2 PI reviewer (paper-reading) and carried in the review overlay (decision-review.json), not set by the extractor." },
+          "shouldEngage": { "type": "boolean" },
+          "shouldEngageReason": { "enum": ["scope_choice", "validity_risk", "cost_risk", "human_preference", "irreversible_action", "routine_no"] },
+          "sequence": { "type": "integer", "minimum": 0, "description": "Within-finding causal order index assigned by the graph/sequence review pass; lower = earlier in the reasoning chain that built the finding. Optional (set post-extraction)." },
+          "paperRef": {
+            "type": ["object", "null"],
+            "required": ["file", "anchor"],
+            "properties": {
+              "section": { "type": "string" },
+              "file": { "type": "string", "pattern": "^paper_draft/" },
+              "anchor": { "type": "string", "minLength": 1 },
+              "note": { "type": "string" }
+            }
+          },
+          "evidence": { "$ref": "#/$defs/evidenceArray" },
+          "links": { "$ref": "#/$defs/entityLinks" },
+          "relatedErrors": { "type": "array", "items": { "type": "string" } },
+          "ts": { "type": "string" }
+        }
+      }
+    },
+
+    "assessments": {
+      "description": "DORMANT in v3. Retained for back-compat and possible revival; not produced as a top-level node by the v3 pipeline. The only load-bearing signal it carried — engage_user — now lives on every decision as shouldEngage.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "engage_user"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^AS" },
+          "type": { "const": "assessment" },
+          "affects": { "$ref": "#/$defs/fileList" },
+          "basedOn": { "$ref": "#/$defs/fileList" },
+          "ts": { "type": "string" },
+          "phase": { "type": "string" },
+          "situation": { "type": "string" },
+          "uncertainty": { "type": "string" },
+          "crux": { "type": "string" },
+          "decision_pending": { "type": "string" },
+          "engage_user": { "type": "boolean" },
+          "rationale": { "type": "string" },
+          "links": { "$ref": "#/$defs/entityLinks" }
+        }
+      }
+    },
+
+    "incidents": {
+      "description": "DORMANT in v3. Failures are no longer a top-level node type; an interpretation-layer decision links to them via relatedErrors when a fault is load-bearing. Retained so the Errors view can be revived without a schema break.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "detail"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^I" },
+          "type": { "const": "incident" },
+          "affects": { "$ref": "#/$defs/fileList" },
+          "basedOn": { "$ref": "#/$defs/fileList" },
+          "ts": { "type": "string" },
+          "kind": { "enum": ["recovered", "unresolved", "self_reported"] },
+          "category": { "type": ["string", "null"] },
+          "subtype": { "type": ["string", "null"] },
+          "phase": { "type": "string" },
+          "detail": { "type": "string", "minLength": 1 },
+          "evidence": { "$ref": "#/$defs/evidenceArray" },
+          "links": { "$ref": "#/$defs/entityLinks" }
+        }
+      }
+    },
+
+    "panel_layout": { "type": "array", "items": { "type": "string" } },
+    "sections": { "type": "object" },
+    "frontPageDecisions": {
+      "type": "array",
+      "description": "About 3 (up to 5) D-ids a reviewer can soundly judge from the abstract alone — picked for a quick, broad read on run quality by a separate abstract-only selection call. Optional; the UI falls back to top decisions by importance when absent.",
+      "items": { "type": "string", "pattern": "^D" }
+    }
+  },
+  "$defs": {
+    "fileList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "entityLinks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["relation", "target", "basis", "rationale"],
+        "properties": {
+          "relation": { "enum": ["supports", "refutes", "produced_by", "motivated_by", "depends_on", "caused", "recovered_by"] },
+          "target": { "type": "string", "minLength": 1 },
+          "basis": { "enum": ["explicit", "inferred"] },
+          "rationale": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "evidenceArray": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["type", "note"],
+        "properties": {
+          "type": { "enum": ["artifact", "transcript_item"] },
+          "path": { "type": "string" },
+          "itemId": { "type": ["string", "null"] },
+          "note": { "type": "string" },
+          "anchor": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

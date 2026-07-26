@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SteerBench Annotator</title>
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/autoresearch.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <img class="mark" src="/avatar.jpg" alt="NeuriCo logo" />
+          <div class="brand-copy">
+              <h1>SteerBench</h1>
+              <p>Annotator</p>
+          </div>
+        </div>
+        <button id="steering-sidebar-toggle" class="sidebar-collapse-toggle" type="button" aria-label="Expand sidebar" aria-expanded="false">
+          <span class="sidebar-toggle-icon" aria-hidden="true">☰</span>
+          <span class="sidebar-label">Expand sidebar</span>
+        </button>
+        <nav class="nav" aria-label="Views">
+          <button class="nav-item active" data-view="overview" title="Whiteboard"><span class="nav-icon" aria-hidden="true">W</span><span class="sidebar-label">Whiteboard</span></button>
+          <button class="nav-item" data-view="steering" title="Steering"><span class="nav-icon" aria-hidden="true">S</span><span class="sidebar-label">Steering</span></button>
+          <button class="nav-item" data-view="trajectory" title="Journey"><span class="nav-icon" aria-hidden="true">J</span><span class="sidebar-label">Journey</span></button>
+          <button class="nav-item" data-view="artifacts" title="Evidence"><span class="nav-icon" aria-hidden="true">E</span><span class="sidebar-label">Evidence</span></button>
+          <button class="nav-item" data-view="autoresearch" data-autoresearch-tab hidden title="AutoResearch"><span class="nav-icon" aria-hidden="true">R</span><span class="sidebar-label">AutoResearch</span></button>
+          <button class="nav-item" data-view="advanced" title="Advanced"><span class="nav-icon" aria-hidden="true">⋯</span><span class="sidebar-label">Advanced</span></button>
+        </nav>
+        <div class="sidebar-foot">
+          <button id="reviewer-toggle" class="reviewer-toggle" type="button" aria-pressed="false">
+            <span class="reviewer-toggle-state">Off</span>
+            <span class="reviewer-toggle-label">Reviewer's take</span>
+          </button>
+          <p class="reviewer-toggle-hint">Show the AI reviewer's judgments (trust, should-pause, critique, flagged issues).</p>
+        </div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-left">
+            <button id="back-to-list" class="back-to-list" type="button" hidden>← All Ideas / Submissions</button>
+            <div>
+              <p class="eyebrow" id="run-eyebrow">SteerBench Annotator</p>
+              <h2 id="run-title">Loading...</h2>
+            </div>
+          </div>
+          <div class="topbar-right">
+            <div class="global-ask" id="global-ask" hidden>
+              <select id="ask-scope" aria-label="Ask/Search scope">
+                <option value="run">Ask this run</option>
+                <option value="checkpoint">Ask selected checkpoint</option>
+                <option value="artifact">Ask selected artifact</option>
+                <option value="stage">Ask this Journey stage</option>
+              </select>
+              <input id="ask-input" type="search" autocomplete="off" placeholder="Ask whole run…">
+              <div id="ask-results" class="ask-results" hidden></div>
+            </div>
+            <button id="user-chip" class="user-chip" type="button" hidden></button>
+            <div class="status-pill" id="run-status">Loading</div>
+          </div>
+        </header>
+        <section id="view-root" class="view"></section>
+      </main>
+    </div>
+    <script src="/app.js?v=steerbench-annotator-v1" type="module"></script>
+</body>
+</html>

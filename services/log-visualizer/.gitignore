@@ -1,0 +1,19 @@
+node_modules/
+.DS_Store
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Generated run outputs and reviewer annotations (built locally, not versioned)
+data/
+
+# Local historical backups
+public/*.bak*
+public/*~
+*.bak*
+*~
+
+# Full local user-test runs may contain model caches, nested repos, and large results.
+user-test-runs/
