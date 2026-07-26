@@ -10,6 +10,9 @@ let selectedArtifactPath = "";
 let reportQuery = "";
 let selectedJourneyStage = 0;
 let selectedJourneyNodeId = "";
+let selectedJourneyPhaseId = "";
+let selectedJourneyTab = "summary";
+let selectedProvenanceNodeId = "";
 let journeyFilter = "all";
 let journeyZoom = 1;
 const collapsedJourneyPhases = new Set();
@@ -17,6 +20,8 @@ let showAllSteeringCandidates = false;
 let developerMode = new URLSearchParams(location.search).get("dev") === "1";
 let assistantDraft = null;
 let assistantResponse = null;
+let assistantDraftSaving = false;
+let annotationSaving = false;
 let selectedReviewSource = "ranked_queue";
 let openedJourney = false;
 let openedReports = false;
@@ -54,6 +59,29 @@ const PROCESSING_STATUSES = [
   "annotation_ready",
   "completed",
   "failed",
+];
+const REVIEWABLE_STATUS_ORDER = [
+  "completed",
+  "annotation_ready",
+  "fallback_review_ready",
+  "canonical_ready",
+  "literature_ready",
+  "world_model_ready",
+];
+const RETRY_ALLOWED_STATUSES = new Set(["failed", "world_model_failed", "git_sync_failed"]);
+const RUN_LEVEL_ACTION_UNAVAILABLE = "Run-level review completion is not available in this user-test build.";
+const RUN_LEVEL_UNSUPPORTED_TITLES = {
+  markReviewed: RUN_LEVEL_ACTION_UNAVAILABLE,
+  skipLowQuality: "Run-level low-quality skipping is not available in this user-test build.",
+  needsExpert: "Run-level expert review routing is not available in this user-test build.",
+  assignSecond: "Run-level second-rater assignment is not available in this user-test build.",
+};
+const SUPPORTED_VIEWS = new Set(["overview", "steering", "trajectory", "artifacts", "autoresearch", "advanced"]);
+const ASSISTANT_PROMPTS = [
+  "Why is this issue important?",
+  "What evidence supports this?",
+  "What alternatives did NeuriCo have?",
+  "Turn my comment into annotation",
 ];
 
 const STEERING_DECISIONS = ["", "continue", "update_user", "interrupt_redirect", "request_clarification"];
@@ -131,6 +159,47 @@ function runQuery(prefix = "&") {
 
 function withRun(body) {
   return { ...body, runId: currentRunId, user: userEmail, raterId: userEmail || "anonymous" };
+}
+
+function navDebug(action, extra = {}) {
+  console.debug("[nav]", {
+    action,
+    currentScreen,
+    currentView,
+    runId: run?.runId || currentRunId || "",
+    selectedTargetKey,
+    ...extra,
+  });
+}
+
+function showNotice(message, type = "info") {
+  if (!message) return;
+  let slot = document.querySelector("[data-global-notice]");
+  if (!slot) {
+    slot = document.createElement("div");
+    slot.className = "notice";
+    slot.dataset.globalNotice = "true";
+    slot.setAttribute("role", "status");
+    slot.setAttribute("aria-live", "polite");
+    document.querySelector(".main")?.prepend(slot);
+  }
+  slot.className = `notice notice-${type}`;
+  slot.textContent = message;
+  window.clearTimeout(showNotice.timer);
+  showNotice.timer = window.setTimeout(() => {
+    if (slot.textContent === message) slot.textContent = "";
+  }, 4500);
+}
+
+function sidebarNotice() {
+  let slot = document.querySelector("[data-sidebar-notice]");
+  if (!slot) {
+    slot = document.createElement("p");
+    slot.className = "sidebar-notice";
+    slot.dataset.sidebarNotice = "true";
+    document.querySelector(".nav")?.before(slot);
+  }
+  return slot;
 }
 
 function reviewHeavyView() {
@@ -255,13 +324,20 @@ function artifactLabel(refOrPath) {
 }
 
 function paperPdfUrl() {
-  return run?.paperPdf ? `/api/file?path=${encodeURIComponent(run.paperPdf)}${runQuery()}` : "";
+  const path = availablePaperPath();
+  return path && /\.pdf$/i.test(path) ? `/api/file?path=${encodeURIComponent(path)}${runQuery()}` : "";
+}
+
+function availablePaperPath() {
+  if (run?.paperPdf) return run.paperPdf;
+  const artifacts = [...(run?.artifacts || []), ...(run?.outputArtifacts || [])];
+  const paper = artifacts.find((artifact) => /^paper_draft\/main\.pdf$/i.test(artifactPath(artifact)))
+    || artifacts.find((artifact) => /(^|\/)(main|paper|report).*\.(pdf|md|tex)$/i.test(artifactPath(artifact)));
+  return artifactPath(paper);
 }
 
 function mainPaperPath() {
-  if (run?.paperPdf) return run.paperPdf;
-  const paper = (run?.artifacts || []).find((artifact) => /(^|\/)(main|paper|report).*\.(pdf|md|tex)$/i.test(artifactPath(artifact)));
-  return artifactPath(paper) || "paper_draft/main.pdf";
+  return availablePaperPath() || "paper_draft/main.pdf";
 }
 
 function firstSentence(text) {
@@ -284,6 +360,19 @@ function canonicalEvents() {
   const data = run?.canonicalTrajectory || {};
   if (Array.isArray(data.events)) return data.events;
   if (Array.isArray(data.traceEvents)) return data.traceEvents;
+  if (Array.isArray(run?.transcriptFlow?.nodes)) {
+    return run.transcriptFlow.nodes.map((node, index) => ({
+      ...node,
+      event_id: node.id || `transcript-${index + 1}`,
+      event_type: node.eventType || node.kind || node.type || "transcript_event",
+      stage: node.group || node.kind || "log",
+      summary: node.label || node.detail || node.outputPreview || "",
+      _text: node.detail || node.outputPreview || node.label || "",
+      sequence: node.sequence ?? index,
+      source_log_path: node.source || "",
+      rawPreview: node.outputPreview || "",
+    }));
+  }
   return [];
 }
 
@@ -447,7 +536,7 @@ function priorityCandidates(includeAll = false) {
 }
 
 function selectedCandidate() {
-  const candidates = priorityCandidates();
+  const candidates = priorityCandidates(true);
   if (selectedTargetKey) {
     const exact = candidates.find((candidate) => candidate.key === selectedTargetKey || candidate.legacyKey === selectedTargetKey);
     if (exact) return exact;
@@ -458,17 +547,22 @@ function selectedCandidate() {
       return artifactCandidate(selectedTargetKey.slice("artifact:".length));
     }
   }
-  return candidates[0] || artifactCandidate(mainPaperPath());
+  return priorityCandidates()[0] || candidates[0] || null;
 }
 
 function applyCandidatePaperAnchor(key) {
-  const candidate = priorityCandidates(true).find((item) => item.key === key || item.legacyKey === key);
-  const section = candidate?.decision?.paperRef?.section || candidate?.decision?.affectedOutput || "";
-  if (!section) return;
-  const normalized = String(section).toLowerCase().replace(/\s+/g, "_");
-  const known = outputSections().map(([sectionKey]) => sectionKey);
-  selectedRegion = known.includes(normalized) ? normalized : known.find((item) => item === normalized.replace(/s$/, "")) || selectedRegion;
-  selectedAnnotationAnchor = sectionAnchor();
+  try {
+    const candidate = priorityCandidates(true).find((item) => item.key === key || item.legacyKey === key);
+    const section = candidate?.decision?.paperRef?.section || candidate?.decision?.affectedOutput || "";
+    if (!candidate || !section) return;
+    const normalized = String(section).toLowerCase().replace(/\s+/g, "_");
+    const known = outputSections().map(([sectionKey]) => sectionKey);
+    selectedRegion = known.includes(normalized) ? normalized : known.find((item) => item === normalized.replace(/s$/, "")) || selectedRegion;
+    selectedAnnotationAnchor = sectionAnchor();
+  } catch (error) {
+    console.error("Could not apply candidate paper anchor", error);
+    showNotice("Could not select the paper anchor for this issue.", "error");
+  }
 }
 
 function manualCandidate(key) {
@@ -522,11 +616,17 @@ function updateChrome() {
   userChip.hidden = !userEmail;
   userChip.textContent = userEmail || "";
   runEyebrow.textContent = inRun ? "SteerBench Annotator" : "SteerBench Annotator";
+  const sideNote = sidebarNotice();
+  sideNote.textContent = inRun ? "" : "Open a run first.";
+  sideNote.hidden = Boolean(inRun);
   navButtons.forEach((button) => {
     const auto = button.dataset.autoresearchTab;
     if (auto) button.hidden = !run?.autoresearch?.detected;
     if (button.dataset.view === "advanced") button.hidden = !developerMode;
-    button.classList.toggle("active", button.dataset.view === currentView);
+    button.disabled = !inRun;
+    button.title = inRun ? button.querySelector(".sidebar-label")?.textContent || button.dataset.view : "Open a run first.";
+    button.setAttribute("aria-disabled", inRun ? "false" : "true");
+    button.classList.toggle("active", Boolean(inRun && button.dataset.view === currentView));
   });
   if (!inRun) {
     title.textContent = currentScreen === "entry" ? "Sign in" : "Choose a run";
@@ -588,8 +688,11 @@ async function renderRunList() {
   root.innerHTML = `<section class="panel"><p class="muted">Loading runs...</p></section>`;
   let runs = [];
   try {
-    runs = await (await fetch("/api/runs")).json();
+    const response = await fetch("/api/runs");
+    if (!response.ok) throw new Error(`GET /api/runs failed with ${response.status}`);
+    runs = await response.json();
   } catch (error) {
+    console.error("Could not load runs", error);
     root.innerHTML = `<section class="panel"><h3>Could not load runs</h3><p>${escapeHtml(error.message)}</p></section>`;
     return;
   }
@@ -611,13 +714,41 @@ async function renderRunList() {
         ${runs.map((item) => renderRunCard(item)).join("") || `<p class="muted">No runs found.</p>`}
       </div>
     </section>`;
-  root.querySelectorAll("[data-open-run]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      if (event.target.closest("summary, details")) return;
-      openRun(button.dataset.openRun);
+  root.querySelector("[data-next-priority]")?.addEventListener("click", async () => {
+    const target = nextPriorityRun(runs);
+    if (!target) {
+      showRunListMessage("No runs are available to review.");
+      return;
+    }
+    await runAction(() => openRun(target.runId), "Could not open the next priority run.");
+  });
+  [
+    ["[data-mark-reviewed]", RUN_LEVEL_UNSUPPORTED_TITLES.markReviewed],
+    ["[data-skip-low-quality]", RUN_LEVEL_UNSUPPORTED_TITLES.skipLowQuality],
+    ["[data-needs-expert]", RUN_LEVEL_UNSUPPORTED_TITLES.needsExpert],
+    ["[data-assign-second]", RUN_LEVEL_UNSUPPORTED_TITLES.assignSecond],
+  ].forEach(([selector, title]) => {
+    const button = root.querySelector(selector);
+    if (!button) return;
+    button.disabled = true;
+    button.title = title;
+    button.setAttribute("aria-disabled", "true");
+  });
+  root.querySelectorAll(".run-card[data-open-run]").forEach((card) => {
+    card.addEventListener("click", async (event) => {
+      if (event.target.closest("button, summary, details")) return;
+      await runAction(() => openRun(card.dataset.openRun), "Could not open the selected run.");
     });
-    button.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") openRun(button.dataset.openRun);
+    card.addEventListener("keydown", async (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      await runAction(() => openRun(card.dataset.openRun), "Could not open the selected run.");
+    });
+  });
+  root.querySelectorAll(".run-card-actions [data-open-run]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await runAction(() => openRun(button.dataset.openRun), "Could not open the selected run.");
     });
   });
   root.querySelectorAll("[data-retry-run]").forEach((button) => {
@@ -627,18 +758,63 @@ async function renderRunList() {
       const label = button.textContent;
       button.textContent = "Retrying...";
       try {
-        await fetch("/api/retry-processing", {
+        const response = await fetch("/api/retry-processing", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ runId: button.dataset.retryRun }),
         });
+        if (!response.ok) throw new Error(`POST /api/retry-processing failed with ${response.status}`);
         button.textContent = "Retry started";
-      } catch {
+      } catch (error) {
+        console.error("Could not retry processing", error);
+        showRunListMessage(error.message || "Could not retry processing.");
         button.textContent = label;
         button.disabled = false;
       }
     });
   });
+}
+
+function nextPriorityRun(runs) {
+  if (!runs.length) return null;
+  for (const wanted of REVIEWABLE_STATUS_ORDER) {
+    const match = runs.find((item) => (item.runStatus?.status || "raw_only") === wanted);
+    if (match) return match;
+  }
+  return runs[0];
+}
+
+async function runAction(action, fallbackMessage) {
+  try {
+    await action();
+  } catch (error) {
+    console.error(fallbackMessage, error);
+    showRunListMessage(error.message || fallbackMessage);
+  }
+}
+
+function showRunListMessage(message) {
+  const head = root.querySelector(".run-list-head") || root.querySelector(".panel");
+  if (!head) return;
+  let slot = root.querySelector("[data-run-list-message]");
+  if (!slot) {
+    slot = document.createElement("p");
+    slot.className = "muted run-list-message";
+    slot.dataset.runListMessage = "true";
+    head.append(slot);
+  }
+  slot.textContent = message;
+}
+
+function showInlineError(message) {
+  let slot = root.querySelector("[data-inline-error]");
+  if (!slot) {
+    slot = document.createElement("section");
+    slot.className = "panel inline-error";
+    slot.dataset.inlineError = "true";
+    root.prepend(slot);
+  }
+  slot.innerHTML = `<p>${escapeHtml(message)}</p>`;
 }
 
 function statusRank(item) {
@@ -680,7 +856,11 @@ function reviewItemCount(item) {
 function renderRunCard(item) {
   const commit = item.commit ? String(item.commit).slice(0, 12) : "none";
   const lastProcessed = item.lastProcessedAt ? new Date(item.lastProcessedAt).toLocaleString() : "not processed";
-  const retryLabel = item.runStatus?.status === "git_sync_failed" ? "Retry sync" : "Retry processing";
+  const currentStatus = item.runStatus?.status || "raw_only";
+  const retryLabel = currentStatus === "git_sync_failed" ? "Retry sync" : "Retry processing";
+  const retryButton = RETRY_ALLOWED_STATUSES.has(currentStatus)
+    ? `<button type="button" data-retry-run="${escapeHtml(item.runId)}">${escapeHtml(retryLabel)}</button>`
+    : "";
   return `
     <article class="run-card" role="button" tabindex="0" data-open-run="${escapeHtml(item.runId)}">
       <div class="run-card-head">
@@ -696,7 +876,7 @@ function renderRunCard(item) {
       </div>
       <div class="run-card-actions">
         <button type="button" data-open-run="${escapeHtml(item.runId)}">Open</button>
-        <button type="button" data-retry-run="${escapeHtml(item.runId)}">${escapeHtml(retryLabel)}</button>
+        ${retryButton}
       </div>
       <details class="run-card-details">
         <summary>Details</summary>
@@ -711,6 +891,8 @@ function renderRunCard(item) {
 }
 
 async function openRun(runId) {
+  if (!runId) throw new Error("No run id provided.");
+  navDebug("open-run:before", { runId });
   currentRunId = runId;
   currentScreen = "viewer";
   currentView = "overview";
@@ -722,14 +904,28 @@ async function openRun(runId) {
   root.innerHTML = `<section class="panel"><p class="muted">Loading run...</p></section>`;
   updateChrome();
   try {
-    run = await (await fetch(`/api/run?runId=${encodeURIComponent(runId)}&user=${encodeURIComponent(userEmail || "")}`)).json();
+    const response = await fetch(`/api/run?runId=${encodeURIComponent(runId)}&user=${encodeURIComponent(userEmail || "")}`);
+    if (!response.ok) {
+      let detail = "";
+      try {
+        detail = (await response.json()).error || "";
+      } catch {
+        detail = await response.text();
+      }
+      throw new Error(detail || `GET /api/run failed with ${response.status}`);
+    }
+    run = await response.json();
   } catch (error) {
+    console.error(`Failed to load run ${runId}`, error);
     root.innerHTML = `<section class="panel"><h3>Failed to load run</h3><p>${escapeHtml(error.message)}</p></section>`;
+    showNotice("Request failed while opening the run.", "error");
     return;
   }
   title.textContent = researchState().title || run.idea?.title || run.runId || "Run";
   selectedArtifactPath = mainPaperPath();
   setRunStatus();
+  navDebug("open-run:after");
+  showNotice("Run opened.");
   render();
 }
 
@@ -742,6 +938,10 @@ function render() {
   if (currentView === "artifacts") return renderReports();
   if (currentView === "autoresearch") return renderAutoResearch();
   if (currentView === "advanced") return developerMode ? renderAdvanced() : renderWhiteboard();
+  console.error("Unsupported view", currentView);
+  showNotice("Navigation unavailable for this view.", "error");
+  currentView = "overview";
+  return renderWhiteboard();
 }
 
 function statusCard() {
@@ -919,6 +1119,11 @@ function relatedFiles(candidate) {
 
 async function createManualIssue(kind = "manual_crux", stage = "") {
   if (!run) return;
+  const current = selectedCandidate();
+  if (kind === "expert_review" && current && hasUnresolvedEscalation(current, "expert_escalation")) {
+    showNotice("This issue is already escalated.", "warning");
+    return;
+  }
   const defaultComment = kind === "llm_missed_issue"
     ? "LLM missed an issue that should be reviewed."
     : kind === "expert_review"
@@ -983,11 +1188,21 @@ async function createManualIssue(kind = "manual_crux", stage = "") {
     createdAt: now,
     updatedAt: now,
   };
-  await fetch("/api/annotation", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(withRun(payload)),
-  });
+  try {
+    const response = await fetch("/api/annotation", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(withRun(payload)),
+    });
+    if (!response.ok) throw new Error(`POST /api/annotation failed with ${response.status}`);
+  } catch (error) {
+    console.error("Could not create manual issue", error);
+    const message = error.message || "Could not create manual issue.";
+    const saveStatus = root.querySelector("#save-status");
+    if (saveStatus) saveStatus.textContent = message;
+    else showInlineError(message);
+    return;
+  }
   selectedTargetKey = key;
   currentView = "steering";
   await openRun(currentRunId);
@@ -1125,11 +1340,49 @@ function renderQueueChain(candidate) {
     </article>`;
 }
 
+function candidateForWhiteboardTarget(target) {
+  const candidates = priorityCandidates(true);
+  const found = candidates.find((candidate) => {
+    const text = `${candidate.title} ${candidate.summary} ${affectedOutput(candidate)} ${reviewReason(candidate)}`.toLowerCase();
+    if (target === "hypothesis") return /hypothesis|idea|direction|research|method/.test(text);
+    if (target === "claim") return /claim|support|abstract|conclusion|headline/.test(text);
+    if (target === "result") return /result|accuracy|metric|evaluation/.test(text);
+    if (target === "abstract") return /abstract|paper|claim/.test(text);
+    return false;
+  });
+  return found || candidates[0] || null;
+}
+
+function openCandidateInSteering(candidate, action = "open-candidate") {
+  if (!candidate?.key) {
+    showNotice("No review candidate is available for this run.", "warning");
+    return false;
+  }
+  selectedTargetKey = candidate.key;
+  applyCandidatePaperAnchor(selectedTargetKey);
+  selectedReviewSource = "ranked_queue";
+  sidebarExpandedOverride = false;
+  currentScreen = "viewer";
+  currentView = "steering";
+  navDebug(`${action}:after-select`);
+  render();
+  return true;
+}
+
 function wireWhiteboard() {
   root.querySelectorAll("[data-read-report]").forEach((button) => button.addEventListener("click", () => {
-    selectedArtifactPath = mainPaperPath();
+    navDebug("read-paper:before");
+    const path = availablePaperPath();
+    if (!path) {
+      showNotice("No paper artifact is available for this run.", "warning");
+      showInlineError("No paper artifact is available for this run.");
+      navDebug("read-paper:unavailable");
+      return;
+    }
+    selectedArtifactPath = path;
     openedReports = true;
     currentView = "artifacts";
+    navDebug("read-paper:after");
     render();
   }));
   root.querySelector("[data-toggle-abstract]")?.addEventListener("click", () => {
@@ -1146,33 +1399,28 @@ function wireWhiteboard() {
     renderWhiteboard();
   });
   root.querySelectorAll("[data-review-whiteboard-target]").forEach((button) => button.addEventListener("click", () => {
+    navDebug("whiteboard-review:before", { target: button.dataset.reviewWhiteboardTarget });
     const target = button.dataset.reviewWhiteboardTarget;
     selectedRegion = target === "result" ? "results" : target === "hypothesis" ? "method" : "abstract";
-    const candidates = priorityCandidates(true);
-    const found = candidates.find((candidate) => {
-      const text = `${candidate.title} ${candidate.summary} ${affectedOutput(candidate)}`.toLowerCase();
-      if (target === "hypothesis") return /hypothesis|idea|direction|research/.test(text);
-      if (target === "claim") return /claim|support|abstract|conclusion/.test(text);
-      if (target === "result") return /result|accuracy|metric|evaluation/.test(text);
-      return /abstract|paper|claim/.test(text);
-    }) || candidates[0];
-    selectedTargetKey = found?.key || "";
-    currentView = "steering";
-    render();
+    if (!openCandidateInSteering(candidateForWhiteboardTarget(target), "whiteboard-review")) {
+      showInlineError("No review candidate is available for this run.");
+    }
   }));
   root.querySelectorAll("[data-open-steering]").forEach((button) => button.addEventListener("click", () => {
-    selectedTargetKey = priorityCandidates()[0]?.key || "";
-    sidebarExpandedOverride = false;
-    currentView = "steering";
-    render();
+    openCandidateInSteering(priorityCandidates()[0], "open-steering");
   }));
   root.querySelectorAll("[data-view-all-decisions]").forEach((button) => button.addEventListener("click", () => {
+    navDebug("view-all-decisions:before");
+    const candidate = priorityCandidates(true)[0];
+    if (!candidate) {
+      showNotice("No review decisions are available for this run.", "warning");
+      showInlineError("No review decisions are available for this run.");
+      navDebug("view-all-decisions:unavailable");
+      return;
+    }
     showAllReviewIssues = true;
     showAllSteeringCandidates = true;
-    selectedTargetKey = priorityCandidates(true)[0]?.key || "";
-    sidebarExpandedOverride = false;
-    currentView = "steering";
-    render();
+    openCandidateInSteering(candidate, "view-all-decisions");
   }));
   root.querySelector("[data-open-journey]")?.addEventListener("click", () => {
     selectedReviewSource = "journey_escalation";
@@ -1182,12 +1430,12 @@ function wireWhiteboard() {
     render();
   });
   root.querySelectorAll("[data-open-target]").forEach((button) => button.addEventListener("click", () => {
-    selectedTargetKey = button.dataset.openTarget;
-    applyCandidatePaperAnchor(selectedTargetKey);
-    selectedReviewSource = "ranked_queue";
-    sidebarExpandedOverride = false;
-    currentView = "steering";
-    render();
+    navDebug("whiteboard-open-target:before", { target: button.dataset.openTarget });
+    const key = button.dataset.openTarget;
+    const candidate = priorityCandidates(true).find((item) => item.key === key || item.legacyKey === key);
+    if (!openCandidateInSteering(candidate, "whiteboard-open-target")) {
+      showInlineError("No review candidate is available for this run.");
+    }
   }));
   root.querySelectorAll("[data-open-report]").forEach((button) => button.addEventListener("click", () => {
     selectedArtifactPath = button.dataset.openReport;
@@ -1223,6 +1471,27 @@ function sectionText(key) {
 
 function renderSteering() {
   const candidate = selectedCandidate();
+  if (!candidate) {
+    root.innerHTML = `
+      <section class="panel empty-state">
+        <span class="eyebrow">Steering</span>
+        <h3>No review decisions are available for this run.</h3>
+        <p class="muted">This run loaded, but no reviewable decisions were reconstructed. You can return to the Whiteboard or inspect available reports.</p>
+        <div class="form-actions">
+          <button type="button" data-back-whiteboard>Back to Whiteboard</button>
+          <button type="button" data-open-reports-empty>Reports & Evidence</button>
+        </div>
+      </section>`;
+    root.querySelector("[data-back-whiteboard]")?.addEventListener("click", () => {
+      currentView = "overview";
+      render();
+    });
+    root.querySelector("[data-open-reports-empty]")?.addEventListener("click", () => {
+      currentView = "artifacts";
+      render();
+    });
+    return;
+  }
   selectedTargetKey = candidate.key;
   root.innerHTML = `
     <div class="steering-page">
@@ -1616,10 +1885,13 @@ function renderReviewAssistant(candidate, anno) {
     <section class="review-assistant">
       <h4>Review Assistant</h4>
       <div class="assistant-prompts">
-        ${["Why is this issue important?", "What evidence supports this?", "What alternatives did NeuriCo have?", "What should I check?", "Turn my comment into annotation"].map((prompt) => `<button type="button" data-assistant-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}
+        ${ASSISTANT_PROMPTS.map((prompt) => `<button type="button" data-assistant-prompt="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`).join("")}
       </div>
       <textarea id="assistant-input" rows="3" placeholder="Ask about this issue or describe your concern..."></textarea>
-      <div class="form-actions compact-row"><button type="button" data-create-assistant-draft>Save this as draft</button></div>
+      <div class="form-actions compact-row">
+        <button type="button" data-create-assistant-draft ${assistantDraftSaving ? "disabled" : ""}>Save this as draft</button>
+        <span id="assistant-status"></span>
+      </div>
       ${response ? `<article class="assistant-answer">
         <h5>${escapeHtml(response.title)}</h5>
         ${response.lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}
@@ -1636,7 +1908,7 @@ function renderReviewAssistant(candidate, anno) {
         <div class="form-actions">
           <button type="button" data-accept-assistant-draft>Accept</button>
           <button type="button" data-edit-assistant-draft>Edit</button>
-          <button type="button" data-save-assistant-draft>Save</button>
+          <button type="button" data-save-assistant-draft ${assistantDraftSaving ? "disabled" : ""}>Save</button>
         </div>
       </article>` : ""}
     </section>`;
@@ -1996,7 +2268,7 @@ function handleSelectionAction(candidate, action) {
   if (action === "ask") {
     const input = root.querySelector("#assistant-input");
     if (input) input.value = `Ask about: ${compactText(currentAnchor().selectedText || selectedSectionLabel(), 120)}`;
-    createAssistantResponse(candidate, "What should I check?");
+    createAssistantResponse(candidate, "What evidence supports this?");
     return;
   }
   if (action === "escalate") {
@@ -2091,7 +2363,7 @@ function wireSteering(candidate) {
       input.value = `Ask about the ${selectedSectionLabel()} section`;
       input.focus();
     }
-    createAssistantResponse(candidate, "What should I check?");
+    createAssistantResponse(candidate, "What evidence supports this?");
   }));
   root.querySelectorAll("[data-escalate-section]").forEach((button) => button.addEventListener("click", () => {
     selectedReviewSource = "section_comment";
@@ -2227,8 +2499,18 @@ function wireSteering(candidate) {
     root.querySelector("#assistant-input")?.focus();
   });
   root.querySelector("[data-save-assistant-draft]")?.addEventListener("click", async () => {
-    applyAssistantDraft();
-    await saveAnnotation(candidate, "benchmark");
+    if (assistantDraftSaving) return;
+    if (!assistantDraft && !createAssistantDraft(candidate)) return;
+    assistantDraftSaving = true;
+    const status = root.querySelector("#assistant-status");
+    if (status) status.textContent = "Saving draft...";
+    try {
+      applyAssistantDraft();
+      await saveAnnotation(candidate, "benchmark");
+      showNotice("Draft saved.");
+    } finally {
+      assistantDraftSaving = false;
+    }
   });
   root.querySelector("[data-include-benchmark]")?.addEventListener("click", () => {
     root.querySelector('[name="includeInBenchmark"]').checked = true;
@@ -2253,11 +2535,19 @@ function markNeedsExpert(message) {
   if (adjudication) adjudication.value = "pending";
   const status = root.querySelector("#save-status");
   if (status) status.textContent = message;
+  showNotice(message);
 }
 
 function createAssistantDraft(candidate) {
   const input = root.querySelector("#assistant-input");
   const text = input?.value || root.querySelector('[name="reviewerComment"]')?.value || "";
+  const status = root.querySelector("#assistant-status");
+  if (!text.trim()) {
+    if (status) status.textContent = "Enter a comment before saving a draft.";
+    showNotice("Enter a comment before saving a draft.", "warning");
+    input?.focus();
+    return false;
+  }
   const lower = text.toLowerCase();
   const summary = reviewSummaryFor(candidate);
   const needsExpertReview = /expert|uncertain|not sure|unclear|gold|adjudicat/.test(lower);
@@ -2284,9 +2574,15 @@ function createAssistantDraft(candidate) {
     ],
   };
   renderSteering();
+  showNotice("Draft created.");
+  return true;
 }
 
 function createAssistantResponse(candidate, prompt) {
+  if (!ASSISTANT_PROMPTS.includes(prompt)) {
+    showNotice("Assistant action is unavailable.", "warning");
+    return;
+  }
   const summary = reviewSummaryFor(candidate);
   const comment = root.querySelector('[name="reviewerComment"]')?.value || "";
   const files = summary.files.map((ref) => artifactLabel(ref)).filter(Boolean).join(", ") || "no related files linked";
@@ -2309,11 +2605,6 @@ function createAssistantResponse(candidate, prompt) {
       `NeuriCo chose: ${summary.chosen}.`,
       `Alternatives: ${summary.alternatives.join("; ")}.`,
       "Check whether the selected alternative would have changed the paper claim, method, result, or limitation text.",
-    ],
-    "What should I check?": [
-      `Check whether the ${selectedSectionLabel()} wording is supported by the linked files.`,
-      "Verify whether the checklist needs more evidence, paper explanation, provenance inspection, expert review, or a revise/rerun action.",
-      `Use related files: ${files}.`,
     ],
   };
   assistantResponse = {
@@ -2353,7 +2644,28 @@ function applyAssistantDraft() {
   if (comment && !comment.value.trim()) comment.value = assistantDraft.crux;
 }
 
+function hasUnresolvedEscalation(candidate, routeMode) {
+  if (routeMode !== "expert_escalation") return false;
+  const raw = annotationFor(candidate.key);
+  const reviewer = userEmail || "anonymous";
+  const issue = candidate.title || candidate.key;
+  const entries = Array.isArray(raw.individualAnnotations) ? raw.individualAnnotations : [];
+  return entries.some((item) => {
+    const labels = item.labels || {};
+    const itemRoute = item.annotationRoute || labels.annotationRoute || raw.annotationRoute;
+    const itemReviewer = item.raterId || item.raterMetadata?.raterId || raw.raterId || "";
+    const itemIssue = item.selectedIssue || item.reviewerVerification?.selectedIssue || raw.selectedIssue || issue;
+    const workflow = item.workflowStatus || item.benchmarkStatus?.workflowStatus || labels.workflowStatus || "";
+    const resolved = Boolean(item.resolved || item.resolvedAt || /resolved|adjudicated|excluded|dismissed|benchmark_ready/.test(workflow));
+    return itemRoute === "expert_escalation"
+      && itemReviewer === reviewer
+      && itemIssue === issue
+      && !resolved;
+  });
+}
+
 async function saveAnnotation(candidate, mode = "quick") {
+  if (annotationSaving) return;
   const form = root.querySelector("#annotation-form");
   const data = new FormData(form);
   const related = relatedContext(candidate);
@@ -2362,6 +2674,12 @@ async function saveAnnotation(candidate, mode = "quick") {
   const selectedText = selectedRegionText || outputSections().find(([key]) => key === selectedRegion)?.[2] || candidate.summary || "";
   const anchor = currentAnchor();
   const routeMode = ROUTES.includes(mode) ? mode : (get("annotationRoute") || suggestions.annotationRoute || "benchmark_annotation");
+  if (hasUnresolvedEscalation(candidate, routeMode)) {
+    const saveStatus = root.querySelector("#save-status");
+    if (saveStatus) saveStatus.textContent = "This issue is already escalated.";
+    showNotice("This issue is already escalated.", "warning");
+    return;
+  }
   const includeBenchmark = routeMode === "benchmark_annotation" || mode === "benchmark" || data.get("includeInBenchmark") === "on";
   const now = new Date().toISOString();
   const reviewerChecklist = {
@@ -2603,46 +2921,44 @@ async function saveAnnotation(candidate, mode = "quick") {
     includeInBenchmarkDecision: get("includeInBenchmarkDecision"),
   };
   const saveStatus = root.querySelector("#save-status");
-  saveStatus.textContent = "Saving...";
-  const response = await fetch("/api/annotation", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(withRun(payload)),
+  if (saveStatus) saveStatus.textContent = "Saving...";
+  annotationSaving = true;
+  root.querySelectorAll("[data-route-action], [data-save-assistant-draft]").forEach((button) => {
+    button.disabled = true;
   });
-  run.visualizerData.annotations = await response.json();
-  saveStatus.textContent = "Saved";
-}
-
-function journeyStages() {
-  const stageNames = ["Idea", "Literature / Evidence", "Hypothesis / Plan", "Experiment Design", "Experiment Run", "Result Analysis", "Report Writing"];
-  const events = canonicalEvents();
-  return stageNames.map((name, index) => {
-    const key = name.toLowerCase().replace(/ \/ .*/, "").split(" ")[0];
-    const matchingEvents = events.filter((event) => eventStage(event).toLowerCase().includes(key)).slice(0, 8);
-    const relatedDecisions = decisions().filter((decision) => {
-      const text = `${decision.layer || ""} ${decision.phase || ""} ${decision.title || ""}`.toLowerCase();
-      return text.includes(key) || (index === 6 && /paper|report|writing/.test(text));
-    }).slice(0, 4);
-    const outputs = outputArtifacts().filter((artifact) => {
-      const path = artifactPath(artifact).toLowerCase();
-      return index === 6 ? /paper|report|draft/.test(path) : path.includes(key) || (index === 5 && /result|metric|table|figure/.test(path));
-    }).slice(0, 5);
-    return { name, key, matchingEvents, relatedDecisions, outputs };
-  });
+  try {
+    const response = await fetch("/api/annotation", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(withRun(payload)),
+    });
+    if (!response.ok) throw new Error(`POST /api/annotation failed with ${response.status}`);
+    run.visualizerData.annotations = await response.json();
+    if (saveStatus) saveStatus.textContent = "Saved";
+    showNotice(needsExpertReview ? "Annotation saved." : "Annotation saved.");
+  } catch (error) {
+    console.error("Could not save annotation", error);
+    if (saveStatus) saveStatus.textContent = error.message || "Could not save annotation.";
+    else showInlineError(error.message || "Could not save annotation.");
+    showNotice("Request failed.", "error");
+  } finally {
+    annotationSaving = false;
+    root.querySelectorAll("[data-route-action], [data-save-assistant-draft]").forEach((button) => {
+      button.disabled = false;
+    });
+  }
 }
 
 function trajectoryPhaseDefinitions() {
   return [
-    ["idea", "User idea from Hypogenic Hub", /idea|intent|user|hypogenic|submission/],
-    ["refinement", "Idea refinement", /refine|scope|clarify|direction|hypothesis/],
-    ["literature", "Literature/evidence search", /literature|evidence|search|related|paper|citation|review/],
+    ["idea", "User idea", /idea|intent|user|hypogenic|submission|research_prompt|session_instructions/],
+    ["refinement", "Idea refinement", /refine|scope|clarify|direction|planning|plan/],
+    ["literature", "Literature / evidence", /literature|evidence|search|related|paper|citation|review|resource/],
     ["hypothesis", "Hypothesis generation", /hypothesis|claim|candidate/],
-    ["design", "Experiment design", /design|protocol|split|evaluation|baseline|method|plan/],
-    ["data", "Data/config preparation", /data|dataset|config|vocab|prepar|table/],
-    ["execution", "Experiment execution", /run|execute|train|eval|model|experiment|job/],
-    ["analysis", "Result analysis", /result|metric|accuracy|analysis|figure|plot|summary/],
-    ["writing", "Report writing", /write|report|paper|draft|abstract|claim/],
-    ["revision", "Revision/final output", /revision|final|validate|complete|finish/],
+    ["design", "Experiment design", /design|protocol|split|evaluation|baseline|method|config|dataset|vocab/],
+    ["execution", "Execution", /run|execute|train|eval|model|experiment|job|command_execution|python|npm|node/],
+    ["analysis", "Analysis", /result|metric|accuracy|analysis|figure|plot|summary|validation|comparison/],
+    ["writing", "Paper writing", /write|report|paper|draft|abstract|claim|tex|pdf/],
   ];
 }
 
@@ -2652,78 +2968,13 @@ function phaseForText(text, fallbackIndex = 0) {
   return found?.[1] || trajectoryPhaseDefinitions()[Math.min(fallbackIndex, trajectoryPhaseDefinitions().length - 1)][1];
 }
 
-function trajectoryNodes() {
-  const explicit = run?.trajectoryNodes || run?.visualizerData?.trajectoryNodes || run?.trajectoryJourney?.nodes;
-  if (Array.isArray(explicit) && explicit.length) return normalizeTrajectoryNodes(explicit);
-  const phaseDefs = trajectoryPhaseDefinitions();
-  const events = canonicalEvents();
-  const nodes = phaseDefs.map(([key, phase], index) => {
-    const matchingEvents = events.filter((event) => phaseForText(`${eventStage(event)} ${eventText(event)}`, index) === phase).slice(0, 8);
-    const phaseDecisions = decisions().filter((decision) => phaseForText(`${decision.layer || ""} ${decision.phase || ""} ${decisionTitle(decision)} ${decision.rationale || ""}`, index) === phase).slice(0, 5);
-    const phaseFindings = findings().filter((finding) => phaseForText(`${finding.kind || ""} ${finding.text || ""} ${finding.insight || ""}`, index) === phase).slice(0, 4);
-    const phaseArtifacts = outputArtifacts().filter((artifact) => phaseForText(`${artifactPath(artifact)} ${artifact.summary || ""}`, index) === phase).slice(0, 5);
-    const decision = phaseDecisions[0] || {};
-    const event = matchingEvents[0] || {};
-    const inputSummary = index === 0
-      ? (run.idea?.description || run.idea?.hypothesis || researchState().headline || "User-submitted research idea")
-      : `${phaseDefs[Math.max(0, index - 1)][1]} output`;
-    const outputSummary = phaseArtifacts[0] ? artifactLabel(phaseArtifacts[0]) : (phaseFindings[0]?.text || decision.choice || event.output || event.result || `${phase} output`);
-    return {
-      nodeId: key,
-      phase,
-      title: phase,
-      inputSummary: compactText(inputSummary, 150),
-      outputSummary: compactText(outputSummary, 150),
-      activitySummary: compactText(eventText(event) || decision.rationale || `NeuriCo worked on ${phase.toLowerCase()}.`, 220),
-      howItWorkedSummary: compactText(decision.choice || event.action || event.command || phaseHowItWorked(phase), 220),
-      assumptions: humanList(decision.assumptions || researchState().assumptions || [], "No explicit assumptions reconstructed."),
-      constraints: humanList(decision.constraints || researchState().constraints || [], "No explicit constraints reconstructed."),
-      decisions: phaseDecisions.map((item) => decisionTitle(item)),
-      alternatives: humanList(decision.alternatives || (decision.options || []).map((opt) => opt.text || opt.label || opt.choice || opt), "No alternatives reconstructed."),
-      evidenceUsed: dedupeRefs([...phaseDecisions.flatMap(evidenceRefsForDecision), ...phaseFindings.flatMap(evidenceRefsForFinding), ...phaseArtifacts.map((artifact) => ({ path: artifactPath(artifact), note: artifactLabel(artifact) }))]),
-      uncertaintyCrux: compactText(decision.importanceRationale || decision.rationale || phaseFindings[0]?.text || "Reviewer should verify whether this step supports downstream claims.", 180),
-      humanCheck: "Verify whether the step is adequately supported, whether a crux was missed, and whether expert adjudication is needed.",
-      relatedArtifacts: phaseArtifacts.map((artifact) => ({ path: artifactPath(artifact), name: artifactLabel(artifact) })),
-      relatedFindings: phaseFindings,
-      relatedDecisions: phaseDecisions,
-      sourceEvents: matchingEvents,
-      parentNodeIds: index ? [phaseDefs[index - 1][0]] : [],
-      childNodeIds: index < phaseDefs.length - 1 ? [phaseDefs[index + 1][0]] : [],
-      provenanceTree: provenanceTreeForPhase(phase, phaseDecisions, phaseFindings, phaseArtifacts),
-      tokenTraceAvailable: matchingEvents.some(hasTokenTrace),
-      anchors: phaseDecisions.map((item) => item.paperRef).filter(Boolean),
-      status: phaseDecisions.length ? "crux" : matchingEvents.length || phaseArtifacts.length ? "completed" : "sparse",
-    };
-  });
-  return nodes;
-}
-
-function normalizeTrajectoryNodes(nodes) {
-  return nodes.map((node, index) => ({
-    nodeId: node.nodeId || node.id || `node-${index + 1}`,
-    phase: node.phase || phaseForText(node.title || node.summary, index),
-    title: node.title || node.name || phaseForText(node.summary, index),
-    inputSummary: node.inputSummary || node.input || "Run context",
-    outputSummary: node.outputSummary || node.output || "Step output",
-    activitySummary: node.activitySummary || node.summary || node.whatItDid || "",
-    howItWorkedSummary: node.howItWorkedSummary || node.howItWorked || node.does || "",
-    assumptions: humanList(node.assumptions),
-    constraints: humanList(node.constraints),
-    decisions: humanList(node.decisions),
-    alternatives: humanList(node.alternatives),
-    evidenceUsed: Array.isArray(node.evidenceUsed) ? node.evidenceUsed : [],
-    uncertaintyCrux: node.uncertaintyCrux || node.crux || "",
-    humanCheck: node.humanCheck || "Reviewer verification needed.",
-    relatedArtifacts: node.relatedArtifacts || [],
-    relatedFindings: node.relatedFindings || [],
-    relatedDecisions: node.relatedDecisions || [],
-    sourceEvents: node.sourceEvents || [],
-    parentNodeIds: node.parentNodeIds || [],
-    childNodeIds: node.childNodeIds || [],
-    provenanceTree: node.provenanceTree || [],
-    tokenTraceAvailable: Boolean(node.tokenTraceAvailable),
-    anchors: node.anchors || [],
-    status: node.status || (node.uncertaintyCrux ? "crux" : "completed"),
+function journeyStages() {
+  return journeyPhases().map((phase) => ({
+    name: phase.name,
+    key: phase.id,
+    matchingEvents: phase.steps.filter((step) => step.rawEvent).map((step) => step.rawEvent),
+    relatedDecisions: phase.steps.filter((step) => step.decision).map((step) => step.decision),
+    outputs: phase.steps.filter((step) => step.artifact).map((step) => step.artifact),
   }));
 }
 
@@ -2740,93 +2991,175 @@ function hasTokenTrace(event) {
   return Boolean(event?.token_ref || event?.tokenRefs || event?.chunk_refs || event?.chunkRefs || event?.promptSpan || event?.prompt_span);
 }
 
-function provenanceTreeForPhase(phase, phaseDecisions, phaseFindings, phaseArtifacts) {
-  const decision = phaseDecisions[0] || {};
-  const artifact = phaseArtifacts[0] || {};
-  const finding = phaseFindings[0] || {};
-  return [{
-    label: "User input",
-    summary: run?.idea?.description || run?.idea?.hypothesis || "User-submitted research idea.",
-    children: [{
-      label: "Generated idea(s)",
-      summary: researchState().headline || phaseHowItWorked(phase),
-      children: [{
-        label: "Selected hypothesis",
-        summary: researchState().currentBest || finding.text || finding.insight || phase,
-        children: [{
-          label: "Decision",
-          summary: decisionTitle(decision) || "Decision reconstructed from review data.",
-          targetKey: decision.id ? `decision:${decision.id}` : "",
-          children: [{
-            label: "Artifact / table / result",
-            summary: artifactLabel(artifact) || "Generated artifact.",
-            path: artifactPath(artifact) || "",
-            children: [{
-              label: "Paper claim",
-              summary: selectedSectionLabel(),
-              path: mainPaperPath(),
-            }],
-          }],
-        }],
-      }],
-    }],
-  }];
+function journeyStepKey(step) {
+  return `journey:${step.id}`;
 }
 
-function filteredTrajectoryNodes() {
-  const nodes = trajectoryNodes();
-  return nodes.filter((node) => {
-    if (journeyFilter === "all") return true;
-    if (journeyFilter === "decisions") return node.relatedDecisions.length || node.decisions.length;
-    if (journeyFilter === "cruxes") return /crux|failure|risk|uncertain/i.test(`${node.status} ${node.uncertaintyCrux}`);
-    if (journeyFilter === "artifacts") return node.relatedArtifacts.length || node.evidenceUsed.length;
-    if (journeyFilter === "failures") return /fail|error|retry|traceback|timeout/i.test(JSON.stringify(node.sourceEvents));
-    if (journeyFilter === "paper-writing steps") return /report|paper|writing|abstract|claim/i.test(`${node.phase} ${node.title}`);
-    return true;
+function eventTitle(event) {
+  return compactText(event.label || event.action || event.command || eventText(event) || event.event_type || "Trace event", 72);
+}
+
+function eventStatus(event) {
+  const text = `${event.status || ""} ${event.event_type || ""} ${event.summary || ""}`.toLowerCase();
+  if (/fail|error|exception|traceback|timeout/.test(text)) return "failure";
+  if (/retry|retried/.test(text)) return "retry";
+  return event.status || "recorded";
+}
+
+function pathMatchesPhase(path, phase, index) {
+  return phaseForText(path, index) === phase || (phase === "Paper writing" && /paper|report|draft|tex|pdf/i.test(path));
+}
+
+function journeySteps() {
+  const phaseDefs = trajectoryPhaseDefinitions();
+  const steps = [];
+  canonicalEvents().forEach((event, index) => {
+    const phase = phaseForText(`${eventStage(event)} ${eventText(event)} ${event.source_log_path || event.source || ""}`, index);
+    steps.push({
+      id: `event:${eventId(event, index)}`,
+      kind: /command_execution|tool|command/i.test(`${event.event_type} ${event.kind}`) ? "tool call" : "event",
+      phase,
+      title: eventTitle(event),
+      status: eventStatus(event),
+      sequence: Number(event.sequence ?? index) + 1,
+      timestamp: event.timestamp || event.ts || "",
+      output: compactText(event.output || event.result || event.outputPreview || eventText(event), 150),
+      input: event.input || event.prompt || event.detail || event.command || "",
+      rawEvent: event,
+      badges: [
+        /command_execution|tool|command/i.test(`${event.event_type} ${event.kind}`) ? "tool call" : "",
+        /fail|error|exception|traceback|timeout/i.test(JSON.stringify(event)) ? "failure" : "",
+      ].filter(Boolean),
+      refs: [],
+    });
+  });
+  decisions().forEach((decision, index) => {
+    const phase = phaseForText(`${decision.layer || ""} ${decision.phase || ""} ${decisionTitle(decision)} ${decision.chosen || ""}`, index);
+    steps.push({
+      id: `decision:${decision.id || index + 1}`,
+      kind: "decision",
+      phase,
+      title: decisionTitle(decision),
+      status: decision.shouldEngage ? "crux" : "recorded",
+      sequence: Number(decision.sequence ?? (canonicalEvents().length + index)) + 1,
+      timestamp: decision.ts || "",
+      output: compactText(decision.chosen || decision.choice || decision.inferredRationale || "", 150),
+      input: decision.question || "",
+      decision,
+      badges: ["decision", decision.shouldEngage ? "crux" : ""].filter(Boolean),
+      refs: evidenceRefsForDecision(decision),
+    });
+  });
+  outputArtifacts().forEach((artifact, index) => {
+    const path = artifactPath(artifact);
+    if (!path) return;
+    const phase = phaseDefs.find(([, label], phaseIndex) => pathMatchesPhase(path, label, phaseIndex))?.[1] || "Analysis";
+    steps.push({
+      id: `artifact:${path}`,
+      kind: "artifact",
+      phase,
+      title: artifactLabel(artifact),
+      status: "produced",
+      sequence: canonicalEvents().length + decisions().length + index + 1,
+      timestamp: artifact.modified_at || artifact.modifiedAt || "",
+      output: path,
+      input: "",
+      artifact,
+      badges: ["artifact"],
+      refs: [{ path, note: artifactLabel(artifact) }],
+    });
+  });
+  return steps.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+}
+
+function stepMatchesFilter(step) {
+  if (journeyFilter === "all") return true;
+  if (journeyFilter === "decisions") return step.kind === "decision" || step.badges.includes("decision");
+  if (journeyFilter === "cruxes") return step.badges.includes("crux") || /crux|risk|uncertain/i.test(`${step.status} ${step.output}`);
+  if (journeyFilter === "artifacts") return step.kind === "artifact" || step.badges.includes("artifact");
+  if (journeyFilter === "failures") return step.badges.includes("failure") || /fail|error|retry|traceback|timeout/i.test(`${step.status} ${step.output}`);
+  if (journeyFilter === "paper-writing steps") return /paper|report|writing|draft|claim/i.test(`${step.phase} ${step.title} ${step.output}`);
+  return true;
+}
+
+function journeyPhases() {
+  const steps = journeySteps();
+  return trajectoryPhaseDefinitions().map(([id, name], index) => {
+    const phaseSteps = steps.filter((step) => step.phase === name);
+    const artifacts = phaseSteps.filter((step) => step.kind === "artifact").length;
+    const phaseDecisions = phaseSteps.filter((step) => step.kind === "decision").length;
+    const failures = phaseSteps.filter((step) => /failure|retry/i.test(`${step.status} ${step.badges.join(" ")}`)).length;
+    const sample = phaseSteps.find((step) => step.output)?.output || phaseHowItWorked(name);
+    return {
+      id,
+      name,
+      status: phaseSteps.length ? (failures ? "needs review" : "recorded") : "empty",
+      steps: phaseSteps,
+      decisions: phaseDecisions,
+      artifacts,
+      failures,
+      summary: compactText(sample, 110),
+      index,
+      matches: phaseSteps.filter(stepMatchesFilter).length,
+    };
   });
 }
 
+function selectedJourneyStep() {
+  return journeySteps().find((step) => step.id === selectedJourneyNodeId) || null;
+}
+
 function renderJourney() {
-  const nodes = filteredTrajectoryNodes();
-  const allNodes = trajectoryNodes();
-  const selected = allNodes.find((node) => node.nodeId === selectedJourneyNodeId);
-  const tokenAvailable = allNodes.some((node) => node.tokenTraceAvailable);
+  const phases = journeyPhases();
+  const selectedPhase = phases.find((phase) => phase.id === selectedJourneyPhaseId) || null;
+  const selectedStep = selectedJourneyStep();
+  const tokenAvailable = canonicalEvents().some(hasTokenTrace);
+  const matchCount = journeySteps().filter(stepMatchesFilter).length;
   root.innerHTML = `
     <div class="journey-page trajectory-page">
       <section class="journey-head">
         <span class="eyebrow">Journey</span>
-        <h2>Understand the trajectory</h2>
-        <p>High-level map of where the research process went, with step-level transformation details available on click.</p>
-        ${tokenAvailable ? "" : `<p class="provenance-warning">Token-level trace is not available for this run. Showing semantic and log-level provenance.</p>`}
+        <h2>Research trajectory</h2>
+        <p>Phase overview first. Select a phase to inspect steps, then select a step to inspect provenance and raw event data.</p>
+        <p class="provenance-warning">${tokenAvailable ? "Token/chunk references detected for this run." : "Token-level trace was not recorded. Showing event- and log-level provenance."}</p>
       </section>
       <section class="trajectory-shell">
         <div class="trajectory-controls">
           <div class="issue-filter-tabs">
-            ${["all", "decisions", "cruxes", "artifacts", "failures", "paper-writing steps"].map((filter) => `<button type="button" class="${journeyFilter === filter ? "active" : ""}" data-journey-filter="${escapeHtml(filter)}">${escapeHtml(filter)}</button>`).join("")}
+            ${["all", "decisions", "cruxes", "artifacts", "failures", "paper-writing steps"].map((filter) => `<button type="button" class="${journeyFilter === filter ? "active" : ""}" data-journey-filter="${escapeHtml(filter)}">${escapeHtml(filter)}${journeyFilter === filter ? ` (${escapeHtml(matchCount)})` : ""}</button>`).join("")}
           </div>
           <div class="trajectory-zoom">
-            <button type="button" data-journey-zoom="out">-</button>
-            <button type="button" data-journey-zoom="fit">Fit</button>
-            <button type="button" data-journey-zoom="in">+</button>
+            ${selectedPhase ? `<button type="button" data-back-phases>Back to phases</button>` : ""}
+            <button type="button" data-journey-zoom="fit">Fit graph</button>
+            <button type="button" data-center-selected>Center selected</button>
           </div>
         </div>
-        <div class="trajectory-canvas" style="--journey-zoom:${journeyZoom}">
-          <div class="trajectory-track">
-            ${nodes.map((node, index) => renderTrajectoryNode(node, index, nodes.length)).join("")}
-          </div>
+        <div class="trajectory-canvas compact" style="--journey-zoom:${journeyZoom}">
+          ${selectedPhase ? renderPhaseDrilldown(selectedPhase, phases) : renderPhaseOverview(phases)}
         </div>
-        <div class="trajectory-minimap">
-          ${trajectoryPhaseDefinitions().map(([, phase]) => `<button type="button" data-toggle-phase="${escapeHtml(phase)}" class="${collapsedJourneyPhases.has(phase) ? "collapsed" : ""}">${escapeHtml(phase)}</button>`).join("")}
-        </div>
-        ${selected ? renderTrajectoryDrawer(selected) : ""}
+        ${selectedStep ? renderJourneyDetailPanel(selectedStep) : ""}
       </section>
     </div>`;
+  root.querySelectorAll("[data-journey-phase]").forEach((button) => button.addEventListener("click", () => {
+    selectedJourneyPhaseId = button.dataset.journeyPhase;
+    selectedJourneyNodeId = "";
+    selectedJourneyTab = "summary";
+    renderJourney();
+  }));
   root.querySelectorAll("[data-journey-node]").forEach((button) => button.addEventListener("click", () => {
     selectedJourneyNodeId = button.dataset.journeyNode;
+    selectedJourneyTab = selectedJourneyTab || "summary";
     renderJourney();
   }));
   root.querySelector("[data-close-journey-drawer]")?.addEventListener("click", () => {
     selectedJourneyNodeId = "";
+    selectedProvenanceNodeId = "";
+    renderJourney();
+  });
+  root.querySelector("[data-back-phases]")?.addEventListener("click", () => {
+    selectedJourneyPhaseId = "";
+    selectedJourneyNodeId = "";
+    selectedProvenanceNodeId = "";
     renderJourney();
   });
   root.querySelectorAll("[data-journey-filter]").forEach((button) => button.addEventListener("click", () => {
@@ -2834,224 +3167,346 @@ function renderJourney() {
     renderJourney();
   }));
   root.querySelectorAll("[data-journey-zoom]").forEach((button) => button.addEventListener("click", () => {
-    const action = button.dataset.journeyZoom;
-    if (action === "fit") journeyZoom = 1;
-    if (action === "in") journeyZoom = Math.min(1.45, journeyZoom + .15);
-    if (action === "out") journeyZoom = Math.max(.75, journeyZoom - .15);
+    journeyZoom = 1;
     renderJourney();
   }));
-  root.querySelectorAll("[data-toggle-phase]").forEach((button) => button.addEventListener("click", () => {
-    const phase = button.dataset.togglePhase;
-    if (collapsedJourneyPhases.has(phase)) collapsedJourneyPhases.delete(phase);
-    else collapsedJourneyPhases.add(phase);
+  root.querySelector("[data-center-selected]")?.addEventListener("click", () => {
+    showNotice(selectedJourneyNodeId || selectedJourneyPhaseId ? "Selected trajectory item is centered in the current view." : "Select a phase or step first.", selectedJourneyNodeId || selectedJourneyPhaseId ? "info" : "warning");
+  });
+  root.querySelectorAll("[data-journey-tab]").forEach((button) => button.addEventListener("click", () => {
+    selectedJourneyTab = button.dataset.journeyTab;
     renderJourney();
   }));
-  root.querySelectorAll("[data-open-steering-target]").forEach((button) => button.addEventListener("click", () => {
-    selectedTargetKey = button.dataset.openSteeringTarget;
-    currentView = "steering";
+  root.querySelectorAll("[data-provenance-node]").forEach((button) => button.addEventListener("click", () => {
+    selectedProvenanceNodeId = button.dataset.provenanceNode;
+    selectedJourneyTab = "raw event";
+    renderJourney();
+  }));
+  root.querySelectorAll("[data-open-report]").forEach((button) => button.addEventListener("click", () => openJourneyArtifact(button.dataset.openReport)));
+  root.querySelectorAll("[data-trace-provenance]").forEach((button) => button.addEventListener("click", () => {
+    selectedJourneyNodeId = button.dataset.traceProvenance || selectedJourneyNodeId;
+    selectedJourneyTab = "provenance";
+    showNotice("Showing upstream provenance for the selected step.");
     render();
   }));
-  root.querySelectorAll("[data-open-report]").forEach((button) => button.addEventListener("click", () => {
-    selectedArtifactPath = button.dataset.openReport;
-    openedReports = true;
-    currentView = "artifacts";
-    render();
-  }));
-  root.querySelectorAll("[data-create-stage-issue]").forEach((button) => button.addEventListener("click", () => {
-    createManualIssue("manual_crux", button.dataset.createStageIssue);
-  }));
-  root.querySelectorAll("[data-escalate-stage]").forEach((button) => button.addEventListener("click", () => {
-    createManualIssue("expert_review", button.dataset.escalateStage);
-  }));
+  root.querySelector("[data-save-journey-annotation]")?.addEventListener("click", () => saveJourneyAnnotation("benchmark_annotation"));
+  root.querySelector("[data-escalate-journey]")?.addEventListener("click", () => saveJourneyAnnotation("expert_escalation"));
 }
 
-function renderTrajectoryNode(node, index) {
-  if (collapsedJourneyPhases.has(node.phase)) {
-    return `<button class="trajectory-cluster collapsed" type="button" data-toggle-phase="${escapeHtml(node.phase)}">${escapeHtml(node.phase)}</button>`;
-  }
-  const x = 70 + index * 220;
-  const y = index % 2 ? 168 : 54;
-  const crux = /crux|failure|risk|uncertain/i.test(`${node.status} ${node.uncertaintyCrux}`);
+function renderPhaseOverview(phases) {
   return `
-    <button type="button" class="trajectory-node ${selectedJourneyNodeId === node.nodeId ? "active" : ""} ${crux ? "crux" : ""}" data-journey-node="${escapeHtml(node.nodeId)}" style="left:${x}px;top:${y}px">
-      <span class="node-dot"></span>
-      <small>Phase: ${escapeHtml(compactText(node.phase, 42))}</small>
-      <strong>${escapeHtml(compactText(node.title, 54))}</strong>
-      <small>Input: ${escapeHtml(compactText(node.inputSummary, 82))}</small>
-      <small>Output: ${escapeHtml(compactText(node.outputSummary, 82))}</small>
-      <small>${escapeHtml(compactText(node.activitySummary, 82))}</small>
-      <em>${escapeHtml(crux ? "crux" : node.status || "step")}</em>
+    <div class="phase-overview">
+      ${phases.map((phase, index) => `
+        <button type="button" class="phase-node ${selectedJourneyPhaseId === phase.id ? "active" : ""} ${phase.matches ? "" : "dimmed"}" data-journey-phase="${escapeHtml(phase.id)}">
+          <span class="phase-seq">${escapeHtml(index + 1)}</span>
+          <strong>${escapeHtml(phase.name)}</strong>
+          <small>${escapeHtml(phase.status)}</small>
+          <div class="phase-metrics">
+            <span>${escapeHtml(phase.steps.length)} steps</span>
+            <span>${escapeHtml(phase.decisions)} decisions</span>
+            <span>${escapeHtml(phase.artifacts)} artifacts</span>
+            <span>${escapeHtml(phase.failures)} failures</span>
+          </div>
+          <p>${escapeHtml(phase.summary)}</p>
+        </button>
+        ${index < phases.length - 1 ? `<i class="phase-edge" aria-hidden="true"></i>` : ""}
+      `).join("")}
+    </div>`;
+}
+
+function renderPhaseDrilldown(phase, phases) {
+  const visibleSteps = phase.steps.filter(stepMatchesFilter);
+  return `
+    <div class="phase-context-strip">
+      ${phases.map((item) => `<button type="button" class="${item.id === phase.id ? "active" : ""}" data-journey-phase="${escapeHtml(item.id)}">${escapeHtml(item.name)}</button>`).join("")}
+    </div>
+    <div class="step-timeline">
+      <header>
+        <div><span class="eyebrow">Phase drill-down</span><h3>${escapeHtml(phase.name)}</h3></div>
+        <small>${escapeHtml(visibleSteps.length)} matching steps of ${escapeHtml(phase.steps.length)} recorded</small>
+      </header>
+      <div class="step-node-grid">
+        ${visibleSteps.map((step) => renderStepNode(step)).join("") || `<p class="empty-state">No steps match this filter in this phase.</p>`}
+      </div>
+    </div>`;
+}
+
+function renderStepNode(step) {
+  return `
+    <button type="button" class="step-node ${selectedJourneyNodeId === step.id ? "active" : ""} ${stepMatchesFilter(step) ? "" : "dimmed"}" data-journey-node="${escapeHtml(step.id)}">
+      <small>${escapeHtml(step.sequence ? `#${step.sequence}` : step.timestamp || "recorded")} · ${escapeHtml(step.kind)}</small>
+      <strong>${escapeHtml(compactText(step.title, 70))}</strong>
+      <p>${escapeHtml(compactText(step.output || "No output recorded.", 95))}</p>
+      <span class="step-badges">${step.badges.map((badge) => `<em>${escapeHtml(badge)}</em>`).join("") || `<em>${escapeHtml(step.status)}</em>`}</span>
     </button>`;
 }
 
-function renderTrajectoryDrawer(node) {
+function renderJourneyDetailPanel(step) {
+  const tabs = ["summary", "provenance", "raw event", "annotation"];
+  const current = selectedJourneyTab || "summary";
   return `
-    <aside class="trajectory-drawer">
+    <aside class="trajectory-drawer journey-detail-panel">
       <div class="panel-head">
-        <div><span class="eyebrow">Step detail</span><h3>${escapeHtml(node.title)}</h3></div>
+        <div><span class="eyebrow">Step detail</span><h3>${escapeHtml(compactText(step.title, 90))}</h3></div>
         <button type="button" data-close-journey-drawer>Close</button>
       </div>
-      <dl class="trajectory-detail-list">
-        <dt>Input</dt><dd>${escapeHtml(node.inputSummary)}</dd>
-        <dt>Output</dt><dd>${escapeHtml(node.outputSummary)}</dd>
-        <dt>What NeuriCo did</dt><dd>${escapeHtml(node.activitySummary)}</dd>
-        <dt>How it did it</dt><dd>${escapeHtml(node.howItWorkedSummary)}</dd>
-        <dt>Assumptions / constraints</dt><dd>${escapeHtml([...humanList(node.assumptions), ...humanList(node.constraints)].join(" | "))}</dd>
-        <dt>Decisions</dt><dd>${escapeHtml(humanList(node.decisions).join(" | "))}</dd>
-        <dt>Alternatives considered</dt><dd>${escapeHtml(humanList(node.alternatives).join(" | "))}</dd>
-        <dt>Evidence used</dt><dd>${renderEvidenceButtons(node.evidenceUsed)}</dd>
-        <dt>Uncertainty / crux</dt><dd>${escapeHtml(node.uncertaintyCrux || "No crux reconstructed.")}</dd>
-        <dt>Human check</dt><dd>${escapeHtml(node.humanCheck)}</dd>
-        <dt>Related files</dt><dd>${renderArtifactButtons(node.relatedArtifacts)}</dd>
-      </dl>
-      <section class="provenance-tree-section">
-        <h4>Provenance tree</h4>
-        ${renderProvenanceTree(node.provenanceTree)}
-      </section>
-      <div class="context-actions">
-        <button data-create-stage-issue="${escapeHtml(node.title)}">Comment on this step</button>
-        <button data-open-steering-target="${escapeHtml(node.relatedDecisions[0]?.id ? `decision:${node.relatedDecisions[0].id}` : selectedCandidate().key)}">Ask NeuriCo to fix</button>
-        <button data-open-steering-target="${escapeHtml(node.relatedDecisions[0]?.id ? `decision:${node.relatedDecisions[0].id}` : selectedCandidate().key)}">Save benchmark annotation</button>
-        <button data-escalate-stage="${escapeHtml(node.title)}">Escalate</button>
-        <button data-open-report="${escapeHtml(node.relatedArtifacts[0]?.path || node.evidenceUsed[0]?.path || mainPaperPath())}">Open related report/source</button>
-        <button data-traceback-stage>Traceback</button>
+      <div class="journey-tabs">
+        ${tabs.map((tab) => `<button type="button" class="${current === tab ? "active" : ""}" data-journey-tab="${escapeHtml(tab)}">${escapeHtml(tab.replace(/\b\w/g, (m) => m.toUpperCase()))}</button>`).join("")}
       </div>
-      <details class="${developerMode ? "" : "dev-hidden"}">
-        <summary>Log/event provenance</summary>
-        <pre>${escapeHtml(JSON.stringify({ sourceEvents: node.sourceEvents, anchors: node.anchors }, null, 2))}</pre>
-      </details>
+      ${current === "summary" ? renderJourneySummaryTab(step) : ""}
+      ${current === "provenance" ? renderJourneyProvenanceTab(step) : ""}
+      ${current === "raw event" ? renderJourneyRawTab(step) : ""}
+      ${current === "raw" ? renderJourneyRawTab(step) : ""}
+      ${current === "annotation" ? renderJourneyAnnotationTab(step) : ""}
+      <div class="context-actions journey-actions">
+        <button data-journey-tab="annotation">Comment on this step</button>
+        <button data-save-journey-annotation>Save annotation</button>
+        <button data-escalate-journey ${journeyStepEscalated(step) ? "disabled" : ""}>${journeyStepEscalated(step) ? "Escalated" : "Escalate"}</button>
+        <button data-open-report="${escapeHtml(primaryStepArtifact(step))}">Open related artifact/source</button>
+        <button data-trace-provenance="${escapeHtml(step.id)}">Trace provenance</button>
+      </div>
     </aside>`;
 }
 
+function renderJourneySummaryTab(step) {
+  const decision = step.decision || {};
+  return `
+    <dl class="trajectory-detail-list">
+      <dt>Step</dt><dd>${escapeHtml(step.title)}</dd>
+      <dt>Phase</dt><dd>${escapeHtml(step.phase)}</dd>
+      <dt>Purpose</dt><dd>${escapeHtml(phaseHowItWorked(step.phase))}</dd>
+      <dt>Exact input</dt><dd>${escapeHtml(step.input || "No explicit input recorded for this step.")}</dd>
+      <dt>Exact output</dt><dd>${escapeHtml(step.output || "No explicit output recorded for this step.")}</dd>
+      <dt>Decision made</dt><dd>${escapeHtml(decision.chosen || decision.choice || "No decision recorded on this step.")}</dd>
+      <dt>Artifacts</dt><dd>${renderEvidenceButtons(step.refs)}</dd>
+      <dt>Failures/retries</dt><dd>${escapeHtml(/failure|retry/i.test(`${step.status} ${step.badges.join(" ")}`) ? step.status : "No failure/retry marker on this step.")}</dd>
+    </dl>`;
+}
+
+function renderJourneyProvenanceTab(step) {
+  const graph = provenanceGraphForStep(step);
+  const upstream = graph.edges.filter((edge) => edge.target === step.id || edge.target === `selected:${step.id}`).length;
+  if (!upstream && !graph.edges.length) {
+    return `<p class="empty-state">No structured upstream provenance was recorded for this step.</p>`;
+  }
+  return `
+    <div class="breadcrumb">Phase -> ${escapeHtml(step.phase)} -> ${escapeHtml(compactText(step.title, 48))}${selectedProvenanceNodeId ? ` -> Source event` : ""}</div>
+    <div class="provenance-legend">
+      ${["event", "decision", "evidence", "artifact", "tool call", "failure/retry", "paper claim"].map((type) => `<span class="prov-${escapeHtml(type.replace(/\W+/g, "-"))}">${escapeHtml(type)}</span>`).join("")}
+    </div>
+    <div class="provenance-graph">
+      ${graph.edges.map((edge) => renderProvenanceEdge(edge)).join("")}
+      ${graph.nodes.map((node) => renderProvenanceNode(node, step)).join("")}
+    </div>
+    ${graph.edges.some((edge) => edge.inferred) ? `<p class="traceback-note">Dashed edges are inferred from sequence, timestamp order, or shared artifact references. Solid edges come from explicit IDs, decision evidence, finding evidence, or artifact paths.</p>` : ""}`;
+}
+
+function provenanceGraphForStep(step) {
+  const nodes = new Map();
+  const edges = [];
+  const addNode = (node) => nodes.set(node.id, { ...nodes.get(node.id), ...node });
+  const addEdge = (source, target, label, inferred = false, note = "") => edges.push({ id: `${source}->${target}:${label}`, source, target, label, inferred, note });
+  addNode({ id: step.id, type: step.kind === "tool call" ? "tool call" : step.kind, label: step.title, detail: step.output, raw: step.rawEvent || step.decision || step.artifact });
+
+  const refs = step.refs || [];
+  refs.forEach((ref, index) => {
+    const id = `evidence:${ref.path}:${index}`;
+    addNode({ id, type: ref.path === mainPaperPath() ? "paper claim" : "evidence", label: artifactLabel(ref), detail: ref.note || ref.anchor || ref.path, path: ref.path });
+    addEdge(id, step.id, step.kind === "decision" ? "informed" : "produced", false);
+  });
+
+  if (step.decision?.finding && step.decision.finding !== "global") {
+    const finding = findingForDecision(step.decision);
+    if (finding) {
+      const id = `finding:${finding.id}`;
+      addNode({ id, type: "evidence", label: finding.id, detail: finding.text || finding.insight || "" });
+      addEdge(id, step.id, "informed", false);
+      evidenceRefsForFinding(finding).forEach((ref, index) => {
+        const refId = `finding-evidence:${ref.path}:${index}`;
+        addNode({ id: refId, type: "evidence", label: artifactLabel(ref), detail: ref.note || ref.path, path: ref.path });
+        addEdge(refId, id, "validated", false);
+      });
+    }
+  }
+
+  const path = step.artifact ? artifactPath(step.artifact) : primaryStepArtifact(step);
+  if (path) {
+    decisions().filter((decision) => evidenceRefsForDecision(decision).some((ref) => ref.path === path)).slice(0, 8).forEach((decision) => {
+      const id = `decision:${decision.id}`;
+      addNode({ id, type: "decision", label: decisionTitle(decision), detail: decision.chosen || decision.inferredRationale || "" });
+      if (step.kind === "artifact") addEdge(step.id, id, "informed", false);
+      else addEdge(id, step.id, "produced", true, "Shared artifact reference.");
+      if (decision.paperRef || run?.paperHighlights?.[decision.id]) {
+        const claimId = `paper:${decision.id}`;
+        addNode({ id: claimId, type: "paper claim", label: "Paper claim", detail: decision.paperRef?.section || selectedSectionLabel(), path: mainPaperPath() });
+        addEdge(id, claimId, "cited by", false);
+      }
+    });
+  }
+
+  if (step.rawEvent) {
+    const events = canonicalEvents();
+    const index = events.findIndex((event, i) => `event:${eventId(event, i)}` === step.id);
+    const previous = index > 0 ? events[index - 1] : null;
+    const next = index >= 0 ? events[index + 1] : null;
+    if (previous) {
+      const id = `event:${eventId(previous, index - 1)}`;
+      addNode({ id, type: /fail|error|retry/i.test(JSON.stringify(previous)) ? "failure/retry" : (/command_execution|tool|command/i.test(`${previous.event_type} ${previous.kind}`) ? "tool call" : "event"), label: eventTitle(previous), detail: eventText(previous), raw: previous });
+      addEdge(id, step.id, /retry/i.test(JSON.stringify(step.rawEvent)) ? "retried after" : "informed", true, "Adjacent event in the same recorded transcript sequence.");
+    }
+    if (next) {
+      const id = `event:${eventId(next, index + 1)}`;
+      addNode({ id, type: /command_execution|tool|command/i.test(`${next.event_type} ${next.kind}`) ? "tool call" : "event", label: eventTitle(next), detail: eventText(next), raw: next });
+      addEdge(step.id, id, "generated", true, "Adjacent event in the same recorded transcript sequence.");
+    }
+  }
+
+  return { nodes: [...nodes.values()], edges };
+}
+
+function renderProvenanceNode(node, step) {
+  const selected = selectedProvenanceNodeId === node.id;
+  const style = node.id === step.id ? "grid-column:2;grid-row:2" : "";
+  return `
+    <button type="button" class="prov-node prov-${escapeHtml(node.type.replace(/\W+/g, "-"))} ${selected ? "active" : ""}" data-provenance-node="${escapeHtml(node.id)}" style="${style}">
+      <small>${escapeHtml(node.type)}</small>
+      <strong>${escapeHtml(compactText(node.label, 60))}</strong>
+      <span>${escapeHtml(compactText(node.detail, 95))}</span>
+    </button>`;
+}
+
+function renderProvenanceEdge(edge) {
+  return `<span class="prov-edge ${edge.inferred ? "inferred" : ""}" title="${escapeHtml(edge.note || edge.label)}">${escapeHtml(edge.label)}${edge.inferred ? " (inferred)" : ""}</span>`;
+}
+
+function rawObjectForStep(step) {
+  if (selectedProvenanceNodeId) {
+    const node = provenanceGraphForStep(step).nodes.find((item) => item.id === selectedProvenanceNodeId);
+    if (node?.raw) return node.raw;
+    if (node?.path) return { artifactPath: node.path, label: node.label, detail: node.detail };
+    if (node) return node;
+  }
+  return step.rawEvent || step.decision || step.artifact || {};
+}
+
+function renderJourneyRawTab(step) {
+  const raw = rawObjectForStep(step);
+  return `
+    <p class="traceback-note">Token-level trace was not recorded. Showing event- and log-level provenance.</p>
+    <dl class="trajectory-detail-list">
+      <dt>Event ID</dt><dd>${escapeHtml(step.id)}</dd>
+      <dt>Timestamp</dt><dd>${escapeHtml(step.timestamp || raw.timestamp || raw.ts || "not recorded")}</dd>
+      <dt>Source log path</dt><dd>${escapeHtml(raw.source_log_path || raw.source || "not recorded")}</dd>
+      <dt>Raw event type</dt><dd>${escapeHtml(raw.event_type || raw.eventType || raw.type || step.kind)}</dd>
+      <dt>Tool name</dt><dd>${escapeHtml(raw.tool || raw.toolName || raw.label || raw.command || "not recorded")}</dd>
+      <dt>Exit code</dt><dd>${escapeHtml(raw.exitCode ?? raw.exit_code ?? "not recorded")}</dd>
+      <dt>Error text</dt><dd>${escapeHtml(raw.error || raw.errorText || (/fail|error/i.test(JSON.stringify(raw)) ? compactText(JSON.stringify(raw), 260) : "not recorded"))}</dd>
+      <dt>Artifact path</dt><dd>${escapeHtml(primaryStepArtifact(step) || raw.artifactPath || "not recorded")}</dd>
+    </dl>
+    <pre class="raw-event-pre">${escapeHtml(JSON.stringify(raw, null, 2))}</pre>`;
+}
+
+function renderJourneyAnnotationTab(step) {
+  const anno = annotationFor(journeyStepKey(step));
+  const latest = latestAnnotation(journeyStepKey(step));
+  return `
+    <div class="journey-annotation-box">
+      <label><span>Comment</span><textarea name="journeyComment" rows="5" placeholder="Add a specific annotation for this step.">${escapeHtml(latest.quickComment || anno.quickComment || anno.comment || "")}</textarea></label>
+      <label><span>Issue type</span><select name="journeyIssueType">${ISSUE_TYPES.map((item) => `<option value="${escapeHtml(item)}" ${item === (latest.issueType || anno.issueType) ? "selected" : ""}>${escapeHtml(item)}</option>`).join("")}</select></label>
+      <p data-journey-save-status class="traceback-note">${annotationFor(journeyStepKey(step)).individualAnnotations?.length ? "Saved annotations are loaded for this step." : "No saved annotation for this step yet."}</p>
+    </div>
+    ${journeyStepEscalated(step) ? `<p class="provenance-warning">This step is already escalated for this reviewer.</p>` : ""}`;
+}
+
+function primaryStepArtifact(step) {
+  return step.artifact ? artifactPath(step.artifact) : (step.refs || []).find((ref) => ref.path)?.path || "";
+}
+
+function journeyStepEscalated(step) {
+  const individuals = annotationFor(journeyStepKey(step)).individualAnnotations || [];
+  return individuals.some((item) => item.needsExpertReview || item.needsExpertAdjudication || item.annotationRoute === "expert_escalation");
+}
+
+function openJourneyArtifact(path) {
+  if (!path) {
+    showNotice("No related artifact/source was recorded for this step.", "warning");
+    return;
+  }
+  selectedArtifactPath = path;
+  openedReports = true;
+  currentView = "artifacts";
+  render();
+}
+
+async function saveJourneyAnnotation(routeMode = "benchmark_annotation") {
+  const step = selectedJourneyStep();
+  if (!step || annotationSaving) return;
+  if (routeMode === "expert_escalation" && journeyStepEscalated(step)) {
+    showNotice("This step is already escalated for this reviewer.", "warning");
+    return;
+  }
+  const textarea = root.querySelector("[name='journeyComment']");
+  const issueType = root.querySelector("[name='journeyIssueType']")?.value || "other";
+  const comment = compactText(textarea?.value || "", 2000);
+  const saveStatus = root.querySelector("[data-journey-save-status]");
+  if (routeMode !== "expert_escalation" && !comment) {
+    if (saveStatus) saveStatus.textContent = "Add a meaningful comment before saving.";
+    showNotice("Add a meaningful comment before saving.", "warning");
+    return;
+  }
+  annotationSaving = true;
+  root.querySelectorAll("[data-save-journey-annotation], [data-escalate-journey]").forEach((button) => { button.disabled = true; });
+  try {
+    const body = withRun({
+      key: journeyStepKey(step),
+      targetType: "journey_step",
+      targetId: step.id,
+      subjectKind: "journey_step",
+      title: step.title,
+      category: step.phase,
+      comment: comment || `Escalated journey step: ${step.title}`,
+      quickComment: comment || `Escalated journey step: ${step.title}`,
+      reviewerComment: comment || `Escalated journey step: ${step.title}`,
+      issueType,
+      annotationRoute: routeMode,
+      needsExpertReview: routeMode === "expert_escalation",
+      selectedArtifactPath: primaryStepArtifact(step),
+      relatedFiles: (step.refs || []).map((ref) => ref.path).filter(Boolean),
+      relatedDecisionIds: step.decision?.id || "",
+      relatedEventIds: step.rawEvent ? step.id : "",
+      evidenceRefs: JSON.stringify(step.refs || []),
+      source: "journey",
+      openedJourney: true,
+      provenanceUsage: { selectedTab: selectedJourneyTab, selectedProvenanceNodeId },
+    });
+    const response = await fetch("/api/annotation", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error(`POST /api/annotation failed with ${response.status}`);
+    run.visualizerData.annotations = await response.json();
+    if (saveStatus) saveStatus.textContent = routeMode === "expert_escalation" ? "Escalated" : "Saved";
+    showNotice(routeMode === "expert_escalation" ? "Step escalated." : "Annotation saved.");
+    renderJourney();
+  } catch (error) {
+    console.error("Could not save journey annotation", error);
+    if (saveStatus) saveStatus.textContent = error.message || "Could not save annotation.";
+    showNotice(error.message || "Could not save annotation.", "error");
+  } finally {
+    annotationSaving = false;
+    root.querySelectorAll("[data-save-journey-annotation], [data-escalate-journey]").forEach((button) => { button.disabled = false; });
+  }
+}
+
 function renderEvidenceButtons(refs = []) {
-  const items = refs.slice(0, 8);
+  const items = refs.filter((ref) => ref.path).slice(0, 8);
   return items.length ? `<div class="related-file-list">${items.map((ref) => `<button type="button" class="related-file-link" data-open-report="${escapeHtml(ref.path)}">${escapeHtml(artifactLabel(ref))}</button>`).join("")}</div>` : "No evidence file linked.";
 }
 
 function renderArtifactButtons(refs = []) {
-  const items = refs.slice(0, 8);
+  const items = refs.filter((ref) => ref.path).slice(0, 8);
   return items.length ? `<div class="related-file-list">${items.map((ref) => `<button type="button" class="related-file-link" data-open-report="${escapeHtml(ref.path)}">${escapeHtml(ref.name || artifactLabel(ref))}</button>`).join("")}</div>` : "No related file linked.";
-}
-
-function renderProvenanceTree(tree = []) {
-  const nodes = tree.length ? tree : defaultProvenanceTree();
-  const renderNode = (node) => `
-    <li>
-      <button type="button" class="provenance-node" ${node.path ? `data-open-report="${escapeHtml(node.path)}"` : node.targetKey ? `data-open-steering-target="${escapeHtml(node.targetKey)}"` : ""}>
-        <strong>${escapeHtml(node.label || "Activity")}</strong>
-        <span>${escapeHtml(compactText(node.summary || "", 120))}</span>
-      </button>
-      ${node.children?.length ? `<ul>${node.children.map(renderNode).join("")}</ul>` : ""}
-    </li>`;
-  return `<ul class="provenance-tree">${nodes.map(renderNode).join("")}</ul>`;
-}
-
-function defaultProvenanceTree() {
-  return [{
-    label: "User input",
-    summary: run?.idea?.description || run?.idea?.hypothesis || "User-submitted research idea.",
-    children: [{
-      label: "Generated idea(s)",
-      summary: researchState().headline || "Research direction reconstructed from the run.",
-      children: [{
-        label: "Selected hypothesis",
-        summary: researchState().currentBest || researchState().headline || "Selected hypothesis or claim.",
-        children: [{
-          label: "Decision",
-          summary: selectedCandidate().title || "Review decision.",
-          targetKey: selectedCandidate().key,
-          children: [{
-            label: "Artifact / table / result",
-            summary: humanTitle(selectedArtifactPath || mainPaperPath()),
-            path: selectedArtifactPath || mainPaperPath(),
-            children: [{
-              label: "Paper claim",
-              summary: selectedSectionLabel(),
-              path: mainPaperPath(),
-            }],
-          }],
-        }],
-      }],
-    }],
-  }];
-}
-
-function stageDetailValues(stage) {
-  const event = stage.matchingEvents[0] || {};
-  const decision = stage.relatedDecisions[0] || {};
-  const output = stage.outputs[0] || {};
-  const fallback = "Agent activity summary is not available for this stage. Showing available input/output and linked artifacts.";
-  return {
-    "Input": stageInput(stage),
-    "Output": stageOutput(stage),
-    "Agent working process": compactText(event.action || event.command || eventText(event) || fallback, 220),
-    "Evidence used": compactText(stage.outputs.map((artifact) => humanTitle(artifactPath(artifact))).join(", ") || "Evidence is linked when available.", 180),
-    "Uncertainty / crux": compactText(decision.rationale || decision.choice || event.current_plan || "Check whether this stage supports the final output.", 180),
-    "Human check": "Should an annotator steer, request missing context, or challenge the claim before downstream work continues?",
-  };
-}
-
-function stageInput(stage) {
-  const event = stage.matchingEvents[0] || {};
-  return compactText(event.input || event.prompt || (stage.name === "Idea" ? researchState().headline || run?.idea?.title : stage.name), 120) || "Run context";
-}
-
-function stageOutput(stage) {
-  const output = stage.outputs[0];
-  const event = stage.matchingEvents[0] || {};
-  return compactText(humanTitle(artifactPath(output || {})) || event.output || event.result || "No linked output yet.", 120);
-}
-
-function renderStageDetail(stage) {
-  const values = stageDetailValues(stage);
-  return `
-    <div class="panel-head">
-      <div><span class="eyebrow">Stage detail</span><h3>${escapeHtml(stage.name)}</h3></div>
-      <button data-open-steering-target="${escapeHtml(priorityCandidates()[0]?.key || "")}">Open in Steering</button>
-    </div>
-    <div class="stage-grid">
-      ${Object.entries(values).map(([label, value]) => `<article><span>${escapeHtml(label)}</span><p>${escapeHtml(value)}</p></article>`).join("")}
-    </div>
-    <div class="stage-related">
-      <section>
-        <h4>Related decisions</h4>
-        ${stage.relatedDecisions.map((decision) => `<button data-open-steering-target="decision:${escapeHtml(decision.id)}">${escapeHtml(compactText(decisionTitle(decision), 100))}</button>`).join("") || `<p class="muted">No related reconstructed decisions.</p>`}
-      </section>
-      <section>
-        <h4>Related reports/tables/figures</h4>
-        ${stage.outputs.map((artifact) => `<button data-open-report="${escapeHtml(artifactPath(artifact))}">${escapeHtml(humanTitle(artifactPath(artifact)))}</button>`).join("") || `<p class="muted">No related output artifacts.</p>`}
-      </section>
-      <section>
-        <h4>Available provenance</h4>
-        ${stage.matchingEvents.map((event, index) => `<article><b>Research stage</b><span>${escapeHtml(eventText(event))}</span><small class="dev-secondary ${developerMode ? "" : "dev-hidden"}">Raw trace: ${escapeHtml(eventId(event, index))}</small></article>`).join("") || `<p class="muted">Token-level trace is not available for this run. Showing stage/file-level provenance.</p>`}
-      </section>
-    </div>
-    <div class="context-actions">
-      <button data-open-report="${escapeHtml(artifactPath(stage.outputs[0] || {}) || mainPaperPath())}">Open related report</button>
-      <button data-traceback-stage>Traceback</button>
-      <button data-create-stage-issue="${escapeHtml(stage.name)}">Create issue from this stage</button>
-      <button data-escalate-stage="${escapeHtml(stage.name)}">Escalate</button>
-      <button data-open-steering-target="${escapeHtml(priorityCandidates()[0]?.key || "")}">Return to Steering</button>
-    </div>`;
-}
-
-function renderTraceback() {
-  const candidate = selectedCandidate();
-  const tokenAvailable = canonicalEvents().some((event) => event.token_ref || event.tokenRefs || event.chunk_refs || event.chunkRefs);
-  const stageAvailable = Boolean(relatedContext(candidate).relatedEvents[0] || candidate.evidence[0] || candidate.findingId);
-  const chain = [
-    `Output section: ${selectedSectionLabel()}`,
-    candidate.findingId ? "Related finding" : "Related finding not linked",
-    "Decision summary",
-    relatedContext(candidate).relatedEvents[0] ? "Research stage" : "Research stage not linked",
-    candidate.evidence[0]?.path ? `Reference file: ${humanTitle(candidate.evidence[0].path)}` : "Reference file not linked",
-    developerMode ? "Raw trace" : "",
-  ];
-  return `
-    <div class="traceback-chain">
-      ${chain.filter(Boolean).map((item) => `<span>${escapeHtml(item)}</span>`).join("<i></i>")}
-    </div>
-    <p><strong>Available provenance.</strong> ${tokenAvailable ? "Token/chunk references detected for this run." : "Token-level trace is not available for this run. Showing stage/file-level provenance."}</p>`;
 }
 
 function reportItems() {
@@ -3102,7 +3557,7 @@ function dedupeArtifacts(artifacts) {
 
 function renderReports() {
   const items = reportItems().filter((artifact) => !reportQuery || `${humanTitle(artifactPath(artifact))} ${artifactPath(artifact)}`.toLowerCase().includes(reportQuery.toLowerCase()));
-  const selected = selectedArtifactPath || mainPaperPath();
+  const selected = selectedArtifactPath || availablePaperPath() || artifactPath(items[0]) || "";
   const selectedTitle = humanTitle(selected);
   const grouped = groupedReportItems(items);
   root.innerHTML = `
@@ -3442,7 +3897,7 @@ function renderHiddenStateSummary(path) {
 }
 
 function renderReportPreview(path) {
-  if (!path) return `<p class="muted">Select a report, table, figure, or diagram.</p>`;
+  if (!path) return `<p class="muted">No paper or report artifact is available for this run.</p>`;
   if (String(path).startsWith("review://")) return renderReviewArtifact(path);
   if (/^https?:\/\//i.test(path)) return `<section class="artifact-human-summary"><h4>Source</h4><p>${escapeHtml(path)}</p></section>`;
   if (/hidden.*states.*qwen|hidden[-_ ]?state/i.test(path)) {
@@ -3496,11 +3951,14 @@ async function loadReportPreview(path) {
   const body = root.querySelector(".artifact-content");
   if (!body || !path) return;
   try {
-    const artifact = await (await fetch(`/api/artifact?path=${encodeURIComponent(path)}${runQuery()}`)).json();
+    const response = await fetch(`/api/artifact?path=${encodeURIComponent(path)}${runQuery()}`);
+    if (!response.ok) throw new Error(`GET /api/artifact failed with ${response.status}`);
+    const artifact = await response.json();
     if (artifact.previewType === "csv") body.innerHTML = renderCsv(artifact.csv);
     else if (/\.json$/i.test(path)) body.innerHTML = renderJsonTable(artifact.content || "");
     else body.innerHTML = renderMarkdownish(artifact.content || "");
-  } catch {
+  } catch (error) {
+    console.error(`Could not load artifact preview ${path}`, error);
     body.innerHTML = `<p>Could not load ${escapeHtml(humanTitle(path))}.</p>`;
   }
 }
@@ -3606,12 +4064,15 @@ async function openEvidence(path) {
   const body = drawer.querySelector(".drawer-body");
   body.innerHTML = `<p class="muted">Loading...</p>`;
   try {
-    const artifact = await (await fetch(`/api/artifact?path=${encodeURIComponent(path)}${runQuery()}`)).json();
+    const response = await fetch(`/api/artifact?path=${encodeURIComponent(path)}${runQuery()}`);
+    if (!response.ok) throw new Error(`GET /api/artifact failed with ${response.status}`);
+    const artifact = await response.json();
     if (artifact.previewType === "image") body.innerHTML = `<img src="${artifact.url}" alt="${escapeHtml(path)}">`;
     else if (artifact.previewType === "binary") body.innerHTML = `<iframe src="${artifact.url}" title="${escapeHtml(path)}"></iframe>`;
     else if (artifact.previewType === "csv") body.innerHTML = renderCsv(artifact.csv);
     else body.innerHTML = `<pre>${escapeHtml(artifact.content || "")}</pre>`;
   } catch (error) {
+    console.error(`Could not load evidence ${path}`, error);
     body.innerHTML = `<p>Could not load ${escapeHtml(path)}.</p>`;
   }
 }
@@ -3623,12 +4084,34 @@ function renderCsv(csv) {
 
 navButtons.forEach((button) => {
   button.addEventListener("click", () => {
-    if (button.dataset.autoresearchTab && !run?.autoresearch?.detected) return;
-    if (button.dataset.view === "advanced" && !developerMode) return;
-    if (button.dataset.view === "trajectory") openedJourney = true;
-    if (button.dataset.view === "artifacts") openedReports = true;
+    const targetView = button.dataset.view;
+    navDebug("sidebar-click:before", { targetView });
+    if (!run) {
+      showNotice("Open a run first.", "warning");
+      navDebug("sidebar-click:no-run", { targetView });
+      return;
+    }
+    if (!SUPPORTED_VIEWS.has(targetView)) {
+      console.error("Unsupported sidebar view", targetView);
+      showNotice("Navigation unavailable for this view.", "error");
+      return;
+    }
+    if (button.dataset.autoresearchTab && !run?.autoresearch?.detected) {
+      showNotice("AutoResearch is not available for this run.", "warning");
+      navDebug("sidebar-click:unavailable", { targetView });
+      return;
+    }
+    if (targetView === "advanced" && !developerMode) {
+      console.error("Unsupported sidebar view outside developer mode", targetView);
+      showNotice("Advanced is unavailable in this user-test view.", "warning");
+      return;
+    }
+    if (targetView === "trajectory") openedJourney = true;
+    if (targetView === "artifacts") openedReports = true;
     sidebarExpandedOverride = false;
-    currentView = button.dataset.view;
+    currentScreen = "viewer";
+    currentView = targetView;
+    navDebug("sidebar-click:after", { targetView });
     render();
   });
 });

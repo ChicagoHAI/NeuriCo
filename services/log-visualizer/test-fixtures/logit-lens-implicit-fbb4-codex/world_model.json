@@ -1,0 +1,3370 @@
+{
+  "schemaVersion": 3,
+  "runId": "logit-lens-implicit-fbb4-codex",
+  "reconstructed": true,
+  "updated_at": "2026-07-22T13:53:29.905366+00:00",
+  "narrative": "This run tested whether a logit-lens-style decoder can map intermediate Qwen2.5-0.5B hidden states to implicit vocabulary items — whole multi-token English word types absent from the explicit tokenizer. A 128-entry implicit vocabulary was built from WikiText-2, arranged into 16 final-subtoken groups of 8 words each to control for suffix leakage, and a layer-local prototype table (ITL) was evaluated against five baselines on 512 held-out test examples. The ITL at validation-selected layer 5 reached 19.53% test top-1 accuracy, significantly outperforming the final-subtoken majority ceiling of 12.50% and the mean-subtoken embedding baseline of 10.94%. A Tuned-Lens-style ridge translator to final-layer prototypes failed badly at this data scale, reaching only 3.71% test top-1, confirming that layer-local prototype tables — not a universal translated output space — are the viable method in this setting. The layer-wise pattern, with whole-word ITL peaking at layer 5 while suffix-token identity peaks at layer 0, is qualitatively consistent with the token-erasure account of implicit vocabulary formation, though causal validation and unsupervised discovery remain open.",
+  "current_best": "Layer-local ITL at validation-selected layer 5: test top-1 19.53%, test top-5 25.59%, test MRR 0.240; beats final-subtoken majority by 7.03 pp (CI [2.53, 11.72], p=0.0045) and raw final-prototype baseline by 5.47 pp (CI [2.15, 8.79], p=0.0023)",
+  "headline": "A layer-local implicit-token lens recovers held-out multi-token word identity at 19.53% test top-1 over 128 candidates, beating the final-subtoken majority ceiling (12.50%) by 7.03 pp (bootstrap 95% CI [2.53, 11.72], p=0.0045).",
+  "keyFacts": [
+    "128 candidate implicit vocabulary words from WikiText-2; 16 suffix groups × 8 words each (12.5% subtoken ceiling)",
+    "Qwen2.5-0.5B; 896-dim hidden size; 25 hidden-state levels (embedding + 24 transformer layers)",
+    "2048 total examples: 1280 train / 256 val / 512 test (10/2/4 per word)",
+    "5 baselines: final-subtoken majority, majority-word chance, mean-subtoken embedding, raw final prototype, ridge-to-final ablation",
+    "Full reproducibility verified: second cached rerun produced identical SHA-256 hashes for all primary output files",
+    "Single NVIDIA RTX A6000 GPU; scope limited to one model, one English corpus, supervised vocabulary only"
+  ],
+  "methodology": [
+    "Dataset: local WikiText-2 raw; candidates are lowercased alphabetic words tokenizing into ≥2 pieces with ≥16 corpus occurrences",
+    "Leakage control: 16 balanced final-subtoken groups × 8 words each, capping trivial suffix ceiling at 12.5% top-1",
+    "Hidden-state extraction: final-subtoken-position states at all 25 levels with final LayerNorm applied, stored as float16 NPZ; shape [2048, 25, 896]",
+    "Primary ITL: per-layer cosine-similarity retrieval against L2-normalized training centroids; layer selected by validation top-1 accuracy",
+    "Ablation: ridge-to-final-prototype translator (λ=10, unregularized bias) mapping each layer into fixed final-layer prototype space",
+    "Statistics: 3000-sample bootstrap CIs, 6000-sample paired randomization tests, McNemar exact test, BH FDR correction for 25 layer-wise comparisons"
+  ],
+  "future_work": [
+    "Mine candidate implicit items from token-erasure footprints and validate with Patchscopes — removing pre-specified word-type labels to move toward unsupervised discovery",
+    "Scale to Qwen-7B and Llama-3 family models to test whether the layer-5 peak and suffix-group confound pattern hold with larger hidden dimensions",
+    "Test causal validity: ablate or replace implicit-word prototype directions and measure effect on downstream prediction accuracy",
+    "Extend vocabulary to named entities, multi-word phrases, and non-English text to assess generality beyond simple alphabetic English words",
+    "Increase training occurrences per word (>10) and explore lower-rank or sketched affine translators to test whether the ridge failure is recoverable with more data",
+    "Investigate why 'highland' is the dominant default wrong prediction across multiple suffix groups — a possible prototype geometry artifact worth localizing"
+  ],
+  "crux": "The vocabulary is supervised and fixed to known word types, so the experiment demonstrates decodability of a pre-specified set but cannot establish that the model internally organizes representations around implicit items beyond what a labelled prototype probe can exploit; errors concentrated within suffix groups and across topically related terms (ireland→lebanon, lowland→highland) leave residual orthographic and contextual confounds unresolved at this scale.",
+  "cruxEvidence": [
+    {
+      "type": "finding",
+      "id": "F13"
+    },
+    {
+      "type": "decision",
+      "id": "D6"
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "H1",
+      "statement": "Multi-token word occurrences cluster by whole-word identity in final-layer hidden-state space strongly enough to define reusable implicit-token prototypes.",
+      "status": "supported",
+      "affects": [],
+      "basedOn": [
+        "planning.md"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/additional_comparisons.json",
+          "itemId": null,
+          "note": "raw_final_layer22 accuracy 0.140625 (14.06%) with bootstrap CI [0.111328125, 0.171875], confirming final-layer prototype centroids retrieve held-out word identity well above 0.78% chance."
+        },
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "candidate_vocab_stats: 128 words, 16 unique_final_subtokens, largest_final_subtoken_group=8; all_prototypes_finite=true in validation_checks confirming stable centroids."
+        }
+      ],
+      "updated_at": "2026-06-29T05:08:57.883559",
+      "type": "hypothesis",
+      "ts": "2026-06-29T05:08:57.883559",
+      "links": []
+    },
+    {
+      "id": "H2",
+      "statement": "Earlier-layer hidden states can be translated into the final-layer implicit-token prototype space with a simple affine/ridge map (Tuned-Lens-style implicit lens).",
+      "status": "refuted",
+      "affects": [],
+      "basedOn": [
+        "planning.md"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Ridge-to-final ablation selected layer 17 by validation, reached only 3.71% test top-1 and 11.52% top-5 — below the final-subtoken majority baseline of 12.50%, indicating the 896-dim ridge translator fails with 10 training examples per word."
+        },
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "layerwise_itl_vs_raw_tests shows ridge method is the weakest whole-word method across all layers; its validation top-1 at layer 17 was 6.25% per REPORT.md main table."
+        }
+      ],
+      "updated_at": "2026-06-29T05:08:57.883559",
+      "type": "hypothesis",
+      "ts": "2026-06-29T05:08:57.883559",
+      "links": []
+    },
+    {
+      "id": "H3",
+      "statement": "The implicit-token lens predicts held-out whole-word identities better than baselines based only on explicit final-subtoken identity or mean subtoken embeddings.",
+      "status": "supported",
+      "affects": [],
+      "basedOn": [
+        "planning.md"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "ITL layer 5 test top-1 0.1953125 vs final-subtoken majority 0.125: accuracy_difference_itl_minus_baseline=0.0703125, difference_bootstrap_ci95=[0.02534, 0.11719], paired_randomization_p_value=0.00450, mcnemar_exact p=0.00464."
+        },
+        {
+          "type": "artifact",
+          "path": "results/additional_comparisons.json",
+          "itemId": null,
+          "note": "itl_layer5_vs_mean_subtoken_layer0: accuracy_difference=0.0859375, diff_ci95=[0.05078125, 0.12109375], paired_randomization_p=9.999e-05. itl_layer5_vs_raw_final_layer22: accuracy_difference=0.0546875, diff_ci95=[0.021484375, 0.087890625], p=0.0023."
+        }
+      ],
+      "updated_at": "2026-06-29T05:08:57.883559",
+      "type": "hypothesis",
+      "ts": "2026-06-29T05:08:57.883559",
+      "links": []
+    },
+    {
+      "id": "H4",
+      "statement": "Decoding accuracy varies systematically by layer, with middle/late layers outperforming very early layers for the implicit-token lens.",
+      "status": "uncertain",
+      "affects": [],
+      "basedOn": [
+        "planning.md"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "layerwise_itl_vs_raw_tests: ITL advantage over raw prototype is largest at layers 1–6 (diffs 0.156–0.180) and shrinks by layer 22 (diff=0.021, BH-corrected p=0.175, ns). Systematic variation confirmed; however ITL peaks at layer 5, not middle/late as predicted."
+        },
+        {
+          "type": "artifact",
+          "path": "figures/layer_top1_accuracy.png",
+          "itemId": null,
+          "note": "Layer-wise plot shows ITL top-1 peaks at layer 5 (early), then declines; raw-final-prototype peaks at layer 22 — partial support for layerwise variation but direction differs from hypothesis."
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Report notes explicit final-subtoken diagnostic is strongest at layer 0 (20.12%), falling as ITL rises — qualitatively consistent with token erasure but ITL peak at layer 5 is earlier than 'middle/late' prediction."
+        }
+      ],
+      "updated_at": "2026-06-29T05:08:57.883559",
+      "type": "hypothesis",
+      "ts": "2026-06-29T05:08:57.883559",
+      "links": []
+    },
+    {
+      "id": "H5",
+      "statement": "LLMs have implicit vocabularies not strictly part of the tokenizer vocabulary matrix, and it is possible to construct a logit lens that utilizes these implicit tokens (overarching project hypothesis from idea.yaml).",
+      "status": "supported",
+      "affects": [],
+      "basedOn": [
+        ".neurico/idea.yaml",
+        "planning.md"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "Primary comparison: ITL test top-1 0.1953125 (19.53%) vs majority-word baseline 0.0078 (0.78% chance) and final-subtoken majority 0.125 (12.50%); positive CI and p<0.005 confirm feasibility of a prototype implicit-token lens. Support is bounded: method is supervised."
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Section 9 conclusion: 'Yes, we can make a prototype logit lens that uses implicit tokens… the layer-local ITL recovered held-out word identity significantly above final-subtoken and compositional baselines.' Limitations acknowledged: supervised, single model, English only."
+        }
+      ],
+      "updated_at": "2026-06-29T05:08:57.883559",
+      "type": "hypothesis",
+      "ts": "2026-06-29T05:08:57.883559",
+      "links": []
+    }
+  ],
+  "experiments": [
+    {
+      "id": "E1",
+      "mode": "computational_analysis",
+      "name": "Candidate implicit vocabulary construction from WikiText-2 multi-token words",
+      "design": "Scanned all alphabetic word occurrences across WikiText-2 train/val/test splits, filtered to words with ≥16 occurrences and ≥2 Qwen tokenizer pieces, then grouped by final tokenizer ID requiring ≥8 distinct word types per group (max 8 per group) to control final-subtoken leakage. Selected 128 entries across 16 balanced suffix groups; split 10 train / 2 val / 4 test occurrences per word (2,048 total examples) with seed 42.",
+      "hypothesis": "H1,H5",
+      "status": "done",
+      "result": "128 word types, 16 unique final subtokens, mean piece count 2.453, max 5 pieces (e.g., odaenathus, hygrometricus). Each suffix group contains exactly 8 words, making final-subtoken majority baseline deterministically 12.5%. Splits: 1280 train, 256 val, 512 test.",
+      "ranBy": "experiment_runner",
+      "affects": [
+        "results/candidate_vocab.json",
+        "results/examples.jsonl",
+        "results/config.json"
+      ],
+      "basedOn": [
+        "datasets/wikitext2_raw",
+        "artifacts/hf_cache/hub/models--Qwen--Qwen2.5-0.5B"
+      ],
+      "ts": "2026-06-29T04:52:39.899028",
+      "type": "experiment",
+      "links": [
+        {
+          "relation": "motivated_by",
+          "target": "H1",
+          "basis": "explicit",
+          "rationale": "E1 constructs the candidate implicit vocabulary to provide the prototype material H1 predicts should cluster by whole-word identity"
+        }
+      ]
+    },
+    {
+      "id": "E2",
+      "mode": "empirical_experiment",
+      "name": "Layer-wise hidden state extraction from frozen Qwen2.5-0.5B",
+      "design": "Fed all 2,048 occurrence contexts (left-padded, max 96 tokens) through frozen Qwen/Qwen2.5-0.5B in batches of 64 on one RTX A6000 (CUDA_VISIBLE_DEVICES=1). Extracted hidden states at the final-subtoken position across all 25 hidden-state levels (embedding + 24 transformer layers, hidden size 896), applying the model's RMSNorm and L2-normalizing each vector before storage as float16.",
+      "hypothesis": "H1,H3,H4,H5",
+      "status": "done",
+      "result": "Output array shape [2048, 25, 896], all_hidden_finite=true (results/validation_checks.json). Stored as ~91.8MB float16 NPZ. A second cached rerun reproduced identical SHA-256 hashes for summary.json, metrics_layerwise.csv, and additional_comparisons.json.",
+      "ranBy": "experiment_runner",
+      "affects": [
+        "results/hidden_states_Qwen_Qwen2p5-0p5B_words128_ex2048_seed42_len96.npz",
+        "results/validation_checks.json",
+        "results/environment.json",
+        "results/package_versions.json"
+      ],
+      "basedOn": [
+        "results/examples.jsonl",
+        "artifacts/hf_cache/hub/models--Qwen--Qwen2.5-0.5B",
+        "results/config.json"
+      ],
+      "ts": "2026-06-29T04:52:39.899028",
+      "type": "experiment",
+      "links": [
+        {
+          "relation": "motivated_by",
+          "target": "H1",
+          "basis": "inferred",
+          "rationale": "Extracting layer-wise hidden states is the prerequisite measurement for testing whether they cluster by whole-word identity as H1 claims"
+        }
+      ]
+    },
+    {
+      "id": "E3",
+      "mode": "empirical_experiment",
+      "name": "Layer-local implicit token lens (ITL) whole-word retrieval evaluation and baseline comparison",
+      "design": "For each of 25 layers, built a 128×896 implicit vocabulary table by averaging L2-normalized training states per word type, then normalizing each prototype row. Scored val/test hidden states by cosine similarity against all 128 rows. Selected layer by validation top-1 accuracy. Evaluated four additional methods on identical splits: (a) mean-subtoken embedding baseline using averaged input embedding rows; (b) raw-final-prototype baseline using final-layer (layer 24) centroids applied to every layer; (c) final-subtoken majority baseline (no hidden states); (d) majority-word baseline. All paired comparisons used 3,000 bootstrap samples and 6,000 randomization permutations.",
+      "hypothesis": "H1,H3,H4,H5",
+      "status": "done",
+      "result": "ITL selected layer 5: val top-1 21.09%, test top-1 19.53%, test top-5 25.59%, test MRR 0.240. Final-subtoken majority: 12.50% (fixed). Raw-final-prototype: 14.06% at layer 22. Mean-subtoken: 10.94% at layer 0. Majority-word: 0.78%. ITL vs final-subtoken majority: +7.03pp, bootstrap CI [2.53, 11.72], p=0.0045. ITL vs raw-final-prototype: +5.47pp, CI [2.15, 8.79], p=0.0023. ITL vs mean-subtoken: +8.59pp, CI [5.08, 12.11], p<0.001.",
+      "ranBy": "experiment_runner",
+      "affects": [
+        "results/implicit_vocab_tables.npz",
+        "results/metrics_layerwise.csv",
+        "results/summary.json",
+        "results/additional_comparisons.json",
+        "figures/layer_top1_accuracy.png",
+        "figures/layer_top5_accuracy.png",
+        "figures/layer_mrr.png"
+      ],
+      "basedOn": [
+        "results/hidden_states_Qwen_Qwen2p5-0p5B_words128_ex2048_seed42_len96.npz",
+        "results/candidate_vocab.json",
+        "results/examples.jsonl"
+      ],
+      "ts": "2026-06-29T05:08:57.883559",
+      "links": [
+        {
+          "relation": "motivated_by",
+          "target": "H3",
+          "basis": "explicit",
+          "rationale": "E3 name is 'ITL whole-word retrieval evaluation and baseline comparison', directly operationalizing H3's prediction of better-than-baseline performance"
+        },
+        {
+          "relation": "motivated_by",
+          "target": "H1",
+          "basis": "inferred",
+          "rationale": "E3 also tests whether layer-local prototype tables constitute reusable implicit-token representations, the reusability claim of H1"
+        }
+      ],
+      "type": "experiment"
+    },
+    {
+      "id": "E4",
+      "mode": "empirical_experiment",
+      "name": "Ridge-to-final-prototype translator ablation (Tuned-Lens analogue for implicit tokens)",
+      "design": "For each of 25 layers, trained a ridge-regularized (λ=10.0) affine map with unregularized bias from the layer's 896-dim training states (1,280 examples) to the final-layer prototype space. Applied via augmented-matrix linear system solve. Translated states were L2-normalized then scored against final-layer prototype table. Layer selected by validation top-1. Designed as the closest analogue to the Tuned Lens affine-translator paradigm applied to the implicit vocabulary output space.",
+      "hypothesis": "H2",
+      "status": "done",
+      "result": "Selected layer 17 by validation (val top-1 6.25%); test top-1 3.71%, test top-5 11.52%, test MRR 0.092. Well below final-subtoken majority (12.50%). Confirms H2 refuted: with 10 training examples per word and 896-dimensional states, ridge translation into a fixed final-layer prototype space is underdetermined and unreliable.",
+      "ranBy": "experiment_runner",
+      "affects": [
+        "results/metrics_layerwise.csv",
+        "results/summary.json"
+      ],
+      "basedOn": [
+        "results/hidden_states_Qwen_Qwen2p5-0p5B_words128_ex2048_seed42_len96.npz",
+        "results/implicit_vocab_tables.npz",
+        "results/candidate_vocab.json"
+      ],
+      "ts": "2026-06-29T05:08:57.883559",
+      "links": [
+        {
+          "relation": "motivated_by",
+          "target": "H2",
+          "basis": "explicit",
+          "rationale": "E4 is labeled 'Tuned-Lens analogue for implicit tokens', directly testing H2's claim about affine translation of earlier-layer states into final-prototype space"
+        }
+      ],
+      "type": "experiment"
+    },
+    {
+      "id": "E5",
+      "mode": "computational_analysis",
+      "name": "Layer-wise decoding trajectory analysis with BH-corrected ITL vs raw-prototype tests",
+      "design": "Tracked per-layer top-1 accuracy, top-5 accuracy, and MRR for all five methods (ITL, ridge ablation, raw-final-prototype, mean-subtoken embedding, explicit final-subtoken diagnostic) on validation and test splits across all 25 hidden-state levels. Ran paired randomization tests (6,000 permutations) for ITL vs raw-prototype at every layer and applied Benjamini-Hochberg FDR correction across the 25 comparisons.",
+      "hypothesis": "H4",
+      "status": "done",
+      "result": "ITL peaks at layer 5 (test top-1 19.53%) and declines steadily. Raw-final-prototype peaks at layer 22 (14.06%). Explicit final-subtoken diagnostic peaks at layer 0 (20.12% over 16 suffix IDs, not whole-word decoding). ITL vs raw-prototype BH-corrected p<0.007 at layers 0–21; p=0.175 at layer 22 (ns); p=1.0 at layer 24 where ITL diff_itl_minus_raw=0.0. Pattern qualitatively consistent with token erasure: suffix-token identity most recoverable at embedding layer, whole-word ITL retrieval peaks early (layer 5), then diminishes as final-layer next-token prediction geometry dominates.",
+      "ranBy": "experiment_runner",
+      "affects": [
+        "results/metrics_layerwise.csv",
+        "results/summary.json",
+        "figures/layer_top1_accuracy.png",
+        "figures/layer_mrr.png",
+        "figures/layer_top5_accuracy.png"
+      ],
+      "basedOn": [
+        "results/hidden_states_Qwen_Qwen2p5-0p5B_words128_ex2048_seed42_len96.npz",
+        "results/implicit_vocab_tables.npz",
+        "results/candidate_vocab.json"
+      ],
+      "ts": "2026-06-29T05:08:57.883559",
+      "type": "experiment",
+      "links": [
+        {
+          "relation": "motivated_by",
+          "target": "H4",
+          "basis": "explicit",
+          "rationale": "E5 is 'Layer-wise decoding trajectory analysis', directly designed to test H4's prediction of systematic layer-wise decoding variation"
+        },
+        {
+          "relation": "motivated_by",
+          "target": "H1",
+          "basis": "inferred",
+          "rationale": "E5 layer-wise analysis also tests whether implicit-token prototypes are layer-specific or reducible to final-layer geometry, probing H1's reusability claim at each layer"
+        }
+      ]
+    },
+    {
+      "id": "E6",
+      "mode": "qualitative_analysis",
+      "name": "Error analysis of ITL layer-5 mispredictions on test set",
+      "design": "Inspected representative mispredictions from the ITL at validation-selected layer 5 on the 512 test examples. Categorized errors by (a) within vs. across final-subtoken group, (b) rank of correct label, and (c) context string, to identify confounding factors including orthographic/suffix residue, topical/geographic co-occurrence, and context brevity.",
+      "hypothesis": "H3",
+      "status": "done",
+      "result": "35 representative failures recorded in results/error_examples.json. Majority of errors are within the same suffix group (e.g., 'england' → 'highland'/'queensland', rank 10 and 114). Some cross-group errors occur (e.g., 'ireland' → 'lebanon', rank 2 on 'Northern Ireland' context). Confounds: orthographic prefix similarity within group, topical co-occurrence of geographic names, short contexts (e.g., bare 'Eaton' → 'highland' rank 124). Confirms ITL learns beyond final subtoken identity but cannot cleanly separate whole-word identity from orthographic and contextual similarity at this scale.",
+      "ranBy": "experiment_runner",
+      "affects": [
+        "results/error_examples.json"
+      ],
+      "basedOn": [
+        "results/hidden_states_Qwen_Qwen2p5-0p5B_words128_ex2048_seed42_len96.npz",
+        "results/examples.jsonl",
+        "results/candidate_vocab.json",
+        "results/implicit_vocab_tables.npz"
+      ],
+      "ts": "2026-06-29T05:08:57.883559",
+      "type": "experiment",
+      "links": [
+        {
+          "relation": "motivated_by",
+          "target": "H3",
+          "basis": "inferred",
+          "rationale": "Analyzing ITL mispredictions characterizes the nature and robustness of the H3-supporting ITL advantage"
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "F1",
+      "text": "Layer-local implicit token lens (ITL) at validation-selected layer 5 reaches 19.53% test top-1 accuracy over 128 whole-word labels, 25.59% top-5, and 0.240 MRR on 512 held-out examples",
+      "insight": "A supervised prototype-based implicit-token output space is viable for logit-lens-style decoding; whole-word identity is recoverable above chance in a small open model",
+      "kind": "result",
+      "category": "primary_metric",
+      "affects": [],
+      "basedOn": [
+        "results/summary.json",
+        "results/additional_comparisons.json"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "primary_comparison.itl_test: top1=0.1953125, top5=0.255859375, mrr=0.2401843564917992, layer=5"
+        },
+        {
+          "type": "artifact",
+          "path": "results/additional_comparisons.json",
+          "itemId": null,
+          "note": "itl_layer5.accuracy=0.1953125, ci95=[0.162109375, 0.228515625]"
+        }
+      ],
+      "links": [
+        {
+          "relation": "supports",
+          "target": "H1",
+          "basis": "inferred",
+          "rationale": "19.53% top-1 whole-word retrieval demonstrates prototype-based decoding is viable, confirming clustering is strong enough for reusable implicit-token prototypes"
+        },
+        {
+          "relation": "supports",
+          "target": "H3",
+          "basis": "inferred",
+          "rationale": "ITL outperforms all five baselines on the held-out test set, satisfying H3's prediction of better-than-baseline whole-word prediction"
+        },
+        {
+          "relation": "supports",
+          "target": "H5",
+          "basis": "inferred",
+          "rationale": "Demonstrates feasibility of constructing a logit lens over implicit tokens not in the tokenizer vocabulary, the core claim of H5"
+        },
+        {
+          "relation": "produced_by",
+          "target": "E3",
+          "basis": "explicit",
+          "rationale": "F1 reports ITL layer-5 test results; E3 is 'Layer-local ITL whole-word retrieval evaluation and baseline comparison'"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F2",
+      "text": "Final-subtoken majority baseline achieves 12.50% test top-1 (1/8 within balanced suffix groups of 8 words each)",
+      "insight": "Leakage control is functioning: suffix-group design caps the trivial final-subtoken ceiling at 12.5%, making ITL gains interpretable as beyond-subtoken signal",
+      "kind": "result",
+      "category": "control",
+      "affects": [],
+      "basedOn": [
+        "results/summary.json",
+        "results/config.json"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "primary_comparison.baseline_test.top1=0.125; final_group_min_types=8, max_words_per_final_group=8"
+        },
+        {
+          "type": "artifact",
+          "path": "results/config.json",
+          "itemId": null,
+          "note": "final_group_min_types: 8, max_words_per_final_group: 8"
+        }
+      ],
+      "links": [
+        {
+          "relation": "produced_by",
+          "target": "E1",
+          "basis": "explicit",
+          "rationale": "E1 result states final-subtoken majority is 'deterministically 12.5%' from the 16-group×8-word balanced design; F2 reports this fixed value"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F3",
+      "text": "Majority-word chance baseline is 0.78% (1/128 under balanced labels across 128 candidate words)",
+      "insight": "Establishes the random floor; ITL at 19.53% is 18.75 percentage points above chance",
+      "kind": "result",
+      "category": "control",
+      "affects": [],
+      "basedOn": [
+        "results/summary.json",
+        "results/config.json"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "majority word baseline top1=0.0078125 (0.78%), n_candidate_words=128"
+        },
+        {
+          "type": "artifact",
+          "path": "results/config.json",
+          "itemId": null,
+          "note": "max_words: 128, train_per_word: 10, val_per_word: 2, test_per_word: 4 → balanced labels"
+        }
+      ],
+      "links": [
+        {
+          "relation": "produced_by",
+          "target": "E1",
+          "basis": "inferred",
+          "rationale": "0.78% majority-word baseline is 1/128 derived from E1's 128-candidate vocabulary; F3 reports this design-determined floor"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F4",
+      "text": "Primary paired comparison ITL layer 5 vs final-subtoken majority: +7.03 pp accuracy difference, bootstrap 95% CI [2.53, 11.72], paired randomization p=0.0045, McNemar exact p=0.0046 (discordant: 95 ITL-only correct, 59 baseline-only correct, n=154)",
+      "insight": "The ITL improvement over the subtoken-leakage ceiling is statistically robust; the effect is not explained by reading out the last tokenizer piece",
+      "kind": "result",
+      "category": "inferential_statistic",
+      "affects": [],
+      "basedOn": [
+        "results/summary.json"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "primary_comparison: accuracy_difference_itl_minus_baseline=0.0703125, difference_bootstrap_ci95=[0.02534,0.1171875], paired_randomization_p_value=0.00449925, mcnemar_exact.p_value=0.004637, a_only=95, b_only=59"
+        }
+      ],
+      "links": [
+        {
+          "relation": "supports",
+          "target": "H3",
+          "basis": "explicit",
+          "rationale": "F4 is the pre-registered primary confirmatory comparison for H3; +7.03pp, bootstrap CI [2.53,11.72], p=0.0045 over final-subtoken majority baseline"
+        },
+        {
+          "relation": "produced_by",
+          "target": "E3",
+          "basis": "explicit",
+          "rationale": "F4 reports the paired statistical comparison between ITL and the final-subtoken majority baseline, computed within E3"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F5",
+      "text": "ITL layer 5 vs raw final-prototype layer 22: +5.47 pp, bootstrap 95% CI [2.15, 8.79], paired randomization p=0.0023, McNemar exact p=0.0020 (a_only=53, b_only=25)",
+      "insight": "Layer-local prototype tables outperform a fixed final-layer implicit vocabulary table; the implicit-token geometry is layer-specific, not reducible to final-layer similarity",
+      "kind": "result",
+      "category": "ablation_comparison",
+      "affects": [],
+      "basedOn": [
+        "results/additional_comparisons.json"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/additional_comparisons.json",
+          "itemId": null,
+          "note": "itl_layer5_vs_raw_final_layer22: accuracy_difference=0.0546875, diff_ci95=[0.021484375, 0.087890625], paired_randomization_p=0.0023, mcnemar p=0.00203"
+        }
+      ],
+      "links": [
+        {
+          "relation": "supports",
+          "target": "H1",
+          "basis": "inferred",
+          "rationale": "Layer-local ITL beating fixed final-layer prototypes by +5.47pp shows implicit-token geometry is layer-specific, confirming that layer-local clusters are real and reusable"
+        },
+        {
+          "relation": "produced_by",
+          "target": "E3",
+          "basis": "explicit",
+          "rationale": "F5 reports ITL vs raw-final-prototype comparison; E3 result text lists this as part of its additional comparisons"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F6",
+      "text": "ITL layer 5 vs mean-subtoken embedding layer 0: +8.59 pp, bootstrap 95% CI [5.08, 12.11], paired randomization p<0.0001, McNemar exact p=4.9e-6 (a_only=68, b_only=24)",
+      "insight": "The ITL signal is not merely a compositional average of input subtoken embeddings; hidden states encode whole-word geometry beyond what subword composition predicts",
+      "kind": "result",
+      "category": "ablation_comparison",
+      "affects": [],
+      "basedOn": [
+        "results/additional_comparisons.json"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/additional_comparisons.json",
+          "itemId": null,
+          "note": "itl_layer5_vs_mean_subtoken_layer0: accuracy_difference=0.0859375, diff_ci95=[0.05078125, 0.12109375], paired_randomization_p=9.999e-05, mcnemar p=4.935e-6"
+        }
+      ],
+      "links": [
+        {
+          "relation": "supports",
+          "target": "H3",
+          "basis": "inferred",
+          "rationale": "ITL beats mean-subtoken embedding baseline by +8.59pp (p<0.0001), one of the baselines H3 explicitly claims to outperform"
+        },
+        {
+          "relation": "produced_by",
+          "target": "E3",
+          "basis": "explicit",
+          "rationale": "F6 reports ITL vs mean-subtoken embedding comparison; this baseline is part of E3's five-baseline comparison suite"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F7",
+      "text": "Ridge-to-final implicit lens ablation (closest analogue to Tuned Lens): validation-selected layer 17, validation top-1=6.25%, test top-1=3.71%, test top-5=11.52%, MRR=0.092 — far below chance-relevant bounds and all other methods",
+      "insight": "A Tuned-Lens-style affine translator to final-layer implicit prototypes fails at this data scale (10 train examples × 896 dimensions × ridge λ=10); the successful implicit-token lens is layer-local prototypes, not a universal translated output space",
+      "kind": "dead_end",
+      "category": "ablation",
+      "affects": [],
+      "basedOn": [
+        "REPORT.md",
+        "results/summary.json"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Table row: Ridge-to-final ITL ablation, selected layer 17, val 6.25%, test 3.71%, top-5 11.52%, MRR 0.092"
+        },
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "config.ridge_lambda=10.0, train_per_word=10; ridge method selected layer 17 per layerwise csv referenced in outputs"
+        }
+      ],
+      "links": [
+        {
+          "relation": "refutes",
+          "target": "H2",
+          "basis": "explicit",
+          "rationale": "E4 result states 'Confirms H2 refuted'; ridge translator reaches only 3.71% test top-1, well below the 12.50% subtoken baseline"
+        },
+        {
+          "relation": "produced_by",
+          "target": "E4",
+          "basis": "explicit",
+          "rationale": "F7 reports the ridge translator ablation metrics; E4 is 'Ridge-to-final-prototype translator ablation'"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F8",
+      "text": "ITL top-1 accuracy peaks at layer 5 (validation-selected), then declines gradually through layers 6–24; the layer-5 advantage over raw final prototypes is +17.58 pp (p<0.0001, McNemar p=1.6e-27)",
+      "insight": "Whole-word identity becomes decodable in early-to-middle layers; the final representation is optimized for next-token prediction and does not expose current whole-word identity as directly",
+      "kind": "result",
+      "category": "layer_profile",
+      "affects": [],
+      "basedOn": [
+        "results/summary.json",
+        "results/additional_comparisons.json",
+        "figures/layer_top1_accuracy.png"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "best_itl_validation.layer=5, top1=0.2109375; layerwise_itl_vs_raw_tests[5].diff_itl_minus_raw=0.17578125, p=0.0004997"
+        },
+        {
+          "type": "artifact",
+          "path": "results/additional_comparisons.json",
+          "itemId": null,
+          "note": "itl_layer5_vs_raw_final_layer5: diff=0.17578125, mcnemar a_only=90, b_only=0, p=1.6e-27"
+        },
+        {
+          "type": "artifact",
+          "path": "figures/layer_top1_accuracy.png",
+          "itemId": null,
+          "note": "Layer-wise top-1 accuracy figure referenced in paper and REPORT.md"
+        }
+      ],
+      "links": [
+        {
+          "relation": "supports",
+          "target": "H1",
+          "basis": "inferred",
+          "rationale": "ITL peaking at layer 5 confirms whole-word identity is decodable from intermediate hidden states via layer-local prototypes"
+        },
+        {
+          "relation": "refutes",
+          "target": "H4",
+          "basis": "inferred",
+          "rationale": "H4 predicted middle/late-layer peak; F8 shows ITL peaks at layer 5 (early) and declines monotonically through layers 6-24; H4 status is 'uncertain'"
+        },
+        {
+          "relation": "produced_by",
+          "target": "E5",
+          "basis": "explicit",
+          "rationale": "F8 reports the layer-wise ITL accuracy trajectory; E5 is 'Layer-wise decoding trajectory analysis'"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F9",
+      "text": "Raw final-prototype baseline (fixed final-layer prototypes applied to all layers) peaks at layer 22 with test top-1=14.06%, but its top-1 is 5.47 pp below ITL; its top-5=29.69% at layer 22 is higher than ITL top-5=25.59%",
+      "insight": "Final-layer prototypes are geometrically best matched to late hidden states (layer 22≈final transformer layer) but are poor decoders for earlier layers; layer-local ITL dominates on top-1 even though raw final prototype has an edge on top-5",
+      "kind": "result",
+      "category": "ablation",
+      "affects": [],
+      "basedOn": [
+        "results/additional_comparisons.json",
+        "REPORT.md"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/additional_comparisons.json",
+          "itemId": null,
+          "note": "raw_final_layer22.accuracy=0.140625, ci95=[0.111328125, 0.171875]"
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Table: Raw final prototype, selected layer 22, test top-1 14.06%, test top-5 29.69%, MRR 0.220"
+        }
+      ],
+      "links": [
+        {
+          "relation": "supports",
+          "target": "H1",
+          "basis": "inferred",
+          "rationale": "Raw final-prototype achieving 14.06% at layer 22 confirms that final-layer centroids cluster by whole-word identity sufficiently to be useful, supporting H1's clustering claim"
+        },
+        {
+          "relation": "produced_by",
+          "target": "E5",
+          "basis": "explicit",
+          "rationale": "F9 reports raw final-prototype layer-wise performance; E5 result text explicitly describes raw-final-prototype peaks at layer 22"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F10",
+      "text": "Explicit final-subtoken embedding diagnostic (measuring suffix-token recovery, not whole-word decoding) is strongest at layer 0 with 20.12% test accuracy over 16 suffix IDs, and declines in early/middle layers while ITL whole-word accuracy rises",
+      "insight": "Qualitatively consistent with token-erasure hypothesis: component-token (suffix) identity is most directly readable at the embedding level and decreases as the model builds a whole-word representation decodable by layer 5",
+      "kind": "result",
+      "category": "layer_profile",
+      "affects": [],
+      "basedOn": [
+        "REPORT.md",
+        "paper_draft/sections/results.tex"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Section 5: explicit final-subtoken embedding diagnostic reached 20.12% top-1 on test at layer 0"
+        },
+        {
+          "type": "artifact",
+          "path": "paper_draft/sections/results.tex",
+          "itemId": null,
+          "note": "'explicit final-subtoken diagnostic is strongest at layer 0, with 20.12% test accuracy over the 16 suffix IDs, and falls in early and middle layers while word-level ITL improves'"
+        }
+      ],
+      "links": [
+        {
+          "relation": "produced_by",
+          "target": "E5",
+          "basis": "explicit",
+          "rationale": "F10 reports the explicit final-subtoken diagnostic; E5 result text describes this diagnostic (20.12% at layer 0) as part of the trajectory analysis"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F11",
+      "text": "Candidate implicit vocabulary: 128 lowercased alphabetic words, mean 2.45 tokenizer pieces per word (min 2, max 5), arranged in exactly 16 final-subtoken groups with 8 words per group",
+      "insight": "The leakage-control design was successfully realized: each group's 8-way ambiguity bounds the final-subtoken ceiling at 12.5%, making any ITL improvement interpretable",
+      "kind": "note",
+      "category": "data_characterization",
+      "affects": [],
+      "basedOn": [
+        "results/summary.json",
+        "results/candidate_vocab.json"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "candidate_vocab_stats: mean_piece_count=2.453125, min=2, max=5, unique_final_subtokens=16, largest_final_subtoken_group=8"
+        },
+        {
+          "type": "artifact",
+          "path": "results/candidate_vocab.json",
+          "itemId": null,
+          "note": "128-entry list; first 16 entries show 'land' group: england, ireland, maryland, queensland, portland, lowland, finland, highland with final_token='land'"
+        }
+      ],
+      "links": [
+        {
+          "relation": "produced_by",
+          "target": "E1",
+          "basis": "explicit",
+          "rationale": "F11 describes the candidate vocabulary structure (128 words, 16 groups, mean 2.45 pieces); E1 is 'Candidate implicit vocabulary construction'"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F12",
+      "text": "Hidden states tensor shape [2048, 25, 896]: 2048 examples (1280 train / 256 val / 512 test), 25 hidden-state levels (embedding + 24 transformer layers), 896-dimensional hidden size; all finite",
+      "insight": "Data collection completed without numerical issues; experiment is fully cacheable for exact reproduction",
+      "kind": "note",
+      "category": "data_quality",
+      "affects": [],
+      "basedOn": [
+        "results/validation_checks.json",
+        "results/summary.json"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/validation_checks.json",
+          "itemId": null,
+          "note": "hidden_states_shape=[2048,25,896], all_hidden_finite=true, prototype_shape=[128,896], all_prototypes_finite=true"
+        },
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "n_examples=2048, split_counts={train:1280, val:256, test:512}, n_layers_including_embedding=25, hidden_size=896"
+        }
+      ],
+      "links": [
+        {
+          "relation": "produced_by",
+          "target": "E2",
+          "basis": "explicit",
+          "rationale": "F12 reports tensor shape [2048,25,896] and finiteness; E2 is 'Layer-wise hidden state extraction' whose result text gives identical figures"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F13",
+      "text": "Most ITL errors fall within the same final-subtoken group (e.g., england→highland, ireland→highland, finland→highland across multiple test instances); cross-group errors also occur (ireland→lebanon, ireland→hardy)",
+      "insight": "Hidden states encode a mixture of whole-word identity, residual orthographic/subtoken information, and contextual semantics; suffix-group and topical similarity remain substantial confounds even after ITL improves over the subtoken baseline",
+      "kind": "result",
+      "category": "error_analysis",
+      "affects": [],
+      "basedOn": [
+        "results/error_examples.json",
+        "REPORT.md"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/error_examples.json",
+          "itemId": null,
+          "note": "example_id=12,13: england→highland rank 10; example_id=28,31: ireland→highland rank 26; example_id=30: ireland→lebanon rank 2; example_id=108: finland→highland rank 53"
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Section 6: 'Many ITL errors are within the same final-subtoken group... suffix-group and topical/geographic similarity remain major confounds'"
+        }
+      ],
+      "links": [
+        {
+          "relation": "produced_by",
+          "target": "E6",
+          "basis": "explicit",
+          "rationale": "F13 reports error patterns (england→highland, ireland→lebanon); E6 is 'Error analysis of ITL layer-5 mispredictions'"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F14",
+      "text": "Layer-wise ITL vs raw final prototype: statistically significant advantage (p<0.01 BH-corrected) at every layer from 0 through 21; not significant at layer 22 (p=0.168); equal at layer 24 (diff=0.0, p=1.0)",
+      "insight": "Layer-local prototypes are beneficial throughout almost all of the network, but converge with (and do not beat) fixed final-layer prototypes at the final transformer layer, confirming that layer-local advantage is largest in early-middle layers",
+      "kind": "result",
+      "category": "layer_profile",
+      "affects": [],
+      "basedOn": [
+        "results/summary.json"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/summary.json",
+          "itemId": null,
+          "note": "layerwise_itl_vs_raw_tests: layer 0 diff=0.076 p=0.0005; layer 5 diff=0.176 p=0.0005; layer 21 diff=0.037 p=0.013 (BH 0.0141); layer 22 diff=0.021 p=0.168 (BH 0.175); layer 24 diff=0.0 p=1.0"
+        }
+      ],
+      "links": [
+        {
+          "relation": "supports",
+          "target": "H1",
+          "basis": "inferred",
+          "rationale": "Layer-local prototypes outperform fixed final-layer prototypes (BH-corrected p<0.007) at layers 0-21, confirming layer-specific implicit lexical geometry as implicit in H1"
+        },
+        {
+          "relation": "produced_by",
+          "target": "E5",
+          "basis": "explicit",
+          "rationale": "F14 reports BH-corrected layer-wise ITL vs raw-prototype significance; E5 name includes 'BH-corrected ITL vs raw-prototype tests'"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    },
+    {
+      "id": "F15",
+      "text": "Experiment ran on a single NVIDIA RTX A6000 (50.6 GB free), batch size 64, Python 3.12.8, PyTorch 2.12.1+cu130, Transformers 5.12.1, Datasets 5.0.0; a cached rerun reproduced identical SHA-256 hashes for summary.json, metrics_layerwise.csv, and additional_comparisons.json",
+      "insight": "The experiment is deterministic and reproducible from cached HuggingFace assets; results are not stochastic artifacts",
+      "kind": "note",
+      "category": "reproducibility",
+      "affects": [],
+      "basedOn": [
+        "results/environment.json",
+        "results/package_versions.json",
+        "REPORT.md"
+      ],
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/environment.json",
+          "itemId": null,
+          "note": "cuda_device_count=1, device=NVIDIA RTX A6000, mem_get_info_bytes[0]=50615025664"
+        },
+        {
+          "type": "artifact",
+          "path": "results/package_versions.json",
+          "itemId": null,
+          "note": "torch=2.12.1+cu130, transformers=5.12.1, datasets=5.0.0, numpy=2.5.0, scipy=1.18.0, sklearn=1.9.0"
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Section 4: 'A second cached rerun produced identical SHA-256 hashes for results/summary.json, results/metrics_layerwise.csv, and results/additional_comparisons.json'"
+        }
+      ],
+      "links": [
+        {
+          "relation": "produced_by",
+          "target": "E2",
+          "basis": "explicit",
+          "rationale": "F15 reports hardware/software setup and reproducibility via SHA-256; E2 result text records the same hardware, framework versions, and hash-match rerun"
+        }
+      ],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "finding"
+    }
+  ],
+  "open_questions": [
+    "Would the ITL layer-5 peak and suffix-group confounds persist in larger models (Qwen-7B, Llama-3) with higher hidden dimensionality?",
+    "Can implicit vocabulary items be discovered unsupervisedly via token-erasure footprint clustering, removing the need for pre-specified word-type labels?",
+    "Do cross-group errors (ireland→lebanon) reflect genuine semantic proximity in model geometry or corpus co-occurrence artifacts in WikiText-2?",
+    "Would named entities, multi-word phrases, or morphologically complex forms show different implicit-token layer-wise geometry than simple multi-subtoken words?",
+    "Can causal interventions (prototype ablation or replacement) confirm that the model relies on the decoded implicit-token representations for downstream prediction?"
+  ],
+  "decisions": [
+    {
+      "id": "D1",
+      "finding": "global",
+      "layer": "hypothesis",
+      "question": "What should 'implicit token' mean concretely — whole multi-token word types drawn from WikiText-2, named entities, multi-word phrases, or arbitrary latent clusters discovered from token-erasure footprints?",
+      "options": [
+        {
+          "text": "Lowercased alphabetic multi-token word types drawn from WikiText-2 corpus occurrences",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Named entities (persons, locations, organizations) consistent with token-erasure literature",
+          "status": "alternative",
+          "source": "inferred"
+        },
+        {
+          "text": "Multi-word phrases or arbitrary latent clusters discovered unsupervisedly",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Lowercased alphabetic multi-token word types drawn from WikiText-2 corpus occurrences",
+      "statedRationale": null,
+      "inferredRationale": "Word types have ground-truth whole-word identity labels enabling clean retrieval evaluation; named entities require NER pipelines; phrases add multi-word boundary ambiguity; latent clusters add an unsupervised discovery step that would confound the lens evaluation itself.",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Approach section states the concrete operationalization of implicit tokens as alphabetic multi-token word types",
+          "anchor": "From WikiText-2, extract frequent alphabetic word types that tokenize into at least two tokens under the model tokenizer."
+        },
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Planning explicitly defers entity- and phrase-level implicit tokens as out-of-scope",
+          "anchor": "phrase-level, entity-level, and learned soft-token vocabularies remain open",
+          "anchorResolved": false
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D2",
+      "finding": "global",
+      "layer": "hypothesis",
+      "question": "Should the implicit vocabulary be a supervised fixed set of known word types with ground-truth labels, or should implicit vocabulary items be discovered unsupervisedly via clustering token-erasure footprints and validated with Patchscopes?",
+      "options": [
+        {
+          "text": "Supervised: fixed set of 128 known multi-token word types, evaluated by retrieval accuracy against ground-truth labels",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "Unsupervised: mine implicit vocabulary entries by clustering token-erasure footprints, then validate with Patchscopes",
+          "status": "alternative",
+          "source": "artifact",
+          "path": "REPORT.md"
+        }
+      ],
+      "chosen": "Supervised: fixed set of 128 known multi-token word types, evaluated by retrieval accuracy against ground-truth labels",
+      "statedRationale": null,
+      "inferredRationale": "Supervised labels allow unambiguous retrieval evaluation without confounding the lens assessment with clustering quality; unsupervised discovery was explicitly deferred as a harder next step.",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Limitations section identifies the supervised constraint as a core design choice, not merely a limitation",
+          "anchor": "The implicit vocabulary is supervised and fixed to known word types. This is not yet an unsupervised method"
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Conclusions section defers unsupervised discovery to future work, confirming the in-scope/out-of-scope split",
+          "anchor": "mine candidate prototypes by clustering token-erasure footprints, validate them with Patchscopes"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 1
+    },
+    {
+      "id": "D3",
+      "finding": "F1",
+      "layer": "hypothesis",
+      "question": "Should the primary implicit-token lens be a layer-local prototype table (one per layer, each in its own geometry) or a universal affine translator mapping each layer into a shared final-prototype space (Tuned Lens analogue)?",
+      "options": [
+        {
+          "text": "Layer-local prototype table: build one implicit vocabulary table per layer from training centroids in that layer's own space",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Universal translated space: train a ridge affine map per layer into the final-layer prototype space, analogous to Tuned Lens",
+          "status": "alternative",
+          "source": "artifact",
+          "path": "planning.md"
+        }
+      ],
+      "chosen": "Layer-local prototype table: build one implicit vocabulary table per layer from training centroids in that layer's own space",
+      "statedRationale": null,
+      "inferredRationale": "A smoke test before full data collection showed the ridge translator was underdetermined with only 10 training contexts per word in 896-dimensional space; the layer-local approach was promoted to primary and the translator demoted to ablation.",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Approach section states the layer-local prototype table is the primary method",
+          "anchor": "The primary lens uses one layer-local prototype table per layer"
+        },
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Smoke test result that empirically motivated demoting the ridge translator to ablation",
+          "anchor": "a smoke test showed it is underdetermined with only 10 training contexts per word."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D4",
+      "finding": "F1",
+      "layer": "hypothesis",
+      "question": "At which position within the multi-token target word should hidden states be extracted — the final subtoken, the first subtoken, or an aggregation over all subtokens?",
+      "options": [
+        {
+          "text": "Final subtoken position: extract the hidden state at the last token of the target word, for every layer",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Mean aggregation over all subtokens of the target word",
+          "status": "alternative",
+          "source": "inferred"
+        },
+        {
+          "text": "First subtoken position, where the word begins in the sequence",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Final subtoken position: extract the hidden state at the last token of the target word, for every layer",
+      "statedRationale": null,
+      "inferredRationale": "Token erasure literature argues that the whole-word implicit representation accumulates at the last subtoken because constituent-token information is erased there; probing any earlier position would not align with the motivating hypothesis.",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Experimental Steps describe probing exclusively at the final subtoken position, operationalizing the token erasure hypothesis",
+          "anchor": "store the hidden state at the final subtoken position for every layer."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 1
+    },
+    {
+      "id": "D5",
+      "finding": "F2",
+      "layer": "hypothesis",
+      "question": "Should the candidate vocabulary be designed to explicitly control for trivial final-subtoken leakage by requiring candidates to be balanced into equal-sized groups sharing the same final token?",
+      "options": [
+        {
+          "text": "Balance candidates into 16 final-subtoken groups of exactly 8 words each, giving a controlled 1/8 final-subtoken majority baseline",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Select candidates without final-subtoken balance, accepting that the final subtoken might trivially disambiguate most words",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Balance candidates into 16 final-subtoken groups of exactly 8 words each, giving a controlled 1/8 final-subtoken majority baseline",
+      "statedRationale": "Final-subtoken identity may trivially identify words; mitigation is grouping candidate words by shared final subtoken where possible and reporting the final-subtoken majority baseline.",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "validity_risk",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Experimental Steps make leakage control a first-class design concern",
+          "anchor": "Filter candidate words to reduce trivial leakage: prefer final-subtoken groups with at least two word types"
+        },
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Potential Challenges section states the explicit mitigation strategy for final-subtoken leakage",
+          "anchor": "mitigation is grouping candidate words by shared final subtoken where possible"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "links": [
+        {
+          "relation": "motivated_by",
+          "target": "D9",
+          "basis": "inferred",
+          "rationale": "D5's leakage-control design (16 groups × 8 words) was adopted to make the primary comparison defined in D9 interpretable as signal beyond suffix identity"
+        }
+      ],
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D6",
+      "finding": "global",
+      "layer": "hypothesis",
+      "question": "Should the experiment claim causal evidence that the model relies on implicit-token prototypes for downstream prediction, or limit its claim to decodability (correlational evidence that hidden states can be decoded into whole-word labels)?",
+      "options": [
+        {
+          "text": "Limit claim to decodability: show that hidden states can be decoded into whole-word labels without proving the model causally uses the implicit prototype",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "Test causality via ablation or patching interventions that replace or suppress learned implicit-word prototypes",
+          "status": "alternative",
+          "source": "artifact",
+          "path": "REPORT.md"
+        }
+      ],
+      "chosen": "Limit claim to decodability: show that hidden states can be decoded into whole-word labels without proving the model causally uses the implicit prototype",
+      "statedRationale": null,
+      "inferredRationale": "Causal interventions add substantial experimental complexity and are a natural next step; the feasibility question — whether retrieval is above chance — can be answered correlatively, reducing scope and implementation risk.",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Limitations section explicitly restricts the claim to decodability and acknowledges the causal gap",
+          "anchor": "The method does not prove causal use of the implicit token representation. It shows decodability"
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Conclusions section defers causal interventions to future work",
+          "anchor": "test causal interventions that replace or ablate an implicit word prototype"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 3
+    },
+    {
+      "id": "D7",
+      "finding": "F8",
+      "layer": "hypothesis",
+      "question": "Which layers were pre-specified to be expected to peak in implicit-word decoding — middle or late layers (as inner-lexicon work suggests word reconstruction occurs there) or early layers?",
+      "options": [
+        {
+          "text": "Middle/late layers expected to outperform very early layers: whole-word identity becomes stable after initial composition",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Early layers expected to peak: token erasure happens rapidly, so implicit representations form immediately after the first subtoken is processed",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Middle/late layers expected to outperform very early layers: whole-word identity becomes stable after initial composition",
+      "statedRationale": null,
+      "inferredRationale": "Inner-lexicon and token-erasure literature both indicate word reconstruction occurs in early-to-middle layers, not at the very first layer; predicting middle/late outperform very early is the conservative reading of those findings.",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "H4 states the pre-specified expected layer-wise pattern, which results (layer 5 peak) partially contradicted",
+          "anchor": "H4: Decoding accuracy varies systematically by layer, with middle/late layers outperforming very early layers."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D8",
+      "finding": "F9",
+      "layer": "hypothesis",
+      "question": "Is H1 — that final-layer hidden states cluster stably enough by whole-word identity to yield reusable implicit-token prototype rows — testable via simple centroid averaging, or does it require explicit cluster-validation (k-means, silhouette scores)?",
+      "options": [
+        {
+          "text": "Testable via centroid averaging: average normalized final-layer training states per word to form one prototype row per word",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Requires explicit cluster validation to confirm within-word variance is small relative to between-word variance before prototypes are trusted",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Testable via centroid averaging: average normalized final-layer training states per word to form one prototype row per word",
+      "statedRationale": null,
+      "inferredRationale": "Averaging normalized vectors is computationally cheap and directly analogous to mean-subtoken embedding baselines; if H1 holds, centroids should suffice even without explicit cluster quality checks.",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "H1 states the clustering assumption that the run accepted without an explicit cluster-quality validation step",
+          "anchor": "H1: Multi-token word occurrences cluster by whole-word identity in final-layer hidden-state space strongly enough"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D9",
+      "finding": "F4",
+      "layer": "hypothesis",
+      "question": "What should the primary pre-registered confirmatory comparison for H3 be — ITL versus the final-subtoken majority baseline (isolating signal beyond suffix leakage) or versus the strongest validation-selected baseline overall?",
+      "options": [
+        {
+          "text": "Primary comparison: ITL vs final-subtoken majority baseline, chosen because it isolates implicit-word signal from final-token identity",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Primary comparison: ITL vs best validation-selected baseline across all methods, including raw final prototype",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Primary comparison: ITL vs final-subtoken majority baseline, chosen because it isolates implicit-word signal from final-token identity",
+      "statedRationale": "The primary confirmatory comparison is ITL versus the strongest non-ITL baseline at the validation-selected layer, evaluated on the held-out test split.",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "H3 defines the primary contrast as against final-subtoken-only and mean-subtoken baselines",
+          "anchor": "H3: The implicit-token lens predicts held-out whole-word identities better than baselines based only on"
+        },
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Statistical Analysis Plan pre-registers the primary comparison methodology",
+          "anchor": "The primary confirmatory comparison is ITL versus the strongest non-ITL baseline at the validation-selected layer"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D10",
+      "finding": "F7",
+      "layer": "hypothesis",
+      "question": "Should H2 — that earlier-layer hidden states can be mapped into an implicit-token prototype space via an affine ridge translator — be the primary ITL variant or relegated to an ablation after a pre-run smoke test showed underdetermination?",
+      "options": [
+        {
+          "text": "Ablation: retain ridge-to-final translator as an ablation after smoke test showed underdetermination at 10 training contexts per word",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Primary method: H2 is the Tuned-Lens-style analogue and should be the main variant, with the layer-local approach as ablation",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Ablation: retain ridge-to-final translator as an ablation after smoke test showed underdetermination at 10 training contexts per word",
+      "statedRationale": null,
+      "inferredRationale": "The smoke test revealed that 10 training occurrences per 896-dimensional word produce an underdetermined ridge system; the layer-local approach bypasses this by operating in each layer's own geometry where prototypes are always well-defined.",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "H2 states the translated-prototype-space hypothesis that was demoted to ablation",
+          "anchor": "H2: Earlier-layer hidden states can be translated into that implicit-token prototype space"
+        },
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Approach section records the empirical smoke-test result that demoted the ridge translator",
+          "anchor": "a smoke test showed it is underdetermined with only 10 training contexts per word."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "links": [
+        {
+          "relation": "motivated_by",
+          "target": "H2",
+          "basis": "explicit",
+          "rationale": "D10 demotes the ridge translator to ablation because H2's pre-run smoke test showed underdetermination at 10 training contexts per word"
+        }
+      ],
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D11",
+      "finding": "global",
+      "layer": "hypothesis",
+      "question": "Should the experiment evaluate implicit-token decoding on a single small model (Qwen2.5-0.5B) to establish feasibility, or on multiple models to establish generalizability?",
+      "options": [
+        {
+          "text": "Single model: Qwen2.5-0.5B as a 2024-era real model with accessible hidden states that fits available GPU memory",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Multiple models: e.g., Qwen2.5-0.5B plus GPT-2 or Pythia to establish cross-architecture generalizability",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Single model: Qwen2.5-0.5B as a 2024-era real model with accessible hidden states that fits available GPU memory",
+      "statedRationale": null,
+      "inferredRationale": "Single-model evaluation was sufficient to test feasibility of the prototype implicit-token lens; cross-model generalization was explicitly deferred to future work to keep the run within timeline and GPU constraints.",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Approach section states Qwen2.5-0.5B as the chosen single model and rationale",
+          "anchor": "preferably `Qwen/Qwen2.5-0.5B` for a 2024-era real model that fits on the available GPUs."
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Limitations section acknowledges single-model scope as an acknowledged generalizability limitation",
+          "anchor": "The study uses one small open model, Qwen2.5-0.5B, and one English dataset."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:39Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 2
+    },
+    {
+      "id": "D12",
+      "finding": "global",
+      "layer": "experiment_design",
+      "question": "Which pretrained LLM to use for hidden-state extraction?",
+      "options": [
+        {
+          "text": "Qwen/Qwen2.5-0.5B (2024-era HuggingFace causal LM with accessible hidden states)",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "EleutherAI/pythia-160m or gpt2 as fallback alternatives",
+          "status": "alternative",
+          "source": "artifact",
+          "path": "planning.md"
+        }
+      ],
+      "chosen": "Qwen/Qwen2.5-0.5B",
+      "statedRationale": "2024-era real model that fits on the available GPUs with accessible hidden states",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Primary model selection with rationale",
+          "anchor": "preferably `Qwen/Qwen2.5-0.5B` for a 2024-era real model that fits on the available GPUs"
+        },
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Fallback options explicitly named",
+          "anchor": "fallback is `EleutherAI/pythia-160m` or `gpt2`, explicitly documented as a smaller/older mechanistic baseline"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 4
+    },
+    {
+      "id": "D13",
+      "finding": "global",
+      "layer": "experiment_design",
+      "question": "Which text corpus to use for collecting multi-token word occurrences?",
+      "options": [
+        {
+          "text": "WikiText-2 raw (local copy)",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "LAMBADA, WikiText-103, or The Pile",
+          "status": "alternative",
+          "source": "artifact",
+          "path": "resources.md"
+        }
+      ],
+      "chosen": "WikiText-2 raw (local copy)",
+      "statedRationale": null,
+      "inferredRationale": "WikiText-2 was small enough to cache all hidden states locally; LAMBADA was earmarked for long-context tests only",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Dataset selection stated in methodology",
+          "anchor": "From WikiText-2, extract frequent alphabetic word types that tokenize into at least two tokens under the model tokenizer"
+        },
+        {
+          "type": "artifact",
+          "path": "resources.md",
+          "itemId": null,
+          "note": "LAMBADA explicitly considered but assigned to a different experiment type",
+          "anchor": "Primary datasets: WikiText-2 for word-level hidden-state experiments; LAMBADA for long-context"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 5
+    },
+    {
+      "id": "D14",
+      "finding": "F11",
+      "layer": "experiment_design",
+      "question": "How many candidate words to include in the implicit vocabulary?",
+      "options": [
+        {
+          "text": "128 candidate word types",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "results/config.json"
+        },
+        {
+          "text": "Smaller set (32 or 64) or larger set (256+)",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "128 candidate words",
+      "statedRationale": null,
+      "inferredRationale": "128 provides enough classes to make retrieval non-trivial while remaining feasible with 10 training occurrences per word; companion hidden-state files at 32 and 64 words also exist, suggesting scale was explored",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/config.json",
+          "itemId": null,
+          "note": "Vocabulary size in experiment config",
+          "anchor": "\"max_words\": 128"
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Confirmed in methodology description",
+          "anchor": "Candidate implicit vocabulary: 128 lowercased alphabetic word types that tokenize into at least two pieces"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 2
+    },
+    {
+      "id": "D15",
+      "finding": "F2",
+      "layer": "experiment_design",
+      "question": "How to control for final-subtoken identity leakage in the candidate vocabulary design?",
+      "options": [
+        {
+          "text": "Arrange 128 words into exactly 16 final-subtoken groups of 8 words each, so suffix identity alone gives at most 1/8 accuracy",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "No explicit grouping constraint; select candidates by frequency alone without balancing suffix groups",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "16 final-subtoken groups × 8 words per group",
+      "statedRationale": "so knowing only the final tokenizer ID gives 1/8 = 12.5% word accuracy",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "validity_risk",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Leakage control design and rationale explicitly stated",
+          "anchor": "candidates were arranged as 16 final-subtoken groups with 8 words per group"
+        },
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Design criterion for suffix grouping stated in planning",
+          "anchor": "prefer final-subtoken groups with at least two word types, and require enough occurrences per word"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 1
+    },
+    {
+      "id": "D16",
+      "finding": "F1",
+      "layer": "experiment_design",
+      "question": "How many occurrences per candidate word to allocate across train, validation, and test splits?",
+      "options": [
+        {
+          "text": "10 train / 2 validation / 4 test per word (16 occurrences total per word; 2,048 total examples)",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "Larger allocations (e.g., 20 train / 4 val / 8 test) or different train-heavy ratios",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "10 train / 2 val / 4 test per word",
+      "statedRationale": null,
+      "inferredRationale": "Minimum occurrence threshold of 16 exactly covers the 10+2+4 need; more train would require raising the corpus-frequency floor and shrinking the candidate set",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "validity_risk",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Split allocation stated in methodology",
+          "anchor": "Each word contributes 10 training, 2 validation, and 4 test occurrences, for 2,048 total examples",
+          "anchorResolved": false
+        },
+        {
+          "type": "artifact",
+          "path": "results/config.json",
+          "itemId": null,
+          "note": "Split sizes in experiment config",
+          "anchor": "\"train_per_word\": 10"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 3
+    },
+    {
+      "id": "D17",
+      "finding": "F7",
+      "layer": "experiment_design",
+      "question": "Whether to treat the ridge-to-final-prototype translator as the primary ITL method or demote it to an ablation?",
+      "options": [
+        {
+          "text": "Demote to ablation after a smoke test showed underdetermination; use layer-local prototypes as the primary method",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Treat the ridge translator as primary (analogous to Tuned Lens), with layer-local prototypes as the ablation",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Layer-local prototypes as primary; ridge translator as ablation",
+      "statedRationale": "a smoke test showed it is underdetermined with only 10 training contexts per word",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Demotion decision and its empirical basis stated during planning",
+          "anchor": "a smoke test showed it is underdetermined with only 10 training contexts per word"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 1
+    },
+    {
+      "id": "D18",
+      "finding": "global",
+      "layer": "experiment_design",
+      "question": "How many model families and sizes to evaluate in the experiment?",
+      "options": [
+        {
+          "text": "Single model: Qwen2.5-0.5B only",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "Multiple models: larger Qwen variants, Llama-3, or Pythia family",
+          "status": "alternative",
+          "source": "artifact",
+          "path": "REPORT.md"
+        }
+      ],
+      "chosen": "Single model only",
+      "statedRationale": null,
+      "inferredRationale": "Feasibility-first scope: validate the pipeline on one small model before scaling; multi-model evaluation deferred to next steps",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Single-model scope acknowledged as limitation",
+          "anchor": "The study uses one small open model, Qwen2.5-0.5B, and one English dataset"
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Multi-model evaluation explicitly deferred",
+          "anchor": "Scaling the same evaluation to larger Qwen and Llama-family models, named entities, phrases, and non-English data",
+          "anchorResolved": false
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 6
+    },
+    {
+      "id": "D19",
+      "finding": "F1",
+      "layer": "experiment_design",
+      "question": "At which token position within a multi-token word to extract hidden states?",
+      "options": [
+        {
+          "text": "Final subtoken position (last piece of the target word) at every layer",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "First subtoken, mean over all subtokens, or a dedicated probing position",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Final subtoken position",
+      "statedRationale": null,
+      "inferredRationale": "Token erasure literature establishes that whole-word representations emerge specifically at the final subtoken; this is the standard locus for implicit vocabulary probing in prior work",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Extraction position stated in methodology",
+          "anchor": "store the hidden state at the final subtoken position for every layer"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 2
+    },
+    {
+      "id": "D20",
+      "finding": "F8",
+      "layer": "experiment_design",
+      "question": "Should the implicit vocabulary prototype table be rebuilt separately per layer or built once from final-layer states?",
+      "options": [
+        {
+          "text": "Layer-local: one separate normalized prototype table per layer, built from that layer's training states",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Single global table: build prototypes from final-layer states only and apply that table to all layers (raw final prototype baseline)",
+          "status": "alternative",
+          "source": "artifact",
+          "path": "planning.md"
+        }
+      ],
+      "chosen": "Layer-local prototype tables (one per layer)",
+      "statedRationale": null,
+      "inferredRationale": "Allows each layer's own representational geometry to define implicit vocabulary rows rather than forcing all layers to be measured against final-layer prototype geometry",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Layer-local design stated as the primary method",
+          "anchor": "The primary lens uses one layer-local prototype table per layer, analogous to an implicit vocabulary/unembedding matrix"
+        },
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Single-final-layer alternative retained as the raw prototype baseline",
+          "anchor": "Raw prototype lens: directly compare layer states to final-layer word prototypes without a trained translator"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 1
+    },
+    {
+      "id": "D21",
+      "finding": "F11",
+      "layer": "experiment_design",
+      "question": "What types of linguistic items to include as candidates in the implicit vocabulary?",
+      "options": [
+        {
+          "text": "Lowercased alphabetic English word types only (no named entities, multi-word phrases, or nonwords)",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Named entities, phrases, nonwords, or cross-lingual items",
+          "status": "alternative",
+          "source": "artifact",
+          "path": "REPORT.md"
+        }
+      ],
+      "chosen": "Lowercased alphabetic English words only",
+      "statedRationale": null,
+      "inferredRationale": "Alphabetic words have well-defined whole-word identity, are frequent enough for prototype construction, and avoid entity-resolution complexity",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Word type restriction stated in methodology",
+          "anchor": "extract frequent alphabetic word types that tokenize into at least two tokens under the model tokenizer"
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Named entities and phrases acknowledged as out-of-scope",
+          "anchor": "Candidate words were selected for frequent multi-token forms and balanced final-subtoken groups; results may differ for rarer words or nonword strings"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D22",
+      "finding": "F1",
+      "layer": "experiment_design",
+      "question": "How to select which layer to use for the primary ITL comparison on the held-out test set?",
+      "options": [
+        {
+          "text": "Select layer by validation top-1 accuracy; report test metrics at that validation-selected layer",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Pre-register a specific fixed layer (e.g., middle layer) before seeing any data",
+          "status": "alternative",
+          "source": "artifact",
+          "path": "planning.md"
+        }
+      ],
+      "chosen": "Validation-selected layer",
+      "statedRationale": "The primary confirmatory comparison is ITL versus the strongest non-ITL baseline at the validation-selected layer",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Validation-based layer selection stated as the primary strategy",
+          "anchor": "The primary confirmatory comparison is ITL versus the strongest non-ITL baseline at the validation-selected layer"
+        },
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Preregistered middle layer also mentioned as a secondary reference point",
+          "anchor": "paired permutation/McNemar-style tests for the preregistered middle layer and best validation-selected ITL layer"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 4
+    },
+    {
+      "id": "D23",
+      "finding": "F11",
+      "layer": "experiment_design",
+      "question": "What minimum corpus occurrence count to require before a word qualifies as a candidate implicit vocabulary item?",
+      "options": [
+        {
+          "text": "16 minimum occurrences per word",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "results/config.json"
+        },
+        {
+          "text": "Higher threshold (e.g., 32) for more reliable prototypes, or lower (e.g., 8) for broader coverage",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "16 minimum occurrences",
+      "statedRationale": null,
+      "inferredRationale": "16 exactly matches the total occurrences needed per word (10+2+4), making it the minimum constraint consistent with the split design",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "results/config.json",
+          "itemId": null,
+          "note": "Minimum occurrence threshold in experiment config",
+          "anchor": "\"min_occurrences\": 16"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 1
+    },
+    {
+      "id": "D24",
+      "finding": "F4",
+      "layer": "experiment_design",
+      "question": "Which baselines to compare the ITL against?",
+      "options": [
+        {
+          "text": "Five baselines: majority word, final-subtoken majority, mean-subtoken embedding, raw final prototype, ridge-to-final translator",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Fewer baselines (majority only) or additional ones (Patchscopes, proper Tuned Lens over explicit vocab)",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Five-baseline comparison suite",
+      "statedRationale": null,
+      "inferredRationale": "Set covers the key alternative explanations for ITL success: chance, suffix identity, compositional embedding, and two implicit-prototype variants",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Mean-subtoken embedding baseline explicitly enumerated",
+          "anchor": "Mean-subtoken embedding lens: score a layer state against the mean input embedding of each candidate word"
+        },
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Final-subtoken majority baseline design stated",
+          "anchor": "Final-subtoken majority baseline: predict the most frequent training word sharing the target occurrence's final tokenizer"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 1
+    },
+    {
+      "id": "D25",
+      "finding": "F14",
+      "layer": "experiment_design",
+      "question": "Whether to apply multiple-testing correction to the 25 layer-wise ITL vs raw-prototype comparisons?",
+      "options": [
+        {
+          "text": "Apply Benjamini-Hochberg FDR correction and treat layer-wise comparisons as exploratory",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "planning.md"
+        },
+        {
+          "text": "Treat all 25 layer-wise comparisons as confirmatory without correction",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "BH FDR correction; layer-wise comparisons treated as exploratory",
+      "statedRationale": "Layer-wise comparisons are descriptive and will be treated as exploratory unless corrected with Benjamini-Hochberg",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "planning.md",
+          "itemId": null,
+          "note": "Multiple-testing correction plan stated in statistical analysis section",
+          "anchor": "Layer-wise comparisons are descriptive and will be treated as exploratory unless corrected with Benjamini-Hochberg"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D26",
+      "finding": "F10",
+      "layer": "experiment_design",
+      "question": "Whether to include the explicit final-subtoken embedding result as a competing whole-word retrieval method or as a separate diagnostic?",
+      "options": [
+        {
+          "text": "Include as a diagnostic only: measures suffix-token recovery over 16 suffix IDs, not treated as a competing 128-class whole-word method",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "paper_draft/sections/methodology.tex"
+        },
+        {
+          "text": "Treat it as a competing whole-word method (which would require mapping 16-class suffix predictions to 128-class word labels)",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Separate diagnostic, not a competing whole-word method",
+      "statedRationale": "This diagnostic measures recoverability of the suffix token, not whole-word decoding, so we do not treat it as a competing whole-word method",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "paper_draft/sections/methodology.tex",
+          "itemId": null,
+          "note": "Diagnostic scope and exclusion from competition stated in methods",
+          "anchor": "This diagnostic measures recoverability of the suffix token, not whole-word decoding, so we do not treat it as a competing whole-word method"
+        },
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Diagnostic result distinguished from whole-word retrieval results in the results section",
+          "anchor": "this predicts only one of 16 final-token IDs, not one of 128 whole-word labels"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:35:32.597987",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D27",
+      "finding": "F1",
+      "layer": "interpretation",
+      "question": "Should the main result be framed as 'positive but bounded' rather than as strong or near-definitive support for the hypothesis?",
+      "options": [
+        {
+          "text": "Frame as 'positive but bounded': ITL beats all baselines but the improvement is modest, the ridge analogue failed, and the method is limited to one model and dataset",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "paper_draft/sections/introduction.tex"
+        },
+        {
+          "text": "Frame as strong support: ITL significantly and consistently outperforms all baselines with paired statistical evidence across multiple metrics",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Frame as 'positive but bounded'",
+      "statedRationale": null,
+      "inferredRationale": "19.53% vs 12.50% is a real effect but only ~7 pp; the Tuned-Lens-style ridge ablation failed; claims are limited to a single small model and WikiText-2; these together motivate the hedged framing",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "paper_draft/sections/introduction.tex",
+          "itemId": null,
+          "note": "Explicit valence label applied to the headline result",
+          "anchor": "Our main result is positive but bounded."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 8
+    },
+    {
+      "id": "D28",
+      "finding": "F7",
+      "layer": "interpretation",
+      "question": "Should the ridge-to-final-prototype ablation failure be interpreted as a data-scale limitation rather than evidence that affine translators fundamentally cannot work for implicit-token decoding?",
+      "options": [
+        {
+          "text": "Attribute failure to data scale (10 train examples per word, 896-dimensional states): a poor fit for ridge in this regime, not a principled impossibility",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "paper_draft/sections/results.tex"
+        },
+        {
+          "text": "Interpret the failure as evidence that affine translation to a fixed final-prototype space is a conceptually flawed approach for implicit-token lenses",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Attribute to data scale, not fundamental impossibility",
+      "statedRationale": "with 10 training occurrences per word and 896-dimensional states, the simple ridge translator is a poor fit compared with layer-local prototype rows",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "paper_draft/sections/results.tex",
+          "itemId": null,
+          "note": "Run explicitly separated data-scale diagnosis from principled impossibility",
+          "anchor": "This does not show that affine translators cannot work in principle."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 6
+    },
+    {
+      "id": "D29",
+      "finding": "F10",
+      "layer": "interpretation",
+      "question": "Should the explicit final-subtoken embedding diagnostic (reaching 20.12% top-1 at layer 0, above ITL's 19.53%) be excluded from the competing-methods comparison on the grounds that it predicts a different output space?",
+      "options": [
+        {
+          "text": "Exclude: the diagnostic predicts one of 16 suffix IDs, not one of 128 whole-word labels, so it is not a valid competing whole-word decoder",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "paper_draft/sections/methodology.tex"
+        },
+        {
+          "text": "Include as a competing baseline: 20.12% top-1 at layer 0 exceeds ITL's 19.53%, which would complicate the superiority claim",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Exclude from whole-word competing-methods comparison",
+      "statedRationale": "This diagnostic measures recoverability of the suffix token, not whole-word decoding, so we do not treat it as a competing whole-word method.",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "validity_risk",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "paper_draft/sections/methodology.tex",
+          "itemId": null,
+          "note": "Explicit exclusion rationale given in methodology section",
+          "anchor": "This diagnostic measures recoverability of the suffix token, not whole-word decoding, so we do not treat it as a competing whole-word method."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 2
+    },
+    {
+      "id": "D30",
+      "finding": "F8",
+      "layer": "interpretation",
+      "question": "Should the layer-wise pattern — ITL peaking at layer 5 while explicit suffix identity is strongest at layer 0 — be interpreted as qualitatively consistent with the token erasure account of implicit vocabulary formation?",
+      "options": [
+        {
+          "text": "Interpret as qualitatively consistent with token erasure: surface suffix identity declines as a whole-word representation becomes decodable, matching prior token-erasure claims",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "paper_draft/sections/results.tex"
+        },
+        {
+          "text": "Treat as potentially artifactual: early layers may have more isotropic representations that happen to favor cosine-based nearest-neighbor retrieval, not necessarily encoding more whole-word information",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Qualitatively consistent with token erasure",
+      "statedRationale": null,
+      "inferredRationale": "The directionality (suffix drops as whole-word rises) matches the token-erasure footprint described in Feucht et al. and is the most natural theoretical handle for the layer-5 peak",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "paper_draft/sections/results.tex",
+          "itemId": null,
+          "note": "Layer-wise pattern is explicitly framed through the token-erasure lens",
+          "anchor": "This pattern is qualitatively consistent with token erasure: surface suffix identity becomes less directly recoverable as a whole-word representation becomes more decodable."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 4
+    },
+    {
+      "id": "D31",
+      "finding": "F13",
+      "layer": "interpretation",
+      "question": "Should errors concentrated within the same final-subtoken group be read as evidence that the lens learns more than the final subtoken, or as a residual leakage problem that weakens the superiority claim?",
+      "options": [
+        {
+          "text": "Read as evidence of learning beyond final subtoken: if the lens used only the suffix, it could not distinguish england from highland; the fact that it sometimes decodes cross-group (ireland→lebanon) shows non-suffix signal",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "Read primarily as a leakage and confound failure: suffix-group and topic correlations are so strong that the lens is not really doing implicit vocabulary decoding",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Evidence of learning more than final subtoken, with suffix/topic confounds acknowledged as remaining",
+      "statedRationale": null,
+      "inferredRationale": "The ITL's 7 pp improvement over the final-subtoken majority baseline (which has access to suffix identity) provides the empirical grounding; errors show confounds but do not nullify the positive result",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Error section explicitly claims the lens goes beyond suffix identity while naming the remaining confounds",
+          "anchor": "This indicates the lens is learning more than the final subtoken, but suffix-group and topical/geographic similarity remain major confounds."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D32",
+      "finding": "F9",
+      "layer": "interpretation",
+      "question": "Should the raw final-prototype baseline's higher top-5 accuracy (29.69% vs ITL's 25.59%) be treated as a metric on which ITL does not beat the baseline, or noted but not treated as undermining ITL's claimed superiority?",
+      "options": [
+        {
+          "text": "Note the top-5 discrepancy but maintain ITL superiority claim on the basis of top-1 and MRR being the primary preregistered metrics",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "paper_draft/sections/results.tex"
+        },
+        {
+          "text": "Treat the top-5 discrepancy as a meaningful challenge: raw final-prototype may capture a different and complementary signal that ITL does not dominate",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Note but do not treat as undermining; top-1 is primary metric",
+      "statedRationale": null,
+      "inferredRationale": "Planning.md pre-specified top-1 as primary; top-5 is secondary and the discrepancy was not large enough to reverse the claim",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "validity_risk",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "paper_draft/sections/results.tex",
+          "itemId": null,
+          "note": "Raw prototype's top-5 advantage is noted inline but framed as subordinate to the top-1 deficit",
+          "anchor": "\\rawproto reaches a higher test top-5 accuracy at its selected layer, but its top-1 accuracy remains 5.47 points below \\itl."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 1
+    },
+    {
+      "id": "D33",
+      "finding": "F1",
+      "layer": "interpretation",
+      "question": "Should the supervised prototype method be explicitly labeled as not constituting unsupervised implicit vocabulary discovery, rather than allowing it to be read as a demonstration that implicit vocabulary items can be discovered?",
+      "options": [
+        {
+          "text": "Explicitly disclaim: the vocabulary is supervised and fixed to known word types; this is not unsupervised discovery of arbitrary latent entries",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "Frame as implicit vocabulary discovery: the prototype table operationalizes implicit tokens and decodes them from hidden states, which is a form of discovery",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Explicitly labeled as supervised; not unsupervised discovery",
+      "statedRationale": null,
+      "inferredRationale": "The candidate words were pre-selected from WikiText-2 counts, labeled, and prototypes built from labeled training states; no clustering or unsupervised mining was performed",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Limitations section draws a hard line between the method and unsupervised discovery",
+          "anchor": "The implicit vocabulary is supervised and fixed to known word types. This is not yet an unsupervised method for discovering arbitrary latent vocabulary entries."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 9
+    },
+    {
+      "id": "D34",
+      "finding": "F7",
+      "layer": "interpretation",
+      "question": "Should the ridge-to-final-prototype failure be framed as an ablation (one method variant that did not work in this small-data setting) rather than as a primary negative result that undermines the Tuned-Lens-style design space?",
+      "options": [
+        {
+          "text": "Frame as ablation: label it 'ridge-to-final implicit lens ablation'; present its failure as a regime-specific finding; keep the layer-local ITL as the primary positive result",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "paper_draft/sections/results.tex"
+        },
+        {
+          "text": "Frame as a primary negative result: since the Tuned-Lens analogue is the closest to the motivating prior work, its failure is the central finding and should limit how strongly the hypothesis is confirmed",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Ridge failure framed as ablation, not as the central result",
+      "statedRationale": null,
+      "inferredRationale": "Calling it an ablation preserves the positive framing of the layer-local ITL; the planning.md listed 'full support' criteria that the ITL (not the ridge) met, so the ridge's failure does not disqualify the ITL claim",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "scope_choice",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "paper_draft/sections/results.tex",
+          "itemId": null,
+          "note": "Section heading and framing mark this as an ablation, not a primary negative finding",
+          "anchor": "Ablation: translating to final prototypes is weak."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 7
+    },
+    {
+      "id": "D35",
+      "finding": "F4",
+      "layer": "interpretation",
+      "question": "Should the ITL's superiority over baselines be claimed only as evidence of decodability of implicit word identity, explicitly not as evidence that the model causally relies on the decoded prototype?",
+      "options": [
+        {
+          "text": "Claim decodability only: the experiment shows a hidden state can be decoded to a whole-word label above baselines, not that the model uses that prototype for downstream prediction",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "Read the decoding success as circumstantial evidence that the model is using these implicit token representations causally",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Decodability only, not causal use",
+      "statedRationale": "The method does not prove causal use of the implicit token representation. It shows decodability, not that the model relies on the decoded prototype for downstream prediction.",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Limitations section explicitly draws the decodability/causality distinction",
+          "anchor": "The method does not prove causal use of the implicit token representation. It shows decodability, not that the model relies on the decoded prototype for downstream prediction."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 4
+    },
+    {
+      "id": "D36",
+      "finding": "global",
+      "layer": "interpretation",
+      "question": "Should the overall result be read as meeting the 'support' criterion from the pre-stated hypothesis decomposition (positive CI over baselines), or as meeting only the 'partial support' criterion (given that the Tuned-Lens-style translator failed)?",
+      "options": [
+        {
+          "text": "Read as meeting 'support' criterion: the pre-stated success condition was that ITL exceeds subtoken and mean-embedding baselines with a positive CI, which the layer-local ITL achieved; the ridge failure is treated as an ablation of a different method variant",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "Read as 'partial support': the planning.md partial-support scenario was 'early/mid-layer translators do not work, implying implicit tokens exist but the proposed lens is insufficient'; since the Tuned-Lens analogue failed, partial support is the better category",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Support criterion met; ridge failure treated as a separate ablation outside the success criteria",
+      "statedRationale": null,
+      "inferredRationale": "The planning.md 'partial support' scenario required that 'final-layer prototypes decode well but early/mid-layer translators do not'; the layer-local ITL succeeds at early layers, so this scenario does not apply even though the ridge translator failed",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Discussion explicitly invokes the 'narrow version of the hypothesis' framing, signaling a qualified but real affirmative",
+          "anchor": "The results support the narrow version of the hypothesis"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 8
+    },
+    {
+      "id": "D37",
+      "finding": "F8",
+      "layer": "interpretation",
+      "question": "Should the fact that layer-local prototypes outperform a fixed final-layer prototype table at every evaluated layer be interpreted as evidence that implicit lexical identity is encoded in layer-specific representational geometry?",
+      "options": [
+        {
+          "text": "Yes: the layer-local prototype's consistent advantage shows each layer's geometry encodes whole-word identity in a distinct way, not reducible to how the final layer encodes it",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "The layer-local advantage may reflect overfitting to each layer's scale and orientation rather than a genuine layer-specific implicit-token geometry",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Interpret as evidence of layer-specific implicit lexical geometry",
+      "statedRationale": "This suggests that implicit lexical identity is present in layer-specific representational geometry and that directly learning implicit token rows for each layer is useful.",
+      "inferredRationale": null,
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Discussion section draws the layer-geometry interpretation explicitly from the layer-local vs fixed-final comparison",
+          "anchor": "This suggests that implicit lexical identity is present in layer-specific representational geometry and that directly learning implicit token rows for each layer is useful."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 3
+    },
+    {
+      "id": "D38",
+      "finding": "F13",
+      "layer": "interpretation",
+      "question": "Should the error pattern — including cross-group errors like ireland→lebanon — be interpreted as evidence that hidden states encode a mixture of word identity, orthographic residue, and contextual semantics, rather than as evidence of fundamental leakage that disqualifies the positive result?",
+      "options": [
+        {
+          "text": "Interpret as mixed encoding: errors reflect a blend of signals, which is expected in a probe-style decoder and does not invalidate the overall positive finding",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "Interpret as a fundamental leakage/confound problem: the error mix shows the lens is not genuinely decoding implicit word identity but residual contextual correlations",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Mixed encoding; errors expected in a probe-style setup; do not invalidate the positive result",
+      "statedRationale": null,
+      "inferredRationale": "Cross-group errors (ireland→lebanon) show some non-suffix signal but also context similarity; the quantitative improvement over suffix baseline remains positive",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Error analysis section characterizes errors as a mixture rather than as a single confound failure",
+          "anchor": "The error pattern suggests that hidden states encode a mixture of current word identity, orthographic/subtoken residue, and contextual semantics."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 1
+    },
+    {
+      "id": "D39",
+      "finding": "F1",
+      "layer": "interpretation",
+      "question": "Should the result be explicitly limited to the tested model (Qwen2.5-0.5B) and corpus (WikiText-2), with no generalization claimed to larger models, named entities, phrases, or other languages?",
+      "options": [
+        {
+          "text": "Explicitly scope-limit: list single model, single English dataset as limitations; name specific untested generalization directions (Llama-style models, named entities, phrases, multilingual)",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "REPORT.md"
+        },
+        {
+          "text": "Cautiously speculate about generalization: note that the mechanism is general enough to expect similar results on other causal LMs",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "Explicit scope limitation with no generalization claim",
+      "statedRationale": null,
+      "inferredRationale": "Only one model size and family were tested; occurrence-level splits may carry domain correlation; these confounds are too large to support even cautious generalization without further experiments",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "REPORT.md",
+          "itemId": null,
+          "note": "Limitations section enumerates the specific axes along which generalization remains untested",
+          "anchor": "The study uses one small open model, Qwen2.5-0.5B, and one English dataset. Generalization to larger models, Llama-style models, named entities, phrases, and other languages remains untested."
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T05:08:57Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 10
+    },
+    {
+      "id": "D40",
+      "finding": "F6",
+      "layer": "method",
+      "question": "How should the mean-subtoken embedding baseline represent each candidate word?",
+      "options": [
+        {
+          "text": "Average the input embedding rows for all tokenizer pieces, then L2-normalize: normalize(mean(emb[ids]))",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "Sum the piece embeddings without normalizing",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "mean_rows.append(emb[ids].mean(dim=0).numpy())",
+      "statedRationale": null,
+      "inferredRationale": "Averaging produces a compositional word vector; the outer normalize_np call in candidate_embedding_tables gives unit-norm rows suitable for cosine scoring against normalized hidden states",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Mean subtoken embedding computation in candidate_embedding_tables",
+          "anchor": "mean_rows.append(emb[ids].mean(dim=0).numpy())"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    },
+    {
+      "id": "D41",
+      "finding": "F1",
+      "layer": "method",
+      "question": "How should the implicit token lens prototype for each word and layer be constructed from training hidden states?",
+      "options": [
+        {
+          "text": "normalize(mean(normalize(h_i))) — normalize each training state, average, then normalize the mean",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "normalize(mean(h_i)) — average raw states then normalize, giving high-magnitude outliers more influence",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "prototypes[layer, label] = normalize_np(rows).mean(axis=0)",
+      "statedRationale": null,
+      "inferredRationale": "Pre-normalizing before averaging prevents high-magnitude training examples from dominating the centroid; double normalization ensures unit-norm prototype rows for consistent cosine scoring",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Prototype centroid computation in compute_layer_prototypes",
+          "anchor": "prototypes[layer, label] = normalize_np(rows).mean(axis=0)"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 5
+    },
+    {
+      "id": "D42",
+      "finding": "F7",
+      "layer": "method",
+      "question": "What regularization strength should be used for the ridge-to-final implicit lens translator?",
+      "options": [
+        {
+          "text": "ridge_lambda = 10.0",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "ridge_lambda = 1.0 or 100.0 — one order of magnitude weaker or stronger",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "ridge_lambda: float = 10.0",
+      "statedRationale": null,
+      "inferredRationale": "With 1280 training examples and 896-dimensional states, moderate regularization is needed to prevent overfitting; the REPORT.md acknowledges the failure may reflect sample size and regularization choices rather than a fundamental limit",
+      "by": "agent",
+      "shouldEngage": true,
+      "shouldEngageReason": "validity_risk",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Config default ridge regularization coefficient",
+          "anchor": "ridge_lambda: float = 10.0"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 2
+    },
+    {
+      "id": "D43",
+      "finding": "F7",
+      "layer": "method",
+      "question": "Should the ridge translator include a bias term, and should the bias be regularized?",
+      "options": [
+        {
+          "text": "Include bias via augmented ones column; set reg[-1,-1]=0.0 to leave the intercept unregularized",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "No bias term — pure linear map without intercept",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "reg[-1, -1] = 0.0",
+      "statedRationale": null,
+      "inferredRationale": "Unregularized intercept is standard in ridge regression; the bias absorbs distributional shift between layer hidden-state space and the final-prototype space without being shrunk toward zero",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Regularization matrix setup in train_ridge_translator",
+          "anchor": "reg[-1, -1] = 0.0"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 3
+    },
+    {
+      "id": "D44",
+      "finding": "F7",
+      "layer": "method",
+      "question": "How should the ridge normal equations be solved: torch.linalg.solve, lstsq, or explicit matrix inversion?",
+      "options": [
+        {
+          "text": "torch.linalg.solve(xtx + reg, xty) — solve the regularized normal equations directly",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "torch.linalg.lstsq — iterative least-squares solver with optional LAPACK driver",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "weights = torch.linalg.solve(xtx + reg, xty)",
+      "statedRationale": null,
+      "inferredRationale": "Ridge regularization makes XᵀX + λI full-rank and well-conditioned; direct solve is numerically stable and avoids lstsq overhead for this closed-form case",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Normal equation solution in train_ridge_translator",
+          "anchor": "weights = torch.linalg.solve(xtx + reg, xty)"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 4
+    },
+    {
+      "id": "D45",
+      "finding": "F7",
+      "layer": "method",
+      "question": "Should the ridge translator's output be L2-normalized before scoring against final-layer prototypes?",
+      "options": [
+        {
+          "text": "Yes — return normalize_np(x_aug @ weights)",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "No — score raw translated vectors by dot product against prototypes",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "return normalize_np(x_aug @ weights)",
+      "statedRationale": null,
+      "inferredRationale": "Final-layer prototypes are unit-normalized; normalizing translated vectors makes the dot product equivalent to cosine similarity, consistent with how ITL scores its layer-local prototypes",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Return value of apply_translator",
+          "anchor": "return normalize_np(x_aug @ weights)"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 5
+    },
+    {
+      "id": "D46",
+      "finding": "F1",
+      "layer": "method",
+      "question": "What similarity function should score a hidden state against the implicit token prototype rows?",
+      "options": [
+        {
+          "text": "Cosine similarity via dot product of L2-normalized vectors: normalize_np(x_all) @ layer_prototypes[layer].T",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "Negative Euclidean distance — scores words closer in L2 space higher",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "centroid_scores_all = normalize_np(x_all) @ layer_prototypes[layer].T",
+      "statedRationale": null,
+      "inferredRationale": "Cosine similarity is scale-invariant and standard for comparing unit-normalized representations; both stored hidden states and prototypes are pre-normalized so dot product equals cosine similarity exactly",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "ITL scoring computation in evaluate_layer_scores",
+          "anchor": "centroid_scores_all = normalize_np(x_all) @ layer_prototypes[layer].T"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 6
+    },
+    {
+      "id": "D47",
+      "finding": "F8",
+      "layer": "method",
+      "question": "Which evaluation split and metric should determine the best ITL layer for the primary test comparison?",
+      "options": [
+        {
+          "text": "Validation top-1 accuracy — select the layer with highest top-1 on the validation split",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "Validation MRR — select by mean reciprocal rank, which gives partial credit to near-misses",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "split_masks = {\"validation\": val_mask, \"test\": test_mask}",
+      "statedRationale": null,
+      "inferredRationale": "Top-1 accuracy is the primary reported metric; selecting by the same metric avoids the layer being tuned for MRR while underperforming on top-1; confirmed by summary.json showing layer 5 selected at validation top-1 21.09%",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "split_masks dict in evaluate_layer_scores establishing which splits are evaluated per layer",
+          "anchor": "split_masks = {\"validation\": val_mask, \"test\": test_mask}"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 2
+    },
+    {
+      "id": "D48",
+      "finding": "F10",
+      "layer": "method",
+      "question": "How should the explicit final-subtoken diagnostic compute group-level scores when multiple candidate words share the same final token?",
+      "options": [
+        {
+          "text": "Average the final_token_embeddings rows for all candidate words in each final-token group, then score each hidden state against the per-group mean embedding",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "Score each of 128 words individually by its own final-token embedding (128-way classification)",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "token_embedding_rows_for_id = final_token_embeddings[class_rows].mean(\n                axis=0, keepdims=True\n            )",
+      "statedRationale": null,
+      "inferredRationale": "The diagnostic measures recovery of the final subtoken ID (16 classes), not whole-word identity (128 classes); grouping by token ID and taking the mean produces a clean 16-class diagnostic that is strictly weaker than whole-word decoding",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Token diagnostic scoring in evaluate_layer_scores",
+          "anchor": "token_embedding_rows_for_id = final_token_embeddings[class_rows].mean("
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 1
+    },
+    {
+      "id": "D49",
+      "finding": "F4",
+      "layer": "method",
+      "question": "How many bootstrap resamples should be used for confidence interval estimation?",
+      "options": [
+        {
+          "text": "bootstrap_samples = 3000",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "bootstrap_samples = 1000 — faster but less stable CI endpoints; or 10000 — more stable but slower",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "bootstrap_samples: int = 3000",
+      "statedRationale": null,
+      "inferredRationale": "3000 resamples gives stable 95% CI endpoints for n=512 test examples while remaining fast; exceeds the conventional 1000-sample minimum without the cost of 10000",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Config default bootstrap sample count",
+          "anchor": "bootstrap_samples: int = 3000"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 2
+    },
+    {
+      "id": "D50",
+      "finding": "F4",
+      "layer": "method",
+      "question": "How many permutation samples should be used for the paired randomization test?",
+      "options": [
+        {
+          "text": "randomization_samples = 6000",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "randomization_samples = 1000 — minimum p-value resolution ~0.001; or 10000 for finer resolution",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "randomization_samples: int = 6000",
+      "statedRationale": null,
+      "inferredRationale": "6000 permutations gives minimum achievable p-value ≈ 1/6000 ≈ 0.000167, sufficient to resolve the observed p=0.0045; twice the bootstrap count provides finer p-value granularity than bootstrap alone",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Config default permutation test sample count",
+          "anchor": "randomization_samples: int = 6000"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 3
+    },
+    {
+      "id": "D51",
+      "finding": "F1",
+      "layer": "method",
+      "question": "How should rank be defined for tied scores when computing MRR and top-k accuracy?",
+      "options": [
+        {
+          "text": "Strict rank: 1 + count of scores strictly greater than the correct label's score",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "Average rank: (min_rank + max_rank) / 2 for tied entries",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "return 1 + np.sum(scores > correct[:, None], axis=1)",
+      "statedRationale": null,
+      "inferredRationale": "Strict ranking assigns the correct label the best possible position among ties; this is the optimistic convention consistent with argmax prediction which also selects the lowest-index tied element",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Rank computation in ranks_from_scores",
+          "anchor": "return 1 + np.sum(scores > correct[:, None], axis=1)"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 7
+    },
+    {
+      "id": "D52",
+      "finding": "global",
+      "layer": "method",
+      "question": "What epsilon value should protect both L2 normalization utilities from division by zero?",
+      "options": [
+        {
+          "text": "eps = 1e-8 in both normalize_np and normalize_torch",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "eps = 1e-6 — larger guard that may slightly deflate near-zero vectors",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "def normalize_np(x: np.ndarray, eps: float = 1e-8) -> np.ndarray:",
+      "statedRationale": null,
+      "inferredRationale": "1e-8 is well below float32 noise floor (~1e-7 relative precision) so it acts as a true zero-only guard without affecting any non-zero hidden state in practice",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "routine_no",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Default eps in normalize_np; identical default appears in normalize_torch",
+          "anchor": "def normalize_np(x: np.ndarray, eps: float = 1e-8) -> np.ndarray:"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 7
+    },
+    {
+      "id": "D53",
+      "finding": "F12",
+      "layer": "method",
+      "question": "Should BOS/special tokens be prepended when tokenizing context strings for hidden state extraction?",
+      "options": [
+        {
+          "text": "add_special_tokens=False — no BOS prepended; context is treated as a bare continuation string",
+          "status": "chosen",
+          "source": "artifact",
+          "path": "src/run_implicit_token_lens.py"
+        },
+        {
+          "text": "add_special_tokens=True — prepend BOS as in standard Qwen inference, potentially shifting word position by one",
+          "status": "alternative",
+          "source": "inferred"
+        }
+      ],
+      "chosen": "add_special_tokens=False,",
+      "statedRationale": null,
+      "inferredRationale": "Suppressing BOS keeps the target word at the true rightmost position after left-truncation; adding BOS would shift every sequence by one token and require adjusting the last_positions index, and would make short contexts differ from long ones in position structure",
+      "by": "agent",
+      "shouldEngage": false,
+      "shouldEngageReason": "validity_risk",
+      "evidence": [
+        {
+          "type": "artifact",
+          "path": "src/run_implicit_token_lens.py",
+          "itemId": null,
+          "note": "Tokenizer call in collect_hidden_states batch loop",
+          "anchor": "add_special_tokens=False,"
+        }
+      ],
+      "relatedErrors": [],
+      "ts": "2026-06-29T04:52:00Z",
+      "type": "decision",
+      "affects": [],
+      "basedOn": [],
+      "sequence": 0
+    }
+  ],
+  "frontPageDecisions": [
+    "D16",
+    "D18",
+    "D9",
+    "D14"
+  ],
+  "assessments": [],
+  "incidents": [],
+  "panel_layout": [
+    "crux",
+    "current_best",
+    "narrative",
+    "hypotheses",
+    "leaderboard",
+    "findings",
+    "decisions",
+    "open_questions",
+    "experiments"
+  ],
+  "sections": {
+    "leaderboard": {
+      "title": "Method Comparison — Test Set (512 examples, 128 classes)",
+      "kind": "table",
+      "data": {
+        "columns": [
+          "Method",
+          "Selected Layer",
+          "Val Top-1",
+          "Test Top-1",
+          "Test Top-5",
+          "Test MRR"
+        ],
+        "rows": [
+          [
+            "Implicit Token Lens (ITL)",
+            "5",
+            "21.09%",
+            "19.53%",
+            "25.59%",
+            "0.240"
+          ],
+          [
+            "Final-subtoken majority",
+            "n/a",
+            "12.50%",
+            "12.50%",
+            "n/a",
+            "n/a"
+          ],
+          [
+            "Raw final prototype",
+            "22",
+            "11.33%",
+            "14.06%",
+            "29.69%",
+            "0.220"
+          ],
+          [
+            "Mean subtoken embedding",
+            "0",
+            "8.59%",
+            "10.94%",
+            "21.88%",
+            "0.175"
+          ],
+          [
+            "Ridge-to-final ITL (ablation)",
+            "17",
+            "6.25%",
+            "3.71%",
+            "11.52%",
+            "0.092"
+          ],
+          [
+            "Majority word (chance)",
+            "n/a",
+            "0.78%",
+            "0.78%",
+            "n/a",
+            "n/a"
+          ]
+        ]
+      }
+    }
+  },
+  "reconstruction": {
+    "promptVersion": "world-model-reconstruction v3 findings-spine",
+    "model": "sonnet",
+    "generatedAt": "2026-07-22T13:53:29.915071+00:00"
+  }
+}

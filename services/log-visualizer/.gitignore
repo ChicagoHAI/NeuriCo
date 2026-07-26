@@ -14,3 +14,6 @@ public/*.bak*
 public/*~
 *.bak*
 *~
+
+# Full local user-test runs may contain model caches, nested repos, and large results.
+user-test-runs/
