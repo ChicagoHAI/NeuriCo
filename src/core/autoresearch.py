@@ -1843,6 +1843,7 @@ class AutoResearchController:
         results_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return results_path
 
+    @staticmethod
     def _resolve_proposal_text(attempt_dir: Path, proposal_result: Any) -> str:
         proposal_path = Path(attempt_dir) / "proposal.md"
         if isinstance(proposal_result, str):
