@@ -16,7 +16,7 @@ import os
 import re
 import shutil
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 
 from core.autoresearch import (
     AttemptHistoryManager,
@@ -253,7 +253,9 @@ def _archive_failed_hitl_attempt(
     archive_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "kind": "hitl_runtime_failure",
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "timestamp": (
+            datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        ),
         "parent_node_sha": parent_sha,
         "attempt_id": attempt_id,
         "phase": phase,
@@ -2110,7 +2112,7 @@ class HitlAutoResearchController:
             "error": f"AutoResearch {stage} scorer did not produce scoring/results.json",
             "scorer_result": scorer_result or {},
             "generated_by": "autoresearch",
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         results_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return results_path
