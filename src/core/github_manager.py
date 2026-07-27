@@ -625,14 +625,17 @@ Output ONLY the repository name, nothing else."""
             idea_spec: Idea specification dictionary
         """
         import yaml
+        from core.local_resources import workspace_contract_copy
 
         # Create metadata directory
         metadata_dir = repo_path / ".neurico"
         metadata_dir.mkdir(exist_ok=True)
 
-        # Save full idea spec
+        # Save full idea spec, with host-machine paths redacted: this file
+        # lives in the (possibly GitHub-backed) research repo
         with open(metadata_dir / "idea.yaml", 'w', encoding='utf-8') as f:
-            yaml.dump(idea_spec, f, default_flow_style=False, sort_keys=False)
+            yaml.dump(workspace_contract_copy(idea_spec), f,
+                      default_flow_style=False, sort_keys=False)
 
         print("✓ Added idea metadata to .neurico/idea.yaml")
 

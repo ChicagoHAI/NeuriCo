@@ -381,7 +381,10 @@ properties:
           exact metric names, targets, or output formats must be applied
           faithfully. The rule maker transcribes these verbatim into
           scoring/targets.json (tagged source: user) instead of deriving
-          its own.
+          its own. A metric may omit its target: the rule maker then
+          derives one, tags it source: derived, and the eval verifier
+          accepts that tag for exactly the metrics declared without a
+          target.
         properties:
           metrics:
             type: array
@@ -400,7 +403,7 @@ properties:
                     - "Mean test accuracy over 3 seeds"
                 target:
                   type: string
-                  description: "Success condition, transcribed verbatim"
+                  description: "Success condition, transcribed verbatim (optional: omit to let the rule maker derive one, tagged source: derived)"
                   examples:
                     - ">= 0.915"
                     - ">= baseline + 0.5 points"

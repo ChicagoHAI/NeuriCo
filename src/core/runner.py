@@ -610,7 +610,8 @@ class ResearchRunner:
 
         # Generate prompt
         print("📝 Generating research prompt...")
-        prompt = self.prompt_generator.generate_research_prompt(idea, root_dir=work_dir)
+        prompt = self.prompt_generator.generate_research_prompt(
+            idea, root_dir=work_dir, scoring_enabled=scoring_enabled)
 
         # Save prompt for reference
         prompt_file = work_dir / "logs" / "research_prompt.txt"
@@ -630,6 +631,7 @@ class ResearchRunner:
             domain=domain,
             idea_spec=idea.get("idea", {}),
             provider=provider,
+            scoring_enabled=scoring_enabled,
         )
 
         # Save session instructions

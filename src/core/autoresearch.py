@@ -1999,6 +1999,7 @@ def run_autoresearch_loop(
         return run_scorer(
             work_dir=score_work_dir,
             timeout=scorer_timeout,
+            idea=idea,
         )
 
     controller = AutoResearchController(

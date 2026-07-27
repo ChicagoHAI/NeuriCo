@@ -264,11 +264,14 @@ def run_resource_finder(idea: Dict[str, Any], work_dir: Path, provider: str,
 def run_experiment_runner(idea: Dict[str, Any], work_dir: Path, provider: str,
                           tracker: RunTracker, full_permissions: bool = True,
                           use_scribe: bool = False,
-                          templates_dir: Optional[Path] = None) -> Dict[str, Any]:
+                          templates_dir: Optional[Path] = None,
+                          scoring_enabled: bool = False) -> Dict[str, Any]:
     """
     Run the experiment runner agent.
 
     Extracted from pipeline_orchestrator.py to be callable standalone.
+    scoring_enabled gates scoring-only prompt content (e.g. the
+    required_for_evaluation obligation); standalone re-runs default unscored.
     """
     from templates.prompt_generator import PromptGenerator
     from templates.research_agent_instructions import generate_instructions
@@ -293,7 +296,8 @@ def run_experiment_runner(idea: Dict[str, Any], work_dir: Path, provider: str,
 
         # Generate research prompt
         prompt_generator = PromptGenerator(templates_dir)
-        prompt = prompt_generator.generate_research_prompt(idea, root_dir=work_dir)
+        prompt = prompt_generator.generate_research_prompt(
+            idea, root_dir=work_dir, scoring_enabled=scoring_enabled)
 
         # Save prompt
         prompt_file = work_dir / "logs" / "research_prompt.txt"
@@ -310,6 +314,7 @@ def run_experiment_runner(idea: Dict[str, Any], work_dir: Path, provider: str,
             domain=domain,
             idea_spec=idea.get('idea', {}),
             provider=provider,
+            scoring_enabled=scoring_enabled,
         )
 
         # Save session instructions

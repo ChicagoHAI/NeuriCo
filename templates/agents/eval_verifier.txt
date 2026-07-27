@@ -52,11 +52,16 @@ CHECK 2: TRANSCRIPTION (only when the contract lists evaluation.metrics)
 For each user-declared metric, targets.json must contain a property with:
 
 ✓ The EXACT user-given name (no renaming, merging, or splitting).
-✓ A target that faithfully expresses the user's stated threshold in the
-  metric's units. A prose threshold ("at least 0.5 points over baseline")
-  may be expressed numerically, but the number must follow from the user's
-  wording, not from the rule_maker's judgment.
-✓ `"source": "user"` on the property record.
+✓ When the user STATED a target: a target that faithfully expresses the
+  user's stated threshold in the metric's units, with `"source": "user"`.
+  A prose threshold ("at least 0.5 points over baseline") may be expressed
+  numerically, but the number must follow from the user's wording, not
+  from the rule_maker's judgment.
+✓ When the user declared the metric WITHOUT a target (check the contract —
+  the target key is optional): a rule_maker-derived target tagged
+  `"source": "derived"`, with the derivation documented in
+  rule_maker_log.md. `"source": "user"` on a target the user never stated
+  is a FAIL (fabricated provenance), and so is a missing property.
 
 Extra rule_maker-added properties are acceptable ONLY for aspects the user
 did not cover; they must not water down or gate the user's own metrics.

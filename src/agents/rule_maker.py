@@ -257,11 +257,18 @@ def run_rule_maker(
     print(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
     print("=" * 80)
 
+    # Per-attempt artifact names: the orchestrator re-runs the rule maker
+    # once after a verifier rejection, and fixed names would overwrite the
+    # first attempt's audit trail (prompt, log, and transcript).
+    attempt = 1
+    while (logs_dir / f"rule_maker_{provider}_attempt{attempt}.log").exists():
+        attempt += 1
+
     # Generate prompt and persist it for debugging
     prompt = generate_rule_maker_prompt(idea, work_dir, templates_dir)
     if prompt_suffix:
         prompt += prompt_suffix
-    prompt_file = logs_dir / "rule_maker_prompt.txt"
+    prompt_file = logs_dir / f"rule_maker_prompt_attempt{attempt}.txt"
     prompt_file.write_text(prompt, encoding='utf-8')
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
@@ -280,8 +287,8 @@ def run_rule_maker(
     if transcript_flag:
         cmd += f" {transcript_flag}"
 
-    log_file = logs_dir / f"rule_maker_{provider}.log"
-    transcript_file = logs_dir / f"rule_maker_{provider}_transcript.jsonl"
+    log_file = logs_dir / f"rule_maker_{provider}_attempt{attempt}.log"
+    transcript_file = logs_dir / f"rule_maker_{provider}_attempt{attempt}_transcript.jsonl"
 
     print(f"▶️  Launching {provider} CLI agent...")
     print(f"   Command: {cmd}")

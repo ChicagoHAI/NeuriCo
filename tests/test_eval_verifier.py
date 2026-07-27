@@ -130,7 +130,8 @@ def test_format_violations_renders_check_and_evidence():
 
 # ---------------------------------------------------------------- integrity
 
-def _staged_workspace(tmp_path):
+def _staged_workspace_full(tmp_path):
+    import copy
     src = tmp_path / "host"
     src.mkdir()
     fn = src / "protocol_eval.py"
@@ -140,7 +141,13 @@ def _staged_workspace(tmp_path):
     idea_spec = _idea(local_resources={'functions': [
         {'path': str(fn), 'entrypoint': 'evaluate_protocol', 'usage': 'all evaluation',
          'required_for_evaluation': True}]})
+    trusted = copy.deepcopy(idea_spec)  # as the orchestrator holds it (pre-staging)
     stage_local_resources(work_dir, idea_spec)
+    return work_dir, trusted, fn
+
+
+def _staged_workspace(tmp_path):
+    work_dir, _trusted, _fn = _staged_workspace_full(tmp_path)
     return work_dir
 
 
@@ -171,6 +178,120 @@ def test_scorer_refuses_tampered_function(tmp_path):
     result = run_scorer(work_dir, timeout=10)
     assert not result['success']
     assert "integrity" in result['error']
+
+
+# ------------------------------------------- integrity: fail-closed (trusted)
+
+def test_trusted_intact_passes(tmp_path):
+    work_dir, trusted, _fn = _staged_workspace_full(tmp_path)
+    assert staged_function_mismatches(work_dir, idea=trusted) == []
+
+
+def test_trusted_deleted_metadata_does_not_silence_guard(tmp_path):
+    # A worker deleting .neurico/idea.yaml must not silence the guard:
+    # tampering is still caught via the read-only source file
+    work_dir, trusted, _fn = _staged_workspace_full(tmp_path)
+    (work_dir / ".neurico" / "idea.yaml").unlink()
+    (work_dir / "code/local/protocol_eval.py").write_text(
+        "def evaluate_protocol(p, l):\n    return 1.0\n")
+    mismatches = staged_function_mismatches(work_dir, idea=trusted)
+    assert mismatches
+    assert "differs from its source" in mismatches[0]
+    # Legacy mode (no trusted contract) stays permissive for workspaces
+    # that legitimately have no metadata
+    assert staged_function_mismatches(work_dir) == []
+
+
+def test_trusted_blanked_resources_does_not_silence_guard(tmp_path):
+    import yaml
+    work_dir, trusted, _fn = _staged_workspace_full(tmp_path)
+    contract_path = work_dir / ".neurico" / "idea.yaml"
+    spec = yaml.safe_load(contract_path.read_text())
+    spec['idea'].pop('local_resources')
+    contract_path.write_text(yaml.dump(spec))
+    (work_dir / "code/local/protocol_eval.py").write_text(
+        "def evaluate_protocol(p, l):\n    return 1.0\n")
+    assert staged_function_mismatches(work_dir, idea=trusted)
+
+
+def test_trusted_record_redirect_is_defeated(tmp_path):
+    # Redirect bypass: copy pristine bytes to a decoy, point the workspace
+    # record at the decoy, tamper the real staged file. The guard must
+    # verify the CONTRACT's canonical path, not the worker-chosen one.
+    import shutil
+    import yaml
+    work_dir, trusted, _fn = _staged_workspace_full(tmp_path)
+    real = work_dir / "code/local/protocol_eval.py"
+    decoy = work_dir / "code/local/decoy.py"
+    shutil.copy2(real, decoy)
+    real.write_text("def evaluate_protocol(p, l):\n    return 1.0\n")
+    contract_path = work_dir / ".neurico" / "idea.yaml"
+    spec = yaml.safe_load(contract_path.read_text())
+    spec['idea']['local_resources']['functions'][0]['path'] = "code/local/decoy.py"
+    contract_path.write_text(yaml.dump(spec))
+    mismatches = staged_function_mismatches(work_dir, idea=trusted)
+    assert mismatches
+    assert "protocol_eval.py" in mismatches[0]
+
+
+def test_trusted_forged_sha_is_defeated_by_source(tmp_path):
+    # Tamper the staged function AND rewrite the recorded sha to match —
+    # the reachable source file must still expose the mismatch
+    import hashlib
+    import yaml
+    work_dir, trusted, _fn = _staged_workspace_full(tmp_path)
+    staged = work_dir / "code/local/protocol_eval.py"
+    staged.write_text("def evaluate_protocol(p, l):\n    return 1.0\n")
+    contract_path = work_dir / ".neurico" / "idea.yaml"
+    spec = yaml.safe_load(contract_path.read_text())
+    spec['idea']['local_resources']['functions'][0]['sha256'] = \
+        hashlib.sha256(staged.read_bytes()).hexdigest()
+    contract_path.write_text(yaml.dump(spec))
+    mismatches = staged_function_mismatches(work_dir, idea=trusted)
+    assert mismatches
+    assert "differs from its source" in mismatches[0]
+
+
+def test_trusted_missing_entry_sha_fails_closed(tmp_path):
+    # Source gone AND no recorded fingerprint -> cannot verify -> mismatch
+    import yaml
+    work_dir, trusted, fn = _staged_workspace_full(tmp_path)
+    fn.unlink()  # source unreachable
+    contract_path = work_dir / ".neurico" / "idea.yaml"
+    spec = yaml.safe_load(contract_path.read_text())
+    spec['idea']['local_resources']['functions'][0].pop('sha256')
+    contract_path.write_text(yaml.dump(spec))
+    mismatches = staged_function_mismatches(work_dir, idea=trusted)
+    assert mismatches
+    assert "cannot be verified" in mismatches[0]
+
+
+def test_legacy_required_function_without_sha_is_reported(tmp_path):
+    import yaml
+    work_dir, _trusted, _fn = _staged_workspace_full(tmp_path)
+    contract_path = work_dir / ".neurico" / "idea.yaml"
+    spec = yaml.safe_load(contract_path.read_text())
+    spec['idea']['local_resources']['functions'][0].pop('sha256')
+    contract_path.write_text(yaml.dump(spec))
+    mismatches = staged_function_mismatches(work_dir)
+    assert mismatches
+    assert "no verifiable fingerprint" in mismatches[0]
+
+
+# ---------------------------------------------------------------- verdict strictness
+
+def test_interpret_verdict_strict_boolean():
+    from agents.eval_verifier import interpret_verdict
+    passed, violations = interpret_verdict({'pass': True})
+    assert passed is True and violations == []
+    # A string — even "false" — must never count as a pass
+    passed, violations = interpret_verdict({'pass': 'false'})
+    assert passed is False
+    assert any('JSON boolean' in str(v) for v in violations)
+    passed, _ = interpret_verdict({'pass': 'true'})
+    assert passed is False
+    passed, _ = interpret_verdict({'pass': 1})
+    assert passed is False
 
 
 # ---------------------------------------------------------------- sealing

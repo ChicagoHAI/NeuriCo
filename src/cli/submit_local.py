@@ -191,6 +191,19 @@ def _convert_without_llm(local_content: dict) -> dict:
     print("   ⚠️  This is a rough template-based conversion.")
     print("   You may want to manually refine the YAML (especially the hypothesis).")
 
+    # Template conversion cannot extract structured local_resources; a path
+    # left only in background.description is never staged or mounted, so the
+    # faithfulness gate below will (correctly) reject the submission.
+    from core.local_resources import find_path_tokens
+    leftover = find_path_tokens(description)
+    if leftover:
+        print("   ⚠️  Local paths detected in the idea text:")
+        for token in leftover:
+            print(f"      - {token}")
+        print("   Without an API key they cannot be extracted into local_resources;")
+        print("   add a local_resources block to the YAML by hand (path + usage),")
+        print("   or set an API key and re-run the conversion.")
+
     return {'parsed': idea_data, 'yaml_string': yaml_string}
 
 
@@ -587,17 +600,37 @@ def main():
     result = convert_to_yaml(local_content)
 
     # Faithfulness check: every local path mentioned in the source file must
-    # survive conversion verbatim. A dropped path means the agent would never
-    # learn the resource exists, so this is a hard failure.
-    from core.local_resources import missing_paths_in_idea
+    # land in a location the pipeline honors (local_resources or a paper
+    # path) — surviving only in prose means it is never staged or mounted,
+    # so this is a hard failure.
+    from core.local_resources import canonicalize_local_paths, missing_paths_in_idea
     dropped = missing_paths_in_idea(local_content['raw_text'], result['parsed'])
     if dropped:
-        print("\n❌ Error: conversion dropped local paths mentioned in the idea:")
+        print("\n❌ Error: conversion did not carry these local paths into")
+        print("   local_resources (or background.papers), so they would never be")
+        print("   staged or mounted:")
         for token in dropped:
             print(f"   - {token}")
-        print("   Re-run the conversion, or state each path's usage more explicitly")
-        print("   in the idea file so it lands in local_resources.")
+        print("   Re-run the conversion, or add each path to local_resources by")
+        print("   hand with its usage stated.")
         sys.exit(1)
+
+    # Canonicalize relative paths to host-absolute while the submitter's
+    # working directory still gives them meaning. Inside Docker, run.sh
+    # passes the host cwd via NEURICO_HOST_CWD (and mounts it at the same
+    # location) so the recorded paths keep host semantics for the mounts
+    # sidecar and for staging at run time.
+    host_cwd = os.environ.get('NEURICO_HOST_CWD')
+    rewrites = canonicalize_local_paths(
+        result['parsed'].get('idea', {}),
+        base_dir=Path(host_cwd) if host_cwd else None)
+    if rewrites:
+        print("\n📍 Canonicalized relative resource paths:")
+        for before, after in rewrites:
+            print(f"   {before} -> {after}")
+        result['yaml_string'] = yaml.dump(
+            result['parsed'], default_flow_style=False,
+            sort_keys=False, allow_unicode=True)
 
     # Step 3: Save file
     if args.output:
@@ -695,7 +728,20 @@ def main():
                 print("   Set it in .env file or export GITHUB_TOKEN=your_token")
 
         # Optionally run research immediately
-        if args.run:
+        in_docker = (os.environ.get('NEURICO_IN_DOCKER')
+                     or os.path.exists('/.dockerenv'))
+        if args.run and in_docker:
+            # Running in-process here would bypass the host-side
+            # `./neurico run`, which is the only path that mounts the
+            # declared local resources (ideas/mounts/<idea_id>.txt) into
+            # the research container. docker/run.sh intercepts --run and
+            # dispatches to cmd_run itself; reaching this branch means
+            # submit_local was invoked in Docker directly.
+            print("\n⚠️  --run inside the submission container would not see the")
+            print("   declared local resources. Run instead (from the host):")
+            print(f"   ./neurico run {idea_id} --provider "
+                  f"{args.provider or 'claude'} --full-permissions")
+        elif args.run:
             print("\n" + "=" * 80)
             print("RUNNING RESEARCH")
             print("=" * 80)

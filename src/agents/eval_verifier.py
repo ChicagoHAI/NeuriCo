@@ -26,8 +26,10 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import subprocess
 import shlex
+import shutil
 import os
 import sys
+import threading
 import time
 import json
 
@@ -174,9 +176,25 @@ def run_eval_verifier(
     logs_dir = work_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Remove any stale verdict so a crashed agent cannot pass on old results
+    # Per-attempt artifact names: the orchestrator re-runs the verifier once
+    # after a rule-maker retry, and fixed names would overwrite the first
+    # attempt's audit trail (log, transcript, prompt, and failed verdict).
+    attempt = 1
+    while (logs_dir / f"eval_verifier_{provider}_attempt{attempt}.log").exists():
+        attempt += 1
+    log_file = logs_dir / f"eval_verifier_{provider}_attempt{attempt}.log"
+    transcript_file = logs_dir / f"eval_verifier_{provider}_attempt{attempt}_transcript.jsonl"
+
+    # Remove any stale verdict so a crashed agent cannot pass on old results,
+    # archiving it first so a rejected earlier attempt stays auditable.
     verdict_path = scoring_dir / VERDICT_FILE_NAME
-    verdict_path.unlink(missing_ok=True)
+    if verdict_path.exists():
+        archive = logs_dir / (f"eval_verifier_{provider}_verification_"
+                              f"before_attempt{attempt}.json")
+        try:
+            shutil.move(str(verdict_path), str(archive))
+        except OSError:
+            verdict_path.unlink(missing_ok=True)
 
     print(f"🔎 Starting Eval Verifier Agent")
     print(f"   Provider: {provider}")
@@ -186,7 +204,7 @@ def run_eval_verifier(
 
     # Generate prompt and persist it for debugging
     prompt = generate_eval_verifier_prompt(idea, work_dir, templates_dir)
-    prompt_file = logs_dir / "eval_verifier_prompt.txt"
+    prompt_file = logs_dir / f"eval_verifier_prompt_attempt{attempt}.txt"
     prompt_file.write_text(prompt, encoding='utf-8')
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
@@ -205,9 +223,6 @@ def run_eval_verifier(
     if transcript_flag:
         cmd += f" {transcript_flag}"
 
-    log_file = logs_dir / f"eval_verifier_{provider}.log"
-    transcript_file = logs_dir / f"eval_verifier_{provider}_transcript.jsonl"
-
     print(f"▶️  Launching {provider} CLI agent...")
     print(f"   Command: {cmd}")
     print(f"   Log file: {log_file}")
@@ -220,6 +235,17 @@ def run_eval_verifier(
     env['PYTHONUNBUFFERED'] = '1'
     if provider == "gemini":
         env['GEMINI_CLI_IDE_DISABLE'] = '1'
+
+    # The verifier's mandate is to REPORT on the scoring contract, not to
+    # edit it — but the agent process necessarily has filesystem access to
+    # scoring/. Snapshot the reviewed files (None = absent, so a file the
+    # agent CREATES is also caught) so any modification can be detected,
+    # restored, and turned into a failing verdict.
+    reviewed_files = {}
+    for reviewed_name in ('eval.py', 'targets.json', 'rule_maker_log.md'):
+        reviewed_path = scoring_dir / reviewed_name
+        reviewed_files[reviewed_name] = (
+            reviewed_path.read_bytes() if reviewed_path.exists() else None)
 
     start_time = time.time()
 
@@ -240,14 +266,37 @@ def run_eval_verifier(
             process.stdin.write(prompt)
             process.stdin.close()
 
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    sanitized = sanitize_text(line)
-                    print(sanitized, end='')
-                    log_f.write(sanitized)
-                    transcript_f.write(sanitized)
+            # Drain stdout on a helper thread so the timeout below is
+            # enforced on wall clock. Reading to EOF inline would block for
+            # as long as the agent keeps stdout open, so wait(timeout=...)
+            # would never be reached and a stuck verifier would hang the
+            # pipeline indefinitely.
+            def _drain():
+                try:
+                    for line in iter(process.stdout.readline, ''):
+                        if line:
+                            sanitized = sanitize_text(line)
+                            print(sanitized, end='')
+                            log_f.write(sanitized)
+                            transcript_f.write(sanitized)
+                except ValueError:
+                    # Log files closed after a timeout kill while an
+                    # orphaned child still held the pipe open — drop the
+                    # remaining output rather than crash the thread.
+                    pass
 
-            return_code = process.wait(timeout=timeout)
+            reader = threading.Thread(target=_drain, daemon=True)
+            reader.start()
+            try:
+                return_code = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # Kill inside the with-block so the reader hits EOF and
+                # finishes before the log files close.
+                process.kill()
+                process.wait()
+                reader.join(timeout=10)
+                raise
+            reader.join(timeout=10)
 
         print()
         print("=" * 80)
@@ -263,12 +312,56 @@ def run_eval_verifier(
             print(f"⚠️  Agent exited with return code: {return_code}")
 
     except subprocess.TimeoutExpired:
+        # Fail closed: a verdict the agent managed to write before the kill
+        # must not be trusted — the review never finished.
         print(f"\n⏱️  Eval verifier timed out after {timeout} seconds")
         process.kill()
+        verdict_path.unlink(missing_ok=True)
+        return {
+            'success': False,
+            'passed': False,
+            'violations': [
+                {'check': 'timeout',
+                 'detail': f"verifier timed out after {timeout}s; any partial "
+                           f"verdict was discarded"}
+            ],
+            'log_file': str(log_file),
+            'transcript_file': str(transcript_file),
+            'elapsed_time': time.time() - start_time,
+        }
 
     except Exception as e:
         print(f"\n❌ Error during eval_verifier execution: {e}")
         raise
+
+    # Enforce read-only review: restore any reviewed file the agent touched
+    # and fail the verification outright — a verifier that edits the
+    # contract it reviews cannot be trusted to have judged it.
+    tampered = []
+    for reviewed_name, original_bytes in reviewed_files.items():
+        reviewed_path = scoring_dir / reviewed_name
+        current = reviewed_path.read_bytes() if reviewed_path.exists() else None
+        if current != original_bytes:
+            if original_bytes is None:
+                reviewed_path.unlink(missing_ok=True)  # agent created it
+            else:
+                reviewed_path.write_bytes(original_bytes)
+            tampered.append(reviewed_name)
+    if tampered:
+        print(f"⚠️  Verifier modified reviewed scoring files "
+              f"({', '.join(tampered)}); originals restored, verification failed.")
+        return {
+            'success': True,
+            'passed': False,
+            'violations': [
+                {'check': 'read_only',
+                 'detail': f"verifier modified reviewed scoring files: "
+                           f"{', '.join(tampered)} (restored)"}
+            ],
+            'log_file': str(log_file),
+            'transcript_file': str(transcript_file),
+            'elapsed_time': time.time() - start_time,
+        }
 
     # Read the verdict
     verdict = read_verdict(work_dir)
@@ -285,8 +378,8 @@ def run_eval_verifier(
             'elapsed_time': time.time() - start_time,
         }
 
-    passed = bool(verdict.get('pass'))
-    violations = verdict.get('violations') or []
+    passed, verdict_violations = interpret_verdict(verdict)
+    violations = verdict_violations
     if passed:
         print("✅ Scoring contract verified against user declarations.")
     else:
@@ -303,6 +396,28 @@ def run_eval_verifier(
         'transcript_file': str(transcript_file),
         'elapsed_time': time.time() - start_time,
     }
+
+
+def interpret_verdict(verdict: Dict[str, Any]) -> tuple:
+    """
+    Strictly interpret a verification.json verdict.
+
+    Only JSON true counts as a pass: bool() coercion would accept any
+    non-empty string — including "false" — as passing. A non-boolean
+    'pass' value fails and is surfaced as its own violation.
+
+    Returns:
+        (passed, violations)
+    """
+    raw_pass = verdict.get('pass')
+    passed = raw_pass is True
+    violations = verdict.get('violations') or []
+    if not passed and not isinstance(raw_pass, bool):
+        violations = list(violations) + [{
+            'check': 'verdict',
+            'detail': f"verification.json 'pass' must be a JSON boolean, got {raw_pass!r}",
+        }]
+    return passed, violations
 
 
 def read_verdict(work_dir: Path) -> Optional[Dict[str, Any]]:

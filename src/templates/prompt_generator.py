@@ -177,7 +177,7 @@ class PromptGenerator:
             "                    RESEARCH TASK SPECIFICATION",
             "=" * 80,
             "",
-            self._generate_task_section(idea_spec),
+            self._generate_task_section(idea_spec, scoring_enabled=scoring_enabled),
             "",
             "=" * 80,
             "                 RESEARCH METHODOLOGY (UNIVERSAL)",
@@ -306,7 +306,8 @@ Location: {run_dir}
 
         return variables
 
-    def _generate_task_section(self, idea_spec: Dict[str, Any]) -> str:
+    def _generate_task_section(self, idea_spec: Dict[str, Any],
+                               scoring_enabled: bool = False) -> str:
         """
         Generate the task-specific section of the prompt.
 
@@ -315,6 +316,9 @@ Location: {run_dir}
 
         Args:
             idea_spec: Idea specification
+            scoring_enabled: If True, render scoring-only obligations such as
+                             required_for_evaluation. Ordinary research runs
+                             are unscored, so those obligations are omitted.
 
         Returns:
             Formatted task section string
@@ -398,7 +402,11 @@ Location: {run_dir}
                 entrypoint = func.get('entrypoint', 'unknown')
                 lines.append(f"### Function: {entrypoint}() in {func.get('path', 'unknown')}")
                 lines.append(f"- **Usage**: {func.get('usage', 'not stated')}")
-                if func.get('required_for_evaluation'):
+                # required_for_evaluation is a scoring-pipeline obligation
+                # (eval.py must route through this function). Only surface it
+                # when scoring is actually enabled; ordinary research runs are
+                # unscored and must not carry the binding requirement.
+                if scoring_enabled and func.get('required_for_evaluation'):
                     lines.append("- **MANDATORY FOR EVALUATION**: all evaluation MUST call this "
                                  "function; do not reimplement its metric")
                 lines.append("")
@@ -724,7 +732,8 @@ it fits.
     def generate_session_instructions(self, prompt: str, work_dir: str,
                                        use_scribe: bool = False, domain: str = 'general',
                                        idea_spec: Optional[Dict[str, Any]] = None,
-                                       provider: str = "claude") -> str:
+                                       provider: str = "claude",
+                                       scoring_enabled: bool = False) -> str:
         """
         Generate session instructions from template.
 
@@ -733,6 +742,8 @@ it fits.
             work_dir: Working directory path for the research
             use_scribe: If True, include notebook instructions; if False, use Python scripts
             domain: Research domain for template override lookup
+            scoring_enabled: If True, render scoring-only obligations
+                             (required_for_evaluation) in the resource contract
 
         Returns:
             Complete session instructions string
@@ -766,7 +777,8 @@ and the general workflow, ALWAYS follow the user's instructions.
 
         # Local resource contract: read from the structured idea fields, not
         # from the rendered prompt, so it cannot be lost to regex extraction
-        priority_section += self._generate_local_resource_contract(idea_spec or {})
+        priority_section += self._generate_local_resource_contract(
+            idea_spec or {}, scoring_enabled=scoring_enabled)
 
         # Code workflow instructions depend on whether we're using notebooks or scripts
         if use_scribe:
@@ -795,7 +807,8 @@ and the general workflow, ALWAYS follow the user's instructions.
 
         return self.render_template(template, variables)
 
-    def _generate_local_resource_contract(self, idea_spec: Dict[str, Any]) -> str:
+    def _generate_local_resource_contract(self, idea_spec: Dict[str, Any],
+                                          scoring_enabled: bool = False) -> str:
         """
         Build the binding local-resource banner for session instructions.
 
@@ -805,6 +818,8 @@ and the general workflow, ALWAYS follow the user's instructions.
 
         Args:
             idea_spec: Inner idea dictionary (idea['idea'])
+            scoring_enabled: If True, render scoring-only obligations such as
+                             required_for_evaluation; unscored runs omit them
 
         Returns:
             Banner string, or empty string when no local resources declared
@@ -822,7 +837,9 @@ and the general workflow, ALWAYS follow the user's instructions.
             if isinstance(func, dict) and func.get('path'):
                 entrypoint = func.get('entrypoint', 'unknown')
                 line = f"- Function {entrypoint}() in {func['path']}: {func.get('usage', 'usage not stated')}"
-                if func.get('required_for_evaluation'):
+                # Scoring-only obligation: see _generate_task_section — the
+                # requirement binds eval.py, so it only appears in scored runs
+                if scoring_enabled and func.get('required_for_evaluation'):
                     line += "\n  MANDATORY: all evaluation must call this function; never reimplement its metric."
                 lines.append(line)
 

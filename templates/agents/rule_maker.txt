@@ -100,6 +100,12 @@ The idea may carry two structured declarations that BIND your design. Check
      user-given name. Do not rename, merge, or reinterpret it.
    ✓ Express the user's target numerically in the metric's units and record
      the user's verbatim wording as `source_text` with `"source": "user"`.
+   ✓ A declared metric MAY omit its target (the schema allows it). Keep the
+     metric under its exact name, derive a defensible target yourself
+     (literature first, then heuristic), tag the property
+     `"source": "derived"`, and document the derivation in
+     rule_maker_log.md. Never tag a target `"source": "user"` unless the
+     user actually stated it.
    ✓ Add properties of your own ONLY for aspects the user did not cover,
      tagged `"source": "literature"` or `"source": "heuristic"`.
    ✓ If `evaluation.results_format` is given, interface.md and eval.py must
@@ -501,7 +507,10 @@ WHERE TARGETS COME FROM:
 
 1. FIRST: the idea's `evaluation.metrics` entries — transcribe each name and
    target verbatim, `"source": "user"`, with the user's wording in
-   `source_text` (see USER-DECLARED EVALUATION CONTRACT above).
+   `source_text` (see USER-DECLARED EVALUATION CONTRACT above). A declared
+   metric with NO target keeps its exact name and gets a target you derive
+   (rules 3-4 below), tagged `"source": "derived"` and documented in
+   rule_maker_log.md.
 2. ELSE: explicit numbers in the idea's `evaluation_criteria` field.
 3. ELSE: numbers stated in the literature for this task.
 4. ELSE: a defensible heuristic (e.g. "1.5x speedup for a known O(n²) → O(n

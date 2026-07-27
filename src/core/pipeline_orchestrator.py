@@ -321,7 +321,8 @@ class ResearchPipelineOrchestrator:
             # STAGE 4 (scoring mode only): Scorer
             # Executes scoring/eval.py and captures results.json.
             if scoring_enabled:
-                results["stages"][SCORER_STAGE] = self._run_scorer(timeout=scorer_timeout)
+                results["stages"][SCORER_STAGE] = self._run_scorer(
+                    timeout=scorer_timeout, idea=idea)
 
             runner_ok = results["stages"]["experiment_runner"]["success"]
 
@@ -597,6 +598,7 @@ class ResearchPipelineOrchestrator:
                 domain=domain,
                 idea_spec=idea.get("idea", {}),
                 provider=provider,
+                scoring_enabled=scoring_enabled,
             )
 
             # Save session instructions
@@ -847,10 +849,12 @@ class ResearchPipelineOrchestrator:
                   "after one retry -- failing the rule maker stage.")
         return retry
 
-    def _run_scorer(self, timeout: int) -> Dict[str, Any]:
+    def _run_scorer(self, timeout: int,
+                    idea: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Run the scorer stage (scoring mode only). Executes scoring/eval.py
-        and captures the structured results into scoring/results.json.
+        and captures the structured results into scoring/results.json. The
+        trusted idea makes the staged-function integrity check fail closed.
         """
         print()
         print("─" * 80)
@@ -860,7 +864,8 @@ class ResearchPipelineOrchestrator:
 
         self.state.start_stage(SCORER_STAGE)
         try:
-            result = run_scorer(work_dir=self.work_dir, timeout=timeout)
+            result = run_scorer(work_dir=self.work_dir, timeout=timeout,
+                                idea=idea)
             self.state.complete_stage(SCORER_STAGE, result["success"], result)
             return result
         except Exception as e:
@@ -982,7 +987,8 @@ class ResearchPipelineOrchestrator:
             return results
 
         # STAGE B3: Scorer (executes scoring/eval.py against the existing artifacts).
-        results['stages'][SCORER_STAGE] = self._run_scorer(timeout=scorer_timeout)
+        results['stages'][SCORER_STAGE] = self._run_scorer(
+            timeout=scorer_timeout, idea=idea)
 
         scorer_ok = results['stages'][SCORER_STAGE].get('success', False)
         if scorer_ok:

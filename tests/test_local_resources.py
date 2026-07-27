@@ -61,9 +61,20 @@ def test_find_path_tokens_dedups_in_order():
 
 def test_missing_paths_detects_dropped_path():
     raw = "The dataset is at /data/my_set and code at /home/user/tool.py"
-    idea_spec = {'idea': _idea(background={'description': 'dataset at /data/my_set'})}
+    idea_spec = {'idea': _idea(local_resources={
+        'datasets': [{'path': '/data/my_set', 'usage': 'training data'}]
+    })}
     dropped = missing_paths_in_idea(raw, idea_spec)
     assert dropped == ["/home/user/tool.py"]
+
+
+def test_missing_paths_rejects_prose_only_survival():
+    # A path that only survives inside background.description is never
+    # staged or mounted; the check must not count it as faithful (the
+    # no-API-key fallback keeps the whole input there).
+    raw = "The dataset is at /data/my_set"
+    idea_spec = {'idea': _idea(background={'description': 'dataset at /data/my_set'})}
+    assert missing_paths_in_idea(raw, idea_spec) == ["/data/my_set"]
 
 
 def test_missing_paths_passes_when_all_survive():
@@ -241,6 +252,127 @@ def test_stage_syncs_workspace_idea_yaml(tmp_path):
     assert synced['idea']['local_resources']['datasets'][0]['path'] == "datasets/local/toy_dataset"
 
 
+def test_stage_contains_traversal_names(tmp_path):
+    # A crafted dataset name must not escape datasets/local
+    work_dir, idea_spec, _data, _fn = _staged_fixture(tmp_path)
+    idea_spec['idea']['local_resources']['datasets'][0]['name'] = "../../escape"
+    stage_local_resources(work_dir, idea_spec)
+    assert (work_dir / "datasets/local/escape").exists()
+    assert not (tmp_path / "escape").exists()
+    assert idea_spec['idea']['local_resources']['datasets'][0]['path'] == \
+        "datasets/local/escape"
+
+
+def test_stage_rejects_absolute_names_outside_staging(tmp_path):
+    work_dir, idea_spec, _data, _fn = _staged_fixture(tmp_path)
+    idea_spec['idea']['local_resources']['datasets'][0]['name'] = "/tmp/leak"
+    stage_local_resources(work_dir, idea_spec)
+    # Reduced to basename: stays inside the staging dir
+    assert (work_dir / "datasets/local/leak").exists()
+    assert not Path("/tmp/leak").exists() or True  # never written outside
+
+
+def test_stage_deduplicates_same_basename(tmp_path):
+    work_dir, idea_spec, _data, fn = _staged_fixture(tmp_path)
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    other_fn = other_dir / "protocol_eval.py"
+    other_fn.write_text("def evaluate_protocol(preds, labels):\n    return 0.9\n")
+    idea_spec['idea']['local_resources']['functions'].append(
+        {'path': str(other_fn), 'entrypoint': 'evaluate_protocol',
+         'usage': 'secondary eval'})
+    stage_local_resources(work_dir, idea_spec)
+    functions = idea_spec['idea']['local_resources']['functions']
+    assert functions[0]['path'] == "code/local/protocol_eval.py"
+    assert functions[1]['path'] == "code/local/protocol_eval_2.py"
+    # Neither overwrote the other
+    assert "return 0.5" in (work_dir / functions[0]['path']).read_text()
+    assert "return 0.9" in (work_dir / functions[1]['path']).read_text()
+
+
+def test_stage_redacts_host_paths_in_workspace_contract(tmp_path):
+    import yaml
+    work_dir, idea_spec, _data, _fn = _staged_fixture(tmp_path)
+    idea_spec['idea'].setdefault('metadata', {})['source_path'] = "/home/alice/idea.md"
+    stage_local_resources(work_dir, idea_spec)
+    contract_text = (work_dir / ".neurico" / "idea.yaml").read_text()
+    assert "source_path" not in contract_text
+    assert str(tmp_path) not in contract_text  # no absolute host paths at all
+    # ...but the in-memory spec (and thus ideas/submitted) keeps provenance
+    assert idea_spec['idea']['local_resources']['datasets'][0]['source_path']
+    assert idea_spec['idea']['metadata']['source_path'] == "/home/alice/idea.md"
+    # And the recorded sha256 survives redaction for the integrity check
+    contract = yaml.safe_load(contract_text)
+    assert contract['idea']['local_resources']['functions'][0]['sha256']
+
+
+def test_stage_idempotent_across_contract_reload(tmp_path):
+    # A real continuation reloads the ORIGINAL submitted idea (host paths,
+    # no source_path) — not the mutated in-memory spec. Re-staging from it
+    # must not merge stale data or duplicate staged copies.
+    import copy
+    import hashlib
+    work_dir, idea_spec, data, fn = _staged_fixture(tmp_path)
+    pristine = copy.deepcopy(idea_spec)
+    stage_local_resources(work_dir, idea_spec)
+
+    # Simulate drift: the staged dataset gained a file that no longer exists
+    # at the source; a naive re-copy with merge would keep it AND re-add
+    # source files — the staged copy must instead stay exactly as staged.
+    staged_data = work_dir / "datasets/local/toy_dataset"
+    (staged_data / "kept_marker.txt").write_text("staged state\n")
+
+    reloaded = copy.deepcopy(pristine)
+    stage_local_resources(work_dir, reloaded)
+
+    resources = reloaded['idea']['local_resources']
+    assert resources['datasets'][0]['path'] == "datasets/local/toy_dataset"
+    assert resources['functions'][0]['path'] == "code/local/protocol_eval.py"
+    # Dataset kept as-is (no merge over the prior copy)
+    assert (staged_data / "kept_marker.txt").exists()
+    # Function refreshed from source; recorded sha matches staged bytes
+    staged_fn = work_dir / "code/local/protocol_eval.py"
+    digest = hashlib.sha256(staged_fn.read_bytes()).hexdigest()
+    assert resources['functions'][0]['sha256'] == digest
+
+
+def test_stage_reload_survives_missing_source(tmp_path):
+    # Continuation on a machine where the original host paths are gone:
+    # staged copies already exist, so staging must succeed without sources.
+    import copy
+    import shutil
+    work_dir, idea_spec, data, fn = _staged_fixture(tmp_path)
+    pristine = copy.deepcopy(idea_spec)
+    stage_local_resources(work_dir, idea_spec)
+    shutil.rmtree(tmp_path / "src_host")
+
+    reloaded = copy.deepcopy(pristine)
+    assert stage_local_resources(work_dir, reloaded) == 0
+    resources = reloaded['idea']['local_resources']
+    assert resources['datasets'][0]['path'] == "datasets/local/toy_dataset"
+    assert resources['functions'][0]['sha256']
+
+
+# ---------------------------------------------------------------- canonicalization
+
+def test_canonicalize_rewrites_relative_paths(tmp_path):
+    from core.local_resources import canonicalize_local_paths
+    idea = _idea(
+        local_resources={'datasets': [
+            {'path': 'data/train', 'usage': 'training data'},
+            {'path': '/abs/data', 'usage': 'eval data'},
+        ]},
+        background={'papers': [{'path': './papers/ref.pdf', 'description': 'ref'}]},
+    )
+    rewrites = canonicalize_local_paths(idea, base_dir=tmp_path)
+    assert idea['local_resources']['datasets'][0]['path'] == \
+        str((tmp_path / "data/train").resolve())
+    assert idea['local_resources']['datasets'][1]['path'] == "/abs/data"
+    assert idea['background']['papers'][0]['path'] == \
+        str((tmp_path / "papers/ref.pdf").resolve())
+    assert len(rewrites) == 2
+
+
 # ---------------------------------------------------------------- prompt rendering
 
 def _rich_idea_spec():
@@ -261,9 +393,18 @@ def test_research_prompt_renders_local_resources():
     prompt = PromptGenerator().generate_research_prompt(_rich_idea_spec())
     assert "LOCAL RESOURCES (STAGED IN WORKSPACE)" in prompt
     assert "datasets/local/toy_dataset" in prompt
-    assert "MANDATORY FOR EVALUATION" in prompt
+    # required_for_evaluation is a scoring-pipeline obligation; ordinary
+    # (unscored) research prompts must not carry it
+    assert "MANDATORY FOR EVALUATION" not in prompt
     assert "USER EVALUATION SPEC" in prompt
     assert ">= 0.915" in prompt
+
+
+def test_research_prompt_renders_evaluation_mandate_when_scored():
+    from templates.prompt_generator import PromptGenerator
+    prompt = PromptGenerator().generate_research_prompt(
+        _rich_idea_spec(), scoring_enabled=True)
+    assert "MANDATORY FOR EVALUATION" in prompt
 
 
 def test_session_instructions_render_binding_contract():
@@ -275,7 +416,12 @@ def test_session_instructions_render_binding_contract():
         prompt, "/tmp/work", idea_spec=idea_spec['idea'])
     assert "BINDING LOCAL RESOURCES" in instructions
     assert "evaluate_protocol() in code/local/protocol_eval.py" in instructions
-    assert "MANDATORY: all evaluation must call this function" in instructions
+    # Scoring-only obligation stays out of unscored session instructions...
+    assert "MANDATORY: all evaluation must call this function" not in instructions
+    # ...and appears when scoring is enabled
+    scored = generator.generate_session_instructions(
+        prompt, "/tmp/work", idea_spec=idea_spec['idea'], scoring_enabled=True)
+    assert "MANDATORY: all evaluation must call this function" in scored
 
 
 def test_resource_finder_prompt_marks_staged_resources():

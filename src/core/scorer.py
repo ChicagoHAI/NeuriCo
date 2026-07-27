@@ -48,6 +48,7 @@ def run_scorer(
     work_dir: Path,
     timeout: int = 600,
     python_executable: Optional[str] = None,
+    idea: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Execute scoring/eval.py against the runner's artifact.
@@ -59,6 +60,9 @@ def run_scorer(
         python_executable: Python binary to use. Defaults to the workspace's
                   own .venv interpreter (where the runner installed deps),
                   falling back to sys.executable.
+        idea: The trusted submitted idea (held by the orchestrator, outside
+                  the worker-visible workspace). When given, the staged-
+                  function integrity check fails closed against it.
 
     Returns:
         Dict with:
@@ -89,10 +93,11 @@ def run_scorer(
 
     # Integrity guard for user-mandated evaluation functions: eval.py may
     # call code staged under code/local/, so a run that edited those files
-    # after staging must not be scored as-is. Purely a file check; ideas
-    # without staged functions pass trivially.
+    # after staging must not be scored as-is. With the trusted idea the
+    # check fails closed (missing/blanked integrity metadata is itself a
+    # mismatch); ideas without staged functions pass trivially.
     from core.local_resources import staged_function_mismatches
-    mismatches = staged_function_mismatches(work_dir)
+    mismatches = staged_function_mismatches(work_dir, idea=idea)
     if mismatches:
         return {
             'success': False,
