@@ -1629,8 +1629,11 @@ class AutoResearchController:
         proposal = ""
         comment_result: Dict[str, Any] = {}
         pre_scoring_error: Optional[str] = None
-        sealed_dir = seal_scoring_files(self.work_dir)
+        sealed_dir: Optional[Path] = None
+        failure_stage = "scoring seal"
         try:
+            sealed_dir = seal_scoring_files(self.work_dir)
+            failure_stage = "proposal/comment stage"
             proposal_result = self._call_proposal_generator(
                 parent_sha=parent_sha,
                 attempt_dir=attempt_dir,
@@ -1640,10 +1643,10 @@ class AutoResearchController:
             self.history.write_proposal(attempt_dir, proposal)
             comment_result = self.comment_mode(self._idea_with_comments(proposal), self.work_dir)
         except Exception as exc:
-            pre_scoring_error = str(exc)
+            pre_scoring_error = f"AutoResearch {failure_stage} failed: {exc}"
             comment_result = {
                 "success": False,
-                "error": f"AutoResearch proposal/comment stage failed: {exc}",
+                "error": pre_scoring_error,
             }
         finally:
             unseal_scoring_files(self.work_dir, sealed_dir)
@@ -1653,7 +1656,7 @@ class AutoResearchController:
             candidate_summary = ScoreSummary(
                 valid=False,
                 source="candidate",
-                error=f"AutoResearch proposal/comment stage failed: {pre_scoring_error}",
+                error=pre_scoring_error,
             )
             self._clear_stale_results_json()
             results_path = self.work_dir / "scoring" / "results.json"
@@ -1678,7 +1681,7 @@ class AutoResearchController:
                 ).sha
             except Exception as exc:
                 checkpoint_error = str(exc)
-            reason = candidate_summary.error or "AutoResearch proposal/comment stage failed."
+            reason = candidate_summary.error or "AutoResearch pre-scoring stage failed."
             if checkpoint_error:
                 reason = f"Candidate could not be checkpointed: {checkpoint_error}"
             decision = {
