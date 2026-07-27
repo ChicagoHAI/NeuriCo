@@ -333,7 +333,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
     if (
         isinstance(frontier_transition, dict)
         and frontier_transition.get("status") != "completed"
-        and str(frontier_transition.get("attempt_id", "")).strip() == marker
+        and str(frontier_transition.get("attempt_id", "")).strip() == attempt_dir.name
     ):
         return HitlRecoveryResult(
             marker=marker,
@@ -887,7 +887,10 @@ class HitlAutoResearchController:
         ).frontier_decision_transition()
         if not isinstance(transition, dict):
             raise RuntimeError("Recovered frontier decision has no durable transition record.")
-        if str(transition.get("attempt_id", "")).strip() != recovery.marker:
+        if (
+            str(transition.get("attempt_id", "")).strip()
+            != recovery.removed_attempt_dir.name
+        ):
             raise RuntimeError("Recovered frontier decision does not match the active attempt.")
         candidate_summary_data = transition.get("candidate_summary")
         if not isinstance(candidate_summary_data, dict):
@@ -1167,11 +1170,11 @@ class HitlAutoResearchController:
         transition = HitlRuntimeState(self.work_dir).frontier_decision_transition()
         if (
             isinstance(transition, dict)
-            and str(transition.get("attempt_id", "")).strip() == self._attempt_id(attempt_dir)
+            and str(transition.get("attempt_id", "")).strip() == attempt_dir.name
             and str(transition.get("candidate_node_sha", "")).strip() == child_sha
         ):
             HitlRuntimeState(self.work_dir).advance_frontier_decision_transition(
-                attempt_id=self._attempt_id(attempt_dir),
+                attempt_id=attempt_dir.name,
                 candidate_node_sha=child_sha,
                 status="completed",
             )
