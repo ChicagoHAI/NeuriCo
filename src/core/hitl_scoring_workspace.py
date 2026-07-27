@@ -33,6 +33,16 @@ def _copy_path(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def _prepare_scoring_directory(work_dir: Path) -> None:
+    """Remove candidate-authored neighbors before restoring the sealed evaluator."""
+    scoring_dir = work_dir / "scoring"
+    if scoring_dir.is_symlink() or (scoring_dir.exists() and not scoring_dir.is_dir()):
+        scoring_dir.unlink()
+    elif scoring_dir.is_dir():
+        shutil.rmtree(scoring_dir)
+    scoring_dir.mkdir(parents=True)
+
+
 def _write_public_results(path: Path, source: Path) -> str:
     """Publish a scorer review copy atomically, without making it authoritative."""
     payload = source.read_bytes()
@@ -95,6 +105,7 @@ def isolated_scoring_workspace(
             )
         created = True
 
+        _prepare_scoring_directory(scorer_dir)
         copied = 0
         for relative in SEALED_PATHS:
             source = sealed_root / relative.rstrip("/")
