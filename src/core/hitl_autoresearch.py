@@ -289,6 +289,20 @@ def _best_effort_archive_failed_hitl_attempt(**kwargs: Any) -> None:
         print(f"⚠️  Could not archive HITL runtime failure diagnostics: {exc}")
 
 
+def _scoring_source_workspace_fingerprint(
+    pending: Dict[str, Any],
+    cached_score: Optional[Dict[str, Any]],
+) -> str:
+    """Use the post-cleanup source fingerprint when isolated scoring is resumable."""
+    if isinstance(cached_score, dict) and cached_score.get("status") == "prepared":
+        source_fingerprint = str(
+            cached_score.get("source_workspace_fingerprint", "")
+        ).strip()
+        if source_fingerprint:
+            return source_fingerprint
+    return str(pending.get("workspace_fingerprint", "")).strip()
+
+
 def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlRecoveryResult]:
     """Recover a leftover HITL AutoResearch attempt before clean-workspace validation."""
     work_dir = Path(work_dir)
@@ -1706,7 +1720,10 @@ class HitlAutoResearchController:
                 if not scorer_result or not source_sha:
                     raise RuntimeError("Persisted isolated scoring handoff is incomplete.")
             else:
-                reviewed_fingerprint = str(pending.get("workspace_fingerprint", "")).strip()
+                reviewed_fingerprint = _scoring_source_workspace_fingerprint(
+                    pending,
+                    cached_score,
+                )
                 from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
                 if not reviewed_fingerprint:
@@ -1727,6 +1744,9 @@ class HitlAutoResearchController:
                         )
                 else:
                     self._clear_stale_results_json()
+                    source_workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+                        self.work_dir
+                    )
                     source_sha = self.checkpoints.create_checkpoint(
                         "HITL AutoResearch candidate before isolated scoring"
                     ).sha
@@ -1735,6 +1755,7 @@ class HitlAutoResearchController:
                         isolated_scoring={
                             "status": "prepared",
                             "source_checkpoint_sha": source_sha,
+                            "source_workspace_fingerprint": source_workspace_fingerprint,
                         },
                     )
                 try:
