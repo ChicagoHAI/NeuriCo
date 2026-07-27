@@ -87,7 +87,10 @@ class HitlGitStateStore:
 
     def discard_autoresearch_hitl_attempt(self, attempt_id: str) -> None:
         """Remove a completed AutoResearch attempt's private rollback boundary."""
-        self.discard(self._autoresearch_hitl_attempt_snapshot(attempt_id))
+        ref = self._autoresearch_hitl_rollback_ref(attempt_id)
+        if not self._ref_exists(ref):
+            return
+        self.discard(ref)
 
     def has_autoresearch_hitl_attempt_boundary(self, attempt_id: str) -> bool:
         """Return whether the attempt's deterministic private rollback ref exists."""
@@ -332,6 +335,20 @@ class HitlGitStateStore:
         if process.returncode:
             return None
         return process.stdout.strip()
+
+    def _ref_exists(self, ref: str) -> bool:
+        process = subprocess.run(
+            ["git", "-C", str(self.work_dir), "rev-parse", "--verify", "--quiet", ref],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if process.returncode == 0:
+            return True
+        if process.returncode == 1:
+            return False
+        raise HitlGitStateError("Git could not verify the HITL rollback boundary.")
 
     def _record_whiteboard_version(
         self,

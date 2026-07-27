@@ -303,6 +303,69 @@ def _scoring_source_workspace_fingerprint(
     return str(pending.get("workspace_fingerprint", "")).strip()
 
 
+def _retire_temporary_scoring_ref(
+    work_dir: Path,
+    scorer_result: Dict[str, Any],
+    *,
+    strict: bool,
+) -> None:
+    """Drop a private scored-checkpoint ref; replay treats an absent ref as done."""
+    scoring_ref = str(scorer_result.get("scoring_ref", "")).strip()
+    if not scoring_ref:
+        return
+    removed = subprocess.run(
+        ["git", "-C", str(work_dir), "update-ref", "-d", scoring_ref],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if removed.returncode == 0:
+        return
+    exists = subprocess.run(
+        ["git", "-C", str(work_dir), "rev-parse", "--verify", "--quiet", scoring_ref],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if exists.returncode == 1:
+        return
+    if not strict:
+        return
+    if exists.returncode != 0:
+        raise RuntimeError("Runtime could not verify its temporary scoring ref.")
+    detail = (removed.stderr or removed.stdout or "unknown Git error").strip()
+    raise RuntimeError(
+        f"Runtime could not retire its temporary scoring ref: {detail}"
+    )
+
+
+def _retire_runtime_scoring_refs(
+    work_dir: Path,
+    runtime_state: HitlRuntimeState,
+    *,
+    strict: bool,
+) -> None:
+    """Retire every scorer ref still named by live runtime state before rollback."""
+    records: list[Dict[str, Any]] = []
+    pending = runtime_state.pending_worker_command()
+    if isinstance(pending, dict):
+        isolated = pending.get("isolated_scoring")
+        if isinstance(isolated, dict):
+            records.append(dict(isolated.get("scorer_result") or {}))
+    transition = runtime_state.frontier_decision_transition()
+    if isinstance(transition, dict):
+        records.append(dict(transition.get("scorer_result") or {}))
+    seen: set[str] = set()
+    for scorer_result in records:
+        scoring_ref = str(scorer_result.get("scoring_ref", "")).strip()
+        if not scoring_ref or scoring_ref in seen:
+            continue
+        seen.add(scoring_ref)
+        _retire_temporary_scoring_ref(work_dir, scorer_result, strict=strict)
+
+
 def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlRecoveryResult]:
     """Recover a leftover HITL AutoResearch attempt before clean-workspace validation."""
     work_dir = Path(work_dir)
@@ -387,14 +450,15 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             "The current-attempt marker was left in place so the workspace is not "
             "silently advanced with an unverifiable HITL trace."
         )
+    _retire_runtime_scoring_refs(work_dir, runtime_state, strict=True)
     CheckpointManager(work_dir).restore_checkpoint(
         current_best_sha,
         clean_untracked_public=True,
     )
     _restore_hitl_state_snapshot(work_dir, attempt_dir)
     _rollback_failed_hitl_whiteboard_attempt(work_dir, marker)
+    _remove_hitl_state_snapshot(work_dir, attempt_dir)
     clear_hitl_current_attempt_marker(work_dir)
-    _best_effort_remove_hitl_state_snapshot(work_dir, attempt_dir)
     _best_effort_archive_failed_hitl_attempt(
         history_root=history_root,
         parent_sha=current_best_sha,
@@ -489,7 +553,7 @@ def _begin_hitl_autoresearch_attempt_state(work_dir: Path, attempt_dir: Path) ->
         return marker
     except Exception:
         if snapshot_created:
-            _best_effort_remove_hitl_state_snapshot(work_dir, attempt_dir)
+            _remove_hitl_state_snapshot(work_dir, attempt_dir)
         raise
 
 
@@ -503,14 +567,6 @@ def _remove_hitl_state_snapshot(work_dir: Path, attempt_dir: Path) -> None:
     HitlGitStateStore(work_dir).discard_autoresearch_hitl_attempt(
         _attempt_marker_for_dir(attempt_dir)
     )
-
-
-def _best_effort_remove_hitl_state_snapshot(work_dir: Path, attempt_dir: Path) -> None:
-    """Clean completed rollback metadata without reviving a cleared attempt."""
-    try:
-        _remove_hitl_state_snapshot(work_dir, attempt_dir)
-    except Exception as exc:
-        print(f"⚠️  Could not clean completed HITL rollback state: {exc}")
 
 
 def _rollback_failed_hitl_whiteboard_attempt(work_dir: Path, attempt_id: str) -> None:
@@ -535,9 +591,9 @@ def _recover_rejected_whiteboard_cleanup(
     reverted = whiteboard.revert_attempt(attempt_marker)
     if reverted:
         whiteboard.save()
+    _remove_hitl_state_snapshot(work_dir, attempt_dir)
     runtime_state.complete_rejected_whiteboard_cleanup(attempt_marker)
     clear_hitl_current_attempt_marker(work_dir)
-    _best_effort_remove_hitl_state_snapshot(work_dir, attempt_dir)
 
 
 def _attempt_marker_for_dir(attempt_dir: Path) -> str:
@@ -1106,8 +1162,8 @@ class HitlAutoResearchController:
         self._abandon_pending_worker_request_for_rollback(
             "The AutoResearch candidate could not be scored and runtime is restoring its parent."
         )
-        self._retire_temporary_scoring_ref(scorer_result, strict=False)
-        self._retire_pending_scoring_ref()
+        self._retire_temporary_scoring_ref(scorer_result, strict=True)
+        self._retire_pending_scoring_ref(strict=True)
         self.checkpoints.restore_checkpoint(parent_sha, clean_untracked_public=True)
         remove_public_sealed_paths(self.work_dir)
         _restore_hitl_state_snapshot(self.work_dir, attempt_dir)
@@ -1117,8 +1173,8 @@ class HitlAutoResearchController:
             self._attempt_id(attempt_dir),
         )
         self.hitl_runtime = None
+        _remove_hitl_state_snapshot(self.work_dir, attempt_dir)
         clear_hitl_current_attempt_marker(self.work_dir)
-        _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
         _best_effort_archive_failed_hitl_attempt(
             history_root=self.history.history_root,
             parent_sha=parent_sha,
@@ -1177,8 +1233,8 @@ class HitlAutoResearchController:
                 attempt_id=self._attempt_id(attempt_dir),
                 clean_untracked_public=True,
             )
+        _remove_hitl_state_snapshot(self.work_dir, attempt_dir)
         clear_hitl_current_attempt_marker(self.work_dir)
-        _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
         from core.hitl_runtime_state import HitlRuntimeState
 
         transition = HitlRuntimeState(self.work_dir).frontier_decision_transition()
@@ -1327,42 +1383,12 @@ class HitlAutoResearchController:
         *,
         strict: bool,
     ) -> None:
-        """Remove the runtime-only ref retaining an isolated scoring checkpoint."""
-        scoring_ref = str(scorer_result.get("scoring_ref", "")).strip()
-        if not scoring_ref:
-            return
-        removed = subprocess.run(
-            ["git", "-C", str(self.work_dir), "update-ref", "-d", scoring_ref],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            check=False,
-        )
-        if removed.returncode == 0 or not strict:
-            return
-        detail = (removed.stderr or removed.stdout or "unknown Git error").strip()
-        raise RuntimeError(
-            f"Runtime finalized the frontier but could not retire its temporary scoring ref: {detail}"
-        )
+        _retire_temporary_scoring_ref(self.work_dir, scorer_result, strict=strict)
 
-    def _retire_pending_scoring_ref(self) -> None:
-        """Best-effort cleanup for a scored candidate that never reached publication."""
+    def _retire_pending_scoring_ref(self, *, strict: bool) -> None:
+        """Retire all private scorer refs named by the active runtime state."""
         state = HitlRuntimeState(self.work_dir)
-        pending = state.pending_worker_command()
-        if isinstance(pending, dict):
-            isolated = pending.get("isolated_scoring")
-            if isinstance(isolated, dict):
-                self._retire_temporary_scoring_ref(
-                    dict(isolated.get("scorer_result") or {}),
-                    strict=False,
-                )
-        transition = state.frontier_decision_transition()
-        if isinstance(transition, dict):
-            self._retire_temporary_scoring_ref(
-                dict(transition.get("scorer_result") or {}),
-                strict=False,
-            )
+        _retire_runtime_scoring_refs(self.work_dir, state, strict=strict)
 
     def _prepare_frontier_decision(
         self,
@@ -1493,15 +1519,15 @@ class HitlAutoResearchController:
             self._abandon_pending_worker_request_for_rollback(
                 "The AutoResearch attempt failed before scoring and runtime is restoring its parent."
             )
-            self._retire_pending_scoring_ref()
+            self._retire_pending_scoring_ref(strict=True)
             self.checkpoints.restore_checkpoint(parent_sha, clean_untracked_public=True)
             remove_public_sealed_paths(self.work_dir)
             _restore_hitl_state_snapshot(self.work_dir, attempt_dir)
             self._reload_manager_after_hitl_restore()
             _rollback_failed_hitl_whiteboard_attempt(self.work_dir, attempt_marker)
             self.hitl_runtime = None
+            _remove_hitl_state_snapshot(self.work_dir, attempt_dir)
             clear_hitl_current_attempt_marker(self.work_dir)
-            _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
             _best_effort_archive_failed_hitl_attempt(
                 history_root=self.history.history_root,
                 parent_sha=parent_sha,
@@ -1559,8 +1585,8 @@ class HitlAutoResearchController:
             self._abandon_pending_worker_request_for_rollback(
                 "The AutoResearch candidate did not finalize and runtime is restoring its parent."
             )
-            self._retire_temporary_scoring_ref(scorer_result, strict=False)
-            self._retire_pending_scoring_ref()
+            self._retire_temporary_scoring_ref(scorer_result, strict=True)
+            self._retire_pending_scoring_ref(strict=True)
             self.checkpoints.restore_checkpoint(
                 parent_sha,
                 clean_untracked_public=True,
@@ -1573,8 +1599,8 @@ class HitlAutoResearchController:
                 attempt_marker,
             )
             self.hitl_runtime = None
+            _remove_hitl_state_snapshot(self.work_dir, attempt_dir)
             clear_hitl_current_attempt_marker(self.work_dir)
-            _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
             _best_effort_archive_failed_hitl_attempt(
                 history_root=self.history.history_root,
                 parent_sha=parent_sha,
@@ -1599,9 +1625,8 @@ class HitlAutoResearchController:
                 clean_untracked_public=True,
             )
         if child_sha is not None:
+            _remove_hitl_state_snapshot(self.work_dir, attempt_dir)
             clear_hitl_current_attempt_marker(self.work_dir)
-        if child_sha is not None:
-            _best_effort_remove_hitl_state_snapshot(self.work_dir, attempt_dir)
 
         return AutoResearchIterationResult(
             iteration=iteration,
@@ -1696,7 +1721,7 @@ class HitlAutoResearchController:
             *, request_key: str, scorer_result: Dict[str, Any]
         ) -> None:
             """Discard an obsolete score before the worker revises the workspace."""
-            self._retire_temporary_scoring_ref(scorer_result, strict=False)
+            self._retire_temporary_scoring_ref(scorer_result, strict=True)
             HitlRuntimeState(self.work_dir).update_pending_worker_command(
                 request_key,
                 isolated_scoring=None,
