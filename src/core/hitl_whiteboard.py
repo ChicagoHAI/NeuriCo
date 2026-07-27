@@ -10,12 +10,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict
 
+from core.autoresearch_common import (
+    clear_attempt_marker_file,
+    read_attempt_marker_file,
+    write_attempt_marker_file,
+)
 from core.hitl_git_state import HitlGitStateStore
+from core.hitl_paths import (
+    HITL_ATTEMPT_MARKER_RELATIVE_PATH,
+    HITL_WHITEBOARD_RELATIVE_PATH,
+)
 from core.whiteboard import Whiteboard
 
 HITL_WHITEBOARD_ENV = "NEURICO_HITL_AUTORESEARCH_WHITEBOARD"
-HITL_WHITEBOARD_RELATIVE_PATH = Path(".neurico") / "hitl" / "whiteboard" / "whiteboard.json"
-HITL_ATTEMPT_MARKER_RELATIVE_PATH = Path(".neurico") / "hitl" / "whiteboard" / ".current_attempt"
 
 
 def hitl_whiteboard_path(work_dir: Path) -> Path:
@@ -44,22 +51,17 @@ def write_hitl_current_attempt_marker(work_dir: Path, attempt_id: str) -> None:
     """Start the hidden whiteboard transaction for one HITL AutoResearch attempt."""
     work_dir = Path(work_dir)
     HitlGitStateStore(work_dir).begin_hitl_autoresearch_whiteboard_attempt(attempt_id)
-    marker = hitl_current_attempt_marker_path(work_dir)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(attempt_id.strip() + "\n", encoding="utf-8")
+    write_attempt_marker_file(hitl_current_attempt_marker_path(work_dir), attempt_id)
 
 
 def read_hitl_current_attempt_marker(work_dir: Path) -> str:
     """Read the hidden whiteboard's active AutoResearch attempt identifier."""
-    marker = hitl_current_attempt_marker_path(work_dir)
-    if not marker.exists():
-        return ""
-    return marker.read_text(encoding="utf-8").strip()
+    return read_attempt_marker_file(hitl_current_attempt_marker_path(work_dir))
 
 
 def clear_hitl_current_attempt_marker(work_dir: Path) -> None:
     """Clear the hidden whiteboard's active AutoResearch attempt marker."""
-    hitl_current_attempt_marker_path(work_dir).unlink(missing_ok=True)
+    clear_attempt_marker_file(hitl_current_attempt_marker_path(work_dir))
 
 
 class HitlAutoResearchWhiteboard(Whiteboard):

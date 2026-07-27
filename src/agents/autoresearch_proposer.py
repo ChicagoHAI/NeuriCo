@@ -11,7 +11,6 @@ files.
 from pathlib import Path
 from typing import Any, Dict, Optional
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -23,28 +22,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.compute_backend import get_runtime_compute_backend
 from core.security import sanitize_text
 from core.agent_runner import run_prebuilt_cli_agent
-
-CLI_COMMANDS = {
-    "claude": "claude -p",
-    "codex": "codex exec",
-    "gemini": "gemini",
-}
-
-TRANSCRIPT_FLAGS = {
-    "claude": "--verbose --output-format stream-json",
-    "codex": "--json",
-    "gemini": "--output-format stream-json",
-}
-
-
-def _skill_root_for_provider(provider: str) -> str:
-    return f".{provider}/skills"
+from core.agent_cli import (
+    CLI_COMMANDS,
+    append_prompt_block,
+    build_agent_command,
+    build_agent_environment,
+    provider_skill_root,
+)
 
 
 def _generate_compute_backend_section(idea_spec: Dict[str, Any], provider: str = "claude") -> str:
     """Return proposer-only backend constraints for explicit remote backends."""
     backend = get_runtime_compute_backend(idea_spec)
-    skill_root = _skill_root_for_provider(provider)
+    skill_root = provider_skill_root(provider)
     dsi_skill_path = f"{skill_root}/dsi-slurm/SKILL.md"
     if backend == "dsi-slurm":
         return f"""
@@ -284,26 +274,14 @@ def run_autoresearch_proposer(
             env_extra and env_extra.get("NEURICO_HITL_AUTORESEARCH_WHITEBOARD") == "1"
         ),
     )
-    if prompt_suffix.strip():
-        prompt = f"{prompt.rstrip()}\n\n{prompt_suffix.strip()}\n"
+    prompt = append_prompt_block(prompt, prompt_suffix)
 
     prompt_file = attempt_dir / "proposer_prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
 
-    cmd = CLI_COMMANDS[provider]
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
-
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
 
     transcript_file = attempt_dir / f"proposer_{provider}_transcript.jsonl"
 
@@ -316,12 +294,7 @@ def run_autoresearch_proposer(
     print(f"   Transcript: {transcript_file}")
     print()
 
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    if env_extra:
-        env.update({str(k): str(v) for k, v in env_extra.items()})
-    if provider == "gemini":
-        env["GEMINI_CLI_IDE_DISABLE"] = "1"
+    env = build_agent_environment(provider, env_extra)
 
     start_time = time.time()
     return_code: Optional[int] = None

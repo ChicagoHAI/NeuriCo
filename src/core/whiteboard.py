@@ -49,6 +49,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from core.autoresearch_common import (
+    clear_attempt_marker_file,
+    read_attempt_marker_file,
+    write_attempt_marker_file,
+)
+
 SCHEMA_VERSION = 2
 WHITEBOARD_FILENAME = "whiteboard.json"
 CURRENT_ATTEMPT_FILENAME = ".current_attempt"
@@ -114,24 +120,15 @@ def write_current_attempt_marker(work_dir: Path, attempt_id: str) -> None:
     # Establish the private rollback boundary first. A marker must never
     # advertise a recoverable active attempt before that boundary exists.
     _begin_autoresearch_whiteboard_attempt(Path(work_dir), attempt_id)
-    marker = current_attempt_marker_path(work_dir)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(attempt_id.strip() + "\n", encoding="utf-8")
+    write_attempt_marker_file(current_attempt_marker_path(work_dir), attempt_id)
 
 
 def clear_current_attempt_marker(work_dir: Path) -> None:
-    marker = current_attempt_marker_path(work_dir)
-    try:
-        marker.unlink()
-    except FileNotFoundError:
-        pass
+    clear_attempt_marker_file(current_attempt_marker_path(work_dir))
 
 
 def read_current_attempt_marker(work_dir: Path) -> str:
-    marker = current_attempt_marker_path(work_dir)
-    if not marker.exists():
-        return ""
-    return marker.read_text(encoding="utf-8").strip()
+    return read_attempt_marker_file(current_attempt_marker_path(work_dir))
 
 
 def _record_autoresearch_whiteboard_version(work_dir: Path) -> None:

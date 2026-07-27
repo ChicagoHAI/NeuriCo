@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List
 
 from core.hitl import HitlIdeaLog, HitlValidationError
 from core.hitl_frontier import HitlFrontierError, HitlFrontierStore
@@ -18,6 +18,7 @@ from core.hitl_manager_history import HitlManagerHistory
 from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_runtime_state import HitlRuntimeState
 from core.hitl_manager_context import HitlManagerContext
+from core.hitl_paths import hitl_state_dir
 from core.hitl_whiteboard import hitl_whiteboard_path
 
 
@@ -48,7 +49,7 @@ class HitlWorkspaceView:
 
     def __init__(self, work_dir: Path):
         self.work_dir = Path(work_dir)
-        self.root = self.work_dir / ".neurico" / "hitl"
+        self.root = hitl_state_dir(self.work_dir)
 
     def snapshot(self) -> Dict[str, Any]:
         if not self.root.is_dir():

@@ -23,7 +23,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -33,21 +32,7 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.security import sanitize_text
-
-
-# CLI commands for different providers (mirrors rule_maker.py)
-CLI_COMMANDS = {
-    "claude": "claude -p",
-    "codex": "codex exec",
-    "gemini": "gemini",
-}
-
-# Verbose / structured-transcript output flags per provider
-TRANSCRIPT_FLAGS = {
-    "claude": "--verbose --output-format stream-json",
-    "codex": "--json",
-    "gemini": "--output-format stream-json",
-}
+from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
 
 # Files the bootstrap rule_maker is responsible for producing (relative to scoring/)
 BOOTSTRAP_OUTPUT_FILES = {
@@ -171,18 +156,7 @@ def run_bootstrap_rule_maker(
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "bootstrap_rule_maker_prompt.txt").write_text(prompt, encoding="utf-8")
 
-    cmd = CLI_COMMANDS[provider]
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
-
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
 
     print(f"📐 Launching Bootstrap Rule Maker ({provider})")
     print(f"   Command: {cmd}")
@@ -195,10 +169,7 @@ def run_bootstrap_rule_maker(
     if log_dir is not None:
         transcript_path = log_dir / f"bootstrap_rule_maker_{provider}_transcript.jsonl"
 
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    if provider == "gemini":
-        env["GEMINI_CLI_IDE_DISABLE"] = "1"
+    env = build_agent_environment(provider)
 
     start_time = time.time()
     return_code: Optional[int] = None

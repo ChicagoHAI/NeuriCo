@@ -12,11 +12,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import inspect
 import json
-import os
 import re
 import shutil
-import subprocess
-from datetime import datetime, timezone
 
 from core.autoresearch import (
     AttemptHistoryManager,
@@ -31,6 +28,14 @@ from core.autoresearch import (
     autoresearch_result_payload,
     resolve_autoresearch_history_root,
 )
+from core.autoresearch_common import (
+    attempt_id_for,
+    clear_stale_results_json,
+    ensure_results_json,
+    idea_with_comments,
+    invoke_proposal_generator,
+    revert_whiteboard_attempt,
+)
 from core.hitl import (
     HitlIdeaLog,
     HitlRuntime,
@@ -38,9 +43,12 @@ from core.hitl import (
     validate_required_artifact_contract,
 )
 from core.hitl_frontier import HitlFrontierStore
+from core.hitl_git import delete_git_ref
 from core.hitl_git_state import HitlGitStateStore
 from core.hitl_runtime_state import HitlRuntimeState
 from core.hitl_scoring_workspace import run_isolated_scorer
+from core.hitl_stage_runtime import run_worker_with_replacements
+from core.hitl_util import atomic_write_json, utc_now
 from core.hitl_whiteboard import (
     HitlAutoResearchWhiteboard,
     clear_hitl_current_attempt_marker,
@@ -59,6 +67,10 @@ MAX_ACTIVE_HITL_FRONTIER_NODES = 10
 
 class HitlFrontierPublicationPendingError(RuntimeError):
     """A durable frontier publication must resume instead of being rolled back."""
+
+
+class HitlTerminalRuntimeError(RuntimeError):
+    """A runtime dependency failed in a way that must stop this HITL run."""
 
 
 @dataclass(frozen=True)
@@ -212,20 +224,12 @@ def _initial_frontier_acceptance_reason(work_dir: Path) -> str:
 
 def _delete_runtime_git_ref(work_dir: Path, ref_name: str, *, strict: bool) -> None:
     """Delete one runtime-owned retention ref without touching public history."""
-    if not ref_name:
-        return
-    result = subprocess.run(
-        ["git", "-C", str(work_dir), "update-ref", "-d", ref_name],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        check=False,
-    )
-    if result.returncode == 0 or not strict:
-        return
-    detail = (result.stderr or result.stdout or "unknown Git error").strip()
-    raise RuntimeError(f"Runtime could not retire temporary HITL scoring ref {ref_name}: {detail}")
+    try:
+        delete_git_ref(work_dir, ref_name, strict=strict)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"Runtime could not retire temporary HITL scoring ref {ref_name}: {exc}"
+        ) from exc
 
 
 def _archive_failed_hitl_attempt(
@@ -253,9 +257,7 @@ def _archive_failed_hitl_attempt(
     archive_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "kind": "hitl_runtime_failure",
-        "timestamp": (
-            datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        ),
+        "timestamp": utc_now(timespec="seconds"),
         "parent_node_sha": parent_sha,
         "attempt_id": attempt_id,
         "phase": phase,
@@ -263,23 +265,7 @@ def _archive_failed_hitl_attempt(
         "attempt_directory_removed": True,
     }
     incident_path = archive_dir / "runtime_incident.json"
-    temporary_path = incident_path.with_suffix(".json.tmp")
-    with temporary_path.open("w", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, indent=2) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary_path, incident_path)
-    try:
-        descriptor = os.open(archive_dir, os.O_RDONLY)
-    except OSError:
-        descriptor = None
-    if descriptor is not None:
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            pass
-        finally:
-            os.close(descriptor)
+    atomic_write_json(incident_path, payload, ensure_ascii=True, indent=2)
     return archive_dir
 
 
@@ -313,34 +299,10 @@ def _retire_temporary_scoring_ref(
 ) -> None:
     """Drop a private scored-checkpoint ref; replay treats an absent ref as done."""
     scoring_ref = str(scorer_result.get("scoring_ref", "")).strip()
-    if not scoring_ref:
-        return
-    removed = subprocess.run(
-        ["git", "-C", str(work_dir), "update-ref", "-d", scoring_ref],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        check=False,
-    )
-    if removed.returncode == 0:
-        return
-    exists = subprocess.run(
-        ["git", "-C", str(work_dir), "rev-parse", "--verify", "--quiet", scoring_ref],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if exists.returncode == 1:
-        return
-    if not strict:
-        return
-    if exists.returncode != 0:
-        raise RuntimeError("Runtime could not verify its temporary scoring ref.")
-    detail = (removed.stderr or removed.stdout or "unknown Git error").strip()
-    raise RuntimeError(
-        f"Runtime could not retire its temporary scoring ref: {detail}"
-    )
+    try:
+        delete_git_ref(work_dir, scoring_ref, strict=strict)
+    except RuntimeError as exc:
+        raise RuntimeError(f"Runtime could not retire its temporary scoring ref: {exc}") from exc
 
 
 def _retire_runtime_scoring_refs(
@@ -779,6 +741,7 @@ class HitlAutoResearchController:
 
         resumed_results: list[AutoResearchIterationResult] = []
         resumed_frontier_selection_required = False
+        resumed_terminal_failure = False
         if self.pending_hitl_recovery is not None:
             if self.pending_hitl_recovery.recovery_classification == "frontier_decision_transition":
                 resumed = self._resume_frontier_decision_transition(self.pending_hitl_recovery)
@@ -787,6 +750,9 @@ class HitlAutoResearchController:
             if self._is_normal_scored_iteration(resumed):
                 resumed_results.append(replace(resumed, iteration=1))
                 resumed_frontier_selection_required = True
+            elif bool(getattr(resumed, "terminal_failure", False)):
+                resumed_results.append(replace(resumed, iteration=1))
+                resumed_terminal_failure = True
             self.pending_hitl_recovery = None
 
         self._ensure_results_json("initial")
@@ -814,6 +780,13 @@ class HitlAutoResearchController:
                 last_iteration=0,
             )
         iteration_results = resumed_results
+        if resumed_terminal_failure:
+            return AutoResearchRunResult(
+                success=False,
+                initial_sha=initial.sha,
+                current_best_sha=current_best_sha,
+                iterations=iteration_results,
+            )
 
         needs_another_proposal = len(resumed_results) < iterations
         if needs_another_proposal and resumed_frontier_selection_required:
@@ -828,6 +801,13 @@ class HitlAutoResearchController:
         for iteration in range(first_iteration, iterations + 1):
             result = self._run_iteration_until_scored(iteration, current_best_sha)
             iteration_results.append(result)
+            if bool(getattr(result, "terminal_failure", False)):
+                return AutoResearchRunResult(
+                    success=False,
+                    initial_sha=initial.sha,
+                    current_best_sha=current_best_sha,
+                    iterations=iteration_results,
+                )
             if iteration < iterations:
                 self._prune_frontier_before_next_proposal()
                 current_best_sha = self._select_frontier_before_next_proposal()
@@ -847,7 +827,9 @@ class HitlAutoResearchController:
         """Relaunch a rolled-back HITL iteration from its selected parent."""
         while True:
             result = self.run_iteration(iteration, parent_sha)
-            if self._is_normal_scored_iteration(result):
+            if bool(getattr(result, "terminal_failure", False)) or self._is_normal_scored_iteration(
+                result
+            ):
                 return result
             print(
                 "↻ HITL AutoResearch attempt rollback completed; "
@@ -1048,6 +1030,7 @@ class HitlAutoResearchController:
                         source="candidate",
                         error=str(submission.get("error", "Recovered proposal was not admitted.")),
                     ),
+                    terminal_failure=bool(submission.get("hitl_terminal_failure")),
                 )
             proposal = str(submission.get("proposal", "")).strip()
             proposal_idea_id = str(submission.get("proposal_idea_id", "")).strip()
@@ -1082,6 +1065,7 @@ class HitlAutoResearchController:
                         )
                     ),
                 ),
+                terminal_failure=bool(comment_result.get("hitl_terminal_failure")),
             )
         scorer_result = dict(scored_candidate.get("scorer_result") or {})
         trusted_results = scorer_result.get("results") if isinstance(scorer_result, dict) else None
@@ -1159,6 +1143,7 @@ class HitlAutoResearchController:
         candidate_summary: ScoreSummary,
         failure_phase: str = "scoring_recovery",
         failure_reason: Optional[str] = None,
+        terminal_failure: bool = False,
     ) -> AutoResearchIterationResult:
         """Restore the parent only after scoring recovery has exhausted its retries."""
         self._abandon_pending_worker_request_for_rollback(
@@ -1206,6 +1191,7 @@ class HitlAutoResearchController:
             parent_summary=parent_summary,
             candidate_summary=candidate_summary,
             attempt_dir_removed=True,
+            terminal_failure=terminal_failure,
         )
 
     def _complete_scored_hitl_attempt(
@@ -1465,6 +1451,7 @@ class HitlAutoResearchController:
         proposal_idea_id = ""
         comment_result: Dict[str, Any] = {}
         pre_scoring_error: Optional[str] = None
+        terminal_failure = False
         try:
             # Rule maker establishes the evaluator authority. Every later HITL
             # attempt must reuse that sealed payload, never replace it with
@@ -1491,11 +1478,17 @@ class HitlAutoResearchController:
                 sealed_scoring=sealed_scoring,
             )
             if not comment_result.get("success"):
-                raise RuntimeError(
+                error_type = (
+                    HitlTerminalRuntimeError
+                    if comment_result.get("hitl_terminal_failure")
+                    else RuntimeError
+                )
+                raise error_type(
                     comment_result.get("error")
                     or "AutoResearch HITL candidate experiment failed before scoring."
                 )
         except Exception as e:
+            terminal_failure = isinstance(e, HitlTerminalRuntimeError)
             transition = HitlRuntimeState(self.work_dir).frontier_decision_transition()
             if (
                 isinstance(transition, dict)
@@ -1551,6 +1544,7 @@ class HitlAutoResearchController:
                 parent_summary=parent_summary,
                 candidate_summary=candidate_summary,
                 attempt_dir_removed=True,
+                terminal_failure=terminal_failure,
             )
 
         scored_candidate = comment_result.get("scored_candidate")
@@ -1692,7 +1686,12 @@ class HitlAutoResearchController:
         finally:
             runtime.clear_idea_tool_context()
         if submission.get("status") != "approved":
-            raise RuntimeError(str(submission.get("error", "HITL proposal admission failed.")))
+            error_type = (
+                HitlTerminalRuntimeError
+                if submission.get("hitl_terminal_failure")
+                else RuntimeError
+            )
+            raise error_type(str(submission.get("error", "HITL proposal admission failed.")))
         proposal = str(submission.get("proposal", "")).strip()
         proposal_idea_id = str(submission.get("proposal_idea_id", "")).strip()
         if not proposal or not proposal_idea_id:
@@ -1923,48 +1922,47 @@ class HitlAutoResearchController:
                     requires_human_approval=True,
                 )
             )
-            if not resume_pending:
-                runtime.register_worker_prompt(prompt)
-            result = run_worker(
-                (
-                    "Reconnect to the runtime-held HITL request before doing any new work."
-                    if resume_pending
-                    else "Use the runtime-supplied approved proposal to write or update the living control plan. "
-                    "After the plan is approved through "
-                    "hitl-finish-phase, continue execution in this same worker session "
-                    "using the runtime-provided execution instructions."
-                ),
-                prompt,
-                (
+            initial_context = (
+                "Reconnect to the runtime-held HITL request before doing any new work."
+                if resume_pending
+                else "Use the runtime-supplied approved proposal to write or update the living control plan. "
+                "After the plan is approved through "
+                "hitl-finish-phase, continue execution in this same worker session "
+                "using the runtime-provided execution instructions."
+            )
+
+            def launch_worker(
+                worker_prompt: str,
+                worker_log_prefix: str,
+                *,
+                record_continuation: bool,
+            ) -> Dict[str, Any]:
+                if record_continuation and not resume_pending:
+                    runtime.register_worker_prompt(worker_prompt)
+                return run_worker(
+                    (
+                        initial_context
+                        if record_continuation
+                        else "Continue the interrupted HITL experiment from the current "
+                        "workspace state using the runtime instructions below."
+                    ),
+                    worker_prompt,
+                    worker_log_prefix,
+                    env_extra=runtime.idea_tool_env(),
+                )
+
+            result, finish = run_worker_with_replacements(
+                runtime=runtime,
+                launch_worker=launch_worker,
+                prompt=prompt,
+                log_prefix=(
                     "autoresearch_hitl_experiment_resume"
                     if resume_pending
                     else "autoresearch_hitl_experiment_plan"
                 ),
-                env_extra=runtime.idea_tool_env(),
-            )
-            finish = runtime.handle_worker_exit_after_finish(
-                result,
                 phase="stage",
                 worker_name="AutoResearch candidate experiment",
             )
-            recovery_index = 0
-            while finish.get("replacement"):
-                recovery_index += 1
-                replacement_prompt = str(finish["prompt_block"])
-                result = run_worker(
-                    (
-                        "Continue the interrupted HITL experiment from the current "
-                        "workspace state using the runtime instructions below."
-                    ),
-                    replacement_prompt,
-                    f"autoresearch_hitl_experiment_recovery_{recovery_index}",
-                    env_extra=runtime.idea_tool_env(),
-                )
-                finish = runtime.handle_worker_exit_after_finish(
-                    result,
-                    phase="stage",
-                    worker_name="AutoResearch candidate experiment",
-                )
         finally:
             runtime.clear_idea_tool_context()
         if not finish or not finish.get("approved"):
@@ -2045,27 +2043,16 @@ class HitlAutoResearchController:
         prompt_suffix: str = "",
         env_extra: Optional[Dict[str, str]] = None,
     ) -> Any:
-        args = (self.idea, self.work_dir, parent_sha, attempt_dir, attempt_history)
-        kwargs: Dict[str, Any] = {}
-        signature = inspect.signature(self.proposal_generator)
-        accepts_kwargs = any(
-            param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
+        return invoke_proposal_generator(
+            self.proposal_generator,
+            idea=self.idea,
+            work_dir=self.work_dir,
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            attempt_history=attempt_history,
+            prompt_suffix=prompt_suffix,
+            env_extra=env_extra,
         )
-        if prompt_suffix:
-            if "prompt_suffix" not in signature.parameters and not accepts_kwargs:
-                raise TypeError(
-                    "HITL proposal revision requires a proposal generator that "
-                    "accepts prompt_suffix."
-                )
-            kwargs["prompt_suffix"] = prompt_suffix
-        if env_extra:
-            if "env_extra" not in signature.parameters and not accepts_kwargs:
-                raise TypeError(
-                    "HITL proposal idea reporting requires a proposal generator that "
-                    "accepts env_extra."
-                )
-            kwargs["env_extra"] = env_extra
-        return self.proposal_generator(*args, **kwargs)
 
     def _proposal_hitl_runtime(self) -> HitlRuntime:
         if self.hitl_runtime is None:
@@ -2102,31 +2089,18 @@ class HitlAutoResearchController:
         If the scorer fails before producing results.json, write a small public
         failure payload so the candidate state can still be checkpointed.
         """
-        results_path = self.work_dir / "scoring" / "results.json"
-        if results_path.exists():
-            return results_path
-
-        results_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "overall_satisfied": False,
-            "error": f"AutoResearch {stage} scorer did not produce scoring/results.json",
-            "scorer_result": scorer_result or {},
-            "generated_by": "autoresearch",
-            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        }
-        results_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return results_path
+        return ensure_results_json(
+            self.work_dir,
+            stage,
+            scorer_result,
+            created_at=utc_now(),
+        )
 
     def _idea_with_comments(self, proposal: str) -> Dict[str, Any]:
-        idea_copy = json.loads(json.dumps(self.idea, default=str))
-        idea_spec = idea_copy.setdefault("idea", {})
-        idea_spec["comments"] = proposal
-        return idea_copy
+        return idea_with_comments(self.idea, proposal)
 
     def _clear_stale_results_json(self) -> None:
-        results_path = self.work_dir / "scoring" / "results.json"
-        if results_path.exists():
-            results_path.unlink()
+        clear_stale_results_json(self.work_dir)
 
     def _read_experiment_plan(self) -> str:
         path = self.work_dir / "plans" / "experiment_runner_plan.md"
@@ -2189,11 +2163,7 @@ class HitlAutoResearchController:
         Recorded on tips by clear_tip / prune_tip so a rejection can be
         rolled back with `revert_attempt`.
         """
-        attempt_dir = Path(attempt_dir)
-        try:
-            return str(attempt_dir.relative_to(self.history.history_root))
-        except ValueError:
-            return attempt_dir.name
+        return attempt_id_for(self.history.history_root, attempt_dir)
 
     def _revert_whiteboard_for(self, attempt_id: str) -> None:
         """Undo any clear/prune the comment_handler or proposer made this attempt.
@@ -2207,7 +2177,7 @@ class HitlAutoResearchController:
         if not attempt_id:
             return
         wb = HitlAutoResearchWhiteboard(self.work_dir).load()
-        reverted = wb.revert_attempt(attempt_id)
+        reverted = revert_whiteboard_attempt(wb, attempt_id)
         if reverted:
             wb.save()
 

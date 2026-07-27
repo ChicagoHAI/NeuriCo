@@ -14,11 +14,20 @@ import math
 import re
 import shutil
 import tempfile
-from datetime import datetime
 
 from core.scorer import load_scoring_results
 from core.scoring_seal import seal_scoring_files, unseal_scoring_files
 from core.dsi_slurm_artifacts import DSI_SLURM_ARTIFACTS_DIR, move_dsi_slurm_artifacts
+from core.autoresearch_common import (
+    attempt_id_for,
+    clear_stale_results_json,
+    ensure_results_json,
+    idea_with_comments,
+    invoke_proposal_generator,
+    revert_whiteboard_attempt,
+)
+from core.hitl_util import atomic_write_json, utc_now
+from core.hitl_paths import HITL_RELATIVE_ROOT
 from core.whiteboard import (
     Whiteboard,
     clear_current_attempt_marker,
@@ -54,7 +63,7 @@ AUTORESEARCH_STATE_PATTERNS = (".neurico/autoresearch_state.json",)
 BOOTSTRAP_BASELINE_STATE_PATTERNS = (".neurico/bootstrap_baseline_state.json",)
 AGENT_LOCAL_PATTERNS = (".claude/", ".gemini/", ".codex/")
 PRIVATE_RUNTIME_PATTERNS = (
-    ".neurico/hitl/",
+    f"{HITL_RELATIVE_ROOT.as_posix()}/",
     ".neurico/runs/",
     ".experiment_runner_plan_complete",
     ".experiment_runner_complete",
@@ -150,7 +159,7 @@ def write_bootstrap_baseline_state(
     state_path = bootstrap_baseline_state_path(work_dir)
     state_path.parent.mkdir(parents=True, exist_ok=True)
 
-    now = datetime.now().isoformat()
+    now = utc_now()
     state = {
         "history_root": str(Path(history_root)),
         "bootstrap_source_sha": bootstrap_source_sha,
@@ -158,7 +167,7 @@ def write_bootstrap_baseline_state(
         "last_attempt": last_attempt,
         "updated_at": now,
     }
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    atomic_write_json(state_path, state)
 
 
 def resolve_autoresearch_history_root(
@@ -204,9 +213,9 @@ def write_autoresearch_state(
         "lineage_source_sha": lineage_source_sha,
         "current_best_sha": current_best_sha,
         "last_iteration": last_iteration,
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": utc_now(),
     }
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    atomic_write_json(state_path, state)
 
 
 ProposalGeneratorHook = Callable[
@@ -246,6 +255,7 @@ class AutoResearchIterationResult:
     parent_summary: ScoreSummary
     candidate_summary: ScoreSummary
     attempt_dir_removed: bool = False
+    terminal_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -1654,7 +1664,7 @@ class AutoResearchController:
                         "overall_satisfied": False,
                         "error": candidate_summary.error,
                         "generated_by": "autoresearch",
-                        "created_at": datetime.now().isoformat(),
+                        "created_at": utc_now(),
                     },
                     indent=2,
                 ),
@@ -1792,12 +1802,13 @@ class AutoResearchController:
         attempt_dir: Path,
         attempt_history: list[Dict[str, Any]],
     ) -> Any:
-        return self.proposal_generator(
-            self.idea,
-            self.work_dir,
-            parent_sha,
-            attempt_dir,
-            attempt_history,
+        return invoke_proposal_generator(
+            self.proposal_generator,
+            idea=self.idea,
+            work_dir=self.work_dir,
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            attempt_history=attempt_history,
         )
 
     def _ensure_whiteboard_before(self, attempt_dir: Path) -> None:
@@ -1828,20 +1839,12 @@ class AutoResearchController:
         If the scorer fails before producing results.json, write a small public
         failure payload so the candidate state can still be checkpointed.
         """
-        results_path = self.work_dir / "scoring" / "results.json"
-        if results_path.exists():
-            return results_path
-
-        results_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "overall_satisfied": False,
-            "error": f"AutoResearch {stage} scorer did not produce scoring/results.json",
-            "scorer_result": scorer_result or {},
-            "generated_by": "autoresearch",
-            "created_at": datetime.now().isoformat(),
-        }
-        results_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return results_path
+        return ensure_results_json(
+            self.work_dir,
+            stage,
+            scorer_result,
+            created_at=utc_now(),
+        )
 
     @staticmethod
     def _resolve_proposal_text(attempt_dir: Path, proposal_result: Any) -> str:
@@ -1859,15 +1862,10 @@ class AutoResearchController:
         raise RuntimeError("Proposal generator did not return or write proposal.md")
 
     def _idea_with_comments(self, proposal: str) -> Dict[str, Any]:
-        idea_copy = json.loads(json.dumps(self.idea, default=str))
-        idea_spec = idea_copy.setdefault("idea", {})
-        idea_spec["comments"] = proposal
-        return idea_copy
+        return idea_with_comments(self.idea, proposal)
 
     def _clear_stale_results_json(self) -> None:
-        results_path = self.work_dir / "scoring" / "results.json"
-        if results_path.exists():
-            results_path.unlink()
+        clear_stale_results_json(self.work_dir)
 
     def _attempt_id(self, attempt_dir: Path) -> str:
         """Stable id for the attempt used to attribute whiteboard mutations.
@@ -1876,11 +1874,7 @@ class AutoResearchController:
         Recorded on tips by clear_tip / prune_tip so a rejection can be
         rolled back with `revert_attempt`.
         """
-        attempt_dir = Path(attempt_dir)
-        try:
-            return str(attempt_dir.relative_to(self.history.history_root))
-        except ValueError:
-            return attempt_dir.name
+        return attempt_id_for(self.history.history_root, attempt_dir)
 
     def _revert_whiteboard_for(self, attempt_id: str) -> None:
         """Undo any clear/prune the comment_handler or proposer made this attempt.
@@ -1895,7 +1889,7 @@ class AutoResearchController:
             return
         try:
             wb = Whiteboard(self.work_dir).load()
-            reverted = wb.revert_attempt(attempt_id)
+            reverted = revert_whiteboard_attempt(wb, attempt_id)
             if reverted:
                 wb.save()
         except Exception:

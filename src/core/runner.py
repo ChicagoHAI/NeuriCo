@@ -33,6 +33,11 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from core.idea_manager import IdeaManager
 from core.config_loader import ConfigLoader
+from core.agent_cli import (
+    build_agent_command,
+    build_agent_environment,
+    provider_workspace_root,
+)
 from core.security import sanitize_text
 from core.compute_backend import (
     attach_runtime_compute_backend,
@@ -48,15 +53,6 @@ try:
     GITHUB_AVAILABLE = True
 except ImportError:
     GITHUB_AVAILABLE = False
-
-
-# CLI commands for different providers (same as resource_finder.py)
-# Note: For claude, we use '-p' (print mode) to enable streaming JSON output
-CLI_COMMANDS = {
-    "claude": "claude -p",  # Print mode enables streaming JSON output with stdin
-    "codex": "codex exec",  # Non-interactive mode: read from stdin
-    "gemini": "gemini",
-}
 
 
 class ResearchRunner:
@@ -763,36 +759,18 @@ class ResearchRunner:
         success = False
         try:
             # Set environment variables
-            env = os.environ.copy()
-            env["PYTHONUNBUFFERED"] = "1"
+            env = build_agent_environment(provider)
             if use_scribe:
                 env["SCRIBE_RUN_DIR"] = str(work_dir)
 
             # Prepare command
             log_file = work_dir / "logs" / f"execution_{provider}.log"
 
-            # Build command - raw CLI by default, scribe if requested
-            if use_scribe:
-                cmd = f"scribe {provider}"
-            else:
-                cmd = CLI_COMMANDS[provider]
-
-            # Add permission flags
-            if full_permissions:
-                if provider == "codex":
-                    cmd += " --yolo"
-                elif provider == "claude":
-                    cmd += " --dangerously-skip-permissions"
-                elif provider == "gemini":
-                    cmd += " --yolo --skip-trust"
-
-            # Add streaming JSON output flags for detailed logging
-            if provider == "claude":
-                cmd += " --verbose --output-format stream-json"  # Streaming JSON (requires -p and --verbose)
-            elif provider == "codex":
-                cmd += " --json"
-            elif provider == "gemini":
-                cmd += " --output-format stream-json"
+            cmd = build_agent_command(
+                provider,
+                full_permissions=full_permissions,
+                use_scribe=use_scribe,
+            )
 
             print(f"   Command: {cmd}")
             print(f"   Log file: {log_file}")
@@ -1064,7 +1042,10 @@ https://github.com/ChicagoHAI/neurico
         import shutil
 
         skills_src = self.project_root / "templates" / "skills"
-        provider_skill_roots = [".claude", ".gemini", ".codex"]
+        provider_skill_roots = [
+            provider_workspace_root(provider)
+            for provider in ("claude", "gemini", "codex")
+        ]
         compute_skill_names = {"modal-training", "modal-vllm", "dsi-slurm"}
         backend_skill_names = {
             "local": set(),

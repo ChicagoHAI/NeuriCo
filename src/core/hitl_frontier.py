@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
+
+from core.hitl_git import HitlGitCommandError, run_git
+from core.hitl_paths import hitl_state_dir
+from core.hitl_util import atomic_write_json, atomic_write_text
 
 
 class HitlFrontierError(RuntimeError):
@@ -27,7 +29,7 @@ class HitlFrontierPaths:
 
     @property
     def root(self) -> Path:
-        return self.work_dir / ".neurico" / "hitl"
+        return hitl_state_dir(self.work_dir)
 
     @property
     def state(self) -> Path:
@@ -65,47 +67,11 @@ class HitlFrontierStore:
 
     @staticmethod
     def _write_json(path: Path, payload: Dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_name, path)
-            HitlFrontierStore._fsync_directory(path.parent)
-        finally:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
+        atomic_write_json(path, payload, ensure_ascii=False, indent=2)
 
     @staticmethod
     def _write_text(path: Path, content: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_name, path)
-            HitlFrontierStore._fsync_directory(path.parent)
-        finally:
-            if os.path.exists(tmp_name):
-                os.unlink(tmp_name)
-
-    @staticmethod
-    def _fsync_directory(path: Path) -> None:
-        try:
-            descriptor = os.open(path, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            pass
-        finally:
-            os.close(descriptor)
+        atomic_write_text(path, content)
 
     @staticmethod
     def _read_json(path: Path) -> Dict[str, Any]:
@@ -214,17 +180,10 @@ class HitlFrontierStore:
         ref_name = self._require_sha(name, "private HITL ref name")
         target = self._require_sha(node_sha or name, "private HITL ref target SHA")
         ref = f"refs/neurico/hitl/{kind}s/{ref_name}"
-        completed = subprocess.run(
-            ["git", "-C", str(self.paths.work_dir), "update-ref", ref, target],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            check=False,
-        )
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "unknown Git error").strip()
-            raise HitlFrontierError(f"Could not retain HITL {kind} Git ref: {detail}")
+        try:
+            run_git(self.paths.work_dir, "update-ref", ref, target)
+        except HitlGitCommandError as exc:
+            raise HitlFrontierError(f"Could not retain HITL {kind} Git ref: {exc}") from exc
 
     def _write_state(self, *, selected: str | None, active: List[str]) -> None:
         payload = self._read_json(self.paths.state) if self.paths.state.exists() else {}

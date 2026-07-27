@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import subprocess
 import shlex
-import os
 import sys
 import time
 import json
@@ -32,20 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.security import sanitize_text
 from core.agent_runner import run_prebuilt_cli_agent
-
-# CLI commands for different providers (mirrors resource_finder.py)
-CLI_COMMANDS = {
-    "claude": "claude -p",
-    "codex": "codex exec",
-    "gemini": "gemini",
-}
-
-# Verbose / structured-transcript output flags per provider
-TRANSCRIPT_FLAGS = {
-    "claude": "--verbose --output-format stream-json",
-    "codex": "--json",
-    "gemini": "--output-format stream-json",
-}
+from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
 
 # Files the rule_maker is responsible for producing (relative to scoring/)
 RULE_MAKER_OUTPUT_FILES = {
@@ -272,18 +258,7 @@ def run_rule_maker(
     print(f"   Prompt length: {len(prompt)} characters")
 
     # Build CLI command
-    cmd = CLI_COMMANDS[provider]
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
-
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
 
     log_file = logs_dir / f"{log_prefix}_{provider}.log"
     transcript_file = logs_dir / f"{log_prefix}_{provider}_transcript.jsonl"
@@ -298,12 +273,7 @@ def run_rule_maker(
     print("RULE MAKER OUTPUT (streaming)")
     print("=" * 80)
 
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    if env_extra:
-        env.update({str(key): str(value) for key, value in env_extra.items()})
-    if provider == "gemini":
-        env["GEMINI_CLI_IDE_DISABLE"] = "1"
+    env = build_agent_environment(provider, env_extra)
 
     start_time = time.time()
     return_code: Optional[int] = None

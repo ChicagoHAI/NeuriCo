@@ -7,18 +7,17 @@ queued conversation or an active runtime request in browser memory alone.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from core.hitl_lock import exclusive_file_lock
+from core.hitl_paths import hitl_manager_dir
+from core.hitl_util import atomic_write_json, utc_now
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return utc_now(zulu=False)
 
 
 class HitlWebInputError(ValueError):
@@ -33,7 +32,7 @@ class HitlManagerInbox:
     """Atomic queue for ordinary human messages to one manager workspace."""
 
     def __init__(self, work_dir: Path):
-        manager_dir = Path(work_dir) / ".neurico" / "hitl" / "manager"
+        manager_dir = hitl_manager_dir(work_dir)
         self.path = manager_dir / "inbox.json"
         self.lock_path = manager_dir / "inbox.lock"
 
@@ -53,17 +52,13 @@ class HitlManagerInbox:
         return payload
 
     def _write(self, payload: Dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, name = tempfile.mkstemp(prefix=".inbox-", suffix=".json", dir=str(self.path.parent))
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(name, self.path)
-        finally:
-            Path(name).unlink(missing_ok=True)
+        atomic_write_json(
+            self.path,
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            fsync_parent=False,
+        )
 
     def snapshot(self) -> Dict[str, Any]:
         with exclusive_file_lock(self.lock_path):

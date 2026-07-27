@@ -8,12 +8,12 @@ manager process restart.
 from __future__ import annotations
 
 import json
-import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 from core.hitl_lock import exclusive_file_lock
+from core.hitl_paths import hitl_runtime_state_path, hitl_state_dir
+from core.hitl_util import atomic_write_json, utc_now
 
 
 class HitlRuntimeStateError(RuntimeError):
@@ -21,7 +21,7 @@ class HitlRuntimeStateError(RuntimeError):
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return utc_now()
 
 
 class HitlRuntimeState:
@@ -35,8 +35,8 @@ class HitlRuntimeState:
 
     def __init__(self, work_dir: Path):
         self.work_dir = Path(work_dir)
-        self.hitl_dir = self.work_dir / ".neurico" / "hitl"
-        self.path = self.hitl_dir / "runtime.json"
+        self.hitl_dir = hitl_state_dir(self.work_dir)
+        self.path = hitl_runtime_state_path(self.work_dir)
         self.lock_path = self.hitl_dir / "runtime.lock"
         self.hitl_dir.mkdir(parents=True, exist_ok=True)
         with self._locked():
@@ -76,34 +76,7 @@ class HitlRuntimeState:
 
     def _save_unlocked(self) -> None:
         self._state["updated_at"] = _now()
-        temporary = self.path.with_suffix(".json.tmp")
-        try:
-            with temporary.open("w", encoding="utf-8") as handle:
-                handle.write(json.dumps(self._state, indent=2, ensure_ascii=False) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
-            self._fsync_parent_directory()
-        finally:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-
-    def _fsync_parent_directory(self) -> None:
-        """Persist the replacement directory entry where the platform allows it."""
-        try:
-            descriptor = os.open(self.hitl_dir, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            # Some platforms do not permit directory fsync; the file itself is
-            # still flushed before replacement.
-            pass
-        finally:
-            os.close(descriptor)
+        atomic_write_json(self.path, self._state, ensure_ascii=False, indent=2)
 
     def snapshot(self) -> Dict[str, Any]:
         with self._locked():
@@ -226,7 +199,13 @@ class HitlRuntimeState:
             self._state["pending_worker_command"] = command
             self._save_unlocked()
 
-    def cancel_pending_worker_command(self, request_key: str, *, reason: str) -> Dict[str, Any]:
+    def cancel_pending_worker_command(
+        self,
+        request_key: str,
+        *,
+        reason: str,
+        cancellation_kind: str = "attempt_rollback",
+    ) -> Dict[str, Any]:
         """Release a held command before restoring its attempt boundary.
 
         This is only for runtime rollback. A cancelled command is never a worker
@@ -235,15 +214,19 @@ class HitlRuntimeState:
         message = str(reason).strip()
         if not message:
             raise HitlRuntimeStateError("Cancelled HITL worker command requires a reason")
+        kind = str(cancellation_kind).strip()
+        if not kind:
+            raise HitlRuntimeStateError("Cancelled HITL worker command requires a cancellation kind")
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             command = self._state.get("pending_worker_command")
             if not isinstance(command, dict) or command.get("request_key") != request_key:
                 raise HitlRuntimeStateError("No matching pending HITL worker command")
-            if command.get("status") == "resolved":
+            if command.get("status") in {"resolved", "cancelled"}:
                 return self._copy(command)
             command["status"] = "cancelled"
             command["cancellation_reason"] = message
+            command["cancellation_kind"] = kind
             command["cancelled_at"] = _now()
             command["human_request_record_id"] = None
             self._state["pending_worker_command"] = command

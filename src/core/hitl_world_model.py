@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from core.hitl_lock import exclusive_file_lock
-from core.hitl_frontier import HitlFrontierError, HitlFrontierStore
+from core.hitl_frontier import HitlFrontierStore
+from core.hitl_paths import hitl_idea_log_path, hitl_state_dir
+from core.hitl_util import read_jsonl_objects
 from core.hitl_whiteboard import hitl_whiteboard_path
 from interactive.research_state import ResearchState
 
@@ -34,8 +36,8 @@ class HitlWorldModelSync:
 
     def __init__(self, work_dir: Path):
         self.work_dir = Path(work_dir)
-        self.hitl_dir = self.work_dir / ".neurico" / "hitl"
-        self.idea_log_path = self.hitl_dir / "idea" / "idea.jsonl"
+        self.hitl_dir = hitl_state_dir(self.work_dir)
+        self.idea_log_path = hitl_idea_log_path(self.work_dir)
         self.whiteboard_path = hitl_whiteboard_path(self.work_dir)
 
     @contextmanager
@@ -91,26 +93,10 @@ class HitlWorldModelSync:
         return "\n".join(lines)
 
     def _ideas(self) -> List[Dict[str, Any]]:
-        if not self.idea_log_path.exists():
-            return []
-        ideas: List[Dict[str, Any]] = []
-        for line_number, line in enumerate(
-            self.idea_log_path.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise RuntimeError(
-                    f"Invalid finalized HITL idea record at line {line_number}."
-                ) from exc
-            if not isinstance(record, dict):
-                raise RuntimeError(
-                    f"Finalized HITL idea record at line {line_number} must be an object."
-                )
-            ideas.append(record)
-        return ideas
+        return read_jsonl_objects(
+            self.idea_log_path,
+            record_label="finalized HITL idea record",
+        )
 
     def _sync_idea_records(
         self,

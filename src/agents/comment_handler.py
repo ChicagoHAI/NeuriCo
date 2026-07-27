@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import subprocess
 import shlex
-import os
 import sys
 import time
 
@@ -23,21 +22,12 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent_runner import run_prebuilt_cli_agent
-
-
-# CLI commands for different providers
-CLI_COMMANDS = {
-    'claude': 'claude -p',
-    'codex': 'codex exec',
-    'gemini': 'gemini'
-}
-
-# CLI flags for verbose/structured transcript output
-TRANSCRIPT_FLAGS = {
-    'claude': '--verbose --output-format stream-json',
-    'codex': '--json',
-    'gemini': '--output-format stream-json'
-}
+from core.agent_cli import (
+    CLI_COMMANDS,
+    append_prompt_block,
+    build_agent_command,
+    build_agent_environment,
+)
 
 
 def resolve_workspace(
@@ -337,7 +327,7 @@ def build_comment_handler_launch(
     else:
         prompt = generate_comment_prompt(idea, work_dir, templates_dir, provider=provider)
     if prompt_override.strip() and not prompt_override_only:
-        prompt = f"{prompt.rstrip()}\n\n{prompt_override.strip()}\n"
+        prompt = append_prompt_block(prompt, prompt_override)
 
     logs_dir = logs_dir or (work_dir / "logs")
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -346,29 +336,12 @@ def build_comment_handler_launch(
     with open(prompt_file, "w", encoding="utf-8") as f:
         f.write(prompt)
 
-    cmd = CLI_COMMANDS[provider]
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
 
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
-
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    if env_extra:
-        env.update({str(k): str(v) for k, v in env_extra.items()})
+    env = build_agent_environment(provider, env_extra)
     if dsi_remote_info is not None:
         env["NEURICO_DSI_REMOTE_ROOT"] = dsi_remote_info["remote_root"]
         env["NEURICO_DSI_RSYNC_REMOTE_ROOT"] = dsi_remote_info["rsync_remote_root"]
-    if provider == "gemini":
-        env["GEMINI_CLI_IDE_DISABLE"] = "1"
-
     return {
         "prompt": prompt,
         "prompt_file": prompt_file,

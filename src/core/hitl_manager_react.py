@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from core.hitl_paths import hitl_manager_dir
 from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
 from core.hitl_workspace_inspection import HitlWorkspaceInspector
 
@@ -252,7 +253,6 @@ class HitlManager:
         channel: Optional[Any] = None,
     ):
         from interactive.channel import TerminalChannel
-        from interactive.llm_backend import LLMBackend
         from interactive.research_state import ResearchState
         from core.hitl_manager_context import HitlManagerTranscript
         from core.hitl_world_model import HitlWorldModelSync
@@ -268,7 +268,7 @@ class HitlManager:
         self.channel = channel or TerminalChannel()
         self.runtime_state = HitlRuntimeState(self.work_dir)
         self.conversation = HitlManagerTranscript(
-            self.work_dir / ".neurico" / "hitl" / "manager",
+            hitl_manager_dir(self.work_dir),
             context_tokens=int(
                 config.get("manager", {}).get("hitl_manager_conversation_tokens", 300_000)
             ),
@@ -370,6 +370,12 @@ class HitlManager:
             "design_panel",
         }
     )
+    _REQUEST_FINALIZER_TOOL_NAMES = frozenset(
+        {
+            "finalize_worker_request",
+            "finalize_frontier_decision",
+        }
+    )
 
     def _available_tool_names(self) -> set[str]:
         """Return the runtime-authorized tool surface for the next ReAct turn.
@@ -393,8 +399,13 @@ class HitlManager:
         if not isinstance(pending, dict) or pending.get("status") != "pending":
             return names
 
-        if pending.get("scoring_review_idea_id"):
-            names.add("finalize_frontier_decision")
+        manager_finalizer = str(pending.get("manager_finalizer", "")).strip()
+        if manager_finalizer:
+            if manager_finalizer not in self._REQUEST_FINALIZER_TOOL_NAMES:
+                raise HitlRuntimeStateError(
+                    f"Pending worker command has an invalid manager finalizer: {manager_finalizer}"
+                )
+            names.add(manager_finalizer)
             return names
 
         names.add("ask_human")
@@ -575,13 +586,15 @@ class HitlManager:
 
         pending = snapshot.get("pending_worker_command")
         if isinstance(pending, dict) and pending.get("status") == "pending":
-            if pending.get("scoring_review_idea_id"):
-                expected = "finalize_frontier_decision"
-            else:
-                expected = "finalize_worker_request"
+            expected = str(pending.get("manager_finalizer", "")).strip()
+            if expected:
+                return (
+                    f"Error: {tool_name} is unavailable for the current worker request. "
+                    f"Use {expected}."
+                )
             return (
                 f"Error: {tool_name} is unavailable for the current worker request. "
-                f"Use {expected}, or ask_human if human intent is required."
+                "Use finalize_worker_request, or ask_human if human intent is required."
             )
         return (
             f"Error: {tool_name} is unavailable because runtime has not opened that action. "
@@ -717,6 +730,12 @@ class HitlManager:
         request_key = str(pending["request_key"])
         if pending.get("status") == "resolved" and isinstance(pending.get("response"), dict):
             return dict(pending["response"])
+        if pending.get("status") == "cancelled":
+            reason = str(pending.get("cancellation_reason", "")).strip()
+            raise HitlRuntimeStateError(
+                "Runtime cancelled the held worker command while rolling back its failed attempt."
+                + (f" {reason}" if reason else "")
+            )
         with self._resolution_lock:
             if human_inputs is not None:
                 human_inputs[:] = self._human_inputs_from_pending(pending)
@@ -1096,7 +1115,12 @@ class HitlManager:
             proposal_type=proposal_type,
             objective_score_json=json.dumps(objective_score, ensure_ascii=False, indent=2),
         )
-        return self.resume_worker_request(prompt=prompt, validate=validate, finalize=on_finalize)
+        return self.resume_worker_request(
+            prompt=prompt,
+            validate=validate,
+            finalize=on_finalize,
+            manager_finalizer="finalize_frontier_decision",
+        )
 
     def review_initial_scoring_result(
         self,
@@ -1130,6 +1154,7 @@ class HitlManager:
             ),
             validate=validate,
             finalize=on_finalize,
+            manager_finalizer="finalize_worker_request",
         )
 
     def submit_resolution_reply(self, response: str) -> None:
@@ -1171,6 +1196,7 @@ class HitlManager:
         prompt: str,
         validate: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        manager_finalizer: str = "finalize_worker_request",
     ) -> Dict[str, Any]:
         """Attach the next runtime step to the same held worker command.
 
@@ -1185,6 +1211,11 @@ class HitlManager:
         request_key = str(pending.get("request_key", "")).strip()
         if not request_key:
             raise HitlRuntimeStateError("Pending worker command is missing request_key.")
+        manager_finalizer = str(manager_finalizer).strip()
+        if manager_finalizer not in self._REQUEST_FINALIZER_TOOL_NAMES:
+            raise HitlRuntimeStateError(
+                f"Unsupported manager finalizer for resumed worker request: {manager_finalizer}"
+            )
         with self._resolution_lock:
             resolution = self._resolutions.get(request_key)
             if resolution is None:
@@ -1199,7 +1230,11 @@ class HitlManager:
             else:
                 resolution.validate = validate
                 resolution.finalize = finalize
-        self.runtime_state.update_pending_worker_command(request_key, status="pending")
+        self.runtime_state.update_pending_worker_command(
+            request_key,
+            status="pending",
+            manager_finalizer=manager_finalizer,
+        )
         self.notify_runtime(prompt, request_key=request_key)
         resolution.completed.wait()
         completed = self.runtime_state.pending_worker_command()
@@ -1732,7 +1767,11 @@ class HitlManager:
             and pending.get("status") in {"pending", "scoring_approval_pending", "scoring"}
         ):
             reason = f"{failure} Runtime is rolling back this AutoResearch attempt."
-            self.runtime_state.cancel_pending_worker_command(request_key, reason=reason)
+            self.runtime_state.cancel_pending_worker_command(
+                request_key,
+                reason=reason,
+                cancellation_kind="manager_backend_failure",
+            )
             clear_request = getattr(self.channel, "clear_resolution_request", None)
             if callable(clear_request):
                 clear_request()

@@ -31,14 +31,17 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     workspace = args.workspace.expanduser().resolve()
-    hitl_root = workspace / ".neurico" / "hitl"
     if not workspace.is_dir():
         raise SystemExit(f"Workspace does not exist: {workspace}")
-    if not hitl_root.is_dir():
-        raise SystemExit(f"Workspace has no HITL state: {hitl_root}")
 
     project_root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(project_root / "src"))
+    from core.hitl_paths import hitl_state_dir
+
+    hitl_root = hitl_state_dir(workspace)
+    if not hitl_root.is_dir():
+        raise SystemExit(f"Workspace has no HITL state: {hitl_root}")
+
     from core.hitl_manager_host import HitlManagerHost
     from interactive.manager import load_config
 

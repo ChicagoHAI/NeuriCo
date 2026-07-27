@@ -13,6 +13,7 @@ import os
 import shutil
 import uuid
 
+from core.hitl_util import sha256_file as _sha256_file
 
 SEALED_PATHS: list[str] = [
     "scoring/eval.py",
@@ -22,14 +23,6 @@ SEALED_PATHS: list[str] = [
 ]
 SEALED_REQUIRED_PATHS = ("scoring/eval.py", "scoring/targets.json")
 SEALED_MANIFEST_NAME = "evaluator_manifest.json"
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _manifest_entry(path: Path) -> dict[str, Any]:

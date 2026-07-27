@@ -14,22 +14,15 @@ import json
 import hashlib
 import os
 import shutil
-import subprocess
 import tempfile
 
+from core.hitl_git import run_git
 from core.scoring_seal import SEALED_PATHS, verify_sealed_scoring_manifest
+from core.hitl_util import atomic_write_bytes, sha256_file
 
 
 class HitlScoringWorkspaceError(RuntimeError):
     """Raised when runtime cannot prepare an isolated HITL scorer workspace."""
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _copy_path(source: Path, destination: Path) -> None:
@@ -44,18 +37,8 @@ def _write_public_results(path: Path, source: Path) -> str:
     """Publish a scorer review copy atomically, without making it authoritative."""
     payload = source.read_bytes()
     digest = hashlib.sha256(payload).hexdigest()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
-        temporary = Path(handle.name)
-        try:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        except Exception:
-            temporary.unlink(missing_ok=True)
-            raise
-    os.replace(temporary, path)
-    if _sha256_file(path) != digest:
+    atomic_write_bytes(path, payload, fsync_parent=False)
+    if sha256_file(path) != digest:
         raise HitlScoringWorkspaceError("Runtime could not verify the public scoring review copy.")
     return digest
 
@@ -96,12 +79,13 @@ def isolated_scoring_workspace(
     scorer_dir = temporary_parent / "workspace"
     created = False
     try:
-        completed = subprocess.run(
-            ["git", "-C", str(work_dir), "worktree", "add", "--detach", str(scorer_dir), normalized_sha],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
+        completed = run_git(
+            work_dir,
+            "worktree",
+            "add",
+            "--detach",
+            str(scorer_dir),
+            normalized_sha,
             check=False,
         )
         if completed.returncode != 0:
@@ -139,18 +123,16 @@ def isolated_scoring_workspace(
         yield scorer_dir, evaluator_manifest_sha256
     finally:
         if created:
-            subprocess.run(
-                ["git", "-C", str(work_dir), "worktree", "remove", "--force", str(scorer_dir)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            run_git(
+                work_dir,
+                "worktree",
+                "remove",
+                "--force",
+                str(scorer_dir),
                 check=False,
+                quiet=True,
             )
-            subprocess.run(
-                ["git", "-C", str(work_dir), "worktree", "prune"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
+            run_git(work_dir, "worktree", "prune", check=False, quiet=True)
         shutil.rmtree(temporary_parent, ignore_errors=True)
 
 
@@ -187,21 +169,19 @@ def run_isolated_scorer(
             json.dumps(results, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        commit = subprocess.run(
-            ["git", "-C", str(scorer_work_dir), "add", "--", "scoring/results.json"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
+        commit = run_git(
+            scorer_work_dir,
+            "add",
+            "--",
+            "scoring/results.json",
             check=False,
         )
         if commit.returncode == 0:
-            commit = subprocess.run(
-                ["git", "-C", str(scorer_work_dir), "commit", "-m", "HITL runtime scored result"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
+            commit = run_git(
+                scorer_work_dir,
+                "commit",
+                "-m",
+                "HITL runtime scored result",
                 check=False,
             )
         if commit.returncode != 0:
@@ -209,24 +189,16 @@ def run_isolated_scorer(
             raise HitlScoringWorkspaceError(
                 f"Runtime could not commit the isolated scored result: {detail}"
             )
-        resolved = subprocess.run(
-            ["git", "-C", str(scorer_work_dir), "rev-parse", "HEAD"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            check=False,
-        )
+        resolved = run_git(scorer_work_dir, "rev-parse", "HEAD", check=False)
         if resolved.returncode != 0:
             raise HitlScoringWorkspaceError("Runtime could not resolve the scored checkpoint.")
         scored_checkpoint_sha = resolved.stdout.strip()
         if temporary_ref:
-            retained = subprocess.run(
-                ["git", "-C", str(scorer_work_dir), "update-ref", temporary_ref, scored_checkpoint_sha],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
+            retained = run_git(
+                scorer_work_dir,
+                "update-ref",
+                temporary_ref,
+                scored_checkpoint_sha,
                 check=False,
             )
             if retained.returncode != 0:

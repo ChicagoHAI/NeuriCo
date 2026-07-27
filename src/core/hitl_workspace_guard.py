@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from core.hitl_util import sha256_file
+
 _EXCLUDED_PUBLIC_PREFIXES = {
     ".claude",
     ".codex",
@@ -129,7 +131,7 @@ class HitlWorkspaceWriteGuard:
                     kind="file",
                     size=stats.st_size,
                     modified_ns=stats.st_mtime_ns,
-                    sha256=HitlWorkspaceWriteGuard._sha256(path),
+                    sha256=sha256_file(path),
                 )
         return states
 
@@ -160,7 +162,7 @@ class HitlWorkspaceWriteGuard:
                     kind="file",
                     size=stats.st_size,
                     modified_ns=stats.st_mtime_ns,
-                    sha256=HitlWorkspaceWriteGuard._sha256(path) if hash_content else None,
+                    sha256=sha256_file(path) if hash_content else None,
                 )
             else:
                 states[relative] = _FileState(
@@ -169,14 +171,6 @@ class HitlWorkspaceWriteGuard:
                     modified_ns=stats.st_mtime_ns,
                 )
         return states
-
-    @staticmethod
-    def _sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
 
     @staticmethod
     def _is_excluded(relative: str) -> bool:

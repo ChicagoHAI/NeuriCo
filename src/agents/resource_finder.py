@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import subprocess
 import shlex
-import os
 import sys
 import time
 
@@ -22,24 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.security import sanitize_text
 from core.agent_runner import run_prebuilt_cli_agent
-
-# CLI commands for different providers
-# Note: For codex, we use 'exec' subcommand for non-interactive mode (stdin pipe)
-# Note: For claude, we use '-p' (print mode) to enable streaming JSON output
-CLI_COMMANDS = {
-    "claude": "claude -p",  # Print mode enables streaming JSON output with stdin
-    "codex": "codex exec",  # Non-interactive mode: read from stdin
-    "gemini": "gemini",
-}
-
-# CLI flags for verbose/structured transcript output
-# These enable capturing detailed conversation transcripts for logging
-# All providers now output streaming JSON for consistent transcript format
-TRANSCRIPT_FLAGS = {
-    "claude": "--verbose --output-format stream-json",  # Streaming JSON (requires -p and --verbose)
-    "codex": "--json",  # Outputs newline-delimited JSON events (works with codex exec)
-    "gemini": "--output-format stream-json",  # Outputs JSONL stream
-}
+from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
 
 
 def generate_resource_finder_prompt(
@@ -163,21 +145,7 @@ def run_resource_finder(
     print()
 
     # Prepare command
-    cmd = CLI_COMMANDS[provider]
-
-    # Add permission flags if requested
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
-
-    # Add transcript/JSON output flags for structured logging
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
 
     log_file = logs_dir / f"{log_prefix}_{provider}.log"
     transcript_file = logs_dir / f"{log_prefix}_{provider}_transcript.jsonl"
@@ -193,15 +161,7 @@ def run_resource_finder(
     print()
 
     # Set environment variables
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    if env_extra:
-        env.update({str(k): str(v) for k, v in env_extra.items()})
-
-    # Disable IDE integration for Gemini CLI to avoid directory mismatch errors
-    # when running programmatically from different work directories
-    if provider == "gemini":
-        env["GEMINI_CLI_IDE_DISABLE"] = "1"
+    env = build_agent_environment(provider, env_extra)
 
     # Execute agent
     success = False

@@ -9,17 +9,22 @@ node identities stable while making HITL rollback state Git-versioned.
 from __future__ import annotations
 
 import io
-import os
 import re
 from pathlib import Path, PurePosixPath
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Iterable, Sequence
+
+from core.hitl_git import HitlGitCommandError, run_git
+from core.hitl_paths import (
+    HITL_RELATIVE_ROOT,
+    HITL_WHITEBOARD_RELATIVE_PATH,
+    hitl_state_dir,
+)
 
 
 class HitlGitStateError(RuntimeError):
@@ -31,13 +36,13 @@ class HitlGitStateError(RuntimeError):
 # restore explicitly exclude live locks, SQLite sidecars, temporary files, and
 # generated worker command wrappers; those are process artifacts, not state.
 DURABLE_HITL_STATE_PATHS = (
-    ".neurico/hitl",
+    HITL_RELATIVE_ROOT.as_posix(),
     ".neurico/research_state.json",
 )
 
 WHITEBOARD_STATE_PATH = "logs/experiment-autoresearch/whiteboard.json"
 AUTORESEARCH_WHITEBOARD_REF = "refs/neurico/autoresearch-whiteboard"
-HITL_AUTORESEARCH_WHITEBOARD_STATE_PATH = ".neurico/hitl/whiteboard/whiteboard.json"
+HITL_AUTORESEARCH_WHITEBOARD_STATE_PATH = HITL_WHITEBOARD_RELATIVE_PATH.as_posix()
 HITL_AUTORESEARCH_WHITEBOARD_REF = "refs/neurico/hitl-autoresearch-whiteboard"
 AUTORESEARCH_WHITEBOARD_ATTEMPT_TRAILER = "NeuriCo-AutoResearch-Attempt:"
 AUTORESEARCH_HITL_ROLLBACK_REF_PREFIX = "refs/neurico/autoresearch-hitl-rollback"
@@ -225,8 +230,10 @@ class HitlGitStateStore:
         return HitlGitSnapshot(ref=ref, commit_sha=commit_sha, paths=tuple(normalized_paths))
 
     def _manager_conversation_snapshot_guard(self, paths: Sequence[str]):
-        hitl_dir = self.work_dir / ".neurico" / "hitl"
-        if ".neurico/hitl" not in paths or not (hitl_dir / "manager" / "history.sqlite").exists():
+        hitl_dir = hitl_state_dir(self.work_dir)
+        if HITL_RELATIVE_ROOT.as_posix() not in paths or not (
+            hitl_dir / "manager" / "history.sqlite"
+        ).exists():
             return nullcontext()
         from core.hitl_manager_history import HitlManagerHistory
 
@@ -236,7 +243,7 @@ class HitlGitStateStore:
         normalized_paths = self._normalize_paths(paths)
         for relative_path in normalized_paths:
             target = self.work_dir / relative_path
-            if relative_path == ".neurico/hitl" and target.is_dir():
+            if relative_path == HITL_RELATIVE_ROOT.as_posix() and target.is_dir():
                 self._clear_durable_hitl_directory(target)
             elif target.is_dir():
                 shutil.rmtree(target)
@@ -273,7 +280,7 @@ class HitlGitStateStore:
         present: list[str] = []
         for relative_path in paths:
             target = self.work_dir / relative_path
-            if relative_path == ".neurico/hitl" and target.is_dir():
+            if relative_path == HITL_RELATIVE_ROOT.as_posix() and target.is_dir():
                 for path in target.rglob("*"):
                     if not path.is_file():
                         continue
@@ -288,7 +295,7 @@ class HitlGitStateStore:
     def _is_ephemeral_hitl_path(relative_path: str) -> bool:
         path = PurePosixPath(relative_path)
         parts = path.parts
-        root = (".neurico", "hitl")
+        root = HITL_RELATIVE_ROOT.parts
         if parts[: len(root)] != root:
             return False
         suffix = parts[len(root) :]
@@ -325,23 +332,18 @@ class HitlGitStateStore:
         self._run_git("rev-parse", "--git-dir")
 
     def _optional_rev_parse(self, ref: str) -> str | None:
-        process = subprocess.run(
-            ["git", "-C", str(self.work_dir), "rev-parse", "--verify", ref],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
+        process = run_git(self.work_dir, "rev-parse", "--verify", ref, check=False)
         if process.returncode:
             return None
         return process.stdout.strip()
 
     def _ref_exists(self, ref: str) -> bool:
-        process = subprocess.run(
-            ["git", "-C", str(self.work_dir), "rev-parse", "--verify", "--quiet", ref],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        process = run_git(
+            self.work_dir,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            ref,
             check=False,
         )
         if process.returncode == 0:
@@ -429,28 +431,18 @@ class HitlGitStateStore:
         return self._run_git("rev-parse", "--verify", ref).strip()
 
     def _run_git(self, *args: str, env: dict[str, str] | None = None) -> str:
-        process = subprocess.run(
-            ["git", "-C", str(self.work_dir), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env={**os.environ, **(env or {})},
-            check=False,
-        )
-        if process.returncode:
-            raise HitlGitStateError("Git could not complete the HITL state operation.")
-        return process.stdout
+        try:
+            process = run_git(self.work_dir, *args, env=env)
+        except HitlGitCommandError as exc:
+            raise HitlGitStateError(str(exc)) from exc
+        return str(process.stdout)
 
     def _run_git_bytes(self, *args: str) -> bytes:
-        process = subprocess.run(
-            ["git", "-C", str(self.work_dir), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if process.returncode:
-            raise HitlGitStateError("Git could not read the HITL state snapshot.")
-        return process.stdout
+        try:
+            process = run_git(self.work_dir, *args, text=False)
+        except HitlGitCommandError as exc:
+            raise HitlGitStateError(str(exc)) from exc
+        return bytes(process.stdout)
 
     @staticmethod
     def _require_attempt_id(value: str) -> str:

@@ -19,11 +19,22 @@ import sys
 import threading
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 from core.hitl_lock import exclusive_file_lock
+from core.hitl_paths import (
+    hitl_artifact_contract_path,
+    hitl_idea_log_path,
+    hitl_state_dir,
+)
+from core.hitl_util import (
+    atomic_write_json,
+    atomic_write_text,
+    read_jsonl_objects,
+    sha256_file as _sha256_file,
+    utc_now,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -110,7 +121,7 @@ RUNTIME_PROVENANCE_FIELDS = ("parent_node_id", "attempt_id")
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return utc_now(timespec="seconds")
 
 
 def _compact_json(obj: Any) -> str:
@@ -154,16 +165,6 @@ def _with_runtime_premises(
     """Add runtime-known causal dependencies without exposing extra log fields."""
     proposal_idea_id = str((provenance or {}).get("proposal_idea_id", "")).strip()
     return _normalize_premises([*premises, *([proposal_idea_id] if proposal_idea_id else [])])
-
-
-def hitl_state_dir(work_dir: Path) -> Path:
-    """Return the hidden HITL runtime directory that owns finalized ideas."""
-    return Path(work_dir) / ".neurico" / "hitl"
-
-
-def hitl_research_state_path(work_dir: Path) -> Path:
-    """Return the interactive manager world-model path used by HITL."""
-    return Path(work_dir) / ".neurico" / "research_state.json"
 
 
 def _as_related_artifacts(value: Any) -> List[Dict[str, str]]:
@@ -428,7 +429,7 @@ class HitlIdeaLog:
         self.work_dir = Path(work_dir)
         self.hitl_dir = hitl_state_dir(self.work_dir)
         self.hitl_dir.mkdir(parents=True, exist_ok=True)
-        self.path = self.hitl_dir / "idea" / "idea.jsonl"
+        self.path = hitl_idea_log_path(self.work_dir)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, idea: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
@@ -477,19 +478,7 @@ class HitlIdeaLog:
             ordered = _ordered_idea_record(record)
             existing = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
             addition = _compact_json(ordered) + "\n"
-            tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-            try:
-                with tmp_path.open("w", encoding="utf-8") as handle:
-                    handle.write(existing + addition)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(tmp_path, self.path)
-                self._fsync_log_directory()
-            finally:
-                try:
-                    tmp_path.unlink()
-                except FileNotFoundError:
-                    pass
+            atomic_write_text(self.path, existing + addition)
         # The idea log is authoritative. Reconciliation is derived state, so a
         # projection failure must not turn a successfully finalized idea into a
         # failed worker command that an agent will retry and duplicate. A later
@@ -541,18 +530,6 @@ class HitlIdeaLog:
         lock_path = self.path.with_suffix(".jsonl.lock")
         with exclusive_file_lock(lock_path):
             yield
-
-    def _fsync_log_directory(self) -> None:
-        try:
-            descriptor = os.open(self.path.parent, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            pass
-        finally:
-            os.close(descriptor)
 
     @staticmethod
     def _next_number(records: Iterable[Dict[str, Any]]) -> int:
@@ -794,7 +771,7 @@ class HitlPaths:
 
     @property
     def hitl_dir(self) -> Path:
-        return self.work_dir / ".neurico" / "hitl"
+        return hitl_state_dir(self.work_dir)
 
     @property
     def manager_dir(self) -> Path:
@@ -1567,17 +1544,13 @@ class HitlRuntime:
             "human_admission_decision_idea_id": admission.get("human_idea_id", ""),
             "manager_feedback": admission.get("feedback", ""),
         }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        try:
-            with temporary.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, ensure_ascii=False)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        atomic_write_json(
+            path,
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            fsync_parent=False,
+        )
 
     @staticmethod
     def _raised_idea_request_key(record: Dict[str, Any]) -> str:
@@ -1696,6 +1669,13 @@ class HitlRuntime:
         *,
         worker_name: str,
     ) -> Dict[str, Any]:
+        cancelled = self._cancelled_worker_command_result(
+            result,
+            phase="proposal",
+            worker_name=worker_name,
+        )
+        if cancelled is not None:
+            return cancelled
         submitted = self._proposal_submit_result
         if submitted and submitted.get("status") == "approved":
             if result.get("background_processes_terminated"):
@@ -2268,6 +2248,39 @@ class HitlRuntime:
 
         return HitlRuntimeState(self.work_dir).pending_worker_command()
 
+    def _cancelled_worker_command_result(
+        self,
+        result: Dict[str, Any],
+        *,
+        phase: str,
+        worker_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Turn a cancelled manager request into a non-replaceable worker failure."""
+        pending = self._pending_worker_command()
+        if not isinstance(pending, dict) or pending.get("status") != "cancelled":
+            return None
+        self._clear_worker_continuation()
+        reason = str(pending.get("cancellation_reason", "")).strip()
+        manager_backend_failure = (
+            str(pending.get("cancellation_kind", "")).strip() == "manager_backend_failure"
+            or "bounded retry budget" in reason
+        )
+        return {
+            **result,
+            "success": False,
+            "approved": False,
+            "replacement": False,
+            "hitl": True,
+            "phase": phase,
+            "hitl_terminal_failure": manager_backend_failure,
+            "manager_backend_failure": manager_backend_failure,
+            "error": reason
+            or (
+                f"{worker_name} cannot continue because runtime cancelled its held "
+                "HITL manager request."
+            ),
+        }
+
     def resume_pending_worker_command(self) -> Dict[str, Any]:
         """Reconnect a replacement worker to the one runtime-held command.
 
@@ -2829,6 +2842,13 @@ class HitlRuntime:
         live tool-server and request state and gives a continuation worker the runtime
         prompt that the lost worker should have continued from.
         """
+        cancelled = self._cancelled_worker_command_result(
+            result,
+            phase=phase,
+            worker_name=worker_name,
+        )
+        if cancelled is not None:
+            return cancelled
         if result.get("background_processes_terminated"):
             return {
                 "approved": False,
@@ -3604,14 +3624,7 @@ class HitlRuntime:
 
 
 def read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    records: List[Dict[str, Any]] = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                records.append(json.loads(line))
-    return records
+    return read_jsonl_objects(path, record_label="finalized HITL idea record")
 
 
 @dataclass(frozen=True)
@@ -3725,7 +3738,7 @@ def validate_required_artifact_contract(work_dir: Path) -> Dict[str, Any]:
 
 
 def _artifact_contract_path(work_dir: Path) -> Path:
-    return Path(work_dir) / ".neurico" / "hitl" / "artifact_contract.json"
+    return hitl_artifact_contract_path(work_dir)
 
 
 def persist_hitl_required_artifact_contract(work_dir: Path) -> List[RequiredArtifact]:
@@ -3742,17 +3755,13 @@ def persist_hitl_required_artifact_contract(work_dir: Path) -> List[RequiredArti
         ],
     }
     path = _artifact_contract_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    atomic_write_json(
+        path,
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        fsync_parent=False,
+    )
     return artifacts
 
 
@@ -3836,11 +3845,3 @@ def _normalize_required_artifact_path(value: str) -> str:
         raise HitlValidationError(f"Unsafe artifact path: {value}")
     normalized = Path(path).as_posix()
     return f"{normalized}/" if wants_directory and not normalized.endswith("/") else normalized
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

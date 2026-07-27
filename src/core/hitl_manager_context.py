@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Dict, Iterator, List
 
 from core.hitl_lock import exclusive_file_lock
+from core.hitl_util import atomic_write_text, utc_now
 
 MICROCOMPACT_TRIGGER_RATIO = 0.55
 MICROCOMPACT_RECENT_TOOL_BUDGET_TOKENS = 5_000
@@ -28,7 +26,7 @@ COMPACTION_MIN_MIDDLE_MESSAGES = 1
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return utc_now()
 
 
 def _record_id(*parts: str) -> str:
@@ -237,31 +235,7 @@ class HitlManagerContext:
     def _persist_locked(self) -> None:
         payload = self._render(self._records)
         with self._file_lock():
-            tmp_path = self.path.with_suffix(".jsonl.tmp")
-            try:
-                with tmp_path.open("w", encoding="utf-8") as handle:
-                    handle.write(payload)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(tmp_path, self.path)
-                self._fsync_parent_directory()
-            finally:
-                try:
-                    tmp_path.unlink()
-                except FileNotFoundError:
-                    pass
-
-    def _fsync_parent_directory(self) -> None:
-        try:
-            descriptor = os.open(self.manager_dir, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            pass
-        finally:
-            os.close(descriptor)
+            atomic_write_text(self.path, payload)
 
     @staticmethod
     def _render(records: List[Dict[str, Any]]) -> str:

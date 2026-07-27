@@ -33,23 +33,17 @@ import sys
 import threading
 import time
 import traceback
-from datetime import datetime
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.compute_backend import attach_runtime_compute_backend
+from core.agent_cli import (
+    build_agent_command,
+    build_agent_environment,
+)
 from core.security import sanitize_text
-
-# CLI commands for different providers
-CLI_COMMANDS = {"claude": "claude -p", "codex": "codex exec", "gemini": "gemini"}
-
-# CLI flags for verbose/structured transcript output
-TRANSCRIPT_FLAGS = {
-    "claude": "--verbose --output-format stream-json",
-    "codex": "--json",
-    "gemini": "--output-format stream-json",
-}
+from core.hitl_util import utc_now
 
 
 class RunTracker:
@@ -77,7 +71,7 @@ class RunTracker:
                 "agent": self.agent_name,
                 "status": "running",
                 "pid": pid,
-                "started_at": datetime.now().isoformat(),
+                "started_at": utc_now(),
                 "completed_at": None,
                 "exit_code": None,
             }
@@ -87,7 +81,7 @@ class RunTracker:
         """Mark this run as successfully completed."""
         status = self._read_status()
         status["status"] = "completed"
-        status["completed_at"] = datetime.now().isoformat()
+        status["completed_at"] = utc_now()
         status["exit_code"] = exit_code
         self._write_status(status)
 
@@ -98,11 +92,11 @@ class RunTracker:
         """Mark this run as failed."""
         status = self._read_status()
         status["status"] = "failed"
-        status["completed_at"] = datetime.now().isoformat()
+        status["completed_at"] = utc_now()
         status["exit_code"] = exit_code
         self._write_status(status)
 
-        error_info = {"error": error_msg, "traceback": tb, "timestamp": datetime.now().isoformat()}
+        error_info = {"error": error_msg, "traceback": tb, "timestamp": utc_now()}
         with open(self.error_file, "w") as f:
             json.dump(error_info, f, indent=2)
 
@@ -110,7 +104,7 @@ class RunTracker:
         """Mark this run as stopped (by user/manager)."""
         status = self._read_status()
         status["status"] = "stopped"
-        status["completed_at"] = datetime.now().isoformat()
+        status["completed_at"] = utc_now()
         self._write_status(status)
 
     def _read_status(self) -> Dict[str, Any]:
@@ -128,26 +122,12 @@ def _build_agent_command(
     provider: str, full_permissions: bool = True, use_scribe: bool = False
 ) -> str:
     """Build the CLI command for launching an agent."""
-    if use_scribe:
-        cmd = f"scribe {provider}"
-    else:
-        cmd = CLI_COMMANDS[provider]
-
-    # Add permission flags
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo"
-
-    # Add transcript/JSON output flags
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
-
-    return cmd
+    return build_agent_command(
+        provider,
+        full_permissions=full_permissions,
+        use_scribe=use_scribe,
+        gemini_skip_trust=False,
+    )
 
 
 def _run_cli_agent(
@@ -164,14 +144,7 @@ def _run_cli_agent(
 
     This is the common execution pattern shared by all agents.
     """
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    if env_extra:
-        env.update(env_extra)
-
-    # Disable IDE integration for Gemini CLI
-    if "gemini" in cmd:
-        env["GEMINI_CLI_IDE_DISABLE"] = "1"
+    env = build_agent_environment("gemini" if "gemini" in cmd else "", env_extra)
 
     log_file.parent.mkdir(parents=True, exist_ok=True)
 

@@ -17,6 +17,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.config_loader import ConfigLoader, normalize_domain
 from core.compute_backend import get_runtime_compute_backend
+from core.agent_cli import provider_skill_root
 
 
 class PromptGenerator:
@@ -549,7 +550,7 @@ Location: {run_dir}
 
     @staticmethod
     def _skill_root_for_provider(provider: str) -> str:
-        return f".{provider}/skills"
+        return provider_skill_root(provider)
 
     def _generate_compute_backend_section(
         self, idea_spec: Dict[str, Any], mode: str, provider: str = "claude"
