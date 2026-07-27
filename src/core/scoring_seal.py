@@ -58,6 +58,30 @@ def _write_manifest(sealed_dir: Path, moved: list[str]) -> None:
         os.fsync(handle.fileno())
 
 
+def _read_manifest(sealed_dir: Path) -> tuple[bytes, dict[str, dict[str, Any]]]:
+    manifest_path = Path(sealed_dir) / SEALED_MANIFEST_NAME
+    try:
+        raw = manifest_path.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Missing or unreadable sealed evaluator manifest.") from exc
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise RuntimeError("Invalid sealed evaluator manifest version.")
+    entries = payload.get("entries")
+    required = payload.get("required")
+    if not isinstance(entries, dict) or required != list(SEALED_REQUIRED_PATHS):
+        raise RuntimeError("Invalid sealed evaluator manifest structure.")
+    if any(
+        not isinstance(relative, str) or not isinstance(entry, dict)
+        for relative, entry in entries.items()
+    ):
+        raise RuntimeError("Invalid sealed evaluator manifest entry.")
+    for relative in SEALED_REQUIRED_PATHS:
+        if relative not in entries:
+            raise RuntimeError(f"Sealed evaluator manifest is missing required {relative}.")
+    return raw, entries
+
+
 def _fsync_directory(path: Path) -> None:
     """Persist a directory entry where the current platform permits it."""
     try:
@@ -89,24 +113,8 @@ def _fsync_tree(path: Path) -> None:
 def verify_sealed_scoring_manifest(sealed_dir: Path) -> str:
     """Validate the complete immutable evaluator payload and return its digest."""
     sealed_dir = Path(sealed_dir)
-    manifest_path = sealed_dir / SEALED_MANIFEST_NAME
-    try:
-        raw = manifest_path.read_bytes()
-        payload = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError("Missing or unreadable sealed evaluator manifest.") from exc
-    if not isinstance(payload, dict) or payload.get("version") != 1:
-        raise RuntimeError("Invalid sealed evaluator manifest version.")
-    entries = payload.get("entries")
-    required = payload.get("required")
-    if not isinstance(entries, dict) or required != list(SEALED_REQUIRED_PATHS):
-        raise RuntimeError("Invalid sealed evaluator manifest structure.")
-    for relative in SEALED_REQUIRED_PATHS:
-        if relative not in entries:
-            raise RuntimeError(f"Sealed evaluator manifest is missing required {relative}.")
+    raw, entries = _read_manifest(sealed_dir)
     for relative, expected in entries.items():
-        if not isinstance(relative, str) or not isinstance(expected, dict):
-            raise RuntimeError("Invalid sealed evaluator manifest entry.")
         actual = _manifest_entry(sealed_dir / relative)
         if actual != expected:
             raise RuntimeError(f"Sealed evaluator payload changed: {relative}")
@@ -161,8 +169,7 @@ def _public_payload_matches_sealed_manifest(work_dir: Path, sealed_dir: Path) ->
     if not public_paths:
         return False
     return all(
-        relative in entries
-        and _manifest_entry(Path(work_dir) / relative) == entries[relative]
+        relative in entries and _manifest_entry(Path(work_dir) / relative) == entries[relative]
         for relative in public_paths
     )
 
@@ -212,18 +219,54 @@ def seal_scoring_files(work_dir: Path, *, immutable: bool = False) -> Optional[P
     staging_dir = sealed_parent / f".{sealed_dir.name}.staging-{uuid.uuid4().hex}"
     staging_dir.mkdir(parents=True, exist_ok=False)
     copied: list[str] = []
+    public_copied: list[str] = []
+
+    # A best-effort unseal can restore only part of a generation. Reconcile
+    # verified leftovers into staging before overlaying the public files so an
+    # optional artifact cannot be deleted by the next non-immutable reseal.
+    if sealed_dir.exists():
+        _, existing_entries = _read_manifest(sealed_dir)
+        supported_paths = {relative.rstrip("/") for relative in SEALED_PATHS}
+        unsupported = sorted(set(existing_entries) - supported_paths)
+        if unsupported:
+            raise RuntimeError(
+                "Sealed evaluator manifest contains unsupported path(s): " + ", ".join(unsupported)
+            )
+        for relative, expected in existing_entries.items():
+            sealed_source = sealed_dir / relative
+            public_source = work_dir / relative
+            if sealed_source.exists():
+                if _manifest_entry(sealed_source) != expected:
+                    raise RuntimeError(f"Sealed evaluator payload changed: {relative}")
+                destination = staging_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if sealed_source.is_dir() and not sealed_source.is_symlink():
+                    shutil.copytree(sealed_source, destination, symlinks=True)
+                else:
+                    shutil.copy2(sealed_source, destination, follow_symlinks=False)
+                copied.append(relative)
+            elif not public_source.exists():
+                raise RuntimeError(f"Cannot reconcile sealed evaluator payload missing {relative}.")
+
     for rel in SEALED_PATHS:
         normalized_rel = rel.rstrip("/")
         src = work_dir / normalized_rel
         if not src.exists():
             continue
         dst = staging_dir / normalized_rel
+        if dst.exists():
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink()
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.is_dir() and not src.is_symlink():
             shutil.copytree(src, dst, symlinks=True)
         else:
             shutil.copy2(src, dst, follow_symlinks=False)
-        copied.append(rel)
+        if normalized_rel not in copied:
+            copied.append(normalized_rel)
+        public_copied.append(normalized_rel)
 
     if not copied:
         try:
@@ -246,7 +289,7 @@ def seal_scoring_files(work_dir: Path, *, immutable: bool = False) -> Optional[P
     _fsync_directory(sealed_parent)
 
     # The active generation is durable before public evaluator inputs vanish.
-    for rel in copied:
+    for rel in public_copied:
         source = work_dir / rel.rstrip("/")
         if source.is_dir() and not source.is_symlink():
             shutil.rmtree(source)
