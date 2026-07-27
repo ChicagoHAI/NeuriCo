@@ -117,9 +117,6 @@ def write_current_attempt_marker(work_dir: Path, attempt_id: str) -> None:
     mutations. If the marker is missing, the CLI still works but the
     mutation is unattributed and cannot be rolled back if the attempt fails.
     """
-    # Establish the private rollback boundary first. A marker must never
-    # advertise a recoverable active attempt before that boundary exists.
-    _begin_autoresearch_whiteboard_attempt(Path(work_dir), attempt_id)
     write_attempt_marker_file(current_attempt_marker_path(work_dir), attempt_id)
 
 
@@ -129,26 +126,6 @@ def clear_current_attempt_marker(work_dir: Path) -> None:
 
 def read_current_attempt_marker(work_dir: Path) -> str:
     return read_attempt_marker_file(current_attempt_marker_path(work_dir))
-
-
-def _record_autoresearch_whiteboard_version(work_dir: Path) -> None:
-    """Append the live whiteboard to its private Git history during AutoResearch."""
-    work_dir = Path(work_dir)
-    if not (work_dir / ".git").exists() or not whiteboard_path(work_dir).is_file():
-        return
-    from core.hitl_git_state import HitlGitStateStore
-
-    HitlGitStateStore(work_dir).record_autoresearch_whiteboard()
-
-
-def _begin_autoresearch_whiteboard_attempt(work_dir: Path, attempt_id: str) -> None:
-    """Create the private Git boundary used only if this attempt fails."""
-    work_dir = Path(work_dir)
-    if not (work_dir / ".git").exists():
-        return
-    from core.hitl_git_state import HitlGitStateStore
-
-    HitlGitStateStore(work_dir).begin_autoresearch_whiteboard_attempt(attempt_id)
 
 
 # Directories that identify a NeuriCo AutoResearch workspace. Auto-detect
@@ -206,9 +183,7 @@ class Whiteboard:
             if attempt_marker_path is not None
             else current_attempt_marker_path(self.work_dir)
         )
-        self._record_version = record_version or (
-            lambda: _record_autoresearch_whiteboard_version(self.work_dir)
-        )
+        self._record_version = record_version
         self._restore_on_version_failure = bool(restore_on_version_failure)
         self.schema_version: int = SCHEMA_VERSION
         self._next_id_num: int = 1
@@ -233,7 +208,13 @@ class Whiteboard:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        previous = self.path.read_bytes() if self.path.exists() else None
+        previous = (
+            self.path.read_bytes()
+            if self._record_version is not None
+            and self._restore_on_version_failure
+            and self.path.exists()
+            else None
+        )
         payload = {
             "schema_version": self.schema_version,
             "next_id_num": self._next_id_num,
@@ -250,7 +231,7 @@ class Whiteboard:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_name, self.path)
-            if self.attempt_marker_path.exists():
+            if self._record_version is not None and self.attempt_marker_path.exists():
                 try:
                     self._record_version()
                 except Exception:

@@ -40,8 +40,6 @@ DURABLE_HITL_STATE_PATHS = (
     ".neurico/research_state.json",
 )
 
-WHITEBOARD_STATE_PATH = "logs/experiment-autoresearch/whiteboard.json"
-AUTORESEARCH_WHITEBOARD_REF = "refs/neurico/autoresearch-whiteboard"
 HITL_AUTORESEARCH_WHITEBOARD_STATE_PATH = HITL_WHITEBOARD_RELATIVE_PATH.as_posix()
 HITL_AUTORESEARCH_WHITEBOARD_REF = "refs/neurico/hitl-autoresearch-whiteboard"
 AUTORESEARCH_WHITEBOARD_ATTEMPT_TRAILER = "NeuriCo-AutoResearch-Attempt:"
@@ -101,43 +99,6 @@ class HitlGitStateStore:
         """Return whether the attempt's deterministic private rollback ref exists."""
         return (
             self._optional_rev_parse(self._autoresearch_hitl_rollback_ref(attempt_id)) is not None
-        )
-
-    def record_autoresearch_whiteboard(self) -> HitlGitSnapshot:
-        """Append the live AutoResearch whiteboard to its private Git history."""
-        return self._record_whiteboard_version(
-            path=WHITEBOARD_STATE_PATH,
-            ref=AUTORESEARCH_WHITEBOARD_REF,
-            message="NeuriCo AutoResearch whiteboard",
-        )
-
-    def begin_autoresearch_whiteboard_attempt(self, attempt_id: str) -> HitlGitSnapshot:
-        """Record the rollback boundary for one active AutoResearch attempt."""
-        return self._begin_whiteboard_attempt(
-            attempt_id,
-            path=WHITEBOARD_STATE_PATH,
-            ref=AUTORESEARCH_WHITEBOARD_REF,
-            label="NeuriCo AutoResearch whiteboard",
-        )
-
-    def rollback_autoresearch_whiteboard_attempt(self, attempt_id: str) -> None:
-        """Undo only a failed attempt's whiteboard changes from Git history.
-
-        Rejected scored attempts deliberately do not call this method: their
-        whiteboard learning is valid cross-attempt state. This method is the
-        transaction rollback reserved for failed or interrupted attempts.
-        """
-        self._rollback_whiteboard_attempt(
-            attempt_id,
-            path=WHITEBOARD_STATE_PATH,
-            ref=AUTORESEARCH_WHITEBOARD_REF,
-        )
-
-    def has_autoresearch_whiteboard_attempt_boundary(self, attempt_id: str) -> bool:
-        """Return whether the private whiteboard history can roll back an attempt."""
-        return self._has_whiteboard_attempt_boundary(
-            attempt_id,
-            ref=AUTORESEARCH_WHITEBOARD_REF,
         )
 
     def record_hitl_autoresearch_whiteboard(self) -> HitlGitSnapshot:
