@@ -14,6 +14,7 @@ import subprocess
 from typing import Any, Iterable
 
 from core.hitl_util import sha256_file
+from core.scoring_seal import SEALED_PATHS
 
 _HIDDEN_PATH_PARTS = {
     ".claude",
@@ -24,12 +25,12 @@ _HIDDEN_PATH_PARTS = {
     ".venv",
     "__pycache__",
 }
-_PROTECTED_RELATIVE_PATHS = {
-    "scoring/eval.py",
-    "scoring/rule_maker_log.md",
-    "scoring/targets.json",
-}
-_PROTECTED_PREFIXES = {"data/.test"}
+_PROTECTED_RELATIVE_PATHS = frozenset(
+    path.rstrip("/") for path in SEALED_PATHS if not path.endswith("/")
+)
+_PROTECTED_PREFIXES = frozenset(
+    path.rstrip("/") for path in SEALED_PATHS if path.endswith("/")
+)
 _SECRET_FILE_NAMES = {
     "credentials",
     "credentials.json",
