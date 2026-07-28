@@ -327,6 +327,18 @@ def test_interpret_verdict_requires_consistent_structure():
     assert passed is False
     passed, _ = interpret_verdict(_valid_verdict(checks={'mystery': 'pass'}))
     assert passed is False
+    # Every mandated check must be reported explicitly; a passing verdict that
+    # omits transcription/format is a silent skip, not a pass
+    passed, violations = interpret_verdict(_valid_verdict(checks={'routing': 'pass'}))
+    assert passed is False
+    assert any('missing' in str(v) for v in violations)
+    passed, _ = interpret_verdict(_valid_verdict(
+        checks={'routing': 'pass', 'transcription': 'pass'}))
+    assert passed is False
+    # Explicit not_applicable for a non-applicable check is still a valid pass
+    passed, violations = interpret_verdict(_valid_verdict(
+        checks={'routing': 'pass', 'transcription': 'not_applicable', 'format': 'not_applicable'}))
+    assert passed is True and violations == []
     # A malformed violation entry (no detail) fails
     passed, _ = interpret_verdict(_valid_verdict(**{'pass': False, 'violations': [{'check': 'routing'}]}))
     assert passed is False

@@ -413,7 +413,10 @@ def interpret_verdict(verdict: Dict[str, Any]) -> Tuple[bool, List[Dict[str, Any
 
     - `pass` must be a JSON boolean; bool() coercion would accept any non-empty
       string — including "false" — as passing.
-    - `checks` must be a mapping of known checks to pass/fail/not_applicable.
+    - `checks` must report every mandated check (routing, transcription,
+      format) with pass/fail/not_applicable; a check that does not apply must
+      say `not_applicable` explicitly rather than be omitted, so a verifier
+      cannot silently skip part of the contract.
     - `pass` must be consistent with the checks: true only when no applicable
       check failed; a check reporting "fail" under pass=true is a contradiction.
     - A failing verdict must justify itself — pass=false with an empty
@@ -448,6 +451,10 @@ def interpret_verdict(verdict: Dict[str, Any]) -> Tuple[bool, List[Dict[str, Any
                        f"expected one of {list(VERDICT_CHECK_VALUES)}")
             elif value == 'fail':
                 failed.append(name)
+        missing = [name for name in VERDICT_CHECK_NAMES if name not in checks]
+        if missing:
+            reject(f"verification.json 'checks' must report every mandated check "
+                   f"(use 'not_applicable' when a check does not apply); missing: {missing}")
         # `pass` is true only when every applicable check passes.
         if raw_pass is True and failed:
             reject(f"'pass' is true but these checks failed: {failed}")
