@@ -183,10 +183,9 @@ class HitlWebChannel(WebChannel):
         }
 
     def poll_input(self, timeout: float = 0.0) -> Optional[str]:
-        del timeout
         if self._inbox is None:
             try:
-                value = self._memory_input.get_nowait()
+                value = self._memory_input.get(timeout=max(0.0, timeout))
             except queue.Empty:
                 self._last_polled_input_recorded = False
                 self._last_polled_provider = ""
@@ -198,6 +197,7 @@ class HitlWebChannel(WebChannel):
         if value is None:
             self._last_polled_input_recorded = False
             self._last_polled_provider = ""
+            self._closed.wait(max(0.0, timeout))
             return None
         self._last_polled_input_recorded = True
         self._last_polled_provider = str(value.get("provider", "")).strip().lower()
@@ -491,7 +491,7 @@ class HitlManagerHost:
             self.channel.send(text, kind="system")
 
         while not self._stop.is_set():
-            message = self.channel.poll_input(timeout=0.25)
+            message = self.channel.poll_input(timeout=0.5)
             if not message:
                 continue
             try:

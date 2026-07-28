@@ -2175,6 +2175,37 @@ class HitlRuntime:
         finally:
             self._worker_request_lock.release()
 
+    def _terminal_phase_finish_response(self) -> Optional[Dict[str, Any]]:
+        """Replay the terminal result for this runtime-owned worker invocation."""
+        if (
+            isinstance(self._phase_finish_result, dict)
+            and bool(self._phase_finish_result.get("final"))
+            and isinstance(self._phase_finish_response, dict)
+            and bool(self._phase_finish_response.get("final"))
+        ):
+            return dict(self._phase_finish_response)
+
+        pending = self._pending_worker_command()
+        if (
+            not isinstance(pending, dict)
+            or pending.get("kind") != "phase_finish"
+            or pending.get("status") != "resolved"
+            or pending.get("pipeline_stage") != self.pipeline_stage
+        ):
+            return None
+        response = pending.get("response")
+        if not isinstance(response, dict) or not bool(response.get("final")):
+            return None
+        pending_provenance = pending.get("provenance")
+        current_provenance = self._tool_context.get("provenance")
+        if (
+            not isinstance(pending_provenance, dict)
+            or not isinstance(current_provenance, dict)
+            or pending_provenance != current_provenance
+        ):
+            return None
+        return dict(response)
+
     def _phase_finish_response_for_retry(
         self,
         request_key: str,
@@ -2528,6 +2559,9 @@ class HitlRuntime:
 
     def _finish_tool_phase_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
+            terminal_response = self._terminal_phase_finish_response()
+            if terminal_response is not None:
+                return terminal_response
             summary = _require_text(payload.get("summary"), "summary", "HITL phase finish")
             related_artifacts = _as_related_artifacts(payload.get("related_artifacts"))
             hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))

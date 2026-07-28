@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.security import sanitize_text
 from core.agent_runner import run_prebuilt_cli_agent
 from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
+from core.scorer import RESULTS_FILE_NAME
 
 # Files the rule_maker is responsible for producing (relative to scoring/)
 RULE_MAKER_OUTPUT_FILES = {
@@ -40,6 +41,153 @@ RULE_MAKER_OUTPUT_FILES = {
     "interface": "interface.md",
     "rationale_log": "rule_maker_log.md",
 }
+
+
+_DISALLOWED_EVALUATOR_CLI_MODULES = {"argparse", "click", "docopt", "typer"}
+_EVALUATOR_RESULTS_PATH = f"scoring/{RESULTS_FILE_NAME}"
+_EVALUATOR_OWNED_INTERFACE_PREFIXES = ("scoring/", "data/.test/")
+
+
+def _assigned_expressions(tree: ast.AST) -> dict[str, ast.AST]:
+    assignments: dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None:
+                assignments[node.target.id] = node.value
+    return assignments
+
+
+def _path_string_parts(
+    node: ast.AST,
+    assignments: dict[str, ast.AST],
+    *,
+    resolving: Optional[set[str]] = None,
+) -> list[str]:
+    resolving = set(resolving or ())
+    if isinstance(node, ast.Name) and node.id in assignments and node.id not in resolving:
+        resolving.add(node.id)
+        return _path_string_parts(
+            assignments[node.id],
+            assignments,
+            resolving=resolving,
+        )
+    parts: list[str] = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            value = child.value.strip().replace("\\", "/")
+            if value:
+                parts.append(value)
+    return parts
+
+
+def _is_canonical_results_path(
+    node: ast.AST,
+    assignments: dict[str, ast.AST],
+) -> bool:
+    parts = _path_string_parts(node, assignments)
+    if any(part.rstrip("/").endswith(_EVALUATOR_RESULTS_PATH) for part in parts):
+        return True
+    if "scoring" in parts and "results.json" in parts:
+        return True
+    normalized = "/".join(part.strip("/") for part in parts)
+    return normalized.endswith(_EVALUATOR_RESULTS_PATH)
+
+
+def _write_path_expressions(tree: ast.AST) -> list[ast.AST]:
+    paths: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        if isinstance(function, ast.Attribute) and function.attr in {
+            "write_text",
+            "write_bytes",
+        }:
+            paths.append(function.value)
+            continue
+        if isinstance(function, ast.Attribute) and function.attr == "open":
+            mode = node.args[0] if node.args else None
+            for keyword in node.keywords:
+                if keyword.arg == "mode":
+                    mode = keyword.value
+            if (
+                isinstance(mode, ast.Constant)
+                and isinstance(mode.value, str)
+                and any(flag in mode.value for flag in "wax+")
+            ):
+                paths.append(function.value)
+            continue
+        if isinstance(function, ast.Name) and function.id == "open" and node.args:
+            mode = node.args[1] if len(node.args) > 1 else None
+            for keyword in node.keywords:
+                if keyword.arg == "mode":
+                    mode = keyword.value
+            if (
+                isinstance(mode, ast.Constant)
+                and isinstance(mode.value, str)
+                and any(flag in mode.value for flag in "wax+")
+            ):
+                paths.append(node.args[0])
+    return paths
+
+
+def _validate_evaluator_abi(tree: ast.AST) -> list[str]:
+    """Validate the fixed ``python scoring/eval.py`` scorer ABI."""
+    issues: list[str] = []
+    sys_aliases = {"sys"}
+    argv_aliases: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                module = imported.name.split(".", 1)[0]
+                if module in _DISALLOWED_EVALUATOR_CLI_MODULES:
+                    issues.append(
+                        "scoring/eval.py must use the zero-argument scorer ABI; "
+                        f"command-line parser module `{module}` is not allowed."
+                    )
+                if imported.name == "sys":
+                    sys_aliases.add(imported.asname or imported.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = (node.module or "").split(".", 1)[0]
+            if module in _DISALLOWED_EVALUATOR_CLI_MODULES:
+                issues.append(
+                    "scoring/eval.py must use the zero-argument scorer ABI; "
+                    f"command-line parser module `{module}` is not allowed."
+                )
+            if node.module == "sys":
+                for imported in node.names:
+                    if imported.name == "argv":
+                        argv_aliases.add(imported.asname or imported.name)
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "argv"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in sys_aliases
+        ) or (isinstance(node, ast.Name) and node.id in argv_aliases):
+            issues.append(
+                "scoring/eval.py must use the zero-argument scorer ABI; "
+                "reading command-line arguments is not allowed."
+            )
+            break
+
+    assignments = _assigned_expressions(tree)
+    if not any(
+        _is_canonical_results_path(path, assignments)
+        for path in _write_path_expressions(tree)
+    ):
+        issues.append(
+            "scoring/eval.py must write its authoritative structured result to "
+            f"`{_EVALUATOR_RESULTS_PATH}`."
+        )
+
+    return list(dict.fromkeys(issues))
 
 
 def generate_rule_maker_prompt(
@@ -402,8 +550,12 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
         issues.append(f"missing: {eval_path}")
     else:
         try:
-            ast.parse(eval_path.read_text(encoding="utf-8"))
-            found["eval_script"] = str(eval_path)
+            evaluator_tree = ast.parse(eval_path.read_text(encoding="utf-8"))
+            evaluator_issues = _validate_evaluator_abi(evaluator_tree)
+            if evaluator_issues:
+                issues.extend(evaluator_issues)
+            else:
+                found["eval_script"] = str(eval_path)
         except SyntaxError as e:
             issues.append(f"eval.py has syntax error: {e}")
 
@@ -412,8 +564,19 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
         issues.append(f"missing: {targets_path}")
     else:
         try:
-            json.loads(targets_path.read_text(encoding="utf-8"))
-            found["targets"] = str(targets_path)
+            targets = json.loads(targets_path.read_text(encoding="utf-8"))
+            declared_result = (
+                str(targets.get("result_file", "")).strip().replace("\\", "/")
+                if isinstance(targets, dict)
+                else ""
+            )
+            if declared_result and declared_result != _EVALUATOR_RESULTS_PATH:
+                issues.append(
+                    "scoring/targets.json declares a conflicting result_file; "
+                    f"the evaluator ABI requires `{_EVALUATOR_RESULTS_PATH}`."
+                )
+            else:
+                found["targets"] = str(targets_path)
         except json.JSONDecodeError as e:
             issues.append(f"targets.json is not valid JSON: {e}")
 
@@ -428,8 +591,20 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
         try:
             from core.hitl import HitlValidationError, parse_required_artifacts
 
-            parse_required_artifacts(interface_path)
-            found["interface"] = str(interface_path)
+            artifacts = parse_required_artifacts(interface_path)
+            evaluator_owned = [
+                artifact.path
+                for artifact in artifacts
+                if artifact.path.startswith(_EVALUATOR_OWNED_INTERFACE_PREFIXES)
+            ]
+            if evaluator_owned:
+                issues.append(
+                    "scoring/interface.md assigns evaluator-owned paths to the "
+                    "experiment runner: "
+                    + ", ".join(evaluator_owned)
+                )
+            else:
+                found["interface"] = str(interface_path)
         except (OSError, HitlValidationError) as exc:
             issues.append(f"invalid artifact contract in {interface_path}: {exc}")
 

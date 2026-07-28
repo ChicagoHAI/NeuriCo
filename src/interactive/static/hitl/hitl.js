@@ -121,10 +121,14 @@
     const workspace = state.snapshot?.workspace || "HITL workspace";
     const runStatus = state.snapshot?.run?.status || "unavailable";
     const runIsActive = runStatus === "running";
+    const runCanLaunch = ["idle", "completed", "failed"].includes(runStatus);
+    const runActionTitle = state.snapshot?.autoresearch?.mode === "continue"
+      ? "Continue AutoResearch"
+      : "Start AutoResearch";
     const runControl = runIsActive
       ? q("button", { class: "icon-button toolbar-action run-active", title: "AutoResearch is running", "aria-label": "AutoResearch is running", disabled: "disabled", text: "■" })
-      : runStatus === "idle"
-        ? icon("▶", "Start AutoResearch", () => { state.runPanel = !state.runPanel; render(); }, "toolbar-action")
+      : runCanLaunch
+        ? icon("▶", runActionTitle, () => { state.runPanel = !state.runPanel; render(); }, "toolbar-action")
         : null;
     return q("header", { class: "topbar" }, [
       q("div", { class: "brand" }, [q("span", { class: "workspace-mark", text: "▱" }), q("span", { class: "workspace-title", text: workspace }), q("span", { class: "page-label", text: state.route === "conversation" ? "Conversation" : "Research" })]),

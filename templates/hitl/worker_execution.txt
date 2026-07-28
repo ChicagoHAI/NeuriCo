@@ -29,6 +29,12 @@ remain under `scoring/`.
 Rule-maker execution requirements:
 - create or update only the approved evaluation contract: `scoring/eval.py`,
   `scoring/targets.json`, `scoring/interface.md`, and `scoring/rule_maker_log.md`
+- preserve the fixed evaluator ABI: runtime invokes exactly
+  `python scoring/eval.py` with no command-line arguments, and the evaluator
+  must write its authoritative structured result to `scoring/results.json`
+- keep evaluator-owned files and evaluator results out of
+  `scoring/interface.md`'s `Files to produce` table; that table lists only
+  prerequisites the experiment runner must create
 - keep metric direction, targets, interface requirements, and rationale aligned
   with the approved plan
 - do not run `scoring/eval.py` before runner artifacts exist

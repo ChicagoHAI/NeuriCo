@@ -4,6 +4,10 @@ When you believe this phase is complete:
 2. Then call `hitl-finish-phase` and wait for reviewer feedback.
 3. After receiving the feedback, follow its instruction for the next step.
 
+`hitl-finish-phase` may remain blocked throughout scoring and manager review.
+Run exactly one instance. Do not launch concurrent, background, timed, polling,
+or delayed retries. Wait for that instance to return.
+
 If the command prints `HITL_COMMAND_ERROR` or `HITL_ERROR`, follow its printed
 instruction, correct the command, and retry in this same worker session.
 

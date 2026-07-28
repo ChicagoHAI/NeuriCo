@@ -996,6 +996,7 @@ class HitlManager:
             related_artifacts_json=json.dumps(related_artifacts, indent=2, ensure_ascii=False),
             requires_human_approval=requires_human_approval,
             allow_scoring_approval=allow_scoring_approval,
+            is_rule_maker=(pipeline_stage == "rule_maker"),
         )
         return self.request_worker_resolution(
             command={
