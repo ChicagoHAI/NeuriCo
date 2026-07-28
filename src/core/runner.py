@@ -11,6 +11,8 @@ This module orchestrates the execution of research by:
 
 from pathlib import Path
 from typing import Optional, Dict, Any
+from functools import wraps
+import inspect
 import subprocess
 import shlex
 import sys
@@ -53,6 +55,43 @@ try:
     GITHUB_AVAILABLE = True
 except ImportError:
     GITHUB_AVAILABLE = False
+
+
+def _with_hitl_workspace_run_ownership(method):
+    """Hold the workspace lease around every HITL entry into the shared runner."""
+    method_signature = inspect.signature(method)
+
+    @wraps(method)
+    def owned_run(self, *args, **kwargs):
+        arguments = method_signature.bind(self, *args, **kwargs)
+        arguments.apply_defaults()
+        hitl_interface = (
+            arguments.arguments["hitl_autoresearch"]
+            or arguments.arguments["hitl_continue_autoresearch"]
+        )
+        if not hitl_interface:
+            return method(self, *args, **kwargs)
+
+        from core.hitl_lock import hitl_workspace_run_lease
+
+        idea_id = str(arguments.arguments["idea_id"])
+        work_dir = self._hitl_workspace_for_run_ownership(
+            idea_id,
+            force_fresh=bool(arguments.arguments["force_fresh"]),
+        )
+        mode = "continue" if arguments.arguments["hitl_continue_autoresearch"] else "fresh"
+        with hitl_workspace_run_lease(
+            work_dir,
+            owner={
+                "idea_id": idea_id,
+                "interface": str(hitl_interface),
+                "mode": mode,
+                "provider": str(arguments.arguments["provider"]),
+            },
+        ):
+            return method(self, *args, **kwargs)
+
+    return owned_run
 
 
 class ResearchRunner:
@@ -112,6 +151,28 @@ class ResearchRunner:
                     print(f"⚠️  GitHub integration failed: {e}")
                     self.use_github = False
 
+    def _hitl_workspace_for_run_ownership(self, idea_id: str, *, force_fresh: bool) -> Path:
+        idea = self.idea_manager.get_idea(idea_id)
+        if idea is None:
+            raise ValueError(f"Idea not found: {idea_id}")
+        metadata = dict(idea.get("idea", {}).get("metadata", {}) or {})
+
+        if self.use_github and self.github_manager is not None:
+            repo_name = str(metadata.get("github_repo_name", "")).strip() or None
+            existing = self.github_manager.get_workspace_path(idea_id, repo_name)
+            if existing is not None:
+                return Path(existing).resolve()
+            if repo_name:
+                return (Path(self.github_manager.workspace_dir) / repo_name).resolve()
+
+        local_workspace = str(metadata.get("local_workspace", "")).strip()
+        if not force_fresh and local_workspace:
+            candidate = Path(local_workspace).expanduser()
+            if candidate.exists():
+                return candidate.resolve()
+        return (self.runs_dir / idea_id).resolve()
+
+    @_with_hitl_workspace_run_ownership
     def run_research(
         self,
         idea_id: str,

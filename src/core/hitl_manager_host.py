@@ -13,7 +13,11 @@ from typing import Any, Dict, List, Optional
 from interactive.channel import UserChannel, WebChannel, _SHUTDOWN
 from interactive.hitl_web_server import HitlWebServer
 
-from core.hitl_manager_inbox import HitlManagerInbox, HitlWebInputError
+from core.hitl_manager_inbox import (
+    HitlManagerInbox,
+    HitlWebInputError,
+    normalize_human_message,
+)
 from core.hitl_manager_context import HitlManagerTranscript
 from core.hitl_manager_react import HitlManager
 
@@ -140,8 +144,7 @@ class HitlWebChannel(WebChannel):
                     None,
                 )
                 response = str(text).strip() or (str(selected["text"]) if selected else "")
-                if not response:
-                    raise ValueError("Select an option or provide feedback before submitting.")
+                response = normalize_human_message(response)
                 self._resolution_reply_handler(response)
             except HitlWebInputError:
                 raise
@@ -161,6 +164,7 @@ class HitlWebChannel(WebChannel):
             self._emit({"event": "status", "waiting": False})
             self._emit({"event": "workspace_changed", "section": "inbox"})
             return {"status": "accepted", "request_key": expected_key}
+        text = normalize_human_message(text)
         if self._inbox is None:
             self._memory_input.put(text)
             return {"status": "accepted"}
@@ -209,6 +213,10 @@ class HitlWebChannel(WebChannel):
     def update_queued_input(self, item_id: str, text: str) -> Dict[str, str]:
         if self._inbox is None:
             raise HitlWebInputError("invalid", "Queued-message editing is only available in the web manager.")
+        try:
+            text = normalize_human_message(text)
+        except ValueError as exc:
+            raise HitlWebInputError("invalid", str(exc)) from exc
         try:
             updated = self._inbox.update(item_id, text)
         except ValueError as exc:
@@ -307,6 +315,11 @@ class HitlTerminalChannel(UserChannel):
                 request_key, text = reply_parts
             else:
                 input_kind = _CONVERSATION
+        try:
+            text = normalize_human_message(text)
+        except ValueError as exc:
+            self.send(str(exc), kind="system")
+            return
         if input_kind == _RESOLUTION_REPLY:
             with self._state_lock:
                 accepting = (
@@ -423,6 +436,14 @@ class HitlManagerHost:
         if isinstance(self.channel, HitlWebChannel):
             self.channel.bind_conversation(self.manager.conversation)
 
+    @property
+    def browser_url(self) -> Optional[str]:
+        if self.web_server is None:
+            return None
+        if self._browser_url is not None:
+            return self.web_server.access_url(self._browser_url)
+        return self.web_server.url
+
     def start(self) -> None:
         if self.web_server is not None:
             self.web_server.start()
@@ -432,10 +453,11 @@ class HitlManagerHost:
                     "The requested HITL manager port is unavailable inside the container: "
                     f"{self._requested_port}. Choose a different --hitl-manager-port."
                 )
-            browser_url = self._browser_url or self.web_server.url
+            browser_url = self.browser_url
+            assert browser_url is not None
             print(f"\nHITL manager web interface: {browser_url}", flush=True)
             if self._open_browser and self._browser_url is None:
-                threading.Timer(0.8, lambda: webbrowser.open(self.web_server.url)).start()
+                threading.Timer(0.8, lambda: webbrowser.open(browser_url)).start()
         else:
             assert isinstance(self.channel, HitlTerminalChannel)
             self.channel.start()

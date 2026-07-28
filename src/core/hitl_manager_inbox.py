@@ -15,9 +15,24 @@ from core.hitl_lock import exclusive_file_lock
 from core.hitl_paths import hitl_manager_dir
 from core.hitl_util import atomic_write_json, utc_now
 
+MAX_HUMAN_MESSAGE_CHARS = 32_000
+MAX_QUEUED_MESSAGES = 64
+
 
 def _now() -> str:
     return utc_now(zulu=False)
+
+
+def normalize_human_message(text: str) -> str:
+    value = str(text).strip()
+    if not value:
+        raise ValueError("Enter a message before sending it.")
+    if len(value) > MAX_HUMAN_MESSAGE_CHARS:
+        raise ValueError(
+            "Manager messages are limited to "
+            f"{MAX_HUMAN_MESSAGE_CHARS:,} characters."
+        )
+    return value
 
 
 class HitlWebInputError(ValueError):
@@ -67,9 +82,7 @@ class HitlManagerInbox:
     def enqueue(
         self, text: str, *, provider: str = "", client_turn_id: str = ""
     ) -> Dict[str, str]:
-        text = str(text).strip()
-        if not text:
-            raise ValueError("Enter a message before sending it.")
+        text = normalize_human_message(text)
         supplied_id = str(client_turn_id).strip()
         record = {
             "id": supplied_id or f"H{uuid.uuid4().hex}",
@@ -79,6 +92,11 @@ class HitlManagerInbox:
         }
         with exclusive_file_lock(self.lock_path):
             state = self._load()
+            if len(state["queue"]) >= MAX_QUEUED_MESSAGES:
+                raise ValueError(
+                    "The manager input queue is full. Wait for the manager to "
+                    "consume a message or remove one before sending another."
+                )
             state["queue"].append(record)
             self._write(state)
         return record
@@ -97,11 +115,9 @@ class HitlManagerInbox:
     def update(self, item_id: str, text: str) -> Dict[str, str]:
         """Replace one queued message without changing its place in the queue."""
         item_id = str(item_id).strip()
-        text = str(text).strip()
+        text = normalize_human_message(text)
         if not item_id:
             raise ValueError("Choose a queued message to edit.")
-        if not text:
-            raise ValueError("A queued message cannot be empty.")
         with exclusive_file_lock(self.lock_path):
             state = self._load()
             for item in state["queue"]:

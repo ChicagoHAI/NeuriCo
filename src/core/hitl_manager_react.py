@@ -21,7 +21,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from core.hitl_paths import hitl_manager_dir
-from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+from core.hitl_runtime_state import (
+    MANAGER_REVIEW_FINALIZERS,
+    HitlRuntimeState,
+    HitlRuntimeStateError,
+)
 from core.hitl_workspace_inspection import HitlWorkspaceInspector
 
 
@@ -376,7 +380,6 @@ class HitlManager:
             "finalize_frontier_decision",
         }
     )
-
     def _available_tool_names(self) -> set[str]:
         """Return the runtime-authorized tool surface for the next ReAct turn.
 
@@ -547,10 +550,10 @@ class HitlManager:
                 call_id=call_id, name=tool_name, arguments=dict(arguments)
             )
             result = HitlManagerToolExecutor(self).execute(tool_name, dict(arguments))
-            self.conversation.append_tool_result(
+            projected_result = self.conversation.append_tool_result(
                 call_id=call_id, tool_name=tool_name, content=result
             )
-        return result, result.startswith("Error:")
+        return projected_result, result.startswith("Error:")
 
     def _stop_cli_mcp_bridge(self) -> None:
         server = self._mcp_server
@@ -1120,6 +1123,7 @@ class HitlManager:
             validate=validate,
             finalize=on_finalize,
             manager_finalizer="finalize_frontier_decision",
+            manager_review_kind="frontier_scoring",
         )
 
     def review_initial_scoring_result(
@@ -1155,6 +1159,7 @@ class HitlManager:
             validate=validate,
             finalize=on_finalize,
             manager_finalizer="finalize_worker_request",
+            manager_review_kind="initial_scoring",
         )
 
     def submit_resolution_reply(self, response: str) -> None:
@@ -1197,6 +1202,7 @@ class HitlManager:
         validate: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         manager_finalizer: str = "finalize_worker_request",
+        manager_review_kind: str,
     ) -> Dict[str, Any]:
         """Attach the next runtime step to the same held worker command.
 
@@ -1216,6 +1222,17 @@ class HitlManager:
             raise HitlRuntimeStateError(
                 f"Unsupported manager finalizer for resumed worker request: {manager_finalizer}"
             )
+        manager_review_kind = str(manager_review_kind).strip()
+        expected_finalizer = MANAGER_REVIEW_FINALIZERS.get(manager_review_kind)
+        if expected_finalizer is None:
+            raise HitlRuntimeStateError(
+                f"Unsupported manager review kind for resumed worker request: {manager_review_kind}"
+            )
+        if manager_finalizer != expected_finalizer:
+            raise HitlRuntimeStateError(
+                f"Manager review kind {manager_review_kind} requires {expected_finalizer}, "
+                f"not {manager_finalizer}."
+            )
         with self._resolution_lock:
             resolution = self._resolutions.get(request_key)
             if resolution is None:
@@ -1234,6 +1251,7 @@ class HitlManager:
             request_key,
             status="pending",
             manager_finalizer=manager_finalizer,
+            manager_review_kind=manager_review_kind,
         )
         self.notify_runtime(prompt, request_key=request_key)
         resolution.completed.wait()

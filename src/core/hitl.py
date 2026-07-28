@@ -1095,14 +1095,10 @@ class HitlRuntime:
             proposal_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
             proposal_submission_validator = proposal_guard.require_unchanged
         allowed_worker_commands = self._worker_commands_for_stage(hitl_stage)
-        from core.hitl_runtime_state import HitlRuntimeState
+        from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
 
         pending_command = HitlRuntimeState(self.work_dir).pending_worker_command()
-        if isinstance(pending_command, dict) and pending_command.get("status") in {
-            "pending",
-            "scoring_approval_pending",
-            "scoring",
-        }:
+        if worker_command_requires_resume(pending_command):
             allowed_worker_commands.add("hitl-resume-worker-request")
 
         self._tool_context = {
@@ -2281,6 +2277,134 @@ class HitlRuntime:
             ),
         }
 
+    @staticmethod
+    def _validate_runtime_scoring_failure(data: Dict[str, Any]) -> Dict[str, Any]:
+        if str(data.get("status", "")).strip() != "feedback":
+            raise HitlValidationError("A runtime scoring failure requires status='feedback'.")
+        return {
+            "status": "feedback",
+            "context": _require_text(
+                data.get("context"),
+                "context",
+                "Runtime scoring failure",
+            ),
+            "manager_feedback": _require_text(
+                data.get("manager_feedback"),
+                "manager_feedback",
+                "Runtime scoring failure",
+            ),
+        }
+
+    def _run_protected_scoring_handler(
+        self,
+        handler: Callable[[Dict[str, Any]], None],
+        approval: Dict[str, Any],
+        *,
+        finalize_failure: Callable[[Dict[str, Any]], Dict[str, Any]],
+    ) -> None:
+        """Run one scoring handoff without stranding its held worker request."""
+        try:
+            handler(approval)
+        except Exception as exc:
+            self.manager.resume_worker_request(
+                prompt=_load_hitl_template(
+                    "manager_runtime_scoring_failure.txt",
+                    error=str(exc),
+                ),
+                validate=self._validate_runtime_scoring_failure,
+                finalize=finalize_failure,
+                manager_review_kind="scoring_failure",
+            )
+
+    def _finalize_resumed_scoring_failure(
+        self,
+        review: Dict[str, Any],
+        *,
+        pending: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Rebuild the normal repair response when the original finish stack is gone."""
+        hitl_stage = _require_text(
+            pending.get("hitl_stage"),
+            "hitl_stage",
+            "Resumed runtime scoring failure",
+        )
+        if hitl_stage not in {"execution", "review"}:
+            raise HitlValidationError(
+                f"Runtime scoring failure cannot resume from HITL stage {hitl_stage!r}."
+            )
+        summary = _require_text(
+            pending.get("finish_summary"),
+            "finish_summary",
+            "Resumed runtime scoring failure",
+        )
+        related_artifacts = _as_related_artifacts(pending.get("related_artifacts"))
+        feedback = _require_text(
+            review.get("manager_feedback"),
+            "manager_feedback",
+            "Resumed runtime scoring failure",
+        )
+        record = self.log.append(
+            self._finish_review_record(
+                hitl_stage="review",
+                summary=summary,
+                related_artifacts=related_artifacts,
+                review=review,
+                decision="O2",
+                raised=True,
+                manager_feedback=feedback,
+            ),
+            idempotent=True,
+        )
+        return self.scoring_repair_response(
+            context=_require_text(
+                review.get("context"),
+                "context",
+                "Resumed runtime scoring failure",
+            ),
+            manager_feedback=feedback,
+            record=record,
+        )
+
+    def _resume_pending_scoring_handler(
+        self,
+        *,
+        request_key: str,
+        pending: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Reconnect one held command to its persisted scoring lifecycle."""
+        handler = self._tool_context.get("scoring_handler")
+        if not callable(handler):
+            raise HitlValidationError(
+                "Runtime resumed a scoring handoff without its scoring handler. "
+                "Keep the workspace unchanged and retry after the HITL controller restarts recovery."
+            )
+        record = self._complete_pending_scoring_approval(
+            request_key=request_key,
+            pending=pending,
+        )
+        approval = {
+            "status": "approved_for_scoring",
+            "context": str(pending.get("scoring_context", "")).strip(),
+            "scoring_review_idea_id": str(record["idea_id"]),
+        }
+        if request_key not in self._started_scoring_requests:
+            self._started_scoring_requests.add(request_key)
+
+            def finalize_failure(review: Dict[str, Any]) -> Dict[str, Any]:
+                return self._finalize_resumed_scoring_failure(
+                    review,
+                    pending=pending,
+                )
+
+            threading.Thread(
+                target=self._run_protected_scoring_handler,
+                args=(handler, approval),
+                kwargs={"finalize_failure": finalize_failure},
+                daemon=True,
+                name="neurico-hitl-resumed-scoring",
+            ).start()
+        return self.manager.wait_for_worker_request(request_key)
+
     def resume_pending_worker_command(self) -> Dict[str, Any]:
         """Reconnect a replacement worker to the one runtime-held command.
 
@@ -2305,31 +2429,29 @@ class HitlRuntime:
             return dict(response)
         kind = str(pending.get("kind", "")).strip()
         if kind == "phase_finish":
-            if pending.get("status") in {"scoring_approval_pending", "scoring"}:
-                handler = self._tool_context.get("scoring_handler")
-                if not callable(handler):
+            from core.hitl_runtime_state import MANAGER_REVIEW_FINALIZERS
+
+            manager_review_kind = str(pending.get("manager_review_kind", "")).strip()
+            if manager_review_kind and manager_review_kind not in MANAGER_REVIEW_FINALIZERS:
+                raise HitlValidationError(
+                    f"Pending HITL worker request has an unsupported manager review kind: "
+                    f"{manager_review_kind}."
+                )
+            if manager_review_kind:
+                expected_finalizer = MANAGER_REVIEW_FINALIZERS[manager_review_kind]
+                manager_finalizer = str(pending.get("manager_finalizer", "")).strip()
+                if manager_finalizer != expected_finalizer:
                     raise HitlValidationError(
-                        "Runtime resumed a scoring handoff without its scoring handler. "
-                        "Keep the workspace unchanged and retry after the HITL controller restarts recovery."
+                        f"Pending {manager_review_kind} review requires {expected_finalizer}, "
+                        f"not {manager_finalizer or '<missing>'}."
                     )
-                record = self._complete_pending_scoring_approval(
+            if pending.get("status") in {"scoring_approval_pending", "scoring"} or (
+                pending.get("status") == "pending" and manager_review_kind
+            ):
+                return self._resume_pending_scoring_handler(
                     request_key=request_key,
                     pending=pending,
                 )
-                approval = {
-                    "status": "approved_for_scoring",
-                    "context": str(pending.get("scoring_context", "")).strip(),
-                    "scoring_review_idea_id": str(record["idea_id"]),
-                }
-                if request_key not in self._started_scoring_requests:
-                    self._started_scoring_requests.add(request_key)
-                    threading.Thread(
-                        target=handler,
-                        args=(approval,),
-                        daemon=True,
-                        name="neurico-hitl-resumed-scoring",
-                    ).start()
-                return self.manager.wait_for_worker_request(request_key)
             return self.finish_tool_phase(
                 {
                     "summary": pending.get("finish_summary", ""),
@@ -2582,44 +2704,10 @@ class HitlRuntime:
                 finalized["record"] = record
                 payload = {**review, "scoring_review_idea_id": record["idea_id"]}
 
-                def run_scoring() -> None:
-                    try:
-                        handler(payload)
-                    except Exception as exc:
-                        # A scorer handoff must never leave the worker held with
-                        # no route back into the normal manager ReAct loop.
-                        # Runtime asks the manager for repair feedback on the
-                        # same command rather than treating this as terminal.
-                        def validate_scoring_failure(data: Dict[str, Any]) -> Dict[str, Any]:
-                            if str(data.get("status", "")).strip() != "feedback":
-                                raise HitlValidationError(
-                                    "A runtime scoring failure requires status='feedback'."
-                                )
-                            return {
-                                "status": "feedback",
-                                "context": _require_text(
-                                    data.get("context"),
-                                    "context",
-                                    "Runtime scoring failure",
-                                ),
-                                "manager_feedback": _require_text(
-                                    data.get("manager_feedback"),
-                                    "manager_feedback",
-                                    "Runtime scoring failure",
-                                ),
-                            }
-
-                        self.manager.resume_worker_request(
-                            prompt=_load_hitl_template(
-                                "manager_runtime_scoring_failure.txt",
-                                error=str(exc),
-                            ),
-                            validate=validate_scoring_failure,
-                            finalize=persist_phase_review,
-                        )
-
                 threading.Thread(
-                    target=run_scoring,
+                    target=self._run_protected_scoring_handler,
+                    args=(handler, payload),
+                    kwargs={"finalize_failure": persist_phase_review},
                     daemon=True,
                     name="neurico-hitl-scoring",
                 ).start()

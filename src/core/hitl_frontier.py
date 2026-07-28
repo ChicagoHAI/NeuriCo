@@ -150,7 +150,24 @@ class HitlFrontierStore:
         objective_score: Dict[str, Any],
         reason_for_acceptance: str,
     ) -> None:
+        node_sha = self._require_sha(node_sha, "root node SHA")
         if self.exists():
+            current = self.state()
+            if (
+                current["selected_frontier_node_sha"] != node_sha
+                or current["active_frontier_node_shas"] != [node_sha]
+            ):
+                raise HitlFrontierError(
+                    "Existing HITL frontier does not match the initial root publication"
+                )
+            self._write_node(
+                parent_node_sha=None,
+                node_sha=node_sha,
+                plan_text=plan_text,
+                objective_score=objective_score,
+                reason_for_acceptance=reason_for_acceptance,
+            )
+            self._retain_git_object("frontier", node_sha)
             return
         self._write_node(
             parent_node_sha=None,
@@ -160,10 +177,10 @@ class HitlFrontierStore:
             reason_for_acceptance=reason_for_acceptance,
         )
         self._write_state(
-            selected=self._require_sha(node_sha, "root node SHA"),
-            active=[self._require_sha(node_sha, "root node SHA")],
+            selected=node_sha,
+            active=[node_sha],
         )
-        self._retain_git_object("frontier", self._require_sha(node_sha, "root node SHA"))
+        self._retain_git_object("frontier", node_sha)
 
     def _retain_git_object(self, kind: str, name: str, node_sha: str | None = None) -> None:
         """Keep runtime-owned frontier objects reachable across Git maintenance.

@@ -20,6 +20,7 @@ from core.hitl_runtime_state import HitlRuntimeState
 from core.hitl_manager_context import HitlManagerContext
 from core.hitl_paths import hitl_state_dir
 from core.hitl_whiteboard import hitl_whiteboard_path
+from core.whiteboard import MAX_TIP_CONTENT_CHARS
 
 
 class HitlWorkspaceViewError(RuntimeError):
@@ -121,7 +122,12 @@ class HitlWorkspaceView:
             plan_path = path.with_suffix(".md")
             if not plan_path.is_file():
                 raise HitlWorkspaceViewError(f"Accepted HITL node is missing its saved plan: {node_sha}")
-            payload["plan"] = plan_path.read_text(encoding="utf-8")
+            try:
+                payload["plan"] = plan_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise HitlWorkspaceViewError(
+                    f"Accepted HITL node has an unreadable saved plan: {node_sha}"
+                ) from exc
             payload["active"] = node_sha in state["active_frontier_node_shas"]
             payload["selected"] = node_sha == state["selected_frontier_node_sha"]
             nodes_by_sha[node_sha] = payload
@@ -164,8 +170,11 @@ class HitlWorkspaceView:
         payload = _read_object(path, "HITL whiteboard")
         tips = _as_records(payload.get("tips", []), "HITL whiteboard tips")
         for tip in tips:
-            if not str(tip.get("id", "")).strip() or not str(tip.get("content", "")).strip():
+            content = str(tip.get("content", ""))
+            if not str(tip.get("id", "")).strip() or not content.strip():
                 raise HitlWorkspaceViewError("Every HITL whiteboard tip requires id and content.")
+            if len(content) > MAX_TIP_CONTENT_CHARS:
+                tip["content"] = content[:MAX_TIP_CONTENT_CHARS]
             if not isinstance(tip.get("affects", []), list) or any(
                 not isinstance(value, str) for value in tip.get("affects", [])
             ):

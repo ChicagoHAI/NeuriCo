@@ -45,8 +45,11 @@ from core.hitl import (
 from core.hitl_frontier import HitlFrontierStore
 from core.hitl_git import delete_git_ref
 from core.hitl_git_state import HitlGitStateStore
-from core.hitl_runtime_state import HitlRuntimeState
-from core.hitl_scoring_workspace import run_isolated_scorer
+from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
+from core.hitl_scoring_workspace import (
+    run_isolated_scorer,
+    scoring_source_workspace_fingerprint,
+)
 from core.hitl_stage_runtime import run_worker_with_replacements
 from core.hitl_util import atomic_write_json, utc_now
 from core.hitl_whiteboard import (
@@ -86,6 +89,126 @@ class HitlRecoveryResult:
     frontier_transition: Optional[Dict[str, Any]] = None
 
 
+def _initial_publication_pipeline_result(
+    work_dir: Path,
+    transition: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Load the completed pipeline summary without making it a recovery gate."""
+    path = Path(work_dir) / ".neurico" / "pipeline_results.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict):
+        return payload
+    objective_score = transition.get("objective_score")
+    scorer_result = (
+        dict(objective_score.get("scorer_result") or {})
+        if isinstance(objective_score, dict)
+        else {}
+    )
+    return {
+        "success": True,
+        "stages": {
+            "experiment_runner": {"success": True},
+            "scorer": scorer_result,
+        },
+    }
+
+
+def _commit_initial_root_publication(
+    work_dir: Path,
+    transition: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Publish the approved initial score through replay-safe durable steps."""
+    work_dir = Path(work_dir)
+    runtime_state = HitlRuntimeState(work_dir)
+    frontier = HitlFrontierStore(work_dir)
+    status = str(transition.get("status", "prepared")).strip()
+
+    if status == "prepared":
+        checkpoint = CheckpointManager(work_dir).create_checkpoint(
+            "HITL AutoResearch initial public scored state"
+        )
+        transition = runtime_state.advance_initial_root_publication_transition(
+            status="checkpoint_created",
+            node_sha=checkpoint.sha,
+        )
+        status = "checkpoint_created"
+
+    node_sha = str(transition.get("node_sha", "")).strip()
+    objective_score = transition.get("objective_score")
+    if not node_sha or not isinstance(objective_score, dict):
+        raise RuntimeError("Persisted initial-root publication is incomplete.")
+
+    if status == "checkpoint_created":
+        frontier.initialize_root(
+            node_sha=node_sha,
+            plan_text=str(transition.get("plan_text", "")),
+            objective_score=objective_score,
+            reason_for_acceptance=str(
+                transition.get("reason_for_acceptance", "")
+            ),
+        )
+        transition = runtime_state.advance_initial_root_publication_transition(
+            status="root_initialized",
+        )
+        status = "root_initialized"
+
+    if status == "root_initialized":
+        frontier.configure_autoresearch_run(
+            history_root=Path(str(transition.get("history_root", ""))),
+            lineage_source_sha=node_sha,
+            last_iteration=0,
+        )
+        transition = runtime_state.advance_initial_root_publication_transition(
+            status="run_configured",
+        )
+        status = "run_configured"
+
+    if status == "run_configured":
+        history_root = Path(str(transition.get("history_root", "")))
+        frontier.mirror_nodes_to(history_root / "nodes")
+        transition = runtime_state.advance_initial_root_publication_transition(
+            status="mirrored",
+        )
+        status = "mirrored"
+
+    if status == "mirrored":
+        scoring_ref = str(transition.get("scoring_ref", "")).strip()
+        if scoring_ref:
+            _delete_runtime_git_ref(work_dir, scoring_ref, strict=True)
+        transition = runtime_state.advance_initial_root_publication_transition(
+            status="completed",
+        )
+        status = "completed"
+
+    if status != "completed":
+        raise RuntimeError(
+            f"Unsupported initial-root publication status: {status or '<empty>'}"
+        )
+    return transition
+
+
+def _initial_node_result_from_publication(
+    work_dir: Path,
+    transition: Dict[str, Any],
+    pipeline_result: Dict[str, Any],
+) -> InitialAutoResearchNodeResult:
+    node_sha = str(transition.get("node_sha", "")).strip()
+    if not node_sha:
+        raise RuntimeError("Completed initial-root publication has no root checkpoint.")
+    return InitialAutoResearchNodeResult(
+        success=True,
+        mode="fresh_initial_node",
+        work_dir=str(work_dir),
+        initial_sha=node_sha,
+        current_best_sha=node_sha,
+        reason="Fresh HITL scored pipeline succeeded and initialized the frontier.",
+        pipeline_result=pipeline_result,
+    )
+
+
 def run_fresh_hitl_autoresearch_initial_node(
     *,
     idea: Dict[str, Any],
@@ -110,6 +233,24 @@ def run_fresh_hitl_autoresearch_initial_node(
     from core.pipeline_orchestrator import ResearchPipelineOrchestrator
 
     work_dir = Path(work_dir)
+    existing_publication = (
+        HitlRuntimeState(work_dir).initial_root_publication_transition()
+    )
+    if isinstance(existing_publication, dict):
+        pipeline_result = _initial_publication_pipeline_result(
+            work_dir,
+            existing_publication,
+        )
+        completed_publication = _commit_initial_root_publication(
+            work_dir,
+            existing_publication,
+        )
+        return _initial_node_result_from_publication(
+            work_dir,
+            completed_publication,
+            pipeline_result,
+        )
+
     pipeline_result = ResearchPipelineOrchestrator(
         work_dir=work_dir,
         templates_dir=templates_dir,
@@ -153,9 +294,6 @@ def run_fresh_hitl_autoresearch_initial_node(
             pipeline_result=pipeline_result,
         )
 
-    initial = CheckpointManager(work_dir).create_checkpoint(
-        "HITL AutoResearch initial public scored state"
-    )
     plan_path = work_dir / "plans" / "experiment_runner_plan.md"
     if not plan_path.is_file():
         raise RuntimeError(
@@ -168,37 +306,28 @@ def run_fresh_hitl_autoresearch_initial_node(
     if not isinstance(results, dict):
         raise RuntimeError("HITL initial scorer result did not include structured objective results.")
     history_root, _ = resolve_autoresearch_history_root(work_dir, autoresearch_history_dir)
-    frontier = HitlFrontierStore(work_dir)
-    frontier.initialize_root(
-        node_sha=initial.sha,
-        plan_text=plan_path.read_text(encoding="utf-8"),
-        objective_score={
-            "scorer_result": scorer_result if isinstance(scorer_result, dict) else {},
-            "results": results,
-        },
-        reason_for_acceptance=_initial_frontier_acceptance_reason(work_dir),
+    publication = HitlRuntimeState(
+        work_dir
+    ).begin_initial_root_publication_transition(
+        {
+            "plan_text": plan_path.read_text(encoding="utf-8"),
+            "objective_score": {
+                "scorer_result": scorer_result if isinstance(scorer_result, dict) else {},
+                "results": results,
+            },
+            "reason_for_acceptance": _initial_frontier_acceptance_reason(work_dir),
+            "history_root": str(history_root.resolve()),
+            "scoring_ref": str(scorer_result.get("scoring_ref", "")).strip(),
+        }
     )
-    frontier.configure_autoresearch_run(
-        history_root=history_root,
-        lineage_source_sha=initial.sha,
-        last_iteration=0,
+    completed_publication = _commit_initial_root_publication(
+        work_dir,
+        publication,
     )
-    frontier.mirror_nodes_to(history_root / "nodes")
-    scoring_ref = str(scorer_result.get("scoring_ref", "")).strip()
-    if scoring_ref:
-        # Root initialization is already durable at this point. A retained
-        # temporary ref is harmless recovery debris; failing the completed
-        # initial run here would create a worse state than leaving it for
-        # runtime cleanup.
-        _delete_runtime_git_ref(work_dir, scoring_ref, strict=False)
-    return InitialAutoResearchNodeResult(
-        success=True,
-        mode="fresh_initial_node",
-        work_dir=str(work_dir),
-        initial_sha=initial.sha,
-        current_best_sha=initial.sha,
-        reason="Fresh HITL scored pipeline succeeded and initialized the frontier.",
-        pipeline_result=pipeline_result,
+    return _initial_node_result_from_publication(
+        work_dir,
+        completed_publication,
+        pipeline_result,
     )
 
 
@@ -275,20 +404,6 @@ def _best_effort_archive_failed_hitl_attempt(**kwargs: Any) -> None:
         _archive_failed_hitl_attempt(**kwargs)
     except Exception as exc:
         print(f"⚠️  Could not archive HITL runtime failure diagnostics: {exc}")
-
-
-def _scoring_source_workspace_fingerprint(
-    pending: Dict[str, Any],
-    cached_score: Optional[Dict[str, Any]],
-) -> str:
-    """Use the post-cleanup source fingerprint when isolated scoring is resumable."""
-    if isinstance(cached_score, dict) and cached_score.get("status") == "prepared":
-        source_fingerprint = str(
-            cached_score.get("source_workspace_fingerprint", "")
-        ).strip()
-        if source_fingerprint:
-            return source_fingerprint
-    return str(pending.get("workspace_fingerprint", "")).strip()
 
 
 def _retire_temporary_scoring_ref(
@@ -386,13 +501,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         )
     continuation = runtime_state.worker_continuation()
     if (
-        isinstance(pending_request, dict)
-        and pending_request.get("status")
-        in {
-            "pending",
-            "scoring_approval_pending",
-            "scoring",
-        }
+        worker_command_requires_resume(pending_request)
         and isinstance(continuation, dict)
         and str((continuation.get("provenance") or {}).get("attempt_id", "")).strip()
         == attempt_dir.name
@@ -789,9 +898,8 @@ class HitlAutoResearchController:
             )
 
         needs_another_proposal = len(resumed_results) < iterations
-        if needs_another_proposal and resumed_frontier_selection_required:
-            self._prune_frontier_before_next_proposal()
-            current_best_sha = self._select_frontier_before_next_proposal()
+        if resumed_frontier_selection_required:
+            current_best_sha = self._maintain_frontier_after_scored_iteration()
         elif needs_another_proposal:
             resumed_selection = self._resume_frontier_boundary_if_needed()
             if resumed_selection is not None:
@@ -808,9 +916,7 @@ class HitlAutoResearchController:
                     current_best_sha=current_best_sha,
                     iterations=iteration_results,
                 )
-            if iteration < iterations:
-                self._prune_frontier_before_next_proposal()
-                current_best_sha = self._select_frontier_before_next_proposal()
+            current_best_sha = self._maintain_frontier_after_scored_iteration()
 
         return AutoResearchRunResult(
             success=True,
@@ -860,6 +966,11 @@ class HitlAutoResearchController:
         if not selected or selected != state["selected_frontier_node_sha"]:
             raise RuntimeError("HITL manager did not finalize a valid frontier selection.")
         return selected
+
+    def _maintain_frontier_after_scored_iteration(self) -> str:
+        """Close one scored iteration with pruning and an explicit selection."""
+        self._prune_frontier_before_next_proposal()
+        return self._select_frontier_before_next_proposal()
 
     def _prune_frontier_before_next_proposal(self) -> None:
         """Restore the active portfolio limit after a completed iteration."""
@@ -1605,38 +1716,33 @@ class HitlAutoResearchController:
                 reason=reason or "Runtime could not publish a scored HITL candidate.",
             )
             shutil.rmtree(attempt_dir, ignore_errors=True)
-            attempt_dir_removed = True
-        else:
-            attempt_dir_removed = False
-
-        if accepted and child_sha is not None:
-            # The provider has returned, so discard any post-approval writes
-            # and leave the public workspace at the exact checkpoint scored by
-            # runtime and retained by the manager.
-            self.checkpoints.restore_checkpoint(child_sha, clean_untracked_public=True)
-        elif not accepted and child_sha is not None:
-            self._restore_rejected_candidate_workspace(
+            return AutoResearchIterationResult(
+                iteration=iteration,
                 parent_sha=parent_sha,
-                attempt_id=attempt_marker,
-                clean_untracked_public=True,
+                child_sha=None,
+                attempt_dir=attempt_dir,
+                accepted=False,
+                reason=reason,
+                proposal=proposal,
+                comment_result=comment_result,
+                scorer_result=scorer_result,
+                parent_summary=parent_summary,
+                candidate_summary=candidate_summary,
+                attempt_dir_removed=True,
             )
-        if child_sha is not None:
-            _remove_hitl_state_snapshot(self.work_dir, attempt_dir)
-            clear_hitl_current_attempt_marker(self.work_dir)
 
-        return AutoResearchIterationResult(
+        return self._complete_scored_hitl_attempt(
             iteration=iteration,
             parent_sha=parent_sha,
             child_sha=child_sha,
             attempt_dir=attempt_dir,
-            accepted=accepted,
-            reason=reason,
             proposal=proposal,
             comment_result=comment_result,
             scorer_result=scorer_result,
             parent_summary=parent_summary,
             candidate_summary=candidate_summary,
-            attempt_dir_removed=attempt_dir_removed,
+            accepted=accepted,
+            reason=reason,
         )
 
     def _run_proposal_admission_loop(
@@ -1746,7 +1852,7 @@ class HitlAutoResearchController:
                 if not scorer_result or not source_sha:
                     raise RuntimeError("Persisted isolated scoring handoff is incomplete.")
             else:
-                reviewed_fingerprint = _scoring_source_workspace_fingerprint(
+                reviewed_fingerprint = scoring_source_workspace_fingerprint(
                     pending,
                     cached_score,
                 )

@@ -42,7 +42,10 @@ from core.agent_cli import (
     build_agent_environment,
 )
 from core.scorer import run_scorer
-from core.hitl_scoring_workspace import run_isolated_scorer
+from core.hitl_scoring_workspace import (
+    run_isolated_scorer,
+    scoring_source_workspace_fingerprint,
+)
 from core.hitl_runtime_state import HitlRuntimeState
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
 from core.workspace_manifest import build_manifest, curate_manifest
@@ -554,6 +557,7 @@ class ResearchPipelineOrchestrator:
         recovery = self.state.get_runtime_recovery("experiment_runner")
         if not recovery:
             return
+        self._retire_initial_scoring_refs_before_rollback()
         canceller = getattr(self.hitl_manager, "abandon_worker_request_for_rollback", None)
         if callable(canceller):
             canceller(
@@ -601,6 +605,26 @@ class ResearchPipelineOrchestrator:
             state_store.discard(snapshot_ref)
         except Exception as cleanup_error:
             print(f"⚠️  Could not clean restored HITL recovery snapshot: {cleanup_error}")
+
+    def _retire_initial_scoring_refs_before_rollback(self) -> None:
+        """Retire refs named by live initial-scoring state before restoring it."""
+        pending = HitlRuntimeState(self.work_dir).pending_worker_command()
+        if not isinstance(pending, dict):
+            return
+        isolated = pending.get("isolated_scoring")
+        if not isinstance(isolated, dict):
+            return
+        refs: set[str] = set()
+        scorer_result = isolated.get("scorer_result")
+        if isinstance(scorer_result, dict):
+            scoring_ref = str(scorer_result.get("scoring_ref", "")).strip()
+            if scoring_ref:
+                refs.add(scoring_ref)
+        request_key = str(pending.get("request_key", "")).strip()
+        if request_key:
+            refs.add(f"refs/neurico/hitl/scoring/{request_key}")
+        for scoring_ref in refs:
+            delete_git_ref(self.work_dir, scoring_ref, strict=True)
 
     # Provider → top-level skills directory inside the workspace. runner.py
     # copies templates/skills/* to every provider's directory so skills work
@@ -1252,7 +1276,10 @@ class ResearchPipelineOrchestrator:
                     raise RuntimeError("Persisted isolated initial scoring handoff is incomplete.")
             else:
                 checkpoints = CheckpointManager(self.work_dir)
-                reviewed_fingerprint = str(pending.get("workspace_fingerprint", "")).strip()
+                reviewed_fingerprint = scoring_source_workspace_fingerprint(
+                    pending,
+                    cached_score,
+                )
                 if not reviewed_fingerprint:
                     raise RuntimeError(
                         "HITL initial scoring is missing its reviewed workspace fingerprint."
@@ -1274,6 +1301,9 @@ class ResearchPipelineOrchestrator:
                     # immutable source tree.
                     stale_results = self.work_dir / "scoring" / "results.json"
                     stale_results.unlink(missing_ok=True)
+                    source_workspace_fingerprint = (
+                        HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
+                    )
                     source_sha = checkpoints.create_checkpoint(
                         "HITL initial experiment before isolated scoring"
                     ).sha
@@ -1282,6 +1312,7 @@ class ResearchPipelineOrchestrator:
                         isolated_scoring={
                             "status": "prepared",
                             "source_checkpoint_sha": source_sha,
+                            "source_workspace_fingerprint": source_workspace_fingerprint,
                         },
                     )
                 try:

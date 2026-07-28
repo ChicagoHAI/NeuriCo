@@ -23,6 +23,7 @@ MICROCOMPACT_MEDIUM_OUTPUT_CHARS = 300
 MICROCOMPACT_LARGE_OUTPUT_CHARS = 1_200
 COMPACTION_MIN_RECENT_MESSAGES = 2
 COMPACTION_MIN_MIDDLE_MESSAGES = 1
+MAX_ACTIVE_TOOL_RESULT_CHARS = 64_000
 
 
 def _now() -> str:
@@ -39,6 +40,21 @@ def _line(record: Dict[str, Any]) -> str:
 
 def _estimate_tokens(records: List[Dict[str, Any]]) -> int:
     return max(1, len("\n".join(_line(record) for record in records)) // 4) if records else 0
+
+
+def _project_tool_result(content: str) -> tuple[str, bool]:
+    raw = str(content)
+    if len(raw) <= MAX_ACTIVE_TOOL_RESULT_CHARS:
+        return raw, False
+    marker = (
+        "\n\n[Tool result truncated at the manager boundary: "
+        f"{len(raw):,} characters total; showing the beginning and end. "
+        "The complete result remains in durable manager history.]\n\n"
+    )
+    available = MAX_ACTIVE_TOOL_RESULT_CHARS - len(marker)
+    tail_chars = available // 4
+    head_chars = available - tail_chars
+    return raw[:head_chars] + marker + raw[-tail_chars:], True
 
 
 class HitlManagerContext:
@@ -58,7 +74,8 @@ class HitlManagerContext:
         self.context_tokens = max(4_000, int(context_tokens))
         self._records: List[Dict[str, Any]] = []
         self._lock = RLock()
-        self._restore()
+        with self._file_lock():
+            self._restore()
 
     def _file_lock(self) -> Iterator[None]:
         return exclusive_file_lock(self.lock_path)
@@ -178,13 +195,26 @@ class HitlManagerContext:
 
     def append_tool_result(self, *, call_id: str, tool_name: str, content: str) -> Dict[str, Any]:
         timestamp = _now()
+        projected, truncated = _project_tool_result(content)
+        output: Dict[str, Any] = {
+            "tool_name": str(tool_name),
+            "content": projected,
+        }
+        if truncated:
+            output.update(
+                {
+                    "truncated": True,
+                    "original_chars": len(str(content)),
+                    "limit_chars": MAX_ACTIVE_TOOL_RESULT_CHARS,
+                }
+            )
         return self._append(
             {
                 "id": _record_id("function_call_output", call_id, timestamp),
                 "timestamp": timestamp,
                 "type": "function_call_output",
                 "call_id": str(call_id),
-                "output": {"tool_name": str(tool_name), "content": str(content)},
+                "output": output,
             }
         )
 
@@ -422,6 +452,10 @@ class HitlManagerTranscript:
             for existing in self.context.records():
                 if str(existing.get("id", "")) == record_id:
                     return existing
+        if normalized == "human":
+            from core.hitl_manager_inbox import normalize_human_message
+
+            content = normalize_human_message(content)
         record = self.context.append_message(
             role=role,
             content=content,
@@ -438,12 +472,18 @@ class HitlManagerTranscript:
         self.history.append(record)
         self.context.persist()
 
-    def append_tool_result(self, *, call_id: str, tool_name: str, content: str) -> None:
+    def append_tool_result(self, *, call_id: str, tool_name: str, content: str) -> str:
+        raw_content = str(content)
         record = self.context.append_tool_result(
-            call_id=call_id, tool_name=tool_name, content=content
+            call_id=call_id, tool_name=tool_name, content=raw_content
         )
-        self.history.append(record)
+        history_record = dict(record)
+        history_output = dict(record["output"])
+        history_output["content"] = raw_content
+        history_record["output"] = history_output
+        self.history.append(history_record)
         self.context.persist()
+        return str(record["output"]["content"])
 
     def prepare(self, *, research_state: str, summarize: Callable[[str, str], str]) -> str:
         return self.context.prepare(research_state=research_state, summarize=summarize)

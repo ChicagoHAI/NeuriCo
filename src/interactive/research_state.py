@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from core.hitl_util import utc_now
 
 SCHEMA_VERSION = 3
 
@@ -78,7 +79,7 @@ BUILTIN_SECTIONS = ("crux", "current_best", "narrative", "assessment",
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return utc_now(timespec="seconds")
 
 
 def _set_defaults(d: Dict[str, Any], defaults: Dict[str, Any]) -> bool:

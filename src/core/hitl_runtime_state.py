@@ -16,6 +16,41 @@ from core.hitl_paths import hitl_runtime_state_path, hitl_state_dir
 from core.hitl_util import atomic_write_json, utc_now
 
 
+# Durable review identity and the only finalizer legal at each scoring boundary.
+MANAGER_REVIEW_FINALIZERS = {
+    "initial_scoring": "finalize_worker_request",
+    "frontier_scoring": "finalize_frontier_decision",
+    "scoring_failure": "finalize_worker_request",
+}
+UNRESOLVED_WORKER_COMMAND_STATUSES = frozenset(
+    {
+        "pending",
+        "scoring_approval_pending",
+        "scoring",
+    }
+)
+
+
+def worker_command_requires_resume(command: Any) -> bool:
+    """Return whether a replacement worker must reconnect to this command."""
+    if not isinstance(command, dict):
+        return False
+    status = str(command.get("status", "")).strip()
+    if status in UNRESOLVED_WORKER_COMMAND_STATUSES:
+        return True
+    if status != "resolved":
+        return False
+    response = command.get("response")
+    if not isinstance(response, dict):
+        return False
+    return (
+        str(response.get("status", "")).strip() == "feedback"
+        and not bool(response.get("final"))
+        and not isinstance(response.get("scored_candidate"), dict)
+        and not isinstance(response.get("scorer_result"), dict)
+    )
+
+
 class HitlRuntimeStateError(RuntimeError):
     """Raised when HITL runtime control state cannot make a safe transition."""
 
@@ -51,6 +86,7 @@ class HitlRuntimeState:
             "next_autoresearch_action": None,
             "rejected_whiteboard_cleanup": None,
             "frontier_decision_transition": None,
+            "initial_root_publication_transition": None,
             "approved_plans": {},
         }
 
@@ -499,6 +535,72 @@ class HitlRuntimeState:
     def frontier_decision_transition(self) -> Optional[Dict[str, Any]]:
         value = self.snapshot().get("frontier_decision_transition")
         return value if isinstance(value, dict) and value else None
+
+    def begin_initial_root_publication_transition(
+        self,
+        transition: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Persist initial-root publication before its first public checkpoint."""
+        required_text = (
+            "plan_text",
+            "reason_for_acceptance",
+            "history_root",
+        )
+        if any(not str(transition.get(key, "")).strip() for key in required_text):
+            raise HitlRuntimeStateError(
+                "Initial-root publication requires plan, acceptance reason, and history root"
+            )
+        if not isinstance(transition.get("objective_score"), dict):
+            raise HitlRuntimeStateError(
+                "Initial-root publication requires the complete objective score"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            existing = self._state.get("initial_root_publication_transition")
+            if isinstance(existing, dict) and existing:
+                return self._copy(existing)
+            record = self._copy(transition)
+            record["status"] = "prepared"
+            record["created_at"] = _now()
+            self._state["initial_root_publication_transition"] = record
+            self._save_unlocked()
+            return self._copy(record)
+
+    def initial_root_publication_transition(self) -> Optional[Dict[str, Any]]:
+        value = self.snapshot().get("initial_root_publication_transition")
+        return value if isinstance(value, dict) and value else None
+
+    def advance_initial_root_publication_transition(
+        self,
+        *,
+        status: str,
+        **updates: Any,
+    ) -> Dict[str, Any]:
+        valid_statuses = {
+            "prepared",
+            "checkpoint_created",
+            "root_initialized",
+            "run_configured",
+            "mirrored",
+            "completed",
+        }
+        if status not in valid_statuses:
+            raise HitlRuntimeStateError(
+                f"Invalid initial-root publication status: {status}"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            current = self._state.get("initial_root_publication_transition")
+            if not isinstance(current, dict) or not current:
+                raise HitlRuntimeStateError(
+                    "No initial-root publication transition is pending"
+                )
+            current.update(self._copy(updates))
+            current["status"] = status
+            current["updated_at"] = _now()
+            self._state["initial_root_publication_transition"] = current
+            self._save_unlocked()
+            return self._copy(current)
 
     def advance_frontier_decision_transition(
         self,

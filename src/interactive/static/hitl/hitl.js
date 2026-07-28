@@ -9,8 +9,11 @@
     tab: "overview", composer: "", provider: initialProvider,
     notice: "", thinking: false, stale: "", selectedOption: "", requestFeedback: "",
     editingQueueId: "", queueDraft: "", runPanel: false, snapshotSig: "", scrollToBottom: false,
-    graphScroll: {}, sidebarCollapsed: false,
+    graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
+    runDraft: { iterations: 2, writePaper: true, paperStyle: "auto", github: false },
   };
+  let refreshPromise = null;
+  let refreshPending = false;
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
   const q = (tag, attrs = {}, children = []) => {
     const element = document.createElement(tag);
@@ -43,6 +46,39 @@
   function saveRequestDraft(request, patch) { const draft = { ...loadRequestDraft(request), ...patch }; sessionStorage.setItem(requestDraftKey(request), JSON.stringify(draft)); }
   function clearRequestDraft(request) { sessionStorage.removeItem(requestDraftKey(request)); state.selectedOption = ""; state.requestFeedback = ""; }
   function captureGraphScroll() { const scroller = document.querySelector(".graph-scroll"); if (scroller) state.graphScroll[state.view] = { left: scroller.scrollLeft, top: scroller.scrollTop }; }
+  function captureFocusedControl() {
+    const element = document.activeElement;
+    const key = element instanceof HTMLElement ? element.dataset.focusKey : "";
+    if (!key) return null;
+    let selectionStart = null; let selectionEnd = null; let selectionDirection = null;
+    try {
+      selectionStart = typeof element.selectionStart === "number" ? element.selectionStart : null;
+      selectionEnd = typeof element.selectionEnd === "number" ? element.selectionEnd : null;
+      selectionDirection = element.selectionDirection || null;
+    } catch (_) {}
+    return { key, selectionStart, selectionEnd, selectionDirection, scrollTop: element.scrollTop, scrollLeft: element.scrollLeft };
+  }
+  function restoreFocusedControl(snapshot) {
+    if (!snapshot) return;
+    const element = [...document.querySelectorAll("[data-focus-key]")].find((candidate) => candidate.dataset.focusKey === snapshot.key);
+    if (!(element instanceof HTMLElement)) return;
+    element.focus({ preventScroll: true });
+    if (snapshot.selectionStart !== null && typeof element.setSelectionRange === "function") {
+      try { element.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd, snapshot.selectionDirection); } catch (_) {}
+    }
+    element.scrollTop = snapshot.scrollTop || 0;
+    element.scrollLeft = snapshot.scrollLeft || 0;
+  }
+  function captureDrawerScroll() {
+    const panel = document.querySelector(".drawer[data-drawer-key]");
+    if (panel?.dataset.drawerKey) state.drawerScroll[panel.dataset.drawerKey] = panel.scrollTop;
+  }
+  function drawerKey() {
+    if (!state.drawer) return "";
+    const { kind, source } = state.drawer;
+    const id = kind === "idea" ? source.idea_id : kind === "whiteboard" ? source.id : source.node_sha;
+    return `${kind}:${id || "unknown"}:${state.tab}`;
+  }
 
   function navigate(route) {
     state.route = route;
@@ -108,13 +144,14 @@
     (request.options || []).forEach((option) => options.append(q("button", {
       class: `resolution-option ${selectedOption === option.id ? "selected" : ""}`,
       "aria-pressed": selectedOption === option.id ? "true" : "false",
+      "data-focus-key": `request-option:${request.request_key}:${option.id}`,
       onclick: () => {
         state.selectedOption = option.id;
         saveRequestDraft(request, { selectedOption: option.id });
         render({ preserveScroll: true });
       },
     }, [q("span", { class: "option-mark", text: selectedOption === option.id ? "✓" : "" }), q("span", { text: option.text })])));
-    const feedback = q("textarea", { class: "resolution-feedback", placeholder: "Add feedback for the manager" });
+    const feedback = q("textarea", { class: "resolution-feedback", placeholder: "Add feedback for the manager", "data-focus-key": `request-feedback:${request.request_key}` });
     feedback.value = requestFeedback;
     feedback.oninput = () => {
       state.requestFeedback = feedback.value;
@@ -147,7 +184,7 @@
     const list = q("div", { class: "queue" });
     queue.forEach((item) => {
       const editing = state.editingQueueId === item.id;
-      const input = q("input", { class: "queue-editor", value: editing ? state.queueDraft : item.text, readonly: editing ? null : "readonly" });
+      const input = q("input", { class: "queue-editor", value: editing ? state.queueDraft : item.text, readonly: editing ? null : "readonly", "data-focus-key": `queue:${item.id}` });
       if (editing) { input.removeAttribute("readonly"); input.oninput = () => { state.queueDraft = input.value; }; input.onkeydown = (event) => { if (event.key === "Enter") updateQueued(item.id); if (event.key === "Escape") { state.editingQueueId = ""; render(); } }; }
       list.append(q("div", { class: "queue-row" }, [input, editing ? icon("✓", "Save queued message", () => updateQueued(item.id), "small-icon") : icon("✎", "Edit queued message", () => { state.editingQueueId = item.id; state.queueDraft = item.text; render(); }, "small-icon"), icon("×", "Remove queued message", () => removeQueued(item.id), "small-icon")]));
     });
@@ -155,8 +192,8 @@
   }
   function composer() {
     const context = state.snapshot?.context || {}; const percent = Math.max(0, Math.min(100, Number(context.percent) || 0));
-    const area = q("textarea", { placeholder: "Message the manager" }); area.value = state.composer; area.oninput = () => { state.composer = area.value; }; area.onkeydown = (event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitConversation(); } };
-    const provider = q("select", { class: "provider", title: "Choose manager provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; localStorage.setItem("neurico-hitl-provider", state.provider); };
+    const area = q("textarea", { placeholder: "Message the manager", "data-focus-key": "composer" }); area.value = state.composer; area.oninput = () => { state.composer = area.value; }; area.onkeydown = (event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitConversation(); } };
+    const provider = q("select", { class: "provider", title: "Choose manager provider", "data-focus-key": "composer-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; localStorage.setItem("neurico-hitl-provider", state.provider); };
     const meter = q("span", { class: "meter" }, [q("span")]); meter.firstChild.style.width = `${Math.max(2, percent)}%`;
     const usedTokens = Number(context.used_tokens || 0);
     const limitTokens = Number(context.limit_tokens || 300000);
@@ -169,10 +206,11 @@
     if (!state.runPanel || state.snapshot?.run?.status === "running") return null;
     const mode = state.snapshot?.autoresearch?.mode === "continue" ? "continue" : "fresh";
     const title = mode === "continue" ? "Continue AutoResearch" : "Fresh AutoResearch";
-    const provider = q("select", { id: "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider;
-    const iterations = q("input", { id: "run-iterations", type: "number", min: "1", max: "100", value: "2" });
-    const paper = q("input", { id: "run-paper", type: "checkbox" }); paper.checked = true; const github = q("input", { id: "run-github", type: "checkbox" });
-    const style = q("select", { id: "run-style" }); [["auto", "Automatic"], ["neurips", "NeurIPS"], ["icml", "ICML"], ["acl", "ACL"]].forEach(([value, label]) => style.append(q("option", { value, text: label })));
+    const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; localStorage.setItem("neurico-hitl-provider", state.provider); };
+    const iterations = q("input", { id: "run-iterations", type: "number", min: "1", max: "100", value: state.runDraft.iterations, "data-focus-key": "run-iterations" }); iterations.oninput = () => { state.runDraft.iterations = iterations.value; };
+    const paper = q("input", { id: "run-paper", type: "checkbox", "data-focus-key": "run-paper" }); paper.checked = state.runDraft.writePaper; paper.onchange = () => { state.runDraft.writePaper = paper.checked; };
+    const github = q("input", { id: "run-github", type: "checkbox", "data-focus-key": "run-github" }); github.checked = state.runDraft.github; github.onchange = () => { state.runDraft.github = github.checked; };
+    const style = q("select", { id: "run-style", "data-focus-key": "run-style" }); [["auto", "Automatic"], ["neurips", "NeurIPS"], ["icml", "ICML"], ["acl", "ACL"]].forEach(([value, label]) => style.append(q("option", { value, text: label }))); style.value = state.runDraft.paperStyle; style.onchange = () => { state.runDraft.paperStyle = style.value; };
     const row = (label, control) => q("label", { class: "run-row" }, [q("span", { text: label }), control]);
     return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close AutoResearch setup", () => { state.runPanel = false; render(); })]), row("Worker", provider), row("Iterations", iterations), q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", `Start ${title}`, () => launchRun({ provider: provider.value, iterations: Number(iterations.value), write_paper: paper.checked, paper_style: style.value, github: github.checked }), "run-start")])]);
   }
@@ -262,7 +300,7 @@
   function displayProposal(proposal) { return String(proposal || "").replace(/^\s*#?\s*AUTORESEARCH PROPOSAL\s*\n+/i, "").trim() || "Proposal record unavailable."; }
   function renderNodeDrawer(drawer, item, attempt) { const accepted = attempt ? item.accepted : true; drawer.append(q("h1", { text: attempt ? `${accepted ? "Accepted" : "Rejected"} ${item.proposal_type || "research"}` : item.selected ? "Selected research node" : "Research node" }), q("p", { class: "detail-meta", text: attempt ? `Candidate ${shortSha(item.node_sha)} from ${shortSha(item.parent_node_sha)}` : `${item.active ? "Active frontier" : "Retained"} · ${shortSha(item.node_sha)}${item.parent_node_sha ? ` · from ${shortSha(item.parent_node_sha)}` : ""}` })); tabs(drawer, attempt ? ["overview", "proposal", "score"] : ["overview", "plan", "score"]); if (state.tab === "overview") { const reason = item.reason_for_acceptance || item.reason_for_rejection; if (reason) drawer.append(detail(item.accepted === false ? "Reason for rejection" : "Reason for acceptance", reason)); if (attempt && item.proposal_idea_id) drawer.append(detail("Proposal", links([item.proposal_idea_id]))); if (!attempt) { const attempts = (state.snapshot?.attempts || []).filter((a) => a.parent_node_sha === item.node_sha); if (attempts.length) drawer.append(detail("Attempts from this node", q("div", { class: "attempt-list" }, attempts.map((a) => q("button", { class: "attempt-link", text: `${a.accepted ? "Accepted" : "Rejected"} ${a.proposal_type || "research"}${a.proposal_idea_id ? ` · ${a.proposal_idea_id}` : ""}`, onclick: () => openDrawer("attempt", a) }))))); } } else if (state.tab === "plan") drawer.append(detail("Experiment plan", displayPlan(item.plan))); else if (state.tab === "proposal") { const proposal = ideaById(item.proposal_idea_id); drawer.append(detail("Proposal", displayProposal(proposal?.proposal || proposal?.content))); } else drawer.append(detail("Objective score", scoreTable(item.objective_score))); }
   function renderWhiteboardDrawer(drawer, tip) { drawer.append(q("h1", { text: `${tip.id} ${tip.category || "note"}` }), q("p", { class: "detail-meta", text: `${tip.status || "active"} · recorded by ${tip.author || "worker"}` }), detail("Note", tip.content)); if (tip.affects?.length) drawer.append(detail("Artifacts", artifactList(tip.affects))); }
-  function drawer() { if (!state.drawer) return []; const shade = q("div", { class: "drawer-shade", onclick: () => { state.drawer = null; render(); } }); const panel = q("aside", { class: "drawer" }); panel.append(icon("×", "Close details", () => { state.drawer = null; render(); }, "drawer-close")); const { kind, source } = state.drawer; if (kind === "idea") renderIdeaDrawer(panel, source); else if (kind === "whiteboard") renderWhiteboardDrawer(panel, source); else renderNodeDrawer(panel, source, kind === "attempt"); return [shade, panel]; }
+  function drawer() { if (!state.drawer) return []; const shade = q("div", { class: "drawer-shade", onclick: () => { state.drawer = null; render(); } }); const panel = q("aside", { class: "drawer", "data-drawer-key": drawerKey() }); panel.append(icon("×", "Close details", () => { state.drawer = null; render(); }, "drawer-close")); const { kind, source } = state.drawer; if (kind === "idea") renderIdeaDrawer(panel, source); else if (kind === "whiteboard") renderWhiteboardDrawer(panel, source); else renderNodeDrawer(panel, source, kind === "attempt"); return [shade, panel]; }
 
   async function post(path, payload) { const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Could not submit."); return data; }
   async function submitConversation() { const text = state.composer.trim(); if (!text) return; state.composer = ""; state.notice = ""; state.scrollToBottom = true; render(); try { await post("/input", { text, input_kind: "conversation", provider: state.provider, client_turn_id: crypto.randomUUID() }); await refresh(); } catch (error) { state.notice = error.message; render(); } }
@@ -273,20 +311,59 @@
   async function launchRun(payload) { try { await post("/api/run", payload); state.runPanel = false; state.notice = ""; await refresh(); } catch (error) { state.notice = error.message; render(); } }
   function render(options = {}) {
     captureGraphScroll();
+    captureDrawerScroll();
+    const focusedControl = captureFocusedControl();
     const preserveScroll = Boolean(options.preserveScroll);
     const previousY = window.scrollY;
     const wasNearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
     document.querySelectorAll(".drawer-shade,.drawer").forEach((element) => element.remove());
     app.replaceChildren(topbar(), state.route === "conversation" ? conversation() : research());
     drawer().forEach((element) => document.body.append(element));
+    const activeDrawer = document.querySelector(".drawer[data-drawer-key]");
+    if (activeDrawer?.dataset.drawerKey && Object.prototype.hasOwnProperty.call(state.drawerScroll, activeDrawer.dataset.drawerKey)) {
+      activeDrawer.scrollTop = state.drawerScroll[activeDrawer.dataset.drawerKey];
+    }
     if (state.scrollToBottom || (preserveScroll && state.route === "conversation" && wasNearBottom)) {
       window.scrollTo({ top: document.body.scrollHeight });
       state.scrollToBottom = false;
     } else if (preserveScroll) {
       window.scrollTo({ top: previousY });
     }
+    restoreFocusedControl(focusedControl);
   }
   window.addEventListener("popstate", () => { state.route = location.pathname === "/research" ? "research" : "conversation"; state.drawer = null; state.runPanel = false; render(); });
-  async function refresh() { let changed = false; try { const response = await fetch("/api/snapshot", { cache: "no-store" }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Workspace data unavailable."); const signature = JSON.stringify(data); changed = signature !== state.snapshotSig || Boolean(state.stale); state.snapshot = data; state.snapshotSig = signature; state.stale = ""; } catch (error) { changed = state.stale !== error.message; state.stale = error.message; } if (changed) render({ preserveScroll: true }); }
+  async function drainRefreshes() {
+    while (refreshPending) {
+      refreshPending = false;
+      let result;
+      try {
+        const response = await fetch("/api/snapshot", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Workspace data unavailable.");
+        result = { data, signature: JSON.stringify(data), error: "" };
+      } catch (error) {
+        result = { data: null, signature: "", error: error.message };
+      }
+      if (refreshPending) continue;
+      const changed = result.error
+        ? state.stale !== result.error
+        : result.signature !== state.snapshotSig || Boolean(state.stale);
+      if (result.error) {
+        state.stale = result.error;
+      } else {
+        state.snapshot = result.data;
+        state.snapshotSig = result.signature;
+        state.stale = "";
+      }
+      if (changed) render({ preserveScroll: true });
+    }
+  }
+  function refresh() {
+    refreshPending = true;
+    if (!refreshPromise) {
+      refreshPromise = drainRefreshes().finally(() => { refreshPromise = null; });
+    }
+    return refreshPromise;
+  }
   const events = new EventSource("/stream"); events.addEventListener("status", (event) => { try { const thinking = Boolean(JSON.parse(event.data).thinking); if (state.thinking !== thinking) { state.thinking = thinking; render({ preserveScroll: true }); } } catch (_) {} }); ["message", "refresh", "workspace_changed", "resolution_cleared"].forEach((name) => events.addEventListener(name, refresh)); setInterval(refresh, 5000); refresh();
 })();

@@ -6,15 +6,19 @@ It exposes one durable snapshot endpoint and uses SSE solely as a refresh hint.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import queue
+import secrets
 import threading
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
+from core.hitl_lock import HitlWorkspaceRunActiveError
 from core.hitl_manager_inbox import HitlWebInputError
 from core.hitl_workspace_view import HitlWorkspaceView, HitlWorkspaceViewError
 from interactive.channel import WebChannel
@@ -43,12 +47,32 @@ ASSET_TYPES = {
 }
 
 
+def _session_cookie_name(access_token: str) -> str:
+    fingerprint = hashlib.sha256(access_token.encode("utf-8")).hexdigest()[:12]
+    return f"neurico_hitl_session_{fingerprint}"
+
+
+def _access_url(base_url: str, access_token: str) -> str:
+    parsed = urlsplit(base_url)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != "token"
+    ]
+    query.append(("token", access_token))
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)
+    )
+
+
 def _handler(
     channel: WebChannel,
     workspace: Path,
     title: str,
     run_launcher: Callable[[dict[str, Any]], dict[str, Any]],
     run_status: Callable[[], dict[str, Any]],
+    access_token: str,
+    session_cookie_name: str,
 ):
     page = PAGE.replace("{{WORKSPACE}}", html.escape(workspace.name)).replace(
         "{{TITLE}}", html.escape(title)
@@ -57,6 +81,58 @@ def _handler(
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args: Any) -> None:
             pass
+
+        def _has_access(self) -> bool:
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+            except (KeyError, ValueError):
+                return False
+            value = cookie.get(session_cookie_name)
+            return value is not None and secrets.compare_digest(
+                value.value, access_token
+            )
+
+        def _bootstrap_access(self) -> bool:
+            parsed = urlsplit(self.path)
+            if parsed.path not in {"/", "/research"}:
+                return False
+            supplied = (parse_qs(parsed.query).get("token") or [""])[0]
+            if not supplied or not secrets.compare_digest(supplied, access_token):
+                return False
+            self.send_response(302)
+            self.send_header("Location", parsed.path or "/")
+            self.send_header(
+                "Set-Cookie",
+                f"{session_cookie_name}={access_token}; HttpOnly; SameSite=Strict; Path=/",
+            )
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+
+        def _deny_access(self) -> None:
+            body = b"HITL manager access denied."
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _same_origin_post(self) -> bool:
+            origin = self.headers.get("Origin", "")
+            host = self.headers.get("Host", "")
+            parsed = urlsplit(origin)
+            return (
+                parsed.scheme in {"http", "https"}
+                and bool(host)
+                and parsed.netloc.lower() == host.lower()
+                and parsed.path in {"", "/"}
+                and not parsed.query
+                and not parsed.fragment
+            )
 
         def _json(self, payload: Any, status: int = 200) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -74,12 +150,22 @@ def _handler(
                 pass
 
         def do_GET(self) -> None:
+            if self._bootstrap_access():
+                return
+            if not self._has_access():
+                self._deny_access()
+                return
             path = urlsplit(self.path).path
             if path in {"/", "/research"}:
                 body = page.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Security-Policy", "default-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self'; connect-src 'self'; "
+                    "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+                    "base-uri 'none'; frame-ancestors 'none'",
+                )
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -135,6 +221,9 @@ def _handler(
             self.send_error(404)
 
         def do_POST(self) -> None:
+            if not self._has_access() or not self._same_origin_post():
+                self._deny_access()
+                return
             path = urlsplit(self.path).path
             if path not in {"/input", "/api/queue", "/api/run"}:
                 self.send_error(404)
@@ -177,6 +266,9 @@ def _handler(
                 status = 409 if exc.status in {"stale", "already_resolved"} else 400
                 self._json({"status": exc.status, "error": str(exc)}, status)
                 return
+            except HitlWorkspaceRunActiveError as exc:
+                self._json({"status": "conflict", "error": str(exc)}, 409)
+                return
             except (ValueError, RuntimeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
                 self._json({"status": "invalid", "error": str(exc) or "Enter a message before sending it."}, 400)
                 return
@@ -197,6 +289,7 @@ class HitlWebServer:
         title: str,
         port: int = 7890,
         host: str = "localhost",
+        access_token: Optional[str] = None,
     ) -> None:
         del project_root
         self.channel = channel
@@ -204,6 +297,14 @@ class HitlWebServer:
         self.title = title
         self.host = host
         self.port = port
+        self.access_token = (
+            secrets.token_urlsafe(32)
+            if access_token is None
+            else str(access_token).strip()
+        )
+        if not self.access_token:
+            raise ValueError("HITL web access token must be non-empty.")
+        self.session_cookie_name = _session_cookie_name(self.access_token)
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._run_launcher: Callable[[dict[str, Any]], dict[str, Any]] = self._run_unavailable
@@ -224,7 +325,10 @@ class HitlWebServer:
 
     @property
     def url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        return self.access_url(f"http://{self.host}:{self.port}")
+
+    def access_url(self, base_url: str) -> str:
+        return _access_url(base_url, self.access_token)
 
     def start(self) -> None:
         handler = _handler(
@@ -233,6 +337,8 @@ class HitlWebServer:
             self.title,
             lambda payload: self._run_launcher(payload),
             lambda: self._run_status(),
+            self.access_token,
+            self.session_cookie_name,
         )
         last_error: Optional[OSError] = None
         for port in range(self.port, self.port + 10):

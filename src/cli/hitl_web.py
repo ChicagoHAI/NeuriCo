@@ -19,6 +19,7 @@ from core.config_loader import ConfigLoader
 from core.idea_manager import IdeaManager
 from core.hitl_manager_host import HitlManagerHost
 from core.hitl_frontier import HitlFrontierStore
+from core.hitl_lock import HitlWorkspaceRunActiveError, active_hitl_workspace_run
 from core.runner import ResearchRunner
 from interactive.manager import load_config
 
@@ -75,7 +76,14 @@ def main() -> int:
 
     def snapshot_run_status() -> dict[str, object]:
         with launch_lock:
-            return dict(run_status)
+            local_status = dict(run_status)
+            local_running = launch_thread is not None and launch_thread.is_alive()
+        if local_running:
+            return {"status": "running", "source": "web"}
+        external_owner = active_hitl_workspace_run(work_dir)
+        if external_owner is not None:
+            return {"status": "running", "source": "external", "owner": external_owner}
+        return local_status
 
     def publish_run_status() -> None:
         emit = getattr(host.channel, "_emit", None)
@@ -100,6 +108,9 @@ def main() -> int:
         with launch_lock:
             if launch_thread is not None and launch_thread.is_alive():
                 raise RuntimeError("An HITL AutoResearch run is already active for this workspace.")
+            external_owner = active_hitl_workspace_run(work_dir)
+            if external_owner is not None:
+                raise HitlWorkspaceRunActiveError(work_dir, external_owner)
             continuation = HitlFrontierStore(work_dir).exists()
             runner = ResearchRunner(
                 project_root=PROJECT_ROOT,
@@ -119,10 +130,19 @@ def main() -> int:
                         hitl_host=host,
                     )
                     next_status = "completed" if result.get("success") else "failed"
-                except Exception:
+                except HitlWorkspaceRunActiveError as exc:
+                    next_status = "idle"
+                    error = str(exc)
+                except Exception as exc:
                     next_status = "failed"
+                    error = str(exc)
+                else:
+                    error = ""
                 with launch_lock:
-                    run_status["status"] = next_status
+                    run_status.clear()
+                    run_status.update({"status": next_status})
+                    if error:
+                        run_status["error"] = error
                 publish_run_status()
 
             launch_thread = threading.Thread(
@@ -150,7 +170,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     host.start()
-    print(f"HITL workspace: {host.web_server.url}", flush=True)
+    print(f"HITL workspace: {host.browser_url}", flush=True)
     try:
         while not stopping:
             time.sleep(0.25)

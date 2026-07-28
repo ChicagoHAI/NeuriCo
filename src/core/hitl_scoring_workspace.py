@@ -25,6 +25,20 @@ class HitlScoringWorkspaceError(RuntimeError):
     """Raised when runtime cannot prepare an isolated HITL scorer workspace."""
 
 
+def scoring_source_workspace_fingerprint(
+    pending: Dict[str, Any],
+    cached_score: Optional[Dict[str, Any]],
+) -> str:
+    """Return the reviewed fingerprint for a fresh or resumed scoring handoff."""
+    if isinstance(cached_score, dict) and cached_score.get("status") == "prepared":
+        source_fingerprint = str(
+            cached_score.get("source_workspace_fingerprint", "")
+        ).strip()
+        if source_fingerprint:
+            return source_fingerprint
+    return str(pending.get("workspace_fingerprint", "")).strip()
+
+
 def _copy_path(source: Path, destination: Path) -> None:
     if source.is_dir():
         shutil.copytree(source, destination, dirs_exist_ok=True)
