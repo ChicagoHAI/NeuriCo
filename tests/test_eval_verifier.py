@@ -280,17 +280,55 @@ def test_legacy_required_function_without_sha_is_reported(tmp_path):
 
 # ---------------------------------------------------------------- verdict strictness
 
+def _valid_verdict(**overrides):
+    verdict = {
+        'pass': True,
+        'checks': {'routing': 'pass', 'transcription': 'pass', 'format': 'not_applicable'},
+        'violations': [],
+    }
+    verdict.update(overrides)
+    return verdict
+
+
 def test_interpret_verdict_strict_boolean():
     from agents.eval_verifier import interpret_verdict
-    passed, violations = interpret_verdict({'pass': True})
+    passed, violations = interpret_verdict(_valid_verdict())
     assert passed is True and violations == []
     # A string — even "false" — must never count as a pass
-    passed, violations = interpret_verdict({'pass': 'false'})
+    passed, violations = interpret_verdict(_valid_verdict(**{'pass': 'false'}))
     assert passed is False
     assert any('JSON boolean' in str(v) for v in violations)
-    passed, _ = interpret_verdict({'pass': 'true'})
+    passed, _ = interpret_verdict(_valid_verdict(**{'pass': 'true'}))
     assert passed is False
-    passed, _ = interpret_verdict({'pass': 1})
+    passed, _ = interpret_verdict(_valid_verdict(**{'pass': 1}))
+    assert passed is False
+
+
+def test_interpret_verdict_requires_consistent_structure():
+    from agents.eval_verifier import interpret_verdict
+    # A bare pass=true with no checks is incomplete and must not pass
+    passed, violations = interpret_verdict({'pass': True})
+    assert passed is False
+    assert any('checks' in str(v) for v in violations)
+    # pass=true is inconsistent with a failing check
+    passed, _ = interpret_verdict(_valid_verdict(
+        checks={'routing': 'fail', 'transcription': 'pass', 'format': 'not_applicable'}))
+    assert passed is False
+    # A failing verdict must list at least one violation
+    passed, violations = interpret_verdict(_valid_verdict(**{
+        'pass': False,
+        'checks': {'routing': 'pass', 'transcription': 'pass', 'format': 'pass'},
+        'violations': [],
+    }))
+    assert passed is False
+    assert any('no violations' in str(v) for v in violations)
+    # Invalid check value and unknown check name both fail
+    passed, _ = interpret_verdict(_valid_verdict(checks={'routing': 'maybe'}))
+    assert passed is False
+    passed, _ = interpret_verdict(_valid_verdict(checks={'mystery': 'pass'}))
+    assert passed is False
+    # A malformed violation entry (no detail) fails
+    passed, _ = interpret_verdict(_valid_verdict(**{'pass': False, 'violations': [{'check': 'routing'}]}))
     assert passed is False
 
 

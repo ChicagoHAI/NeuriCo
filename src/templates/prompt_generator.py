@@ -900,7 +900,8 @@ substitutes.
 
         return ""
 
-    def generate_resource_finder_prompt(self, idea: Dict[str, Any]) -> str:
+    def generate_resource_finder_prompt(self, idea: Dict[str, Any],
+                                        scoring_enabled: bool = False) -> str:
         """
         Generate resource finder prompt from template.
 
@@ -1003,7 +1004,11 @@ RESEARCH DOMAIN:
                     research_context += (f"- Function: {func.get('entrypoint', 'unknown')}() "
                                          f"in {func.get('path', 'unknown')}\n")
                     research_context += f"  Usage: {func.get('usage', 'not stated')}\n"
-                    if func.get('required_for_evaluation'):
+                    # required_for_evaluation binds eval.py to this function; it
+                    # is a scoring-pipeline obligation, so only surface it in
+                    # scored runs. Resource finding also runs in the ordinary
+                    # unscored workflow, which must not carry the requirement.
+                    if scoring_enabled and func.get('required_for_evaluation'):
                         research_context += "  MANDATORY: all evaluation must run through this function\n"
 
         # Add constraints if provided

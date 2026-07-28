@@ -256,6 +256,7 @@ class ResearchPipelineOrchestrator:
                     provider=provider,
                     timeout=resource_finder_timeout,
                     full_permissions=full_permissions,
+                    scoring_enabled=scoring_enabled,
                 )
 
                 if not results["stages"]["resource_finder"]["success"]:
@@ -466,7 +467,8 @@ class ResearchPipelineOrchestrator:
             print(f"⚠️  Modal sweep encountered an error: {exc}")
 
     def _run_resource_finder(
-        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
+        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool,
+        scoring_enabled: bool = False
     ) -> Dict[str, Any]:
         """Run resource finder stage."""
         print()
@@ -485,6 +487,7 @@ class ResearchPipelineOrchestrator:
                 templates_dir=self.templates_dir,
                 timeout=timeout,
                 full_permissions=full_permissions,
+                scoring_enabled=scoring_enabled,
             )
 
             self.state.complete_stage("resource_finder", result["success"], result.get("outputs"))

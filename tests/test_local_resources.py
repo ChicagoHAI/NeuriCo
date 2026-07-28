@@ -85,6 +85,18 @@ def test_missing_paths_passes_when_all_survive():
     assert missing_paths_in_idea(raw, idea_spec) == []
 
 
+def test_missing_paths_accepts_documented_background_locations():
+    # A mentioned-but-unused path may land in background.datasets[].source or
+    # background.code_references[].repo per the conversion instructions; those
+    # are structured (not prose), so faithfulness must count them as survived.
+    raw = "See dataset /data/my_set and repo /home/user/proj"
+    idea_spec = {'idea': _idea(background={
+        'datasets': [{'name': 'my_set', 'source': '/data/my_set'}],
+        'code_references': [{'name': 'proj', 'repo': '/home/user/proj'}],
+    })}
+    assert missing_paths_in_idea(raw, idea_spec) == []
+
+
 # ---------------------------------------------------------------- local_resources
 
 def test_dataset_missing_usage_is_error(tmp_path):
@@ -429,6 +441,16 @@ def test_resource_finder_prompt_marks_staged_resources():
     prompt = PromptGenerator().generate_resource_finder_prompt(_rich_idea_spec())
     assert "ALREADY STAGED IN THIS WORKSPACE" in prompt
     assert "datasets/local/toy_dataset" in prompt
+    # required_for_evaluation is a scoring-pipeline obligation; resource finding
+    # runs unscored, so the mandate stays out of the default prompt...
+    assert "MANDATORY: all evaluation must run through this function" not in prompt
+
+
+def test_resource_finder_prompt_marks_evaluation_mandate_when_scored():
+    from templates.prompt_generator import PromptGenerator
+    prompt = PromptGenerator().generate_resource_finder_prompt(
+        _rich_idea_spec(), scoring_enabled=True)
+    # ...and appears only when scoring is enabled
     assert "MANDATORY: all evaluation must run through this function" in prompt
 
 

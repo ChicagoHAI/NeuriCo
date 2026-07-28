@@ -64,12 +64,17 @@ def find_path_tokens(text: str) -> List[str]:
 
 def _usable_path_strings(idea_spec: Dict[str, Any]) -> List[str]:
     """
-    Collect path strings from the locations the pipeline actually honors:
-    local_resources entries (path / source_path) and background paper paths.
+    Collect path strings from the structured locations a converted idea may
+    legitimately record a path: local_resources entries (path / source_path),
+    background.papers[].path, background.datasets[].source, and
+    background.code_references[].repo — the destinations the conversion
+    instructions document for a mentioned path.
 
-    Everything else — notably background.description prose — carries no
-    staging or mounting behavior, so a path that only survives there is
-    effectively dropped.
+    Only structured fields count; prose (notably background.description) carries
+    no path semantics, so a path that survives only there is treated as dropped.
+    The background.* fields are advisory (not staged or mounted), but they still
+    satisfy faithfulness, which asks whether a path survived conversion, not
+    whether it became a declared, staged resource.
     """
     idea = idea_spec.get('idea') if isinstance(idea_spec.get('idea'), dict) else idea_spec
     out: List[str] = []
@@ -86,6 +91,12 @@ def _usable_path_strings(idea_spec: Dict[str, Any]) -> List[str]:
         for paper in background.get('papers') or []:
             if isinstance(paper, dict):
                 out.append(paper.get('path'))
+        for dataset in background.get('datasets') or []:
+            if isinstance(dataset, dict):
+                out.append(dataset.get('source'))
+        for ref in background.get('code_references') or []:
+            if isinstance(ref, dict):
+                out.append(ref.get('repo'))
 
     return [str(p) for p in out if p]
 
@@ -95,11 +106,12 @@ def missing_paths_in_idea(raw_text: str, idea_spec: Dict[str, Any]) -> List[str]
     Find local paths mentioned in the source text that did not survive
     conversion into a USABLE location of the idea specification.
 
-    Usable means local_resources entries or background.papers[].path — the
-    places staging and mount collection read from. A plain substring match
-    against the whole idea would pass a path that merely survives inside
-    background.description prose (the no-API-key fallback keeps the full
-    input there), while never being staged or mounted.
+    Usable means the structured path locations _usable_path_strings recognizes
+    (local_resources entries, background.papers[].path, background.datasets[].source,
+    background.code_references[].repo). A plain substring match against the whole
+    idea would instead pass a path that merely survives inside background.description
+    prose (the no-API-key fallback keeps the full input there), where nothing reads
+    it as a path.
 
     Args:
         raw_text: Original text the idea was converted from

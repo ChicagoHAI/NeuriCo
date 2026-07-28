@@ -23,7 +23,7 @@ without evaluation.metrics or mandated functions skip it entirely.
 """
 
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 import subprocess
 import shlex
 import shutil
@@ -398,25 +398,69 @@ def run_eval_verifier(
     }
 
 
-def interpret_verdict(verdict: Dict[str, Any]) -> tuple:
-    """
-    Strictly interpret a verification.json verdict.
+# Verdict structure mandated by templates/agents/eval_verifier.txt: every
+# applicable check reports one of these values, and `pass` is true only when no
+# applicable check failed. Keep these in sync with that template.
+VERDICT_CHECK_NAMES = ('routing', 'transcription', 'format')
+VERDICT_CHECK_VALUES = ('pass', 'fail', 'not_applicable')
 
-    Only JSON true counts as a pass: bool() coercion would accept any
-    non-empty string — including "false" — as passing. A non-boolean
-    'pass' value fails and is surfaced as its own violation.
+
+def interpret_verdict(verdict: Dict[str, Any]) -> Tuple[bool, List[Dict[str, Any]]]:
+    """
+    Strictly interpret a verification.json verdict against the structure the
+    eval_verifier template mandates. Every check below fails closed and is
+    surfaced as its own violation:
+
+    - `pass` must be a JSON boolean; bool() coercion would accept any non-empty
+      string — including "false" — as passing.
+    - `checks` must be a mapping of known checks to pass/fail/not_applicable.
+    - `pass` must be consistent with the checks: true only when no applicable
+      check failed; a check reporting "fail" under pass=true is a contradiction.
+    - A failing verdict must justify itself — pass=false with an empty
+      violations list is invalid — and each declared violation must be a mapping
+      carrying a detail.
 
     Returns:
         (passed, violations)
     """
     raw_pass = verdict.get('pass')
     passed = raw_pass is True
-    violations = verdict.get('violations') or []
-    if not passed and not isinstance(raw_pass, bool):
-        violations = list(violations) + [{
-            'check': 'verdict',
-            'detail': f"verification.json 'pass' must be a JSON boolean, got {raw_pass!r}",
-        }]
+    violations = list(verdict.get('violations') or [])
+
+    def reject(detail: str) -> None:
+        nonlocal passed
+        passed = False
+        violations.append({'check': 'verdict', 'detail': detail})
+
+    if not isinstance(raw_pass, bool):
+        reject(f"verification.json 'pass' must be a JSON boolean, got {raw_pass!r}")
+
+    checks = verdict.get('checks')
+    if not isinstance(checks, dict) or not checks:
+        reject(f"verification.json must include a non-empty 'checks' mapping, got {checks!r}")
+    else:
+        failed = []
+        for name, value in checks.items():
+            if name not in VERDICT_CHECK_NAMES:
+                reject(f"unknown check {name!r}; expected one of {list(VERDICT_CHECK_NAMES)}")
+            if value not in VERDICT_CHECK_VALUES:
+                reject(f"check {name!r} has invalid value {value!r}; "
+                       f"expected one of {list(VERDICT_CHECK_VALUES)}")
+            elif value == 'fail':
+                failed.append(name)
+        # `pass` is true only when every applicable check passes.
+        if raw_pass is True and failed:
+            reject(f"'pass' is true but these checks failed: {failed}")
+
+    # An empty violations list with pass=false is invalid per the template.
+    if raw_pass is False and not (verdict.get('violations') or []):
+        reject("verification.json reports pass=false with no violations listed")
+
+    # Each declared violation must be a mapping carrying a concrete detail.
+    for entry in verdict.get('violations') or []:
+        if not isinstance(entry, dict) or not str(entry.get('detail', '')).strip():
+            reject(f"malformed violation entry: {entry!r}")
+
     return passed, violations
 
 

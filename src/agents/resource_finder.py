@@ -43,7 +43,8 @@ TRANSCRIPT_FLAGS = {
 }
 
 
-def generate_resource_finder_prompt(idea: Dict[str, Any], templates_dir: Path) -> str:
+def generate_resource_finder_prompt(idea: Dict[str, Any], templates_dir: Path,
+                                    scoring_enabled: bool = False) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
 
@@ -53,6 +54,9 @@ def generate_resource_finder_prompt(idea: Dict[str, Any], templates_dir: Path) -
     Args:
         idea: Full idea specification (YAML dict)
         templates_dir: Path to templates directory
+        scoring_enabled: If True, surface scoring-only obligations such as the
+                         required_for_evaluation mandate; ordinary unscored
+                         runs omit them.
 
     Returns:
         Complete prompt string for resource finder agent
@@ -61,7 +65,7 @@ def generate_resource_finder_prompt(idea: Dict[str, Any], templates_dir: Path) -
 
     # templates_dir is typically project_root/templates, so parent is project_root
     generator = PromptGenerator(templates_dir)
-    return generator.generate_resource_finder_prompt(idea)
+    return generator.generate_resource_finder_prompt(idea, scoring_enabled=scoring_enabled)
 
 
 def run_resource_finder(
@@ -70,7 +74,8 @@ def run_resource_finder(
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
     timeout: int = 2700,  # 45 minutes default
-    full_permissions: bool = True
+    full_permissions: bool = True,
+    scoring_enabled: bool = False
 ) -> Dict[str, Any]:
     """
     Launch resource finder agent to gather research resources.
@@ -109,7 +114,7 @@ def run_resource_finder(
 
     # Generate prompt
     print("📝 Generating resource finder prompt...")
-    prompt = generate_resource_finder_prompt(idea, templates_dir)
+    prompt = generate_resource_finder_prompt(idea, templates_dir, scoring_enabled=scoring_enabled)
 
     # Save prompt for reference
     logs_dir = work_dir / "logs"
