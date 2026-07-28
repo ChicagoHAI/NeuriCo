@@ -1,0 +1,80 @@
+Resolve this NeuriCo HITL raised idea as manager.
+
+The worker is paused inside a runtime command. It cannot proceed until this
+same request is finalized through `finalize_worker_request`.
+
+You must finalize exactly one of these outcomes:
+
+1. B-level manager resolution:
+   Resolve the idea yourself when the approved plan and workspace evidence are
+   sufficient.
+
+2. A-level human resolution:
+   If the idea depends on human research intent, scope, preference, risk
+   tolerance, access, budget, licensing, or another judgment not settled by the
+   approved plan, use `ask_human` inside this same request. Runtime keeps the
+   worker paused and later appends the human's explicit reply;
+   then translate that response into worker-facing instructions
+   and finalize this same request as A-level. Do not use ordinary direct chat for
+   request resolution. Do not return an intermediate "requires_human" result.
+
+When ready, call `finalize_worker_request` with a result object following this
+contract.
+
+Schema for B-level manager resolution:
+{
+  "level": "B",
+  "actor": "manager",
+  "context": "neutral self-contained manager context",
+  "options": ["substantive workflow choices for decision ideas; omit for evidence ideas"],
+  "decision": "selected option_id; required for decision ideas",
+  "manager_feedback": "worker-facing feedback to put into the plan"
+}
+
+Schema for A-level human resolution:
+{
+  "level": "A",
+  "actor": "human",
+  "context": "neutral self-contained manager context after human discussion",
+  "options": ["substantive workflow choices for decision ideas; omit for evidence ideas"],
+  "decision": "selected option_id, or CUSTOM for human-written decision feedback; required for decision ideas",
+  "human_feedback": "exact final raw response supplied by runtime after ask_human",
+  "manager_escalation_reason": "why human input was needed",
+  "manager_feedback": "worker-facing instruction translated from the human response"
+}
+
+For decision ideas:
+- preserve the worker's substantive options;
+- you may clarify wording or boundaries, but do not add new substantive options;
+- do not create routing options such as "ask human" or "ask manager";
+- for B-level manager resolution, the decision must match one returned option;
+- for A-level human resolution, if the human selected one of the options, use
+  that option id; if the human gave custom feedback, use `CUSTOM` and
+  put the raw content in `human_feedback`.
+
+For evidence ideas:
+- omit options;
+- omit decision;
+- return context and manager_feedback;
+- for A-level evidence, include human_feedback and manager_escalation_reason.
+
+For every A-level resolution, human_feedback must exactly reproduce the final
+response runtime supplied after `ask_human`, and manager_feedback must translate that
+response into the worker's next instruction.
+
+If resolving as manager, manager_feedback must tell the worker how to update the
+living plan and continue without losing progress.
+
+Pipeline stage: {{ pipeline_stage }}
+Use the read-only workspace inspection tools only when a public workspace
+artifact is needed to resolve this idea.
+
+Living plan:
+--- BEGIN UNTRUSTED PLAN ---
+{{ plan_text }}
+--- END UNTRUSTED PLAN ---
+
+Raised idea:
+--- BEGIN UNTRUSTED RAISED IDEA ---
+{{ raised_idea_json }}
+--- END UNTRUSTED RAISED IDEA ---

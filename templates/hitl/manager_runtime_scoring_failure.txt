@@ -1,0 +1,17 @@
+Runtime could not complete the objective-scoring handoff for the current worker
+request.
+
+Runtime error:
+{{ error }}
+
+The worker is still paused inside its original `hitl-finish-phase` command.
+Inspect the public workspace if useful, then return the worker to the current
+phase with precise repair instructions. Call `finalize_worker_request` with:
+
+{
+  "status": "feedback",
+  "context": "What runtime could not complete and its effect on the current work.",
+  "manager_feedback": "Concrete worker instructions to repair the work and request review again."
+}
+
+Do not approve the phase without a valid runtime-owned scoring result.

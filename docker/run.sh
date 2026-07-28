@@ -673,6 +673,52 @@ cmd_submit() {
 # -----------------------------------------------------------------------------
 # Run research exploration
 # -----------------------------------------------------------------------------
+hitl_web_port_from_args() {
+    local mode=""
+    local port="7890"
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --hitl-autoresearch|--hitl-continue-autoresearch)
+                if [ "$#" -lt 2 ]; then
+                    echo -e "${RED}$1 requires web or cli.${NC}" >&2
+                    return 1
+                fi
+                mode="$2"
+                shift 2
+                ;;
+            --hitl-autoresearch=*|--hitl-continue-autoresearch=*)
+                mode="${1#*=}"
+                shift
+                ;;
+            --hitl-manager-port)
+                if [ "$#" -lt 2 ]; then
+                    echo -e "${RED}--hitl-manager-port requires a port number.${NC}" >&2
+                    return 1
+                fi
+                port="$2"
+                shift 2
+                ;;
+            --hitl-manager-port=*)
+                port="${1#*=}"
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    if [ "$mode" != "web" ]; then
+        return 0
+    fi
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        echo -e "${RED}--hitl-manager-port must be between 1 and 65535.${NC}" >&2
+        return 1
+    fi
+    printf '%s\n' "$port"
+}
+
 cmd_run() {
     if [ -z "$1" ]; then
         echo -e "${RED}Usage: $0 run <idea_id> [--provider claude|codex|gemini] [options]${NC}"
@@ -687,6 +733,12 @@ cmd_run() {
     local user_flags=$(get_user_flags)
     local credential_mounts=$(get_cli_credential_mounts)
     local workspace_dir=$(get_workspace_dir)
+    local hitl_web_port
+    hitl_web_port=$(hitl_web_port_from_args "$@") || exit 1
+    local hitl_web_flags=""
+    if [ -n "$hitl_web_port" ]; then
+        hitl_web_flags="-p 127.0.0.1:${hitl_web_port}:${hitl_web_port} -e NEURICO_HITL_WEB_HOST=0.0.0.0 -e NEURICO_HITL_WEB_CONTAINER_MODE=1 -e NEURICO_HITL_BROWSER_URL=http://localhost:${hitl_web_port}"
+    fi
 
     local tty_flag=$(get_tty_flag)
 
@@ -704,6 +756,7 @@ cmd_run() {
         -v \"$PROJECT_ROOT/config:/app/config:ro\" \
         -v \"$PROJECT_ROOT/templates:/app/templates:ro\" \
         $credential_mounts \
+        $hitl_web_flags \
         -w /app \
         \"$IMAGE_NAME\" \
         python /app/src/core/runner.py $@"
@@ -1771,6 +1824,26 @@ cmd_interactive() {
         $python_cmd "$PROJECT_ROOT/src/interactive/manager.py" "$@"
 }
 
+# -----------------------------------------------------------------------------
+# HITL workspace page: launch the local manager host for an existing idea.
+# -----------------------------------------------------------------------------
+cmd_hitl_web() {
+    if [ -z "$1" ]; then
+        echo -e "${RED}Usage: $0 hitl-web <idea_id> [--port N] [--no-browser]${NC}"
+        exit 1
+    fi
+
+    local python_cmd="${NEURICO_PYTHON:-python3}"
+    if ! command -v "$python_cmd" &> /dev/null && [ ! -x "$python_cmd" ]; then
+        echo -e "${RED}Python is required to open the local HITL page.${NC}"
+        exit 1
+    fi
+
+    NEURICO_PROJECT_ROOT="$PROJECT_ROOT" \
+    NEURICO_WORKSPACE_DIR="$(get_workspace_dir)" \
+    "$python_cmd" "$PROJECT_ROOT/src/cli/hitl_web.py" "$@"
+}
+
 cmd_help() {
     show_banner
     show_status
@@ -1789,6 +1862,7 @@ cmd_help() {
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
     echo "  interactive <id>          Interactive mode (browser UI; --cli for terminal)"
+    echo "  hitl-web <id>             Open the local HITL workspace page"
     echo "  update-tools              Update Claude/Codex/Gemini to latest versions"
     echo "  bump-version <version>    Bump version across all files (e.g., 0.3.0)"
     echo "  up                        Start container in background (compose)"
@@ -1817,7 +1891,7 @@ ACTION="${1:-help}"
 shift 2>/dev/null || true
 
 # Check Docker is available (skip for commands that don't need it)
-if [ "$ACTION" != "config" ] && [ "$ACTION" != "help" ] && [ "$ACTION" != "--help" ] && [ "$ACTION" != "-h" ]; then
+if [ "$ACTION" != "config" ] && [ "$ACTION" != "help" ] && [ "$ACTION" != "--help" ] && [ "$ACTION" != "-h" ] && [ "$ACTION" != "hitl-web" ]; then
     check_docker
 fi
 
@@ -1854,6 +1928,9 @@ case "$ACTION" in
         ;;
     interactive)
         cmd_interactive "$@"
+        ;;
+    hitl-web)
+        cmd_hitl_web "$@"
         ;;
     update-tools)
         cmd_update_tools

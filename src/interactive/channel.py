@@ -15,6 +15,8 @@ Two directions:
 from __future__ import annotations
 
 import queue
+import select
+import sys
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -35,7 +37,8 @@ class UserChannel(ABC):
 
     @abstractmethod
     def prompt(self, message: Optional[str] = None,
-               options: Optional[List[str]] = None) -> Optional[str]:
+               options: Optional[List[str]] = None,
+               input_kind: str = "event_reply") -> Optional[str]:
         """Block until the human replies. Returns the reply, or None if the
         channel was closed (EOF / browser gone / shutdown)."""
 
@@ -70,7 +73,8 @@ class TerminalChannel(UserChannel):
             print(text)
 
     def prompt(self, message: Optional[str] = None,
-               options: Optional[List[str]] = None) -> Optional[str]:
+               options: Optional[List[str]] = None,
+               input_kind: str = "event_reply") -> Optional[str]:
         if message:
             print()
             print("=" * 70)
@@ -99,9 +103,38 @@ class TerminalChannel(UserChannel):
 
         label = "Your response: " if message else "[You] "
         try:
-            return input(label).strip()
+            return self._read_free_text_response(label)
         except EOFError:
             return None
+
+    def _read_free_text_response(self, label: str) -> str:
+        """Read terminal free-text, including lines already pasted after Enter."""
+        first = input(label)
+        lines = [first]
+        lines.extend(self._drain_ready_stdin_lines())
+        return "\n".join(line.rstrip("\n") for line in lines).strip()
+
+    def _drain_ready_stdin_lines(self, quiet_window: float = 0.2) -> List[str]:
+        try:
+            fd = sys.stdin.fileno()
+        except (AttributeError, OSError):
+            return []
+
+        lines: List[str] = []
+        deadline = time.monotonic() + quiet_window
+        while True:
+            try:
+                timeout = max(0.0, deadline - time.monotonic())
+                ready, _, _ = select.select([fd], [], [], timeout)
+            except (OSError, ValueError):
+                return lines
+            if not ready:
+                return lines
+            line = sys.stdin.readline()
+            if line == "":
+                return lines
+            lines.append(line)
+            deadline = time.monotonic() + quiet_window
 
     def poll_input(self, timeout: float = 0.0) -> Optional[str]:
         # The terminal uses the Ctrl+C interjection model (handled by the
@@ -183,13 +216,20 @@ class WebChannel(UserChannel):
 
     # --- inbound (human -> manager) ---
 
-    def submit_input(self, text: str) -> None:
+    def submit_input(
+        self,
+        text: str,
+        input_kind: str = "conversation",
+        request_key: Optional[str] = None,
+    ) -> None:
         """Called by the web server when the browser POSTs input."""
+        del input_kind, request_key
         if not self._closed.is_set():
             self._inbound.put(text)
 
     def prompt(self, message: Optional[str] = None,
-               options: Optional[List[str]] = None) -> Optional[str]:
+               options: Optional[List[str]] = None,
+               input_kind: str = "event_reply") -> Optional[str]:
         if message:
             # Tag as a question so the UI renders it as a distinct "needs your
             # reply" card rather than a normal informational bubble.
@@ -197,9 +237,13 @@ class WebChannel(UserChannel):
                         "text": message, "meta": {"question": True}})
 
         self._waiting = True
-        self._pending_prompt = {"message": message, "options": options or []}
+        self._pending_prompt = {
+            "message": message,
+            "options": options or [],
+            "input_kind": input_kind,
+        }
         self._emit({"event": "prompt", "message": message,
-                    "options": options or []})
+                    "options": options or [], "input_kind": input_kind})
 
         while not self._closed.is_set():
             try:

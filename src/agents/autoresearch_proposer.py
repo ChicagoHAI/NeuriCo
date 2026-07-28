@@ -1,16 +1,16 @@
 """
 AutoResearch Proposal Generator Agent.
 
-This module launches a provider CLI agent to write one structured proposal for
-the next AutoResearch attempt. The agent is a planner only: it writes
-proposal.md into the attempt history directory and must not modify the research
-workspace.
+This module launches a provider CLI agent to prepare one structured proposal
+for the next AutoResearch attempt. The agent is a planner only: normal
+AutoResearch writes proposal.md into attempt history, while HITL submits the
+proposal directly to runtime and must not modify public research-workspace
+files.
 """
 
 from pathlib import Path
 from typing import Any, Dict, Optional
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -21,29 +21,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.compute_backend import get_runtime_compute_backend
 from core.security import sanitize_text
-
-
-CLI_COMMANDS = {
-    "claude": "claude -p",
-    "codex": "codex exec",
-    "gemini": "gemini",
-}
-
-TRANSCRIPT_FLAGS = {
-    "claude": "--verbose --output-format stream-json",
-    "codex": "--json",
-    "gemini": "--output-format stream-json",
-}
-
-
-def _skill_root_for_provider(provider: str) -> str:
-    return f".{provider}/skills"
+from core.agent_runner import run_prebuilt_cli_agent
+from core.agent_cli import (
+    CLI_COMMANDS,
+    append_prompt_block,
+    build_agent_command,
+    build_agent_environment,
+    provider_skill_root,
+)
 
 
 def _generate_compute_backend_section(idea_spec: Dict[str, Any], provider: str = "claude") -> str:
     """Return proposer-only backend constraints for explicit remote backends."""
     backend = get_runtime_compute_backend(idea_spec)
-    skill_root = _skill_root_for_provider(provider)
+    skill_root = provider_skill_root(provider)
     dsi_skill_path = f"{skill_root}/dsi-slurm/SKILL.md"
     if backend == "dsi-slurm":
         return f"""
@@ -112,6 +103,9 @@ def generate_autoresearch_proposal_prompt(
     templates_dir: Path,
     provider: str = "claude",
     attempt_history: Optional[list[Dict[str, Any]]] = None,
+    hitl_idea_reporting: bool = False,
+    hitl_submission: bool = False,
+    hitl_autoresearch_whiteboard: bool = False,
 ) -> str:
     """
     Generate the AutoResearch proposer prompt from a curated public context.
@@ -140,7 +134,12 @@ def generate_autoresearch_proposal_prompt(
     idea_spec = idea.get("idea", idea)
     context = collect_public_proposal_context(
         work_dir=work_dir,
-        attempt_history=attempt_history or [],
+        # HITL exposes the selected direction's relevant attempt history only
+        # through view_current_frontier. Do not duplicate or leak runtime
+        # attempt provenance in the prompt's public context.
+        attempt_history=None if hitl_submission else attempt_history or [],
+        include_attempt_history=not hitl_submission,
+        hitl_autoresearch_whiteboard=hitl_autoresearch_whiteboard,
     )
 
     # Whiteboard tips get their own dedicated UNTRUSTED TIPS section in the
@@ -158,6 +157,11 @@ def generate_autoresearch_proposal_prompt(
         parent_sha=parent_sha,
         attempt_dir=str(attempt_dir),
         proposal_path=str(attempt_dir / "proposal.md"),
+        hitl_idea_reporting=hitl_idea_reporting,
+        hitl_submission=hitl_submission,
+        pipeline_stage="experiment_runner",
+        hitl_stage="proposal",
+        allow_raised_ideas=False,
         public_context=context,
         whiteboard_active_tips_md=whiteboard_active_tips_md,
         compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
@@ -167,6 +171,9 @@ def generate_autoresearch_proposal_prompt(
 def collect_public_proposal_context(
     work_dir: Path,
     attempt_history: Optional[list[Dict[str, Any]]] = None,
+    *,
+    include_attempt_history: bool = True,
+    hitl_autoresearch_whiteboard: bool = False,
 ) -> Dict[str, Any]:
     """
     Build the public context for proposal generation.
@@ -185,16 +192,23 @@ def collect_public_proposal_context(
         "results_summary": _summarize_directory(work_dir / "results"),
         "results_metrics_json": _read_json_or_text(work_dir / "results" / "metrics.json"),
         "src_tree": _list_tree(work_dir / "src"),
-        "attempt_history": attempt_history or [],
-        "whiteboard_active_tips_md": _render_whiteboard(work_dir),
+        "whiteboard_active_tips_md": _render_whiteboard(
+            work_dir,
+            hitl_autoresearch=hitl_autoresearch_whiteboard,
+        ),
     }
+    if include_attempt_history:
+        context["attempt_history"] = attempt_history or []
     return context
 
 
-def _render_whiteboard(work_dir: Path) -> str:
+def _render_whiteboard(work_dir: Path, *, hitl_autoresearch: bool = False) -> str:
     """Render the AutoResearch cross-run whiteboard's active tips as markdown."""
     try:
-        from core.whiteboard import Whiteboard
+        if hitl_autoresearch:
+            from core.hitl_whiteboard import HitlAutoResearchWhiteboard as Whiteboard
+        else:
+            from core.whiteboard import Whiteboard
     except ImportError:  # pragma: no cover
         return ""
     try:
@@ -214,12 +228,15 @@ def run_autoresearch_proposer(
     timeout: int = 900,
     full_permissions: bool = True,
     attempt_history: Optional[list[Dict[str, Any]]] = None,
+    prompt_suffix: str = "",
+    env_extra: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Launch the AutoResearch proposer agent.
 
-    Returns a dict with success, proposal_path, prompt_file, transcript_file,
-    elapsed_time, and error when applicable.
+    Returns launch metadata and success status. Normal AutoResearch also
+    returns its materialized proposal path; HITL proposal content is submitted
+    directly to runtime and has no worker-owned proposal artifact.
     """
     if provider not in CLI_COMMANDS:
         raise ValueError(
@@ -233,8 +250,9 @@ def run_autoresearch_proposer(
     attempt_dir = Path(attempt_dir)
     attempt_dir.mkdir(parents=True, exist_ok=True)
     proposal_path = attempt_dir / "proposal.md"
+    hitl_submission = bool(env_extra and env_extra.get("NEURICO_HITL_URL"))
 
-    print(f"🧭 Starting AutoResearch Proposal Generator")
+    print("🧭 Starting AutoResearch Proposal Generator")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
     print(f"   Parent node: {parent_sha}")
@@ -250,67 +268,85 @@ def run_autoresearch_proposer(
         templates_dir=Path(templates_dir),
         provider=provider,
         attempt_history=attempt_history,
+        hitl_idea_reporting=bool(env_extra and env_extra.get("NEURICO_HITL_URL")),
+        hitl_submission=hitl_submission,
+        hitl_autoresearch_whiteboard=bool(
+            env_extra and env_extra.get("NEURICO_HITL_AUTORESEARCH_WHITEBOARD") == "1"
+        ),
     )
+    prompt = append_prompt_block(prompt, prompt_suffix)
 
     prompt_file = attempt_dir / "proposer_prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
 
-    cmd = CLI_COMMANDS[provider]
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
-
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
 
     transcript_file = attempt_dir / f"proposer_{provider}_transcript.jsonl"
 
     print(f"▶️  Launching {provider} CLI proposer...")
     print(f"   Command: {cmd}")
-    print(f"   Proposal: {proposal_path}")
+    if not hitl_submission:
+        print(f"   Proposal: {proposal_path}")
+    else:
+        print("   Proposal: submitted directly to HITL runtime")
     print(f"   Transcript: {transcript_file}")
     print()
 
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    if provider == "gemini":
-        env["GEMINI_CLI_IDE_DISABLE"] = "1"
+    env = build_agent_environment(provider, env_extra)
 
     start_time = time.time()
     return_code: Optional[int] = None
     error: Optional[str] = None
+    launch: Dict[str, Any] = {
+        "success": False,
+        "timed_out": False,
+        "background_processes_terminated": False,
+    }
 
     try:
-        with open(transcript_file, "w", encoding="utf-8") as transcript_f:
-            process = subprocess.Popen(
-                shlex.split(cmd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+        if hitl_submission:
+            # HITL proposal submission is a live runtime interaction. Use the
+            # shared runner so the configured deadline applies even while the
+            # provider streams progress indefinitely.
+            launch = run_prebuilt_cli_agent(
+                command_argv=shlex.split(cmd),
+                prompt=prompt,
+                work_dir=work_dir,
+                log_file=attempt_dir / f"proposer_{provider}.log",
+                transcript_file=transcript_file,
                 env=env,
-                text=True,
-                encoding="utf-8",
-                bufsize=1,
-                cwd=str(attempt_dir),
+                timeout=timeout,
             )
+            return_code = launch["return_code"]
+            if launch["timed_out"]:
+                error = f"AutoResearch proposer timed out after {timeout}s"
+                print(f"\n⏱️  {error}")
+        else:
+            with open(transcript_file, "w", encoding="utf-8") as transcript_f:
+                process = subprocess.Popen(
+                    shlex.split(cmd),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    text=True,
+                    encoding="utf-8",
+                    bufsize=1,
+                    cwd=str(attempt_dir),
+                )
 
-            process.stdin.write(prompt)
-            process.stdin.close()
+                process.stdin.write(prompt)
+                process.stdin.close()
 
-            for line in iter(process.stdout.readline, ""):
-                if line:
-                    sanitized_line = sanitize_text(line)
-                    print(sanitized_line, end="")
-                    transcript_f.write(sanitized_line)
+                for line in iter(process.stdout.readline, ""):
+                    if line:
+                        sanitized_line = sanitize_text(line)
+                        print(sanitized_line, end="")
+                        transcript_f.write(sanitized_line)
 
-            return_code = process.wait(timeout=timeout)
+                return_code = process.wait(timeout=timeout)
 
     except subprocess.TimeoutExpired:
         process.kill()
@@ -323,9 +359,14 @@ def run_autoresearch_proposer(
 
     elapsed = time.time() - start_time
     proposal_exists = proposal_path.exists() and proposal_path.stat().st_size > 0
-    success = return_code == 0 and proposal_exists and error is None
+    success = (
+        return_code == 0
+        and (hitl_submission or proposal_exists)
+        and error is None
+        and not bool(launch.get("background_processes_terminated"))
+    )
 
-    if not proposal_exists and error is None:
+    if not hitl_submission and not proposal_exists and error is None:
         error = f"proposal.md was not created at {proposal_path}"
 
     if success:
@@ -344,6 +385,10 @@ def run_autoresearch_proposer(
         "transcript_file": str(transcript_file),
         "elapsed_time": elapsed,
         "error": error,
+        "timed_out": bool(launch.get("timed_out")),
+        "background_processes_terminated": bool(
+            launch.get("background_processes_terminated")
+        ),
     }
 
 

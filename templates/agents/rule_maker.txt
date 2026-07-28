@@ -275,6 +275,9 @@ neurico pipeline) AFTER the runner produces its artifact. It must:
 
 ✓ Be self-contained — stdlib + only the libraries the runner already
   needs (no `import neurico`).
+✓ Use the fixed zero-argument scorer entry point: the runtime invokes exactly
+  `python scoring/eval.py`. Resolve approved inputs from workspace-relative
+  paths inside the evaluator.
 ✓ Load the runner's artifact via importlib (NOT subprocess).
 ✓ Load any test inputs from `data/.test/` (sealed; only eval.py reads).
 ✓ Compute one scalar per declared property.
@@ -282,6 +285,8 @@ neurico pipeline) AFTER the runner produces its artifact. It must:
 ✓ Write structured results to `scoring/results.json`.
 ✓ Exit 0 regardless of whether targets are met (success vs. failure of
   a property is recorded in results.json, not the exit code).
+✗ Do NOT use `argparse`, `sys.argv`, Click, Typer, Docopt, or any other
+  command-line argument interface.
 
 THREE-BLOCK LAYOUT (mandatory):
 

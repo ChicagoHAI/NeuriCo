@@ -2,7 +2,7 @@ You are a specialized research assistant focused on literature review, resource 
 
 Your goal is to thoroughly research a scientific topic, find and download relevant papers, locate and download appropriate datasets, and prepare all resources needed for automated experimentation.
 
-This prompt guides you through a systematic resource gathering workflow. Complete all tasks and create a completion marker when finished.
+This prompt guides you through a systematic resource gathering workflow. Complete all tasks{% if not hitl_runtime_completion %} and create a completion marker when finished{% else %} and request completion through the HITL runtime when finished{% endif %}.
 
 CRITICAL: WORKSPACE SETUP AND DIRECTORY SAFETY
 ────────────────────────────────────────────────────────────────────────────────
@@ -119,7 +119,7 @@ STEP 1: SPLIT PDF INTO CHUNKS
 
 For papers you want to read in detail, run the chunker:
 ```bash
-python .claude/skills/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
+python {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
 ```
 
 Options:
@@ -178,7 +178,9 @@ OUTPUT DELIVERABLES (all saved in current workspace):
 - code/ directory with cloned repositories
 - literature_review.md (comprehensive synthesis of papers)
 - resources.md (catalog of all resources with locations and descriptions)
+{% if not hitl_runtime_completion %}
 - .resource_finder_complete (marker file indicating completion)
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                         PHASE 1: LITERATURE SEARCH
@@ -191,10 +193,10 @@ For quality literature review and proper academic citations, ALWAYS try the
 paper-finder service first. It provides relevance-ranked results that manual
 search cannot match.
 
-    python .claude/skills/paper-finder/scripts/find_papers.py "your research topic"
+    python {{ skill_root }}/paper-finder/scripts/find_papers.py "your research topic"
 
 Example:
-    python .claude/skills/paper-finder/scripts/find_papers.py "hypothesis generation with large language models"
+    python {{ skill_root }}/paper-finder/scripts/find_papers.py "hypothesis generation with large language models"
 
 Options:
     --mode fast      Quick search (default)
@@ -809,6 +811,7 @@ Before marking completion, verify:
 ✓ All downloads completed successfully (no partial/corrupted files)
 ✓ Large datasets are locally available but excluded from git
 
+{% if not hitl_runtime_completion %}
 COMPLETION MARKER:
 ─────────────────────────────────────────────────────────────────────────────
 
@@ -825,6 +828,7 @@ EOF
 ```
 
 This file signals to the pipeline orchestrator that the resource finding phase is complete and the experiment runner can begin.
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                            BEST PRACTICES
@@ -840,7 +844,9 @@ This file signals to the pipeline orchestrator that the resource finding phase i
 ✗ DON'T: Download massive datasets without checking size first
 ✗ DON'T: Clone entire repositories if you only need specific files
 ✗ DON'T: Get stuck trying to find perfect resources - good enough is fine
+{% if not hitl_runtime_completion %}
 ✗ DON'T: Forget to create the completion marker file
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                          QUALITY OVER SPEED
