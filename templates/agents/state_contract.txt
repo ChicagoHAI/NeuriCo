@@ -5,15 +5,19 @@ STATE.md is the compact handoff between phases. Read it before beginning each
 phase. The generated sections describe pipeline status and expected artifacts;
 do not rewrite or remove those sections. You own only the text between:
 
-<!-- NEURICO_AGENT_NOTES_START -->
+<!-- NEURICO_AGENT_NOTES_START:{{ phase_name }} -->
 ...
-<!-- NEURICO_AGENT_NOTES_END -->
+<!-- NEURICO_AGENT_NOTES_END:{{ phase_name }} -->
 
-At the end of every phase, update that notes block with:
+At the end of every phase, update only your phase-specific notes block with:
 - Current phase and what was completed
 - Key findings, decisions, and evidence paths
 - The next phase and its concrete next steps
 - Any failure, context drift, or unresolved uncertainty
+
+Do not edit another phase's notes block. Each phase has its own section so
+resource_finder findings remain available to later phases and cannot be
+overwritten by experiment_runner.
 
 Keep the notes concise enough to be useful as a handoff. If STATE.md does not
 exist, create it with the marker pair above before starting Phase 1. Do not

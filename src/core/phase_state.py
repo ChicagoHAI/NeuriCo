@@ -9,6 +9,7 @@ and did the previous phase leave its expected artifacts behind?
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
 
@@ -16,6 +17,16 @@ from typing import Any, Dict, Iterable, Mapping, Optional
 STATE_FILENAME = "STATE.md"
 AGENT_NOTES_START = "<!-- NEURICO_AGENT_NOTES_START -->"
 AGENT_NOTES_END = "<!-- NEURICO_AGENT_NOTES_END -->"
+PHASE_NOTES_START_PREFIX = "<!-- NEURICO_AGENT_NOTES_START:"
+PHASE_NOTES_END_PREFIX = "<!-- NEURICO_AGENT_NOTES_END:"
+
+
+def _phase_notes_start(stage_name: str) -> str:
+    return f"{PHASE_NOTES_START_PREFIX}{stage_name} -->"
+
+
+def _phase_notes_end(stage_name: str) -> str:
+    return f"{PHASE_NOTES_END_PREFIX}{stage_name} -->"
 
 
 def check_working_directory(
@@ -80,11 +91,21 @@ def _completed_summary(stages: Mapping[str, Mapping[str, Any]]) -> str:
 
 
 def extract_agent_notes(document: str) -> str:
-    """Extract the agent-owned notes block from an existing STATE.md."""
+    """Extract the complete agent-owned notes section from STATE.md."""
     if AGENT_NOTES_START not in document or AGENT_NOTES_END not in document:
         return ""
     notes = document.split(AGENT_NOTES_START, 1)[1].split(AGENT_NOTES_END, 1)[0]
     return notes.strip()
+
+
+def extract_phase_notes(document: str) -> Dict[str, str]:
+    """Extract independent notes blocks keyed by pipeline phase."""
+    pattern = re.compile(
+        rf"{re.escape(PHASE_NOTES_START_PREFIX)}([^ ]+) -->\n"
+        rf"(.*?)\n{re.escape(PHASE_NOTES_END_PREFIX)}\1 -->",
+        re.DOTALL,
+    )
+    return {stage: notes.strip() for stage, notes in pattern.findall(document)}
 
 
 def render_state_markdown(state: Mapping[str, Any], agent_notes: str = "") -> str:
@@ -98,6 +119,8 @@ def render_state_markdown(state: Mapping[str, Any], agent_notes: str = "") -> st
         "workspace_check", {}
     )
     validation = current.get("output_validation", {})
+    phase_notes = extract_phase_notes(agent_notes)
+    legacy_notes = agent_notes.strip() if not phase_notes else ""
 
     lines = [
         "# Research State",
@@ -118,7 +141,6 @@ def render_state_markdown(state: Mapping[str, Any], agent_notes: str = "") -> st
                 f"- Phase: `{context_name}`",
                 f"- Status: `{current.get('status', 'unknown')}`",
                 f"- Started: `{current.get('started_at', 'unknown')}`",
-                f"- Resume summary: {current.get('resume_summary') or 'None'}",
             ]
         )
         next_steps = current.get("next_steps") or []
@@ -162,10 +184,27 @@ def render_state_markdown(state: Mapping[str, Any], agent_notes: str = "") -> st
             "## Agent notes",
             "",
             AGENT_NOTES_START,
-            agent_notes.strip() or "Update this section at the end of each phase.",
-            AGENT_NOTES_END,
         ]
     )
+
+    if stages:
+        for stage_name in stages:
+            lines.extend(
+                [
+                    f"### {stage_name}",
+                    _phase_notes_start(stage_name),
+                    phase_notes.get(stage_name)
+                    or f"Update this section at the end of the `{stage_name}` phase.",
+                    _phase_notes_end(stage_name),
+                    "",
+                ]
+            )
+        if legacy_notes:
+            lines.extend(["### Legacy notes", legacy_notes, ""])
+    else:
+        lines.append(legacy_notes or "No phase notes recorded yet.")
+
+    lines.append(AGENT_NOTES_END)
 
     return "\n".join(lines) + "\n"
 

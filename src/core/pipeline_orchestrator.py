@@ -83,11 +83,6 @@ class PipelineState:
         """Mark a stage as started."""
         self.state["current_stage"] = stage_name
         workspace_check = check_working_directory(self.work_dir)
-        resume_summary = ", ".join(
-            f"{name} ({'succeeded' if stage.get('success') else 'failed'})"
-            for name, stage in self.state["stages"].items()
-            if stage.get("status") in {"completed", "failed"}
-        ) or "No prior phases completed."
         self.state["stages"][stage_name] = {
             "status": "in_progress",
             "started_at": datetime.now().isoformat(),
@@ -96,7 +91,6 @@ class PipelineState:
             "outputs": {},
             "expected_outputs": list(expected_outputs or []),
             "next_steps": list(next_steps or []),
-            "resume_summary": resume_summary,
             "workspace_check": workspace_check,
         }
         self._save()

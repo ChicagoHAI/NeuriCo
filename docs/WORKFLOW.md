@@ -168,18 +168,18 @@ The AI agent will have access to all these resources when it runs.
 
 Multi-agent runs maintain a human-readable `STATE.md` in the workspace. The
 pipeline-generated sections record the current phase, prior phase summary,
-workspace check, and expected-output validation. The research agent should
-update only the marked agent-notes block after each phase:
+workspace check, and expected-output validation. Each research agent should
+update only its own phase-specific notes block:
 
 ```markdown
-<!-- NEURICO_AGENT_NOTES_START -->
+<!-- NEURICO_AGENT_NOTES_START:resource_finder -->
 Phase 1 complete: selected the top three directions.
 Key finding: ...
 Next: implement the strongest direction and validate ...
-<!-- NEURICO_AGENT_NOTES_END -->
+<!-- NEURICO_AGENT_NOTES_END:resource_finder -->
 ```
 
-Keep the handoff concise and evidence-based. If a phase is missing an expected
+Keep each handoff concise and evidence-based. If a phase is missing an expected
 artifact, the pipeline records the phase as failed rather than starting the
 next phase with an incomplete workspace. The default direction budget is
 three; set `idea.max_directions` to change it for a particular run.
