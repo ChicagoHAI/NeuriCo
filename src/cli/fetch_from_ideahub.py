@@ -10,6 +10,9 @@ import sys
 import os
 import re
 import json
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
@@ -230,32 +233,100 @@ def _convert_without_llm(ideahub_content: dict) -> dict:
     return {'parsed': idea_data, 'yaml_string': yaml_string}
 
 
-def convert_to_yaml(ideahub_content: dict) -> dict:
-    """
-    Use GPT to convert IdeaHub content to NeuriCo YAML format.
+# CLI commands per provider (mirrors agents/manifest_trimmer.py)
+CLI_COMMANDS = {
+    "claude": "claude -p",
+    "codex": "codex exec",
+    "gemini": "gemini",
+}
 
-    Args:
-        ideahub_content: Dictionary with IdeaHub content
+CONVERSION_SYSTEM_PROMPT = (
+    "You are a research assistant that formats research ideas into minimal YAML. "
+    "Only include information explicitly provided - do not invent datasets, methods, "
+    "or metrics. Return valid YAML without markdown formatting."
+)
+
+
+def _extract_yaml(text: str) -> str:
+    """Pull the YAML document out of a raw LLM or CLI response."""
+    fence = re.search(r"```ya?ml\s*\n(.*?)```", text, re.DOTALL)
+    candidate = fence.group(1) if fence else text.replace("```", "")
+
+    # Drop any preamble the CLI printed before the document itself
+    match = re.search(r"^idea:", candidate, re.MULTILINE)
+    if match:
+        candidate = candidate[match.start():]
+
+    return candidate.strip()
+
+
+def _parse_idea_yaml(yaml_content: str) -> tuple:
+    """
+    Parse an idea YAML document, tolerating trailing chatter that CLI agents
+    append after the document (token counts, closing remarks). Trims one line
+    at a time from the end until the text parses as a dict containing 'idea'.
 
     Returns:
-        Dictionary in NeuriCo format
+        (parsed_dict, cleaned_yaml_string)
     """
-    print("\n🤖 Converting to NeuriCo format using GPT...")
+    lines = yaml_content.split("\n")
+    while lines:
+        text = "\n".join(lines).strip()
+        if text:
+            try:
+                parsed = yaml.safe_load(text)
+            except yaml.YAMLError:
+                parsed = None
+            if isinstance(parsed, dict) and 'idea' in parsed:
+                return parsed, text
+        lines.pop()
 
-    # Check for OpenAI API key
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        print("ℹ️  OPENAI_API_KEY not set — using template-based conversion instead.")
-        return _convert_without_llm(ideahub_content)
+    raise ValueError("no valid 'idea:' YAML document found in the response")
 
-    try:
-        from openai import OpenAI
-    except ImportError:
-        print("ℹ️  openai package not installed — using template-based conversion instead.")
-        return _convert_without_llm(ideahub_content)
 
-    client = OpenAI(api_key=api_key)
+def _convert_with_cli(prompt: str, provider: str, timeout: int = 300) -> dict:
+    """
+    Convert via a local agent CLI (codex/claude/gemini).
 
+    These authenticate with their own login (e.g. your ChatGPT account for
+    codex), so this path still works when OPENAI_API_KEY is unset or has
+    exhausted its quota.
+    """
+    cmd = CLI_COMMANDS[provider]
+    binary = shlex.split(cmd)[0]
+    if shutil.which(binary) is None:
+        raise RuntimeError(f"'{binary}' not found on PATH")
+
+    print(f"   Calling {provider} CLI ({cmd})...")
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    if provider == "gemini":
+        env["GEMINI_CLI_IDE_DISABLE"] = "1"
+
+    result = subprocess.run(
+        shlex.split(cmd),
+        input=f"{CONVERSION_SYSTEM_PROMPT}\n\n{prompt}",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=timeout,
+    )
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-500:]
+        raise RuntimeError(f"exited with code {result.returncode}: {detail}")
+
+    parsed, yaml_content = _parse_idea_yaml(_extract_yaml(result.stdout))
+    print("   ✓ Conversion complete")
+
+    return {'parsed': parsed, 'yaml_string': yaml_content}
+
+
+def _build_conversion_prompt(ideahub_content: dict) -> str:
+    """Build the IdeaHub -> NeuriCo YAML conversion prompt."""
     # Read schema for reference
     schema_path = Path(__file__).parent.parent.parent / "ideas" / "schema.yaml"
     with open(schema_path, 'r', encoding='utf-8') as f:
@@ -354,49 +425,75 @@ idea:
 ```
 """
 
-    try:
-        print("   Calling GPT API...")
-        response = client.chat.completions.create(
-            model="gpt-4.1",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a research assistant that formats research ideas into minimal YAML. Only include information explicitly provided - do not invent datasets, methods, or metrics. Return valid YAML without markdown formatting."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.1,  # Lower temperature for more conservative output
-            max_tokens=2000  # Reduced since we want minimal output
-        )
+    return prompt
 
-        yaml_content = response.choices[0].message.content.strip()
 
-        # Remove markdown code fences if present
-        yaml_content = re.sub(r'^```ya?ml\s*\n', '', yaml_content)
-        yaml_content = re.sub(r'\n```\s*$', '', yaml_content)
-        yaml_content = yaml_content.strip()
+def _convert_with_openai(prompt: str, api_key: str) -> dict:
+    """Convert via the OpenAI API. Raises on auth, quota, or parse failure."""
+    from openai import OpenAI
 
-        print("   ✓ Conversion complete")
+    client = OpenAI(api_key=api_key)
 
-        # Parse YAML to validate
+    print("   Calling GPT API...")
+    response = client.chat.completions.create(
+        model="gpt-4.1",
+        messages=[
+            {"role": "system", "content": CONVERSION_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.1,  # Lower temperature for more conservative output
+        max_tokens=2000  # Reduced since we want minimal output
+    )
+
+    raw = response.choices[0].message.content.strip()
+    parsed, yaml_content = _parse_idea_yaml(_extract_yaml(raw))
+    print("   ✓ Conversion complete")
+
+    return {'parsed': parsed, 'yaml_string': yaml_content}
+
+
+def convert_to_yaml(ideahub_content: dict, provider: str = None) -> dict:
+    """
+    Convert IdeaHub content to NeuriCo YAML format.
+
+    Tries three paths in order, falling through on failure:
+      1. The OpenAI API, if OPENAI_API_KEY is set.
+      2. The local agent CLI for `provider` (default codex), which uses its own
+         login rather than OPENAI_API_KEY -- so it survives a quota error.
+      3. A template-based conversion, which preserves far less of the source
+         idea (no citations, keyword-guessed domain).
+
+    Args:
+        ideahub_content: Dictionary with IdeaHub content
+        provider: Agent CLI to fall back to (claude, codex, gemini)
+
+    Returns:
+        Dictionary with 'parsed' and 'yaml_string' keys
+    """
+    prompt = _build_conversion_prompt(ideahub_content)
+    cli_provider = provider or "codex"
+
+    api_key = os.getenv('OPENAI_API_KEY')
+    if api_key:
+        print("\n🤖 Converting to NeuriCo format using GPT...")
         try:
-            parsed = yaml.safe_load(yaml_content)
-            # Return both parsed data and the raw YAML string
-            return {'parsed': parsed, 'yaml_string': yaml_content}
-        except yaml.YAMLError as e:
-            print(f"⚠️  Warning: Generated YAML may have issues: {e}")
-            print("   Attempting to fix...")
-            # Try to return anyway
-            parsed = yaml.safe_load(yaml_content)
-            return {'parsed': parsed, 'yaml_string': yaml_content}
+            return _convert_with_openai(prompt, api_key)
+        except ImportError:
+            print("⚠️  openai package not installed.")
+        except Exception as e:
+            print(f"⚠️  GPT API call failed: {e}")
+    else:
+        print("\nℹ️  OPENAI_API_KEY not set.")
 
-    except Exception as e:
-        print(f"⚠️  GPT API call failed: {e}")
-        print("   Falling back to template-based conversion.")
-        return _convert_without_llm(ideahub_content)
+    if cli_provider in CLI_COMMANDS:
+        print(f"🤖 Converting to NeuriCo format using the {cli_provider} CLI...")
+        try:
+            return _convert_with_cli(prompt, cli_provider)
+        except Exception as e:
+            print(f"⚠️  {cli_provider} CLI conversion failed: {e}")
+
+    print("   Falling back to template-based conversion.")
+    return _convert_without_llm(ideahub_content)
 
 
 def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
@@ -505,7 +602,7 @@ def main():
         "--provider",
         choices=["claude", "gemini", "codex"],
         default=None,
-        help="AI provider for repo naming and --run execution"
+        help="AI provider for YAML conversion fallback, repo naming, and --run execution (default: codex for conversion)"
     )
     parser.add_argument(
         "--no-hash",
@@ -569,8 +666,8 @@ def main():
     if ideahub_content.get('title'):
         print(f"\n✓ Found idea: {ideahub_content['title']}")
 
-    # Step 2: Convert with GPT
-    result = convert_to_yaml(ideahub_content)
+    # Step 2: Convert (GPT, then the provider's CLI, then a template)
+    result = convert_to_yaml(ideahub_content, provider=args.provider)
 
     # Step 3: Save file
     if args.output:
