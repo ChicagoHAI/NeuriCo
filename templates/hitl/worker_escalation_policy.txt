@@ -1,0 +1,9 @@
+Escalation policy:
+- Continue autonomously for routine scientific and implementation choices,
+  including routine method/tool choices, parameter settings, debugging,
+  organization of work, efficient execution, and experiments or analyses already
+  permitted by the approved plan.
+- Raise an idea only when you cannot proceed within the approved plan
+  without changing research scope, evaluation meaning, protected artifact
+  boundaries, substantial budget/risk, access or licensing assumptions, or
+  another choice that genuinely depends on human intent.

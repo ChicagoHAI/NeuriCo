@@ -5,8 +5,8 @@ Lean 4 / Mathlib formalizations relevant to the research question.
 Your goal is to thoroughly research a mathematical topic, find and download relevant
 papers, catalog prior theorems and techniques, identify which results are already
 formalized in Mathlib, and prepare all resources needed for formal proof construction
-in Lean 4 (verified via the hosted Axiom AXLE API). Complete all tasks and create a
-completion marker when finished.
+in Lean 4 (verified via the hosted Axiom AXLE API). Complete all tasks{% if not hitl_runtime_completion %} and create a
+completion marker when finished{% else %} and request completion through the HITL runtime when finished{% endif %}.
 
 CRITICAL: WORKSPACE SETUP AND DIRECTORY SAFETY
 ────────────────────────────────────────────────────────────────────────────────
@@ -85,7 +85,7 @@ Use the PDF chunker to split papers into smaller PDF files that you can read
 directly. Install pypdf first: uv add pypdf
 
 Run the chunker:
-  python .claude/skills/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
+  python {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
 
 Options:
 - --pages-per-chunk N  (default: 1, use 3 for faster reading)
@@ -112,7 +112,9 @@ OUTPUT DELIVERABLES (all saved in current workspace):
 - literature_review.md (comprehensive synthesis: definitions, theorems, techniques,
   AND Mathlib lemma catalog)
 - resources.md (catalog of all resources including Mathlib lemmas found)
+{% if not hitl_runtime_completion %}
 - .resource_finder_complete (marker file indicating completion)
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                         PHASE 1: LITERATURE SEARCH
@@ -123,7 +125,7 @@ PAPER FINDER (Primary Method - Use First)
 For quality literature review and proper academic citations, ALWAYS try the
 paper-finder service first:
 
-    python .claude/skills/paper-finder/scripts/find_papers.py "your research topic"
+    python {{ skill_root }}/paper-finder/scripts/find_papers.py "your research topic"
 
 Options:
     --mode fast      Quick search (default)
@@ -221,7 +223,7 @@ No local Lean install is needed. Confirm the API key is present, then send a
 
    echo "AXLE key: ${AXLE_API_KEY:0:6}..."   # should print pk_...
 
-   python .claude/skills/axiom-lean-prover/scripts/axle_check.py --json --code '
+   python {{ skill_root }}/axiom-lean-prover/scripts/axle_check.py --json --code '
    #check @Nat.add_comm
    #check @Finset.card_union_add_card_inter
    -- add more candidate names here
@@ -365,6 +367,7 @@ FINAL CHECKLIST:
 ✓ Mathlib lemma names verified with #check via AXLE (or flagged as uncertain)
 ✓ Existing Lean formalizations searched for and documented
 
+{% if not hitl_runtime_completion %}
 COMPLETION MARKER:
 cat > .resource_finder_complete << 'EOF'
 Resource finding phase completed successfully.
@@ -373,6 +376,7 @@ Papers downloaded: [count]
 Prior results cataloged: [count]
 Mathlib lemmas identified: [count]
 EOF
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                            BEST PRACTICES
@@ -388,7 +392,9 @@ EOF
 ✗ DON'T: Paraphrase theorems loosely — precision matters in formal proofs
 ✗ DON'T: Construct proofs here — that's the experiment runner's job
 ✗ DON'T: Try to install Lean/elan/lake — verification is remote via AXLE
+{% if not hitl_runtime_completion %}
 ✗ DON'T: Forget the completion marker file
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
 
