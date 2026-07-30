@@ -36,6 +36,7 @@ CLI (subset run inside a NeuriCo workspace):
 
 Storage: <workspace>/logs/experiment-autoresearch/whiteboard.json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -46,7 +47,13 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Callable, Iterable, Optional
+
+from core.autoresearch_common import (
+    clear_attempt_marker_file,
+    read_attempt_marker_file,
+    write_attempt_marker_file,
+)
 
 SCHEMA_VERSION = 2
 WHITEBOARD_FILENAME = "whiteboard.json"
@@ -75,9 +82,9 @@ class Tip:
     written_at: float = 0.0
     affects: list[str] = field(default_factory=list)
     # Set on clear / prune:
-    cleared_by: str = ""     # author string of the handler that claimed it
+    cleared_by: str = ""  # author string of the handler that claimed it
     cleared_at: float = 0.0
-    cleared_at_attempt: str = ""   # attempt id (e.g. "<parent_sha>/attempt_3")
+    cleared_at_attempt: str = ""  # attempt id (e.g. "<parent_sha>/attempt_3")
     pruned_reason: str = ""
     pruned_at: float = 0.0
     pruned_at_attempt: str = ""
@@ -108,26 +115,17 @@ def write_current_attempt_marker(work_dir: Path, attempt_id: str) -> None:
     that comment_handler / proposer subprocesses running `whiteboard
     clear-tip` and `whiteboard prune-tip` can automatically tag their
     mutations. If the marker is missing, the CLI still works but the
-    mutation is unattributed and cannot be rolled back on rejection.
+    mutation is unattributed and cannot be rolled back if the attempt fails.
     """
-    marker = current_attempt_marker_path(work_dir)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(attempt_id.strip() + "\n", encoding="utf-8")
+    write_attempt_marker_file(current_attempt_marker_path(work_dir), attempt_id)
 
 
 def clear_current_attempt_marker(work_dir: Path) -> None:
-    marker = current_attempt_marker_path(work_dir)
-    try:
-        marker.unlink()
-    except FileNotFoundError:
-        pass
+    clear_attempt_marker_file(current_attempt_marker_path(work_dir))
 
 
 def read_current_attempt_marker(work_dir: Path) -> str:
-    marker = current_attempt_marker_path(work_dir)
-    if not marker.exists():
-        return ""
-    return marker.read_text(encoding="utf-8").strip()
+    return read_attempt_marker_file(current_attempt_marker_path(work_dir))
 
 
 # Directories that identify a NeuriCo AutoResearch workspace. Auto-detect
@@ -169,9 +167,24 @@ class Whiteboard:
     calling the CLI). Atomic save via temp-file + os.replace.
     """
 
-    def __init__(self, work_dir: Path):
+    def __init__(
+        self,
+        work_dir: Path,
+        *,
+        path: Optional[Path] = None,
+        attempt_marker_path: Optional[Path] = None,
+        record_version: Optional[Callable[[], None]] = None,
+        restore_on_version_failure: bool = False,
+    ):
         self.work_dir = Path(work_dir)
-        self.path = whiteboard_path(self.work_dir)
+        self.path = Path(path) if path is not None else whiteboard_path(self.work_dir)
+        self.attempt_marker_path = (
+            Path(attempt_marker_path)
+            if attempt_marker_path is not None
+            else current_attempt_marker_path(self.work_dir)
+        )
+        self._record_version = record_version
+        self._restore_on_version_failure = bool(restore_on_version_failure)
         self.schema_version: int = SCHEMA_VERSION
         self._next_id_num: int = 1
         self.tips: list[Tip] = []
@@ -195,6 +208,13 @@ class Whiteboard:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        previous = (
+            self.path.read_bytes()
+            if self._record_version is not None
+            and self._restore_on_version_failure
+            and self.path.exists()
+            else None
+        )
         payload = {
             "schema_version": self.schema_version,
             "next_id_num": self._next_id_num,
@@ -211,6 +231,33 @@ class Whiteboard:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_name, self.path)
+            if self._record_version is not None and self.attempt_marker_path.exists():
+                try:
+                    self._record_version()
+                except Exception:
+                    if not self._restore_on_version_failure:
+                        raise
+                    # A versioned whiteboard mutation is one operation. Do not
+                    # leave a live change behind when its rollback history was
+                    # not recorded.
+                    if previous is None:
+                        self.path.unlink(missing_ok=True)
+                    else:
+                        restore_fd, restore_name = tempfile.mkstemp(
+                            prefix=".whiteboard.restore.",
+                            suffix=".tmp",
+                            dir=str(self.path.parent),
+                        )
+                        try:
+                            with os.fdopen(restore_fd, "wb") as restore_file:
+                                restore_file.write(previous)
+                                restore_file.flush()
+                                os.fsync(restore_file.fileno())
+                            os.replace(restore_name, self.path)
+                        finally:
+                            if os.path.exists(restore_name):
+                                os.unlink(restore_name)
+                    raise
         except Exception:
             try:
                 os.unlink(tmp_name)
@@ -249,9 +296,7 @@ class Whiteboard:
                 "prompts; keep them terse. Split into multiple tips if needed."
             )
         if category not in CATEGORIES:
-            raise WhiteboardError(
-                f"unknown category {category!r}; must be one of {CATEGORIES}"
-            )
+            raise WhiteboardError(f"unknown category {category!r}; must be one of {CATEGORIES}")
         tip = Tip(
             id=self._new_id(),
             category=category,
@@ -274,9 +319,7 @@ class Whiteboard:
         if t is None:
             raise WhiteboardError(f"no tip with id {tip_id!r}")
         if t.status != STATUS_ACTIVE:
-            raise WhiteboardError(
-                f"tip {tip_id} is already {t.status}, cannot clear"
-            )
+            raise WhiteboardError(f"tip {tip_id} is already {t.status}, cannot clear")
         if t.is_informative():
             raise WhiteboardError(
                 f"tip {tip_id} is category=informative; comment_handler cannot "
@@ -303,9 +346,7 @@ class Whiteboard:
         if t is None:
             raise WhiteboardError(f"no tip with id {tip_id!r}")
         if t.status != STATUS_ACTIVE:
-            raise WhiteboardError(
-                f"tip {tip_id} is already {t.status}, cannot prune"
-            )
+            raise WhiteboardError(f"tip {tip_id} is already {t.status}, cannot prune")
         t.status = STATUS_PRUNED
         t.pruned_reason = reason
         t.pruned_at = time.time()
@@ -392,6 +433,7 @@ class Whiteboard:
 
 # ---- CLI ----
 
+
 def _resolve_workspace(args: argparse.Namespace) -> Path:
     """Turn --workspace (or its absence) into a concrete path, with auto-detect."""
     if args.workspace:
@@ -403,6 +445,12 @@ def _resolve_workspace(args: argparse.Namespace) -> Path:
 
 
 def _load(work_dir: Path) -> Whiteboard:
+    if os.environ.get("NEURICO_HITL_AUTORESEARCH_WHITEBOARD") == "1":
+        from core.hitl_whiteboard import HitlAutoResearchWhiteboard
+
+        wb = HitlAutoResearchWhiteboard(work_dir)
+        wb.load()
+        return wb
     wb = Whiteboard(work_dir)
     wb.load()
     return wb
@@ -451,6 +499,10 @@ def _resolve_attempt(args: argparse.Namespace, ws: Path) -> str:
     explicit = getattr(args, "attempt", None)
     if explicit:
         return explicit.strip()
+    if os.environ.get("NEURICO_HITL_AUTORESEARCH_WHITEBOARD") == "1":
+        from core.hitl_whiteboard import read_hitl_current_attempt_marker
+
+        return read_hitl_current_attempt_marker(ws)
     return read_current_attempt_marker(ws)
 
 
@@ -506,9 +558,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--workspace",
         default=None,
         help="Workspace root. If omitted, auto-detected by walking up from "
-             "cwd looking for `logs/experiment-autoresearch/` or `.neurico/`. "
-             "The whiteboard file is at "
-             "<workspace>/logs/experiment-autoresearch/whiteboard.json.",
+        "cwd looking for `logs/experiment-autoresearch/` or `.neurico/`. "
+        "The whiteboard file is at "
+        "<workspace>/logs/experiment-autoresearch/whiteboard.json.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -518,8 +570,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser(
         "add-tip",
-        help="Record a new tip. Called by comment_handler. Categories: "
-             + ", ".join(CATEGORIES),
+        help="Record a new tip. Called by comment_handler. Categories: " + ", ".join(CATEGORIES),
     )
     a.add_argument("--category", required=True, choices=CATEGORIES)
     a.add_argument("--content", required=True, help="The tip text.")
@@ -538,7 +589,7 @@ def _build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser(
         "clear-tip",
         help="Mark a tip as incorporated. Called by comment_handler. "
-             "Refuses on category=informative.",
+        "Refuses on category=informative.",
     )
     c.add_argument("tip_id", help="Tip id, e.g. T3.")
     c.add_argument("--author", default="", help="Optional attribution.")
@@ -546,8 +597,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--attempt",
         default=None,
         help="Attempt id to attribute this clear to. Defaults to the "
-             ".current_attempt marker written by AutoResearch, so on "
-             "rejection the controller can revert the clear.",
+        ".current_attempt marker written by AutoResearch, so on "
+        "rejection the controller can revert the clear.",
     )
     c.set_defaults(func=_cmd_clear_tip)
 
@@ -562,8 +613,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--attempt",
         default=None,
         help="Attempt id to attribute this prune to. Defaults to the "
-             ".current_attempt marker written by AutoResearch, so on "
-             "rejection the controller can revert the prune.",
+        ".current_attempt marker written by AutoResearch, so on "
+        "rejection the controller can revert the prune.",
     )
     p.set_defaults(func=_cmd_prune_tip)
 

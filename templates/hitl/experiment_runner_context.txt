@@ -1,0 +1,16 @@
+═══════════════════════════════════════════════════════════════════════════════
+                     EXPERIMENT RUNNER RESEARCH CONTEXT
+═══════════════════════════════════════════════════════════════════════════════
+
+This is the research context for the current {{ hitl_phase }} invocation. The
+HITL phase protocol that follows defines the work permitted in this invocation.
+Do not implement, run experiments, or modify public experiment artifacts unless
+that protocol explicitly authorizes execution or review revision work.
+
+RESEARCH IDEA:
+{{ idea_json }}
+
+{% if scoring_interface %}
+PUBLIC EVALUATION INTERFACE:
+{{ scoring_interface }}
+{% endif %}

@@ -1,0 +1,215 @@
+C-Level Idea Reporting
+
+During this HITL invocation, maintain a lightweight logic trail of consequential
+research ideas. This is not bookkeeping. It helps future you, the manager, and
+downstream stages understand which evidence mattered, which choices were made,
+and what those choices depended on.
+
+Record an idea whenever it would change what you or a later worker should do, or
+when it explains why a non-routine choice was made. These records are C-level
+when you can continue autonomously after logging them.
+
+Before making or extending a material idea, run `hitl-view-ideas` when prior
+HITL ideas could inform the judgment. If a prior finalized idea supports the new
+idea, cite it with repeated `--premise I<N>`. Use only idea ids shown by
+`hitl-view-ideas`.
+
+NeuriCo runtime owns HITL state. It supplies only the commands legal for this
+worker invocation. Use `hitl-view-ideas` to read finalized ideas and the
+stage-specific reporting, raising, proposal, or finish command described below.
+Do not inspect or edit runtime state directly, and do not attempt to invoke an
+HITL command that runtime has not supplied.
+
+Good moments to log:
+- after reading a paper and extracting a finding that affects the plan, method,
+  dataset, evaluation, or risk assessment;
+- after discovering a dataset, repository, implementation fact, result, license,
+  access limit, compute limit, or artifact constraint that affects the work;
+- after committing to a search direction, dataset, method, evaluation design,
+  compute/resource choice, or artifact boundary;
+- when new evidence changes, narrows, or contradicts an earlier assumption or
+  premise.
+
+Do not wait until the end of the phase to reconstruct the trail. Log ideas as
+they become clear, then keep working.
+
+{% if hitl_stage == "proposal" %}
+Proposal idea:
+
+Before choosing the next proposal, run `view_current_frontier` when you need
+the selected direction's complete objective score, manager acceptance rationale,
+or attempt history. The current experiment plan is already in the workspace.
+
+Submit the complete proposal directly to runtime with:
+
+```bash
+hitl-submit-proposal \
+  --proposal-type "exploitation" \
+  --premise "I3" <<'PROPOSAL'
+<complete proposal text>
+PROPOSAL
+```
+
+Use `--proposal-type exploitation` when the proposal improves an existing promising
+direction. Use `--proposal-type exploration` when the proposal tests a structurally
+different direction or changed assumption.
+
+Use at least one finalized premise. The proposal text must be supplied on
+standard input exactly as shown. Runtime owns the submitted proposal record.
+
+Wait for `hitl-submit-proposal` to finish. If it prints
+`HITL_PROPOSAL_APPROVED`, stop proposal generation. If it prints
+`HITL_PROPOSAL_FEEDBACK`, do not revise or resubmit the rejected proposal.
+Create a new proposal using the returned feedback, then submit that new
+proposal with `hitl-submit-proposal` in this same proposer session. If it prints
+`HITL_COMMAND_ERROR` or `HITL_ERROR`, follow the printed instruction and retry
+the command before ending proposal generation.
+{% endif %}
+
+{% if pipeline_stage == "resource_finder" %}
+Resource-finder reminders:
+- log paper findings that shape the research direction, benchmark choice,
+  method shortlist, or risk assessment;
+- log dataset, repository, benchmark, or baseline choices when you decide what
+  should be included, excluded, primary, secondary, or only mentioned with
+  caveats;
+- log search-strategy changes when early results narrow, broaden, or redirect
+  the resource search.
+{% elif pipeline_stage == "experiment_runner" %}
+Experiment-runner reminders:
+- log implementation facts that change how the approved proposal or plan can be
+  executed, such as unavailable packages, incompatible APIs, data-format
+  mismatches, or required simplifications;
+- log experiment results that affect the next run, interpretation, error
+  analysis, or conclusion, including failed runs when the failure changes what
+  should happen next;
+- log method, evaluation, compute/resource, and artifact-boundary choices when
+  you decide what to run, what to skip, how to adapt the implementation, or how
+  to present outputs under the approved plan.
+{% elif pipeline_stage == "rule_maker" %}
+Rule-maker reminders:
+- log evidence about a metric's validity, a dataset/split constraint, a
+  baseline limitation, determinism, aggregation, or a reward-hacking risk when
+  it changes how the evaluation contract should be interpreted or implemented;
+- log evaluation choices when you select properties, directions, targets,
+  thresholds, split/aggregation rules, required runner artifacts, or an
+  anti-gaming check within the approved plan;
+- raise rather than decide autonomously when a choice would redefine scientific
+  success, invalidate the research claim, or depend on the human's intended
+  tradeoff between competing evaluation goals.
+{% endif %}
+
+Evidence categories:
+- `paper_finding`
+- `dataset_property`
+- `implementation_fact`
+- `experiment_result`
+- `constraint_or_risk`
+- `other`
+
+Decision categories:
+- `dataset_choice`
+- `search_strategy`
+- `method_choice`
+- `evaluation_choice`
+- `compute_resource_choice`
+- `artifact_boundary_choice`
+- `other`
+
+Evidence idea:
+
+```bash
+hitl-report-idea evidence \
+  --category "dataset_property" \
+  --context "what situation produced this evidence" \
+  --evidence "the evidence idea"
+```
+
+Decision idea:
+
+```bash
+hitl-report-idea decision \
+  --category "search_strategy" \
+  --context "what situation required this decision" \
+  --decision-needed "the question being decided" \
+  --option "one meaningful option considered" \
+  --option "another meaningful option considered" \
+  --decision "the selected option or final decision"
+```
+
+For decision ideas, include every meaningful option you considered using
+repeated `--option`. Do not add filler options. The `--decision` value must
+match one declared option (its exact text or `O<N>`); runtime records the
+selected option id.
+
+Choose exactly one category that best describes the idea. Evidence may be a
+root idea with no premise. Every decision must cite at least one finalized
+premise. Do not invent premise ids.
+
+When a prior finalized idea is relevant, add one premise flag per idea id:
+
+```bash
+  --premise "I3" \
+  --premise "I4"
+```
+
+If a related workspace artifact matters, add one or more artifact pairs:
+
+```bash
+  --artifact "relative/path" "why this artifact matters"
+```
+
+Artifact paths must be POSIX paths relative to the research workspace root.
+
+After the command succeeds, continue the task.
+
+Use this for material autonomous ideas:
+- a non-routine decision that materially affects the proposal, plan, expected
+  artifacts, assumptions, or next steps;
+- evidence that materially changes an assumption, constraint, candidate action,
+  or expected result.
+
+If you are unsure whether to log, ask: would this matter to future you, the
+manager, or a downstream stage? If yes, log it. If it is only a routine command,
+formatting/editing detail, or temporary scratch step, do not log it.
+
+Do not log routine reading, formatting, ordinary commands, minor edits, or
+micro-steps. Do not log the same idea again unless new evidence materially
+changes it. Do not log manager/human feedback, approval, or the act of following
+that feedback as a new C-level idea.
+
+{% if allow_raised_ideas %}
+For issues that need manager or human input, use `hitl-raise-idea` and wait for
+the returned feedback.
+
+Raised evidence idea:
+
+```bash
+hitl-raise-idea evidence \
+  --category "dataset_property" \
+  --context "what situation produced this evidence" \
+  --evidence "the evidence idea" \
+  --reason-for-escalation "why manager or human input is required"
+```
+
+Raised decision idea:
+
+```bash
+hitl-raise-idea decision \
+  --category "dataset_choice" \
+  --context "what situation requires a decision" \
+  --decision-needed "the question being decided" \
+  --option "one substantive option" \
+  --option "another substantive option" \
+  --reason-for-escalation "why manager or human input is required"
+```
+
+For raised decision ideas, include every substantive option that should be
+available for manager/human resolution using repeated `--option`. The command
+blocks until runtime resolves the idea, then prints `HITL_RESOLVED` and
+worker-facing feedback. Read that feedback, update the living plan, and continue
+in the same session.
+
+{% endif %}
+
+Current HITL stage for these autonomous ideas: `{{ hitl_stage }}`.

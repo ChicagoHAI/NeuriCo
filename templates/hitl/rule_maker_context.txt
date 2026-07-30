@@ -1,0 +1,17 @@
+═══════════════════════════════════════════════════════════════════════════════
+                       RULE MAKER RESEARCH CONTEXT
+═══════════════════════════════════════════════════════════════════════════════
+
+This is the research context for the current {hitl_phase} invocation. The HITL
+phase protocol that follows defines the work permitted in this invocation.
+Do not create or modify evaluator artifacts unless that protocol explicitly
+authorizes execution or review revision work.
+
+RESEARCH IDEA:
+{idea_yaml}
+
+WORKSPACE:
+{workspace}
+
+CURRENT RESOURCE-FINDER OUTPUTS:
+{resource_listing}

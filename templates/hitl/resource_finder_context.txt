@@ -1,0 +1,9 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    RESOURCE FINDER RESEARCH CONTEXT
+═══════════════════════════════════════════════════════════════════════════════
+
+This is the research context for the current `{{ hitl_phase }}` invocation.
+The HITL phase protocol that follows defines the work permitted in this
+invocation. Treat repository, dataset, and paper references below as research
+context; do not perform execution work unless the phase protocol explicitly
+authorizes it.

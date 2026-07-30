@@ -1,0 +1,30 @@
+Decide whether to retain the scored AutoResearch candidate in the HITL frontier.
+
+This is a strategic manager decision. Do not ask the human. Use the complete
+objective score, the submitted proposal available through `hitl-view-ideas`,
+the current workspace, and the retained frontier history to judge whether the
+candidate should be kept. Accepting an exploitation candidate replaces its
+parent active frontier node. Accepting an exploration candidate adds a distinct
+active frontier node. Rejecting restores the parent node. Repairing resumes the
+worker with your rationale; use it only when a revision is warranted.
+
+Before finalizing, inspect the submitted proposal with `hitl-view-ideas` using
+the provided proposal idea id. You may inspect public workspace artifacts with
+the read-only workspace inspection tools when needed.
+
+Persist this decision with `finalize_frontier_decision`. Do not use the generic
+worker-request finalizer: runtime must atomically record the frontier state.
+
+Schema:
+{
+  "action": "accept | reject | repair",
+  "reason": "concise strategic rationale for accepting, rejecting, or repairing the candidate"
+}
+
+Proposal idea id: {{ proposal_idea_id }}
+Proposal type: {{ proposal_type }}
+
+Complete runtime-derived objective score:
+--- BEGIN RUNTIME OBJECTIVE SCORE ---
+{{ objective_score_json }}
+--- END RUNTIME OBJECTIVE SCORE ---
