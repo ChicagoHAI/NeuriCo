@@ -142,6 +142,8 @@ WHAT "FULLY-AUTOMATED" MEANS:
 ✓ Document decisions, but keep moving forward
 ✓ Deliver REPORT.md with actual experimental results at the end
 
+{{ state_contract }}
+
 YOU WILL NOT GET ADDITIONAL INSTRUCTIONS between phases.
 This prompt contains everything you need. Execute it completely from start to finish.
 
