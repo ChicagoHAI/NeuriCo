@@ -77,11 +77,11 @@ are acceptable.
                           VERDICT: {verdict_file}
 ═══════════════════════════════════════════════════════════════════════════════
 
-Write your verdict as JSON to {verdict_file}. FORMAT (mirror exactly):
+Write your verdict as JSON to {verdict_file}. FORMAT (mirror exactly,
+INCLUDING the field order):
 
 ```json
 {
-  "pass": true | false,
   "checks": {
     "routing": "pass" | "fail" | "not_applicable",
     "transcription": "pass" | "fail" | "not_applicable",
@@ -94,13 +94,26 @@ Write your verdict as JSON to {verdict_file}. FORMAT (mirror exactly):
       "evidence": "<short verbatim quote from the offending file, with path>"
     }
   ],
-  "summary": "<two or three sentences for the human reader>"
+  "summary": "<two or three sentences for the human reader>",
+  "pass": true | false
 }
 ```
 
-`pass` is true only when every applicable check passes. Every violation
-needs evidence: quote the offending lines (or name what is absent and
-where you looked). An empty violations list with pass=false is invalid.
+Decide `pass` LAST, after the checks and violations are on the page: it is
+your conclusion from that evidence, not a first impression. The rules are
+absolute:
+
+- `violations` must always be present: an empty array when nothing is
+  wrong, and every recorded violation needs evidence (quote the offending
+  lines, or name what is absent and where you looked).
+- `pass` is true ONLY when every applicable check is "pass" AND the
+  violations array is empty.
+- If ANY violation is recorded, any check failed, or you are unsure whether
+  the harness honors the contract, `pass` MUST be false. There is no "pass
+  with reservations": an unresolved problem of any kind means fail, and the
+  pipeline will re-run the rule maker with your findings.
+- pass=false with an empty violations array is invalid: a failing verdict
+  must cite what is wrong.
 
 ═══════════════════════════════════════════════════════════════════════════════
                             RULES OF CONDUCT

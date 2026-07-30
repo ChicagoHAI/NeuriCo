@@ -346,9 +346,10 @@ def interpret_verdict(
 
     - `pass` must be a JSON boolean; bool() coercion would accept any non-empty
       string — including "false" — as passing.
-    - `violations` must be an array of mappings each carrying a concrete
-      detail; any other shape is a failed verdict, never an exception, so a
-      malformed verifier response still reaches the normal retry path.
+    - `violations` must always be present as an array of mappings each
+      carrying a concrete detail; a missing key, null, or any other shape is
+      a failed verdict, never an exception, so a malformed verifier response
+      still reaches the normal retry path.
     - `checks` must report every mandated check (routing, transcription,
       format) with pass/fail/not_applicable; a check that does not apply must
       say `not_applicable` explicitly rather than be omitted, so a verifier
@@ -356,10 +357,14 @@ def interpret_verdict(
     - A check the contract makes applicable (per VERDICT_CHECKS) must not be
       reported `not_applicable`: the verifier only runs because the contract
       declares that component, so waving it off is a silent skip.
-    - `pass` must be consistent with the checks: true only when no applicable
-      check failed; a check reporting "fail" under pass=true is a contradiction.
-    - A failing verdict must justify itself — pass=false with an empty
-      violations list is invalid.
+    - `pass` must be consistent with the evidence in BOTH directions: true
+      requires no failing check AND an empty violations list (a reported
+      defect contradicts a pass), while false requires at least one recorded
+      violation (a failing verdict must justify itself).
+
+    Net invariant: a verdict passes iff `pass` is true, every mandated check
+    is reported, every applicable check passed, and `violations` is exactly
+    empty.
 
     Returns:
         (passed, violations)
@@ -368,12 +373,12 @@ def interpret_verdict(
     passed = raw_pass is True
 
     # Validate the violations container once; everything below reads only the
-    # validated list.
+    # validated list. The template mandates `violations` as an always-present
+    # array (empty when passing), so a missing key or null fails too.
     declared_violations = verdict.get('violations')
-    if declared_violations is None:
-        declared_violations = []
-    bad_container = None if isinstance(declared_violations, list) else declared_violations
-    if bad_container is not None:
+    bad_container = not isinstance(declared_violations, list)
+    if bad_container:
+        bad_value = declared_violations
         declared_violations = []
 
     violations = list(declared_violations)
@@ -383,8 +388,9 @@ def interpret_verdict(
         passed = False
         violations.append({'check': 'verdict', 'detail': detail})
 
-    if bad_container is not None:
-        reject(f"verification.json 'violations' must be an array, got {bad_container!r}")
+    if bad_container:
+        reject(f"verification.json 'violations' must be an array (empty when "
+               f"the verdict passes), got {bad_value!r}")
 
     if not isinstance(raw_pass, bool):
         reject(f"verification.json 'pass' must be a JSON boolean, got {raw_pass!r}")
@@ -420,9 +426,14 @@ def interpret_verdict(
         if raw_pass is True and failed:
             reject(f"'pass' is true but these checks failed: {failed}")
 
-    # An empty violations list with pass=false is invalid per the template.
+    # `pass` and the violations list must agree in both directions: a failing
+    # verdict must justify itself, and a passing verdict cannot carry a
+    # defect report it claims to have cleared.
     if raw_pass is False and not declared_violations:
         reject("verification.json reports pass=false with no violations listed")
+    if raw_pass is True and declared_violations:
+        reject(f"'pass' is true but {len(declared_violations)} violation(s) "
+               f"were reported; a reported defect contradicts a pass")
 
     # Each declared violation must be a mapping carrying a concrete detail.
     for entry in declared_violations:

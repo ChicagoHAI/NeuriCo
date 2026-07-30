@@ -306,9 +306,14 @@ def _contract():
     # a failing verdict must justify itself with well-formed violations
     ({'pass': False}, 'no violations'),
     ({'pass': False, 'violations': [{'check': 'routing'}]}, 'malformed violation'),
-    # the violations container must be an array, not a scalar or mapping
+    # a passing verdict cannot simultaneously report a defect
+    ({'violations': [{'check': 'transcription',
+                      'detail': 'target was copied incorrectly',
+                      'evidence': 'targets.json'}]}, 'contradicts a pass'),
+    # the violations container must be an always-present array
     ({'violations': 1}, 'must be an array'),
     ({'violations': 'nothing to report'}, 'must be an array'),
+    ({'violations': None}, 'must be an array'),
     # a check the contract makes applicable cannot be waved off — an
     # all-not_applicable verdict verifies nothing
     ({'checks': {'routing': 'not_applicable', 'transcription': 'not_applicable',
@@ -325,11 +330,21 @@ def test_interpret_verdict_rejects(mutation, expected_fragment):
 def test_interpret_verdict_never_raises_on_malformed_container():
     # A non-array violations container must degrade to a failed verdict (the
     # retry path), never escape as a TypeError
-    for bad in (1, 'oops', {'detail': 'x'}, True):
+    for bad in (1, 'oops', {'detail': 'x'}, True, None):
         passed, violations = interpret_verdict(
             _valid_verdict(violations=bad), _contract())
         assert passed is False
         assert any('must be an array' in str(v) for v in violations)
+
+
+def test_interpret_verdict_requires_violations_key():
+    # The template mandates `violations` as an always-present array; a
+    # verdict that omits it entirely must not pass
+    verdict = _valid_verdict()
+    verdict.pop('violations')
+    passed, violations = interpret_verdict(verdict, _contract())
+    assert passed is False
+    assert any('must be an array' in str(v) for v in violations)
 
 
 def test_interpret_verdict_rejects_bare_pass():
