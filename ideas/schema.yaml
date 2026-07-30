@@ -64,6 +64,13 @@ properties:
           - "Fine-tuning is more effective than RAG for specialized domains but less cost-effective"
           - "L2 regularization reduces overfitting more than dropout on small datasets"
 
+      max_directions:
+        type: integer
+        minimum: 1
+        maximum: 10
+        default: 3
+        description: "Maximum number of research directions to carry into experiments"
+
       # ═══════════════════════════════════════════════════════
       # BACKGROUND & CONTEXT
       # ═══════════════════════════════════════════════════════

@@ -15,6 +15,7 @@ import yaml
 import json
 import hashlib
 import sys
+import os
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -25,6 +26,22 @@ from core.local_resources import (
     validate_evaluation_spec,
     validate_local_resources,
 )
+
+
+def resolve_ideas_dir(project_root: Optional[Path] = None) -> Path:
+    """Resolve the ideas directory, honoring the NEURICO_IDEAS override.
+
+    Mirrors NEURICO_WORKSPACE: if NEURICO_IDEAS is set, use it, so a shared
+    read-only install can point each user at their own ideas directory.
+    Otherwise fall back to <project_root>/ideas (project_root defaults to the
+    repo root), which is the historical behavior.
+    """
+    env_ideas = os.getenv("NEURICO_IDEAS")
+    if env_ideas:
+        return Path(env_ideas)
+    if project_root is None:
+        project_root = Path(__file__).parent.parent.parent
+    return Path(project_root) / "ideas"
 
 
 class IdeaManager:
@@ -170,6 +187,13 @@ class IdeaManager:
         if 'hypothesis' in idea and len(idea['hypothesis']) < 20:
             warnings.append("Hypothesis is very short (< 20 characters). "
                           "Consider providing more detail.")
+
+        if 'max_directions' in idea:
+            max_directions = idea['max_directions']
+            if not isinstance(max_directions, int) or isinstance(max_directions, bool):
+                errors.append("max_directions must be an integer")
+            elif not 1 <= max_directions <= 10:
+                errors.append("max_directions must be between 1 and 10")
 
         # Validate expected outputs (optional in v1.1)
         if 'expected_outputs' in idea:

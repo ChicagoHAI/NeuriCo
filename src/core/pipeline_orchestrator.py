@@ -54,6 +54,11 @@ from core.hitl_scoring_workspace import (
 from core.hitl_runtime_state import HitlRuntimeState
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
 from core.workspace_manifest import build_manifest, curate_manifest
+from core.phase_state import (
+    check_working_directory,
+    validate_outputs,
+    write_state_document,
+)
 from core.hitl import (
     HitlValidationError,
     HitlRuntime,
@@ -93,39 +98,65 @@ class PipelineState:
                 "current_stage": None,
                 "completed": False,
             }
-            self._save()
+        self.state.setdefault("stages", {})
+        self.state.setdefault("current_stage", None)
+        self.state.setdefault("completed", False)
+        self._save()
 
     def _save(self):
         """Save state to disk."""
         atomic_write_json(self.state_file, self.state, fsync_parent=False)
+        write_state_document(self.work_dir, self.state)
 
-    def start_stage(self, stage_name: str):
+    def start_stage(
+        self,
+        stage_name: str,
+        expected_outputs: Optional[List[str]] = None,
+        next_steps: Optional[List[str]] = None,
+    ):
         """Mark a stage as started."""
         self.state["current_stage"] = stage_name
+        workspace_check = check_working_directory(self.work_dir)
         self.state["stages"][stage_name] = {
             "status": "in_progress",
             "started_at": utc_now(),
             "completed_at": None,
             "success": None,
             "outputs": {},
+            "expected_outputs": list(expected_outputs or []),
+            "next_steps": list(next_steps or []),
+            "workspace_check": workspace_check,
         }
         self._save()
 
-    def complete_stage(self, stage_name: str, success: bool, outputs: Optional[Dict] = None):
+    def complete_stage(
+        self, stage_name: str, success: bool, outputs: Optional[Dict] = None
+    ) -> bool:
         """Mark a stage as completed."""
         if stage_name not in self.state["stages"]:
             self.state["stages"][stage_name] = {}
 
+        stage = self.state["stages"][stage_name]
+        completion_workspace_check = check_working_directory(self.work_dir)
+        validation = validate_outputs(self.work_dir, stage.get("expected_outputs", []))
+        final_success = (
+            bool(success)
+            and completion_workspace_check["healthy"]
+            and validation["valid"]
+        )
         self.state["stages"][stage_name].update(
             {
-                "status": "completed" if success else "failed",
+                "status": "completed" if final_success else "failed",
                 "completed_at": utc_now(),
-                "success": success,
+                "success": final_success,
                 "outputs": outputs or {},
+                "workspace_check_at_completion": completion_workspace_check,
+                "output_validation": validation,
             }
         )
         self.state["current_stage"] = None
         self._save()
+        return final_success
 
     def mark_completed(self):
         """Mark entire pipeline as completed."""
@@ -730,7 +761,11 @@ class ResearchPipelineOrchestrator:
         print("─" * 80)
         print()
 
-        self.state.start_stage("resource_finder")
+        self.state.start_stage(
+            "resource_finder",
+            expected_outputs=["literature_review.md", "resources.md"],
+            next_steps=["Review the literature and resource catalog before running experiments."],
+        )
 
         try:
             result = run_resource_finder(
@@ -743,7 +778,9 @@ class ResearchPipelineOrchestrator:
                 scoring_enabled=scoring_enabled,
             )
 
-            self.state.complete_stage("resource_finder", result["success"], result.get("outputs"))
+            result["success"] = self.state.complete_stage(
+                "resource_finder", result["success"], result.get("outputs")
+            )
 
             return result
 
@@ -951,7 +988,13 @@ class ResearchPipelineOrchestrator:
         print()
 
         if track_pipeline_state:
-            self.state.start_stage("experiment_runner")
+            self.state.start_stage(
+                "experiment_runner",
+                expected_outputs=["REPORT.md"],
+                next_steps=[
+                    "Validate the report and experimental artifacts before finalizing."
+                ],
+            )
 
         # Import here to avoid circular dependency
         import shlex
@@ -1092,7 +1135,9 @@ class ResearchPipelineOrchestrator:
                     result["dsi_slurm_artifacts"] = str(archived_dsi_artifacts)
 
             if track_pipeline_state:
-                self.state.complete_stage("experiment_runner", success, result)
+                result["success"] = self.state.complete_stage(
+                    "experiment_runner", success, result
+                )
 
             return result
 
@@ -1474,7 +1519,15 @@ class ResearchPipelineOrchestrator:
         print("─" * 80)
         print()
 
-        self.state.start_stage(RULE_MAKER_STAGE)
+        self.state.start_stage(
+            RULE_MAKER_STAGE,
+            expected_outputs=[
+                "scoring/interface.md",
+                "scoring/eval.py",
+                "scoring/targets.json",
+                "scoring/rule_maker_log.md",
+            ],
+        )
         try:
             result = run_rule_maker(
                 idea=idea,
@@ -1492,7 +1545,9 @@ class ResearchPipelineOrchestrator:
                     timeout=timeout,
                     full_permissions=full_permissions,
                 )
-            self.state.complete_stage(RULE_MAKER_STAGE, result["success"], result.get("outputs"))
+            result["success"] = self.state.complete_stage(
+                RULE_MAKER_STAGE, result["success"], result.get("outputs")
+            )
             return result
         except Exception as e:
             print(f"❌ Rule maker stage failed: {e}")
@@ -1709,11 +1764,11 @@ class ResearchPipelineOrchestrator:
         print("─" * 80)
         print()
 
-        self.state.start_stage(SCORER_STAGE)
+        self.state.start_stage(SCORER_STAGE, expected_outputs=["scoring/results.json"])
         try:
             result = run_scorer(work_dir=self.work_dir, timeout=timeout,
                                 idea=idea)
-            self.state.complete_stage(SCORER_STAGE, result["success"], result)
+            result["success"] = self.state.complete_stage(SCORER_STAGE, result["success"], result)
             return result
         except Exception as e:
             print(f"❌ Scorer stage failed: {e}")
@@ -1865,7 +1920,10 @@ class ResearchPipelineOrchestrator:
         print("=" * 80)
         print(f"STAGE: {BOOTSTRAP_MANIFEST_STAGE}")
         print("=" * 80)
-        self.state.start_stage(BOOTSTRAP_MANIFEST_STAGE)
+        self.state.start_stage(
+            BOOTSTRAP_MANIFEST_STAGE,
+            expected_outputs=[".neurico/bootstrap_curated_manifest.json"],
+        )
 
         try:
             raw_manifest = build_manifest(self.work_dir)
@@ -1920,7 +1978,9 @@ class ResearchPipelineOrchestrator:
                 "intent_summary": curated.get("intent_summary"),
                 "output_description": curated.get("output_description"),
             }
-            self.state.complete_stage(BOOTSTRAP_MANIFEST_STAGE, success=success, outputs=outputs)
+            success = self.state.complete_stage(
+                BOOTSTRAP_MANIFEST_STAGE, success=success, outputs=outputs
+            )
             return {
                 "success": success,
                 "curated_manifest": curated,
@@ -1945,7 +2005,15 @@ class ResearchPipelineOrchestrator:
         print("=" * 80)
         print(f"STAGE: {BOOTSTRAP_RULE_MAKER_STAGE}")
         print("=" * 80)
-        self.state.start_stage(BOOTSTRAP_RULE_MAKER_STAGE)
+        self.state.start_stage(
+            BOOTSTRAP_RULE_MAKER_STAGE,
+            expected_outputs=[
+                "scoring/interface.md",
+                "scoring/eval.py",
+                "scoring/targets.json",
+                "scoring/rule_maker_log.md",
+            ],
+        )
 
         try:
             result = run_bootstrap_rule_maker(
@@ -1957,7 +2025,7 @@ class ResearchPipelineOrchestrator:
                 full_permissions=full_permissions,
                 log_dir=self.work_dir / ".neurico" / "bootstrap_logs",
             )
-            self.state.complete_stage(
+            result["success"] = self.state.complete_stage(
                 BOOTSTRAP_RULE_MAKER_STAGE,
                 success=result.get("success", False),
                 outputs={

@@ -37,7 +37,8 @@ def extract_user_instructions(prompt: str) -> str:
 def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
                           domain: str = 'general', idea_spec=None,
                           provider: str = "claude",
-                          scoring_enabled: bool = False) -> str:
+                          scoring_enabled: bool = False,
+                          phase_name: str = "experiment_runner") -> str:
     """
     Generate comprehensive session instructions for the research agent.
 
@@ -64,6 +65,7 @@ def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
             idea_spec=idea_spec,
             provider=provider,
             scoring_enabled=scoring_enabled,
+            phase_name=phase_name,
         )
     except TypeError:
         # Backwards compatibility: old Docker images don't support 'domain' parameter
