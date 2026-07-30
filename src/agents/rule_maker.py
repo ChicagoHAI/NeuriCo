@@ -11,6 +11,7 @@ scoring/. The harness consists of:
 - scoring/interface.md: visible to the experiment_runner -- describes what
   files the runner must produce and how they will be invoked.
 - scoring/rule_maker_log.md: rationale for the chosen metrics.
+- data/.test/: optional evaluator-owned private inputs declared by targets.json.
 
 This agent runs between resource_finder and experiment_runner. Its outputs
 should be sealed (read-only) before experiment_runner starts so the runner
@@ -25,6 +26,7 @@ import sys
 import time
 import json
 import ast
+import stat
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -46,6 +48,101 @@ RULE_MAKER_OUTPUT_FILES = {
 _DISALLOWED_EVALUATOR_CLI_MODULES = {"argparse", "click", "docopt", "typer"}
 _EVALUATOR_RESULTS_PATH = f"scoring/{RESULTS_FILE_NAME}"
 _EVALUATOR_OWNED_INTERFACE_PREFIXES = ("scoring/", "data/.test/")
+_SEALED_INPUTS_FIELD = "sealed_inputs"
+
+
+def _validate_declared_sealed_inputs(
+    work_dir: Path,
+    targets: Dict[str, Any],
+) -> list[str]:
+    """Validate the rule-maker-owned private inputs before runtime seals them."""
+    declared = targets.get(_SEALED_INPUTS_FIELD)
+    if not isinstance(declared, list):
+        return [
+            "scoring/targets.json must declare `sealed_inputs` as a list; "
+            "use an empty list when the evaluator needs no private inputs."
+        ]
+
+    issues: list[str] = []
+    seen: set[str] = set()
+    root = Path(work_dir).resolve()
+    for index, raw_path in enumerate(declared):
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            issues.append(f"sealed_inputs[{index}] must be a non-empty workspace-relative path.")
+            continue
+        normalized = raw_path.strip().replace("\\", "/")
+        candidate = Path(normalized)
+        if (
+            candidate.is_absolute()
+            or ".." in candidate.parts
+            or len(candidate.parts) < 3
+            or candidate.parts[:2] != ("data", ".test")
+        ):
+            issues.append(
+                f"sealed input `{normalized}` must be a file under `data/.test/`."
+            )
+            continue
+        relative = candidate.as_posix()
+        if relative in seen:
+            issues.append(f"sealed input `{relative}` is declared more than once.")
+            continue
+        seen.add(relative)
+
+        current = root
+        missing = False
+        for part in candidate.parts:
+            current = current / part
+            try:
+                metadata = current.lstat()
+            except FileNotFoundError:
+                issues.append(f"declared sealed input is missing: {relative}")
+                missing = True
+                break
+            except OSError as exc:
+                issues.append(f"declared sealed input is unreadable: {relative}: {exc}")
+                missing = True
+                break
+            if stat.S_ISLNK(metadata.st_mode):
+                issues.append(f"declared sealed input cannot contain a symlink: {relative}")
+                missing = True
+                break
+        if missing:
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            issues.append(f"declared sealed input must be a regular file: {relative}")
+        elif metadata.st_size == 0:
+            issues.append(f"declared sealed input must not be empty: {relative}")
+
+    private_root = root / "data" / ".test"
+    try:
+        private_metadata = private_root.lstat()
+    except FileNotFoundError:
+        return issues
+    except OSError as exc:
+        issues.append(f"private evaluator input directory is unreadable: {exc}")
+        return issues
+    if stat.S_ISLNK(private_metadata.st_mode):
+        issues.append("private evaluator input directory cannot be a symlink: data/.test")
+        return issues
+    if not stat.S_ISDIR(private_metadata.st_mode):
+        issues.append("private evaluator input root must be a directory: data/.test")
+        return issues
+
+    actual_files: set[str] = set()
+    for path in private_root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            issues.append(f"private evaluator input is unreadable: {relative}: {exc}")
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            issues.append(f"private evaluator input cannot contain a symlink: {relative}")
+        elif stat.S_ISREG(metadata.st_mode):
+            actual_files.add(relative)
+    for relative in sorted(actual_files - seen):
+        issues.append(f"private evaluator input is not declared in sealed_inputs: {relative}")
+    return issues
 
 
 def _assigned_expressions(tree: ast.AST) -> dict[str, ast.AST]:
@@ -534,6 +631,7 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
     Checks:
       - scoring/eval.py exists and parses as valid Python
       - scoring/targets.json exists and parses as valid JSON
+      - targets.json declares every private evaluator input and each file exists
       - scoring/interface.md exists and is non-empty
       - scoring/rule_maker_log.md exists (informational; not required)
 
@@ -565,18 +663,22 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
     else:
         try:
             targets = json.loads(targets_path.read_text(encoding="utf-8"))
-            declared_result = (
-                str(targets.get("result_file", "")).strip().replace("\\", "/")
-                if isinstance(targets, dict)
-                else ""
-            )
-            if declared_result and declared_result != _EVALUATOR_RESULTS_PATH:
-                issues.append(
-                    "scoring/targets.json declares a conflicting result_file; "
-                    f"the evaluator ABI requires `{_EVALUATOR_RESULTS_PATH}`."
-                )
+            if not isinstance(targets, dict):
+                issues.append("scoring/targets.json must contain a JSON object.")
             else:
-                found["targets"] = str(targets_path)
+                target_issues = _validate_declared_sealed_inputs(work_dir, targets)
+                declared_result = (
+                    str(targets.get("result_file", "")).strip().replace("\\", "/")
+                )
+                if declared_result and declared_result != _EVALUATOR_RESULTS_PATH:
+                    target_issues.append(
+                        "scoring/targets.json declares a conflicting result_file; "
+                        f"the evaluator ABI requires `{_EVALUATOR_RESULTS_PATH}`."
+                    )
+                if target_issues:
+                    issues.extend(target_issues)
+                else:
+                    found["targets"] = str(targets_path)
         except json.JSONDecodeError as e:
             issues.append(f"targets.json is not valid JSON: {e}")
 

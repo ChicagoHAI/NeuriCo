@@ -78,8 +78,10 @@ WHAT YOU MUST NOT DO:
 ✗ Do NOT run experiments. You are not the experiment_runner.
 ✗ Do NOT execute scoring/eval.py. The runner's artifact does not exist
   yet — running eval.py would fail and pollute scoring/.
-✗ Do NOT read or reference files under data/.test/. Their contents are
-  sealed; only scoring/eval.py touches them at scorer-execution time.
+✗ Do NOT defer creation of private evaluator inputs until scorer execution.
+  If the evaluator needs fixed private inputs, create them deterministically
+  under data/.test/ during this rule-maker stage, declare each file in
+  scoring/targets.json, and treat them as evaluator-owned sealed data.
 ✗ Do NOT mention targets, test inputs, or the baseline in
   scoring/interface.md. That file is visible to the runner; leaking
   these defeats the evaluation.
@@ -110,8 +112,8 @@ Skim (do not deep-read):
 - literature_review.md — what metrics do prior works use?
 - resources.md — which datasets / baselines are available locally?
 - code/ — is there a baseline implementation you can call from eval.py?
-- datasets/ — is there a held-out split you can use? (look for a
-  data/.test/ subdir; if absent, plan to create one in Phase 3)
+- datasets/ — is there a held-out split you can use? If the evaluator needs a
+  private fixed subset, plan to materialize it under data/.test/ in Phase 3.
 
 STEP 3: Decide the property set
 ─────────────────────────────────────────────────────────────────────────────
@@ -280,6 +282,8 @@ neurico pipeline) AFTER the runner produces its artifact. It must:
   paths inside the evaluator.
 ✓ Load the runner's artifact via importlib (NOT subprocess).
 ✓ Load any test inputs from `data/.test/` (sealed; only eval.py reads).
+✓ Require every private input to exist before this rule-maker stage finishes.
+  eval.py may read declared sealed inputs but must never create or modify them.
 ✓ Compute one scalar per declared property.
 ✓ Load targets from `scoring/targets.json`.
 ✓ Write structured results to `scoring/results.json`.
@@ -454,6 +458,7 @@ FORMAT (mirror exactly):
 {
   "<property_name>": {"target": <number>, "direction": "max" | "min"},
   "<property_name>": {"target": <number>, "direction": "max" | "min"},
+  "sealed_inputs": ["data/.test/<private-evaluator-input>"],
   "success_rule": "ALL_PROPERTIES_SATISFIED",
   "meta": {
     "generated_by": "rule_maker",
@@ -486,6 +491,7 @@ CONCRETE EXAMPLE (LCS speedup):
 {
   "correctness": {"target": 1.0, "direction": "max"},
   "speedup":     {"target": 3.0, "direction": "max"},
+  "sealed_inputs": [],
   "success_rule": "ALL_PROPERTIES_SATISFIED",
   "meta": {
     "generated_by": "rule_maker",
@@ -556,13 +562,17 @@ CHECKS (run each from the workspace root):
    python -c "import json; json.load(open('scoring/targets.json')); print('targets.json: OK')"
    ```
 
-4. interface.md is non-empty and references at least one file the runner
+4. Every path in targets.json `sealed_inputs` already exists as a non-empty
+   regular file under data/.test/. Use an empty list when no private input is
+   required. Do not rely on runtime or eval.py to create these files later.
+
+5. interface.md is non-empty and references at least one file the runner
    must produce:
    ```bash
    grep -q "Files to produce" scoring/interface.md && echo "interface.md: OK"
    ```
 
-5. eval.py does NOT contain `import neurico` or `from neurico`:
+6. eval.py does NOT contain `import neurico` or `from neurico`:
    ```bash
    grep -q "neurico" scoring/eval.py && echo "FAIL: eval.py must not import neurico" || echo "eval.py: no neurico imports"
    ```
@@ -612,10 +622,12 @@ THEN:
 
 IF: the resource_finder did not produce a `data/.test/` split
 THEN:
-  1. Create one in eval.py (NOT in interface.md). Hold out a fixed
-     fraction of any available data using a deterministic seed; write
-     the held-out subset to data/.test/ at scorer-execution time.
-  2. Document the split strategy in rule_maker_log.md.
+  1. If private evaluation data is required, create it during this rule-maker
+     stage (NOT in interface.md or at scorer-execution time). Hold out a fixed
+     fraction of available data using a deterministic seed and write the
+     resulting evaluator-owned file under data/.test/.
+  2. Declare every created file in scoring/targets.json `sealed_inputs`.
+  3. Document the split strategy in rule_maker_log.md.
 
 IF: a property is hard to measure deterministically (timing,
     random initialization)

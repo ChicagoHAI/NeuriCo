@@ -424,6 +424,55 @@ class HitlManager:
         allowed = self._available_tool_names()
         return [tool for tool in self.tool_definitions if tool["name"] in allowed]
 
+    @classmethod
+    def _runtime_completion_tool_name(cls, tools: List[Dict[str, Any]]) -> str:
+        for tool in tools:
+            name = str(tool.get("name", "")).strip()
+            if name in cls._REQUEST_FINALIZER_TOOL_NAMES or name in {
+                "prune_frontier",
+                "select_frontier",
+            }:
+                return name
+        return ""
+
+    @classmethod
+    def _runtime_tool_boundary_instruction(cls, tools: List[Dict[str, Any]]) -> str:
+        """Describe the exact runtime-authorized MCP surface for one turn."""
+        names = [str(tool.get("name", "")).strip() for tool in tools]
+        names = [name for name in names if name]
+        rendered = ", ".join(f"`{name}`" for name in names) or "(none)"
+        lines = [
+            "Runtime-authorized MCP tool surface for this turn:",
+            rendered,
+            "This list is authoritative and these tools are supplied through MCP. "
+            "Do not claim that a listed tool is unavailable, and do not call tools "
+            "outside this list.",
+        ]
+        completion_name = cls._runtime_completion_tool_name(tools)
+        if completion_name:
+            lines.append(
+                "The current runtime-held action remains unresolved until "
+                f"`{completion_name}` succeeds. Direct assistant text does not "
+                "complete the action."
+            )
+        return "\n".join(lines)
+
+    def _unresolved_request_reminder(self) -> str:
+        """Return a boundary-specific reminder for a text-only manager turn."""
+        tools = self._tools_for_current_runtime_boundary()
+        completion_name = self._runtime_completion_tool_name(tools)
+        if completion_name:
+            return (
+                "The worker request remains unresolved. Continue reviewing or consult "
+                "the human as permitted, then call "
+                f"`{completion_name}`. Direct assistant text cannot complete it."
+            )
+        return (
+            "The worker request remains unresolved. Follow the exact "
+            "runtime-authorized MCP tool surface in the system instruction; direct "
+            "assistant text cannot complete it."
+        )
+
     def listed_workspace_artifacts(self) -> set[str]:
         """Return declared sealed evaluator files visible as metadata for review."""
         from core.scoring_seal import SEALED_PATHS
@@ -1733,7 +1782,7 @@ class HitlManager:
                     # abandoning the request after a text-only response.
                     reminder = _Turn(
                         "runtime",
-                        "The worker request remains unresolved. Use the available tools to inspect it, ask the human if needed, or finalize it with a valid runtime result.",
+                        self._unresolved_request_reminder(),
                         requires_worker_resolution=True,
                         generation=turn.generation,
                         request_key=turn.request_key,
@@ -1832,10 +1881,10 @@ class HitlManager:
                 if not self._generation_is_current(generation):
                     return ""
                 try:
-                    messages = self._messages(generation)
+                    tools = self._tools_for_current_runtime_boundary()
+                    messages = self._messages(generation, tools)
                 except _StaleManagerTurn:
                     return ""
-            tools = self._tools_for_current_runtime_boundary()
             response = self._send(messages, tools)
             with self._turn_lock:
                 if not self._generation_is_current(generation):
@@ -1868,7 +1917,11 @@ class HitlManager:
                         return ""
         return ""
 
-    def _messages(self, generation: int) -> List[Dict[str, Any]]:
+    def _messages(
+        self,
+        generation: int,
+        tools: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         from core.hitl import _load_hitl_template
 
         self.world_model.reconcile(self.research)
@@ -1881,6 +1934,10 @@ class HitlManager:
             {
                 "role": "system",
                 "content": _load_hitl_template("interactive_manager_system.txt"),
+            },
+            {
+                "role": "system",
+                "content": self._runtime_tool_boundary_instruction(tools),
             },
             {
                 "role": "user",

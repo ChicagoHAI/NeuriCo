@@ -43,9 +43,10 @@ Rule-maker plan requirements:
   `scoring/interface.md`'s `Files to produce` table; evaluator-owned files and
   evaluator results are not runner artifacts
 - keep rule-maker execution artifacts within `scoring/eval.py`,
-  `scoring/targets.json`, `scoring/interface.md`, and
-  `scoring/rule_maker_log.md`; do not assign those sealed files to the
-  experiment runner
+  `scoring/targets.json`, `scoring/interface.md`,
+  `scoring/rule_maker_log.md`, and any evaluator-owned private input files
+  required under `data/.test/`; declare each private input in
+  `scoring/targets.json` and do not assign sealed files to the experiment runner
 - describe split, aggregation, determinism, and failure behavior where relevant
 - identify reward-hacking risks and how `scoring/eval.py` prevents trivial
   outputs from satisfying the rule

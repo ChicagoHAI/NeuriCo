@@ -33,15 +33,20 @@ For this rule-maker review, verify that the proposed scorer preserves the
 fixed NeuriCo evaluator ABI: runtime invokes exactly `python scoring/eval.py`
 with no command-line arguments, and the evaluator writes its authoritative
 structured result to exactly `scoring/results.json`. The evaluator must resolve
-its approved workspace-relative inputs itself. Verify that
+its approved workspace-relative inputs itself. Any private evaluator inputs
+must already exist under `data/.test/` and be declared by
+`scoring/targets.json`; runtime validates and seals them but does not create
+scientific inputs on the rule maker's behalf. Verify that
 `scoring/interface.md` describes only prerequisites the experiment runner must
 produce; it must not assign `scoring/eval.py`, `scoring/targets.json`, another
 evaluator-owned file, or an evaluator result to that runner. If the plan,
 finish summary, or inspected artifacts use another authoritative result path,
 require runtime-supplied CLI arguments, or cross that ownership boundary,
-finalize `feedback` with a precise correction. Runtime separately validates
-the evaluator source and interface mechanically before sealing; do not infer
-source-level compliance without evidence.
+finalize `feedback` with a precise correction. Also reject any unresolved plan
+that delegates future evaluator-input creation to runtime or scorer execution.
+Runtime separately validates the evaluator source, declared inputs, and
+interface mechanically before sealing; do not infer source-level compliance
+without evidence.
 {% endif %}
 
 When ready, finalize this request with a result object following this contract.

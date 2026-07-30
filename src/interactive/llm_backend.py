@@ -88,6 +88,7 @@ class LLMBackend:
                 tools,
                 timeout_seconds=timeout_seconds,
                 mcp_config_path=mcp_config_path,
+                allowed_mcp_tools=allowed_mcp_tools,
             )
         elif self.backend == "anthropic_api":
             return self._send_anthropic_api(messages, tools, timeout_seconds=timeout_seconds)
@@ -103,6 +104,7 @@ class LLMBackend:
         *,
         timeout_seconds: Optional[float] = None,
         mcp_config_path: Optional[str] = None,
+        allowed_mcp_tools: Optional[List[str]] = None,
     ) -> LLMResponse:
         """Send a manager turn through `codex exec`."""
         prompt = self._messages_to_prompt(messages, None if mcp_config_path else tools)
@@ -120,7 +122,10 @@ class LLMBackend:
         if self.model:
             cmd[2:2] = ["--model", self.model]
         if mcp_config_path:
-            cmd[2:2] = self._codex_mcp_config_args(mcp_config_path)
+            cmd[2:2] = self._codex_mcp_config_args(
+                mcp_config_path,
+                allowed_mcp_tools=allowed_mcp_tools,
+            )
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -150,15 +155,20 @@ class LLMBackend:
         return json.dumps(value, ensure_ascii=False)
 
     @classmethod
-    def _codex_mcp_config_args(cls, mcp_config_path: str) -> List[str]:
+    def _codex_mcp_config_args(
+        cls,
+        mcp_config_path: str,
+        *,
+        allowed_mcp_tools: Optional[List[str]] = None,
+    ) -> List[str]:
         payload = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
         servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
         if not isinstance(servers, dict) or not servers:
-            return []
+            raise ValueError("Codex MCP configuration must define at least one server")
         args: List[str] = []
         for name, server in servers.items():
             if not isinstance(server, dict):
-                continue
+                raise ValueError(f"Codex MCP server {name!r} must be an object")
             prefix = f"mcp_servers.{name}"
             for key in ("command", "args", "cwd", "url", "enabled"):
                 if key in server:
@@ -179,6 +189,18 @@ class LLMBackend:
                     ])
             if "enabled" not in server:
                 args.extend(["-c", f"{prefix}.enabled=true"])
+            allowed_prefix = f"mcp__{name}__"
+            enabled_tools = [
+                tool_name[len(allowed_prefix):]
+                for raw_name in allowed_mcp_tools or []
+                if (tool_name := str(raw_name).strip()).startswith(allowed_prefix)
+            ]
+            if allowed_mcp_tools is not None:
+                args.extend([
+                    "-c",
+                    f"{prefix}.enabled_tools={cls._codex_config_value(enabled_tools)}",
+                ])
+            args.extend(["-c", f"{prefix}.required=true"])
         return args
 
     def _send_cli(
