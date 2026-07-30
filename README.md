@@ -286,9 +286,14 @@ manager, human, worker, runtime, scoring, frontier, and recovery model.
 | `--no-hash` | Simpler repo names (skip random hash) |
 | `--write-paper` | Generate LaTeX paper after experiments |
 | `--paper-style neurips\|icml\|acl` | Paper format (default: neurips) |
+| `--enable-scoring` | Add a `rule_maker` stage that defines a sealed evaluation protocol, then score the run against it |
 | `--autoresearch` | Run AutoResearch after creating the initial scored experiment |
 | `--continue-autoresearch` | Continue AutoResearch from an existing scored workspace |
+| `--continue-recover` | With `--continue-autoresearch`: if the workspace is dirty from an interrupted run, restore to the best checkpoint and continue instead of refusing |
 | `--autoresearch-iterations N` | Number of AutoResearch iterations (default: 1) |
+| `--bootstrap-rule-maker` | Retrofit scoring onto a workspace whose experiment already produced its outputs |
+| `--comment-mode` | Make targeted improvements based on comments in the idea file |
+| `--force-fresh` | Ignore an existing local workspace and start from scratch |
 
 ### Other Commands
 
@@ -432,6 +437,8 @@ Paper-finder starts automatically in Docker — no extra setup needed.
 ## Documentation
 
 - **[docs/WORKFLOW.md](docs/WORKFLOW.md)** - Complete workflow guide
+- **[docs/AUTORESEARCH.md](docs/AUTORESEARCH.md)** - Scoring and the AutoResearch iteration loop (fresh, continue, bootstrap)
+- **[INTERACTIVE_MODE_GUIDE.md](INTERACTIVE_MODE_GUIDE.md)** - Interactive mode with the LLM-driven manager
 - **[docs/IDEAHUB_INTEGRATION.md](docs/IDEAHUB_INTEGRATION.md)** - IdeaHub integration
 - **[ARCHITECTURE_AND_ROADMAP.md](ARCHITECTURE_AND_ROADMAP.md)** - Architecture, template system, and roadmap
 - **[docs/GITHUB_INTEGRATION.md](docs/GITHUB_INTEGRATION.md)** - GitHub setup and usage
