@@ -126,9 +126,15 @@ def run_bootstrap_rule_maker(
     timeout: int = 1800,
     full_permissions: bool = True,
     log_dir: Optional[Path] = None,
+    prompt_suffix: str = "",
 ) -> Dict[str, Any]:
     """
     Launch the bootstrap rule_maker agent against a workspace.
+
+    Args:
+        prompt_suffix: Extra text appended to the generated prompt. Used by
+            the eval-verifier retry loop to feed violations back into the
+            rule_maker's second attempt.
 
     Returns a dict with success, return_code, elapsed_time, transcript_file,
     prompt_file, and a per-output-file existence summary.
@@ -150,6 +156,8 @@ def run_bootstrap_rule_maker(
         work_dir=work_dir,
         templates_dir=Path(templates_dir),
     )
+    if prompt_suffix:
+        prompt += prompt_suffix
 
     if log_dir is not None:
         log_dir = Path(log_dir)

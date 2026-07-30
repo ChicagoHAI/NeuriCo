@@ -206,6 +206,51 @@ fields of the output you chose to measure, and why those reflect task
 success).
 
 ═══════════════════════════════════════════════════════════════════════════════
+              USER-DECLARED EVALUATION CONTRACT (WHEN PRESENT)
+═══════════════════════════════════════════════════════════════════════════════
+
+The idea may carry structured declarations that BIND your design. Check
+.neurico/idea.yaml for them; if absent, skip this section.
+
+1. `evaluation.metrics` — the user's own metrics.
+   ✓ Each declared metric becomes a property under its EXACT user-given
+     name. Express the user's target numerically in the metric's units,
+     record the verbatim wording as `source_text` with `"source": "user"`,
+     and cite anchor_type stated_success_criterion.
+   ✓ Add properties of your own ONLY for aspects the user did not cover.
+
+2. `local_resources.functions` with `required_for_evaluation: true` — a
+   mandated evaluation function staged at the listed workspace path
+   (code/local/...).
+   ✓ eval.py MUST load that file and call the declared entrypoint to compute
+     the corresponding measurements. Do NOT reimplement its metric, and do
+     NOT fall back to your own computation when it errors: an error from the
+     mandated function is an eval failure the user needs to see.
+
+3. `continuation` (continue-research mode) — the workspace is an adopted
+   external repository whose current state you are scoring as the baseline;
+   AutoResearch iterations will then optimize `continuation.goal`.
+   ✓ Design the property set so progress toward the goal is measurable
+     against this baseline.
+   ✓ Each invariant of kind `check` becomes a guardrail property that runs
+     the user's command VERBATIM and scores pass as 1.0:
+       "<derived_name>": {"target": 1.0, "direction": "max",
+                          "source": "user", "source_text": "<the command>"}
+     In eval.py, run the command with subprocess from the workspace root and
+     map exit 0 to value 1.0, nonzero to 0.0. Prepend the workspace
+     .venv/bin to PATH when it exists, else the running interpreter's bin
+     directory (Path(sys.executable).parent), so tools like pytest resolve.
+     This is the one sanctioned use of subprocess in eval.py. Guardrail
+     properties are expected to be satisfied at baseline; the comparator
+     rejects any iteration that breaks one.
+   ✓ Invariants of kind `protected_path` and `statement` are NOT properties;
+     they are enforced elsewhere. Do not encode them in targets.json.
+
+Your scoring/ outputs are reviewed against these declarations by a verifier
+before the baseline is measured; violations send the work back to you with
+the findings appended.
+
+═══════════════════════════════════════════════════════════════════════════════
                               METHODOLOGY
 ═══════════════════════════════════════════════════════════════════════════════
 

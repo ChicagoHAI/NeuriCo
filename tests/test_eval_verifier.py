@@ -272,7 +272,8 @@ def test_trusted_missing_entry_sha_fails_closed(tmp_path):
 def _valid_verdict(**overrides):
     verdict = {
         'pass': True,
-        'checks': {'routing': 'pass', 'transcription': 'pass', 'format': 'not_applicable'},
+        'checks': {'routing': 'pass', 'transcription': 'pass',
+                   'format': 'not_applicable', 'guardrails': 'not_applicable'},
         'violations': [],
     }
     verdict.update(overrides)
@@ -282,7 +283,8 @@ def _valid_verdict(**overrides):
 def _contract():
     """Contract matching _valid_verdict's applicability: the mandated function
     and declared metrics make routing/transcription applicable; there is no
-    results_format, so format may be not_applicable."""
+    results_format or check-invariant, so format/guardrails may be
+    not_applicable."""
     return extract_eval_contract(_contract_idea())
 
 
@@ -299,10 +301,12 @@ def _contract():
     # every mandated check must be reported explicitly; omission is a
     # silent skip, not a pass
     ({'checks': {'routing': 'pass'}}, 'missing'),
-    ({'checks': {'routing': 'pass', 'transcription': 'pass'}}, 'missing'),
+    ({'checks': {'routing': 'pass', 'transcription': 'pass',
+                 'format': 'not_applicable'}}, 'missing'),
     # pass=true contradicts a failing check
     ({'checks': {'routing': 'fail', 'transcription': 'pass',
-                 'format': 'not_applicable'}}, 'checks failed'),
+                 'format': 'not_applicable',
+                 'guardrails': 'not_applicable'}}, 'checks failed'),
     # a failing verdict must justify itself with well-formed violations
     ({'pass': False}, 'no violations'),
     ({'pass': False, 'violations': [{'check': 'routing'}]}, 'malformed violation'),
@@ -317,9 +321,11 @@ def _contract():
     # a check the contract makes applicable cannot be waved off — an
     # all-not_applicable verdict verifies nothing
     ({'checks': {'routing': 'not_applicable', 'transcription': 'not_applicable',
-                 'format': 'not_applicable'}}, "reported 'not_applicable'"),
+                 'format': 'not_applicable', 'guardrails': 'not_applicable'}},
+     "reported 'not_applicable'"),
     ({'checks': {'routing': 'pass', 'transcription': 'not_applicable',
-                 'format': 'not_applicable'}}, "reported 'not_applicable'"),
+                 'format': 'not_applicable', 'guardrails': 'not_applicable'}},
+     "reported 'not_applicable'"),
 ])
 def test_interpret_verdict_rejects(mutation, expected_fragment):
     passed, violations = interpret_verdict(_valid_verdict(**mutation), _contract())
@@ -363,7 +369,8 @@ def test_interpret_verdict_accepts_valid_verdicts():
         evaluation={'metrics': [{'name': 'acc', 'target': '>= 0.9'}]}))
     passed, violations = interpret_verdict(_valid_verdict(
         checks={'routing': 'not_applicable', 'transcription': 'pass',
-                'format': 'not_applicable'}), metrics_only)
+                'format': 'not_applicable', 'guardrails': 'not_applicable'}),
+        metrics_only)
     assert passed is True and violations == []
 
 
@@ -381,7 +388,29 @@ def test_interpret_verdict_applicability_tracks_results_format():
     assert passed is False
     assert any("reported 'not_applicable'" in str(v) for v in violations)
     passed, violations = interpret_verdict(_valid_verdict(
-        checks={'routing': 'pass', 'transcription': 'pass', 'format': 'pass'}), full)
+        checks={'routing': 'pass', 'transcription': 'pass', 'format': 'pass',
+                'guardrails': 'not_applicable'}), full)
+    assert passed is True and violations == []
+
+
+def test_interpret_verdict_applicability_tracks_check_invariants():
+    # A continuation check-invariant makes the guardrails check applicable:
+    # the verdict may no longer wave it off, and must judge it
+    guarded = extract_eval_contract(_idea(
+        continuation={'source_repo': '/repo', 'goal': 'improve accuracy again',
+                      'invariants': [{'kind': 'check',
+                                      'command': 'pytest tests/ -q'}]},
+        evaluation={'metrics': [{'name': 'acc', 'target': '>= 0.9'}]},
+    ))
+    passed, violations = interpret_verdict(_valid_verdict(
+        checks={'routing': 'not_applicable', 'transcription': 'pass',
+                'format': 'not_applicable', 'guardrails': 'not_applicable'}),
+        guarded)
+    assert passed is False
+    assert any("reported 'not_applicable'" in str(v) for v in violations)
+    passed, violations = interpret_verdict(_valid_verdict(
+        checks={'routing': 'not_applicable', 'transcription': 'pass',
+                'format': 'not_applicable', 'guardrails': 'pass'}), guarded)
     assert passed is True and violations == []
 
 

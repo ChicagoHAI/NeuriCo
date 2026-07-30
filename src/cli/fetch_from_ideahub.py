@@ -28,6 +28,9 @@ if env_local.exists():
 elif env_file.exists():
     load_dotenv(env_file)
 
+# Conversion building blocks shared with the other converter CLIs
+from idea_conversion import infer_domain, save_yaml_file
+
 # Check if GitHub integration is available
 try:
     from core.github_manager import GitHubManager
@@ -147,26 +150,6 @@ def fetch_ideahub_content(url: str) -> dict:
         sys.exit(1)
 
 
-def _infer_domain(title: str, description: str, tags: list) -> str:
-    """Infer research domain from title, description, and tags using keyword matching.
-
-    Reads keywords from config/domains.yaml — no hardcoding here.
-    """
-    from core.config_loader import ConfigLoader
-    loader = ConfigLoader()
-    keyword_map = loader.get_all_domain_keywords()
-    default = loader.get_default_domain()
-
-    text = f"{title} {description} {' '.join(tags)}".lower()
-    best_domain = default
-    best_count = 0
-    for domain, keywords in keyword_map.items():
-        count = sum(1 for kw in keywords if kw in text)
-        if count > best_count:
-            best_count = count
-            best_domain = domain
-    return best_domain
-
 
 def _convert_without_llm(ideahub_content: dict) -> dict:
     """
@@ -188,7 +171,7 @@ def _convert_without_llm(ideahub_content: dict) -> dict:
     url = ideahub_content.get('url', '')
 
     # Infer domain from content
-    domain = _infer_domain(title, description, tags)
+    domain = infer_domain(title, description, tags)
 
     # Use description as hypothesis, ensuring minimum 20 chars
     hypothesis = description.strip()
@@ -242,36 +225,13 @@ def convert_to_yaml(ideahub_content: dict) -> dict:
     """
     print("\n🤖 Converting to NeuriCo format using GPT...")
 
-    # Check for an API key: prefer OpenRouter (the repo default), fall back
-    # to a direct OpenAI key.
-    openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
-    api_key = openrouter_key or os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        print("ℹ️  No OPENROUTER_KEY or OPENAI_API_KEY set — using template-based conversion instead.")
+    from idea_conversion import load_schema_reference, make_llm_client, parse_conversion
+
+    client, model_name = make_llm_client()
+    if client is None:
         return _convert_without_llm(ideahub_content)
 
-    try:
-        from openai import OpenAI
-    except ImportError:
-        print("ℹ️  openai package not installed — using template-based conversion instead.")
-        return _convert_without_llm(ideahub_content)
-
-    if openrouter_key:
-        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-        model_name = "openai/gpt-4.1"
-    else:
-        client = OpenAI(api_key=api_key)
-        model_name = "gpt-4.1"
-
-    # Read schema for reference
-    schema_path = Path(__file__).parent.parent.parent / "ideas" / "schema.yaml"
-    with open(schema_path, 'r', encoding='utf-8') as f:
-        schema_content = f.read()
-
-    # Read example for reference
-    example_path = Path(__file__).parent.parent.parent / "ideas" / "examples" / "ai_chain_of_thought_evaluation.yaml"
-    with open(example_path, 'r', encoding='utf-8') as f:
-        example_content = f.read()
+    schema_content = load_schema_reference()
 
     # Build domain reference dynamically from config (single source of truth)
     from core.config_loader import ConfigLoader
@@ -380,117 +340,14 @@ idea:
         )
 
         yaml_content = response.choices[0].message.content.strip()
-
-        # Remove markdown code fences if present
-        yaml_content = re.sub(r'^```ya?ml\s*\n', '', yaml_content)
-        yaml_content = re.sub(r'\n```\s*$', '', yaml_content)
-        yaml_content = yaml_content.strip()
-
         print("   ✓ Conversion complete")
-
-        # Parse YAML to validate
-        try:
-            parsed = yaml.safe_load(yaml_content)
-        except yaml.YAMLError as e:
-            print(f"⚠️  Warning: Generated YAML may have issues: {e}")
-            print("   Attempting to fix...")
-            # Try to parse anyway
-            parsed = yaml.safe_load(yaml_content)
-
-        parsed, yaml_content = _drop_placeholder_author(parsed, yaml_content)
-        # Return both parsed data and the raw YAML string
-        return {'parsed': parsed, 'yaml_string': yaml_content}
+        return parse_conversion(yaml_content)
 
     except Exception as e:
         print(f"⚠️  GPT API call failed: {e}")
         print("   Falling back to template-based conversion.")
         return _convert_without_llm(ideahub_content)
 
-
-def _drop_placeholder_author(parsed: dict, yaml_string: str) -> tuple:
-    """
-    Remove metadata.author when the model emitted the 'Unknown' placeholder
-    despite being told to omit it. Regenerates the YAML string only when a
-    drop actually happened, so faithful conversions stay byte-identical.
-    """
-    try:
-        metadata = parsed['idea']['metadata']
-        author = metadata.get('author')
-    except (KeyError, TypeError):
-        return parsed, yaml_string
-
-    if isinstance(author, str) and author.strip().lower() in ('unknown', ''):
-        del metadata['author']
-        if not metadata:
-            del parsed['idea']['metadata']
-        yaml_string = yaml.dump(parsed, default_flow_style=False,
-                                sort_keys=False, allow_unicode=True)
-    return parsed, yaml_string
-
-
-def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
-    """
-    Save the idea as a YAML file.
-
-    Args:
-        result: Dictionary with 'parsed' and 'yaml_string' keys
-        url: Original IdeaHub URL
-        author: Optional author name from IdeaHub
-
-    Returns:
-        Path to saved file
-    """
-    idea_data = result['parsed']
-    yaml_string = result['yaml_string']
-
-    # Generate filename from title or URL
-    if 'idea' in idea_data and 'title' in idea_data['idea']:
-        title = idea_data['idea']['title']
-        # Sanitize title for filename
-        filename = re.sub(r'[^\w\s-]', '', title.lower())
-        filename = re.sub(r'[-\s]+', '_', filename)
-        filename = filename[:50]  # Limit length
-    else:
-        # Extract ID from URL
-        match = re.search(r'/idea/([A-Za-z0-9]+)', url)
-        if match:
-            filename = f"ideahub_{match.group(1)}"
-        else:
-            filename = "ideahub_idea"
-
-    # Add metadata about source to the parsed data (for submission later)
-    if 'idea' not in idea_data:
-        idea_data = {'idea': idea_data}
-
-    if 'metadata' not in idea_data['idea']:
-        idea_data['idea']['metadata'] = {}
-
-    idea_data['idea']['metadata']['source'] = 'IdeaHub'
-    idea_data['idea']['metadata']['source_url'] = url
-
-    if author and 'author' not in idea_data['idea']['metadata']:
-        idea_data['idea']['metadata']['author'] = author
-
-    # Update the result
-    result['parsed'] = idea_data
-
-    # Save to ideas/ directory
-    ideas_dir = Path(__file__).parent.parent.parent / "ideas"
-    ideas_dir.mkdir(exist_ok=True)
-
-    output_path = ideas_dir / f"{filename}.yaml"
-
-    # Check if file exists
-    counter = 1
-    while output_path.exists():
-        output_path = ideas_dir / f"{filename}_{counter}.yaml"
-        counter += 1
-
-    # Save the GPT-generated YAML string directly
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(yaml_string)
-
-    return output_path
 
 
 def main():
@@ -609,7 +466,12 @@ def main():
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(result['yaml_string'])
     else:
-        output_path = save_yaml_file(result, args.url, author=ideahub_content.get('author'))
+        match = re.search(r'/idea/([A-Za-z0-9]+)', args.url)
+        fallback = f"ideahub_{match.group(1)}" if match else "ideahub_idea"
+        output_path = save_yaml_file(
+            result, args.url, author=ideahub_content.get('author'),
+            source_kind='IdeaHub', source_key='source_url',
+            fallback_filename=fallback)
 
     print(f"\n✅ Idea saved to: {output_path}")
 

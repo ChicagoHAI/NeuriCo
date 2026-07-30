@@ -720,6 +720,158 @@ cmd_submit_local() {
 }
 
 # -----------------------------------------------------------------------------
+# Continue research from an existing repository
+# -----------------------------------------------------------------------------
+cmd_continue_research() {
+    if [ -z "$1" ] || [ -z "$2" ]; then
+        echo -e "${RED}Usage: $0 continue-research <repo-path-or-url> <intention.md> [--submit] [--run] [--provider claude|codex|gemini]${NC}"
+        exit 1
+    fi
+
+    ensure_directories
+    check_env_file
+    warn_if_outdated
+
+    local repo="$1"
+    local intention_file="$2"
+    shift 2
+
+    # Intercept --run: running must happen via the host-side cmd_run (which
+    # applies the local-resource mounts from ideas/mounts/<idea_id>.txt,
+    # including the continuation source repo), never inside the submission
+    # container. Mirrors cmd_submit_local.
+    local do_run=false
+    local provider="claude"
+    local has_submit=false
+    local submit_args=()
+    local run_flags=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --run) do_run=true ;;
+            --provider)
+                if [ -z "${2:-}" ]; then
+                    echo -e "${RED}Error: --provider requires a value${NC}"
+                    exit 1
+                fi
+                provider="$2"; submit_args+=("$1" "$2"); shift ;;
+            --provider=*)
+                provider="${1#*=}"; submit_args+=("$1") ;;
+            --full-permissions|--no-full-permissions)
+                run_flags+=("$1"); submit_args+=("$1") ;;
+            --autoresearch-iterations)
+                if [ -z "${2:-}" ]; then
+                    echo -e "${RED}Error: $1 requires a value${NC}"
+                    exit 1
+                fi
+                run_flags+=("$1" "$2"); submit_args+=("$1" "$2"); shift ;;
+            --submit) has_submit=true; submit_args+=("$1") ;;
+            *) submit_args+=("$1") ;;
+        esac
+        shift
+    done
+    if [ "$do_run" = true ] && [ "$has_submit" = false ]; then
+        echo -e "${RED}Error: --run requires --submit${NC}"
+        exit 1
+    fi
+
+    local gpu_flags=$(get_gpu_flags)
+    local user_flags=$(get_user_flags)
+    local credential_mounts=$(get_cli_credential_mounts)
+    local workspace_dir=$(get_workspace_dir)
+
+    # The intention file lives on the HOST — resolve and mount like
+    # cmd_submit_local does, so relative paths work.
+    if [ ! -f "$intention_file" ]; then
+        echo -e "${RED}Error: intention file not found: $intention_file${NC}"
+        exit 1
+    fi
+    local intention_abs intention_dir intention_name
+    intention_abs=$(cd "$(dirname "$intention_file")" && pwd)/$(basename "$intention_file")
+    intention_dir=$(dirname "$intention_abs")
+    intention_name=$(basename "$intention_abs")
+    local intention_path="/input/$intention_name"
+
+    # A local repository is mounted read-only at its IDENTICAL host path and
+    # passed through unchanged, so the recorded continuation.source_repo
+    # stays a host path that the run-time sidecar mounts can reproduce.
+    # A container-only remap like /source_repo would be recorded in the
+    # contract and never resolve on the host. URLs pass through unmounted.
+    local repo_arg="$repo" repo_mount=()
+    if [[ "$repo" != http://* && "$repo" != https://* && "$repo" != git@* ]]; then
+        if [ ! -e "$repo" ]; then
+            echo -e "${RED}Error: repository path not found: $repo${NC}"
+            exit 1
+        fi
+        repo_arg=$(cd "$repo" && pwd)
+        repo_mount=( -v "$repo_arg:$repo_arg:ro" )
+    fi
+
+    local tty_flag=$(get_tty_flag)
+
+    echo -e "${BLUE}Converting continuation intention...${NC}"
+    echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
+
+    # argv array: path data is never re-parsed as shell syntax (see cmd_run)
+    local docker_args=( run $tty_flag --rm )
+    local helper_args=()
+    eval "helper_args=( $gpu_flags $user_flags $credential_mounts )"
+    docker_args+=(
+        "${helper_args[@]}"
+        --env-file "$PROJECT_ROOT/.env"
+        -e NEURICO_WORKSPACE=/workspaces
+        -v "$workspace_dir:/workspaces"
+        -v "$PROJECT_ROOT/ideas:/app/ideas"
+        -v "$PROJECT_ROOT/logs:/app/logs"
+        -v "$PROJECT_ROOT/config:/app/config:ro"
+        -v "$PROJECT_ROOT/templates:/app/templates:ro"
+        -v "$intention_dir:/input:ro"
+    )
+
+    # Mount the host working directory at its identical path (read-only) and
+    # tell the converter about it, so relative local_resources paths in the
+    # intention can be canonicalized to host-absolute paths. Skip mounts that
+    # duplicate the repo mount (Docker rejects duplicate targets).
+    if [ "$PWD" != "/" ] && [ "$PWD" != "$PROJECT_ROOT" ] && [ "$PWD" != "$repo_arg" ]; then
+        docker_args+=( -v "$PWD:$PWD:ro" )
+    fi
+    docker_args+=( -e NEURICO_HOST_CWD="$PWD" -e NEURICO_IN_DOCKER=1 )
+    docker_args+=( ${repo_mount[@]+"${repo_mount[@]}"} )
+
+    docker_args+=( -w /app "$IMAGE_NAME"
+                   python /app/src/cli/continue_research.py "$repo_arg" "$intention_path"
+                   "${submit_args[@]}" )
+
+    # Capture output so the idea id can drive the host-side run (see
+    # cmd_submit_local for the tee/PIPESTATUS rationale).
+    local output_file
+    output_file=$(mktemp)
+    docker "${docker_args[@]}" | tee "$output_file"
+    local submit_rc=${PIPESTATUS[0]}
+    if [ "$submit_rc" -ne 0 ]; then
+        rm -f "$output_file"
+        echo -e "${RED}[ERROR]${NC} continue-research submission failed (exit $submit_rc)"
+        exit "$submit_rc"
+    fi
+
+    if [ "$do_run" = true ]; then
+        local idea_id
+        idea_id=$(grep "Idea submitted successfully:" "$output_file" \
+                  | tail -1 | sed 's/.*Idea submitted successfully:[[:space:]]*//' \
+                  | tr -d '[:space:]')
+        rm -f "$output_file"
+        if [ -n "$idea_id" ]; then
+            echo ""
+            cmd_run "$idea_id" --provider "$provider" \
+                ${run_flags[@]+"${run_flags[@]}"}
+        else
+            echo -e "${RED}[ERROR]${NC} Could not extract idea ID from submit output — run manually with: ./neurico run <idea_id>"
+        fi
+    else
+        rm -f "$output_file"
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Submit a research idea
 # -----------------------------------------------------------------------------
 cmd_submit() {
@@ -903,10 +1055,10 @@ cmd_run() {
     )
 
     # Ideas that declare host-local resources (local_resources paths, local
-    # papers) get a sidecar written at submit time: ideas/mounts/<idea_id>.txt,
-    # one absolute host path per line. Mount each existing path read-only at
-    # its identical in-container location so staging works unmodified inside
-    # Docker.
+    # papers, continuation source repos) get a sidecar written at submit
+    # time: ideas/mounts/<idea_id>.txt, one absolute host path per line.
+    # Mount each existing path read-only at its identical in-container
+    # location so adoption/staging works unmodified inside Docker.
     local idea_id="$1"
     local mounts_file="$PROJECT_ROOT/ideas/mounts/${idea_id}.txt"
     if [ -f "$mounts_file" ]; then
@@ -2026,6 +2178,7 @@ cmd_help() {
     echo "  shell                     Start an interactive shell"
     echo "  fetch <url> [--submit]    Fetch idea from IdeaHub"
     echo "  submit-local <idea.md> [--submit]  Convert a local idea file (markdown/text)"
+    echo "  continue-research <repo> <intention.md>  Continue research from an existing repo"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
     echo "  interactive <id>          Interactive mode (browser UI; --cli for terminal)"
@@ -2087,6 +2240,9 @@ case "$ACTION" in
         ;;
     submit-local)
         cmd_submit_local "$@"
+        ;;
+    continue-research)
+        cmd_continue_research "$@"
         ;;
     submit)
         cmd_submit "$@"

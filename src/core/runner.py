@@ -322,6 +322,34 @@ class ResearchRunner:
         # Update status
         self.idea_manager.update_status(idea_id, "in_progress")
 
+        # Continue-research mode: the idea carries a continuation contract.
+        # Workspace acquisition (repo adoption), baseline scoring (bootstrap
+        # path), and iteration all differ from the forward pipeline, so
+        # branch off before workspace setup.
+        if isinstance(idea_spec.get("continuation"), dict) and \
+                idea_spec["continuation"].get("source_repo"):
+            return self._run_continue_research(
+                idea=idea,
+                idea_id=idea_id,
+                title=title,
+                provider=provider,
+                full_permissions=full_permissions,
+                rule_maker_timeout=rule_maker_timeout,
+                scorer_timeout=scorer_timeout,
+                manifest_trimmer_timeout=manifest_trimmer_timeout,
+                autoresearch_iterations=autoresearch_iterations,
+                autoresearch_history_dir=autoresearch_history_dir,
+                proposer_timeout=proposer_timeout,
+                comment_timeout=timeout,
+                write_paper=write_paper,
+                paper_style=paper_style,
+                paper_timeout=paper_timeout,
+                compute_backend=compute_backend,
+                private=private,
+                no_hash=no_hash,
+                force_fresh=force_fresh,
+            )
+
         # Setup working directory (GitHub repo or local runs/)
         github_url = None
         github_repo = None
@@ -1107,6 +1135,162 @@ https://github.com/ChicagoHAI/neurico
         else:
             print(f"\n⚠️  Paper generation failed (research still succeeded)")
         return paper_result
+
+    def _run_continue_research(
+        self,
+        idea: Dict[str, Any],
+        idea_id: str,
+        title: str,
+        provider: str,
+        full_permissions: bool,
+        rule_maker_timeout: int,
+        scorer_timeout: int,
+        manifest_trimmer_timeout: int,
+        autoresearch_iterations: int,
+        autoresearch_history_dir: Optional[Path],
+        proposer_timeout: int,
+        comment_timeout: int,
+        write_paper: bool,
+        paper_style: str,
+        paper_timeout: int,
+        compute_backend: str,
+        private: bool,
+        no_hash: bool,
+        force_fresh: bool,
+    ) -> Dict[str, Any]:
+        """
+        Continue-research mode: adopt the continuation source repo, stage
+        declared local resources, score the current state as an AutoResearch
+        baseline (bootstrap path), then iterate toward the declared goal.
+
+        Resume: a workspace that already carries an AutoResearch checkpoint
+        skips adoption and baseline construction and continues from the
+        current best.
+        """
+        from core.autoresearch import (
+            construct_bootstrap_initial_node,
+            continue_from_current_best,
+        )
+        from core.repo_adoption import adopt_repository
+
+        idea_spec = idea.get("idea", {})
+        continuation = idea_spec.get("continuation", {})
+
+        print()
+        print("🔀 CONTINUE-RESEARCH MODE")
+        print(f"   Source repo: {continuation.get('source_repo')}")
+        print(f"   Goal: {continuation.get('goal')}")
+        print(f"   Iterations: {autoresearch_iterations}")
+        print()
+
+        work_dir = self.runs_dir / idea_id
+        github_url = None
+        success = False
+        result_payload: Dict[str, Any] = {}
+
+        try:
+            state_file = work_dir / ".neurico" / "autoresearch_state.json"
+            resuming = state_file.exists() and not force_fresh
+
+            if not resuming:
+                adoption = adopt_repository(
+                    idea,
+                    idea_id,
+                    work_dir,
+                    github_manager=self.github_manager if self.use_github else None,
+                    provider=provider,
+                    private=private,
+                    no_hash=no_hash,
+                )
+                github_url = adoption.get("github_url")
+
+                # Persist workspace path in idea metadata for future runs
+                idea.setdefault("idea", {}).setdefault("metadata", {})[
+                    "local_workspace"
+                ] = str(work_dir)
+                idea_path = self.idea_manager.get_idea_path(idea_id)
+                with open(idea_path, "w", encoding="utf-8") as f:
+                    yaml.dump(
+                        without_runtime_compute_backend(idea),
+                        f,
+                        default_flow_style=False,
+                        sort_keys=False,
+                    )
+
+                # Stage declared local resources before the baseline
+                # checkpoint so the anchored state includes them
+                stage_local_resources(work_dir, idea)
+
+                baseline = construct_bootstrap_initial_node(
+                    idea=idea,
+                    idea_id=idea_id,
+                    work_dir=work_dir,
+                    templates_dir=self.project_root / "templates",
+                    provider=provider,
+                    full_permissions=full_permissions,
+                    rule_maker_timeout=rule_maker_timeout,
+                    scorer_timeout=scorer_timeout,
+                    manifest_trimmer_timeout=manifest_trimmer_timeout,
+                    autoresearch_history_dir=autoresearch_history_dir,
+                    prepare_workspace=lambda bootstrap_work_dir: self._copy_workspace_resources(
+                        bootstrap_work_dir,
+                        compute_backend=compute_backend,
+                    ),
+                )
+                result_payload["baseline"] = baseline
+                if not baseline.get("success"):
+                    print()
+                    print("⚠️  Continue-research baseline construction failed -- aborting.")
+                    return {
+                        "work_dir": work_dir,
+                        "github_url": github_url,
+                        "success": False,
+                        **result_payload,
+                    }
+            else:
+                print("↩️  Existing AutoResearch checkpoint found; skipping adoption "
+                      "and baseline construction.")
+
+            if autoresearch_iterations > 0:
+                iteration_result = continue_from_current_best(
+                    idea=idea,
+                    idea_id=idea_id,
+                    work_dir=work_dir,
+                    templates_dir=self.project_root / "templates",
+                    provider=provider,
+                    full_permissions=full_permissions,
+                    scorer_timeout=scorer_timeout,
+                    iterations=autoresearch_iterations,
+                    autoresearch_history_dir=autoresearch_history_dir,
+                    proposer_timeout=proposer_timeout,
+                    comment_timeout=comment_timeout,
+                )
+                result_payload["autoresearch"] = iteration_result.get("autoresearch")
+                success = iteration_result.get("success", False)
+            else:
+                success = True
+
+            if write_paper and success:
+                self._run_paper_writer_stage(
+                    idea=idea,
+                    work_dir=work_dir,
+                    provider=provider,
+                    paper_style=paper_style,
+                    paper_timeout=paper_timeout,
+                    full_permissions=full_permissions,
+                )
+        except Exception as e:
+            print(f"\n❌ Continue-research error: {e}")
+            success = False
+        finally:
+            self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+
+        return {
+            "work_dir": work_dir,
+            "github_url": github_url,
+            "success": success,
+            **result_payload,
+        }
 
     def _copy_workspace_resources(self, work_dir: Path, compute_backend: str = "local"):
         """

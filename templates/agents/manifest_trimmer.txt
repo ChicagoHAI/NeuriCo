@@ -17,6 +17,16 @@ Everything else in the workspace -- literature, planning, internal helpers,
 paper drafts, sweep replicates, README -- is irrelevant to the rule_maker
 and you should not surface it.
 
+ADOPTED REPOSITORIES (continue-research): when the manifest lists
+.neurico/adoption.json, this workspace is an external repository adopted
+mid-stream, not a NeuriCo-produced experiment. REPORT.md and planning.md are
+usually absent and there may be no output artifacts at all. Answer the five
+questions from README.md, the manifest roles, and the source signatures. For
+primary_runner_outputs, list existing result artifacts when the repo has
+them; otherwise list the entry-point source files whose behavior the scorer
+must execute to measure the current state, and describe that in
+output_description.
+
 ═══════════════════════════════════════════════════════════════════════════════
                               WORKSPACE
 ═══════════════════════════════════════════════════════════════════════════════

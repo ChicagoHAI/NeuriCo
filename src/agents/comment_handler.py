@@ -132,6 +132,7 @@ def generate_comment_prompt(
     work_dir: Path,
     templates_dir: Path,
     provider: str = "claude",
+    scoring_enabled: bool = False,
 ) -> str:
     """
     Generate the comment handler prompt by combining template with idea comments.
@@ -140,6 +141,8 @@ def generate_comment_prompt(
         idea: Full idea specification (YAML dict)
         work_dir: Working directory (existing workspace)
         templates_dir: Path to templates directory
+        scoring_enabled: True in scored flows (AutoResearch iterations) so
+                         scoring-only obligations render in the prompt
 
     Returns:
         Complete prompt string for comment handler agent
@@ -147,7 +150,8 @@ def generate_comment_prompt(
     from templates.prompt_generator import PromptGenerator
 
     generator = PromptGenerator(templates_dir)
-    return generator.generate_comment_prompt(idea, work_dir, provider=provider)
+    return generator.generate_comment_prompt(
+        idea, work_dir, provider=provider, scoring_enabled=scoring_enabled)
 
 
 def run_comment_handler(
@@ -156,7 +160,8 @@ def run_comment_handler(
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
     timeout: int = 1800,  # 30 minutes default
-    full_permissions: bool = True
+    full_permissions: bool = True,
+    scoring_enabled: bool = False,
 ) -> Dict[str, Any]:
     """
     Launch comment handler agent to make targeted improvements.
@@ -325,7 +330,8 @@ def build_comment_handler_launch(
             raise ValueError("prompt_override_only requires a non-empty prompt_override")
         prompt = f"{prompt_override.strip()}\n"
     else:
-        prompt = generate_comment_prompt(idea, work_dir, templates_dir, provider=provider)
+        prompt = generate_comment_prompt(idea, work_dir, templates_dir, provider=provider,
+                                         scoring_enabled=scoring_enabled)
     if prompt_override.strip() and not prompt_override_only:
         prompt = append_prompt_block(prompt, prompt_override)
 

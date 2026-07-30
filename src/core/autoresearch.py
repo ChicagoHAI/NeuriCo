@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 import fnmatch
 import json
 import math
@@ -1680,6 +1680,18 @@ class AutoResearchController:
         finally:
             unseal_scoring_files(self.work_dir, sealed_dir)
 
+        # Protected-path guard (continue-research): reject before scoring when
+        # the iteration touched a path the user declared immutable. This is
+        # deterministic (a git diff against the parent checkpoint), so a
+        # violating candidate never even reaches the scorer.
+        if pre_scoring_error is None:
+            violations = self._protected_path_violations(parent_sha)
+            if violations:
+                pre_scoring_error = (
+                    "iteration modified user-protected paths: " + ", ".join(violations)
+                )
+                comment_result["protected_path_violations"] = violations
+
         if pre_scoring_error is not None:
             self._move_dsi_slurm_artifacts_to_attempt(attempt_dir)
             candidate_summary = ScoreSummary(
@@ -1896,6 +1908,35 @@ class AutoResearchController:
     def _idea_with_comments(self, proposal: str) -> Dict[str, Any]:
         return idea_with_comments(self.idea, proposal)
 
+    def _protected_path_violations(self, parent_sha: str) -> List[str]:
+        """
+        List user-declared protected paths (idea.continuation.invariants of
+        kind protected_path) that the current working tree changed relative
+        to the parent checkpoint. Covers modified tracked files (git diff)
+        and newly created untracked files. Ideas without protected paths
+        trivially pass.
+        """
+        from core.local_resources import protected_path_prefixes
+        protected = protected_path_prefixes(self.idea)
+        if not protected:
+            return []
+
+        try:
+            repo = self.checkpoints.repo
+            changed = repo.git.diff("--name-only", parent_sha).splitlines()
+            changed += list(repo.untracked_files)
+        except Exception as e:
+            # A guard that cannot run must not silently pass
+            return [f"(protected-path guard error: {e})"]
+
+        violations = []
+        for changed_path in changed:
+            for prefix in protected:
+                if changed_path == prefix or changed_path.startswith(prefix + "/"):
+                    violations.append(changed_path)
+                    break
+        return sorted(set(violations))
+
     def _clear_stale_results_json(self) -> None:
         clear_stale_results_json(self.work_dir)
 
@@ -2017,6 +2058,9 @@ def run_autoresearch_loop(
             templates_dir=templates_dir,
             timeout=comment_timeout,
             full_permissions=full_permissions,
+            # AutoResearch iterations are the scored flow: the binding
+            # evaluation obligations must reach the iterating agent
+            scoring_enabled=True,
         )
 
     def scorer(score_work_dir: Path) -> Dict[str, Any]:

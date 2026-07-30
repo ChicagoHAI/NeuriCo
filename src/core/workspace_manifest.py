@@ -153,9 +153,12 @@ _RAW_ROLE_RULES: list[tuple[str, str]] = [
     ("lakefile.toml", "source_code"),
     ("lean-toolchain", "source_code"),
 
-    # Input data.
+    # Input data. datasets/local/ holds user-declared resources staged by
+    # stage_local_resources (sealed ones go to data/.test/ and match the
+    # sealed_groundtruth rules above).
     ("data/**", "input_data"),
     ("inputs/**", "input_data"),
+    ("datasets/local/**", "input_data"),
 
     # Paper outputs.
     ("paper/**", "paper_output"),

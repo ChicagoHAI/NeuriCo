@@ -21,7 +21,7 @@ description: |
 
   The agent handles the rest through systematic literature review and resource gathering.
 
-version: "1.2"
+version: "1.3"
 
 type: object
 required: [idea]
@@ -347,6 +347,14 @@ properties:
                 name:
                   type: string
                   description: "Short name for the staged copy (optional, defaults to the basename)"
+                sealed:
+                  type: boolean
+                  default: false
+                  description: |
+                    If true, the dataset is staged into data/.test/ as sealed
+                    groundtruth: hidden from every agent and readable only by
+                    scoring/eval.py at scorer time. Use for held-out
+                    benchmarks the experiment must not see or fit to.
 
           functions:
             type: array
@@ -420,6 +428,67 @@ properties:
             description: "Expected shape of the results artifact"
             examples:
               - "results.json with per-seed and mean accuracy"
+
+      # ═══════════════════════════════════════════════════════
+      # CONTINUATION (CONTINUE-RESEARCH MODE)
+      # ═══════════════════════════════════════════════════════
+
+      continuation:
+        type: object
+        description: |
+          OPTIONAL: Continue research from an existing repository. The repo
+          is adopted into a workspace, its current state is scored as an
+          AutoResearch baseline (bootstrap rule maker), and iterations then
+          optimize toward the stated goal. Invariants are properties of the
+          current state that no accepted iteration may break.
+        required: [source_repo, goal]
+        properties:
+          source_repo:
+            type: string
+            description: "GitHub URL or local path of the repository to continue"
+            examples:
+              - "https://github.com/user/project"
+              - "/home/user/projects/tagger"
+
+          goal:
+            type: string
+            description: "What to optimize, stated as the direction of improvement"
+            examples:
+              - "Reduce inference latency of the tagger without hurting F1"
+
+          invariants:
+            type: array
+            description: |
+              What must not break. Three kinds, from strongest to weakest
+              enforcement:
+              - protected_path: files no iteration may modify (enforced by a
+                git diff check; a touching iteration is rejected before
+                scoring)
+              - check: a shell command that passes on the current state and
+                must keep passing (encoded as a scoring property with a pass
+                target; the comparator rejects iterations that break it)
+              - statement: a prose constraint (rendered as a binding
+                instruction and reviewed by the verifier; not mechanically
+                enforced)
+            items:
+              type: object
+              required: [kind]
+              properties:
+                kind:
+                  type: string
+                  enum: [protected_path, check, statement]
+                path:
+                  type: string
+                  description: "(protected_path) Workspace-relative path or directory"
+                command:
+                  type: string
+                  description: "(check) Command that must exit 0, e.g. 'pytest tests/'"
+                text:
+                  type: string
+                  description: "(statement) The prose constraint"
+                reason:
+                  type: string
+                  description: "Why this must hold; shown to agents alongside the constraint"
 
       # ═══════════════════════════════════════════════════════
       # METADATA

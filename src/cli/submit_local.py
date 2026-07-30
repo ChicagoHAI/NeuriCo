@@ -35,101 +35,18 @@ try:
 except ImportError:
     GITHUB_AVAILABLE = False
 
-SUPPORTED_SUFFIXES = {'.md', '.markdown', '.txt'}
+# Conversion building blocks shared with the other converter CLIs
+from idea_conversion import (
+    LOCAL_DECLARATION_RULES,
+    SUPPORTED_SUFFIXES,
+    infer_domain,
+    load_schema_reference,
+    make_llm_client,
+    parse_conversion,
+    read_idea_file,
+    save_yaml_file,
+)
 
-
-def read_local_idea(file_path: Path) -> dict:
-    """
-    Read an idea from a local markdown or text file.
-
-    Supports optional YAML frontmatter (delimited by ---) for title, tags,
-    and author. Falls back to the first markdown heading for the title, then
-    to the filename.
-
-    Args:
-        file_path: Path to the local idea file
-
-    Returns:
-        Dictionary with extracted content (same shape as fetch_ideahub_content)
-    """
-    print(f"📥 Reading idea from local file...")
-    print(f"   Path: {file_path}")
-
-    try:
-        raw_text = file_path.read_text(encoding='utf-8')
-    except OSError as e:
-        print(f"❌ Error reading file: {e}")
-        sys.exit(1)
-
-    body = raw_text
-    title = None
-    tags = []
-    author = None
-
-    # Parse optional YAML frontmatter
-    frontmatter_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', raw_text, re.DOTALL)
-    if frontmatter_match:
-        try:
-            frontmatter = yaml.safe_load(frontmatter_match.group(1)) or {}
-        except yaml.YAMLError:
-            frontmatter = {}
-        if isinstance(frontmatter, dict):
-            title = frontmatter.get('title')
-            author = frontmatter.get('author')
-            fm_tags = frontmatter.get('tags')
-            if isinstance(fm_tags, list):
-                tags = [str(t) for t in fm_tags]
-            elif isinstance(fm_tags, str):
-                tags = [t.strip() for t in fm_tags.split(',') if t.strip()]
-        body = raw_text[frontmatter_match.end():]
-
-    # Fall back to the first markdown heading for the title
-    heading_match = re.search(r'^#{1,3}\s+(.+?)\s*$', body, re.MULTILINE)
-    if not title and heading_match:
-        title = heading_match.group(1).strip()
-
-    # Drop the heading line from the description when it duplicates the title
-    if title and heading_match and heading_match.group(1).strip() == title.strip():
-        body = body[:heading_match.start()] + body[heading_match.end():]
-
-    # Last resort: derive the title from the filename
-    if not title:
-        title = file_path.stem.replace('_', ' ').replace('-', ' ').strip().title()
-
-    description = body.strip()
-    if not description:
-        print(f"❌ Error: file has no content beyond the title")
-        sys.exit(1)
-
-    return {
-        'path': str(file_path),
-        'title': title,
-        'description': description,
-        'tags': tags,
-        'author': author,
-        'raw_text': raw_text
-    }
-
-
-def _infer_domain(title: str, description: str, tags: list) -> str:
-    """Infer research domain from title, description, and tags using keyword matching.
-
-    Reads keywords from config/domains.yaml — no hardcoding here.
-    """
-    from core.config_loader import ConfigLoader
-    loader = ConfigLoader()
-    keyword_map = loader.get_all_domain_keywords()
-    default = loader.get_default_domain()
-
-    text = f"{title} {description} {' '.join(tags)}".lower()
-    best_domain = default
-    best_count = 0
-    for domain, keywords in keyword_map.items():
-        count = sum(1 for kw in keywords if kw in text)
-        if count > best_count:
-            best_count = count
-            best_domain = domain
-    return best_domain
 
 
 def _convert_without_llm(local_content: dict) -> dict:
@@ -141,7 +58,7 @@ def _convert_without_llm(local_content: dict) -> dict:
     and metadata.
 
     Args:
-        local_content: Dictionary with local idea content from read_local_idea()
+        local_content: Dictionary with local idea content from read_idea_file()
 
     Returns:
         Dictionary with 'parsed' and 'yaml_string' keys
@@ -152,7 +69,7 @@ def _convert_without_llm(local_content: dict) -> dict:
     source_path = local_content.get('path', '')
 
     # Infer domain from content
-    domain = _infer_domain(title, description, tags)
+    domain = infer_domain(title, description, tags)
 
     # Use description as hypothesis, ensuring minimum 20 chars
     hypothesis = description.strip()
@@ -219,36 +136,11 @@ def convert_to_yaml(local_content: dict) -> dict:
     """
     print("\n🤖 Converting to NeuriCo format using GPT...")
 
-    # Check for an API key: prefer OpenRouter (the repo default), fall back
-    # to a direct OpenAI key.
-    openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
-    api_key = openrouter_key or os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        print("ℹ️  No OPENROUTER_KEY or OPENAI_API_KEY set — using template-based conversion instead.")
+    client, model_name = make_llm_client()
+    if client is None:
         return _convert_without_llm(local_content)
 
-    try:
-        from openai import OpenAI
-    except ImportError:
-        print("ℹ️  openai package not installed — using template-based conversion instead.")
-        return _convert_without_llm(local_content)
-
-    if openrouter_key:
-        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-        model_name = "openai/gpt-4.1"
-    else:
-        client = OpenAI(api_key=api_key)
-        model_name = "gpt-4.1"
-
-    # Read schema for reference
-    schema_path = Path(__file__).parent.parent.parent / "ideas" / "schema.yaml"
-    with open(schema_path, 'r', encoding='utf-8') as f:
-        schema_content = f.read()
-
-    # Read example for reference
-    example_path = Path(__file__).parent.parent.parent / "ideas" / "examples" / "ai_chain_of_thought_evaluation.yaml"
-    with open(example_path, 'r', encoding='utf-8') as f:
-        example_content = f.read()
+    schema_content = load_schema_reference()
 
     # Build domain reference dynamically from config (single source of truth)
     from core.config_loader import ConfigLoader
@@ -308,27 +200,9 @@ The AI research agent will handle finding datasets, designing experiments, and i
    - metadata.author: If an Author is provided above and is not "Unknown", include it as metadata.author
    - constraints: Only include if specified in the content (do NOT default to cpu_only, let users specify their own compute constraints)
 
-3. **Local resources**: The idea comes from a local file, so it may declare
-   datasets or functions that already exist on this machine.
-   - Copy every local path VERBATIM. Do NOT rewrite, resolve, or drop local paths.
-   - If the content states what a local dataset or function is FOR (its usage),
-     put it under local_resources:
-       datasets: path + usage (+ name)
-       functions: path + entrypoint + usage
-     If the content says evaluation must run through a function, also set
-     required_for_evaluation: true on that function.
-   - Local paths whose usage is NOT stated stay in the matching background
-     field instead (datasets source, code_references repo, papers path).
+3. {LOCAL_DECLARATION_RULES}
 
-4. **Evaluation spec**: Only if the content gives explicit metric names,
-   success thresholds, or an expected results format, transcribe them
-   VERBATIM into the evaluation block (metrics: name + definition + target;
-   results_format). Do not reinterpret numbers and do not invent metrics
-   that are not stated. Include results_format ONLY if the content itself
-   describes an output artifact or file format; never copy one from the
-   schema examples.
-
-5. **DO NOT include**:
+4. **DO NOT include**:
    - methodology (agent will design this)
    - expected_outputs (agent will determine)
    - evaluation_criteria (use the evaluation block for explicitly stated
@@ -379,112 +253,14 @@ idea:
         )
 
         yaml_content = response.choices[0].message.content.strip()
-
-        # Remove markdown code fences if present
-        yaml_content = re.sub(r'^```ya?ml\s*\n', '', yaml_content)
-        yaml_content = re.sub(r'\n```\s*$', '', yaml_content)
-        yaml_content = yaml_content.strip()
-
         print("   ✓ Conversion complete")
-
-        # Parse YAML to validate
-        try:
-            parsed = yaml.safe_load(yaml_content)
-        except yaml.YAMLError as e:
-            print(f"⚠️  Warning: Generated YAML may have issues: {e}")
-            print("   Attempting to fix...")
-            # Try to parse anyway
-            parsed = yaml.safe_load(yaml_content)
-
-        parsed, yaml_content = _drop_placeholder_author(parsed, yaml_content)
-        # Return both parsed data and the raw YAML string
-        return {'parsed': parsed, 'yaml_string': yaml_content}
+        return parse_conversion(yaml_content)
 
     except Exception as e:
         print(f"⚠️  GPT API call failed: {e}")
         print("   Falling back to template-based conversion.")
         return _convert_without_llm(local_content)
 
-
-def _drop_placeholder_author(parsed: dict, yaml_string: str) -> tuple:
-    """
-    Remove metadata.author when the model emitted the 'Unknown' placeholder
-    despite being told to omit it. Regenerates the YAML string only when a
-    drop actually happened, so faithful conversions stay byte-identical.
-    """
-    try:
-        metadata = parsed['idea']['metadata']
-        author = metadata.get('author')
-    except (KeyError, TypeError):
-        return parsed, yaml_string
-
-    if isinstance(author, str) and author.strip().lower() in ('unknown', ''):
-        del metadata['author']
-        if not metadata:
-            del parsed['idea']['metadata']
-        yaml_string = yaml.dump(parsed, default_flow_style=False,
-                                sort_keys=False, allow_unicode=True)
-    return parsed, yaml_string
-
-
-def save_yaml_file(result: dict, source_path: str, author: str = None) -> Path:
-    """
-    Save the idea as a YAML file.
-
-    Args:
-        result: Dictionary with 'parsed' and 'yaml_string' keys
-        source_path: Original local file path
-        author: Optional author name from the file
-
-    Returns:
-        Path to saved file
-    """
-    idea_data = result['parsed']
-    yaml_string = result['yaml_string']
-
-    # Generate filename from title or source file
-    if 'idea' in idea_data and 'title' in idea_data['idea']:
-        title = idea_data['idea']['title']
-        # Sanitize title for filename
-        filename = re.sub(r'[^\w\s-]', '', title.lower())
-        filename = re.sub(r'[-\s]+', '_', filename)
-        filename = filename[:50]  # Limit length
-    else:
-        filename = f"local_{Path(source_path).stem}"
-
-    # Add metadata about source to the parsed data (for submission later)
-    if 'idea' not in idea_data:
-        idea_data = {'idea': idea_data}
-
-    if 'metadata' not in idea_data['idea']:
-        idea_data['idea']['metadata'] = {}
-
-    idea_data['idea']['metadata']['source'] = 'local'
-    idea_data['idea']['metadata']['source_path'] = source_path
-
-    if author and 'author' not in idea_data['idea']['metadata']:
-        idea_data['idea']['metadata']['author'] = author
-
-    # Update the result
-    result['parsed'] = idea_data
-
-    # Save to ideas/ directory
-    ideas_dir = Path(__file__).parent.parent.parent / "ideas"
-    ideas_dir.mkdir(exist_ok=True)
-
-    output_path = ideas_dir / f"{filename}.yaml"
-
-    # Check if file exists
-    counter = 1
-    while output_path.exists():
-        output_path = ideas_dir / f"{filename}_{counter}.yaml"
-        counter += 1
-
-    # Save the GPT-generated YAML string directly
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(yaml_string)
-
-    return output_path
 
 
 def main():
@@ -591,7 +367,7 @@ def main():
     print("=" * 80)
 
     # Step 1: Read content
-    local_content = read_local_idea(idea_file)
+    local_content = read_idea_file(idea_file)
 
     if local_content.get('title'):
         print(f"\n✓ Found idea: {local_content['title']}")
@@ -640,7 +416,10 @@ def main():
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(result['yaml_string'])
     else:
-        output_path = save_yaml_file(result, str(idea_file), author=local_content.get('author'))
+        output_path = save_yaml_file(
+            result, str(idea_file), author=local_content.get('author'),
+            source_kind='local',
+            fallback_filename=f"local_{Path(idea_file).stem}")
 
     print(f"\n✅ Idea saved to: {output_path}")
 

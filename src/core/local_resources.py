@@ -37,6 +37,43 @@ import shutil
 DATASETS_STAGING_DIR = "datasets/local"
 FUNCTIONS_STAGING_DIR = "code/local"
 
+# Datasets declared sealed: true are staged here instead. The path matches
+# the existing sealed-groundtruth conventions (scoring_seal.SEALED_PATHS and
+# the workspace manifest's sealed_groundtruth role), so sealed datasets are
+# hidden from every agent and readable only by scoring/eval.py.
+SEALED_STAGING_DIR = "data/.test"
+
+# Invariant kinds accepted in idea.continuation.invariants, with the field
+# each kind requires
+INVARIANT_KINDS = {
+    'protected_path': 'path',
+    'check': 'command',
+    'statement': 'text',
+}
+
+
+def protected_path_prefixes(idea: Dict[str, Any]) -> List[str]:
+    """
+    Normalized workspace-relative prefixes of protected_path invariants.
+
+    One canonical normalization (strip whitespace, leading ./, trailing /)
+    for every consumer of protected paths, so the diff guard and any prompt
+    rendering can never drift on what counts as inside a protected prefix.
+    """
+    idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
+    if not isinstance(idea_spec, dict):
+        return []
+    continuation = idea_spec.get('continuation')
+    if not isinstance(continuation, dict):
+        return []
+    return [
+        str(invariant['path']).strip().lstrip('./').rstrip('/')
+        for invariant in (continuation.get('invariants') or [])
+        if isinstance(invariant, dict)
+        and invariant.get('kind') == 'protected_path'
+        and invariant.get('path')
+    ]
+
 # Warn (but proceed) when a single dataset exceeds this many bytes
 LARGE_DATASET_BYTES = 2 * 1024 ** 3
 
@@ -297,17 +334,39 @@ def _planned_destination(work_dir: Path, kind: str, entry: Dict[str, Any],
 
     Returns (destination, source_str): destination is None when the entry
     stages nothing (no usable path or source), and source_str is the string
-    the staged bytes are expected to come from (None when unknown). Raises
-    ValueError for unusable names, as _staging_destination does.
+    the staged bytes are expected to come from (None when unknown, e.g. an
+    in-repo resource whose only reference is its recorded fingerprint).
+    Raises ValueError for unusable names, as _staging_destination does.
     """
     staging_dir = (DATASETS_STAGING_DIR if kind == 'datasets'
                    else FUNCTIONS_STAGING_DIR)
+    # Sealed datasets stage into the sealed-groundtruth location (hidden
+    # from agents by the seal/manifest machinery). Decided before the
+    # already-staged check so a reloaded contract whose path was rewritten
+    # to data/.test/... is recognized as already staged.
+    if kind == 'datasets' and entry.get('sealed'):
+        staging_dir = SEALED_STAGING_DIR
     entry_path = str(entry.get('path') or '').replace('\\', '/')
     if entry_path.startswith(f"{staging_dir}/"):
         dst = work_dir / entry_path
         taken.add(dst.name)
         source = entry.get('source_path')
         return dst, (str(source) if source else None)
+
+    # In-repo resource (common for adopted repositories): a relative path
+    # with no external source that already exists inside the workspace is
+    # its own destination — fingerprinted in place, never copied. A relative
+    # path resolving outside the workspace root is NOT in-repo; it falls
+    # through to normal staging, which contains it.
+    if entry_path and not Path(entry_path).is_absolute() \
+            and not entry.get('source_path'):
+        candidate = (Path(work_dir) / entry_path).resolve()
+        try:
+            candidate.relative_to(Path(work_dir).resolve())
+            if candidate.exists():
+                return work_dir / entry_path, None
+        except ValueError:
+            pass
 
     source_str = str(entry.get('source_path') or entry_path)
     if not source_str:
@@ -345,6 +404,17 @@ def workspace_contract_copy(idea_spec: Dict[str, Any]) -> Dict[str, Any]:
             for entry in resources.get(kind) or []:
                 if isinstance(entry, dict):
                     entry.pop('source_path', None)
+
+    # A local continuation source repo is an absolute host path; reduce it
+    # to its name for the workspace copy. Remote URLs are provenance worth
+    # keeping and leak nothing about the host machine.
+    continuation = idea.get('continuation')
+    if isinstance(continuation, dict):
+        source_repo = str(continuation.get('source_repo') or '')
+        if source_repo and not source_repo.startswith(
+                ('http://', 'https://', 'git@')):
+            continuation['source_repo'] = Path(source_repo).name
+
     return clean
 
 
@@ -597,13 +667,16 @@ def staged_function_mismatches(work_dir: Path,
 
 
 def _ignore_staged_datasets(work_dir: Path) -> None:
-    """Append the staged-datasets directory to the workspace .gitignore."""
-    pattern = f"{DATASETS_STAGING_DIR}/"
+    """Append the staged-datasets directories to the workspace .gitignore."""
     gitignore = work_dir / ".gitignore"
     existing = gitignore.read_text(encoding='utf-8') if gitignore.exists() else ""
-    if pattern in existing.splitlines():
+    existing_lines = existing.splitlines()
+    missing = [p for p in (f"{DATASETS_STAGING_DIR}/", f"{SEALED_STAGING_DIR}/")
+               if p not in existing_lines]
+    if not missing:
         return
-    section = f"\n# Staged local datasets (copied from the submitting machine)\n{pattern}\n"
+    section = ("\n# Staged local datasets (copied from the submitting machine)\n"
+               + "\n".join(missing) + "\n")
     gitignore.write_text(existing.rstrip("\n") + "\n" + section if existing else section.lstrip("\n"),
                          encoding='utf-8')
 
@@ -672,12 +745,12 @@ def collect_host_paths(idea: Dict[str, Any]) -> List[str]:
     mount each path read-only at its identical in-container location (bash
     reads the sidecar line by line; it cannot parse the idea YAML itself).
 
-    Covers unstaged local_resources entries and local paper paths. Entries
-    that already carry source_path were staged into the workspace and need
-    no mount. Relative paths cannot be mounted meaningfully on another
-    machine: canonicalize_local_paths() should have rewritten them at
-    submit time, so finding one here is worth a loud warning rather than a
-    silent skip.
+    Covers: a local continuation source repo, unstaged local_resources
+    entries, and local paper paths. Entries that already carry source_path
+    were staged into the workspace and need no mount. Relative paths cannot
+    be mounted meaningfully on another machine: canonicalize_local_paths()
+    should have rewritten them at submit time, so finding one here is worth
+    a loud warning rather than a silent skip.
 
     Args:
         idea: The inner idea dictionary (idea_spec['idea'])
@@ -702,6 +775,10 @@ def collect_host_paths(idea: Dict[str, Any]) -> List[str]:
         if expanded not in paths:
             paths.append(expanded)
 
+    continuation = idea.get('continuation')
+    if isinstance(continuation, dict):
+        add(continuation.get('source_repo'))
+
     resources = idea.get('local_resources')
     if isinstance(resources, dict):
         for kind in ('datasets', 'functions'):
@@ -716,6 +793,71 @@ def collect_host_paths(idea: Dict[str, Any]) -> List[str]:
                 add(paper.get('path'))
 
     return paths
+
+
+def validate_continuation(idea: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """
+    Validate the idea.continuation section (continue-research mode).
+
+    Requires source_repo and goal; each invariant must name a supported kind
+    and carry that kind's field (protected_path: path, check: command,
+    statement: text). A missing reason is a warning: agents obey constraints
+    better when told why they exist.
+
+    Args:
+        idea: The inner idea dictionary (idea_spec['idea'])
+
+    Returns:
+        Tuple of (errors, warnings) message lists
+    """
+    errors = []
+    warnings = []
+
+    continuation = idea.get('continuation')
+    if continuation is None:
+        return errors, warnings
+
+    if not isinstance(continuation, dict):
+        errors.append("continuation must be a mapping with 'source_repo' and 'goal'")
+        return errors, warnings
+
+    if not continuation.get('source_repo'):
+        errors.append("continuation: missing 'source_repo' (repository path or URL)")
+    goal = continuation.get('goal')
+    if not goal or not str(goal).strip():
+        errors.append("continuation: missing 'goal' (what to optimize is required)")
+    elif len(str(goal).strip()) < 10:
+        warnings.append("continuation.goal is very short; state the direction of "
+                        "improvement so proposals stay aimed at it")
+
+    invariants = continuation.get('invariants')
+    if invariants is None:
+        return errors, warnings
+    if not isinstance(invariants, list):
+        errors.append("continuation.invariants must be a list")
+        return errors, warnings
+
+    for idx, invariant in enumerate(invariants):
+        label = f"continuation.invariants[{idx}]"
+        if not isinstance(invariant, dict):
+            errors.append(f"{label}: must be a mapping with 'kind'")
+            continue
+        kind = invariant.get('kind')
+        if kind not in INVARIANT_KINDS:
+            errors.append(f"{label}: unknown kind '{kind}' "
+                          f"(supported: {', '.join(INVARIANT_KINDS)})")
+            continue
+        required_field = INVARIANT_KINDS[kind]
+        if not invariant.get(required_field):
+            errors.append(f"{label}: kind '{kind}' requires '{required_field}'")
+        if kind == 'protected_path' and str(invariant.get('path', '')).startswith('/'):
+            warnings.append(f"{label}: protected path should be workspace-relative, "
+                            f"not absolute: {invariant['path']}")
+        if not invariant.get('reason'):
+            warnings.append(f"{label}: no 'reason' given; agents follow constraints "
+                            f"better when told why they exist")
+
+    return errors, warnings
 
 
 def validate_evaluation_spec(idea: Dict[str, Any]) -> Tuple[List[str], List[str]]:

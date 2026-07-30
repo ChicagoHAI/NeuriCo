@@ -73,6 +73,20 @@ interface.md and eval.py must together produce results in the user's
 declared shape. Missing fields the user asked for are a FAIL; extra fields
 are acceptable.
 
+CHECK 4: GUARDRAILS (only when the contract lists check_invariants)
+─────────────────────────────────────────────────────────────────────────────
+
+Each check-invariant is a command the user declared must keep passing. For
+each one, targets.json must contain a guardrail property with target 1.0,
+direction max, and `"source": "user"`, and eval.py must run the user's
+command VERBATIM (subprocess from the workspace root) and map exit 0 to
+value 1.0.
+
+✗ FAIL: the command was altered, weakened (e.g. a subset of the test
+  suite), or replaced with a different way of "checking the same thing".
+✗ FAIL: eval.py swallows the command's failure (fallback to 1.0, ignoring
+  the exit code, or catching the error and scoring pass).
+
 ═══════════════════════════════════════════════════════════════════════════════
                           VERDICT: {verdict_file}
 ═══════════════════════════════════════════════════════════════════════════════
@@ -85,11 +99,12 @@ INCLUDING the field order):
   "checks": {
     "routing": "pass" | "fail" | "not_applicable",
     "transcription": "pass" | "fail" | "not_applicable",
-    "format": "pass" | "fail" | "not_applicable"
+    "format": "pass" | "fail" | "not_applicable",
+    "guardrails": "pass" | "fail" | "not_applicable"
   },
   "violations": [
     {
-      "check": "routing" | "transcription" | "format",
+      "check": "routing" | "transcription" | "format" | "guardrails",
       "detail": "<one sentence: what is wrong>",
       "evidence": "<short verbatim quote from the offending file, with path>"
     }

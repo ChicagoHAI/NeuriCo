@@ -1542,8 +1542,16 @@ class ResearchPipelineOrchestrator:
                     idea=idea,
                     rule_maker_result=result,
                     provider=provider,
-                    timeout=timeout,
                     full_permissions=full_permissions,
+                    rerun_rule_maker=lambda prompt_suffix: run_rule_maker(
+                        idea=idea,
+                        work_dir=self.work_dir,
+                        provider=provider,
+                        templates_dir=self.templates_dir,
+                        timeout=timeout,
+                        full_permissions=full_permissions,
+                        prompt_suffix=prompt_suffix,
+                    ),
                 )
             result["success"] = self.state.complete_stage(
                 RULE_MAKER_STAGE, result["success"], result.get("outputs")
@@ -1559,18 +1567,24 @@ class ResearchPipelineOrchestrator:
         idea: Dict[str, Any],
         rule_maker_result: Dict[str, Any],
         provider: str,
-        timeout: int,
         full_permissions: bool,
+        rerun_rule_maker,
     ) -> Dict[str, Any]:
         """
         Verify the rule_maker's scoring/ outputs against the user's declared
-        evaluation contract (idea.evaluation, mandated local functions).
+        evaluation contract (idea.evaluation, mandated local functions,
+        continuation check-invariants).
 
         Only runs when the idea actually declares a contract. On a failed
-        verdict the rule_maker is re-run ONCE with the verifier's findings
-        appended to its prompt, then re-verified; if it still fails, the
-        rule_maker stage fails. This runs before sealing, so a rejected
-        harness never reaches the experiment_runner.
+        verdict the rule_maker is re-run ONCE (via rerun_rule_maker, which
+        the caller binds to the forward or bootstrap variant) with the
+        verifier's findings appended to its prompt, then re-verified; if it
+        still fails, the rule_maker stage fails. This runs before sealing,
+        so a rejected harness is never measured or shown to a runner.
+
+        Args:
+            rerun_rule_maker: Callable taking a prompt_suffix string and
+                re-running the appropriate rule_maker variant.
         """
         if not has_user_eval_contract(idea):
             return rule_maker_result
@@ -1595,15 +1609,7 @@ class ResearchPipelineOrchestrator:
         print()
         print("↻ Verifier rejected the scoring contract -- re-running rule maker "
               "once with the findings appended.")
-        retry = run_rule_maker(
-            idea=idea,
-            work_dir=self.work_dir,
-            provider=provider,
-            templates_dir=self.templates_dir,
-            timeout=timeout,
-            full_permissions=full_permissions,
-            prompt_suffix=format_violations_for_retry(verdict.get("violations")),
-        )
+        retry = rerun_rule_maker(format_violations_for_retry(verdict.get("violations")))
         if retry["success"]:
             verdict = run_eval_verifier(
                 idea=idea,
@@ -1874,7 +1880,7 @@ class ResearchPipelineOrchestrator:
         # restores them even if the rule_maker crashes, so the scorer can run.
         sealed_dir = self._seal_bootstrap_inputs()
         try:
-            results["stages"][BOOTSTRAP_RULE_MAKER_STAGE] = self._run_bootstrap_rule_maker(
+            bootstrap_result = self._run_bootstrap_rule_maker(
                 curated_manifest=curated_manifest,
                 provider=provider,
                 timeout=rule_maker_timeout,
@@ -1883,7 +1889,47 @@ class ResearchPipelineOrchestrator:
         finally:
             self._unseal_bootstrap_inputs(sealed_dir)
 
-        if not results["stages"][BOOTSTRAP_RULE_MAKER_STAGE].get("success"):
+        # Verify the harness against the user's declared evaluation contract
+        # (continuation metrics, mandated functions, check-invariants) BEFORE
+        # stage completion is recorded, so a verification failure is never
+        # persisted as a succeeded stage (run -> verify -> gated complete,
+        # matching the forward rule_maker stage). The retry re-runs the
+        # sealed rule maker.
+        if bootstrap_result.get("success"):
+            def rerun_bootstrap_rule_maker(prompt_suffix):
+                sealed_retry = self._seal_bootstrap_inputs()
+                try:
+                    return self._run_bootstrap_rule_maker(
+                        curated_manifest=curated_manifest,
+                        provider=provider,
+                        timeout=rule_maker_timeout,
+                        full_permissions=full_permissions,
+                        prompt_suffix=prompt_suffix,
+                    )
+                finally:
+                    self._unseal_bootstrap_inputs(sealed_retry)
+
+            bootstrap_result = self._verify_eval_contract(
+                idea=idea,
+                rule_maker_result=bootstrap_result,
+                provider=provider,
+                full_permissions=full_permissions,
+                rerun_rule_maker=rerun_bootstrap_rule_maker,
+            )
+
+        bootstrap_result["success"] = self.state.complete_stage(
+            BOOTSTRAP_RULE_MAKER_STAGE,
+            success=bootstrap_result.get("success", False),
+            outputs={
+                "return_code": bootstrap_result.get("return_code"),
+                "outputs_exist": bootstrap_result.get("outputs_exist"),
+                "validation": bootstrap_result.get("validation"),
+                "transcript_file": bootstrap_result.get("transcript_file"),
+                "verification": bool(bootstrap_result.get("verification")),
+            },
+        )
+        results["stages"][BOOTSTRAP_RULE_MAKER_STAGE] = bootstrap_result
+        if not bootstrap_result.get("success"):
             print()
             print("⚠️  Bootstrap rule_maker stage failed -- aborting before scorer.")
             return results
@@ -1999,8 +2045,15 @@ class ResearchPipelineOrchestrator:
         provider: str,
         timeout: int,
         full_permissions: bool,
+        prompt_suffix: str = "",
     ) -> Dict[str, Any]:
-        """Launch the bootstrap rule_maker agent."""
+        """Launch the bootstrap rule_maker agent.
+
+        Deliberately does NOT record stage completion on the success path:
+        the caller verifies the harness against the user's evaluation
+        contract first and records one gated completion afterwards, so a
+        verification failure is never persisted as a succeeded stage.
+        """
         print()
         print("=" * 80)
         print(f"STAGE: {BOOTSTRAP_RULE_MAKER_STAGE}")
@@ -2016,7 +2069,7 @@ class ResearchPipelineOrchestrator:
         )
 
         try:
-            result = run_bootstrap_rule_maker(
+            return run_bootstrap_rule_maker(
                 curated_manifest=curated_manifest,
                 work_dir=self.work_dir,
                 provider=provider,
@@ -2024,23 +2077,10 @@ class ResearchPipelineOrchestrator:
                 timeout=timeout,
                 full_permissions=full_permissions,
                 log_dir=self.work_dir / ".neurico" / "bootstrap_logs",
+                prompt_suffix=prompt_suffix,
             )
-            result["success"] = self.state.complete_stage(
-                BOOTSTRAP_RULE_MAKER_STAGE,
-                success=result.get("success", False),
-                outputs={
-                    "return_code": result.get("return_code"),
-                    "outputs_exist": result.get("outputs_exist"),
-                    "validation": result.get("validation"),
-                    "transcript_file": result.get("transcript_file"),
-                },
-            )
-            return result
         except Exception as e:
             print(f"❌ Bootstrap rule_maker stage error: {e}")
-            self.state.complete_stage(
-                BOOTSTRAP_RULE_MAKER_STAGE, success=False, outputs={"error": str(e)}
-            )
             return {"success": False, "error": str(e)}
 
     def _bootstrap_sealed_dir_for(self) -> Path:
