@@ -122,7 +122,8 @@ class GitHubManager:
                            private: bool = False,
                            domain: Optional[str] = None,
                            provider: Optional[str] = None,
-                           no_hash: bool = False) -> Dict[str, Any]:
+                           no_hash: bool = False,
+                           hypothesis: Optional[str] = None) -> Dict[str, Any]:
         """
         Create a new repository in the organization for research.
 
@@ -134,6 +135,7 @@ class GitHubManager:
             domain: Research domain (optional, helps with naming)
             provider: AI provider (claude, gemini, codex)
             no_hash: If True, skip random hash in repo name (use when only one person runs the idea)
+            hypothesis: Research hypothesis (fallback for naming when the title is unusable)
 
         Returns:
             Dictionary with repo information:
@@ -142,8 +144,9 @@ class GitHubManager:
             - clone_url: URL for cloning
             - local_path: Local path where repo will be cloned
         """
-        # Generate a concise repo name using LLM
-        repo_name = self._generate_repo_name(title, domain, idea_id, provider=provider, no_hash=no_hash)
+        # Generate a concise repo name mechanically from the idea content
+        repo_name = self._generate_repo_name(title, domain, idea_id, provider=provider,
+                                             no_hash=no_hash, hypothesis=hypothesis)
 
         # Create description (must be single line, no newlines allowed by GitHub)
         if description is None:
@@ -470,116 +473,91 @@ class GitHubManager:
 
     def _generate_repo_name(self, title: str, domain: Optional[str], idea_id: str,
                             provider: Optional[str] = None,
-                            no_hash: bool = False) -> str:
+                            no_hash: bool = False,
+                            hypothesis: Optional[str] = None) -> str:
         """
-        Generate a concise repository name using GPT-4o-mini.
+        Generate a concise repository name mechanically from the idea content.
 
-        Uses OpenRouter when OPENROUTER_KEY is set (the default key for
-        experiments), otherwise falls back to a direct OpenAI call.
+        The slug is derived deterministically from the idea.yaml content, tried in
+        order title -> hypothesis -> domain, so naming never depends on an external
+        LLM or an OpenAI-compatible API key. This avoids the silent degradation to
+        the raw idea id that happened when no OPENROUTER_KEY/OPENAI_API_KEY was set
+        or the naming call failed.
 
         Args:
-            title: Research title
-            domain: Research domain (optional)
-            idea_id: Fallback identifier
+            title: Research title (from idea.yaml; the primary source)
+            domain: Research domain (fallback if title yields no slug)
+            idea_id: Last-resort identifier when no field is usable
             provider: AI provider (claude, gemini, codex)
-            no_hash: If True, skip random hash suffix (use when only one person runs the idea)
+            no_hash: If True, skip the random hash suffix (single-runner ideas)
+            hypothesis: Research hypothesis (fallback between title and domain)
 
         Returns:
             Repository name:
-            - Default: {slug}-{random}-{provider} (e.g., "llms-expose-science-a3f2-claude")
-            - With no_hash: {slug}-{provider} (e.g., "llms-expose-science-claude")
-            - Without provider: {slug}-{random} (e.g., "llms-expose-science-a3f2")
+            - Default: {slug}-{random}-{provider} (e.g., "llm-theory-of-mind-a3f2-claude")
+            - With no_hash: {slug}-{provider} (e.g., "llm-theory-of-mind-claude")
+            - Without provider: {slug}-{random} (e.g., "llm-theory-of-mind-a3f2")
         """
         import secrets
 
-        # Generate random 4-char hex for uniqueness across different runs
-        random_suffix = secrets.token_hex(2)  # 4 hex chars
-
-        try:
-            import openai
-            import os
-
-            # Prefer OpenRouter (OpenAI-compatible API, same SDK) over a direct
-            # OpenAI call, matching the default key setup for experiments
-            openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
-            openai_key = os.getenv('OPENAI_API_KEY')
-            if openrouter_key:
-                client = openai.OpenAI(api_key=openrouter_key,
-                                       base_url="https://openrouter.ai/api/v1")
-                model_name = "openai/gpt-4o-mini"
-            elif openai_key:
-                client = openai.OpenAI(api_key=openai_key)
-                model_name = "gpt-4o-mini"
-            else:
-                print("   ⚠️  Neither OPENROUTER_KEY nor OPENAI_API_KEY set, using fallback naming")
-                return self._sanitize_repo_name(idea_id)
-
-            # Build prompt - ask for shorter names
-            prompt = f"""Generate a very concise GitHub repository name for this research project.
-
-Title: {title}"""
-
-            if domain:
-                prompt += f"\nDomain: {domain}"
-
-            prompt += """
-
-Requirements:
-- Use lowercase with hyphens (kebab-case)
-- Be descriptive but VERY concise
-- 15-25 characters MAXIMUM (shorter is better)
-- No special characters except hyphens
-- Capture the key research focus in as few words as possible
-- Use abbreviations when appropriate (e.g., "llm" not "large-language-model")
-
-Examples:
-"Compare fine-tuning vs RAG for domain-specific QA" → "finetune-vs-rag"
-"Impact of L2 regularization on small datasets" → "l2-reg-small-data"
-"Customer churn prediction with interpretable features" → "interpret-churn-pred"
-"Do LLMs understand theory of mind?" → "llm-theory-of-mind"
-
-Output ONLY the repository name, nothing else."""
-
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=30
-            )
-
-            slug = response.choices[0].message.content.strip()
-
-            # Validate and sanitize the LLM output
-            slug = slug.lower()
-            slug = ''.join(c if c.isalnum() or c == '-' else '-' for c in slug)
-            slug = slug.strip('-')
-
-            # Smart truncation at word boundary if too long
-            if len(slug) > 25:
-                # Find last hyphen before position 25
-                truncate_pos = slug.rfind('-', 0, 25)
-                if truncate_pos > 15:  # Only truncate if we keep at least 15 chars
-                    slug = slug[:truncate_pos]
-                else:
-                    slug = slug[:25]
-
-            # Combine slug with suffix (random hash and/or provider)
-            if provider:
-                if no_hash:
-                    repo_name = f"{slug}-{provider}"
-                    print(f"   ✨ Generated repo name: {repo_name} (provider: {provider}, no hash)")
-                else:
-                    repo_name = f"{slug}-{random_suffix}-{provider}"
-                    print(f"   ✨ Generated repo name: {repo_name} (provider: {provider})")
-            else:
-                repo_name = f"{slug}-{random_suffix}"
-                print(f"   ✨ Generated repo name: {repo_name} (from: '{response.choices[0].message.content.strip()}')")
-            return repo_name
-
-        except Exception as e:
-            print(f"   ⚠️  Failed to generate repo name with LLM: {e}")
-            print(f"   Using fallback naming")
+        slug = self._mechanical_slug(title, hypothesis, domain)
+        if not slug:
+            # No field yielded anything usable; keep the sanitized idea id as the
+            # last resort.
             return self._sanitize_repo_name(idea_id)
+
+        random_suffix = secrets.token_hex(2)  # 4 hex chars for run uniqueness
+        if provider:
+            repo_name = f"{slug}-{provider}" if no_hash else f"{slug}-{random_suffix}-{provider}"
+        else:
+            repo_name = f"{slug}-{random_suffix}"
+        print(f"   ✨ Generated repo name: {repo_name}")
+        return repo_name
+
+    # Leading articles are dropped; trailing occurrences of these are trimmed
+    # after truncation so a name never ends on a dangling filler word.
+    _NAME_STOPWORDS = frozenset({
+        "a", "an", "the", "for", "of", "on", "in", "to", "with", "and", "or",
+        "using", "via", "based", "toward", "towards",
+    })
+
+    def _mechanical_slug(self, *candidates: Optional[str], max_len: int = 40) -> str:
+        """Deterministic kebab-case slug from the first usable candidate.
+
+        Candidates are tried in order (title, then hypothesis, then domain), so
+        naming never depends on an external LLM or API key. For each: lowercases,
+        converts runs of non-alphanumerics to single hyphens, drops a leading
+        article, truncates at a word boundary, and trims trailing filler words.
+        Returns the first non-empty slug, or "" if none of the candidates yield
+        any alphanumeric content.
+        """
+        import re
+
+        for raw in candidates:
+            text = (raw or "").strip()
+            if not text:
+                continue
+            # Drop apostrophes so possessives/contractions stay one word
+            # ("solver's" -> "solvers", not "solver-s").
+            text = text.replace("'", "").replace("’", "")
+            slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+            parts = [p for p in slug.split("-") if p]
+            if parts and parts[0] in {"a", "an", "the"}:
+                parts = parts[1:]
+            slug = "-".join(parts)
+
+            if len(slug) > max_len:
+                cut = slug.rfind("-", 0, max_len)
+                slug = slug[:cut] if cut > max_len // 2 else slug[:max_len]
+
+            parts = [p for p in slug.split("-") if p]
+            while len(parts) > 1 and parts[-1] in self._NAME_STOPWORDS:
+                parts.pop()
+            result = "-".join(parts)
+            if result:
+                return result
+        return ""
 
     def _sanitize_repo_name(self, idea_id: str) -> str:
         """

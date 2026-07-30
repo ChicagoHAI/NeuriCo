@@ -375,6 +375,7 @@ class ResearchRunner:
                         domain=domain,
                         provider=provider,
                         no_hash=no_hash,
+                        hypothesis=idea_spec.get("hypothesis", ""),
                     )
 
                     github_url = repo_info["repo_url"]
