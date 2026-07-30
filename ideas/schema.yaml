@@ -21,7 +21,7 @@ description: |
 
   The agent handles the rest through systematic literature review and resource gathering.
 
-version: "1.1"
+version: "1.2"
 
 type: object
 required: [idea]
@@ -311,6 +311,115 @@ properties:
           - "Performance improvement over baseline > 5%"
           - "Code quality score > 80/100"
           - "All experiments complete within time/budget constraints"
+
+      # ═══════════════════════════════════════════════════════
+      # LOCAL RESOURCES (FOR LOCAL DEPLOYMENTS)
+      # ═══════════════════════════════════════════════════════
+
+      local_resources:
+        type: object
+        description: |
+          OPTIONAL: Datasets and functions that already exist on the machine
+          running NeuriCo. Unlike background.datasets (advisory: things the
+          agent may search for), entries here are contractual: the files are
+          staged into the workspace before any agent runs, and their stated
+          usage is binding on every pipeline stage.
+
+          Every entry MUST provide the address (path) and its dedicated usage.
+        properties:
+          datasets:
+            type: array
+            items:
+              type: object
+              required: [path, usage]
+              properties:
+                path:
+                  type: string
+                  description: "Local path to the dataset file or directory"
+                  examples:
+                    - "/data/cifar10_fixed_protocol"
+                    - "./datasets/reviews.parquet"
+                usage:
+                  type: string
+                  description: "What this dataset is for and how it must be used"
+                  examples:
+                    - "Training and evaluation data; use this copy, do not download CIFAR-10"
+                name:
+                  type: string
+                  description: "Short name for the staged copy (optional, defaults to the basename)"
+
+          functions:
+            type: array
+            items:
+              type: object
+              required: [path, entrypoint, usage]
+              properties:
+                path:
+                  type: string
+                  description: "Local path to the Python file providing the function"
+                  examples:
+                    - "/home/user/eval_tools/protocol_eval.py"
+                entrypoint:
+                  type: string
+                  description: "Name of the function to call inside the file"
+                  examples:
+                    - "evaluate_protocol"
+                usage:
+                  type: string
+                  description: "What this function is for and when it must be called"
+                required_for_evaluation:
+                  type: boolean
+                  default: false
+                  description: |
+                    If true, all evaluation MUST route through this function:
+                    scoring/eval.py imports and calls it rather than
+                    reimplementing the metric, and a verifier checks compliance
+                    before the scoring contract is sealed.
+
+      # ═══════════════════════════════════════════════════════
+      # EVALUATION SPEC (STRUCTURED)
+      # ═══════════════════════════════════════════════════════
+
+      evaluation:
+        type: object
+        description: |
+          OPTIONAL: Structured evaluation expectations. The free-text
+          evaluation_criteria field remains supported; use this block when
+          exact metric names, targets, or output formats must be applied
+          faithfully. The rule maker transcribes these verbatim into
+          scoring/targets.json (tagged source: user) instead of deriving
+          its own. A metric may omit its target: the rule maker then
+          derives one, tags it source: derived, and the eval verifier
+          accepts that tag for exactly the metrics declared without a
+          target.
+        properties:
+          metrics:
+            type: array
+            items:
+              type: object
+              required: [name, definition]
+              properties:
+                name:
+                  type: string
+                  description: "Metric name, used verbatim in targets.json and results.json"
+                  examples: ["test_accuracy", "macro_f1"]
+                definition:
+                  type: string
+                  description: "How the metric is computed"
+                  examples:
+                    - "Mean test accuracy over 3 seeds"
+                target:
+                  type: string
+                  description: "Success condition, transcribed verbatim (optional: omit to let the rule maker derive one, tagged source: derived)"
+                  examples:
+                    - ">= 0.915"
+                    - ">= baseline + 0.5 points"
+
+          results_format:
+            type: string
+            description: "Expected shape of the results artifact"
+            examples:
+              - "results.json with per-seed and mean accuracy"
 
       # ═══════════════════════════════════════════════════════
       # METADATA

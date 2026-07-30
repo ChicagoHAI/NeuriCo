@@ -35,6 +35,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.config_loader import ConfigLoader
+from core.local_resources import stage_local_resources
 from core.agent_cli import (
     build_agent_command,
     build_agent_environment,
@@ -460,6 +461,11 @@ class ResearchRunner:
         # Copy helper scripts and backend-selected skills to workspace.
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
 
+        # Stage user-declared local resources (datasets, functions) into the
+        # workspace and rewrite their paths workspace-relative, so no agent
+        # ever depends on host paths. Hard error if a declared path is gone.
+        stage_local_resources(work_dir, idea)
+
         recovered_hitl_attempt = None
         if hitl and continue_autoresearch:
             # Recovery can restore the private HITL manager database. Do it before
@@ -789,7 +795,8 @@ class ResearchRunner:
 
         # Generate prompt
         print("📝 Generating research prompt...")
-        prompt = self.prompt_generator.generate_research_prompt(idea, root_dir=work_dir)
+        prompt = self.prompt_generator.generate_research_prompt(
+            idea, root_dir=work_dir, scoring_enabled=scoring_enabled)
 
         # Save prompt for reference
         prompt_file = work_dir / "logs" / "research_prompt.txt"
@@ -809,6 +816,7 @@ class ResearchRunner:
             domain=domain,
             idea_spec=idea.get("idea", {}),
             provider=provider,
+            scoring_enabled=scoring_enabled,
         )
 
         # Save session instructions
@@ -1014,6 +1022,7 @@ https://github.com/ChicagoHAI/neurico
         print(f"   Work dir: {work_dir}")
         print()
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
+        stage_local_resources(work_dir, idea)
 
         # Get GitHub URL if available
         github_url = None

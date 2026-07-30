@@ -31,6 +31,7 @@ def generate_resource_finder_prompt(
     hitl_runtime_completion: bool = False,
     provider: str = "claude",
     hitl_phase: Optional[str] = None,
+    scoring_enabled: bool = False,
 ) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
@@ -43,6 +44,9 @@ def generate_resource_finder_prompt(
         templates_dir: Path to templates directory
         provider: Provider whose workspace skill directory is referenced
             by the rendered prompt.
+        scoring_enabled: If True, surface scoring-only obligations such as the
+                         required_for_evaluation mandate; ordinary unscored
+                         runs omit them.
 
     Returns:
         Complete prompt string for resource finder agent
@@ -56,6 +60,7 @@ def generate_resource_finder_prompt(
         hitl_runtime_completion=hitl_runtime_completion,
         provider=provider,
         hitl_phase=hitl_phase,
+        scoring_enabled=scoring_enabled,
     )
 
 
@@ -72,6 +77,7 @@ def run_resource_finder(
     include_hitl_outputs: bool = False,
     env_extra: Optional[Dict[str, str]] = None,
     prompt_override: Optional[str] = None,
+    scoring_enabled: bool = False,
 ) -> Dict[str, Any]:
     """
     Launch resource finder agent to gather research resources.
@@ -131,6 +137,7 @@ def run_resource_finder(
             templates_dir,
             hitl_runtime_completion=(completion_mode == "hitl_runtime"),
             provider=provider,
+            scoring_enabled=scoring_enabled,
         )
     # Save prompt for reference
     logs_dir = work_dir / "logs"

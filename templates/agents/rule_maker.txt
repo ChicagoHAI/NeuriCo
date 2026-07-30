@@ -89,6 +89,42 @@ WHAT YOU MUST NOT DO:
   scikit-learn, etc. — only if a resource you found requires them).
 
 ═══════════════════════════════════════════════════════════════════════════════
+              USER-DECLARED EVALUATION CONTRACT (WHEN PRESENT)
+═══════════════════════════════════════════════════════════════════════════════
+
+The idea may carry two structured declarations that BIND your design. Check
+{idea_yaml} for them before Phase 1; if absent, skip this section.
+
+1. `evaluation.metrics` — the user's own metrics.
+   ✓ Each declared metric becomes a property in targets.json under its EXACT
+     user-given name. Do not rename, merge, or reinterpret it.
+   ✓ Express the user's target numerically in the metric's units and record
+     the user's verbatim wording as `source_text` with `"source": "user"`.
+   ✓ A declared metric MAY omit its target (the schema allows it). Keep the
+     metric under its exact name, derive a defensible target yourself
+     (literature first, then heuristic), tag the property
+     `"source": "derived"`, and document the derivation in
+     rule_maker_log.md. Never tag a target `"source": "user"` unless the
+     user actually stated it.
+   ✓ Add properties of your own ONLY for aspects the user did not cover,
+     tagged `"source": "literature"` or `"source": "heuristic"`.
+   ✓ If `evaluation.results_format` is given, interface.md and eval.py must
+     produce results in that shape.
+
+2. `local_resources.functions` with `required_for_evaluation: true` — a
+   mandated evaluation function, staged at the listed workspace path
+   (code/local/...).
+   ✓ eval.py MUST load that file with `_load_module` and call the declared
+     entrypoint to compute the corresponding measurements.
+   ✓ Do NOT reimplement its metric, wrap it with output-altering logic, or
+     fall back to your own computation if it errors — an error from the
+     mandated function is an eval failure the user needs to see.
+
+Your scoring/ outputs are reviewed against these declarations by a verifier
+before they are sealed; violations send the work back to you with the
+verifier's findings appended.
+
+═══════════════════════════════════════════════════════════════════════════════
                           PHASE 1: TASK ANALYSIS
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -474,11 +510,20 @@ SUPPORTED `success_rule` VALUES:
 
 WHERE TARGETS COME FROM:
 
-1. PREFER: explicit numbers in the idea's `evaluation_criteria` field.
-2. ELSE: numbers stated in the literature for this task.
-3. ELSE: a defensible heuristic (e.g. "1.5x speedup for a known O(n²) → O(n
+1. FIRST: the idea's `evaluation.metrics` entries — transcribe each name and
+   target verbatim, `"source": "user"`, with the user's wording in
+   `source_text` (see USER-DECLARED EVALUATION CONTRACT above). A declared
+   metric with NO target keeps its exact name and gets a target you derive
+   (rules 3-4 below), tagged `"source": "derived"` and documented in
+   rule_maker_log.md.
+2. ELSE: explicit numbers in the idea's `evaluation_criteria` field.
+3. ELSE: numbers stated in the literature for this task.
+4. ELSE: a defensible heuristic (e.g. "1.5x speedup for a known O(n²) → O(n
    log n) reduction") — document the choice in rule_maker_log.md.
-4. NEVER invent a number to make the run easy or hard.
+5. NEVER invent a number to make the run easy or hard.
+
+Property records may carry the optional keys `"source"` and `"source_text"`
+alongside `target` and `direction`; downstream consumers ignore them.
 
 CONCRETE EXAMPLE (LCS speedup):
 
@@ -565,6 +610,13 @@ CHECKS (run each from the workspace root):
 5. eval.py does NOT contain `import neurico` or `from neurico`:
    ```bash
    grep -q "neurico" scoring/eval.py && echo "FAIL: eval.py must not import neurico" || echo "eval.py: no neurico imports"
+   ```
+
+6. Only when the idea mandates an evaluation function
+   (`required_for_evaluation: true`): eval.py references its staged path
+   and entrypoint:
+   ```bash
+   grep -q "code/local" scoring/eval.py && echo "eval.py: mandated function referenced"
    ```
 
 ⚠️  DO NOT run `python scoring/eval.py`. The runner's artifact does not

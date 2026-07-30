@@ -2019,18 +2019,23 @@ def run_autoresearch_loop(
             full_permissions=full_permissions,
         )
 
-    return AutoResearchController(
+    def scorer(score_work_dir: Path) -> Dict[str, Any]:
+        return run_scorer(
+            work_dir=score_work_dir,
+            timeout=scorer_timeout,
+            idea=idea,
+        )
+
+    controller = AutoResearchController(
         idea=idea,
         idea_id=idea_id,
         work_dir=work_dir,
         history_root=history_root,
         proposal_generator=proposal_generator,
         comment_mode=comment_mode,
-        scorer=lambda score_work_dir: run_scorer(
-            work_dir=score_work_dir,
-            timeout=scorer_timeout,
-        ),
-    ).run(iterations=iterations)
+        scorer=scorer,
+    )
+    return controller.run(iterations=iterations)
 
 
 def normalized_margin(prop: Dict[str, Any]) -> float:

@@ -21,6 +21,11 @@ import os
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config_loader import ConfigLoader
+from core.local_resources import (
+    collect_host_paths,
+    validate_evaluation_spec,
+    validate_local_resources,
+)
 
 
 def resolve_ideas_dir(project_root: Optional[Path] = None) -> Path:
@@ -114,6 +119,16 @@ class IdeaManager:
         idea_path = self.submitted_dir / f"{idea_id}.yaml"
         with open(idea_path, 'w', encoding='utf-8') as f:
             yaml.dump(idea_spec, f, default_flow_style=False, sort_keys=False)
+
+        # Sidecar for docker/run.sh: host paths this idea depends on, one per
+        # line, so cmd_run can mount them (bash cannot parse the idea YAML)
+        host_paths = collect_host_paths(idea_spec.get('idea', {}))
+        if host_paths:
+            mounts_dir = self.ideas_dir / "mounts"
+            mounts_dir.mkdir(parents=True, exist_ok=True)
+            (mounts_dir / f"{idea_id}.txt").write_text(
+                "\n".join(host_paths) + "\n", encoding='utf-8')
+            print(f"  Local paths recorded for docker mounts: {len(host_paths)}")
 
         print(f"✓ Idea submitted successfully: {idea_id}")
         print(f"  Title: {idea_spec['idea'].get('title', 'Untitled')}")
@@ -218,6 +233,17 @@ class IdeaManager:
                 errors.append("evaluation_criteria must be a list")
             elif len(idea['evaluation_criteria']) == 0:
                 warnings.append("No evaluation criteria specified")
+
+        # Validate local resources (contractual: path + usage required,
+        # missing paths are warnings until staging)
+        lr_errors, lr_warnings = validate_local_resources(idea)
+        errors.extend(lr_errors)
+        warnings.extend(lr_warnings)
+
+        # Validate structured evaluation spec
+        ev_errors, ev_warnings = validate_evaluation_spec(idea)
+        errors.extend(ev_errors)
+        warnings.extend(ev_warnings)
 
         valid = len(errors) == 0
 

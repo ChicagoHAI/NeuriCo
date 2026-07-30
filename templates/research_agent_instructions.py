@@ -37,6 +37,7 @@ def extract_user_instructions(prompt: str) -> str:
 def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
                           domain: str = 'general', idea_spec=None,
                           provider: str = "claude",
+                          scoring_enabled: bool = False,
                           phase_name: str = "experiment_runner") -> str:
     """
     Generate comprehensive session instructions for the research agent.
@@ -63,6 +64,7 @@ def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
             domain=domain,
             idea_spec=idea_spec,
             provider=provider,
+            scoring_enabled=scoring_enabled,
             phase_name=phase_name,
         )
     except TypeError:
@@ -72,4 +74,12 @@ def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
             "templates. Run './neurico build' or pull the latest image to update.",
             file=sys.stderr
         )
+        if scoring_enabled:
+            print(
+                "WARNING: scoring is enabled but this fallback drops the "
+                "scoring-only obligations (binding evaluation mandates will be "
+                "missing from session instructions). Update the image before "
+                "running scored ideas.",
+                file=sys.stderr
+            )
         return generator.generate_session_instructions(prompt, work_dir, use_scribe)

@@ -19,6 +19,27 @@ from core.config_loader import ConfigLoader, normalize_domain
 from core.compute_backend import get_runtime_compute_backend
 from core.agent_cli import provider_skill_root
 
+# The scoring-only obligation for a required_for_evaluation function, stated
+# once. It binds eval.py in the scoring pipeline, so it must never appear in
+# ordinary unscored prompts (resource finding included).
+MANDATED_FUNCTION_OBLIGATION = (
+    "MANDATORY FOR EVALUATION: all evaluation MUST call this function; "
+    "never reimplement its metric.")
+
+
+def mandated_function_obligation(func: Any, scoring_enabled: bool) -> Optional[str]:
+    """
+    Return the obligation line to render for a local function, or None when
+    it must not be rendered (unscored run, or function not mandated).
+
+    Every prompt surface that lists local functions goes through this one
+    gate; a new surface that forgets it can only omit the mandate, never
+    leak it into an unscored run.
+    """
+    if scoring_enabled and isinstance(func, dict) and func.get('required_for_evaluation'):
+        return MANDATED_FUNCTION_OBLIGATION
+    return None
+
 
 class PromptGenerator:
     """
@@ -178,7 +199,7 @@ class PromptGenerator:
             "                    RESEARCH TASK SPECIFICATION",
             "=" * 80,
             "",
-            self._generate_task_section(idea_spec),
+            self._generate_task_section(idea_spec, scoring_enabled=scoring_enabled),
             "",
             "=" * 80,
             "                 RESEARCH METHODOLOGY (UNIVERSAL)",
@@ -307,7 +328,8 @@ Location: {run_dir}
 
         return variables
 
-    def _generate_task_section(self, idea_spec: Dict[str, Any]) -> str:
+    def _generate_task_section(self, idea_spec: Dict[str, Any],
+                               scoring_enabled: bool = False) -> str:
         """
         Generate the task-specific section of the prompt.
 
@@ -316,6 +338,9 @@ Location: {run_dir}
 
         Args:
             idea_spec: Idea specification
+            scoring_enabled: If True, render scoring-only obligations such as
+                             required_for_evaluation. Ordinary research runs
+                             are unscored, so those obligations are omitted.
 
         Returns:
             Formatted task section string
@@ -376,6 +401,32 @@ Location: {run_dir}
                         lines.append(f"  - ACTION REQUIRED: Clone this repository and explore its capabilities")
                     else:
                         lines.append(f"- {repo}")
+                lines.append("")
+
+        # Local resources (staged into the workspace before any agent runs)
+        local_resources = idea_spec.get('local_resources', {})
+        if local_resources:
+            lines.append("## LOCAL RESOURCES (STAGED IN WORKSPACE)\n")
+            lines.append("The submitter declared resources that already exist in this workspace.")
+            lines.append("Their stated usage is BINDING: use them exactly as described, and do")
+            lines.append("NOT download, re-collect, or reimplement substitutes.\n")
+
+            for dataset in local_resources.get('datasets') or []:
+                if not isinstance(dataset, dict):
+                    continue
+                lines.append(f"### Dataset: {dataset.get('path', 'unknown')}")
+                lines.append(f"- **Usage**: {dataset.get('usage', 'not stated')}")
+                lines.append("")
+
+            for func in local_resources.get('functions') or []:
+                if not isinstance(func, dict):
+                    continue
+                entrypoint = func.get('entrypoint', 'unknown')
+                lines.append(f"### Function: {entrypoint}() in {func.get('path', 'unknown')}")
+                lines.append(f"- **Usage**: {func.get('usage', 'not stated')}")
+                obligation = mandated_function_obligation(func, scoring_enabled)
+                if obligation:
+                    lines.append(f"- **{obligation}**")
                 lines.append("")
 
         # Methodology (if provided)
@@ -452,6 +503,25 @@ Location: {run_dir}
             lines.append("Your research will be evaluated on:\n")
             for criterion in eval_criteria:
                 lines.append(f"- {criterion}")
+            lines.append("")
+
+        # Structured user evaluation spec (applied verbatim by the rule maker)
+        evaluation = idea_spec.get('evaluation', {})
+        if evaluation:
+            lines.append("## USER EVALUATION SPEC (APPLY FAITHFULLY)\n")
+            lines.append("The submitter stated these metrics explicitly. They are transcribed")
+            lines.append("verbatim into the scoring contract; produce results in these exact terms:\n")
+
+            for metric in evaluation.get('metrics') or []:
+                if not isinstance(metric, dict):
+                    continue
+                entry = f"- **{metric.get('name', 'unnamed')}**: {metric.get('definition', '')}"
+                if metric.get('target'):
+                    entry += f" | Target: {metric['target']}"
+                lines.append(entry)
+
+            if evaluation.get('results_format'):
+                lines.append(f"- **Results format**: {evaluation['results_format']}")
             lines.append("")
 
         return "\n".join(lines)
@@ -681,6 +751,7 @@ it fits.
                                        use_scribe: bool = False, domain: str = 'general',
                                        idea_spec: Optional[Dict[str, Any]] = None,
                                        provider: str = "claude",
+                                       scoring_enabled: bool = False,
                                        phase_name: str = "experiment_runner") -> str:
         """
         Generate session instructions from template.
@@ -690,6 +761,9 @@ it fits.
             work_dir: Working directory path for the research
             use_scribe: If True, include notebook instructions; if False, use Python scripts
             domain: Research domain for template override lookup
+            scoring_enabled: If True, render scoring-only obligations
+                             (required_for_evaluation) in the resource contract
+            phase_name: Pipeline phase whose STATE.md notes block this agent owns
 
         Returns:
             Complete session instructions string
@@ -720,6 +794,11 @@ and the general workflow, ALWAYS follow the user's instructions.
 ────────────────────────────────────────────────────────────────────────────────
 
 '''
+
+        # Local resource contract: read from the structured idea fields, not
+        # from the rendered prompt, so it cannot be lost to regex extraction
+        priority_section += self._generate_local_resource_contract(
+            idea_spec or {}, scoring_enabled=scoring_enabled)
 
         # Code workflow instructions depend on whether we're using notebooks or scripts
         if use_scribe:
@@ -763,6 +842,61 @@ and the general workflow, ALWAYS follow the user's instructions.
         if 'RESEARCH STATE CONTRACT' not in rendered:
             rendered = state_contract + "\n" + rendered
         return rendered
+
+    def _generate_local_resource_contract(self, idea_spec: Dict[str, Any],
+                                          scoring_enabled: bool = False) -> str:
+        """
+        Build the binding local-resource banner for session instructions.
+
+        Reads idea.local_resources directly (the staged, workspace-relative
+        paths) and renders a HIGHEST PRIORITY block so the contract survives
+        even when no free-text user instructions were extracted.
+
+        Args:
+            idea_spec: Inner idea dictionary (idea['idea'])
+            scoring_enabled: If True, render scoring-only obligations such as
+                             required_for_evaluation; unscored runs omit them
+
+        Returns:
+            Banner string, or empty string when no local resources declared
+        """
+        resources = idea_spec.get('local_resources')
+        if not isinstance(resources, dict):
+            return ""
+
+        lines = []
+        for dataset in resources.get('datasets') or []:
+            if isinstance(dataset, dict) and dataset.get('path'):
+                lines.append(f"- Dataset {dataset['path']}: {dataset.get('usage', 'usage not stated')}")
+
+        for func in resources.get('functions') or []:
+            if isinstance(func, dict) and func.get('path'):
+                entrypoint = func.get('entrypoint', 'unknown')
+                line = f"- Function {entrypoint}() in {func['path']}: {func.get('usage', 'usage not stated')}"
+                obligation = mandated_function_obligation(func, scoring_enabled)
+                if obligation:
+                    line += f"\n  {obligation}"
+                lines.append(line)
+
+        if not lines:
+            return ""
+
+        listing = "\n".join(lines)
+        return f'''
+════════════════════════════════════════════════════════════════════════════════
+⚠️  BINDING LOCAL RESOURCES (STAGED IN THIS WORKSPACE)
+════════════════════════════════════════════════════════════════════════════════
+
+The submitter declared these resources. They are already staged at the paths
+below (relative to the workspace root). Their stated usage is binding: use
+them exactly as described, and do NOT download, re-collect, or reimplement
+substitutes.
+
+{listing}
+
+────────────────────────────────────────────────────────────────────────────────
+
+'''
 
     def _extract_user_instructions(self, prompt: str) -> str:
         """
@@ -808,6 +942,7 @@ and the general workflow, ALWAYS follow the user's instructions.
         hitl_runtime_completion: bool = False,
         provider: str = "claude",
         hitl_phase: Optional[str] = None,
+        scoring_enabled: bool = False,
     ) -> str:
         """
         Generate resource finder prompt from template.
@@ -912,6 +1047,28 @@ RESEARCH DOMAIN:
 
             if 'related_work' in background:
                 research_context += f"\nRelated work:\n{background['related_work']}\n"
+
+        # Add staged local resources if declared (already copied into the
+        # workspace by the runner; the finder must not fetch substitutes)
+        local_resources = idea_spec.get('local_resources', {})
+        if isinstance(local_resources, dict) and local_resources:
+            research_context += "\n**LOCAL RESOURCES - ALREADY STAGED IN THIS WORKSPACE**:\n"
+            research_context += ("The following resources were declared by the submitter and are "
+                                 "already present\nat the paths below. Do NOT search for, download, "
+                                 "or clone substitutes for them.\nVerify each exists and record it "
+                                 "in your resources summary with its usage.\n")
+            for dataset in local_resources.get('datasets') or []:
+                if isinstance(dataset, dict):
+                    research_context += f"- Dataset: {dataset.get('path', 'unknown')}\n"
+                    research_context += f"  Usage: {dataset.get('usage', 'not stated')}\n"
+            for func in local_resources.get('functions') or []:
+                if isinstance(func, dict):
+                    research_context += (f"- Function: {func.get('entrypoint', 'unknown')}() "
+                                         f"in {func.get('path', 'unknown')}\n")
+                    research_context += f"  Usage: {func.get('usage', 'not stated')}\n"
+                    obligation = mandated_function_obligation(func, scoring_enabled)
+                    if obligation:
+                        research_context += f"  {obligation}\n"
 
         # Add constraints if provided
         if constraints:

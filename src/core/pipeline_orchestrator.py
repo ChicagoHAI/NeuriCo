@@ -29,6 +29,11 @@ import sys
 import time
 
 from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
+from agents.eval_verifier import (
+    format_violations_for_retry,
+    has_user_eval_contract,
+    run_eval_verifier,
+)
 from agents.rule_maker import (
     generate_rule_maker_prompt,
     run_rule_maker,
@@ -393,6 +398,7 @@ class ResearchPipelineOrchestrator:
                         provider=provider,
                         timeout=resource_finder_timeout,
                         full_permissions=full_permissions,
+                        scoring_enabled=scoring_enabled,
                     )
 
                 if not results["stages"]["resource_finder"]["success"]:
@@ -497,7 +503,8 @@ class ResearchPipelineOrchestrator:
                     },
                 )
             elif scoring_enabled:
-                results["stages"][SCORER_STAGE] = self._run_scorer(timeout=scorer_timeout)
+                results["stages"][SCORER_STAGE] = self._run_scorer(
+                    timeout=scorer_timeout, idea=idea)
 
             runner_ok = results["stages"]["experiment_runner"]["success"]
 
@@ -744,7 +751,8 @@ class ResearchPipelineOrchestrator:
             print(f"⚠️  Modal sweep encountered an error: {exc}")
 
     def _run_resource_finder(
-        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
+        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool,
+        scoring_enabled: bool = False
     ) -> Dict[str, Any]:
         """Run resource finder stage."""
         print()
@@ -767,6 +775,7 @@ class ResearchPipelineOrchestrator:
                 templates_dir=self.templates_dir,
                 timeout=timeout,
                 full_permissions=full_permissions,
+                scoring_enabled=scoring_enabled,
             )
 
             result["success"] = self.state.complete_stage(
@@ -1020,6 +1029,7 @@ class ResearchPipelineOrchestrator:
                     domain=domain,
                     idea_spec=idea.get("idea", {}),
                     provider=provider,
+                    scoring_enabled=scoring_enabled,
                 )
             else:
                 prompt = runtime_prompt
@@ -1369,6 +1379,7 @@ class ResearchPipelineOrchestrator:
                         scorer=lambda scorer_work_dir: run_scorer(
                             work_dir=scorer_work_dir,
                             timeout=scorer_timeout,
+                            idea=idea,
                         ),
                         temporary_ref=f"refs/neurico/hitl/scoring/{request_key}",
                     )
@@ -1526,6 +1537,14 @@ class ResearchPipelineOrchestrator:
                 timeout=timeout,
                 full_permissions=full_permissions,
             )
+            if result["success"]:
+                result = self._verify_eval_contract(
+                    idea=idea,
+                    rule_maker_result=result,
+                    provider=provider,
+                    timeout=timeout,
+                    full_permissions=full_permissions,
+                )
             result["success"] = self.state.complete_stage(
                 RULE_MAKER_STAGE, result["success"], result.get("outputs")
             )
@@ -1534,6 +1553,72 @@ class ResearchPipelineOrchestrator:
             print(f"❌ Rule maker stage failed: {e}")
             self.state.complete_stage(RULE_MAKER_STAGE, False)
             raise
+
+    def _verify_eval_contract(
+        self,
+        idea: Dict[str, Any],
+        rule_maker_result: Dict[str, Any],
+        provider: str,
+        timeout: int,
+        full_permissions: bool,
+    ) -> Dict[str, Any]:
+        """
+        Verify the rule_maker's scoring/ outputs against the user's declared
+        evaluation contract (idea.evaluation, mandated local functions).
+
+        Only runs when the idea actually declares a contract. On a failed
+        verdict the rule_maker is re-run ONCE with the verifier's findings
+        appended to its prompt, then re-verified; if it still fails, the
+        rule_maker stage fails. This runs before sealing, so a rejected
+        harness never reaches the experiment_runner.
+        """
+        if not has_user_eval_contract(idea):
+            return rule_maker_result
+
+        print()
+        print("─" * 80)
+        print("STAGE: EVAL VERIFIER (user evaluation contract declared)")
+        print("─" * 80)
+        print()
+
+        verdict = run_eval_verifier(
+            idea=idea,
+            work_dir=self.work_dir,
+            provider=provider,
+            templates_dir=self.templates_dir,
+            full_permissions=full_permissions,
+        )
+        if verdict["success"] and verdict["passed"]:
+            rule_maker_result["verification"] = verdict
+            return rule_maker_result
+
+        print()
+        print("↻ Verifier rejected the scoring contract -- re-running rule maker "
+              "once with the findings appended.")
+        retry = run_rule_maker(
+            idea=idea,
+            work_dir=self.work_dir,
+            provider=provider,
+            templates_dir=self.templates_dir,
+            timeout=timeout,
+            full_permissions=full_permissions,
+            prompt_suffix=format_violations_for_retry(verdict.get("violations")),
+        )
+        if retry["success"]:
+            verdict = run_eval_verifier(
+                idea=idea,
+                work_dir=self.work_dir,
+                provider=provider,
+                templates_dir=self.templates_dir,
+                full_permissions=full_permissions,
+            )
+            retry["verification"] = verdict
+            retry["success"] = verdict["success"] and verdict["passed"]
+
+        if not retry["success"]:
+            print("⚠️  Scoring contract still violates the user's declarations "
+                  "after one retry -- failing the rule maker stage.")
+        return retry
 
     def _run_rule_maker_hitl(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
@@ -1666,10 +1751,12 @@ class ResearchPipelineOrchestrator:
         finally:
             runtime.clear_idea_tool_context()
 
-    def _run_scorer(self, timeout: int) -> Dict[str, Any]:
+    def _run_scorer(self, timeout: int,
+                    idea: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Run the scorer stage (scoring mode only). Executes scoring/eval.py
-        and captures the structured results into scoring/results.json.
+        and captures the structured results into scoring/results.json. The
+        trusted idea makes the staged-function integrity check fail closed.
         """
         print()
         print("─" * 80)
@@ -1679,7 +1766,8 @@ class ResearchPipelineOrchestrator:
 
         self.state.start_stage(SCORER_STAGE, expected_outputs=["scoring/results.json"])
         try:
-            result = run_scorer(work_dir=self.work_dir, timeout=timeout)
+            result = run_scorer(work_dir=self.work_dir, timeout=timeout,
+                                idea=idea)
             result["success"] = self.state.complete_stage(SCORER_STAGE, result["success"], result)
             return result
         except Exception as e:
@@ -1801,7 +1889,8 @@ class ResearchPipelineOrchestrator:
             return results
 
         # STAGE B3: Scorer (executes scoring/eval.py against the existing artifacts).
-        results["stages"][SCORER_STAGE] = self._run_scorer(timeout=scorer_timeout)
+        results["stages"][SCORER_STAGE] = self._run_scorer(
+            timeout=scorer_timeout, idea=idea)
 
         scorer_ok = results["stages"][SCORER_STAGE].get("success", False)
         if scorer_ok:
