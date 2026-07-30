@@ -148,7 +148,8 @@ def main():
                         private=args.private,
                         domain=domain,
                         provider=args.provider,
-                        no_hash=args.no_hash
+                        no_hash=args.no_hash,
+                        hypothesis=idea.get('idea', {}).get('hypothesis', '')
                     )
 
                     github_repo_url = repo_info['repo_url']
