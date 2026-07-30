@@ -15,11 +15,28 @@ import yaml
 import json
 import hashlib
 import sys
+import os
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config_loader import ConfigLoader
+
+
+def resolve_ideas_dir(project_root: Optional[Path] = None) -> Path:
+    """Resolve the ideas directory, honoring the NEURICO_IDEAS override.
+
+    Mirrors NEURICO_WORKSPACE: if NEURICO_IDEAS is set, use it, so a shared
+    read-only install can point each user at their own ideas directory.
+    Otherwise fall back to <project_root>/ideas (project_root defaults to the
+    repo root), which is the historical behavior.
+    """
+    env_ideas = os.getenv("NEURICO_IDEAS")
+    if env_ideas:
+        return Path(env_ideas)
+    if project_root is None:
+        project_root = Path(__file__).parent.parent.parent
+    return Path(project_root) / "ideas"
 
 
 class IdeaManager:

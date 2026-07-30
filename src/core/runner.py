@@ -33,7 +33,7 @@ _PROJECT_ROOT = _SRC_ROOT.parent
 sys.path.insert(0, str(_SRC_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from core.idea_manager import IdeaManager
+from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.config_loader import ConfigLoader
 from core.agent_cli import (
     build_agent_command,
@@ -123,7 +123,7 @@ class ResearchRunner:
         if config_loader.should_auto_create_workspace():
             self.runs_dir.mkdir(parents=True, exist_ok=True)
 
-        self.idea_manager = IdeaManager(self.project_root / "ideas")
+        self.idea_manager = IdeaManager(resolve_ideas_dir(self.project_root))
         self.prompt_generator = PromptGenerator(self.project_root / "templates")
 
         # GitHub integration
