@@ -7,13 +7,21 @@ expectations (idea.evaluation). Unlike background.* fields, which are advisory
 hints for the resource finder, these declarations are contractual: the paths
 are staged into the workspace and their stated usage is binding.
 
-This module holds the pure validation logic shared by the submission CLIs and
-IdeaManager.validate_idea():
-1. Structural validation of local_resources and evaluation entries
-2. Existence checks for declared paths (warnings at submit time; staging in
-   runner.py is where a missing path becomes a hard error)
-3. Conversion faithfulness: every path-like token in the source text must
-   survive into the generated YAML verbatim
+This module owns the full lifecycle of those declarations, layered by when
+each piece runs:
+1. Submit time — structural validation of local_resources and evaluation
+   entries, existence checks for declared paths (warnings only; staging is
+   where a missing path becomes a hard error), conversion faithfulness
+   (every path-like token in the source text must survive into the YAML),
+   and canonicalization of relative paths against the submitting directory.
+2. Run dispatch — host mount collection and staging: declared resources are
+   copied to sanitized workspace destinations (one deterministic protocol,
+   _planned_destination, shared with verification) and fingerprinted, and
+   the redacted workspace contract copy is written.
+3. Score time — the integrity guard (staged_function_mismatches): staged
+   function bytes are verified against the trusted contract, failing closed.
+   Staging silently re-heals a tampered file only when the pristine source
+   is reachable; the guard is what rejects tampering the source cannot heal.
 """
 
 from pathlib import Path
@@ -275,6 +283,41 @@ def _staging_destination(work_dir: Path, staging_dir: str, requested: str,
     return dst
 
 
+def _planned_destination(work_dir: Path, kind: str, entry: Dict[str, Any],
+                         taken: set):
+    """
+    The one destination protocol shared by staging and the integrity guard:
+    an entry whose path was already rewritten into the staging directory
+    keeps that destination (reserving its name against later duplicates);
+    otherwise the destination is derived from the declared name/basename via
+    _staging_destination. Callers must iterate entries in declaration order
+    with one `taken` set per kind — that lockstep determinism is what lets
+    staged_function_mismatches re-derive exactly where staging wrote each
+    function, so any protocol change here changes both sides at once.
+
+    Returns (destination, source_str): destination is None when the entry
+    stages nothing (no usable path or source), and source_str is the string
+    the staged bytes are expected to come from (None when unknown). Raises
+    ValueError for unusable names, as _staging_destination does.
+    """
+    staging_dir = (DATASETS_STAGING_DIR if kind == 'datasets'
+                   else FUNCTIONS_STAGING_DIR)
+    entry_path = str(entry.get('path') or '').replace('\\', '/')
+    if entry_path.startswith(f"{staging_dir}/"):
+        dst = work_dir / entry_path
+        taken.add(dst.name)
+        source = entry.get('source_path')
+        return dst, (str(source) if source else None)
+
+    source_str = str(entry.get('source_path') or entry_path)
+    if not source_str:
+        return None, None
+    requested = ((entry.get('name') if kind == 'datasets' else None)
+                 or Path(source_str).name)
+    return _staging_destination(work_dir, staging_dir, requested,
+                                kind, taken), source_str
+
+
 def workspace_contract_copy(idea_spec: Dict[str, Any]) -> Dict[str, Any]:
     """
     Deep copy of the idea with host-machine metadata removed.
@@ -360,21 +403,8 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
             entry_path = str(entry['path']).replace('\\', '/')
             already_staged = entry_path.startswith(f"{staging_dir}/")
 
-            if already_staged:
-                # Path was rewritten by a previous staging pass (same
-                # process or a reloaded contract). Reserve the name so later
-                # duplicates cannot collide with it.
-                dst = work_dir / entry_path
-                taken.add(dst.name)
-                src = _resolve(str(entry.get('source_path') or ''), base_dir) \
-                    if entry.get('source_path') else None
-            else:
-                source_str = str(entry.get('source_path') or entry['path'])
-                src = _resolve(source_str, base_dir)
-                requested = (entry.get('name') if kind == 'datasets' else None) \
-                    or Path(source_str).name
-                dst = _staging_destination(work_dir, staging_dir, requested,
-                                           kind, taken)
+            dst, source_str = _planned_destination(work_dir, kind, entry, taken)
+            src = _resolve(source_str, base_dir) if source_str else None
 
             src_available = src is not None and src.exists()
 
@@ -443,29 +473,30 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
 
 
 def staged_function_mismatches(work_dir: Path,
-                               idea: Dict[str, Any] = None) -> List[str]:
+                               idea: Dict[str, Any]) -> List[str]:
     """
     Check staged local functions against their expected fingerprints.
 
-    When the TRUSTED idea (the submitted contract held by the orchestrator,
-    which lives outside the worker-visible workspace) is provided, the check
-    fails closed: the contract says which functions are mandated, so missing
-    integrity metadata is itself a mismatch — a worker deleting or editing
-    .neurico/idea.yaml must not silence the guard. Where the original source
-    file is still reachable (it is mounted read-only during Docker runs),
-    the staged bytes are verified against the SOURCE, which a forged
+    `idea` is the TRUSTED submitted contract held by the orchestrator, which
+    lives outside the worker-visible workspace; it is required so the check
+    always fails closed. The contract says which functions are mandated, so
+    missing integrity metadata is itself a mismatch — a worker deleting or
+    editing .neurico/idea.yaml must not silence the guard. Where the original
+    source file is still reachable (it is mounted read-only during Docker
+    runs), the staged bytes are verified against the SOURCE, which a forged
     workspace-recorded sha256 cannot defeat.
-
-    Without the trusted idea (legacy/standalone callers), the workspace
-    .neurico/idea.yaml is the only reference: recorded fingerprints are
-    verified, and a function marked required_for_evaluation that lacks a
-    verifiable fingerprint is reported rather than skipped.
 
     Returns one message per problem; an empty list means the mandated
     functions are intact. Workspaces whose contract declares no local
     functions trivially pass.
     """
     import yaml
+
+    if not isinstance(idea, dict):
+        raise ValueError(
+            "staged_function_mismatches requires the trusted submitted idea; "
+            "verifying against the worker-writable workspace record alone "
+            "would fail open")
 
     work_dir = Path(work_dir)
 
@@ -477,7 +508,7 @@ def staged_function_mismatches(work_dir: Path,
         return [e for e in resources.get('functions') or []
                 if isinstance(e, dict)]
 
-    trusted_functions = _functions_of(idea) if isinstance(idea, dict) else None
+    trusted_functions = _functions_of(idea)
 
     idea_path = work_dir / ".neurico" / "idea.yaml"
     workspace_functions: List[Dict[str, Any]] = []
@@ -493,22 +524,7 @@ def staged_function_mismatches(work_dir: Path,
     if workspace_error:
         return [workspace_error]
 
-    # No trusted contract: legacy mode against the workspace record only
-    if trusted_functions is None:
-        if not idea_path.exists():
-            return []
-        mismatches = []
-        for entry in workspace_functions:
-            if not entry.get('sha256') or not entry.get('path'):
-                if entry.get('required_for_evaluation'):
-                    mismatches.append(
-                        f"mandated function has no verifiable fingerprint: "
-                        f"{entry.get('path') or entry.get('entrypoint') or entry!r}")
-                continue
-            mismatches.extend(_verify_staged_function(work_dir, entry))
-        return mismatches
-
-    # Trusted mode: every load-bearing fact — which functions exist, where
+    # Every load-bearing fact — which functions exist, where
     # they are staged, what bytes are expected — comes from the trusted
     # contract or the read-only source file. The worker-writable workspace
     # record is consulted only as a fingerprint of last resort (it travels
@@ -529,25 +545,20 @@ def staged_function_mismatches(work_dir: Path,
     for trusted in trusted_functions:
         label = (trusted.get('entrypoint')
                  or Path(str(trusted.get('path', '?'))).name)
-        trusted_path = str(trusted.get('path') or '').replace('\\', '/')
 
-        # Canonical staged location per the contract: either the contract
-        # already carries the rewritten path (staging mutated the
-        # orchestrator-held spec), or it is derived deterministically the
-        # same way staging derives it (same entries, same order)
-        if trusted_path.startswith(f"{FUNCTIONS_STAGING_DIR}/"):
-            staged = work_dir / trusted_path
-            taken.add(staged.name)
-            source_str = trusted.get('source_path')
-        else:
-            source_str = str(trusted.get('source_path') or trusted_path)
-            try:
-                staged = _staging_destination(
-                    work_dir, FUNCTIONS_STAGING_DIR,
-                    Path(source_str).name, 'functions', taken)
-            except ValueError as exc:
-                mismatches.append(str(exc))
-                continue
+        # Canonical staged location and expected source come from the same
+        # destination protocol staging follows (_planned_destination), so
+        # the guard always looks exactly where staging wrote.
+        try:
+            staged, source_str = _planned_destination(
+                work_dir, 'functions', trusted, taken)
+        except ValueError as exc:
+            mismatches.append(str(exc))
+            continue
+        if staged is None:
+            mismatches.append(
+                f"mandated function '{label}' declares no usable path")
+            continue
 
         if not staged.exists():
             mismatches.append(
@@ -583,21 +594,6 @@ def staged_function_mismatches(work_dir: Path,
                 f"{problem}before scoring)")
 
     return mismatches
-
-
-def _verify_staged_function(work_dir: Path, entry: Dict[str, Any]) -> List[str]:
-    """Verify one workspace-recorded function entry against its fingerprint."""
-    staged = Path(work_dir) / entry['path']
-    if not staged.exists():
-        return [f"staged function missing: {entry['path']}"]
-    digest = hashlib.sha256(staged.read_bytes()).hexdigest()
-    if digest != entry['sha256']:
-        return [
-            f"staged function modified after staging: {entry['path']} "
-            f"(restore it from {entry.get('source_path', 'its source')} "
-            f"before scoring)"
-        ]
-    return []
 
 
 def _ignore_staged_datasets(work_dir: Path) -> None:

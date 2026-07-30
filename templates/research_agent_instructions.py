@@ -72,4 +72,12 @@ def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
             "templates. Run './neurico build' or pull the latest image to update.",
             file=sys.stderr
         )
+        if scoring_enabled:
+            print(
+                "WARNING: scoring is enabled but this fallback drops the "
+                "scoring-only obligations (binding evaluation mandates will be "
+                "missing from session instructions). Update the image before "
+                "running scored ideas.",
+                file=sys.stderr
+            )
         return generator.generate_session_instructions(prompt, work_dir, use_scribe)

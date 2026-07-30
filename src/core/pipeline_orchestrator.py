@@ -1334,6 +1334,7 @@ class ResearchPipelineOrchestrator:
                         scorer=lambda scorer_work_dir: run_scorer(
                             work_dir=scorer_work_dir,
                             timeout=scorer_timeout,
+                            idea=idea,
                         ),
                         temporary_ref=f"refs/neurico/hitl/scoring/{request_key}",
                     )

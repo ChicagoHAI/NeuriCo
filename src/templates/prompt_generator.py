@@ -19,6 +19,27 @@ from core.config_loader import ConfigLoader, normalize_domain
 from core.compute_backend import get_runtime_compute_backend
 from core.agent_cli import provider_skill_root
 
+# The scoring-only obligation for a required_for_evaluation function, stated
+# once. It binds eval.py in the scoring pipeline, so it must never appear in
+# ordinary unscored prompts (resource finding included).
+MANDATED_FUNCTION_OBLIGATION = (
+    "MANDATORY FOR EVALUATION: all evaluation MUST call this function; "
+    "never reimplement its metric.")
+
+
+def mandated_function_obligation(func: Any, scoring_enabled: bool) -> Optional[str]:
+    """
+    Return the obligation line to render for a local function, or None when
+    it must not be rendered (unscored run, or function not mandated).
+
+    Every prompt surface that lists local functions goes through this one
+    gate; a new surface that forgets it can only omit the mandate, never
+    leak it into an unscored run.
+    """
+    if scoring_enabled and isinstance(func, dict) and func.get('required_for_evaluation'):
+        return MANDATED_FUNCTION_OBLIGATION
+    return None
+
 
 class PromptGenerator:
     """
@@ -403,13 +424,9 @@ Location: {run_dir}
                 entrypoint = func.get('entrypoint', 'unknown')
                 lines.append(f"### Function: {entrypoint}() in {func.get('path', 'unknown')}")
                 lines.append(f"- **Usage**: {func.get('usage', 'not stated')}")
-                # required_for_evaluation is a scoring-pipeline obligation
-                # (eval.py must route through this function). Only surface it
-                # when scoring is actually enabled; ordinary research runs are
-                # unscored and must not carry the binding requirement.
-                if scoring_enabled and func.get('required_for_evaluation'):
-                    lines.append("- **MANDATORY FOR EVALUATION**: all evaluation MUST call this "
-                                 "function; do not reimplement its metric")
+                obligation = mandated_function_obligation(func, scoring_enabled)
+                if obligation:
+                    lines.append(f"- **{obligation}**")
                 lines.append("")
 
         # Methodology (if provided)
@@ -838,10 +855,9 @@ and the general workflow, ALWAYS follow the user's instructions.
             if isinstance(func, dict) and func.get('path'):
                 entrypoint = func.get('entrypoint', 'unknown')
                 line = f"- Function {entrypoint}() in {func['path']}: {func.get('usage', 'usage not stated')}"
-                # Scoring-only obligation: see _generate_task_section — the
-                # requirement binds eval.py, so it only appears in scored runs
-                if scoring_enabled and func.get('required_for_evaluation'):
-                    line += "\n  MANDATORY: all evaluation must call this function; never reimplement its metric."
+                obligation = mandated_function_obligation(func, scoring_enabled)
+                if obligation:
+                    line += f"\n  {obligation}"
                 lines.append(line)
 
         if not lines:
@@ -1032,12 +1048,9 @@ RESEARCH DOMAIN:
                     research_context += (f"- Function: {func.get('entrypoint', 'unknown')}() "
                                          f"in {func.get('path', 'unknown')}\n")
                     research_context += f"  Usage: {func.get('usage', 'not stated')}\n"
-                    # required_for_evaluation binds eval.py to this function; it
-                    # is a scoring-pipeline obligation, so only surface it in
-                    # scored runs. Resource finding also runs in the ordinary
-                    # unscored workflow, which must not carry the requirement.
-                    if scoring_enabled and func.get('required_for_evaluation'):
-                        research_context += "  MANDATORY: all evaluation must run through this function\n"
+                    obligation = mandated_function_obligation(func, scoring_enabled)
+                    if obligation:
+                        research_context += f"  {obligation}\n"
 
         # Add constraints if provided
         if constraints:

@@ -24,75 +24,67 @@ without evaluation.metrics or mandated functions skip it entirely.
 
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
-import subprocess
 import shlex
 import shutil
-import os
 import sys
-import threading
 import time
 import json
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.security import sanitize_text
-
-# CLI commands for different providers (mirrors rule_maker.py)
-CLI_COMMANDS = {
-    'claude': 'claude -p',
-    'codex': 'codex exec',
-    'gemini': 'gemini',
-}
-
-# Verbose / structured-transcript output flags per provider
-TRANSCRIPT_FLAGS = {
-    'claude': '--verbose --output-format stream-json',
-    'codex': '--json',
-    'gemini': '--output-format stream-json',
-}
+from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
+from core.agent_runner import next_attempt_number, run_prebuilt_cli_agent
 
 VERDICT_FILE_NAME = "verification.json"
 
 
+# The verdict contract, stated once: every check the eval_verifier template
+# mandates, mapped to the predicate that decides whether the submitted
+# contract makes it applicable. templates/agents/eval_verifier.txt states the
+# same rules in prose ("only when the contract lists ..."); keep the two in
+# sync. Whether the verifier runs at all (has_user_eval_contract) and which
+# checks a verdict may wave off as not_applicable (interpret_verdict) are
+# both derived from this table.
+VERDICT_CHECKS = {
+    'routing': lambda contract: bool(contract['mandated_functions']),
+    'transcription': lambda contract: bool(contract['evaluation'].get('metrics')),
+    'format': lambda contract: bool(contract['evaluation'].get('results_format')),
+}
+VERDICT_CHECK_VALUES = ('pass', 'fail', 'not_applicable')
+
+
 def has_user_eval_contract(idea: Dict[str, Any]) -> bool:
     """
-    Return True when the idea declares something the verifier must check:
-    structured evaluation metrics, a declared results format, or a mandated
-    evaluation function.
+    Return True when the idea declares something the verifier must check,
+    i.e. when at least one mandated verdict check is applicable.
     """
-    idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
-    if not isinstance(idea_spec, dict):
-        return False
-
-    evaluation = idea_spec.get('evaluation')
-    if isinstance(evaluation, dict) and (
-        evaluation.get('metrics') or evaluation.get('results_format')
-    ):
-        return True
-
-    resources = idea_spec.get('local_resources')
-    if isinstance(resources, dict):
-        for func in resources.get('functions') or []:
-            if isinstance(func, dict) and func.get('required_for_evaluation'):
-                return True
-
-    return False
+    contract = extract_eval_contract(idea)
+    return any(applicable(contract) for applicable in VERDICT_CHECKS.values())
 
 
 def extract_eval_contract(idea: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Pull the contract-relevant slices of the idea for the verifier's prompt:
-    the structured evaluation spec plus any mandated evaluation functions.
+    Pull the contract-relevant slices of the idea for the verifier's prompt
+    and for verdict interpretation: the structured evaluation spec plus any
+    mandated evaluation functions. Malformed (non-mapping) slices normalize
+    to empty so the VERDICT_CHECKS predicates never trip on bad input.
     """
     idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
-    resources = idea_spec.get('local_resources') or {}
+    if not isinstance(idea_spec, dict):
+        idea_spec = {}
+    evaluation = idea_spec.get('evaluation')
+    if not isinstance(evaluation, dict):
+        evaluation = {}
+    resources = idea_spec.get('local_resources')
+    if not isinstance(resources, dict):
+        resources = {}
     mandated = [
         func for func in (resources.get('functions') or [])
         if isinstance(func, dict) and func.get('required_for_evaluation')
     ]
     return {
-        'evaluation': idea_spec.get('evaluation') or {},
+        'evaluation': evaluation,
         'mandated_functions': mandated,
     }
 
@@ -179,9 +171,8 @@ def run_eval_verifier(
     # Per-attempt artifact names: the orchestrator re-runs the verifier once
     # after a rule-maker retry, and fixed names would overwrite the first
     # attempt's audit trail (log, transcript, prompt, and failed verdict).
-    attempt = 1
-    while (logs_dir / f"eval_verifier_{provider}_attempt{attempt}.log").exists():
-        attempt += 1
+    attempt = next_attempt_number(
+        logs_dir, lambda n: f"eval_verifier_{provider}_attempt{n}.log")
     log_file = logs_dir / f"eval_verifier_{provider}_attempt{attempt}.log"
     transcript_file = logs_dir / f"eval_verifier_{provider}_attempt{attempt}_transcript.jsonl"
 
@@ -209,19 +200,7 @@ def run_eval_verifier(
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
 
-    # Build CLI command
-    cmd = CLI_COMMANDS[provider]
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
-
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
 
     print(f"▶️  Launching {provider} CLI agent...")
     print(f"   Command: {cmd}")
@@ -231,10 +210,7 @@ def run_eval_verifier(
     print("EVAL VERIFIER OUTPUT (streaming)")
     print("=" * 80)
 
-    env = os.environ.copy()
-    env['PYTHONUNBUFFERED'] = '1'
-    if provider == "gemini":
-        env['GEMINI_CLI_IDE_DISABLE'] = '1'
+    env = build_agent_environment(provider)
 
     # The verifier's mandate is to REPORT on the scoring contract, not to
     # edit it — but the agent process necessarily has filesystem access to
@@ -249,73 +225,23 @@ def run_eval_verifier(
 
     start_time = time.time()
 
-    try:
-        with open(log_file, 'w', encoding='utf-8') as log_f, \
-                open(transcript_file, 'w', encoding='utf-8') as transcript_f:
-            process = subprocess.Popen(
-                shlex.split(cmd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                text=True,
-                encoding='utf-8',
-                bufsize=1,
-                cwd=str(work_dir),
-            )
-            process.stdin.write(prompt)
-            process.stdin.close()
+    # The shared deadline-aware runner streams sanitized output to console,
+    # log, and transcript, and enforces the timeout on wall clock (a stuck
+    # verifier keeping stdout open cannot hang the pipeline).
+    launch = run_prebuilt_cli_agent(
+        command_argv=shlex.split(cmd),
+        prompt=prompt,
+        work_dir=work_dir,
+        log_file=log_file,
+        transcript_file=transcript_file,
+        env=env,
+        timeout=timeout,
+    )
 
-            # Drain stdout on a helper thread so the timeout below is
-            # enforced on wall clock. Reading to EOF inline would block for
-            # as long as the agent keeps stdout open, so wait(timeout=...)
-            # would never be reached and a stuck verifier would hang the
-            # pipeline indefinitely.
-            def _drain():
-                try:
-                    for line in iter(process.stdout.readline, ''):
-                        if line:
-                            sanitized = sanitize_text(line)
-                            print(sanitized, end='')
-                            log_f.write(sanitized)
-                            transcript_f.write(sanitized)
-                except ValueError:
-                    # Log files closed after a timeout kill while an
-                    # orphaned child still held the pipe open — drop the
-                    # remaining output rather than crash the thread.
-                    pass
-
-            reader = threading.Thread(target=_drain, daemon=True)
-            reader.start()
-            try:
-                return_code = process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                # Kill inside the with-block so the reader hits EOF and
-                # finishes before the log files close.
-                process.kill()
-                process.wait()
-                reader.join(timeout=10)
-                raise
-            reader.join(timeout=10)
-
-        print()
-        print("=" * 80)
-        elapsed = time.time() - start_time
-        print(
-            f"⏱️  Eval verifier completed in {elapsed:.1f}s "
-            f"({elapsed / 60:.1f} minutes)"
-        )
-
-        if return_code == 0:
-            print("✅ Agent process exited cleanly.")
-        else:
-            print(f"⚠️  Agent exited with return code: {return_code}")
-
-    except subprocess.TimeoutExpired:
+    if launch["timed_out"]:
         # Fail closed: a verdict the agent managed to write before the kill
         # must not be trusted — the review never finished.
         print(f"\n⏱️  Eval verifier timed out after {timeout} seconds")
-        process.kill()
         verdict_path.unlink(missing_ok=True)
         return {
             'success': False,
@@ -330,9 +256,19 @@ def run_eval_verifier(
             'elapsed_time': time.time() - start_time,
         }
 
-    except Exception as e:
-        print(f"\n❌ Error during eval_verifier execution: {e}")
-        raise
+    print()
+    print("=" * 80)
+    elapsed = time.time() - start_time
+    print(
+        f"⏱️  Eval verifier completed in {elapsed:.1f}s "
+        f"({elapsed / 60:.1f} minutes)"
+    )
+
+    return_code = launch["return_code"]
+    if return_code == 0:
+        print("✅ Agent process exited cleanly.")
+    else:
+        print(f"⚠️  Agent exited with return code: {return_code}")
 
     # Enforce read-only review: restore any reviewed file the agent touched
     # and fail the verification outright — a verifier that edits the
@@ -378,7 +314,7 @@ def run_eval_verifier(
             'elapsed_time': time.time() - start_time,
         }
 
-    passed, verdict_violations = interpret_verdict(verdict)
+    passed, verdict_violations = interpret_verdict(verdict, extract_eval_contract(idea))
     violations = verdict_violations
     if passed:
         print("✅ Scoring contract verified against user declarations.")
@@ -398,42 +334,57 @@ def run_eval_verifier(
     }
 
 
-# Verdict structure mandated by templates/agents/eval_verifier.txt: every
-# applicable check reports one of these values, and `pass` is true only when no
-# applicable check failed. Keep these in sync with that template.
-VERDICT_CHECK_NAMES = ('routing', 'transcription', 'format')
-VERDICT_CHECK_VALUES = ('pass', 'fail', 'not_applicable')
-
-
-def interpret_verdict(verdict: Dict[str, Any]) -> Tuple[bool, List[Dict[str, Any]]]:
+def interpret_verdict(
+    verdict: Dict[str, Any],
+    contract: Dict[str, Any],
+) -> Tuple[bool, List[Dict[str, Any]]]:
     """
     Strictly interpret a verification.json verdict against the structure the
-    eval_verifier template mandates. Every check below fails closed and is
-    surfaced as its own violation:
+    eval_verifier template mandates and against the user's declared contract
+    (the output of extract_eval_contract for the submitted idea). Every check
+    below fails closed and is surfaced as its own violation:
 
     - `pass` must be a JSON boolean; bool() coercion would accept any non-empty
       string — including "false" — as passing.
+    - `violations` must be an array of mappings each carrying a concrete
+      detail; any other shape is a failed verdict, never an exception, so a
+      malformed verifier response still reaches the normal retry path.
     - `checks` must report every mandated check (routing, transcription,
       format) with pass/fail/not_applicable; a check that does not apply must
       say `not_applicable` explicitly rather than be omitted, so a verifier
       cannot silently skip part of the contract.
+    - A check the contract makes applicable (per VERDICT_CHECKS) must not be
+      reported `not_applicable`: the verifier only runs because the contract
+      declares that component, so waving it off is a silent skip.
     - `pass` must be consistent with the checks: true only when no applicable
       check failed; a check reporting "fail" under pass=true is a contradiction.
     - A failing verdict must justify itself — pass=false with an empty
-      violations list is invalid — and each declared violation must be a mapping
-      carrying a detail.
+      violations list is invalid.
 
     Returns:
         (passed, violations)
     """
     raw_pass = verdict.get('pass')
     passed = raw_pass is True
-    violations = list(verdict.get('violations') or [])
+
+    # Validate the violations container once; everything below reads only the
+    # validated list.
+    declared_violations = verdict.get('violations')
+    if declared_violations is None:
+        declared_violations = []
+    bad_container = None if isinstance(declared_violations, list) else declared_violations
+    if bad_container is not None:
+        declared_violations = []
+
+    violations = list(declared_violations)
 
     def reject(detail: str) -> None:
         nonlocal passed
         passed = False
         violations.append({'check': 'verdict', 'detail': detail})
+
+    if bad_container is not None:
+        reject(f"verification.json 'violations' must be an array, got {bad_container!r}")
 
     if not isinstance(raw_pass, bool):
         reject(f"verification.json 'pass' must be a JSON boolean, got {raw_pass!r}")
@@ -444,27 +395,37 @@ def interpret_verdict(verdict: Dict[str, Any]) -> Tuple[bool, List[Dict[str, Any
     else:
         failed = []
         for name, value in checks.items():
-            if name not in VERDICT_CHECK_NAMES:
-                reject(f"unknown check {name!r}; expected one of {list(VERDICT_CHECK_NAMES)}")
+            if name not in VERDICT_CHECKS:
+                reject(f"unknown check {name!r}; expected one of {list(VERDICT_CHECKS)}")
             if value not in VERDICT_CHECK_VALUES:
                 reject(f"check {name!r} has invalid value {value!r}; "
                        f"expected one of {list(VERDICT_CHECK_VALUES)}")
             elif value == 'fail':
                 failed.append(name)
-        missing = [name for name in VERDICT_CHECK_NAMES if name not in checks]
+        missing = [name for name in VERDICT_CHECKS if name not in checks]
         if missing:
             reject(f"verification.json 'checks' must report every mandated check "
                    f"(use 'not_applicable' when a check does not apply); missing: {missing}")
+        # A check the submitted contract makes applicable cannot be waved off:
+        # the verifier only ran because at least one of these components was
+        # declared, so an all-not_applicable verdict would verify nothing.
+        waved_off = [
+            name for name, applicable in VERDICT_CHECKS.items()
+            if applicable(contract) and checks.get(name) == 'not_applicable'
+        ]
+        if waved_off:
+            reject(f"checks {waved_off} are applicable under the submitted "
+                   f"contract but were reported 'not_applicable'")
         # `pass` is true only when every applicable check passes.
         if raw_pass is True and failed:
             reject(f"'pass' is true but these checks failed: {failed}")
 
     # An empty violations list with pass=false is invalid per the template.
-    if raw_pass is False and not (verdict.get('violations') or []):
+    if raw_pass is False and not declared_violations:
         reject("verification.json reports pass=false with no violations listed")
 
     # Each declared violation must be a mapping carrying a concrete detail.
-    for entry in verdict.get('violations') or []:
+    for entry in declared_violations:
         if not isinstance(entry, dict) or not str(entry.get('detail', '')).strip():
             reject(f"malformed violation entry: {entry!r}")
 

@@ -277,11 +277,12 @@ def test_stage_contains_traversal_names(tmp_path):
 
 def test_stage_rejects_absolute_names_outside_staging(tmp_path):
     work_dir, idea_spec, _data, _fn = _staged_fixture(tmp_path)
-    idea_spec['idea']['local_resources']['datasets'][0]['name'] = "/tmp/leak"
+    outside = tmp_path / "leak"
+    idea_spec['idea']['local_resources']['datasets'][0]['name'] = str(outside)
     stage_local_resources(work_dir, idea_spec)
-    # Reduced to basename: stays inside the staging dir
+    # Reduced to basename: stays inside the staging dir, never written outside
     assert (work_dir / "datasets/local/leak").exists()
-    assert not Path("/tmp/leak").exists() or True  # never written outside
+    assert not outside.exists()
 
 
 def test_stage_deduplicates_same_basename(tmp_path):
@@ -429,11 +430,11 @@ def test_session_instructions_render_binding_contract():
     assert "BINDING LOCAL RESOURCES" in instructions
     assert "evaluate_protocol() in code/local/protocol_eval.py" in instructions
     # Scoring-only obligation stays out of unscored session instructions...
-    assert "MANDATORY: all evaluation must call this function" not in instructions
+    assert "MANDATORY FOR EVALUATION" not in instructions
     # ...and appears when scoring is enabled
     scored = generator.generate_session_instructions(
         prompt, "/tmp/work", idea_spec=idea_spec['idea'], scoring_enabled=True)
-    assert "MANDATORY: all evaluation must call this function" in scored
+    assert "MANDATORY FOR EVALUATION: all evaluation MUST call this function" in scored
 
 
 def test_resource_finder_prompt_marks_staged_resources():
@@ -443,7 +444,7 @@ def test_resource_finder_prompt_marks_staged_resources():
     assert "datasets/local/toy_dataset" in prompt
     # required_for_evaluation is a scoring-pipeline obligation; resource finding
     # runs unscored, so the mandate stays out of the default prompt...
-    assert "MANDATORY: all evaluation must run through this function" not in prompt
+    assert "MANDATORY FOR EVALUATION" not in prompt
 
 
 def test_resource_finder_prompt_marks_evaluation_mandate_when_scored():
@@ -451,7 +452,7 @@ def test_resource_finder_prompt_marks_evaluation_mandate_when_scored():
     prompt = PromptGenerator().generate_resource_finder_prompt(
         _rich_idea_spec(), scoring_enabled=True)
     # ...and appears only when scoring is enabled
-    assert "MANDATORY: all evaluation must run through this function" in prompt
+    assert "MANDATORY FOR EVALUATION: all evaluation MUST call this function" in prompt
 
 
 def test_prompts_unchanged_without_local_resources():

@@ -21,6 +21,7 @@ from agents.eval_verifier import (  # noqa: E402
     format_violations_for_retry,
     generate_eval_verifier_prompt,
     has_user_eval_contract,
+    interpret_verdict,
     read_verdict,
 )
 from core.local_resources import (  # noqa: E402
@@ -146,36 +147,39 @@ def _staged_workspace_full(tmp_path):
     return work_dir, trusted, fn
 
 
-def _staged_workspace(tmp_path):
-    work_dir, _trusted, _fn = _staged_workspace_full(tmp_path)
-    return work_dir
-
-
 def test_intact_staged_function_passes(tmp_path):
-    work_dir = _staged_workspace(tmp_path)
-    assert staged_function_mismatches(work_dir) == []
+    work_dir, trusted, _fn = _staged_workspace_full(tmp_path)
+    assert staged_function_mismatches(work_dir, idea=trusted) == []
 
 
 def test_modified_staged_function_is_detected(tmp_path):
-    work_dir = _staged_workspace(tmp_path)
+    work_dir, trusted, fn = _staged_workspace_full(tmp_path)
+    fn.unlink()  # source unreachable -> falls back to recorded fingerprint
     (work_dir / "code/local/protocol_eval.py").write_text(
         "def evaluate_protocol(p, l):\n    return 1.0\n")
-    mismatches = staged_function_mismatches(work_dir)
+    mismatches = staged_function_mismatches(work_dir, idea=trusted)
     assert len(mismatches) == 1
     assert "modified after staging" in mismatches[0]
 
 
 def test_workspace_without_resources_passes(tmp_path):
-    assert staged_function_mismatches(tmp_path) == []
+    assert staged_function_mismatches(tmp_path, idea=_idea()) == []
+
+
+def test_missing_trusted_idea_is_refused(tmp_path):
+    # The trusted contract is not optional: verifying against the
+    # worker-writable workspace record alone would fail open
+    with pytest.raises(ValueError, match="trusted"):
+        staged_function_mismatches(tmp_path, idea=None)
 
 
 def test_scorer_refuses_tampered_function(tmp_path):
     from core.scorer import run_scorer
-    work_dir = _staged_workspace(tmp_path)
+    work_dir, trusted, _fn = _staged_workspace_full(tmp_path)
     (work_dir / "scoring").mkdir()
     (work_dir / "scoring" / "eval.py").write_text("print('never runs')\n")
     (work_dir / "code/local/protocol_eval.py").write_text("def evaluate_protocol(p, l):\n    return 1.0\n")
-    result = run_scorer(work_dir, timeout=10)
+    result = run_scorer(work_dir, timeout=10, idea=trusted)
     assert not result['success']
     assert "integrity" in result['error']
 
@@ -197,9 +201,6 @@ def test_trusted_deleted_metadata_does_not_silence_guard(tmp_path):
     mismatches = staged_function_mismatches(work_dir, idea=trusted)
     assert mismatches
     assert "differs from its source" in mismatches[0]
-    # Legacy mode (no trusted contract) stays permissive for workspaces
-    # that legitimately have no metadata
-    assert staged_function_mismatches(work_dir) == []
 
 
 def test_trusted_blanked_resources_does_not_silence_guard(tmp_path):
@@ -266,18 +267,6 @@ def test_trusted_missing_entry_sha_fails_closed(tmp_path):
     assert "cannot be verified" in mismatches[0]
 
 
-def test_legacy_required_function_without_sha_is_reported(tmp_path):
-    import yaml
-    work_dir, _trusted, _fn = _staged_workspace_full(tmp_path)
-    contract_path = work_dir / ".neurico" / "idea.yaml"
-    spec = yaml.safe_load(contract_path.read_text())
-    spec['idea']['local_resources']['functions'][0].pop('sha256')
-    contract_path.write_text(yaml.dump(spec))
-    mismatches = staged_function_mismatches(work_dir)
-    assert mismatches
-    assert "no verifiable fingerprint" in mismatches[0]
-
-
 # ---------------------------------------------------------------- verdict strictness
 
 def _valid_verdict(**overrides):
@@ -290,58 +279,95 @@ def _valid_verdict(**overrides):
     return verdict
 
 
-def test_interpret_verdict_strict_boolean():
-    from agents.eval_verifier import interpret_verdict
-    passed, violations = interpret_verdict(_valid_verdict())
-    assert passed is True and violations == []
-    # A string — even "false" — must never count as a pass
-    passed, violations = interpret_verdict(_valid_verdict(**{'pass': 'false'}))
-    assert passed is False
-    assert any('JSON boolean' in str(v) for v in violations)
-    passed, _ = interpret_verdict(_valid_verdict(**{'pass': 'true'}))
-    assert passed is False
-    passed, _ = interpret_verdict(_valid_verdict(**{'pass': 1}))
-    assert passed is False
+def _contract():
+    """Contract matching _valid_verdict's applicability: the mandated function
+    and declared metrics make routing/transcription applicable; there is no
+    results_format, so format may be not_applicable."""
+    return extract_eval_contract(_contract_idea())
 
 
-def test_interpret_verdict_requires_consistent_structure():
-    from agents.eval_verifier import interpret_verdict
-    # A bare pass=true with no checks is incomplete and must not pass
-    passed, violations = interpret_verdict({'pass': True})
+@pytest.mark.parametrize("mutation, expected_fragment", [
+    # `pass` must be a JSON boolean; a string — even "false" — or an int
+    # must never count as a pass
+    ({'pass': 'false'}, 'JSON boolean'),
+    ({'pass': 'true'}, 'JSON boolean'),
+    ({'pass': 1}, 'JSON boolean'),
+    # checks must be a non-empty mapping of known names to known values
+    ({'checks': None}, "'checks' mapping"),
+    ({'checks': {'routing': 'maybe'}}, 'invalid value'),
+    ({'checks': {'mystery': 'pass'}}, 'unknown check'),
+    # every mandated check must be reported explicitly; omission is a
+    # silent skip, not a pass
+    ({'checks': {'routing': 'pass'}}, 'missing'),
+    ({'checks': {'routing': 'pass', 'transcription': 'pass'}}, 'missing'),
+    # pass=true contradicts a failing check
+    ({'checks': {'routing': 'fail', 'transcription': 'pass',
+                 'format': 'not_applicable'}}, 'checks failed'),
+    # a failing verdict must justify itself with well-formed violations
+    ({'pass': False}, 'no violations'),
+    ({'pass': False, 'violations': [{'check': 'routing'}]}, 'malformed violation'),
+    # the violations container must be an array, not a scalar or mapping
+    ({'violations': 1}, 'must be an array'),
+    ({'violations': 'nothing to report'}, 'must be an array'),
+    # a check the contract makes applicable cannot be waved off — an
+    # all-not_applicable verdict verifies nothing
+    ({'checks': {'routing': 'not_applicable', 'transcription': 'not_applicable',
+                 'format': 'not_applicable'}}, "reported 'not_applicable'"),
+    ({'checks': {'routing': 'pass', 'transcription': 'not_applicable',
+                 'format': 'not_applicable'}}, "reported 'not_applicable'"),
+])
+def test_interpret_verdict_rejects(mutation, expected_fragment):
+    passed, violations = interpret_verdict(_valid_verdict(**mutation), _contract())
+    assert passed is False
+    assert any(expected_fragment in str(v) for v in violations)
+
+
+def test_interpret_verdict_never_raises_on_malformed_container():
+    # A non-array violations container must degrade to a failed verdict (the
+    # retry path), never escape as a TypeError
+    for bad in (1, 'oops', {'detail': 'x'}, True):
+        passed, violations = interpret_verdict(
+            _valid_verdict(violations=bad), _contract())
+        assert passed is False
+        assert any('must be an array' in str(v) for v in violations)
+
+
+def test_interpret_verdict_rejects_bare_pass():
+    # A bare pass=true with no checks at all is incomplete and must not pass
+    passed, violations = interpret_verdict({'pass': True}, _contract())
     assert passed is False
     assert any('checks' in str(v) for v in violations)
-    # pass=true is inconsistent with a failing check
-    passed, _ = interpret_verdict(_valid_verdict(
-        checks={'routing': 'fail', 'transcription': 'pass', 'format': 'not_applicable'}))
-    assert passed is False
-    # A failing verdict must list at least one violation
-    passed, violations = interpret_verdict(_valid_verdict(**{
-        'pass': False,
-        'checks': {'routing': 'pass', 'transcription': 'pass', 'format': 'pass'},
-        'violations': [],
-    }))
-    assert passed is False
-    assert any('no violations' in str(v) for v in violations)
-    # Invalid check value and unknown check name both fail
-    passed, _ = interpret_verdict(_valid_verdict(checks={'routing': 'maybe'}))
-    assert passed is False
-    passed, _ = interpret_verdict(_valid_verdict(checks={'mystery': 'pass'}))
-    assert passed is False
-    # Every mandated check must be reported explicitly; a passing verdict that
-    # omits transcription/format is a silent skip, not a pass
-    passed, violations = interpret_verdict(_valid_verdict(checks={'routing': 'pass'}))
-    assert passed is False
-    assert any('missing' in str(v) for v in violations)
-    passed, _ = interpret_verdict(_valid_verdict(
-        checks={'routing': 'pass', 'transcription': 'pass'}))
-    assert passed is False
-    # Explicit not_applicable for a non-applicable check is still a valid pass
-    passed, violations = interpret_verdict(_valid_verdict(
-        checks={'routing': 'pass', 'transcription': 'not_applicable', 'format': 'not_applicable'}))
+
+
+def test_interpret_verdict_accepts_valid_verdicts():
+    # The canonical verdict for the default contract passes untouched
+    passed, violations = interpret_verdict(_valid_verdict(), _contract())
     assert passed is True and violations == []
-    # A malformed violation entry (no detail) fails
-    passed, _ = interpret_verdict(_valid_verdict(**{'pass': False, 'violations': [{'check': 'routing'}]}))
+    # not_applicable is fine for a check the contract does not make applicable
+    metrics_only = extract_eval_contract(_idea(
+        evaluation={'metrics': [{'name': 'acc', 'target': '>= 0.9'}]}))
+    passed, violations = interpret_verdict(_valid_verdict(
+        checks={'routing': 'not_applicable', 'transcription': 'pass',
+                'format': 'not_applicable'}), metrics_only)
+    assert passed is True and violations == []
+
+
+def test_interpret_verdict_applicability_tracks_results_format():
+    # Once the contract declares results_format, a verdict may no longer wave
+    # the format check off
+    full = extract_eval_contract(_idea(
+        local_resources={'functions': [
+            {'path': 'code/local/e.py', 'entrypoint': 'e', 'usage': 'eval',
+             'required_for_evaluation': True}]},
+        evaluation={'metrics': [{'name': 'acc', 'target': '>= 0.9'}],
+                    'results_format': 'markdown table'},
+    ))
+    passed, violations = interpret_verdict(_valid_verdict(), full)
     assert passed is False
+    assert any("reported 'not_applicable'" in str(v) for v in violations)
+    passed, violations = interpret_verdict(_valid_verdict(
+        checks={'routing': 'pass', 'transcription': 'pass', 'format': 'pass'}), full)
+    assert passed is True and violations == []
 
 
 # ---------------------------------------------------------------- sealing

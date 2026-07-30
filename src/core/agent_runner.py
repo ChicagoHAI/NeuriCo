@@ -190,6 +190,23 @@ def _run_cli_agent(
     }
 
 
+def next_attempt_number(logs_dir: Path, name_for_attempt) -> int:
+    """
+    First attempt number whose log artifact does not yet exist in logs_dir.
+
+    Retry-capable agent launchers name per-attempt artifacts (log, transcript,
+    prompt) so a re-run appends to the audit trail instead of overwriting the
+    first attempt. Probing the log directory keeps that append-only without
+    requiring every caller to thread an attempt counter.
+
+    name_for_attempt: callable mapping an attempt number to the log filename.
+    """
+    attempt = 1
+    while (logs_dir / name_for_attempt(attempt)).exists():
+        attempt += 1
+    return attempt
+
+
 def run_prebuilt_cli_agent(
     *,
     command_argv: list[str],
