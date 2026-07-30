@@ -249,6 +249,8 @@ class HitlManagerToolExecutor:
 class HitlManager:
     """One long-running, queued ReAct manager for an HITL workspace."""
 
+    _CLI_MCP_SERVER_NAME = "neurico_hitl_manager"
+
     def __init__(
         self,
         config: Dict[str, Any],
@@ -496,10 +498,10 @@ class HitlManager:
             if path.startswith("scoring/") and path in declared
         }
 
-    @staticmethod
-    def _mcp_allowed_tool_name(tool_name: str) -> str:
+    @classmethod
+    def _mcp_allowed_tool_name(cls, tool_name: str) -> str:
         """Return Claude Code's global name for one server-local MCP tool."""
-        return f"mcp__neurico_hitl_manager__{tool_name}"
+        return f"mcp__{cls._CLI_MCP_SERVER_NAME}__{tool_name}"
 
     def _uses_cli_mcp_bridge(self) -> bool:
         return getattr(self.backend, "backend", None) in {"cli", "codex_cli", "codex"}
@@ -560,7 +562,7 @@ class HitlManager:
         adapter = Path(__file__).with_name("hitl_manager_mcp.py")
         config = {
             "mcpServers": {
-                "neurico_hitl_manager": {
+                self._CLI_MCP_SERVER_NAME: {
                     "command": sys.executable,
                     "args": [str(adapter)],
                     "env": {
