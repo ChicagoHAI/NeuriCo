@@ -37,6 +37,7 @@ from agents.eval_verifier import (
 from agents.rule_maker import (
     generate_rule_maker_prompt,
     run_rule_maker,
+    validate_hitl_rule_maker_outputs,
     validate_rule_maker_outputs,
 )
 from agents.rule_maker_bootstrap import run_bootstrap_rule_maker
@@ -1647,7 +1648,7 @@ class ResearchPipelineOrchestrator:
         )
 
         def rule_maker_artifact_validator() -> Dict[str, Any]:
-            validation = validate_rule_maker_outputs(self.work_dir)
+            validation = validate_hitl_rule_maker_outputs(self.work_dir)
             if not validation.get("valid"):
                 return validation
             try:

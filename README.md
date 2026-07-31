@@ -272,7 +272,6 @@ After submitting an idea, choose the workflow that matches the research task:
 
 See [HITL AutoResearch Design and Workflow](docs/HITL_AUTORESEARCH.md) for the
 manager, human, worker, runtime, scoring, frontier, and recovery model.
-
 ### Run Options
 
 | Option | Description |

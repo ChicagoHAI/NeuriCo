@@ -249,6 +249,8 @@ class HitlManagerToolExecutor:
 class HitlManager:
     """One long-running, queued ReAct manager for an HITL workspace."""
 
+    _CLI_MCP_SERVER_NAME = "neurico_hitl_manager"
+
     def __init__(
         self,
         config: Dict[str, Any],
@@ -284,14 +286,6 @@ class HitlManager:
         self.max_react_turns = int(config.get("manager", {}).get("hitl_manager_max_turns", 12))
         self.max_backend_retries = max(
             1, int(config.get("manager", {}).get("hitl_manager_backend_retries", 3))
-        )
-        self.backend_timeout_seconds = max(
-            0.01,
-            float(
-                config.get("manager", {}).get(
-                    "hitl_manager_backend_timeout_seconds", 120.0
-                )
-            ),
         )
         self.backend_retry_delay_seconds = max(
             0.1,
@@ -424,6 +418,80 @@ class HitlManager:
         allowed = self._available_tool_names()
         return [tool for tool in self.tool_definitions if tool["name"] in allowed]
 
+    @classmethod
+    def _runtime_completion_tool_name(cls, tools: List[Dict[str, Any]]) -> str:
+        for tool in tools:
+            name = str(tool.get("name", "")).strip()
+            if name in cls._REQUEST_FINALIZER_TOOL_NAMES or name in {
+                "prune_frontier",
+                "select_frontier",
+            }:
+                return name
+        return ""
+
+    @staticmethod
+    def _scoring_handoff_instruction(tools: List[Dict[str, Any]]) -> str:
+        names = {str(tool.get("name", "")).strip() for tool in tools}
+        if {"approve_for_scoring", "finalize_worker_request"} <= names:
+            return (
+                "If the completed work is acceptable, call `approve_for_scoring`; "
+                "if revision is required, call `finalize_worker_request` with a "
+                "`feedback` result."
+            )
+        return ""
+
+    @classmethod
+    def _runtime_tool_boundary_instruction(cls, tools: List[Dict[str, Any]]) -> str:
+        """Describe the exact runtime-authorized MCP surface for one turn."""
+        names = [str(tool.get("name", "")).strip() for tool in tools]
+        names = [name for name in names if name]
+        rendered = ", ".join(f"`{name}`" for name in names) or "(none)"
+        lines = [
+            "Runtime-authorized MCP tool surface for this turn:",
+            rendered,
+            "This list is authoritative and these tools are supplied through MCP. "
+            "Do not claim that a listed tool is unavailable, and do not call tools "
+            "outside this list.",
+        ]
+        scoring_handoff = cls._scoring_handoff_instruction(tools)
+        if scoring_handoff:
+            lines.append(
+                "The current runtime-held action remains unresolved. "
+                f"{scoring_handoff} Direct assistant text does not advance the action."
+            )
+        else:
+            completion_name = cls._runtime_completion_tool_name(tools)
+            if not completion_name:
+                return "\n".join(lines)
+            lines.append(
+                "The current runtime-held action remains unresolved until "
+                f"`{completion_name}` succeeds. Direct assistant text does not "
+                "complete the action."
+            )
+        return "\n".join(lines)
+
+    def _unresolved_request_reminder(self) -> str:
+        """Return a boundary-specific reminder for a text-only manager turn."""
+        tools = self._tools_for_current_runtime_boundary()
+        scoring_handoff = self._scoring_handoff_instruction(tools)
+        if scoring_handoff:
+            return (
+                "The worker request remains unresolved. "
+                f"{scoring_handoff} Direct assistant text cannot advance it."
+            )
+        completion_name = self._runtime_completion_tool_name(tools)
+        if completion_name:
+            return (
+                "The worker request remains unresolved. Continue reviewing or consult "
+                "the human as permitted, then call "
+                f"`{completion_name}`. Direct assistant text cannot complete it."
+            )
+        return (
+            "The worker request remains unresolved. Follow the exact "
+            "runtime-authorized MCP tool surface in the system instruction; direct "
+            "assistant text cannot complete it."
+        )
+
     def listed_workspace_artifacts(self) -> set[str]:
         """Return declared sealed evaluator files visible as metadata for review."""
         from core.scoring_seal import SEALED_PATHS
@@ -447,10 +515,10 @@ class HitlManager:
             if path.startswith("scoring/") and path in declared
         }
 
-    @staticmethod
-    def _mcp_allowed_tool_name(tool_name: str) -> str:
+    @classmethod
+    def _mcp_allowed_tool_name(cls, tool_name: str) -> str:
         """Return Claude Code's global name for one server-local MCP tool."""
-        return f"mcp__neurico_hitl_manager__{tool_name}"
+        return f"mcp__{cls._CLI_MCP_SERVER_NAME}__{tool_name}"
 
     def _uses_cli_mcp_bridge(self) -> bool:
         return getattr(self.backend, "backend", None) in {"cli", "codex_cli", "codex"}
@@ -511,7 +579,7 @@ class HitlManager:
         adapter = Path(__file__).with_name("hitl_manager_mcp.py")
         config = {
             "mcpServers": {
-                "neurico_hitl_manager": {
+                self._CLI_MCP_SERVER_NAME: {
                     "command": sys.executable,
                     "args": [str(adapter)],
                     "env": {
@@ -595,6 +663,14 @@ class HitlManager:
                     f"Error: {tool_name} is unavailable for the current worker request. "
                     f"Use {expected}."
                 )
+            scoring_handoff = self._scoring_handoff_instruction(
+                self._tools_for_current_runtime_boundary()
+            )
+            if scoring_handoff:
+                return (
+                    f"Error: {tool_name} is unavailable for the current worker request. "
+                    f"{scoring_handoff}"
+                )
             return (
                 f"Error: {tool_name} is unavailable for the current worker request. "
                 "Use finalize_worker_request, or ask_human if human intent is required."
@@ -646,6 +722,9 @@ class HitlManager:
     def stop(self) -> None:
         self._stop.set()
         self._turns.put(_Turn("runtime", ""))
+        cancel_active = getattr(self.backend, "cancel_active", None)
+        if callable(cancel_active):
+            cancel_active()
         if self._thread is not None:
             self._thread.join(timeout=1)
         self._stop_cli_mcp_bridge()
@@ -1218,6 +1297,12 @@ class HitlManager:
         request_key = str(pending.get("request_key", "")).strip()
         if not request_key:
             raise HitlRuntimeStateError("Pending worker command is missing request_key.")
+        if pending.get("status") == "cancelled":
+            reason = str(pending.get("cancellation_reason", "")).strip()
+            raise HitlRuntimeStateError(
+                "Runtime cancelled the held worker command while rolling back its failed attempt."
+                + (f" {reason}" if reason else "")
+            )
         manager_finalizer = str(manager_finalizer).strip()
         if manager_finalizer not in self._REQUEST_FINALIZER_TOOL_NAMES:
             raise HitlRuntimeStateError(
@@ -1733,7 +1818,7 @@ class HitlManager:
                     # abandoning the request after a text-only response.
                     reminder = _Turn(
                         "runtime",
-                        "The worker request remains unresolved. Use the available tools to inspect it, ask the human if needed, or finalize it with a valid runtime result.",
+                        self._unresolved_request_reminder(),
                         requires_worker_resolution=True,
                         generation=turn.generation,
                         request_key=turn.request_key,
@@ -1832,10 +1917,10 @@ class HitlManager:
                 if not self._generation_is_current(generation):
                     return ""
                 try:
-                    messages = self._messages(generation)
+                    tools = self._tools_for_current_runtime_boundary()
+                    messages = self._messages(generation, tools)
                 except _StaleManagerTurn:
                     return ""
-            tools = self._tools_for_current_runtime_boundary()
             response = self._send(messages, tools)
             with self._turn_lock:
                 if not self._generation_is_current(generation):
@@ -1868,7 +1953,11 @@ class HitlManager:
                         return ""
         return ""
 
-    def _messages(self, generation: int) -> List[Dict[str, Any]]:
+    def _messages(
+        self,
+        generation: int,
+        tools: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         from core.hitl import _load_hitl_template
 
         self.world_model.reconcile(self.research)
@@ -1881,6 +1970,10 @@ class HitlManager:
             {
                 "role": "system",
                 "content": _load_hitl_template("interactive_manager_system.txt"),
+            },
+            {
+                "role": "system",
+                "content": self._runtime_tool_boundary_instruction(tools),
             },
             {
                 "role": "user",
@@ -1933,18 +2026,17 @@ class HitlManager:
                 return self._send_once(messages, tools, backend=backend)
             except Exception as exc:
                 last = exc
+                if self._stop.is_set():
+                    raise RuntimeError("HITL manager stopped during its provider turn.") from exc
                 if attempt + 1 < self.max_backend_retries:
-                    threading.Event().wait(self.backend_retry_delay_seconds)
+                    if self._stop.wait(self.backend_retry_delay_seconds):
+                        raise RuntimeError(
+                            "HITL manager stopped during its provider turn."
+                        ) from exc
         raise RuntimeError("Manager backend was unavailable") from last
 
     def _send_once(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None) -> Any:
-        """Run one bounded manager provider turn.
-
-        ``LLMBackend`` receives the deadline directly and cancels its own CLI
-        process group or HTTP request. The short daemon wrapper remains only
-        for injected third-party/test backends that do not implement this
-        adapter contract.
-        """
+        """Run one manager provider turn without a wall-clock deadline."""
         result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
 
         parameters: Dict[str, inspect.Parameter] = {}
@@ -1974,7 +2066,7 @@ class HitlManager:
             try:
                 if supports_adapter_contract:
                     kwargs: Dict[str, Any] = {
-                        "timeout_seconds": self.backend_timeout_seconds,
+                        "timeout_seconds": None,
                         "disable_native_tools": True,
                     }
                     if (
@@ -2001,13 +2093,7 @@ class HitlManager:
 
         thread = threading.Thread(target=call_backend, daemon=True)
         thread.start()
-        try:
-            succeeded, value = result.get(timeout=self.backend_timeout_seconds)
-        except queue.Empty as exc:
-            raise TimeoutError(
-                "HITL manager backend call timed out after "
-                f"{self.backend_timeout_seconds:g} seconds"
-            ) from exc
+        succeeded, value = result.get()
         if not succeeded:
             raise value
         return value

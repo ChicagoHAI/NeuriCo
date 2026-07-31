@@ -1345,6 +1345,63 @@ class HitlRuntime:
         response = pending.get("response")
         return dict(response) if isinstance(response, dict) else None
 
+    def _pending_worker_request_replacement(
+        self,
+        *,
+        phase: str,
+        worker_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Reconnect a replacement worker to one durable held command."""
+        from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
+
+        state = HitlRuntimeState(self.work_dir)
+        pending = state.pending_worker_command()
+        continuation = state.worker_continuation()
+        if not worker_command_requires_resume(pending) or not isinstance(continuation, dict):
+            return None
+        if not str(continuation.get("prompt_block", "")).strip():
+            return None
+
+        prompt_block = _load_hitl_template("worker_resume_pending_request.txt")
+        self._update_worker_continuation(
+            prompt_block=prompt_block,
+            hitl_stage=str(continuation.get("hitl_stage", "")).strip() or None,
+            status="replacement_pending",
+        )
+        state.mark_worker_replacement()
+        self._enable_worker_command("hitl-resume-worker-request")
+        return {
+            "status": "replacement",
+            "approved": False,
+            "replacement": True,
+            "prompt_block": prompt_block,
+            "phase": phase,
+            "worker_exit_warning": (
+                f"{worker_name} exited while a runtime-held request still required replay. "
+                "Runtime terminated its remaining processes and will reconnect a "
+                "replacement worker to the preserved request."
+            ),
+        }
+
+    def _join_live_worker_request_handler(self, *, expected_kind: str) -> bool:
+        """Wait for the in-process owner of a durable worker request."""
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        pending = HitlRuntimeState(self.work_dir).pending_worker_command()
+        if (
+            not isinstance(pending, dict)
+            or str(pending.get("kind", "")).strip() != expected_kind
+            or not self._worker_request_lock.locked()
+        ):
+            return False
+
+        # The HTTP handler owns this lock across manager/human review and all
+        # runtime transition work. Joining it preserves the single ordered
+        # completion path when the provider exits before its command child.
+        self._worker_request_lock.acquire()
+        self._worker_request_lock.release()
+        return True
+
     def idea_tool_env(self, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         env = dict(base_env or os.environ)
         env["PYTHONUNBUFFERED"] = "1"
@@ -1402,6 +1459,14 @@ class HitlRuntime:
             return self.log.append(record)
 
     def submit_proposal_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            return self._submit_proposal_payload_locked(payload)
+        finally:
+            self._worker_request_lock.release()
+
+    def _submit_proposal_payload_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
             validator = self._tool_context.get("proposal_submission_validator")
             if callable(validator):
@@ -1665,6 +1730,7 @@ class HitlRuntime:
         *,
         worker_name: str,
     ) -> Dict[str, Any]:
+        self._join_live_worker_request_handler(expected_kind="proposal")
         cancelled = self._cancelled_worker_command_result(
             result,
             phase="proposal",
@@ -1674,16 +1740,6 @@ class HitlRuntime:
             return cancelled
         submitted = self._proposal_submit_result
         if submitted and submitted.get("status") == "approved":
-            if result.get("background_processes_terminated"):
-                return {
-                    "success": False,
-                    "hitl": True,
-                    "phase": "proposal",
-                    "error": (
-                        f"{worker_name} left background processes after proposal admission. "
-                        "Runtime terminated them and discarded the proposal admission."
-                    ),
-                }
             validator = self._tool_context.get("proposal_submission_validator")
             if callable(validator):
                 validation = validator()
@@ -1738,6 +1794,24 @@ class HitlRuntime:
                 "error": (
                     f"{worker_name} exited after proposal feedback, but runtime has no "
                     "continuation prompt to launch safely."
+                ),
+            }
+        pending_replacement = self._pending_worker_request_replacement(
+            phase="proposal",
+            worker_name=worker_name,
+        )
+        if pending_replacement is not None:
+            return pending_replacement
+        if result.get("background_processes_terminated"):
+            return {
+                **result,
+                "success": False,
+                "hitl": True,
+                "phase": "proposal",
+                "error": (
+                    f"{worker_name} left background processes without a durable "
+                    "proposal decision or resumable request. Runtime terminated them "
+                    "and will not advance proposal admission."
                 ),
             }
         continuation = HitlRuntime.worker_continuation(self)
@@ -2114,11 +2188,22 @@ class HitlRuntime:
             "Runtime scoring repair response",
         )
         pending = self._pending_worker_command()
-        request_key = str((pending or {}).get("request_key", "")).strip()
-        if not request_key:
+        manager_request_key = str((pending or {}).get("request_key", "")).strip()
+        if not manager_request_key:
             raise HitlValidationError(
                 "Runtime scoring repair has no pending phase-finish request to resume."
             )
+        request_key = self._phase_finish_request_key_for(
+            hitl_stage=str((pending or {}).get("hitl_stage", "")).strip(),
+            plan_fingerprint=str((pending or {}).get("plan_fingerprint", "")).strip(),
+            workspace_fingerprint=str(
+                (pending or {}).get("workspace_fingerprint", "")
+            ).strip(),
+            summary=str((pending or {}).get("finish_summary", "")).strip(),
+            related_artifacts=_as_related_artifacts(
+                (pending or {}).get("related_artifacts")
+            ),
+        )
         prompt_block = self.compose_worker_prompt(
             hitl_stage="review",
             phase_prompt=self.review_prompt_block(feedback),
@@ -2337,15 +2422,24 @@ class HitlRuntime:
         try:
             handler(approval)
         except Exception as exc:
-            self.manager.resume_worker_request(
-                prompt=_load_hitl_template(
-                    "manager_runtime_scoring_failure.txt",
-                    error=str(exc),
-                ),
-                validate=self._validate_runtime_scoring_failure,
-                finalize=finalize_failure,
-                manager_review_kind="scoring_failure",
-            )
+            pending = self._pending_worker_command()
+            if isinstance(pending, dict) and pending.get("status") == "cancelled":
+                return
+            try:
+                self.manager.resume_worker_request(
+                    prompt=_load_hitl_template(
+                        "manager_runtime_scoring_failure.txt",
+                        error=str(exc),
+                    ),
+                    validate=self._validate_runtime_scoring_failure,
+                    finalize=finalize_failure,
+                    manager_review_kind="scoring_failure",
+                )
+            except Exception:
+                pending = self._pending_worker_command()
+                if isinstance(pending, dict) and pending.get("status") == "cancelled":
+                    return
+                raise
 
     def _finalize_resumed_scoring_failure(
         self,
@@ -2453,12 +2547,35 @@ class HitlRuntime:
         request_key = str(pending.get("request_key", "")).strip()
         if not request_key:
             raise HitlValidationError("Pending HITL worker request has no request key.")
+        kind = str(pending.get("kind", "")).strip()
         if pending.get("status") == "resolved":
             response = pending.get("response")
             if not isinstance(response, dict):
                 raise HitlValidationError("Resolved HITL worker request has no runtime response.")
+            if (
+                kind == "phase_finish"
+                and str(response.get("status", "")).strip() == "feedback"
+                and not str(response.get("feedback", "")).strip()
+            ):
+                return self._normalize_phase_finish_feedback(
+                    request_key=request_key,
+                    hitl_stage=_require_text(
+                        pending.get("hitl_stage"),
+                        "hitl_stage",
+                        "Resolved HITL phase-finish request",
+                    ),
+                    plan_fingerprint=str(pending.get("plan_fingerprint", "")).strip(),
+                    workspace_fingerprint=str(
+                        pending.get("workspace_fingerprint", "")
+                    ).strip(),
+                    summary=str(pending.get("finish_summary", "")).strip(),
+                    related_artifacts=_as_related_artifacts(
+                        pending.get("related_artifacts")
+                    ),
+                    review=response,
+                    record=response.get("record"),
+                )
             return dict(response)
-        kind = str(pending.get("kind", "")).strip()
         if kind == "phase_finish":
             from core.hitl_runtime_state import MANAGER_REVIEW_FINALIZERS
 
@@ -2559,6 +2676,19 @@ class HitlRuntime:
 
     def _finish_tool_phase_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
+            pending = self._pending_worker_command()
+            if (
+                isinstance(pending, dict)
+                and pending.get("kind") == "phase_finish"
+                and pending.get("status") == "cancelled"
+            ):
+                from core.hitl_runtime_state import HitlRuntimeStateError
+
+                reason = str(pending.get("cancellation_reason", "")).strip()
+                raise HitlRuntimeStateError(
+                    "Runtime cancelled the held worker command while rolling back its failed attempt."
+                    + (f" {reason}" if reason else "")
+                )
             terminal_response = self._terminal_phase_finish_response()
             if terminal_response is not None:
                 return terminal_response
@@ -2763,103 +2893,25 @@ class HitlRuntime:
                 on_finalize=persist_phase_review,
                 on_scoring_approval=persist_scoring_approval,
             )
+            if (
+                self._phase_finish_request_key == request_key
+                and isinstance(self._phase_finish_response, dict)
+            ):
+                return dict(self._phase_finish_response)
             status = str(review.get("status", "")).strip()
             if status == "feedback":
-                human_resolved_plan = bool(
-                    hitl_stage == "plan"
-                    and self._tool_context.get("requires_human_approval")
-                    and str(review.get("human_feedback", "")).strip()
-                )
-                if human_resolved_plan:
-                    feedback = _require_text(
-                        review.get("manager_feedback"),
-                        "manager_feedback",
-                        "Manager translation of human plan feedback",
-                    )
-                    logged = finalized.get("record")
-                    if not logged:
-                        raise RuntimeError(
-                            "Human plan feedback was finalized without an audit record."
-                        )
-                    self._phase_finish_result = {
-                        "called": True,
-                        "status": "feedback",
-                        "hitl_stage": hitl_stage,
-                        "plan_fingerprint": plan_fingerprint,
-                        "workspace_fingerprint": workspace_fingerprint,
-                        "summary": summary,
-                        "related_artifacts": related_artifacts,
-                        "manager_feedback": feedback,
-                        "context": str(review.get("context", "")),
-                        "record": logged,
-                        "next_phase": "plan",
-                        "final": False,
-                    }
-                    return self._remember_phase_finish_response(
-                        request_key,
-                        {
-                            "status": "feedback",
-                            "feedback": feedback,
-                            "next_phase": "plan",
-                            "instruction": (
-                                "Apply this plan feedback, update the living plan, then "
-                                "call hitl-finish-phase again."
-                            ),
-                            "prompt_block": self.compose_worker_prompt(
-                                hitl_stage="plan",
-                                phase_prompt=self.plan_revision_prompt_block(feedback),
-                            ),
-                            "record": logged,
-                        },
-                    )
-                feedback = _require_text(
-                    review.get("manager_feedback"),
-                    "manager_feedback",
-                    "Manager phase finish review with status='feedback'",
-                )
-                next_phase = "review" if hitl_stage == "execution" else hitl_stage
-                prompt_block = self._finish_feedback_prompt_block(
-                    hitl_stage=next_phase,
-                    feedback=feedback,
-                )
-                if next_phase != hitl_stage:
-                    self.transition_worker_stage(next_phase, prompt_block=prompt_block)
-                else:
-                    self._update_worker_continuation(
-                        prompt_block=prompt_block,
-                        hitl_stage=next_phase,
-                        status="running",
-                    )
                 logged = finalized.get("record")
                 if not logged:
                     raise RuntimeError("Manager feedback was finalized without an audit record.")
-                self._phase_finish_result = {
-                    "called": True,
-                    "status": "feedback",
-                    "hitl_stage": next_phase,
-                    "plan_fingerprint": plan_fingerprint,
-                    "workspace_fingerprint": workspace_fingerprint,
-                    "summary": summary,
-                    "related_artifacts": related_artifacts,
-                    "manager_feedback": feedback,
-                    "context": str(review.get("context", "")),
-                    "record": logged,
-                    "next_phase": next_phase,
-                    "final": False,
-                }
-                return self._remember_phase_finish_response(
-                    request_key,
-                    {
-                        "status": "feedback",
-                        "feedback": feedback,
-                        "next_phase": next_phase,
-                        "instruction": (
-                            "Apply this feedback in the current phase, update the living "
-                            "plan/current artifacts, then call hitl-finish-phase again."
-                        ),
-                        "prompt_block": prompt_block,
-                        "record": logged,
-                    },
+                return self._normalize_phase_finish_feedback(
+                    request_key=request_key,
+                    hitl_stage=hitl_stage,
+                    plan_fingerprint=plan_fingerprint,
+                    workspace_fingerprint=workspace_fingerprint,
+                    summary=summary,
+                    related_artifacts=related_artifacts,
+                    review=review,
+                    record=logged,
                 )
 
             if status != "approved":
@@ -2964,6 +3016,7 @@ class HitlRuntime:
         live tool-server and request state and gives a continuation worker the runtime
         prompt that the lost worker should have continued from.
         """
+        self._join_live_worker_request_handler(expected_kind="phase_finish")
         cancelled = self._cancelled_worker_command_result(
             result,
             phase=phase,
@@ -2971,14 +3024,6 @@ class HitlRuntime:
         )
         if cancelled is not None:
             return cancelled
-        if result.get("background_processes_terminated"):
-            return {
-                "approved": False,
-                "error": (
-                    f"{worker_name} left background processes after its provider exited. "
-                    "Runtime terminated them and will not accept or score this workspace."
-                ),
-            }
         finish = self.phase_finish_result()
         resolved = self.resolved_worker_response()
         if resolved and (
@@ -3010,22 +3055,32 @@ class HitlRuntime:
                 ),
             }
 
+        pending_replacement = self._pending_worker_request_replacement(
+            phase=phase,
+            worker_name=worker_name,
+        )
+        if pending_replacement is not None:
+            return pending_replacement
+        if result.get("background_processes_terminated") and finish is None and resolved is None:
+            return {
+                **result,
+                "approved": False,
+                "success": False,
+                "hitl": True,
+                "phase": phase,
+                "error": (
+                    f"{worker_name} left background processes without a durable "
+                    "HITL result or resumable request. Runtime terminated them and "
+                    "will not accept or score this workspace."
+                ),
+            }
+
         continuation = self.worker_continuation()
         if continuation is not None:
             prompt_block = str(
                 (finish or {}).get("prompt_block") or continuation.get("prompt_block", "")
             ).strip()
             if prompt_block:
-                pending = self._pending_worker_command()
-                needs_resume = isinstance(pending, dict) and pending.get("status") in {
-                    "pending",
-                    "scoring_approval_pending",
-                    "scoring",
-                }
-                if needs_resume:
-                    # A held command is runtime state, not continuation text.
-                    # The replacement must reconnect before changing the workspace.
-                    prompt_block = _load_hitl_template("worker_resume_pending_request.txt")
                 self._update_worker_continuation(
                     prompt_block=prompt_block,
                     hitl_stage=str(
@@ -3037,11 +3092,6 @@ class HitlRuntime:
                 from core.hitl_runtime_state import HitlRuntimeState
 
                 HitlRuntimeState(self.work_dir).mark_worker_replacement()
-                if needs_resume:
-                    # A replacement is the only worker that may reconnect to
-                    # a runtime-held command. Expose it immediately before the
-                    # replacement launch, never to the original invocation.
-                    self._enable_worker_command("hitl-resume-worker-request")
                 return {
                     "approved": False,
                     "replacement": True,
@@ -3083,6 +3133,81 @@ class HitlRuntime:
         else:
             phase_prompt = self.review_prompt_block(feedback)
         return self.compose_worker_prompt(hitl_stage=hitl_stage, phase_prompt=phase_prompt)
+
+    def _normalize_phase_finish_feedback(
+        self,
+        *,
+        request_key: str,
+        hitl_stage: str,
+        plan_fingerprint: str,
+        workspace_fingerprint: str,
+        summary: str,
+        related_artifacts: List[Dict[str, str]],
+        review: Dict[str, Any],
+        record: Any = None,
+    ) -> Dict[str, Any]:
+        """Convert a manager phase review into the worker-facing continuation."""
+        feedback = _require_text(
+            review.get("manager_feedback"),
+            "manager_feedback",
+            "Manager phase finish review with status='feedback'",
+        )
+        human_resolved_plan = bool(
+            hitl_stage == "plan" and str(review.get("human_feedback", "")).strip()
+        )
+        next_phase = "plan" if human_resolved_plan else (
+            "review" if hitl_stage == "execution" else hitl_stage
+        )
+        prompt_block = self._finish_feedback_prompt_block(
+            hitl_stage=next_phase,
+            feedback=feedback,
+        )
+        current_stage = str(
+            self._tool_context.get("hitl_stage", self.current_hitl_stage)
+        ).strip()
+        if next_phase != current_stage:
+            self.transition_worker_stage(next_phase, prompt_block=prompt_block)
+        else:
+            self._update_worker_continuation(
+                prompt_block=prompt_block,
+                hitl_stage=next_phase,
+                status="running",
+            )
+
+        normalized_record = dict(record) if isinstance(record, dict) else None
+        self._phase_finish_result = {
+            "called": True,
+            "status": "feedback",
+            "hitl_stage": next_phase,
+            "plan_fingerprint": plan_fingerprint,
+            "workspace_fingerprint": workspace_fingerprint,
+            "summary": summary,
+            "related_artifacts": related_artifacts,
+            "manager_feedback": feedback,
+            "context": str(review.get("context", "")),
+            "next_phase": next_phase,
+            "final": False,
+            **({"record": normalized_record} if normalized_record is not None else {}),
+        }
+        instruction = (
+            "Apply this plan feedback, update the living plan, then "
+            "call hitl-finish-phase again."
+            if human_resolved_plan
+            else (
+                "Apply this feedback in the current phase, update the living "
+                "plan/current artifacts, then call hitl-finish-phase again."
+            )
+        )
+        response = {
+            "status": "feedback",
+            "feedback": feedback,
+            "next_phase": next_phase,
+            "instruction": instruction,
+            "prompt_block": prompt_block,
+            "final": False,
+            **({"record": normalized_record} if normalized_record is not None else {}),
+        }
+        return self._remember_phase_finish_response(request_key, response)
 
     def _record_from_tool_payload(
         self,
@@ -3579,11 +3704,21 @@ class HitlRuntime:
 
             def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
                 encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(encoded)))
-                self.end_headers()
-                self.wfile.write(encoded)
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    # Runtime processing is already complete. A provider that
+                    # exits before its blocking command only loses delivery of
+                    # this response; durable state remains authoritative.
+                    self.close_connection = True
+                    LOGGER.info(
+                        "HITL runtime response client disconnected for %s",
+                        self.path,
+                    )
 
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ToolHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

@@ -218,6 +218,15 @@ class HitlRuntimeState:
             command = self._state.get("pending_worker_command")
             if not isinstance(command, dict) or command.get("request_key") != request_key:
                 raise HitlRuntimeStateError("No matching pending HITL worker command")
+            next_status = updates.get("status")
+            if (
+                command.get("status") == "cancelled"
+                and next_status is not None
+                and next_status != "cancelled"
+            ):
+                raise HitlRuntimeStateError(
+                    "A cancelled HITL worker command cannot return to an active state."
+                )
             command.update(self._copy(updates))
             command["updated_at"] = _now()
             self._save_unlocked()
@@ -229,6 +238,10 @@ class HitlRuntimeState:
             command = self._state.get("pending_worker_command")
             if not isinstance(command, dict) or command.get("request_key") != request_key:
                 raise HitlRuntimeStateError("No matching pending HITL worker command")
+            if command.get("status") == "cancelled":
+                raise HitlRuntimeStateError(
+                    "A cancelled HITL worker command cannot be completed."
+                )
             command["status"] = "resolved"
             command["response"] = self._copy(response)
             command["resolved_at"] = _now()
