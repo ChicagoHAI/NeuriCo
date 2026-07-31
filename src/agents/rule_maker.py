@@ -20,7 +20,6 @@ cannot influence what it is being judged on.
 
 from pathlib import Path
 from typing import Optional, Dict, Any
-import subprocess
 import shlex
 import sys
 import time
@@ -31,8 +30,7 @@ import stat
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.security import sanitize_text
-from core.agent_runner import run_prebuilt_cli_agent
+from core.agent_runner import next_attempt_number, run_prebuilt_cli_agent
 from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
 from core.scorer import RESULTS_FILE_NAME
 
@@ -459,6 +457,7 @@ def run_rule_maker(
     templates_dir: Optional[Path] = None,
     timeout: int = 1800,  # 30 min
     full_permissions: bool = True,
+    prompt_suffix: str = "",
     completion_mode: str = "outputs",
     log_prefix: str = "rule_maker",
     include_hitl_outputs: bool = False,
@@ -467,6 +466,11 @@ def run_rule_maker(
 ) -> Dict[str, Any]:
     """
     Launch the rule_maker CLI agent.
+
+    Args:
+        prompt_suffix: Extra text appended to the generated prompt. Used by
+            the eval-verifier retry loop to feed violations back into the
+            rule_maker's second attempt.
 
     Returns:
         Dict with: success, outputs (paths of generated files), issues,
@@ -492,12 +496,20 @@ def run_rule_maker(
     print(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
     print("=" * 80)
 
+    # Per-attempt artifact names: the orchestrator re-runs the rule maker
+    # once after a verifier rejection, and fixed names would overwrite the
+    # first attempt's audit trail (prompt, log, and transcript).
+    attempt = next_attempt_number(
+        logs_dir, lambda n: f"{log_prefix}_{provider}_attempt{n}.log")
+
     # Generate prompt and persist it for debugging
     if prompt_override is not None:
         prompt = prompt_override
     else:
         prompt = generate_rule_maker_prompt(idea, work_dir, templates_dir)
-    prompt_file = logs_dir / f"{log_prefix}_prompt.txt"
+        if prompt_suffix:
+            prompt += prompt_suffix
+    prompt_file = logs_dir / f"{log_prefix}_prompt_attempt{attempt}.txt"
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(prompt, encoding="utf-8")
     print(f"   Prompt saved to: {prompt_file}")
@@ -506,8 +518,8 @@ def run_rule_maker(
     # Build CLI command
     cmd = build_agent_command(provider, full_permissions=full_permissions)
 
-    log_file = logs_dir / f"{log_prefix}_{provider}.log"
-    transcript_file = logs_dir / f"{log_prefix}_{provider}_transcript.jsonl"
+    log_file = logs_dir / f"{log_prefix}_{provider}_attempt{attempt}.log"
+    transcript_file = logs_dir / f"{log_prefix}_{provider}_attempt{attempt}_transcript.jsonl"
     log_file.parent.mkdir(parents=True, exist_ok=True)
     transcript_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -525,48 +537,23 @@ def run_rule_maker(
     return_code: Optional[int] = None
 
     try:
-        if completion_mode == "hitl_runtime":
-            # HITL workers can remain active while emitting output, so use the
-            # shared deadline-aware runner instead of waiting on stdout EOF.
-            launch = run_prebuilt_cli_agent(
-                command_argv=shlex.split(cmd),
-                prompt=prompt,
-                work_dir=work_dir,
-                log_file=log_file,
-                transcript_file=transcript_file,
-                env=env,
-                timeout=timeout,
-            )
-            return_code = launch["return_code"]
-            if launch["timed_out"]:
-                print(f"\n⏱️  Rule maker timed out after {timeout} seconds")
-        else:
-            with (
-                open(log_file, "w", encoding="utf-8") as log_f,
-                open(transcript_file, "w", encoding="utf-8") as transcript_f,
-            ):
-                process = subprocess.Popen(
-                    shlex.split(cmd),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    text=True,
-                    encoding="utf-8",
-                    bufsize=1,
-                    cwd=str(work_dir),
-                )
-                process.stdin.write(prompt)
-                process.stdin.close()
-
-                for line in iter(process.stdout.readline, ""):
-                    if line:
-                        sanitized = sanitize_text(line)
-                        print(sanitized, end="")
-                        log_f.write(sanitized)
-                        transcript_f.write(sanitized)
-
-                return_code = process.wait(timeout=timeout)
+        # The shared deadline-aware runner enforces the timeout on wall
+        # clock. Reading stdout to EOF inline would block for as long as the
+        # agent keeps the pipe open, so wait(timeout=...) would never be
+        # reached: HITL workers legitimately stay active while emitting
+        # output, and a wedged ordinary agent must not hang the pipeline.
+        launch = run_prebuilt_cli_agent(
+            command_argv=shlex.split(cmd),
+            prompt=prompt,
+            work_dir=work_dir,
+            log_file=log_file,
+            transcript_file=transcript_file,
+            env=env,
+            timeout=timeout,
+        )
+        return_code = launch["return_code"]
+        if launch["timed_out"]:
+            print(f"\n⏱️  Rule maker timed out after {timeout} seconds")
 
         print()
         print("=" * 80)
@@ -577,10 +564,6 @@ def run_rule_maker(
             print("✅ Agent process exited cleanly.")
         else:
             print(f"⚠️  Agent exited with return code: {return_code}")
-
-    except subprocess.TimeoutExpired:
-        print(f"\n⏱️  Rule maker timed out after {timeout} seconds")
-        process.kill()
 
     except Exception as e:
         print(f"\n❌ Error during rule_maker execution: {e}")

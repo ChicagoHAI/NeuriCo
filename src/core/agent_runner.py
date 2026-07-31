@@ -190,6 +190,23 @@ def _run_cli_agent(
     }
 
 
+def next_attempt_number(logs_dir: Path, name_for_attempt) -> int:
+    """
+    First attempt number whose log artifact does not yet exist in logs_dir.
+
+    Retry-capable agent launchers name per-attempt artifacts (log, transcript,
+    prompt) so a re-run appends to the audit trail instead of overwriting the
+    first attempt. Probing the log directory keeps that append-only without
+    requiring every caller to thread an attempt counter.
+
+    name_for_attempt: callable mapping an attempt number to the log filename.
+    """
+    attempt = 1
+    while (logs_dir / name_for_attempt(attempt)).exists():
+        attempt += 1
+    return attempt
+
+
 def run_prebuilt_cli_agent(
     *,
     command_argv: list[str],
@@ -414,11 +431,14 @@ def run_experiment_runner(
     full_permissions: bool = True,
     use_scribe: bool = False,
     templates_dir: Optional[Path] = None,
+    scoring_enabled: bool = False,
 ) -> Dict[str, Any]:
     """
     Run the experiment runner agent.
 
     Extracted from pipeline_orchestrator.py to be callable standalone.
+    scoring_enabled gates scoring-only prompt content (e.g. the
+    required_for_evaluation obligation); standalone re-runs default unscored.
     """
     from templates.prompt_generator import PromptGenerator
     from templates.research_agent_instructions import generate_instructions
@@ -443,7 +463,8 @@ def run_experiment_runner(
 
         # Generate research prompt
         prompt_generator = PromptGenerator(templates_dir)
-        prompt = prompt_generator.generate_research_prompt(idea, root_dir=work_dir)
+        prompt = prompt_generator.generate_research_prompt(
+            idea, root_dir=work_dir, scoring_enabled=scoring_enabled)
 
         # Save prompt
         prompt_file = work_dir / "logs" / "research_prompt.txt"
@@ -460,6 +481,7 @@ def run_experiment_runner(
             domain=domain,
             idea_spec=idea.get("idea", {}),
             provider=provider,
+            scoring_enabled=scoring_enabled,
         )
 
         # Save session instructions

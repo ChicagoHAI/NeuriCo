@@ -580,6 +580,146 @@ cmd_fetch() {
 }
 
 # -----------------------------------------------------------------------------
+# Submit a local idea file (markdown or plain text)
+# -----------------------------------------------------------------------------
+cmd_submit_local() {
+    if [ -z "$1" ]; then
+        echo -e "${RED}Usage: $0 submit-local <idea.md> [--submit] [--run] [--provider claude|codex|gemini]${NC}"
+        exit 1
+    fi
+
+    ensure_directories
+    check_env_file
+    warn_if_outdated
+
+    local idea_file="$1"
+    shift
+
+    # Intercept --run: running must happen via the host-side cmd_run (which
+    # applies the local-resource mounts from ideas/mounts/<idea_id>.txt),
+    # never inside the submission container. Every other flag passes through
+    # to submit_local.py unchanged (it uses --provider for repo naming and
+    # next-step hints); flags the runner also understands are additionally
+    # recorded so the dispatched run behaves as the user asked.
+    local do_run=false
+    local provider="claude"
+    local has_submit=false
+    local submit_args=()
+    local run_flags=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --run) do_run=true ;;
+            --provider)
+                if [ -z "${2:-}" ]; then
+                    echo -e "${RED}Error: --provider requires a value${NC}"
+                    exit 1
+                fi
+                provider="$2"; submit_args+=("$1" "$2"); shift ;;
+            --provider=*)
+                provider="${1#*=}"; submit_args+=("$1") ;;
+            --full-permissions|--no-full-permissions|--write-paper|--no-write-paper)
+                run_flags+=("$1"); submit_args+=("$1") ;;
+            --paper-style|--paper-timeout)
+                if [ -z "${2:-}" ]; then
+                    echo -e "${RED}Error: $1 requires a value${NC}"
+                    exit 1
+                fi
+                run_flags+=("$1" "$2"); submit_args+=("$1" "$2"); shift ;;
+            --submit) has_submit=true; submit_args+=("$1") ;;
+            *) submit_args+=("$1") ;;
+        esac
+        shift
+    done
+    if [ "$do_run" = true ] && [ "$has_submit" = false ]; then
+        echo -e "${RED}Error: --run requires --submit${NC}"
+        exit 1
+    fi
+
+    local gpu_flags=$(get_gpu_flags)
+    local user_flags=$(get_user_flags)
+    local credential_mounts=$(get_cli_credential_mounts)
+    local workspace_dir=$(get_workspace_dir)
+
+    # The idea file lives on the HOST — relative or absolute, it must be
+    # mounted in. Resolving to an absolute path first means a plain
+    # `./neurico submit-local idea.md` works instead of probing a
+    # nonexistent /app/idea.md inside the container.
+    if [ ! -f "$idea_file" ]; then
+        echo -e "${RED}Error: idea file not found: $idea_file${NC}"
+        exit 1
+    fi
+    local idea_abs idea_dir idea_name
+    idea_abs=$(cd "$(dirname "$idea_file")" && pwd)/$(basename "$idea_file")
+    idea_dir=$(dirname "$idea_abs")
+    idea_name=$(basename "$idea_abs")
+    local idea_path="/input/$idea_name"
+
+    local tty_flag=$(get_tty_flag)
+
+    echo -e "${BLUE}Converting local idea file...${NC}"
+    echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
+
+    # argv array: path data is never re-parsed as shell syntax (see cmd_run)
+    local docker_args=( run $tty_flag --rm )
+    local helper_args=()
+    eval "helper_args=( $gpu_flags $user_flags $credential_mounts )"
+    docker_args+=(
+        "${helper_args[@]}"
+        --env-file "$PROJECT_ROOT/.env"
+        -e NEURICO_WORKSPACE=/workspaces
+        -v "$workspace_dir:/workspaces"
+        -v "$PROJECT_ROOT/ideas:/app/ideas"
+        -v "$PROJECT_ROOT/logs:/app/logs"
+        -v "$PROJECT_ROOT/config:/app/config:ro"
+        -v "$PROJECT_ROOT/templates:/app/templates:ro"
+        -v "$idea_dir:/input:ro"
+    )
+
+    # Mount the host working directory at its identical path (read-only) and
+    # tell the converter about it, so relative local_resources paths in the
+    # idea can be validated and canonicalized to host-absolute paths that
+    # later mount correctly at run time.
+    if [ "$PWD" != "/" ] && [ "$PWD" != "$PROJECT_ROOT" ]; then
+        docker_args+=( -v "$PWD:$PWD:ro" )
+    fi
+    docker_args+=( -e NEURICO_HOST_CWD="$PWD" -e NEURICO_IN_DOCKER=1 )
+
+    docker_args+=( -w /app "$IMAGE_NAME"
+                   python /app/src/cli/submit_local.py "$idea_path"
+                   "${submit_args[@]}" )
+
+    # Capture output so the idea id can drive the host-side run. tee eats
+    # the container's exit status, so recover it from PIPESTATUS and
+    # propagate a failed submission instead of silently exiting 0.
+    local output_file
+    output_file=$(mktemp)
+    docker "${docker_args[@]}" | tee "$output_file"
+    local submit_rc=${PIPESTATUS[0]}
+    if [ "$submit_rc" -ne 0 ]; then
+        rm -f "$output_file"
+        echo -e "${RED}[ERROR]${NC} submit-local failed (exit $submit_rc)"
+        exit "$submit_rc"
+    fi
+
+    if [ "$do_run" = true ]; then
+        local idea_id
+        idea_id=$(grep "Idea submitted successfully:" "$output_file" \
+                  | tail -1 | sed 's/.*Idea submitted successfully:[[:space:]]*//' \
+                  | tr -d '[:space:]')
+        rm -f "$output_file"
+        if [ -n "$idea_id" ]; then
+            echo ""
+            cmd_run "$idea_id" --provider "$provider" \
+                ${run_flags[@]+"${run_flags[@]}"}
+        else
+            echo -e "${RED}[ERROR]${NC} Could not extract idea ID from submit output — run manually with: ./neurico run <idea_id>"
+        fi
+    else
+        rm -f "$output_file"
+    fi
+}
+
+# -----------------------------------------------------------------------------
 # Submit a research idea
 # -----------------------------------------------------------------------------
 cmd_submit() {
@@ -742,24 +882,50 @@ cmd_run() {
 
     local tty_flag=$(get_tty_flag)
 
+    # Build the docker invocation as an argv array so path data is never
+    # re-parsed as shell syntax. The helper flag strings above are trusted,
+    # self-generated quoting shared with the other commands; parse them once
+    # into an array here. Untrusted paths (the mounts sidecar below, whose
+    # contents come from user idea files) are appended only as literal array
+    # elements, so spaces and shell metacharacters in paths are inert.
+    local docker_args=( run $tty_flag --rm )
+    local helper_args=()
+    eval "helper_args=( $gpu_flags $user_flags $credential_mounts $hitl_web_flags )"
+    docker_args+=(
+        "${helper_args[@]}"
+        --env-file "$PROJECT_ROOT/.env"
+        -e NEURICO_WORKSPACE=/workspaces
+        -v "$workspace_dir:/workspaces"
+        -v "$PROJECT_ROOT/ideas:/app/ideas"
+        -v "$PROJECT_ROOT/logs:/app/logs"
+        -v "$PROJECT_ROOT/config:/app/config:ro"
+        -v "$PROJECT_ROOT/templates:/app/templates:ro"
+    )
+
+    # Ideas that declare host-local resources (local_resources paths, local
+    # papers) get a sidecar written at submit time: ideas/mounts/<idea_id>.txt,
+    # one absolute host path per line. Mount each existing path read-only at
+    # its identical in-container location so staging works unmodified inside
+    # Docker.
+    local idea_id="$1"
+    local mounts_file="$PROJECT_ROOT/ideas/mounts/${idea_id}.txt"
+    if [ -f "$mounts_file" ]; then
+        while IFS= read -r host_path; do
+            [ -z "$host_path" ] && continue
+            if [ -e "$host_path" ]; then
+                docker_args+=( -v "$host_path:$host_path:ro" )
+                echo -e "${BLUE}Mounting local resource:${NC} $host_path"
+            else
+                echo -e "${YELLOW}[SKIP]${NC} declared local path not found on this machine: $host_path"
+            fi
+        done < "$mounts_file"
+    fi
+
     echo -e "${BLUE}Running research exploration...${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
 
-    eval "docker run $tty_flag --rm \
-        $gpu_flags \
-        $user_flags \
-        --env-file \"$PROJECT_ROOT/.env\" \
-        -e NEURICO_WORKSPACE=/workspaces \
-        -v \"$workspace_dir:/workspaces\" \
-        -v \"$PROJECT_ROOT/ideas:/app/ideas\" \
-        -v \"$PROJECT_ROOT/logs:/app/logs\" \
-        -v \"$PROJECT_ROOT/config:/app/config:ro\" \
-        -v \"$PROJECT_ROOT/templates:/app/templates:ro\" \
-        $credential_mounts \
-        $hitl_web_flags \
-        -w /app \
-        \"$IMAGE_NAME\" \
-        python /app/src/core/runner.py $@"
+    docker_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "$@" )
+    docker "${docker_args[@]}"
 }
 
 # -----------------------------------------------------------------------------
@@ -1859,6 +2025,7 @@ cmd_help() {
     echo "  login [provider]          Login to CLI tools (claude/codex/gemini)"
     echo "  shell                     Start an interactive shell"
     echo "  fetch <url> [--submit]    Fetch idea from IdeaHub"
+    echo "  submit-local <idea.md> [--submit]  Convert a local idea file (markdown/text)"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
     echo "  interactive <id>          Interactive mode (browser UI; --cli for terminal)"
@@ -1876,6 +2043,7 @@ cmd_help() {
     echo ""
     echo "Daily usage:"
     echo "  $0 fetch https://ideahub.example.com/idea/123 --submit --run --provider claude --full-permissions"
+    echo "  $0 submit-local my_idea.md --submit --run --provider claude --full-permissions"
     echo "  $0 run my-idea-id --provider claude --full-permissions"
     echo "  $0 interactive my-idea-id --provider claude"
     echo "  $0 shell"
@@ -1916,6 +2084,9 @@ case "$ACTION" in
         ;;
     fetch)
         cmd_fetch "$@"
+        ;;
+    submit-local)
+        cmd_submit_local "$@"
         ;;
     submit)
         cmd_submit "$@"

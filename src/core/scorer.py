@@ -48,6 +48,8 @@ def run_scorer(
     work_dir: Path,
     timeout: int = 600,
     python_executable: Optional[str] = None,
+    *,
+    idea: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
     Execute scoring/eval.py against the runner's artifact.
@@ -59,6 +61,9 @@ def run_scorer(
         python_executable: Python binary to use. Defaults to the workspace's
                   own .venv interpreter (where the runner installed deps),
                   falling back to sys.executable.
+        idea: The trusted submitted idea (held by the orchestrator, outside
+                  the worker-visible workspace). Required so the staged-
+                  function integrity check always fails closed against it.
 
     Returns:
         Dict with:
@@ -85,6 +90,25 @@ def run_scorer(
             'log_path': str(log_path),
             'elapsed_time': 0.0,
             'error': f"scoring/eval.py not found at {eval_script}",
+        }
+
+    # Integrity guard for user-mandated evaluation functions: eval.py may
+    # call code staged under code/local/, so a run that edited those files
+    # after staging must not be scored as-is. The trusted idea makes the
+    # check fail closed (missing/blanked integrity metadata is itself a
+    # mismatch); ideas without staged functions pass trivially.
+    from core.local_resources import staged_function_mismatches
+    mismatches = staged_function_mismatches(work_dir, idea=idea)
+    if mismatches:
+        return {
+            'success': False,
+            'return_code': None,
+            'results': None,
+            'results_path': str(results_path),
+            'log_path': str(log_path),
+            'elapsed_time': 0.0,
+            'error': "staged evaluation functions failed integrity check: "
+                     + "; ".join(mismatches),
         }
 
     # Clear stale results so we never read leftover values from a prior run

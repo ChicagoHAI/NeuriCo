@@ -33,8 +33,9 @@ _PROJECT_ROOT = _SRC_ROOT.parent
 sys.path.insert(0, str(_SRC_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from core.idea_manager import IdeaManager
+from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.config_loader import ConfigLoader
+from core.local_resources import stage_local_resources
 from core.agent_cli import (
     build_agent_command,
     build_agent_environment,
@@ -123,7 +124,7 @@ class ResearchRunner:
         if config_loader.should_auto_create_workspace():
             self.runs_dir.mkdir(parents=True, exist_ok=True)
 
-        self.idea_manager = IdeaManager(self.project_root / "ideas")
+        self.idea_manager = IdeaManager(resolve_ideas_dir(self.project_root))
         self.prompt_generator = PromptGenerator(self.project_root / "templates")
 
         # GitHub integration
@@ -199,6 +200,7 @@ class ResearchRunner:
         autoresearch_iterations: int = 1,
         autoresearch_history_dir: Optional[Path] = None,
         continue_autoresearch: bool = False,
+        continue_recover: bool = False,
         bootstrap_autoresearch_baseline: bool = False,
         proposer_timeout: int = 900,
         compute_backend: str = "local",
@@ -260,6 +262,10 @@ class ResearchRunner:
         if len(selected_hitl_modes) > 1:
             raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
         hitl = hitl_autoresearch or hitl_continue_autoresearch
+        if continue_recover and not continue_autoresearch:
+            raise ValueError(
+                "--continue-recover only applies with --continue-autoresearch."
+            )
         if hitl_autoresearch:
             if autoresearch or continue_autoresearch:
                 raise ValueError(
@@ -369,6 +375,7 @@ class ResearchRunner:
                         domain=domain,
                         provider=provider,
                         no_hash=no_hash,
+                        hypothesis=idea_spec.get("hypothesis", ""),
                     )
 
                     github_url = repo_info["repo_url"]
@@ -455,6 +462,11 @@ class ResearchRunner:
         # Copy helper scripts and backend-selected skills to workspace.
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
 
+        # Stage user-declared local resources (datasets, functions) into the
+        # workspace and rewrite their paths workspace-relative, so no agent
+        # ever depends on host paths. Hard error if a declared path is gone.
+        stage_local_resources(work_dir, idea)
+
         recovered_hitl_attempt = None
         if hitl and continue_autoresearch:
             # Recovery can restore the private HITL manager database. Do it before
@@ -522,6 +534,7 @@ class ResearchRunner:
                         autoresearch_history_dir=autoresearch_history_dir,
                         proposer_timeout=proposer_timeout,
                         comment_timeout=timeout,
+                        continue_recover=continue_recover,
                     )
                 success = pipeline_result.get("success", False)
 
@@ -783,7 +796,8 @@ class ResearchRunner:
 
         # Generate prompt
         print("📝 Generating research prompt...")
-        prompt = self.prompt_generator.generate_research_prompt(idea, root_dir=work_dir)
+        prompt = self.prompt_generator.generate_research_prompt(
+            idea, root_dir=work_dir, scoring_enabled=scoring_enabled)
 
         # Save prompt for reference
         prompt_file = work_dir / "logs" / "research_prompt.txt"
@@ -803,6 +817,7 @@ class ResearchRunner:
             domain=domain,
             idea_spec=idea.get("idea", {}),
             provider=provider,
+            scoring_enabled=scoring_enabled,
         )
 
         # Save session instructions
@@ -1008,6 +1023,7 @@ https://github.com/ChicagoHAI/neurico
         print(f"   Work dir: {work_dir}")
         print()
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
+        stage_local_resources(work_dir, idea)
 
         # Get GitHub URL if available
         github_url = None
@@ -1417,6 +1433,13 @@ def main():
         help="Continue AutoResearch from the existing scored workspace and skip upstream pipeline stages",
     )
     parser.add_argument(
+        "--continue-recover",
+        action="store_true",
+        help="With --continue-autoresearch: if the workspace is dirty from an interrupted "
+             "attempt (e.g. a job killed at the Slurm wall clock), restore it to the current "
+             "best checkpoint and continue, instead of refusing.",
+    )
+    parser.add_argument(
         "--autoresearch-iterations",
         type=int,
         default=1,
@@ -1554,6 +1577,7 @@ def main():
             autoresearch_iterations=args.autoresearch_iterations,
             autoresearch_history_dir=args.autoresearch_history_dir,
             continue_autoresearch=args.continue_autoresearch,
+            continue_recover=args.continue_recover,
             bootstrap_autoresearch_baseline=args.bootstrap_autoresearch_baseline,
             proposer_timeout=args.proposer_timeout,
             compute_backend=args.compute_backend,

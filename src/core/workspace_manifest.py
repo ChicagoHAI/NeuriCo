@@ -129,6 +129,7 @@ _RAW_ROLE_RULES: list[tuple[str, str]] = [
     ("resources.md", "preexperiment_context"),
     ("ideas/**", "preexperiment_context"),
     (".resource_finder_complete", "pipeline_state"),
+    ("STATE.md", "pipeline_state"),
 
     # Runtime artifacts — produced by the experiment_runner.
     ("results/**", "runtime_artifact"),

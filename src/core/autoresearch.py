@@ -1313,6 +1313,7 @@ def continue_from_current_best(
     autoresearch_history_dir: Optional[Path],
     proposer_timeout: int,
     comment_timeout: int,
+    continue_recover: bool = False,
 ) -> Dict[str, Any]:
     """Validate the current scored node and run Phase 2 AutoResearch search."""
     print()
@@ -1321,7 +1322,9 @@ def continue_from_current_best(
     print("=" * 80)
     print()
 
-    current_sha = validate_continue_autoresearch_workspace(work_dir)
+    current_sha = validate_continue_autoresearch_workspace(
+        work_dir, auto_restore=continue_recover
+    )
     state = read_autoresearch_state(work_dir)
     lineage_source_sha = autoresearch_state_lineage_source_sha(state) or current_sha
     previous_last_iteration = autoresearch_state_last_iteration(state)
@@ -1393,8 +1396,16 @@ def continue_from_current_best(
     }
 
 
-def validate_continue_autoresearch_workspace(work_dir: Path) -> str:
-    """Validate the workspace is positioned at its saved AutoResearch current best."""
+def validate_continue_autoresearch_workspace(
+    work_dir: Path, auto_restore: bool = False
+) -> str:
+    """Validate the workspace is positioned at its saved AutoResearch current best.
+
+    With auto_restore, a workspace left dirty or ahead of current_best_sha by an
+    interrupted attempt (for example a job killed at the Slurm wall clock) is
+    restored to current_best_sha and treated as if that attempt were rejected,
+    instead of refusing to continue.
+    """
     work_dir = Path(work_dir)
     if not work_dir.exists():
         raise ValueError(f"Workspace does not exist: {work_dir}")
@@ -1430,15 +1441,33 @@ def validate_continue_autoresearch_workspace(work_dir: Path) -> str:
             + ", ".join(missing)
         )
 
-    status_lines = [
-        line
-        for line in checkpoints.repo.git.status("--porcelain").splitlines()
-        if line.strip() and not _is_allowed_continue_dirty_status(line)
-    ]
+    def _disallowed_dirty():
+        return [
+            line
+            for line in checkpoints.repo.git.status("--porcelain").splitlines()
+            if line.strip() and not _is_allowed_continue_dirty_status(line)
+        ]
+
+    status_lines = _disallowed_dirty()
+    if auto_restore and (status_lines or checkpoints.current_sha() != current_best_sha):
+        # An interrupted attempt can leave the working tree dirty or HEAD ahead
+        # of the saved current best. Restore to current_best_sha and treat the
+        # interrupted attempt as rejected. restore_checkpoint resets only tracked
+        # files and preserves ignored datasets and logs.
+        print(
+            "⚠️  Interrupted-attempt workspace detected; restoring to the "
+            f"current best checkpoint {current_best_sha[:12]} before continuing."
+        )
+        checkpoints.restore_checkpoint(current_best_sha)
+        status_lines = _disallowed_dirty()
+
     if status_lines:
         raise ValueError(
             "Cannot continue AutoResearch with a dirty workspace. "
-            "Commit, stash, or remove pending changes first. Status:\n"
+            "Commit, stash, or remove pending changes first"
+            + (" (--continue-recover left untracked changes it will not delete)"
+               if auto_restore else "")
+            + ". Status:\n"
             + "\n".join(status_lines[:20])
         )
 
@@ -1990,18 +2019,23 @@ def run_autoresearch_loop(
             full_permissions=full_permissions,
         )
 
-    return AutoResearchController(
+    def scorer(score_work_dir: Path) -> Dict[str, Any]:
+        return run_scorer(
+            work_dir=score_work_dir,
+            timeout=scorer_timeout,
+            idea=idea,
+        )
+
+    controller = AutoResearchController(
         idea=idea,
         idea_id=idea_id,
         work_dir=work_dir,
         history_root=history_root,
         proposal_generator=proposal_generator,
         comment_mode=comment_mode,
-        scorer=lambda score_work_dir: run_scorer(
-            work_dir=score_work_dir,
-            timeout=scorer_timeout,
-        ),
-    ).run(iterations=iterations)
+        scorer=scorer,
+    )
+    return controller.run(iterations=iterations)
 
 
 def normalized_margin(prop: Dict[str, Any]) -> float:

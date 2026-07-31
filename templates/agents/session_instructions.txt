@@ -142,6 +142,8 @@ WHAT "FULLY-AUTOMATED" MEANS:
 ✓ Document decisions, but keep moving forward
 ✓ Deliver REPORT.md with actual experimental results at the end
 
+{{ state_contract }}
+
 YOU WILL NOT GET ADDITIONAL INSTRUCTIONS between phases.
 This prompt contains everything you need. Execute it completely from start to finish.
 
@@ -153,8 +155,11 @@ CRITICAL: For LLM/AI Research - Use Real Models, Not Simulations
 IF your research involves LLM behavior, agents, prompting, or AI capabilities:
 
 ✓ YOU MUST use REAL LLM APIs:
-  - GPT-4.1 or GPT-5, or other real models
-  - You can also use openrouter, there is openrouter key in environment variable.
+  - Use OpenRouter by DEFAULT: the key is in the OPENROUTER_KEY environment variable.
+    It serves GPT, Claude, Gemini, and open models through one OpenAI-compatible
+    endpoint (base_url https://openrouter.ai/api/v1, model IDs like "openai/gpt-4.1").
+  - Only call a provider directly (e.g. OPENAI_API_KEY) if OpenRouter cannot serve
+    the model you need.
   - Use actual API calls to test behavior
   - Measure real model outputs, not simulated behavior
   - If you are not sure how to prompt and send API calls, search online.
