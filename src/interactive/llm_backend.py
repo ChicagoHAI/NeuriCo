@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import threading
 
 
 @dataclass
@@ -45,6 +46,24 @@ class LLMBackend:
         """
         self.backend = backend
         self.model = model
+        self._process_lock = threading.Lock()
+        self._active_process: Optional[subprocess.Popen[str]] = None
+
+    def cancel_active(self) -> None:
+        """Terminate the active CLI call owned by this backend, if any."""
+        with self._process_lock:
+            process = self._active_process
+        if process is not None:
+            self._terminate_process_group(process)
+
+    def _set_active_process(self, process: subprocess.Popen[str]) -> None:
+        with self._process_lock:
+            self._active_process = process
+
+    def _clear_active_process(self, process: subprocess.Popen[str]) -> None:
+        with self._process_lock:
+            if self._active_process is process:
+                self._active_process = None
 
     def send(
         self,
@@ -135,14 +154,18 @@ class LLMBackend:
             bufsize=1,
             start_new_session=(os.name == "posix"),
         )
+        self._set_active_process(process)
         try:
-            stdout, stderr = process.communicate(input=prompt, timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            self._terminate_process_group(process)
-            raise TimeoutError(
-                "Codex CLI backend timed out after "
-                f"{timeout_seconds:g} seconds"
-            ) from exc
+            try:
+                stdout, stderr = process.communicate(input=prompt, timeout=timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                self._terminate_process_group(process)
+                raise TimeoutError(
+                    "Codex CLI backend timed out after "
+                    f"{timeout_seconds:g} seconds"
+                ) from exc
+        finally:
+            self._clear_active_process(process)
         if process.returncode != 0:
             error_msg = stderr.strip() if stderr else f"codex exec exited with code {process.returncode}"
             raise RuntimeError(f"Codex CLI backend error: {error_msg}")
@@ -263,15 +286,19 @@ class LLMBackend:
             # ordinary interactive-manager launch behavior unchanged.
             start_new_session=(disable_native_tools and os.name == "posix"),
         )
+        self._set_active_process(process)
 
         try:
-            stdout, stderr = process.communicate(input=prompt, timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            self._terminate_process_group(process)
-            raise TimeoutError(
-                "CLI backend timed out after "
-                f"{timeout_seconds:g} seconds"
-            ) from exc
+            try:
+                stdout, stderr = process.communicate(input=prompt, timeout=timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                self._terminate_process_group(process)
+                raise TimeoutError(
+                    "CLI backend timed out after "
+                    f"{timeout_seconds:g} seconds"
+                ) from exc
+        finally:
+            self._clear_active_process(process)
 
         if process.returncode != 0:
             # Try to extract useful error info
@@ -288,7 +315,7 @@ class LLMBackend:
 
     @staticmethod
     def _terminate_process_group(process: subprocess.Popen[str]) -> None:
-        """Terminate a timed-out CLI turn and any child processes it spawned."""
+        """Terminate one CLI turn and any child processes it spawned."""
         if process.poll() is not None:
             return
         if os.name == "posix":

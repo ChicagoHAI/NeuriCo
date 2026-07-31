@@ -28,25 +28,32 @@ frontier accept/reject decision. If the work needs revision, finalize
 `feedback` with precise worker-facing manager_feedback.
 {% endif %}
 
+{% if pipeline_stage == "resource_finder" %}
+`literature_review.md` and `resources.md` are mandatory pipeline artifacts.
+They may not be omitted, renamed, relocated, or replaced by a worker plan or
+manager decision. If the plan does not preserve both files, finalize `feedback`
+with precise correction instructions. Do not ask the human to choose an
+alternative artifact boundary.
+{% endif %}
+
 {% if is_rule_maker %}
-For this rule-maker review, verify that the proposed scorer preserves the
-fixed NeuriCo evaluator ABI: runtime invokes exactly `python scoring/eval.py`
-with no command-line arguments, and the evaluator writes its authoritative
-structured result to exactly `scoring/results.json`. The evaluator must resolve
-its approved workspace-relative inputs itself. Any private evaluator inputs
-must already exist under `data/.test/` and be declared by
-`scoring/targets.json`; runtime validates and seals them but does not create
-scientific inputs on the rule maker's behalf. Verify that
-`scoring/interface.md` describes only prerequisites the experiment runner must
-produce; it must not assign `scoring/eval.py`, `scoring/targets.json`, another
-evaluator-owned file, or an evaluator result to that runner. If the plan,
-finish summary, or inspected artifacts use another authoritative result path,
-require runtime-supplied CLI arguments, or cross that ownership boundary,
-finalize `feedback` with a precise correction. Also reject any unresolved plan
-that delegates future evaluator-input creation to runtime or scorer execution.
-Runtime separately validates the evaluator source, declared inputs, and
-interface mechanically before sealing; do not infer source-level compliance
-without evidence.
+For this rule-maker review, judge the evaluator's semantic and scientific
+design from the public plan, finish summary, `scoring/interface.md`, and
+finalized HITL evidence. Assess whether the metrics and targets match the
+research objective, the documented evaluation split is scientifically
+defensible, the design avoids leakage and trivial gaming, and the requested
+experiment-runner artifacts are sufficient for the stated measurements.
+`scoring/interface.md` must describe only experiment-runner prerequisites and
+must not require, inspect, or score `paper/` or `paper_draft/`; those outputs
+belong to the later paper_writer stage.
+
+Runtime has already validated the hidden evaluator files, private-input
+declarations and existence, symlink and integrity constraints, evaluator ABI,
+result path, and interface structure before opening this manager review. Do not
+attempt to inspect `data/.test/`, infer hidden source contents, or re-decide
+those mechanical facts. If the public design or documented split is
+scientifically unsound or inconsistent, finalize `feedback` with a precise
+semantic correction.
 {% endif %}
 
 When ready, finalize this request with a result object following this contract.

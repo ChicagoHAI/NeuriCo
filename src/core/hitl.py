@@ -1459,6 +1459,14 @@ class HitlRuntime:
             return self.log.append(record)
 
     def submit_proposal_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            return self._submit_proposal_payload_locked(payload)
+        finally:
+            self._worker_request_lock.release()
+
+    def _submit_proposal_payload_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
             validator = self._tool_context.get("proposal_submission_validator")
             if callable(validator):
@@ -2180,11 +2188,22 @@ class HitlRuntime:
             "Runtime scoring repair response",
         )
         pending = self._pending_worker_command()
-        request_key = str((pending or {}).get("request_key", "")).strip()
-        if not request_key:
+        manager_request_key = str((pending or {}).get("request_key", "")).strip()
+        if not manager_request_key:
             raise HitlValidationError(
                 "Runtime scoring repair has no pending phase-finish request to resume."
             )
+        request_key = self._phase_finish_request_key_for(
+            hitl_stage=str((pending or {}).get("hitl_stage", "")).strip(),
+            plan_fingerprint=str((pending or {}).get("plan_fingerprint", "")).strip(),
+            workspace_fingerprint=str(
+                (pending or {}).get("workspace_fingerprint", "")
+            ).strip(),
+            summary=str((pending or {}).get("finish_summary", "")).strip(),
+            related_artifacts=_as_related_artifacts(
+                (pending or {}).get("related_artifacts")
+            ),
+        )
         prompt_block = self.compose_worker_prompt(
             hitl_stage="review",
             phase_prompt=self.review_prompt_block(feedback),
@@ -2403,15 +2422,24 @@ class HitlRuntime:
         try:
             handler(approval)
         except Exception as exc:
-            self.manager.resume_worker_request(
-                prompt=_load_hitl_template(
-                    "manager_runtime_scoring_failure.txt",
-                    error=str(exc),
-                ),
-                validate=self._validate_runtime_scoring_failure,
-                finalize=finalize_failure,
-                manager_review_kind="scoring_failure",
-            )
+            pending = self._pending_worker_command()
+            if isinstance(pending, dict) and pending.get("status") == "cancelled":
+                return
+            try:
+                self.manager.resume_worker_request(
+                    prompt=_load_hitl_template(
+                        "manager_runtime_scoring_failure.txt",
+                        error=str(exc),
+                    ),
+                    validate=self._validate_runtime_scoring_failure,
+                    finalize=finalize_failure,
+                    manager_review_kind="scoring_failure",
+                )
+            except Exception:
+                pending = self._pending_worker_command()
+                if isinstance(pending, dict) and pending.get("status") == "cancelled":
+                    return
+                raise
 
     def _finalize_resumed_scoring_failure(
         self,
@@ -2648,6 +2676,19 @@ class HitlRuntime:
 
     def _finish_tool_phase_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
+            pending = self._pending_worker_command()
+            if (
+                isinstance(pending, dict)
+                and pending.get("kind") == "phase_finish"
+                and pending.get("status") == "cancelled"
+            ):
+                from core.hitl_runtime_state import HitlRuntimeStateError
+
+                reason = str(pending.get("cancellation_reason", "")).strip()
+                raise HitlRuntimeStateError(
+                    "Runtime cancelled the held worker command while rolling back its failed attempt."
+                    + (f" {reason}" if reason else "")
+                )
             terminal_response = self._terminal_phase_finish_response()
             if terminal_response is not None:
                 return terminal_response
@@ -2852,6 +2893,11 @@ class HitlRuntime:
                 on_finalize=persist_phase_review,
                 on_scoring_approval=persist_scoring_approval,
             )
+            if (
+                self._phase_finish_request_key == request_key
+                and isinstance(self._phase_finish_response, dict)
+            ):
+                return dict(self._phase_finish_response)
             status = str(review.get("status", "")).strip()
             if status == "feedback":
                 logged = finalized.get("record")

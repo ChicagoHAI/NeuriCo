@@ -28,6 +28,8 @@ created under `data/.test/`; all other evaluator-owned outputs remain under
 `scoring/`.
 
 Rule-maker execution requirements:
+- these HITL private-input requirements supersede ordinary rule-maker guidance
+  that permits evaluator inputs to be created at scorer-execution time
 - create or update only the approved evaluation contract: `scoring/eval.py`,
   `scoring/targets.json`, `scoring/interface.md`, `scoring/rule_maker_log.md`,
   and any required evaluator-owned private input files under `data/.test/`

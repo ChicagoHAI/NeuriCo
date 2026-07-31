@@ -48,6 +48,7 @@ RULE_MAKER_OUTPUT_FILES = {
 _DISALLOWED_EVALUATOR_CLI_MODULES = {"argparse", "click", "docopt", "typer"}
 _EVALUATOR_RESULTS_PATH = f"scoring/{RESULTS_FILE_NAME}"
 _EVALUATOR_OWNED_INTERFACE_PREFIXES = ("scoring/", "data/.test/")
+_POST_RESEARCH_ARTIFACT_PREFIXES = ("paper/", "paper_draft/")
 _SEALED_INPUTS_FIELD = "sealed_inputs"
 
 
@@ -631,7 +632,6 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
     Checks:
       - scoring/eval.py exists and parses as valid Python
       - scoring/targets.json exists and parses as valid JSON
-      - targets.json declares every private evaluator input and each file exists
       - scoring/interface.md exists and is non-empty
       - scoring/rule_maker_log.md exists (informational; not required)
 
@@ -663,22 +663,18 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
     else:
         try:
             targets = json.loads(targets_path.read_text(encoding="utf-8"))
-            if not isinstance(targets, dict):
-                issues.append("scoring/targets.json must contain a JSON object.")
-            else:
-                target_issues = _validate_declared_sealed_inputs(work_dir, targets)
-                declared_result = (
-                    str(targets.get("result_file", "")).strip().replace("\\", "/")
+            declared_result = (
+                str(targets.get("result_file", "")).strip().replace("\\", "/")
+                if isinstance(targets, dict)
+                else ""
+            )
+            if declared_result and declared_result != _EVALUATOR_RESULTS_PATH:
+                issues.append(
+                    "scoring/targets.json declares a conflicting result_file; "
+                    f"the evaluator ABI requires `{_EVALUATOR_RESULTS_PATH}`."
                 )
-                if declared_result and declared_result != _EVALUATOR_RESULTS_PATH:
-                    target_issues.append(
-                        "scoring/targets.json declares a conflicting result_file; "
-                        f"the evaluator ABI requires `{_EVALUATOR_RESULTS_PATH}`."
-                    )
-                if target_issues:
-                    issues.extend(target_issues)
-                else:
-                    found["targets"] = str(targets_path)
+            else:
+                found["targets"] = str(targets_path)
         except json.JSONDecodeError as e:
             issues.append(f"targets.json is not valid JSON: {e}")
 
@@ -699,13 +695,26 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
                 for artifact in artifacts
                 if artifact.path.startswith(_EVALUATOR_OWNED_INTERFACE_PREFIXES)
             ]
+            post_research = [
+                artifact.path
+                for artifact in artifacts
+                if artifact.path.startswith(_POST_RESEARCH_ARTIFACT_PREFIXES)
+            ]
             if evaluator_owned:
                 issues.append(
                     "scoring/interface.md assigns evaluator-owned paths to the "
                     "experiment runner: "
                     + ", ".join(evaluator_owned)
                 )
-            else:
+            if post_research:
+                issues.append(
+                    "scoring/interface.md assigns post-research paper outputs to "
+                    "the experiment runner: "
+                    + ", ".join(post_research)
+                    + ". Paper artifacts belong to the later paper_writer stage "
+                    "and cannot be scoring inputs."
+                )
+            if not evaluator_owned and not post_research:
                 found["interface"] = str(interface_path)
         except (OSError, HitlValidationError) as exc:
             issues.append(f"invalid artifact contract in {interface_path}: {exc}")
@@ -719,6 +728,29 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
         "found": found,
         "issues": issues,
     }
+
+
+def validate_hitl_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
+    """Apply the HITL-only private evaluator input contract."""
+    validation = validate_rule_maker_outputs(work_dir)
+    found = dict(validation["found"])
+    issues = list(validation["issues"])
+    targets_path = Path(work_dir) / "scoring" / RULE_MAKER_OUTPUT_FILES["targets"]
+
+    try:
+        targets = json.loads(targets_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"valid": False, "found": found, "issues": issues}
+
+    target_issues = (
+        ["scoring/targets.json must contain a JSON object."]
+        if not isinstance(targets, dict)
+        else _validate_declared_sealed_inputs(Path(work_dir), targets)
+    )
+    issues.extend(target_issues)
+    if target_issues:
+        found.pop("targets", None)
+    return {"valid": len(issues) == 0, "found": found, "issues": issues}
 
 
 def load_interface_for_runner(work_dir: Path) -> str:

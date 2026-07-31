@@ -287,14 +287,6 @@ class HitlManager:
         self.max_backend_retries = max(
             1, int(config.get("manager", {}).get("hitl_manager_backend_retries", 3))
         )
-        self.backend_timeout_seconds = max(
-            0.01,
-            float(
-                config.get("manager", {}).get(
-                    "hitl_manager_backend_timeout_seconds", 120.0
-                )
-            ),
-        )
         self.backend_retry_delay_seconds = max(
             0.1,
             float(config.get("manager", {}).get("hitl_manager_retry_delay_seconds", 1.0)),
@@ -437,6 +429,17 @@ class HitlManager:
                 return name
         return ""
 
+    @staticmethod
+    def _scoring_handoff_instruction(tools: List[Dict[str, Any]]) -> str:
+        names = {str(tool.get("name", "")).strip() for tool in tools}
+        if {"approve_for_scoring", "finalize_worker_request"} <= names:
+            return (
+                "If the completed work is acceptable, call `approve_for_scoring`; "
+                "if revision is required, call `finalize_worker_request` with a "
+                "`feedback` result."
+            )
+        return ""
+
     @classmethod
     def _runtime_tool_boundary_instruction(cls, tools: List[Dict[str, Any]]) -> str:
         """Describe the exact runtime-authorized MCP surface for one turn."""
@@ -450,8 +453,16 @@ class HitlManager:
             "Do not claim that a listed tool is unavailable, and do not call tools "
             "outside this list.",
         ]
-        completion_name = cls._runtime_completion_tool_name(tools)
-        if completion_name:
+        scoring_handoff = cls._scoring_handoff_instruction(tools)
+        if scoring_handoff:
+            lines.append(
+                "The current runtime-held action remains unresolved. "
+                f"{scoring_handoff} Direct assistant text does not advance the action."
+            )
+        else:
+            completion_name = cls._runtime_completion_tool_name(tools)
+            if not completion_name:
+                return "\n".join(lines)
             lines.append(
                 "The current runtime-held action remains unresolved until "
                 f"`{completion_name}` succeeds. Direct assistant text does not "
@@ -462,6 +473,12 @@ class HitlManager:
     def _unresolved_request_reminder(self) -> str:
         """Return a boundary-specific reminder for a text-only manager turn."""
         tools = self._tools_for_current_runtime_boundary()
+        scoring_handoff = self._scoring_handoff_instruction(tools)
+        if scoring_handoff:
+            return (
+                "The worker request remains unresolved. "
+                f"{scoring_handoff} Direct assistant text cannot advance it."
+            )
         completion_name = self._runtime_completion_tool_name(tools)
         if completion_name:
             return (
@@ -646,6 +663,14 @@ class HitlManager:
                     f"Error: {tool_name} is unavailable for the current worker request. "
                     f"Use {expected}."
                 )
+            scoring_handoff = self._scoring_handoff_instruction(
+                self._tools_for_current_runtime_boundary()
+            )
+            if scoring_handoff:
+                return (
+                    f"Error: {tool_name} is unavailable for the current worker request. "
+                    f"{scoring_handoff}"
+                )
             return (
                 f"Error: {tool_name} is unavailable for the current worker request. "
                 "Use finalize_worker_request, or ask_human if human intent is required."
@@ -697,6 +722,9 @@ class HitlManager:
     def stop(self) -> None:
         self._stop.set()
         self._turns.put(_Turn("runtime", ""))
+        cancel_active = getattr(self.backend, "cancel_active", None)
+        if callable(cancel_active):
+            cancel_active()
         if self._thread is not None:
             self._thread.join(timeout=1)
         self._stop_cli_mcp_bridge()
@@ -1269,6 +1297,12 @@ class HitlManager:
         request_key = str(pending.get("request_key", "")).strip()
         if not request_key:
             raise HitlRuntimeStateError("Pending worker command is missing request_key.")
+        if pending.get("status") == "cancelled":
+            reason = str(pending.get("cancellation_reason", "")).strip()
+            raise HitlRuntimeStateError(
+                "Runtime cancelled the held worker command while rolling back its failed attempt."
+                + (f" {reason}" if reason else "")
+            )
         manager_finalizer = str(manager_finalizer).strip()
         if manager_finalizer not in self._REQUEST_FINALIZER_TOOL_NAMES:
             raise HitlRuntimeStateError(
@@ -1992,18 +2026,17 @@ class HitlManager:
                 return self._send_once(messages, tools, backend=backend)
             except Exception as exc:
                 last = exc
+                if self._stop.is_set():
+                    raise RuntimeError("HITL manager stopped during its provider turn.") from exc
                 if attempt + 1 < self.max_backend_retries:
-                    threading.Event().wait(self.backend_retry_delay_seconds)
+                    if self._stop.wait(self.backend_retry_delay_seconds):
+                        raise RuntimeError(
+                            "HITL manager stopped during its provider turn."
+                        ) from exc
         raise RuntimeError("Manager backend was unavailable") from last
 
     def _send_once(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None) -> Any:
-        """Run one bounded manager provider turn.
-
-        ``LLMBackend`` receives the deadline directly and cancels its own CLI
-        process group or HTTP request. The short daemon wrapper remains only
-        for injected third-party/test backends that do not implement this
-        adapter contract.
-        """
+        """Run one manager provider turn without a wall-clock deadline."""
         result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
 
         parameters: Dict[str, inspect.Parameter] = {}
@@ -2033,7 +2066,7 @@ class HitlManager:
             try:
                 if supports_adapter_contract:
                     kwargs: Dict[str, Any] = {
-                        "timeout_seconds": self.backend_timeout_seconds,
+                        "timeout_seconds": None,
                         "disable_native_tools": True,
                     }
                     if (
@@ -2060,13 +2093,7 @@ class HitlManager:
 
         thread = threading.Thread(target=call_backend, daemon=True)
         thread.start()
-        try:
-            succeeded, value = result.get(timeout=self.backend_timeout_seconds)
-        except queue.Empty as exc:
-            raise TimeoutError(
-                "HITL manager backend call timed out after "
-                f"{self.backend_timeout_seconds:g} seconds"
-            ) from exc
+        succeeded, value = result.get()
         if not succeeded:
             raise value
         return value
