@@ -100,13 +100,24 @@ python .claude/skills/modal-vllm/scripts/new_modal_app.py vllm-serve \
     --out src/modal_serve.py
 ```
 
+`--lora-repo` takes a HuggingFace Hub repo id. If the adapter was trained
+via `modal-training`, push `artifacts/final/` to HF Hub first (e.g.
+`huggingface-cli upload <user>/<repo> artifacts/final`) and pass that repo
+here. vLLM hot-loads adapters at startup; there's no Modal-side handoff
+between the training and serving skills.
+
 ### 2. Deploy it
 
 ```bash
 modal deploy --env=neurico-<EXP_ID> src/modal_serve.py
 ```
 
-Modal prints a URL. The scaffolder template writes it (plus proxy-auth tokens minted via Modal CLI) into `.neurico/modal_endpoint.json` so experiment code can read it.
+Modal prints a URL. Then mint a proxy-auth token pair from the Modal dashboard (Settings → Proxy Auth Tokens → Create) and pass it to the generated script's `capture-endpoint` subcommand — the template writes the URL + tokens into `.neurico/modal_endpoint.json` so experiment code can read them:
+
+```bash
+MODAL_KEY=wk-... MODAL_SECRET=ws-... \
+    python src/modal_serve.py capture-endpoint
+```
 
 ### 3. Use it in experiment code
 

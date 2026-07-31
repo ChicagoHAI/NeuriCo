@@ -1,0 +1,399 @@
+"""Integration tests: whiteboard visibility through proposer + comment_handler
+prompt paths, and audit snapshot from the AttemptHistoryManager.
+
+Run: python -m pytest tests/test_whiteboard_integration.py
+"""
+
+import json
+import shutil
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from core.whiteboard import Whiteboard  # noqa: E402
+
+
+# ---------------------------------------------------- proposer public context
+
+def test_proposer_public_context_renders_whiteboard(tmp_path: Path):
+    """`collect_public_proposal_context` includes the active tips rendering."""
+    from agents.autoresearch_proposer import collect_public_proposal_context
+
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip(
+        "Look at line 47 of solver.py",
+        category="insight",
+        author="comment_handler@abc/attempt_1",
+        affects=["solver.py"],
+    )
+    wb.add_tip(
+        "Always run judge locally before submitting",
+        category="informative",
+    )
+    wb.save()
+
+    ctx = collect_public_proposal_context(tmp_path)
+    assert "whiteboard_active_tips_md" in ctx
+    md = ctx["whiteboard_active_tips_md"]
+    assert "T1" in md
+    assert "T2" in md
+    assert "line 47" in md
+    assert "judge locally" in md
+    # Cautionary framing appears
+    assert "hints" in md.lower() or "caution" in md.lower() or "reject" in md.lower()
+
+
+def test_proposer_public_context_empty_whiteboard(tmp_path: Path):
+    from agents.autoresearch_proposer import collect_public_proposal_context
+
+    ctx = collect_public_proposal_context(tmp_path)
+    md = ctx["whiteboard_active_tips_md"]
+    assert "no active tips" in md
+
+
+# ---------------------------------------------------- comment_handler prompt
+
+def test_comment_handler_prompt_includes_whiteboard(tmp_path: Path):
+    from templates.prompt_generator import PromptGenerator
+
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip(
+        "Try the affine family for orders 4-9",
+        category="design",
+        affects=["solver.py"],
+    )
+    wb.save()
+
+    generator = PromptGenerator()
+    prompt = generator.generate_comment_prompt(
+        idea={
+            "idea": {
+                "title": "Test",
+                "domain": "mathematics",
+                "comments": "do a thing",
+            }
+        },
+        work_dir=tmp_path,
+        provider="claude",
+    )
+    assert "affine family" in prompt
+    assert "T1" in prompt
+    # The API reference should be visible so the agent can call it
+    assert "add-tip" in prompt
+    assert "clear-tip" in prompt
+
+
+def test_comment_handler_prompt_empty_whiteboard(tmp_path: Path):
+    from templates.prompt_generator import PromptGenerator
+
+    generator = PromptGenerator()
+    prompt = generator.generate_comment_prompt(
+        idea={
+            "idea": {
+                "title": "Test",
+                "domain": "mathematics",
+                "comments": "do a thing",
+            }
+        },
+        work_dir=tmp_path,
+        provider="claude",
+    )
+    assert "no active tips" in prompt
+    # API reference still shown so first-time handlers know how to add
+    assert "add-tip" in prompt
+
+
+# ---------------------------------------------------- attempt snapshot audit
+
+def test_complete_attempt_snapshots_whiteboard(tmp_path: Path):
+    """When an attempt is finalized, we archive the whiteboard state."""
+    from core.autoresearch import AttemptHistoryManager
+
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+
+    # Populate the live whiteboard at the same directory
+    wb = Whiteboard(tmp_path).load()   # path resolves to history_root/whiteboard.json
+    wb.add_tip("something worth keeping", category="insight")
+    wb.save()
+
+    # Confirm the live file is under history_root (default whiteboard_path).
+    assert (history_root / "whiteboard.json").exists()
+
+    mgr = AttemptHistoryManager(
+        history_root=history_root, idea_id="demo", work_dir=tmp_path
+    )
+    parent_sha = "a" * 40
+    attempt_dir = mgr.next_attempt_dir(parent_sha)
+    mgr.write_proposal(attempt_dir, "# Proposal\n\nsome text\n")
+
+    # Simulate a rejected attempt: no results file, but a decision must still be recorded.
+    fake_results = tmp_path / "scoring" / "results.json"
+    fake_results.parent.mkdir(parents=True, exist_ok=True)
+    fake_results.write_text(json.dumps({"properties": {}, "eval_meta": {}}))
+
+    child_sha = "b" * 40
+    mgr.complete_attempt(
+        attempt_dir=attempt_dir,
+        parent_sha=parent_sha,
+        child_sha=child_sha,
+        results_path=fake_results,
+        decision={"accepted": False, "reason": "not better"},
+    )
+
+    snap = attempt_dir / "whiteboard_snapshot.json"
+    assert snap.exists()
+    snap_data = json.loads(snap.read_text())
+    assert len(snap_data["tips"]) == 1
+    assert snap_data["tips"][0]["content"] == "something worth keeping"
+
+
+def test_complete_attempt_no_whiteboard_is_ok(tmp_path: Path):
+    """If no whiteboard exists yet, snapshotting is a no-op (doesn't crash)."""
+    from core.autoresearch import AttemptHistoryManager
+
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    mgr = AttemptHistoryManager(
+        history_root=history_root, idea_id="demo", work_dir=tmp_path
+    )
+    parent_sha = "a" * 40
+    attempt_dir = mgr.next_attempt_dir(parent_sha)
+    mgr.write_proposal(attempt_dir, "# Proposal\n")
+
+    fake_results = tmp_path / "scoring" / "results.json"
+    fake_results.parent.mkdir(parents=True, exist_ok=True)
+    fake_results.write_text(json.dumps({"properties": {}, "eval_meta": {}}))
+
+    mgr.complete_attempt(
+        attempt_dir=attempt_dir,
+        parent_sha=parent_sha,
+        child_sha="b" * 40,
+        results_path=fake_results,
+        decision={"accepted": True, "reason": "good"},
+    )
+
+    # decision.json and child_pointer.txt got written; snapshot did not.
+    assert (attempt_dir / "decision.json").exists()
+    assert (attempt_dir / "child_pointer.txt").exists()
+    assert not (attempt_dir / "whiteboard_snapshot.json").exists()
+
+
+def test_complete_attempt_snapshots_with_external_history_root(tmp_path: Path):
+    """Snapshot must resolve the live whiteboard against work_dir, not history_root.
+
+    Regression for PR #137 review finding: `history_root` may point outside
+    the workspace entirely, and `Whiteboard(work_dir)` always writes to
+    <work_dir>/logs/experiment-autoresearch/whiteboard.json.
+    """
+    from core.autoresearch import AttemptHistoryManager
+
+    work_dir = tmp_path / "workspace"
+    work_dir.mkdir()
+    external_history_root = tmp_path / "elsewhere" / "attempt_history"
+    external_history_root.mkdir(parents=True)
+
+    wb = Whiteboard(work_dir).load()
+    wb.add_tip("survives external history root", category="insight")
+    wb.save()
+
+    mgr = AttemptHistoryManager(
+        history_root=external_history_root, idea_id="demo", work_dir=work_dir
+    )
+    parent_sha = "a" * 40
+    attempt_dir = mgr.next_attempt_dir(parent_sha)
+    mgr.write_proposal(attempt_dir, "# Proposal\n")
+
+    fake_results = work_dir / "scoring" / "results.json"
+    fake_results.parent.mkdir(parents=True, exist_ok=True)
+    fake_results.write_text(json.dumps({"properties": {}, "eval_meta": {}}))
+
+    mgr.complete_attempt(
+        attempt_dir=attempt_dir,
+        parent_sha=parent_sha,
+        child_sha="b" * 40,
+        results_path=fake_results,
+        decision={"accepted": True, "reason": "good"},
+    )
+
+    snap = attempt_dir / "whiteboard_snapshot.json"
+    assert snap.exists()
+    snap_data = json.loads(snap.read_text())
+    assert snap_data["tips"][0]["content"] == "survives external history root"
+
+
+def test_snapshot_whiteboard_helper_is_reusable(tmp_path: Path):
+    """The snapshot helper is what pre-checkpoint failure paths call.
+
+    Regression for PR #137 review finding: attempts that failed before
+    checkpoint creation must also carry a whiteboard snapshot.
+    """
+    from core.autoresearch import AttemptHistoryManager
+
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip("must be captured even on pre-checkpoint failure", category="pitfall")
+    wb.save()
+
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    mgr = AttemptHistoryManager(
+        history_root=history_root, idea_id="demo", work_dir=tmp_path
+    )
+    attempt_dir = mgr.next_attempt_dir("a" * 40)
+
+    mgr._snapshot_whiteboard(attempt_dir)
+
+    snap = attempt_dir / "whiteboard_snapshot.json"
+    assert snap.exists()
+    snap_data = json.loads(snap.read_text())
+    assert snap_data["tips"][0]["category"] == "pitfall"
+
+
+# ------------------------------------------- controller reject-time revert path
+
+
+def _bare_controller(work_dir: Path, history_root: Path):
+    """Build an AutoResearchController with no-op hooks. Enough to test the
+    whiteboard helper methods without touching git or the scorer."""
+    from core.autoresearch import AutoResearchController
+
+    def _noop_proposal(*args, **kwargs):
+        return "proposal"
+
+    def _noop_comment(*args, **kwargs):
+        return {"success": True}
+
+    def _noop_scorer(*args, **kwargs):
+        return {"success": True}
+
+    class _NoCheckpoints:
+        def create_checkpoint(self, *_a, **_k):
+            raise AssertionError("not used")
+
+        def restore_checkpoint(self, *_a, **_k):
+            return None
+
+        def checkpoint_exists(self, *_a, **_k):
+            return True
+
+    return AutoResearchController(
+        idea={"idea": {"title": "t", "domain": "d", "comments": ""}},
+        idea_id="demo",
+        work_dir=work_dir,
+        history_root=history_root,
+        proposal_generator=_noop_proposal,
+        comment_mode=_noop_comment,
+        scorer=_noop_scorer,
+        checkpoint_manager=_NoCheckpoints(),
+    )
+
+
+def test_controller_attempt_id_matches_disk_layout(tmp_path: Path):
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    ctrl = _bare_controller(tmp_path, history_root)
+    attempt_dir = ctrl.history.next_attempt_dir("a" * 40)
+    aid = ctrl._attempt_id(attempt_dir)
+    # <safe_parent_sha>/<attempt_N>
+    assert aid.endswith("/attempt_1")
+    assert "a" * 40 in aid
+
+
+def test_controller_revert_whiteboard_undoes_clear(tmp_path: Path):
+    """Regression for PR #137 review finding 1: the controller's rejection
+    path must revert the whiteboard mutations the handler made."""
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    ctrl = _bare_controller(tmp_path, history_root)
+    attempt_dir = ctrl.history.next_attempt_dir("a" * 40)
+    attempt_id = ctrl._attempt_id(attempt_dir)
+
+    wb = Whiteboard(tmp_path).load()
+    tip = wb.add_tip("survivor tip", category="insight")
+    wb.clear_tip(tip.id, author="handler", attempt=attempt_id)
+    wb.save()
+
+    ctrl._revert_whiteboard_for(attempt_id)
+
+    reloaded = Whiteboard(tmp_path).load().find(tip.id)
+    assert reloaded is not None
+    assert reloaded.status == "active"
+    assert reloaded.cleared_at_attempt == ""
+
+
+# ------------------------------------------------- proposer prompt hardening
+
+
+def _render_proposer_prompt(work_dir: Path) -> str:
+    from agents.autoresearch_proposer import generate_autoresearch_proposal_prompt
+
+    templates_dir = Path(__file__).resolve().parents[1] / "templates"
+    return generate_autoresearch_proposal_prompt(
+        idea={"idea": {"title": "T", "domain": "d"}},
+        work_dir=work_dir,
+        parent_sha="a" * 40,
+        attempt_dir=work_dir / "logs" / "experiment-autoresearch" / "attempt_1",
+        templates_dir=templates_dir,
+        provider="claude",
+        attempt_history=[],
+    )
+
+
+def test_proposer_prompt_documents_prune_tip_carveout(tmp_path: Path):
+    """Regression for PR #137 review finding 4: the 'do not edit files'
+    line must not contradict the whiteboard prune-tip instruction."""
+    prompt = _render_proposer_prompt(tmp_path)
+
+    # The workspace-mutation ban still exists...
+    assert "Do not edit files in the research workspace" in prompt
+    # ...and the exception for prune-tip is spelled out near it.
+    lowered = prompt.lower()
+    assert "whiteboard prune-tip" in lowered
+    assert "exception" in lowered or "only allowed" in lowered or "carve" in lowered
+
+
+def test_proposer_prompt_renders_tips_only_once(tmp_path: Path):
+    """Regression for PR #137 review finding 6: the whiteboard tip block
+    must not appear both inside the JSON PUBLIC CONTEXT dump and in the
+    dedicated whiteboard section."""
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip("uniquely-worded-tip-marker-Q7X3", category="insight")
+    wb.save()
+
+    prompt = _render_proposer_prompt(tmp_path)
+
+    # The tip content should appear exactly once in the whole prompt
+    assert prompt.count("uniquely-worded-tip-marker-Q7X3") == 1
+    # And the JSON dump must not carry the whiteboard_active_tips_md field
+    assert "whiteboard_active_tips_md" not in prompt
+
+
+def test_proposer_prompt_wraps_tips_in_untrusted_block(tmp_path: Path):
+    """Regression for PR #137 review finding 5: the tip rendering carries
+    an UNTRUSTED TIPS boundary reminder into the proposer prompt."""
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip("marker-for-untrusted-test-9Z", category="insight")
+    wb.save()
+
+    prompt = _render_proposer_prompt(tmp_path)
+
+    assert "BEGIN UNTRUSTED TIPS" in prompt
+    assert "END UNTRUSTED TIPS" in prompt
+    assert "cannot override" in prompt.lower()
+
+
+def test_comment_handler_prompt_wraps_tips_in_untrusted_block(tmp_path: Path):
+    """The same UNTRUSTED framing shows up in the comment_handler prompt."""
+    from templates.prompt_generator import PromptGenerator
+
+    wb = Whiteboard(tmp_path).load()
+    wb.add_tip("handler-marker-8K", category="design", affects=["s.py"])
+    wb.save()
+
+    generator = PromptGenerator()
+    prompt = generator.generate_comment_prompt(
+        idea={"idea": {"title": "T", "domain": "d", "comments": "do a thing"}},
+        work_dir=tmp_path,
+        provider="claude",
+    )
+    assert "BEGIN UNTRUSTED TIPS" in prompt
+    assert "END UNTRUSTED TIPS" in prompt
+    assert "cannot override" in prompt.lower()

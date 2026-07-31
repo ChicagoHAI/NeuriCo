@@ -23,25 +23,28 @@ Routes:
 
 from __future__ import annotations
 
+import html
 import json
 import mimetypes
 import re
 import threading
-import time
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlsplit
 
 from interactive.channel import WebChannel
 from interactive import agent_log
-
 
 # ---------------------------------------------------------------------------
 # Agent-log tailer
 # ---------------------------------------------------------------------------
 
-def _tail_agent_logs(log_dir: Path, channel: WebChannel,
-                     project_root: Path, stop: threading.Event) -> None:
+
+def _tail_agent_logs(
+    log_dir: Path, channel: WebChannel, project_root: Path, stop: threading.Event
+) -> None:
     """Incrementally tail the workspace transcripts and emit formatted entries
     into the channel as `agentlog` events."""
     offsets: dict = {}
@@ -74,8 +77,7 @@ def _tail_agent_logs(log_dir: Path, channel: WebChannel,
                             obj = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        entry = {"ts": obj.get("timestamp", ""),
-                                 "source": source_name, "raw": obj}
+                        entry = {"ts": obj.get("timestamp", ""), "source": source_name, "raw": obj}
                         if entry["ts"]:
                             last_ts = entry["ts"]
                         # Defensive: a single malformed entry must not kill the
@@ -187,8 +189,12 @@ def _compute_dashboard(workspace: Path, project_root: Path) -> dict:
     #   - a running agent → its phase (most real-time);
     #   - else the most recent agent's phase — unless the manager has set a
     #     meaningful terminal state, which we keep.
-    _AGENT_PHASE = {"resource_finder": "exploring", "experiment_runner": "experimenting",
-                    "paper_writer": "writing", "comment_handler": "revising"}
+    _AGENT_PHASE = {
+        "resource_finder": "exploring",
+        "experiment_runner": "experimenting",
+        "paper_writer": "writing",
+        "comment_handler": "revising",
+    }
     _TERMINAL = {"complete", "completed", "done", "finished", "blocked", "failed"}
     if running_agents:
         phase = _AGENT_PHASE.get(running_agents[-1], phase) or phase
@@ -197,8 +203,9 @@ def _compute_dashboard(workspace: Path, project_root: Path) -> dict:
 
     cost = _sum_cost(workspace / "logs", project_root)
     papers = _count_files(workspace / "papers", workspace / "paper_search_results")
-    files = _count_files(workspace / "code", workspace / "figures",
-                         workspace / "results", workspace / "paper_draft")
+    files = _count_files(
+        workspace / "code", workspace / "figures", workspace / "results", workspace / "paper_draft"
+    )
     if (workspace / "REPORT.md").exists():
         files += 1
 
@@ -214,8 +221,9 @@ def _compute_dashboard(workspace: Path, project_root: Path) -> dict:
     }
 
 
-def _emit_dashboard(workspace: Path, project_root: Path, channel: WebChannel,
-                    stop: threading.Event) -> None:
+def _emit_dashboard(
+    workspace: Path, project_root: Path, channel: WebChannel, stop: threading.Event
+) -> None:
     """Periodically push a `dashboard` event, but only when something changed
     (keeps the SSE history small for reconnects)."""
     last = None
@@ -225,22 +233,29 @@ def _emit_dashboard(workspace: Path, project_root: Path, channel: WebChannel,
         except Exception:
             d = None
         if d is not None:
-            sig = (d["phase"], d["cost"], d["agents_done"], d["agents_running"],
-                   d["papers"], d["files"], d["started"])
+            sig = (
+                d["phase"],
+                d["cost"],
+                d["agents_done"],
+                d["agents_running"],
+                d["papers"],
+                d["files"],
+                d["started"],
+            )
             if sig != last:
                 last = sig
                 channel.emit_raw(d)
         stop.wait(3.0)
 
 
-def _emit_research_state(workspace: Path, channel: WebChannel,
-                         stop: threading.Event) -> None:
+def _emit_research_state(workspace: Path, channel: WebChannel, stop: threading.Event) -> None:
     """Push the manager's world model (the `research` event) to the browser when
     it changes. The manager writes research_state.json via update_research_state
     / assess; we poll it and fan a snapshot out to the Research whiteboard. Polled
     (not in-process) so it works identically for fresh and resumed sessions and
     stays decoupled from the manager loop."""
     from interactive.research_state import ResearchState
+
     state_file = workspace / ".neurico" / "research_state.json"
     last_stamp = None
     while not stop.is_set():
@@ -415,6 +430,8 @@ PAGE = r"""<!DOCTYPE html>
   #msg:focus{outline:none;border-color:#58a6ff}
   #send{background:#238636;color:#fff;border:none;border-radius:8px;padding:9px 18px;font-size:14px;font-weight:600;cursor:pointer}
   #send:hover{background:#2ea043}
+  #replyrequest{background:#9e6a03;color:#fff;border:1px solid #d29922;border-radius:8px;padding:9px 12px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
+  #replyrequest:hover{background:#bb8009}
 </style>
 </head>
 <body>
@@ -444,6 +461,7 @@ PAGE = r"""<!DOCTYPE html>
         <div id="options"></div>
         <div id="inputrow">
           <textarea id="msg" rows="1" placeholder="Type a message to the manager… (Enter to send, Shift+Enter for newline)"></textarea>
+          <button id="replyrequest" hidden>Reply to request</button>
           <button id="send">Send</button>
         </div>
       </div>
@@ -473,8 +491,9 @@ PAGE = r"""<!DOCTYPE html>
   const composer=document.getElementById('composer');
   const msg=document.getElementById('msg');
   const send=document.getElementById('send');
+  const replyRequest=document.getElementById('replyrequest');
 
-  let awaitingReply=false;   // true only while the manager is actively asking
+  let resolutionReplyPending=false;
 
   function atBottom(el){return el.scrollHeight-el.scrollTop-el.clientHeight<80;}
 
@@ -602,12 +621,13 @@ PAGE = r"""<!DOCTYPE html>
     if(!Array.isArray(opts)) opts=opts?[opts]:[];
     opts.forEach(o=>{
       const b=document.createElement('button');
-      b.className='opt'; b.textContent=o; b.onclick=()=>submit(o);
+      b.className='opt'; b.textContent=o; b.onclick=()=>submit(o,'resolution_reply');
       optionsEl.appendChild(b);
     });
   }
 
   // --- dashboard ---
+  let resolutionRequestKey=null;
   let startedMs=null;
   function fmtElapsed(){
     if(!startedMs) return;
@@ -632,9 +652,9 @@ PAGE = r"""<!DOCTYPE html>
 
   function setStatus(d){
     if(d.phase) document.getElementById('s-phase').textContent=d.phase;
-    if(d.closed){connEl.textContent='Session ended';hint.textContent='';awaitingReply=false;composer.classList.remove('awaiting');setThinking(false);return;}
+    if(d.closed){connEl.textContent='Session ended';hint.textContent='';resolutionReplyPending=false;replyRequest.hidden=true;composer.classList.remove('awaiting');setThinking(false);return;}
     if(d.thinking){hint.textContent='🤔 Manager is thinking…';connEl.textContent='working';setThinking(true);}
-    if(d.waiting===false){awaitingReply=false;composer.classList.remove('awaiting');}
+    if(d.waiting===false){resolutionReplyPending=false;replyRequest.hidden=true;composer.classList.remove('awaiting');}
     if(d.label){connEl.textContent=d.label;}
   }
 
@@ -778,36 +798,53 @@ PAGE = r"""<!DOCTYPE html>
   es.addEventListener('research',e=>setResearch(JSON.parse(e.data)));
   es.addEventListener('prompt',e=>{
     const d=JSON.parse(e.data);
-    setThinking(false);   // the manager finished thinking and is now asking
+    setThinking(false);
     renderOptions(d.options);
-    awaitingReply=true;
+    resolutionReplyPending=true;
+    resolutionRequestKey=d.request_key || null;
+    replyRequest.hidden=false;
     composer.classList.add('awaiting');
-    hint.textContent='⏳ Your turn — the manager is waiting for your reply';
-    connEl.textContent='waiting for you';
+    hint.textContent='A worker request needs a reply. You can still send ordinary messages to the manager.';
+    connEl.textContent='resolution reply needed';
     msg.focus();
+  });
+  es.addEventListener('resolution_cleared',()=>{
+    resolutionReplyPending=false;
+    resolutionRequestKey=null;
+    replyRequest.hidden=true;
+    composer.classList.remove('awaiting');
+    optionsEl.innerHTML='';
+    hint.textContent='The previous worker request was cancelled during recovery.';
+    connEl.textContent='connected';
   });
   es.addEventListener('status',e=>setStatus(JSON.parse(e.data)));
   es.onerror=()=>{connEl.textContent='connection lost – reload to retry';};
 
-  function submit(text){
+  function submit(text,input_kind='conversation'){
     text=(text||'').trim();
     if(!text) return;
-    const wasAwaiting=awaitingReply;
-    fetch('/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
-    if(!wasAwaiting){
-      // Typed while the manager isn't actively asking: it's queued, not lost.
+    const request=fetch('/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,input_kind,request_key:input_kind==='resolution_reply'?resolutionRequestKey:null})});
+    if(input_kind==='conversation'){
       hint.textContent='✓ Message queued — the manager will see it at its next checkpoint.';
     }else{
-      // Answered a question: the manager is about to think — show it immediately
-      // so the wait never looks like the session died.
-      hint.textContent='';
-      setThinking(true);
+      request.then(response=>{
+        if(!response.ok) throw new Error('runtime rejected the reply');
+        hint.textContent='Resolution reply received — the manager will continue the review.';
+        setThinking(true);
+        resolutionReplyPending=false;
+        resolutionRequestKey=null;
+        replyRequest.hidden=true;
+        composer.classList.remove('awaiting');
+        optionsEl.innerHTML='';
+      }).catch(()=>{
+        hint.textContent='Could not send the resolution reply. It is still active; retry.';
+        connEl.textContent='resolution reply failed';
+      });
     }
-    awaitingReply=false;
-    composer.classList.remove('awaiting');
-    msg.value=''; optionsEl.innerHTML=''; autosize();
+    msg.value=''; autosize();
   }
   send.onclick=()=>submit(msg.value);
+  replyRequest.onclick=()=>{if(resolutionReplyPending) submit(msg.value,'resolution_reply');};
   msg.addEventListener('keydown',e=>{
     if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit(msg.value);}
   });
@@ -841,26 +878,88 @@ def _brand_file(project_root: Path, key: str) -> Optional[Path]:
     return None
 
 
-def _make_handler(channel: WebChannel, workspace_name: str, title: str,
-                  project_root: Path):
-    page = PAGE.replace("{{WORKSPACE}}", workspace_name).replace("{{TITLE}}", title)
+def _make_handler(
+    channel: WebChannel,
+    workspace_name: str,
+    title: str,
+    project_root: Path,
+    *,
+    access_token: Optional[str] = None,
+):
+    page = PAGE.replace("{{WORKSPACE}}", html.escape(workspace_name)).replace(
+        "{{TITLE}}", html.escape(title)
+    )
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
+        def _has_access(self) -> bool:
+            if access_token is None:
+                return True
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+            except (KeyError, ValueError):
+                return False
+            value = cookie.get("neurico_hitl_session")
+            return value is not None and value.value == access_token
+
+        def _bootstrap_access(self) -> bool:
+            if access_token is None:
+                return False
+            parsed = urlsplit(self.path)
+            token = (parse_qs(parsed.query).get("token") or [""])[0]
+            if token != access_token:
+                return False
+            self.send_response(302)
+            self.send_header("Location", parsed.path or "/")
+            self.send_header(
+                "Set-Cookie",
+                f"neurico_hitl_session={access_token}; HttpOnly; SameSite=Strict; Path=/",
+            )
+            self.end_headers()
+            return True
+
+        def _deny_access(self) -> None:
+            body = b"HITL manager access denied."
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _same_origin_post(self) -> bool:
+            if access_token is None:
+                return True
+            origin = self.headers.get("Origin")
+            host = self.headers.get("Host", "")
+            return bool(origin and host and origin == f"http://{host}")
+
         def do_GET(self):
-            if self.path == "/":
+            if self._bootstrap_access():
+                return
+            if not self._has_access():
+                self._deny_access()
+                return
+            path = urlsplit(self.path).path
+            if path == "/":
                 body = page.encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+                    "connect-src 'self'; img-src 'self' data:; "
+                    "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
+                )
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
 
-            elif self.path.startswith("/brand/"):
+            elif path.startswith("/brand/"):
                 # Optional branding image; 404 (handled gracefully by the page) if absent.
-                f = _brand_file(project_root, self.path[len("/brand/"):])
+                f = _brand_file(project_root, path[len("/brand/") :])
                 if f is None:
                     self.send_response(404)
                     self.end_headers()
@@ -880,7 +979,7 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str,
                 self.end_headers()
                 self.wfile.write(data)
 
-            elif self.path == "/stream":
+            elif path == "/stream":
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
@@ -911,16 +1010,31 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str,
                 self.end_headers()
 
         def do_POST(self):
-            if self.path == "/input":
-                length = int(self.headers.get("Content-Length", 0))
+            if not self._has_access() or not self._same_origin_post():
+                self._deny_access()
+                return
+            if urlsplit(self.path).path == "/input":
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                except ValueError:
+                    length = 0
+                if length < 0 or length > 1_000_000:
+                    self.send_response(413)
+                    self.end_headers()
+                    return
                 raw = self.rfile.read(length) if length else b""
                 text = ""
                 try:
-                    text = json.loads(raw.decode("utf-8")).get("text", "")
+                    payload = json.loads(raw.decode("utf-8"))
+                    text = payload.get("text", "")
+                    input_kind = payload.get("input_kind", "conversation")
+                    request_key = payload.get("request_key")
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     text = raw.decode("utf-8", errors="replace")
+                    input_kind = "conversation"
+                    request_key = None
                 if text:
-                    channel.submit_input(text)
+                    channel.submit_input(text, input_kind=input_kind, request_key=request_key)
                 self.send_response(204)
                 self.end_headers()
             else:
@@ -933,15 +1047,23 @@ def _make_handler(channel: WebChannel, workspace_name: str, title: str,
 class InteractiveWebServer:
     """Owns the HTTP server thread, the agent-log tailer, and the dashboard feed."""
 
-    def __init__(self, channel: WebChannel, workspace: Path,
-                 project_root: Path, title: str, port: int = 7890,
-                 host: str = "localhost"):
+    def __init__(
+        self,
+        channel: WebChannel,
+        workspace: Path,
+        project_root: Path,
+        title: str,
+        port: int = 7890,
+        host: str = "localhost",
+        access_token: Optional[str] = None,
+    ):
         self.channel = channel
         self.workspace = Path(workspace)
         self.project_root = Path(project_root)
         self.title = title
         self.host = host
         self.port = port
+        self.access_token = str(access_token).strip() if access_token else None
 
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._server_thread: Optional[threading.Thread] = None
@@ -952,47 +1074,64 @@ class InteractiveWebServer:
 
     @property
     def url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        url = f"http://{self.host}:{self.port}"
+        return f"{url}/?token={self.access_token}" if self.access_token else url
 
     def start(self) -> None:
-        handler = _make_handler(self.channel, self.workspace.name, self.title,
-                                self.project_root)
+        handler = _make_handler(
+            self.channel,
+            self.workspace.name,
+            self.title,
+            self.project_root,
+            access_token=self.access_token,
+        )
         # Try the requested port, then a few above it if taken.
         last_err = None
         for port in range(self.port, self.port + 10):
             try:
                 self._httpd = ThreadingHTTPServer((self.host, port), handler)
-                self.port = port
+                self.port = int(self._httpd.server_address[1])
                 break
             except OSError as e:
                 last_err = e
         if self._httpd is None:
             raise RuntimeError(f"Could not bind a port near {self.port}: {last_err}")
 
-        self._server_thread = threading.Thread(
-            target=self._httpd.serve_forever, daemon=True)
+        self._server_thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._server_thread.start()
 
         log_dir = self.workspace / "logs"
         self._tailer_thread = threading.Thread(
             target=_tail_agent_logs,
             args=(log_dir, self.channel, self.project_root, self._stop),
-            daemon=True)
+            daemon=True,
+        )
         self._tailer_thread.start()
 
         self._dash_thread = threading.Thread(
             target=_emit_dashboard,
             args=(self.workspace, self.project_root, self.channel, self._stop),
-            daemon=True)
+            daemon=True,
+        )
         self._dash_thread.start()
 
         self._research_thread = threading.Thread(
             target=_emit_research_state,
             args=(self.workspace, self.channel, self._stop),
-            daemon=True)
+            daemon=True,
+        )
         self._research_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         if self._httpd is not None:
-            threading.Thread(target=self._httpd.shutdown, daemon=True).start()
+            self._httpd.shutdown()
+            self._httpd.server_close()
+        for thread in (
+            self._server_thread,
+            self._tailer_thread,
+            self._dash_thread,
+            self._research_thread,
+        ):
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=2)

@@ -17,7 +17,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -27,14 +26,7 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.security import sanitize_text
-
-
-# CLI commands for different providers (mirrors rule_maker.py)
-CLI_COMMANDS = {
-    "claude": "claude -p",
-    "codex": "codex exec",
-    "gemini": "gemini",
-}
+from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
 
 # NOTE: unlike rule_maker / autoresearch_proposer (which only need the
 # transcript for human debugging), the trimmer must PARSE the agent's
@@ -134,28 +126,18 @@ def run_manifest_trimmer(
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / "trimmer_prompt.txt").write_text(prompt, encoding="utf-8")
 
-    cmd = CLI_COMMANDS[provider]
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
-
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, "")
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
+    cmd = build_agent_command(
+        provider,
+        full_permissions=full_permissions,
+        transcript_flags=TRANSCRIPT_FLAGS,
+    )
 
     print(f"🧹 Launching manifest trimmer ({provider})")
     print(f"   Command: {cmd}")
     print(f"   Workspace: {work_dir}")
     print(f"   Prompt length: {len(prompt)} chars")
 
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
-    if provider == "gemini":
-        env["GEMINI_CLI_IDE_DISABLE"] = "1"
+    env = build_agent_environment(provider)
 
     transcript_path: Optional[Path] = None
     if log_dir is not None:

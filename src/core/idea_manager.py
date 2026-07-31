@@ -15,11 +15,33 @@ import yaml
 import json
 import hashlib
 import sys
+import os
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config_loader import ConfigLoader
+from core.local_resources import (
+    collect_host_paths,
+    validate_evaluation_spec,
+    validate_local_resources,
+)
+
+
+def resolve_ideas_dir(project_root: Optional[Path] = None) -> Path:
+    """Resolve the ideas directory, honoring the NEURICO_IDEAS override.
+
+    Mirrors NEURICO_WORKSPACE: if NEURICO_IDEAS is set, use it, so a shared
+    read-only install can point each user at their own ideas directory.
+    Otherwise fall back to <project_root>/ideas (project_root defaults to the
+    repo root), which is the historical behavior.
+    """
+    env_ideas = os.getenv("NEURICO_IDEAS")
+    if env_ideas:
+        return Path(env_ideas)
+    if project_root is None:
+        project_root = Path(__file__).parent.parent.parent
+    return Path(project_root) / "ideas"
 
 
 class IdeaManager:
@@ -98,6 +120,16 @@ class IdeaManager:
         with open(idea_path, 'w', encoding='utf-8') as f:
             yaml.dump(idea_spec, f, default_flow_style=False, sort_keys=False)
 
+        # Sidecar for docker/run.sh: host paths this idea depends on, one per
+        # line, so cmd_run can mount them (bash cannot parse the idea YAML)
+        host_paths = collect_host_paths(idea_spec.get('idea', {}))
+        if host_paths:
+            mounts_dir = self.ideas_dir / "mounts"
+            mounts_dir.mkdir(parents=True, exist_ok=True)
+            (mounts_dir / f"{idea_id}.txt").write_text(
+                "\n".join(host_paths) + "\n", encoding='utf-8')
+            print(f"  Local paths recorded for docker mounts: {len(host_paths)}")
+
         print(f"✓ Idea submitted successfully: {idea_id}")
         print(f"  Title: {idea_spec['idea'].get('title', 'Untitled')}")
         print(f"  Location: {idea_path}")
@@ -156,6 +188,13 @@ class IdeaManager:
             warnings.append("Hypothesis is very short (< 20 characters). "
                           "Consider providing more detail.")
 
+        if 'max_directions' in idea:
+            max_directions = idea['max_directions']
+            if not isinstance(max_directions, int) or isinstance(max_directions, bool):
+                errors.append("max_directions must be an integer")
+            elif not 1 <= max_directions <= 10:
+                errors.append("max_directions must be between 1 and 10")
+
         # Validate expected outputs (optional in v1.1)
         if 'expected_outputs' in idea:
             if not isinstance(idea['expected_outputs'], list):
@@ -194,6 +233,17 @@ class IdeaManager:
                 errors.append("evaluation_criteria must be a list")
             elif len(idea['evaluation_criteria']) == 0:
                 warnings.append("No evaluation criteria specified")
+
+        # Validate local resources (contractual: path + usage required,
+        # missing paths are warnings until staging)
+        lr_errors, lr_warnings = validate_local_resources(idea)
+        errors.extend(lr_errors)
+        warnings.extend(lr_warnings)
+
+        # Validate structured evaluation spec
+        ev_errors, ev_warnings = validate_evaluation_spec(idea)
+        errors.extend(ev_errors)
+        warnings.extend(ev_warnings)
 
         valid = len(errors) == 0
 

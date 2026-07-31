@@ -1,0 +1,11 @@
+The active HITL AutoResearch frontier exceeds its maximum of {{ max_active_nodes }} nodes.
+
+Use `list_frontier` and `view_node` to inspect the active portfolio. Identify the
+least promising direction based on its objective score, retained attempt history,
+and strategic potential. It may be the currently selected/newly accepted node.
+Then call `prune_frontier` with exactly that node SHA and a concise strategic
+rationale. Runtime records this as a manager decision node.
+
+`prune_frontier` is the only legal completion action for this runtime boundary.
+Do not select the next proposal frontier yet; runtime opens that separate boundary
+after pruning is complete.

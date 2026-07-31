@@ -23,7 +23,7 @@ if env_local.exists():
 elif env_file.exists():
     load_dotenv(env_file)
     
-from core.idea_manager import IdeaManager
+from core.idea_manager import IdeaManager, resolve_ideas_dir
 
 # Check if GitHub integration is available
 try:
@@ -94,7 +94,7 @@ def main():
         sys.exit(1)
 
     # Initialize manager
-    manager = IdeaManager()
+    manager = IdeaManager(resolve_ideas_dir())
 
     # Validate
     if not args.no_validate:
@@ -148,7 +148,8 @@ def main():
                         private=args.private,
                         domain=domain,
                         provider=args.provider,
-                        no_hash=args.no_hash
+                        no_hash=args.no_hash,
+                        hypothesis=idea.get('idea', {}).get('hypothesis', '')
                     )
 
                     github_repo_url = repo_info['repo_url']

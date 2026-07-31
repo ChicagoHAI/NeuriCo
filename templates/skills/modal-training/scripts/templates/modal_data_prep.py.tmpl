@@ -34,6 +34,8 @@ except ImportError:
 
 if lifecycle is not None:
     PULL_MANIFEST = [
+        {"from_volume": DATA_VOLUME, "from": "/prep_config.json",
+         "to": "data/prep_config.json",  "required": True},
         {"from_volume": DATA_VOLUME, "from": "/stats.json",
          "to": "data/stats.json",        "required": False},
         {"from_volume": DATA_VOLUME, "from": "/train.jsonl",
@@ -89,9 +91,22 @@ def prep() -> dict:
 
     Path("/data").mkdir(parents=True, exist_ok=True)
 
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    data_source = "databricks/databricks-dolly-15k[train[:500]]"
+    prep_config = {
+        "exp_id": "${EXP_ID}",
+        "stage": "data_prep",
+        "data_source": data_source,
+        "started_at": started_at,
+    }
+    with open("/data/prep_config.json", "w", encoding="utf-8") as fh:
+        json.dump(prep_config, fh, indent=2)
+    data_vol.commit()
+
     # Example body — REPLACE with your dataset of choice.
     # The default loads a tiny sample of databricks/dolly so the template runs
-    # end-to-end without modification; swap for your actual data source.
+    # end-to-end without modification; swap for your actual data source. Keep
+    # `prep_config["data_source"]` in sync with what you actually loaded.
     ds = load_dataset("databricks/databricks-dolly-15k", split="train[:500]")
 
     train_path = "/data/train.jsonl"

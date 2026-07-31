@@ -1,9 +1,6 @@
-"""
-AutoResearch support primitives.
+"""Ordinary AutoResearch and its shared Git, history, and scoring primitives.
 
-This module contains the product-neutral pieces used by the AutoResearch loop:
-Git checkpoints for workspace nodes and external attempt history. It does not
-run agents or make proposal decisions.
+The experimental manager-mediated workflow lives in :mod:`core.hitl_autoresearch`.
 """
 
 from __future__ import annotations
@@ -17,11 +14,26 @@ import math
 import re
 import shutil
 import tempfile
-from datetime import datetime
 
 from core.scorer import load_scoring_results
 from core.scoring_seal import seal_scoring_files, unseal_scoring_files
 from core.dsi_slurm_artifacts import DSI_SLURM_ARTIFACTS_DIR, move_dsi_slurm_artifacts
+from core.autoresearch_common import (
+    attempt_id_for,
+    clear_stale_results_json,
+    ensure_results_json,
+    idea_with_comments,
+    invoke_proposal_generator,
+    revert_whiteboard_attempt,
+)
+from core.hitl_util import atomic_write_json, utc_now
+from core.hitl_paths import HITL_RELATIVE_ROOT
+from core.whiteboard import (
+    Whiteboard,
+    clear_current_attempt_marker,
+    whiteboard_path,
+    write_current_attempt_marker,
+)
 
 try:
     from git import Repo, InvalidGitRepositoryError, NoSuchPathError
@@ -50,6 +62,12 @@ AUTORESEARCH_LOG_PATTERNS = (
 AUTORESEARCH_STATE_PATTERNS = (".neurico/autoresearch_state.json",)
 BOOTSTRAP_BASELINE_STATE_PATTERNS = (".neurico/bootstrap_baseline_state.json",)
 AGENT_LOCAL_PATTERNS = (".claude/", ".gemini/", ".codex/")
+PRIVATE_RUNTIME_PATTERNS = (
+    f"{HITL_RELATIVE_ROOT.as_posix()}/",
+    ".neurico/runs/",
+    ".experiment_runner_plan_complete",
+    ".experiment_runner_complete",
+)
 PAPER_OUTPUT_PATTERNS = (
     "paper/",
     "paper_draft/",
@@ -64,10 +82,17 @@ CHECKPOINT_EXCLUDE_PATTERNS = (
     + AUTORESEARCH_STATE_PATTERNS
     + BOOTSTRAP_BASELINE_STATE_PATTERNS
     + AGENT_LOCAL_PATTERNS
+    + PRIVATE_RUNTIME_PATTERNS
     + PAPER_OUTPUT_PATTERNS
 )
 
 COMPARISON_EPS = 1e-6
+MAX_INVALID_ATTEMPTS_PER_VALID_ITERATION = 3
+
+# Allowed drop in a satisfied-property's normalized margin before the
+# comparator calls it a regression. Strict COMPARISON_EPS on unsatisfied
+# properties (bottlenecks) stays. See _compare_properties for use.
+SATISFIED_MARGIN_REGRESSION_TOLERANCE = 0.05
 
 
 def autoresearch_state_path(work_dir: Path) -> Path:
@@ -134,7 +159,7 @@ def write_bootstrap_baseline_state(
     state_path = bootstrap_baseline_state_path(work_dir)
     state_path.parent.mkdir(parents=True, exist_ok=True)
 
-    now = datetime.now().isoformat()
+    now = utc_now()
     state = {
         "history_root": str(Path(history_root)),
         "bootstrap_source_sha": bootstrap_source_sha,
@@ -142,7 +167,7 @@ def write_bootstrap_baseline_state(
         "last_attempt": last_attempt,
         "updated_at": now,
     }
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    atomic_write_json(state_path, state)
 
 
 def resolve_autoresearch_history_root(
@@ -188,9 +213,9 @@ def write_autoresearch_state(
         "lineage_source_sha": lineage_source_sha,
         "current_best_sha": current_best_sha,
         "last_iteration": last_iteration,
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": utc_now(),
     }
-    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    atomic_write_json(state_path, state)
 
 
 ProposalGeneratorHook = Callable[
@@ -229,6 +254,8 @@ class AutoResearchIterationResult:
     scorer_result: Dict[str, Any]
     parent_summary: ScoreSummary
     candidate_summary: ScoreSummary
+    attempt_dir_removed: bool = False
+    terminal_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -487,9 +514,20 @@ class CheckpointManager:
 class AttemptHistoryManager:
     """Stores AutoResearch attempt history under a NeuriCo logs directory."""
 
-    def __init__(self, history_root: Path, idea_id: str):
+    def __init__(
+        self,
+        history_root: Path,
+        idea_id: str,
+        work_dir: Optional[Path] = None,
+    ):
         self.history_root = Path(history_root)
         self.idea_id = idea_id
+        # `work_dir` locates the live whiteboard, which always lives at
+        # <work_dir>/logs/experiment-autoresearch/whiteboard.json regardless
+        # of where the attempt history root is. When omitted (e.g. legacy
+        # tests) whiteboard snapshotting is skipped rather than resolved
+        # against `history_root`, which is not where the whiteboard writes.
+        self.work_dir = Path(work_dir) if work_dir is not None else None
         self.history_root.mkdir(parents=True, exist_ok=True)
 
     def next_attempt_dir(self, parent_sha: str) -> Path:
@@ -566,7 +604,27 @@ class AttemptHistoryManager:
             json.dumps(decision_payload, indent=2),
             encoding="utf-8",
         )
+
+        self._snapshot_whiteboard(attempt_dir)
+
         return attempt_dir
+
+    def _snapshot_whiteboard(self, attempt_dir: Path) -> None:
+        """Copy the live whiteboard.json into an attempt directory for audit.
+
+        The live whiteboard survives across rejected attempts by design, so
+        the per-attempt snapshot is the only way to see what the handler
+        for this specific attempt observed / left behind.
+        """
+        if self.work_dir is None:
+            return
+        try:
+            live = whiteboard_path(self.work_dir)
+            if live.exists():
+                shutil.copyfile(live, Path(attempt_dir) / "whiteboard_snapshot.json")
+        except Exception:
+            # Whiteboard is best-effort; never fail an attempt over the audit copy.
+            pass
 
     def list_attempts(self, parent_sha: str) -> list[Path]:
         parent_dir = self.parent_dir(parent_sha)
@@ -805,7 +863,14 @@ class ScoringResultComparator:
             candidate_prop = candidate.properties[name]
             parent_margin = parent_prop["margin"]
             candidate_margin = candidate_prop["margin"]
-            if candidate_margin < parent_margin - COMPARISON_EPS:
+            # Strict no-regression on the bottleneck / unsatisfied props;
+            # small margin drops on already-satisfied props are tolerated.
+            allowed_drop = (
+                SATISFIED_MARGIN_REGRESSION_TOLERANCE
+                if parent_prop["satisfied"] and candidate_prop["satisfied"]
+                else COMPARISON_EPS
+            )
+            if candidate_margin < parent_margin - allowed_drop:
                 return ComparisonDecision(
                     accepted=False,
                     reason=f"Candidate regressed normalized margin for scoring property {name}.",
@@ -1077,6 +1142,7 @@ def construct_bootstrap_initial_node(
     bootstrap_history = AttemptHistoryManager(
         bootstrap_history_root,
         idea_id,
+        work_dir=work_dir,
     )
     attempt_dir = bootstrap_history.next_attempt_dir(bootstrap_source_sha)
     attempt_number = AttemptHistoryManager._attempt_number(attempt_dir.name) or 0
@@ -1247,6 +1313,7 @@ def continue_from_current_best(
     autoresearch_history_dir: Optional[Path],
     proposer_timeout: int,
     comment_timeout: int,
+    continue_recover: bool = False,
 ) -> Dict[str, Any]:
     """Validate the current scored node and run Phase 2 AutoResearch search."""
     print()
@@ -1255,7 +1322,9 @@ def continue_from_current_best(
     print("=" * 80)
     print()
 
-    current_sha = validate_continue_autoresearch_workspace(work_dir)
+    current_sha = validate_continue_autoresearch_workspace(
+        work_dir, auto_restore=continue_recover
+    )
     state = read_autoresearch_state(work_dir)
     lineage_source_sha = autoresearch_state_lineage_source_sha(state) or current_sha
     previous_last_iteration = autoresearch_state_last_iteration(state)
@@ -1284,7 +1353,7 @@ def continue_from_current_best(
             },
         }
 
-    history = AttemptHistoryManager(history_root, idea_id)
+    history = AttemptHistoryManager(history_root, idea_id, work_dir=work_dir)
     existing_attempts = history.list_attempts(current_sha)
 
     print(f"   Work dir: {work_dir}")
@@ -1327,8 +1396,16 @@ def continue_from_current_best(
     }
 
 
-def validate_continue_autoresearch_workspace(work_dir: Path) -> str:
-    """Validate the workspace is positioned at its saved AutoResearch current best."""
+def validate_continue_autoresearch_workspace(
+    work_dir: Path, auto_restore: bool = False
+) -> str:
+    """Validate the workspace is positioned at its saved AutoResearch current best.
+
+    With auto_restore, a workspace left dirty or ahead of current_best_sha by an
+    interrupted attempt (for example a job killed at the Slurm wall clock) is
+    restored to current_best_sha and treated as if that attempt were rejected,
+    instead of refusing to continue.
+    """
     work_dir = Path(work_dir)
     if not work_dir.exists():
         raise ValueError(f"Workspace does not exist: {work_dir}")
@@ -1364,15 +1441,33 @@ def validate_continue_autoresearch_workspace(work_dir: Path) -> str:
             + ", ".join(missing)
         )
 
-    status_lines = [
-        line
-        for line in checkpoints.repo.git.status("--porcelain").splitlines()
-        if line.strip() and not _is_allowed_continue_dirty_status(line)
-    ]
+    def _disallowed_dirty():
+        return [
+            line
+            for line in checkpoints.repo.git.status("--porcelain").splitlines()
+            if line.strip() and not _is_allowed_continue_dirty_status(line)
+        ]
+
+    status_lines = _disallowed_dirty()
+    if auto_restore and (status_lines or checkpoints.current_sha() != current_best_sha):
+        # An interrupted attempt can leave the working tree dirty or HEAD ahead
+        # of the saved current best. Restore to current_best_sha and treat the
+        # interrupted attempt as rejected. restore_checkpoint resets only tracked
+        # files and preserves ignored datasets and logs.
+        print(
+            "⚠️  Interrupted-attempt workspace detected; restoring to the "
+            f"current best checkpoint {current_best_sha[:12]} before continuing."
+        )
+        checkpoints.restore_checkpoint(current_best_sha)
+        status_lines = _disallowed_dirty()
+
     if status_lines:
         raise ValueError(
             "Cannot continue AutoResearch with a dirty workspace. "
-            "Commit, stash, or remove pending changes first. Status:\n"
+            "Commit, stash, or remove pending changes first"
+            + (" (--continue-recover left untracked changes it will not delete)"
+               if auto_restore else "")
+            + ". Status:\n"
             + "\n".join(status_lines[:20])
         )
 
@@ -1402,6 +1497,7 @@ def autoresearch_result_payload(autoresearch_result: AutoResearchRunResult) -> D
                 "accepted": item.accepted,
                 "reason": item.reason,
                 "attempt_dir": str(item.attempt_dir),
+                "attempt_dir_removed": item.attempt_dir_removed,
             }
             for item in autoresearch_result.iterations
         ],
@@ -1497,13 +1593,7 @@ def _status_line_path(status_line: str) -> Optional[str]:
 
 
 class AutoResearchController:
-    """
-    Runs the experiment-stage AutoResearch loop.
-
-    The controller is intentionally thin: proposal generation, comment-mode
-    modification, and scoring are injected callables. Phase 5 wires those
-    callables to NeuriCo's existing agents; Phase 4 tests use fakes.
-    """
+    """Run ordinary AutoResearch proposal, execution, scoring, and comparison."""
 
     def __init__(
         self,
@@ -1522,39 +1612,32 @@ class AutoResearchController:
         self.idea_id = idea_id
         self.work_dir = Path(work_dir)
         self.checkpoints = checkpoint_manager or CheckpointManager(self.work_dir)
-        self.history = history_manager or AttemptHistoryManager(history_root, idea_id)
+        self.history = history_manager or AttemptHistoryManager(
+            history_root, idea_id, work_dir=self.work_dir
+        )
         self.comparator = comparator or ScoringResultComparator()
         self.proposal_generator = proposal_generator
         self.comment_mode = comment_mode
         self.scorer = scorer
 
     def run(self, iterations: int) -> AutoResearchRunResult:
-        """
-        Execute AutoResearch iterations from the current scored workspace state.
-
-        The initial checkpoint is created from the already-scored public state.
-        Each candidate checkpoint is created only after the scorer writes that
-        candidate's own scoring/results.json.
-        """
+        """Execute ordinary AutoResearch from the current scored workspace state."""
         if iterations < 0:
             raise ValueError("iterations must be non-negative")
-
         self._ensure_results_json("initial")
         initial = self.checkpoints.create_checkpoint("AutoResearch initial public scored state")
         current_best_sha = initial.sha
-        iteration_results: list[AutoResearchIterationResult] = []
-
+        results: list[AutoResearchIterationResult] = []
         for iteration in range(1, iterations + 1):
             result = self.run_iteration(iteration, current_best_sha)
-            iteration_results.append(result)
+            results.append(result)
             if result.accepted and result.child_sha:
                 current_best_sha = result.child_sha
-
         return AutoResearchRunResult(
             success=True,
             initial_sha=initial.sha,
             current_best_sha=current_best_sha,
-            iterations=iteration_results,
+            iterations=results,
         )
 
     def run_iteration(
@@ -1562,40 +1645,38 @@ class AutoResearchController:
         iteration: int,
         parent_sha: str,
     ) -> AutoResearchIterationResult:
-        """Run one proposal/comment/scorer/checkpoint/compare attempt."""
-        parent_results_path = self.work_dir / "scoring" / "results.json"
+        """Run one ordinary proposal, experiment, scorer, and comparison attempt."""
         parent_summary = self.comparator.load_summary(
-            parent_results_path,
-            source="parent",
+            self.work_dir / "scoring" / "results.json", source="parent"
         )
-
         attempt_history = self.history.load_attempt_summaries(parent_sha)
         attempt_dir = self.history.next_attempt_dir(parent_sha)
+        attempt_marker = self._attempt_id(attempt_dir)
+        self._ensure_whiteboard_before(attempt_dir)
+        write_current_attempt_marker(self.work_dir, attempt_marker)
 
-        sealed_dir = seal_scoring_files(self.work_dir)
         proposal = ""
         comment_result: Dict[str, Any] = {}
         pre_scoring_error: Optional[str] = None
+        sealed_dir: Optional[Path] = None
+        failure_stage = "scoring seal"
         try:
-            try:
-                proposal_result = self.proposal_generator(
-                    self.idea,
-                    self.work_dir,
-                    parent_sha,
-                    attempt_dir,
-                    attempt_history,
-                )
-                proposal = self._resolve_proposal_text(attempt_dir, proposal_result)
-                self.history.write_proposal(attempt_dir, proposal)
-
-                comment_idea = self._idea_with_comments(proposal)
-                comment_result = self.comment_mode(comment_idea, self.work_dir)
-            except Exception as e:
-                pre_scoring_error = str(e)
-                comment_result = {
-                    "success": False,
-                    "error": f"AutoResearch proposal/comment stage failed: {e}",
-                }
+            sealed_dir = seal_scoring_files(self.work_dir)
+            failure_stage = "proposal/comment stage"
+            proposal_result = self._call_proposal_generator(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+                attempt_history=attempt_history,
+            )
+            proposal = self._resolve_proposal_text(attempt_dir, proposal_result)
+            self.history.write_proposal(attempt_dir, proposal)
+            comment_result = self.comment_mode(self._idea_with_comments(proposal), self.work_dir)
+        except Exception as exc:
+            pre_scoring_error = f"AutoResearch {failure_stage} failed: {exc}"
+            comment_result = {
+                "success": False,
+                "error": pre_scoring_error,
+            }
         finally:
             unseal_scoring_files(self.work_dir, sealed_dir)
 
@@ -1604,7 +1685,7 @@ class AutoResearchController:
             candidate_summary = ScoreSummary(
                 valid=False,
                 source="candidate",
-                error=f"AutoResearch proposal/comment stage failed: {pre_scoring_error}",
+                error=pre_scoring_error,
             )
             self._clear_stale_results_json()
             results_path = self.work_dir / "scoring" / "results.json"
@@ -1615,7 +1696,7 @@ class AutoResearchController:
                         "overall_satisfied": False,
                         "error": candidate_summary.error,
                         "generated_by": "autoresearch",
-                        "created_at": datetime.now().isoformat(),
+                        "created_at": utc_now(),
                     },
                     indent=2,
                 ),
@@ -1624,16 +1705,15 @@ class AutoResearchController:
             child_sha: Optional[str] = None
             checkpoint_error: Optional[str] = None
             try:
-                candidate_checkpoint = self.checkpoints.create_checkpoint(
+                child_sha = self.checkpoints.create_checkpoint(
                     f"AutoResearch failed candidate iteration {iteration}"
-                )
-                child_sha = candidate_checkpoint.sha
-            except Exception as e:
-                checkpoint_error = str(e)
-            reason = candidate_summary.error
+                ).sha
+            except Exception as exc:
+                checkpoint_error = str(exc)
+            reason = candidate_summary.error or "AutoResearch pre-scoring stage failed."
             if checkpoint_error:
                 reason = f"Candidate could not be checkpointed: {checkpoint_error}"
-            decision_payload = {
+            decision = {
                 "parent_node_id": parent_sha,
                 "parent_sha": parent_sha,
                 "child_node_id": child_sha,
@@ -1651,16 +1731,18 @@ class AutoResearchController:
                     parent_sha=parent_sha,
                     child_sha=child_sha,
                     results_path=results_path,
-                    decision=decision_payload,
+                    decision=decision,
                 )
             else:
                 self._record_failed_before_checkpoint(
                     attempt_dir=attempt_dir,
                     parent_sha=parent_sha,
                     results_path=results_path,
-                    decision=decision_payload,
+                    decision=decision,
                 )
             self.checkpoints.restore_checkpoint(parent_sha)
+            self._revert_whiteboard_for(attempt_marker)
+            clear_current_attempt_marker(self.work_dir)
             return AutoResearchIterationResult(
                 iteration=iteration,
                 parent_sha=parent_sha,
@@ -1678,40 +1760,29 @@ class AutoResearchController:
         self._clear_stale_results_json()
         try:
             scorer_result = self.scorer(self.work_dir)
-        except Exception as e:
+        except Exception as exc:
             scorer_result = {
                 "success": False,
-                "error": f"AutoResearch scorer raised an exception: {e}",
+                "error": f"AutoResearch scorer raised an exception: {exc}",
             }
-        results_path = self._ensure_results_json(
-            stage="candidate",
-            scorer_result=scorer_result,
-        )
+        results_path = self._ensure_results_json("candidate", scorer_result)
         self._move_dsi_slurm_artifacts_to_attempt(attempt_dir)
-
-        candidate_checkpoint: Optional[Checkpoint] = None
         child_sha: Optional[str] = None
         checkpoint_error: Optional[str] = None
         try:
-            candidate_checkpoint = self.checkpoints.create_checkpoint(
+            child_sha = self.checkpoints.create_checkpoint(
                 f"AutoResearch candidate iteration {iteration}"
-            )
-            child_sha = candidate_checkpoint.sha
-        except Exception as e:
-            checkpoint_error = str(e)
-
-        candidate_summary = self.comparator.load_summary(
-            results_path,
-            source="candidate",
-        )
-        decision = self.comparator.compare(parent_summary, candidate_summary)
-        accepted = decision.accepted and child_sha is not None
-        reason = decision.reason
+            ).sha
+        except Exception as exc:
+            checkpoint_error = str(exc)
+        candidate_summary = self.comparator.load_summary(results_path, source="candidate")
+        comparison = self.comparator.compare(parent_summary, candidate_summary)
+        accepted = comparison.accepted and child_sha is not None
+        reason = comparison.reason
         if checkpoint_error:
             accepted = False
             reason = f"Candidate could not be checkpointed: {checkpoint_error}"
-
-        decision_payload = {
+        decision = {
             "parent_node_id": parent_sha,
             "parent_sha": parent_sha,
             "child_node_id": child_sha,
@@ -1723,26 +1794,25 @@ class AutoResearchController:
             "comment_result": comment_result,
             "scorer_result": scorer_result,
         }
-
         if child_sha:
             self.history.complete_attempt(
                 attempt_dir=attempt_dir,
                 parent_sha=parent_sha,
                 child_sha=child_sha,
                 results_path=results_path,
-                decision=decision_payload,
+                decision=decision,
             )
         else:
             self._record_failed_before_checkpoint(
                 attempt_dir=attempt_dir,
                 parent_sha=parent_sha,
                 results_path=results_path,
-                decision=decision_payload,
+                decision=decision,
             )
-
         if not accepted:
             self.checkpoints.restore_checkpoint(parent_sha)
-
+            self._revert_whiteboard_for(attempt_marker)
+        clear_current_attempt_marker(self.work_dir)
         return AutoResearchIterationResult(
             iteration=iteration,
             parent_sha=parent_sha,
@@ -1757,6 +1827,39 @@ class AutoResearchController:
             candidate_summary=candidate_summary,
         )
 
+    def _call_proposal_generator(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_history: list[Dict[str, Any]],
+    ) -> Any:
+        return invoke_proposal_generator(
+            self.proposal_generator,
+            idea=self.idea,
+            work_dir=self.work_dir,
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            attempt_history=attempt_history,
+        )
+
+    def _ensure_whiteboard_before(self, attempt_dir: Path) -> None:
+        live = whiteboard_path(self.work_dir)
+        if not live.exists():
+            Whiteboard(self.work_dir).load().save()
+        before = Path(attempt_dir) / "whiteboard_before.json"
+        before.parent.mkdir(parents=True, exist_ok=True)
+        if not before.exists():
+            shutil.copyfile(live, before)
+
+    def _restore_whiteboard_before(self, attempt_dir: Path) -> None:
+        before = Path(attempt_dir) / "whiteboard_before.json"
+        if not before.exists():
+            raise RuntimeError(f"Missing AutoResearch whiteboard_before.json: {before}")
+        live = whiteboard_path(self.work_dir)
+        live.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(before, live)
+
     def _ensure_results_json(
         self,
         stage: str,
@@ -1768,20 +1871,12 @@ class AutoResearchController:
         If the scorer fails before producing results.json, write a small public
         failure payload so the candidate state can still be checkpointed.
         """
-        results_path = self.work_dir / "scoring" / "results.json"
-        if results_path.exists():
-            return results_path
-
-        results_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "overall_satisfied": False,
-            "error": f"AutoResearch {stage} scorer did not produce scoring/results.json",
-            "scorer_result": scorer_result or {},
-            "generated_by": "autoresearch",
-            "created_at": datetime.now().isoformat(),
-        }
-        results_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return results_path
+        return ensure_results_json(
+            self.work_dir,
+            stage,
+            scorer_result,
+            created_at=utc_now(),
+        )
 
     @staticmethod
     def _resolve_proposal_text(attempt_dir: Path, proposal_result: Any) -> str:
@@ -1799,15 +1894,39 @@ class AutoResearchController:
         raise RuntimeError("Proposal generator did not return or write proposal.md")
 
     def _idea_with_comments(self, proposal: str) -> Dict[str, Any]:
-        idea_copy = json.loads(json.dumps(self.idea, default=str))
-        idea_spec = idea_copy.setdefault("idea", {})
-        idea_spec["comments"] = proposal
-        return idea_copy
+        return idea_with_comments(self.idea, proposal)
 
     def _clear_stale_results_json(self) -> None:
-        results_path = self.work_dir / "scoring" / "results.json"
-        if results_path.exists():
-            results_path.unlink()
+        clear_stale_results_json(self.work_dir)
+
+    def _attempt_id(self, attempt_dir: Path) -> str:
+        """Stable id for the attempt used to attribute whiteboard mutations.
+
+        Format matches the on-disk layout: <safe_parent_sha>/<attempt_N>.
+        Recorded on tips by clear_tip / prune_tip so a rejection can be
+        rolled back with `revert_attempt`.
+        """
+        return attempt_id_for(self.history.history_root, attempt_dir)
+
+    def _revert_whiteboard_for(self, attempt_id: str) -> None:
+        """Undo any clear/prune the comment_handler or proposer made this attempt.
+
+        The rejected code change is being rolled back by `restore_checkpoint`,
+        so tips the handler claimed as incorporated no longer are, and tips
+        the proposer pruned as wrong were pruned based on a plan that will
+        not survive. Adds are left alone: their content is the learning we
+        want to keep across rejection.
+        """
+        if not attempt_id:
+            return
+        try:
+            wb = Whiteboard(self.work_dir).load()
+            reverted = revert_whiteboard_attempt(wb, attempt_id)
+            if reverted:
+                wb.save()
+        except Exception:
+            # Whiteboard is best-effort; never fail an iteration over it.
+            pass
 
     def _move_dsi_slurm_artifacts_to_attempt(self, attempt_dir: Path) -> None:
         move_dsi_slurm_artifacts(
@@ -1846,6 +1965,8 @@ class AutoResearchController:
             encoding="utf-8",
         )
 
+        self.history._snapshot_whiteboard(attempt_dir)
+
 
 def run_autoresearch_loop(
     idea: Dict[str, Any],
@@ -1860,11 +1981,7 @@ def run_autoresearch_loop(
     comment_timeout: int = 1800,
     scorer_timeout: int = 600,
 ) -> AutoResearchRunResult:
-    """
-    Run AutoResearch with NeuriCo's real proposer, comment handler, and scorer.
-
-    This is the production integration point used by runner.py in Phase 6.
-    """
+    """Run ordinary AutoResearch with NeuriCo's proposer, worker, and scorer."""
     from agents.autoresearch_proposer import run_autoresearch_proposer
     from agents.comment_handler import run_comment_handler
     from core.scorer import run_scorer
@@ -1906,6 +2023,7 @@ def run_autoresearch_loop(
         return run_scorer(
             work_dir=score_work_dir,
             timeout=scorer_timeout,
+            idea=idea,
         )
 
     controller = AutoResearchController(

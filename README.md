@@ -13,9 +13,9 @@
 
 <hr>
 
-<!-- agent-summary: NeuriCo is an autonomous research framework. Input: YAML (title, domain, hypothesis). Output: code, results, plots, LaTeX paper, GitHub repo. Providers: Claude Code, Codex, Gemini. Install: curl one-liner or git+docker. Requirements: git + docker (or git + python 3.10+), plus an AI coding CLI (Claude Code, Codex, or Gemini). License: Apache 2.0. Repository: https://github.com/ChicagoHAI/neurico -->
+<!-- agent-summary: NeuriCo is an autonomous and human-in-the-loop research framework. Input: YAML (title, domain, hypothesis). Workflows: single-run research, scored AutoResearch, and manager-mediated HITL AutoResearch. Output: code, results, plots, LaTeX paper, GitHub repo. Providers: Claude Code, Codex, Gemini. Install: curl one-liner or git+docker. Requirements: git + docker (or git + python 3.10+), plus an AI coding CLI (Claude Code, Codex, or Gemini). License: Apache 2.0. Repository: https://github.com/ChicagoHAI/neurico -->
 
-**NeuriCo** (**Neur**al **Co**-Scientist, inspired by Enrico Fermi) is an autonomous research framework that takes structured research ideas and orchestrates AI agents to design, execute, analyze, and document experiments across diverse domains.
+**NeuriCo** (**Neur**al **Co**-Scientist, inspired by Enrico Fermi) takes structured research ideas and orchestrates AI agents to design, execute, analyze, and document experiments across diverse domains.
 
 <div align="center">
 <img src="assets/neurico-6x.gif" alt="NeuriCo Demo" width="700"/>
@@ -29,7 +29,7 @@
 | **Minimal Input** | Just provide title, domain, and hypothesis - agents handle the rest |
 | **Agent-Driven Research** | Literature review, dataset search, baseline identification |
 | **Multi-Provider Support** | Works with Claude, Codex, and Gemini (raw CLI by default, notebooks optional) |
-| **Pragmatic Execution** | Creates resources when they don't exist, always proceeds |
+| **AutoResearch** | Iteratively proposes, executes, scores, and checkpoints improvements |
 | **Domain-Agnostic** | ML, data science, AI, systems, theory, and more |
 | **Smart Documentation** | Auto-generates reports, code, and results |
 | **GitHub Integration** | Auto-creates repos and pushes results |
@@ -81,6 +81,8 @@ cd NeuriCo
 ```
 
 That's it! The agent fetches the idea, creates a GitHub repo, runs experiments, writes a paper, and pushes everything.
+
+For iterative and human-in-the-loop (HITL) AutoResearch workflows, see [Research Workflows](#research-workflows).
 
 <details>
 <summary>Manual setup (alternative to one-liner)</summary>
@@ -257,6 +259,20 @@ uv run python src/cli/submit.py ideas/examples/ml_regularization_test.yaml
 uv run python src/core/runner.py <idea_id> --provider claude --full-permissions
 ```
 
+### Research Workflows
+
+After submitting an idea, choose the workflow that matches the research task:
+
+| Workflow | Command | Use when |
+|----------|---------|----------|
+| **Standard run** | `./neurico run <idea_id>` | Run the research pipeline once |
+| **AutoResearch** | `./neurico run <idea_id> --autoresearch --autoresearch-iterations 3` | Build an initial scored experiment, then try iterative improvements |
+| **Continue AutoResearch** | `./neurico run <idea_id> --continue-autoresearch --autoresearch-iterations 3` | Continue improving an existing scored workspace |
+| **HITL AutoResearch** | `./neurico hitl-web <idea_id>` | Use the local manager interface to work closely with NeuriCo|
+
+See [HITL AutoResearch Design and Workflow](docs/HITL_AUTORESEARCH.md) for the
+manager, human, worker, runtime, scoring, frontier, and recovery model.
+
 ### Run Options
 
 | Option | Description |
@@ -270,6 +286,14 @@ uv run python src/core/runner.py <idea_id> --provider claude --full-permissions
 | `--no-hash` | Simpler repo names (skip random hash) |
 | `--write-paper` | Generate LaTeX paper after experiments |
 | `--paper-style neurips\|icml\|acl` | Paper format (default: neurips) |
+| `--enable-scoring` | Add a `rule_maker` stage that defines a sealed evaluation protocol, then score the run against it |
+| `--autoresearch` | Run AutoResearch after creating the initial scored experiment |
+| `--continue-autoresearch` | Continue AutoResearch from an existing scored workspace |
+| `--continue-recover` | With `--continue-autoresearch`: if the workspace is dirty from an interrupted run, restore to the best checkpoint and continue instead of refusing |
+| `--autoresearch-iterations N` | Number of AutoResearch iterations (default: 1) |
+| `--bootstrap-rule-maker` | Retrofit scoring onto a workspace whose experiment already produced its outputs |
+| `--comment-mode` | Make targeted improvements based on comments in the idea file |
+| `--force-fresh` | Ignore an existing local workspace and start from scratch |
 
 ### Other Commands
 
@@ -334,11 +358,11 @@ workspace/<repo-name>/
 
 **You can submit minimal ideas** - agents will research the details:
 
-- Just provide: title, domain, research question
+- Just provide: title, domain, and a testable hypothesis
 - Agent searches for: datasets, baselines, evaluation methods
 - Grounds in literature when resources exist
 - Creates synthetic data/baselines when they don't
-- Always proceeds to execution - doesn't get stuck
+- Executes without requiring a fully specified methodology upfront
 
 **Example minimal idea:**
 ```yaml
@@ -413,6 +437,8 @@ Paper-finder starts automatically in Docker — no extra setup needed.
 ## Documentation
 
 - **[docs/WORKFLOW.md](docs/WORKFLOW.md)** - Complete workflow guide
+- **[docs/AUTORESEARCH.md](docs/AUTORESEARCH.md)** - Scoring and the AutoResearch iteration loop (fresh, continue, bootstrap)
+- **[INTERACTIVE_MODE_GUIDE.md](INTERACTIVE_MODE_GUIDE.md)** - Interactive mode with the LLM-driven manager
 - **[docs/IDEAHUB_INTEGRATION.md](docs/IDEAHUB_INTEGRATION.md)** - IdeaHub integration
 - **[ARCHITECTURE_AND_ROADMAP.md](ARCHITECTURE_AND_ROADMAP.md)** - Architecture, template system, and roadmap
 - **[docs/GITHUB_INTEGRATION.md](docs/GITHUB_INTEGRATION.md)** - GitHub setup and usage

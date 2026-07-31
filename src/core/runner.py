@@ -10,8 +10,9 @@ This module orchestrates the execution of research by:
 """
 
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-import json
+from typing import Optional, Dict, Any
+from functools import wraps
+import inspect
 import subprocess
 import shlex
 import sys
@@ -32,8 +33,14 @@ _PROJECT_ROOT = _SRC_ROOT.parent
 sys.path.insert(0, str(_SRC_ROOT))
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from core.idea_manager import IdeaManager
+from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.config_loader import ConfigLoader
+from core.local_resources import stage_local_resources
+from core.agent_cli import (
+    build_agent_command,
+    build_agent_environment,
+    provider_workspace_root,
+)
 from core.security import sanitize_text
 from core.compute_backend import (
     attach_runtime_compute_backend,
@@ -51,13 +58,41 @@ except ImportError:
     GITHUB_AVAILABLE = False
 
 
-# CLI commands for different providers (same as resource_finder.py)
-# Note: For claude, we use '-p' (print mode) to enable streaming JSON output
-CLI_COMMANDS = {
-    "claude": "claude -p",  # Print mode enables streaming JSON output with stdin
-    "codex": "codex exec",  # Non-interactive mode: read from stdin
-    "gemini": "gemini",
-}
+def _with_hitl_workspace_run_ownership(method):
+    """Hold the workspace lease around every HITL entry into the shared runner."""
+    method_signature = inspect.signature(method)
+
+    @wraps(method)
+    def owned_run(self, *args, **kwargs):
+        arguments = method_signature.bind(self, *args, **kwargs)
+        arguments.apply_defaults()
+        hitl_interface = (
+            arguments.arguments["hitl_autoresearch"]
+            or arguments.arguments["hitl_continue_autoresearch"]
+        )
+        if not hitl_interface:
+            return method(self, *args, **kwargs)
+
+        from core.hitl_lock import hitl_workspace_run_lease
+
+        idea_id = str(arguments.arguments["idea_id"])
+        work_dir = self._hitl_workspace_for_run_ownership(
+            idea_id,
+            force_fresh=bool(arguments.arguments["force_fresh"]),
+        )
+        mode = "continue" if arguments.arguments["hitl_continue_autoresearch"] else "fresh"
+        with hitl_workspace_run_lease(
+            work_dir,
+            owner={
+                "idea_id": idea_id,
+                "interface": str(hitl_interface),
+                "mode": mode,
+                "provider": str(arguments.arguments["provider"]),
+            },
+        ):
+            return method(self, *args, **kwargs)
+
+    return owned_run
 
 
 class ResearchRunner:
@@ -89,7 +124,7 @@ class ResearchRunner:
         if config_loader.should_auto_create_workspace():
             self.runs_dir.mkdir(parents=True, exist_ok=True)
 
-        self.idea_manager = IdeaManager(self.project_root / "ideas")
+        self.idea_manager = IdeaManager(resolve_ideas_dir(self.project_root))
         self.prompt_generator = PromptGenerator(self.project_root / "templates")
 
         # GitHub integration
@@ -117,6 +152,28 @@ class ResearchRunner:
                     print(f"⚠️  GitHub integration failed: {e}")
                     self.use_github = False
 
+    def _hitl_workspace_for_run_ownership(self, idea_id: str, *, force_fresh: bool) -> Path:
+        idea = self.idea_manager.get_idea(idea_id)
+        if idea is None:
+            raise ValueError(f"Idea not found: {idea_id}")
+        metadata = dict(idea.get("idea", {}).get("metadata", {}) or {})
+
+        if self.use_github and self.github_manager is not None:
+            repo_name = str(metadata.get("github_repo_name", "")).strip() or None
+            existing = self.github_manager.get_workspace_path(idea_id, repo_name)
+            if existing is not None:
+                return Path(existing).resolve()
+            if repo_name:
+                return (Path(self.github_manager.workspace_dir) / repo_name).resolve()
+
+        local_workspace = str(metadata.get("local_workspace", "")).strip()
+        if not force_fresh and local_workspace:
+            candidate = Path(local_workspace).expanduser()
+            if candidate.exists():
+                return candidate.resolve()
+        return (self.runs_dir / idea_id).resolve()
+
+    @_with_hitl_workspace_run_ownership
     def run_research(
         self,
         idea_id: str,
@@ -143,9 +200,15 @@ class ResearchRunner:
         autoresearch_iterations: int = 1,
         autoresearch_history_dir: Optional[Path] = None,
         continue_autoresearch: bool = False,
+        continue_recover: bool = False,
         bootstrap_autoresearch_baseline: bool = False,
         proposer_timeout: int = 900,
         compute_backend: str = "local",
+        hitl_autoresearch: Optional[str] = None,
+        hitl_continue_autoresearch: Optional[str] = None,
+        hitl_manager_port: int = 7890,
+        hitl_manager_no_browser: bool = False,
+        hitl_host: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -167,6 +230,10 @@ class ResearchRunner:
             paper_style: Paper template style (neurips, icml, acl, ams). None = auto-detect from domain
             paper_timeout: Timeout for paper writing in seconds
             force_fresh: Ignore existing local workspace and start a new run from scratch
+            hitl_autoresearch: Human interface for fresh HITL AutoResearch:
+                ``web`` or ``cli``.
+            hitl_continue_autoresearch: Human interface for continuing an
+                existing HITL AutoResearch workspace: ``web`` or ``cli``.
 
         Returns:
             Dictionary with:
@@ -182,6 +249,39 @@ class ResearchRunner:
         print(f"   GitHub: {'Enabled' if self.use_github else 'Disabled'}")
         compute_backend = normalize_compute_backend(compute_backend)
         print(f"   Compute backend: {compute_backend}")
+        hitl_modes = {
+            "--hitl-autoresearch": hitl_autoresearch,
+            "--hitl-continue-autoresearch": hitl_continue_autoresearch,
+        }
+        invalid_hitl_modes = [
+            name for name, mode in hitl_modes.items() if mode not in {None, "web", "cli"}
+        ]
+        if invalid_hitl_modes:
+            raise ValueError("HITL mode must be 'web' or 'cli'.")
+        selected_hitl_modes = [name for name, mode in hitl_modes.items() if mode]
+        if len(selected_hitl_modes) > 1:
+            raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
+        hitl = hitl_autoresearch or hitl_continue_autoresearch
+        if continue_recover and not continue_autoresearch:
+            raise ValueError(
+                "--continue-recover only applies with --continue-autoresearch."
+            )
+        if hitl_autoresearch:
+            if autoresearch or continue_autoresearch:
+                raise ValueError(
+                    "--hitl-autoresearch already selects fresh AutoResearch; do not add "
+                    "--autoresearch or --continue-autoresearch."
+                )
+            autoresearch = True
+        if hitl_continue_autoresearch:
+            if autoresearch or continue_autoresearch:
+                raise ValueError(
+                    "--hitl-continue-autoresearch already selects continuation; do not add "
+                    "--autoresearch or --continue-autoresearch."
+                )
+            continue_autoresearch = True
+        if hitl:
+            print(f"   HITL: enabled ({hitl})")
         autoresearch_modes = [
             name
             for name, enabled in (
@@ -275,6 +375,7 @@ class ResearchRunner:
                         domain=domain,
                         provider=provider,
                         no_hash=no_hash,
+                        hypothesis=idea_spec.get("hypothesis", ""),
                     )
 
                     github_url = repo_info["repo_url"]
@@ -361,25 +462,80 @@ class ResearchRunner:
         # Copy helper scripts and backend-selected skills to workspace.
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
 
+        # Stage user-declared local resources (datasets, functions) into the
+        # workspace and rewrite their paths workspace-relative, so no agent
+        # ever depends on host paths. Hard error if a declared path is gone.
+        stage_local_resources(work_dir, idea)
+
+        recovered_hitl_attempt = None
+        if hitl and continue_autoresearch:
+            # Recovery can restore the private HITL manager database. Do it before
+            # the host starts accepting conversation messages against that state.
+            from core.hitl_autoresearch import recover_interrupted_hitl_autoresearch_attempt
+
+            recovered_hitl_attempt = recover_interrupted_hitl_autoresearch_attempt(work_dir)
+
+        owns_hitl_host = False
+        if hitl:
+            if not multi_agent:
+                raise ValueError("HITL AutoResearch requires the multi-agent pipeline.")
+            if hitl_host is None:
+                from core.hitl_manager_host import HitlManagerHost
+                from interactive.manager import load_config as load_manager_config
+
+                hitl_host = HitlManagerHost(
+                    work_dir=work_dir,
+                    config=load_manager_config(),
+                    interface=hitl,
+                    project_root=self.project_root,
+                    title=title,
+                    port=hitl_manager_port,
+                    open_browser=not hitl_manager_no_browser,
+                )
+                hitl_host.start()
+                owns_hitl_host = True
+
         if continue_autoresearch:
             success = False
             pipeline_result: Dict[str, Any] = {}
             try:
-                from core.autoresearch import continue_from_current_best
+                if hitl:
+                    from core.hitl_autoresearch import continue_hitl_autoresearch
 
-                pipeline_result = continue_from_current_best(
-                    idea=idea,
-                    idea_id=idea_id,
-                    work_dir=work_dir,
-                    templates_dir=self.project_root / "templates",
-                    provider=provider,
-                    full_permissions=full_permissions,
-                    scorer_timeout=scorer_timeout,
-                    iterations=autoresearch_iterations,
-                    autoresearch_history_dir=autoresearch_history_dir,
-                    proposer_timeout=proposer_timeout,
-                    comment_timeout=timeout,
-                )
+                    pipeline_result = continue_hitl_autoresearch(
+                        idea=idea,
+                        idea_id=idea_id,
+                        work_dir=work_dir,
+                        templates_dir=self.project_root / "templates",
+                        provider=provider,
+                        full_permissions=full_permissions,
+                        scorer_timeout=scorer_timeout,
+                        iterations=autoresearch_iterations,
+                        autoresearch_history_dir=autoresearch_history_dir,
+                        proposer_timeout=proposer_timeout,
+                        comment_timeout=timeout,
+                        manager=hitl_host.manager,
+                        channel=hitl_host.channel,
+                        manager_config=hitl_host.manager.config,
+                        recovered_attempt=recovered_hitl_attempt,
+                    )
+                else:
+                    from core.autoresearch import continue_from_current_best
+
+                    pipeline_result = continue_from_current_best(
+                        idea=idea,
+                        idea_id=idea_id,
+                        work_dir=work_dir,
+                        templates_dir=self.project_root / "templates",
+                        provider=provider,
+                        full_permissions=full_permissions,
+                        scorer_timeout=scorer_timeout,
+                        iterations=autoresearch_iterations,
+                        autoresearch_history_dir=autoresearch_history_dir,
+                        proposer_timeout=proposer_timeout,
+                        comment_timeout=timeout,
+                        continue_recover=continue_recover,
+                    )
                 success = pipeline_result.get("success", False)
 
                 if write_paper and success:
@@ -396,6 +552,8 @@ class ResearchRunner:
                 success = False
             finally:
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                if owns_hitl_host:
+                    hitl_host.stop()
 
             return {
                 "work_dir": work_dir,
@@ -432,6 +590,8 @@ class ResearchRunner:
                 success = False
             finally:
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                if owns_hitl_host:
+                    hitl_host.stop()
 
             return {
                 "work_dir": work_dir,
@@ -468,8 +628,13 @@ class ResearchRunner:
             from core.pipeline_orchestrator import ResearchPipelineOrchestrator
 
             orchestrator = ResearchPipelineOrchestrator(
-                work_dir=work_dir, templates_dir=self.project_root / "templates"
+                work_dir=work_dir,
+                templates_dir=self.project_root / "templates",
+                hitl_manager=hitl_host.manager if hitl_host else None,
+                hitl_channel=hitl_host.channel if hitl_host else None,
+                hitl_manager_config=hitl_host.manager.config if hitl_host else None,
             )
+            success = False
 
             # If resuming into an existing workspace, check which stages already completed
             # and skip them — read pipeline_state.json directly rather than relying on
@@ -490,10 +655,16 @@ class ResearchRunner:
 
             try:
                 if autoresearch:
-                    from core.autoresearch import (
-                        construct_fresh_initial_node,
-                        continue_from_current_best,
-                    )
+                    if hitl:
+                        from core.hitl_autoresearch import (
+                            continue_hitl_autoresearch,
+                            run_fresh_hitl_autoresearch_initial_node,
+                        )
+                    else:
+                        from core.autoresearch import (
+                            construct_fresh_initial_node,
+                            continue_from_current_best,
+                        )
 
                     print()
                     print("=" * 80)
@@ -501,22 +672,31 @@ class ResearchRunner:
                     print("=" * 80)
                     print()
 
-                    initial_result = construct_fresh_initial_node(
-                        idea=idea,
-                        work_dir=work_dir,
-                        templates_dir=self.project_root / "templates",
-                        provider=provider,
-                        pause_after_resources=pause_after_resources,
-                        skip_resource_finder=skip_resource_finder,
-                        resource_finder_timeout=resource_finder_timeout,
-                        experiment_runner_timeout=timeout,
-                        full_permissions=full_permissions,
-                        use_scribe=use_scribe,
-                        rule_maker_timeout=rule_maker_timeout,
-                        scorer_timeout=scorer_timeout,
-                        manifest_trimmer_timeout=manifest_trimmer_timeout,
-                        autoresearch_history_dir=autoresearch_history_dir,
-                    )
+                    initial_args = {
+                        "idea": idea,
+                        "work_dir": work_dir,
+                        "templates_dir": self.project_root / "templates",
+                        "provider": provider,
+                        "pause_after_resources": pause_after_resources,
+                        "skip_resource_finder": skip_resource_finder,
+                        "resource_finder_timeout": resource_finder_timeout,
+                        "experiment_runner_timeout": timeout,
+                        "full_permissions": full_permissions,
+                        "use_scribe": use_scribe,
+                        "rule_maker_timeout": rule_maker_timeout,
+                        "scorer_timeout": scorer_timeout,
+                        "manifest_trimmer_timeout": manifest_trimmer_timeout,
+                        "autoresearch_history_dir": autoresearch_history_dir,
+                    }
+                    if hitl:
+                        initial_result = run_fresh_hitl_autoresearch_initial_node(
+                            **initial_args,
+                            manager=hitl_host.manager,
+                            channel=hitl_host.channel,
+                            manager_config=hitl_host.manager.config,
+                        )
+                    else:
+                        initial_result = construct_fresh_initial_node(**initial_args)
                     pipeline_result = initial_result.pipeline_result or {
                         "success": initial_result.success,
                     }
@@ -530,19 +710,28 @@ class ResearchRunner:
                     success = initial_result.success
 
                     if success:
-                        autoresearch_result = continue_from_current_best(
-                            idea=idea,
-                            idea_id=idea_id,
-                            work_dir=work_dir,
-                            templates_dir=self.project_root / "templates",
-                            provider=provider,
-                            full_permissions=full_permissions,
-                            scorer_timeout=scorer_timeout,
-                            iterations=autoresearch_iterations,
-                            autoresearch_history_dir=autoresearch_history_dir,
-                            proposer_timeout=proposer_timeout,
-                            comment_timeout=timeout,
-                        )
+                        continuation_args = {
+                            "idea": idea,
+                            "idea_id": idea_id,
+                            "work_dir": work_dir,
+                            "templates_dir": self.project_root / "templates",
+                            "provider": provider,
+                            "full_permissions": full_permissions,
+                            "scorer_timeout": scorer_timeout,
+                            "iterations": autoresearch_iterations,
+                            "autoresearch_history_dir": autoresearch_history_dir,
+                            "proposer_timeout": proposer_timeout,
+                            "comment_timeout": timeout,
+                        }
+                        if hitl:
+                            autoresearch_result = continue_hitl_autoresearch(
+                                **continuation_args,
+                                manager=hitl_host.manager,
+                                channel=hitl_host.channel,
+                                manager_config=hitl_host.manager.config,
+                            )
+                        else:
+                            autoresearch_result = continue_from_current_best(**continuation_args)
                         pipeline_result["autoresearch"] = autoresearch_result.get("autoresearch")
                         success = autoresearch_result.get("success", False)
                 else:
@@ -560,6 +749,7 @@ class ResearchRunner:
                         scorer_timeout=scorer_timeout,
                         bootstrap_mode=bootstrap_mode,
                         manifest_trimmer_timeout=manifest_trimmer_timeout,
+                        hitl_enabled=bool(hitl),
                     )
 
                     success = pipeline_result.get("success", False)
@@ -582,6 +772,8 @@ class ResearchRunner:
             finally:
                 # GitHub integration and status updates
                 self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                if owns_hitl_host:
+                    hitl_host.stop()
 
             # Return result info
             result = {
@@ -604,7 +796,8 @@ class ResearchRunner:
 
         # Generate prompt
         print("📝 Generating research prompt...")
-        prompt = self.prompt_generator.generate_research_prompt(idea, root_dir=work_dir)
+        prompt = self.prompt_generator.generate_research_prompt(
+            idea, root_dir=work_dir, scoring_enabled=scoring_enabled)
 
         # Save prompt for reference
         prompt_file = work_dir / "logs" / "research_prompt.txt"
@@ -624,6 +817,7 @@ class ResearchRunner:
             domain=domain,
             idea_spec=idea.get("idea", {}),
             provider=provider,
+            scoring_enabled=scoring_enabled,
         )
 
         # Save session instructions
@@ -641,36 +835,18 @@ class ResearchRunner:
         success = False
         try:
             # Set environment variables
-            env = os.environ.copy()
-            env["PYTHONUNBUFFERED"] = "1"
+            env = build_agent_environment(provider)
             if use_scribe:
                 env["SCRIBE_RUN_DIR"] = str(work_dir)
 
             # Prepare command
             log_file = work_dir / "logs" / f"execution_{provider}.log"
 
-            # Build command - raw CLI by default, scribe if requested
-            if use_scribe:
-                cmd = f"scribe {provider}"
-            else:
-                cmd = CLI_COMMANDS[provider]
-
-            # Add permission flags
-            if full_permissions:
-                if provider == "codex":
-                    cmd += " --yolo"
-                elif provider == "claude":
-                    cmd += " --dangerously-skip-permissions"
-                elif provider == "gemini":
-                    cmd += " --yolo --skip-trust"
-
-            # Add streaming JSON output flags for detailed logging
-            if provider == "claude":
-                cmd += " --verbose --output-format stream-json"  # Streaming JSON (requires -p and --verbose)
-            elif provider == "codex":
-                cmd += " --json"
-            elif provider == "gemini":
-                cmd += " --output-format stream-json"
+            cmd = build_agent_command(
+                provider,
+                full_permissions=full_permissions,
+                use_scribe=use_scribe,
+            )
 
             print(f"   Command: {cmd}")
             print(f"   Log file: {log_file}")
@@ -757,11 +933,15 @@ https://github.com/ChicagoHAI/neurico
                     print(f"\n⚠️  Failed to push to GitHub: {e}")
                     print("   Results are available locally")
 
-            # Update idea status
-            self.idea_manager.update_status(idea_id, "completed")
+            # Update idea status. Leave unsuccessful/interrupted runs in progress
+            # so they can be inspected and resumed instead of falsely archived.
+            self.idea_manager.update_status(idea_id, "completed" if success else "in_progress")
 
             print()
-            print(f"✅ Research completed!")
+            if success:
+                print("✅ Research completed!")
+            else:
+                print("⚠️  Research did not complete successfully.")
             print(f"   Location: {work_dir}")
             if github_url:
                 print(f"   GitHub: {github_url}")
@@ -843,6 +1023,7 @@ https://github.com/ChicagoHAI/neurico
         print(f"   Work dir: {work_dir}")
         print()
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
+        stage_local_resources(work_dir, idea)
 
         # Get GitHub URL if available
         github_url = None
@@ -938,7 +1119,10 @@ https://github.com/ChicagoHAI/neurico
         import shutil
 
         skills_src = self.project_root / "templates" / "skills"
-        provider_skill_roots = [".claude", ".gemini", ".codex"]
+        provider_skill_roots = [
+            provider_workspace_root(provider)
+            for provider in ("claude", "gemini", "codex")
+        ]
         compute_skill_names = {"modal-training", "modal-vllm", "dsi-slurm"}
         backend_skill_names = {
             "local": set(),
@@ -993,7 +1177,11 @@ https://github.com/ChicagoHAI/neurico
         template_content = template_gitignore.read_text(encoding="utf-8")
 
         if workspace_gitignore.exists():
-            # Merge: append only patterns not already present
+            # Merge: append only patterns not already present. Skip the append
+            # entirely if every non-comment/non-blank pattern in the template
+            # is already covered, so the merge is idempotent across relaunches
+            # (previous behaviour appended the template's section headers on
+            # every run, leaving the tree dirty for --continue-autoresearch).
             existing_content = workspace_gitignore.read_text(encoding="utf-8")
             existing_lines = set(
                 line.strip()
@@ -1001,18 +1189,34 @@ https://github.com/ChicagoHAI/neurico
                 if line.strip() and not line.strip().startswith("#")
             )
 
-            new_lines = []
-            for line in template_content.splitlines():
-                stripped = line.strip()
-                if stripped.startswith("#") or not stripped:
-                    # Keep comments and blank lines for readability
-                    new_lines.append(line)
-                elif stripped not in existing_lines:
-                    new_lines.append(line)
+            template_data_lines = [
+                line.strip()
+                for line in template_content.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            missing = [l for l in template_data_lines if l not in existing_lines]
+            if not missing:
+                print(
+                    f"   Research .gitignore patterns already present, skipping merge"
+                )
+            else:
+                new_lines = []
+                for line in template_content.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        # Carry comments / blanks alongside new data lines only.
+                        new_lines.append(line)
+                    elif stripped not in existing_lines:
+                        new_lines.append(line)
 
-            merged_content = existing_content.rstrip("\n") + "\n\n" + "\n".join(new_lines) + "\n"
-            workspace_gitignore.write_text(merged_content, encoding="utf-8")
-            print(f"   Merged research .gitignore patterns into workspace")
+                merged_content = (
+                    existing_content.rstrip("\n") + "\n\n" + "\n".join(new_lines) + "\n"
+                )
+                workspace_gitignore.write_text(merged_content, encoding="utf-8")
+                print(
+                    f"   Merged {len(missing)} new research .gitignore pattern(s) "
+                    f"into workspace"
+                )
         else:
             # No existing .gitignore (e.g. local-only mode), copy template directly
             import shutil
@@ -1070,10 +1274,13 @@ https://github.com/ChicagoHAI/neurico
                 print("   Results are available locally")
 
         # Update idea status
-        self.idea_manager.update_status(idea_id, "completed")
+        self.idea_manager.update_status(idea_id, "completed" if success else "in_progress")
 
         print()
-        print(f"✅ Research completed!")
+        if success:
+            print("✅ Research completed!")
+        else:
+            print("⚠️  Research did not complete successfully.")
         print(f"   Location: {work_dir}")
         if github_url:
             print(f"   GitHub: {github_url}")
@@ -1226,6 +1433,13 @@ def main():
         help="Continue AutoResearch from the existing scored workspace and skip upstream pipeline stages",
     )
     parser.add_argument(
+        "--continue-recover",
+        action="store_true",
+        help="With --continue-autoresearch: if the workspace is dirty from an interrupted "
+             "attempt (e.g. a job killed at the Slurm wall clock), restore it to the current "
+             "best checkpoint and continue, instead of refusing.",
+    )
+    parser.add_argument(
         "--autoresearch-iterations",
         type=int,
         default=1,
@@ -1269,6 +1483,27 @@ def main():
         help="Timeout for each manifest_trimmer agent call in seconds (default: 300 = 5 min, "
         "bootstrap mode only)",
     )
+    parser.add_argument(
+        "--hitl-autoresearch",
+        choices=["web", "cli"],
+        help="Run fresh AutoResearch through the HITL frontier, manager, and audit workflow.",
+    )
+    parser.add_argument(
+        "--hitl-continue-autoresearch",
+        choices=["web", "cli"],
+        help="Continue an existing HITL AutoResearch workspace from its selected frontier node.",
+    )
+    parser.add_argument(
+        "--hitl-manager-port",
+        type=int,
+        default=7890,
+        help="Local browser port for HITL web mode (default: 7890).",
+    )
+    parser.add_argument(
+        "--hitl-manager-no-browser",
+        action="store_true",
+        help="Start HITL web mode without opening the browser automatically.",
+    )
 
     args = parser.parse_args()
     autoresearch_modes = [
@@ -1276,6 +1511,8 @@ def main():
         for name, enabled in (
             ("--autoresearch", args.autoresearch),
             ("--continue-autoresearch", args.continue_autoresearch),
+            ("--hitl-autoresearch", bool(args.hitl_autoresearch)),
+            ("--hitl-continue-autoresearch", bool(args.hitl_continue_autoresearch)),
             ("--bootstrap-autoresearch-baseline", args.bootstrap_autoresearch_baseline),
         )
         if enabled
@@ -1340,14 +1577,22 @@ def main():
             autoresearch_iterations=args.autoresearch_iterations,
             autoresearch_history_dir=args.autoresearch_history_dir,
             continue_autoresearch=args.continue_autoresearch,
+            continue_recover=args.continue_recover,
             bootstrap_autoresearch_baseline=args.bootstrap_autoresearch_baseline,
             proposer_timeout=args.proposer_timeout,
             compute_backend=args.compute_backend,
+            hitl_autoresearch=args.hitl_autoresearch,
+            hitl_continue_autoresearch=args.hitl_continue_autoresearch,
+            hitl_manager_port=args.hitl_manager_port,
+            hitl_manager_no_browser=args.hitl_manager_no_browser,
         )
 
         print()
         print("=" * 80)
-        print("SUCCESS! Research execution completed.")
+        if result.get("success"):
+            print("SUCCESS! Research execution completed.")
+        else:
+            print("Research execution did not complete successfully.")
         print(f"Location: {result['work_dir']}")
         if result.get("github_url"):
             print(f"GitHub: {result['github_url']}")

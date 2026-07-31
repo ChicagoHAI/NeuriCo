@@ -1,0 +1,24 @@
+Terminal contract:
+Before requesting finish review, COMPLETE should hold:
+
+- Every approved plan step is complete.
+- If `scoring/interface.md` exists, every required artifact listed there exists
+  locally.
+- No required training, evaluation, job, or artifact-generation work remains
+  running.
+- The plan progress section is current.
+
+{% include "hitl/worker_finish_phase_contract.txt" %}
+
+If manager/human input is needed before completion, call `hitl-raise-idea` and
+wait for the returned feedback instead of requesting finish review. If a HITL
+command prints `HITL_COMMAND_ERROR` or `HITL_ERROR`, follow its printed
+instruction and retry it in this same worker session. If it prints
+`HITL_RUNTIME_ERROR`, preserve the current workspace and retry the same command
+in this worker session. Only if an external non-HITL blocker prevents that retry,
+record the current progress and blocker in the plan.
+
+Do not leave required work running unattended in the background.
+Do not state that you will return later.
+Do not create or modify `scoring/results.json`.
+Do not read or modify hidden scoring files.

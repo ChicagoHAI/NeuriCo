@@ -13,37 +13,26 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import subprocess
 import shlex
-import os
 import sys
 import time
-from datetime import datetime
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.security import sanitize_text
+from core.agent_runner import run_prebuilt_cli_agent
+from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
 
 
-# CLI commands for different providers
-# Note: For codex, we use 'exec' subcommand for non-interactive mode (stdin pipe)
-# Note: For claude, we use '-p' (print mode) to enable streaming JSON output
-CLI_COMMANDS = {
-    'claude': 'claude -p',  # Print mode enables streaming JSON output with stdin
-    'codex': 'codex exec',  # Non-interactive mode: read from stdin
-    'gemini': 'gemini'
-}
-
-# CLI flags for verbose/structured transcript output
-# These enable capturing detailed conversation transcripts for logging
-# All providers now output streaming JSON for consistent transcript format
-TRANSCRIPT_FLAGS = {
-    'claude': '--verbose --output-format stream-json',  # Streaming JSON (requires -p and --verbose)
-    'codex': '--json',  # Outputs newline-delimited JSON events (works with codex exec)
-    'gemini': '--output-format stream-json'  # Outputs JSONL stream
-}
-
-
-def generate_resource_finder_prompt(idea: Dict[str, Any], templates_dir: Path) -> str:
+def generate_resource_finder_prompt(
+    idea: Dict[str, Any],
+    templates_dir: Path,
+    *,
+    hitl_runtime_completion: bool = False,
+    provider: str = "claude",
+    hitl_phase: Optional[str] = None,
+    scoring_enabled: bool = False,
+) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
 
@@ -53,6 +42,11 @@ def generate_resource_finder_prompt(idea: Dict[str, Any], templates_dir: Path) -
     Args:
         idea: Full idea specification (YAML dict)
         templates_dir: Path to templates directory
+        provider: Provider whose workspace skill directory is referenced
+            by the rendered prompt.
+        scoring_enabled: If True, surface scoring-only obligations such as the
+                         required_for_evaluation mandate; ordinary unscored
+                         runs omit them.
 
     Returns:
         Complete prompt string for resource finder agent
@@ -61,7 +55,13 @@ def generate_resource_finder_prompt(idea: Dict[str, Any], templates_dir: Path) -
 
     # templates_dir is typically project_root/templates, so parent is project_root
     generator = PromptGenerator(templates_dir)
-    return generator.generate_resource_finder_prompt(idea)
+    return generator.generate_resource_finder_prompt(
+        idea,
+        hitl_runtime_completion=hitl_runtime_completion,
+        provider=provider,
+        hitl_phase=hitl_phase,
+        scoring_enabled=scoring_enabled,
+    )
 
 
 def run_resource_finder(
@@ -70,7 +70,14 @@ def run_resource_finder(
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
     timeout: int = 2700,  # 45 minutes default
-    full_permissions: bool = True
+    full_permissions: bool = True,
+    completion_marker_name: str = ".resource_finder_complete",
+    completion_mode: str = "marker",
+    log_prefix: str = "resource_finder",
+    include_hitl_outputs: bool = False,
+    env_extra: Optional[Dict[str, str]] = None,
+    prompt_override: Optional[str] = None,
+    scoring_enabled: bool = False,
 ) -> Dict[str, Any]:
     """
     Launch resource finder agent to gather research resources.
@@ -82,6 +89,17 @@ def run_resource_finder(
         templates_dir: Path to templates directory (auto-detected if None)
         timeout: Maximum execution time in seconds (default: 45 min)
         full_permissions: Allow full permissions to CLI agents (default: True)
+        completion_marker_name: Marker expected for a normal, non-HITL
+            invocation. Normal resource finding uses .resource_finder_complete.
+        completion_mode: "marker" preserves normal NeuriCo marker-based
+            completion. HITL callers may use "hitl_runtime" so runtime command
+            approval/fallback is handled by the orchestrator.
+        log_prefix: Prefix for prompt/log/transcript files. HITL uses unique
+            prefixes because resource_finder can run multiple times in one stage.
+        include_hitl_outputs: Include the HITL plan in output reporting. Normal
+            non-HITL resource finding leaves this false.
+        env_extra: Optional environment overrides for this external agent
+            invocation. HITL uses this to expose scoped runtime commands.
 
     Returns:
         Dictionary with:
@@ -95,13 +113,15 @@ def run_resource_finder(
         FileNotFoundError: If completion marker not created
     """
     if provider not in CLI_COMMANDS:
-        raise ValueError(f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}")
+        raise ValueError(
+            f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}"
+        )
 
     # Auto-detect templates directory if not provided
     if templates_dir is None:
         templates_dir = Path(__file__).parent.parent.parent / "templates"
 
-    print(f"🔍 Starting Resource Finder Agent")
+    print("🔍 Starting Resource Finder Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
     print(f"   Timeout: {timeout}s ({timeout//60} minutes)")
@@ -109,14 +129,22 @@ def run_resource_finder(
 
     # Generate prompt
     print("📝 Generating resource finder prompt...")
-    prompt = generate_resource_finder_prompt(idea, templates_dir)
-
+    if prompt_override is not None:
+        prompt = prompt_override
+    else:
+        prompt = generate_resource_finder_prompt(
+            idea,
+            templates_dir,
+            hitl_runtime_completion=(completion_mode == "hitl_runtime"),
+            provider=provider,
+            scoring_enabled=scoring_enabled,
+        )
     # Save prompt for reference
     logs_dir = work_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    prompt_file = logs_dir / "resource_finder_prompt.txt"
-    with open(prompt_file, 'w', encoding='utf-8') as f:
+    prompt_file = logs_dir / f"{log_prefix}_prompt.txt"
+    with open(prompt_file, "w", encoding="utf-8") as f:
         f.write(prompt)
 
     print(f"   Prompt saved to: {prompt_file}")
@@ -124,24 +152,10 @@ def run_resource_finder(
     print()
 
     # Prepare command
-    cmd = CLI_COMMANDS[provider]
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
 
-    # Add permission flags if requested
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
-
-    # Add transcript/JSON output flags for structured logging
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
-
-    log_file = logs_dir / f"resource_finder_{provider}.log"
-    transcript_file = logs_dir / f"resource_finder_{provider}_transcript.jsonl"
+    log_file = logs_dir / f"{log_prefix}_{provider}.log"
+    transcript_file = logs_dir / f"{log_prefix}_{provider}_transcript.jsonl"
 
     print(f"▶️  Launching {provider} CLI agent...")
     print(f"   Command: {cmd}")
@@ -154,51 +168,63 @@ def run_resource_finder(
     print()
 
     # Set environment variables
-    env = os.environ.copy()
-    env['PYTHONUNBUFFERED'] = '1'
-
-    # Disable IDE integration for Gemini CLI to avoid directory mismatch errors
-    # when running programmatically from different work directories
-    if provider == "gemini":
-        env['GEMINI_CLI_IDE_DISABLE'] = '1'
+    env = build_agent_environment(provider, env_extra)
 
     # Execute agent
     success = False
-    completion_marker = work_dir / ".resource_finder_complete"
+    completion_marker = work_dir / completion_marker_name
     start_time = time.time()
 
     try:
-        with open(log_file, 'w', encoding='utf-8') as log_f, \
-             open(transcript_file, 'w', encoding='utf-8') as transcript_f:
-            # Start process in workspace directory
-            process = subprocess.Popen(
-                shlex.split(cmd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+        if completion_mode == "hitl_runtime":
+            # HITL workers can remain active while emitting output, so use the
+            # shared deadline-aware runner instead of waiting on stdout EOF.
+            launch = run_prebuilt_cli_agent(
+                command_argv=shlex.split(cmd),
+                prompt=prompt,
+                work_dir=work_dir,
+                log_file=log_file,
+                transcript_file=transcript_file,
                 env=env,
-                text=True,
-                encoding='utf-8',
-                bufsize=1,
-                cwd=str(work_dir)
+                timeout=timeout,
             )
+            return_code = launch["return_code"]
+            if launch["timed_out"]:
+                print(f"\n⏱️  Resource finder timed out after {timeout} seconds")
+        else:
+            with (
+                open(log_file, "w", encoding="utf-8") as log_f,
+                open(transcript_file, "w", encoding="utf-8") as transcript_f,
+            ):
+                # Start process in workspace directory
+                process = subprocess.Popen(
+                    shlex.split(cmd),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    text=True,
+                    encoding="utf-8",
+                    bufsize=1,
+                    cwd=str(work_dir),
+                )
 
-            # Send prompt
-            process.stdin.write(prompt)
-            process.stdin.close()
+                # Send prompt
+                process.stdin.write(prompt)
+                process.stdin.close()
 
-            # Stream output to both log file and transcript file (sanitized for security)
-            # For Claude/Codex with JSON flags, the output IS the transcript
-            # For Gemini, the output is regular text but sessions are saved separately
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    sanitized_line = sanitize_text(line)
-                    print(sanitized_line, end='')
-                    log_f.write(sanitized_line)
-                    transcript_f.write(sanitized_line)
+                # Stream output to both log file and transcript file (sanitized for security)
+                # For Claude/Codex with JSON flags, the output IS the transcript
+                # For Gemini, the output is regular text but sessions are saved separately
+                for line in iter(process.stdout.readline, ""):
+                    if line:
+                        sanitized_line = sanitize_text(line)
+                        print(sanitized_line, end="")
+                        log_f.write(sanitized_line)
+                        transcript_f.write(sanitized_line)
 
-            # Wait for completion
-            return_code = process.wait(timeout=timeout)
+                # Wait for completion
+                return_code = process.wait(timeout=timeout)
 
         print()
         print("=" * 80)
@@ -211,14 +237,18 @@ def run_resource_finder(
         else:
             print(f"⚠️  Agent execution finished with return code: {return_code}")
 
-        # Check for completion marker
-        if completion_marker.exists():
-            print(f"✅ Completion marker found: {completion_marker}")
-            success = True
+        if completion_mode == "hitl_runtime":
+            success = bool(launch.get("success"))
+            print("ℹ️  HITL runtime completion mode; orchestrator will review finish state.")
         else:
-            print(f"⚠️  Completion marker NOT found: {completion_marker}")
-            print("   Agent may not have finished all tasks.")
-            success = False
+            # Check for completion marker
+            if completion_marker.exists():
+                print(f"✅ Completion marker found: {completion_marker}")
+                success = True
+            else:
+                print(f"⚠️  Completion marker NOT found: {completion_marker}")
+                print("   Agent may not have finished all tasks.")
+                success = False
 
     except subprocess.TimeoutExpired:
         print(f"\n⏱️  Resource finder timed out after {timeout} seconds")
@@ -235,19 +265,25 @@ def run_resource_finder(
     print("📦 Checking for expected outputs...")
 
     outputs = {
-        'literature_review': work_dir / "literature_review.md",
-        'resources_catalog': work_dir / "resources.md",
-        'papers_dir': work_dir / "papers",
-        'datasets_dir': work_dir / "datasets",
-        'code_dir': work_dir / "code"
+        "literature_review": work_dir / "literature_review.md",
+        "resources_catalog": work_dir / "resources.md",
+        "papers_dir": work_dir / "papers",
+        "datasets_dir": work_dir / "datasets",
+        "code_dir": work_dir / "code",
     }
+    if include_hitl_outputs:
+        outputs.update(
+            {
+                "hitl_plan": work_dir / "plans" / "resource_finder_plan.md",
+            }
+        )
 
     found_outputs = {}
     for name, path in outputs.items():
         if path.exists():
             if path.is_dir():
                 # Count files in directory
-                files = list(path.rglob('*'))
+                files = list(path.rglob("*"))
                 file_count = len([f for f in files if f.is_file()])
                 print(f"   ✅ {name}: {path} ({file_count} files)")
             else:
@@ -261,20 +297,19 @@ def run_resource_finder(
     print()
 
     return {
-        'success': success,
-        'completion_marker': str(completion_marker) if completion_marker.exists() else None,
-        'outputs': found_outputs,
-        'log_file': str(log_file),
-        'transcript_file': str(transcript_file),
-        'elapsed_time': time.time() - start_time
+        "success": success,
+        "completion_marker": str(completion_marker) if completion_marker.exists() else None,
+        "outputs": found_outputs,
+        "log_file": str(log_file),
+        "transcript_file": str(transcript_file),
+        "elapsed_time": time.time() - start_time,
+        "background_processes_terminated": bool(launch.get("background_processes_terminated"))
+        if completion_mode == "hitl_runtime"
+        else False,
     }
 
 
-def wait_for_completion(
-    work_dir: Path,
-    timeout: int = 3600,
-    check_interval: int = 5
-) -> bool:
+def wait_for_completion(work_dir: Path, timeout: int = 3600, check_interval: int = 5) -> bool:
     """
     Poll for completion marker file.
 
@@ -291,7 +326,7 @@ def wait_for_completion(
     completion_marker = work_dir / ".resource_finder_complete"
     start_time = time.time()
 
-    print(f"⏳ Waiting for resource finder completion...")
+    print("⏳ Waiting for resource finder completion...")
     print(f"   Checking for: {completion_marker}")
     print(f"   Timeout: {timeout}s ({timeout//60} minutes)")
 

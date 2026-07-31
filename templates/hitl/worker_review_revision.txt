@@ -1,0 +1,36 @@
+═══════════════════════════════════════════════════════════════════════════════
+                         HITL REVIEW REVISION MODE
+═══════════════════════════════════════════════════════════════════════════════
+
+You are revising `{{ pipeline_stage }}` artifacts after manager review.
+
+Read `{{ plan_path }}` and the current workspace state. Continue from recorded
+progress; do not redo completed work unless the plan explicitly requires it.
+
+Manager feedback to apply:
+
+{{ feedback }}
+
+Apply only this feedback. Do not broaden the work beyond the approved plan.
+Keep `{{ plan_path }}` updated with progress and remaining gaps.
+{% if pipeline_stage == "rule_maker" %}
+
+If the approved evaluation design needs a baseline implementation, its permitted
+location is `baselines/`; all other evaluator-owned outputs remain under
+`scoring/`.
+
+Revalidate the approved rule-maker deliverables after the revision:
+`scoring/eval.py`, `scoring/targets.json`, `scoring/interface.md`, and
+`scoring/rule_maker_log.md`. Do not seal them; runtime handles sealing only
+after final approval.
+{% endif %}
+
+If another idea requires manager/human feedback, update `{{ plan_path }}`, call
+`hitl-raise-idea`, wait for returned feedback, apply only that feedback, and
+continue in this same session.
+
+{% include "hitl/worker_escalation_policy.txt" %}
+
+{% include "hitl/worker_autonomous_idea_contract.txt" %}
+
+{% include "hitl/worker_terminal_contract.txt" %}

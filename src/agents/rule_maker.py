@@ -19,9 +19,7 @@ cannot influence what it is being judged on.
 
 from pathlib import Path
 from typing import Optional, Dict, Any
-import subprocess
 import shlex
-import os
 import sys
 import time
 import json
@@ -30,30 +28,164 @@ import ast
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.security import sanitize_text
-
-
-# CLI commands for different providers (mirrors resource_finder.py)
-CLI_COMMANDS = {
-    'claude': 'claude -p',
-    'codex': 'codex exec',
-    'gemini': 'gemini',
-}
-
-# Verbose / structured-transcript output flags per provider
-TRANSCRIPT_FLAGS = {
-    'claude': '--verbose --output-format stream-json',
-    'codex': '--json',
-    'gemini': '--output-format stream-json',
-}
+from core.agent_runner import next_attempt_number, run_prebuilt_cli_agent
+from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
+from core.scorer import RESULTS_FILE_NAME
 
 # Files the rule_maker is responsible for producing (relative to scoring/)
 RULE_MAKER_OUTPUT_FILES = {
-    'eval_script': 'eval.py',
-    'targets': 'targets.json',
-    'interface': 'interface.md',
-    'rationale_log': 'rule_maker_log.md',
+    "eval_script": "eval.py",
+    "targets": "targets.json",
+    "interface": "interface.md",
+    "rationale_log": "rule_maker_log.md",
 }
+
+
+_DISALLOWED_EVALUATOR_CLI_MODULES = {"argparse", "click", "docopt", "typer"}
+_EVALUATOR_RESULTS_PATH = f"scoring/{RESULTS_FILE_NAME}"
+_EVALUATOR_OWNED_INTERFACE_PREFIXES = ("scoring/", "data/.test/")
+
+
+def _assigned_expressions(tree: ast.AST) -> dict[str, ast.AST]:
+    assignments: dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None:
+                assignments[node.target.id] = node.value
+    return assignments
+
+
+def _path_string_parts(
+    node: ast.AST,
+    assignments: dict[str, ast.AST],
+    *,
+    resolving: Optional[set[str]] = None,
+) -> list[str]:
+    resolving = set(resolving or ())
+    if isinstance(node, ast.Name) and node.id in assignments and node.id not in resolving:
+        resolving.add(node.id)
+        return _path_string_parts(
+            assignments[node.id],
+            assignments,
+            resolving=resolving,
+        )
+    parts: list[str] = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            value = child.value.strip().replace("\\", "/")
+            if value:
+                parts.append(value)
+    return parts
+
+
+def _is_canonical_results_path(
+    node: ast.AST,
+    assignments: dict[str, ast.AST],
+) -> bool:
+    parts = _path_string_parts(node, assignments)
+    if any(part.rstrip("/").endswith(_EVALUATOR_RESULTS_PATH) for part in parts):
+        return True
+    if "scoring" in parts and "results.json" in parts:
+        return True
+    normalized = "/".join(part.strip("/") for part in parts)
+    return normalized.endswith(_EVALUATOR_RESULTS_PATH)
+
+
+def _write_path_expressions(tree: ast.AST) -> list[ast.AST]:
+    paths: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        if isinstance(function, ast.Attribute) and function.attr in {
+            "write_text",
+            "write_bytes",
+        }:
+            paths.append(function.value)
+            continue
+        if isinstance(function, ast.Attribute) and function.attr == "open":
+            mode = node.args[0] if node.args else None
+            for keyword in node.keywords:
+                if keyword.arg == "mode":
+                    mode = keyword.value
+            if (
+                isinstance(mode, ast.Constant)
+                and isinstance(mode.value, str)
+                and any(flag in mode.value for flag in "wax+")
+            ):
+                paths.append(function.value)
+            continue
+        if isinstance(function, ast.Name) and function.id == "open" and node.args:
+            mode = node.args[1] if len(node.args) > 1 else None
+            for keyword in node.keywords:
+                if keyword.arg == "mode":
+                    mode = keyword.value
+            if (
+                isinstance(mode, ast.Constant)
+                and isinstance(mode.value, str)
+                and any(flag in mode.value for flag in "wax+")
+            ):
+                paths.append(node.args[0])
+    return paths
+
+
+def _validate_evaluator_abi(tree: ast.AST) -> list[str]:
+    """Validate the fixed ``python scoring/eval.py`` scorer ABI."""
+    issues: list[str] = []
+    sys_aliases = {"sys"}
+    argv_aliases: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                module = imported.name.split(".", 1)[0]
+                if module in _DISALLOWED_EVALUATOR_CLI_MODULES:
+                    issues.append(
+                        "scoring/eval.py must use the zero-argument scorer ABI; "
+                        f"command-line parser module `{module}` is not allowed."
+                    )
+                if imported.name == "sys":
+                    sys_aliases.add(imported.asname or imported.name)
+        elif isinstance(node, ast.ImportFrom):
+            module = (node.module or "").split(".", 1)[0]
+            if module in _DISALLOWED_EVALUATOR_CLI_MODULES:
+                issues.append(
+                    "scoring/eval.py must use the zero-argument scorer ABI; "
+                    f"command-line parser module `{module}` is not allowed."
+                )
+            if node.module == "sys":
+                for imported in node.names:
+                    if imported.name == "argv":
+                        argv_aliases.add(imported.asname or imported.name)
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "argv"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in sys_aliases
+        ) or (isinstance(node, ast.Name) and node.id in argv_aliases):
+            issues.append(
+                "scoring/eval.py must use the zero-argument scorer ABI; "
+                "reading command-line arguments is not allowed."
+            )
+            break
+
+    assignments = _assigned_expressions(tree)
+    if not any(
+        _is_canonical_results_path(path, assignments)
+        for path in _write_path_expressions(tree)
+    ):
+        issues.append(
+            "scoring/eval.py must write its authoritative structured result to "
+            f"`{_EVALUATOR_RESULTS_PATH}`."
+        )
+
+    return list(dict.fromkeys(issues))
 
 
 def generate_rule_maker_prompt(
@@ -61,6 +193,8 @@ def generate_rule_maker_prompt(
     work_dir: Path,
     templates_dir: Path,
     domain: Optional[str] = None,
+    *,
+    hitl_phase: Optional[str] = None,
 ) -> str:
     """
     Build the rule_maker agent's prompt.
@@ -94,21 +228,25 @@ def generate_rule_maker_prompt(
     work_dir = Path(work_dir)
     templates_dir = Path(templates_dir)
 
-    # Load the general body. It lives at templates/agents/rule_maker.txt,
-    # alongside the other per-run agents (resource_finder.txt, paper_writer.txt).
-    # Per-domain supplements live separately at templates/domains/<d>/rule_maker.txt.
-    base_path = templates_dir / "agents" / "rule_maker.txt"
+    if hitl_phase not in {None, "plan", "execution", "review"}:
+        raise ValueError(f"Unsupported HITL rule-maker phase: {hitl_phase}")
+
+    # Planning/review receive research context only. The evaluator-authoring
+    # procedure and domain supplement are execution-only in HITL mode.
+    base_path = (
+        templates_dir / "hitl" / "rule_maker_context.txt"
+        if hitl_phase in {"plan", "review"}
+        else templates_dir / "agents" / "rule_maker.txt"
+    )
     if not base_path.exists():
         raise FileNotFoundError(
             f"rule_maker base template not found at {base_path}. "
             "Create templates/agents/rule_maker.txt before running."
         )
-    base_template = base_path.read_text(encoding='utf-8')
+    base_template = base_path.read_text(encoding="utf-8")
 
     scoring_dir = work_dir / "scoring"
-    output_files = "\n".join(
-        f"  - scoring/{name}" for name in RULE_MAKER_OUTPUT_FILES.values()
-    )
+    output_files = "\n".join(f"  - scoring/{name}" for name in RULE_MAKER_OUTPUT_FILES.values())
     resource_listing = _summarize_resource_outputs(work_dir)
 
     try:
@@ -117,37 +255,38 @@ def generate_rule_maker_prompt(
         idea_repr = repr(idea)
 
     substitutions = {
-        '{idea_yaml}': idea_repr,
-        '{workspace}': str(work_dir),
-        '{scoring_dir}': str(scoring_dir),
-        '{output_files}': output_files,
-        '{resource_listing}': resource_listing,
+        "{idea_yaml}": idea_repr,
+        "{workspace}": str(work_dir),
+        "{scoring_dir}": str(scoring_dir),
+        "{output_files}": output_files,
+        "{resource_listing}": resource_listing,
     }
 
     prompt = base_template
     for placeholder, value in substitutions.items():
         prompt = prompt.replace(placeholder, value)
 
-    # Append per-domain supplement (if any) with a banner.
-    resolved_domain = _resolve_domain(idea, domain)
-    supplement = _load_domain_supplement(templates_dir, resolved_domain)
-    if supplement:
-        banner = "=" * 80
-        domain_label = resolved_domain.upper().replace('_', ' ')
-        prompt = (
-            f"{prompt}\n\n"
-            f"{banner}\n"
-            f"           RULE MAKER DOMAIN GUIDELINES: {domain_label}\n"
-            f"{banner}\n\n"
-            f"{supplement}\n"
-        )
+    if hitl_phase in {"plan", "review"}:
+        prompt = prompt.replace("{hitl_phase}", hitl_phase)
+    else:
+        # Append per-domain supplement (if any) with a banner.
+        resolved_domain = _resolve_domain(idea, domain)
+        supplement = _load_domain_supplement(templates_dir, resolved_domain)
+        if supplement:
+            banner = "=" * 80
+            domain_label = resolved_domain.upper().replace("_", " ")
+            prompt = (
+                f"{prompt}\n\n"
+                f"{banner}\n"
+                f"           RULE MAKER DOMAIN GUIDELINES: {domain_label}\n"
+                f"{banner}\n\n"
+                f"{supplement}\n"
+            )
 
     return prompt
 
 
-def _resolve_domain(
-    idea: Dict[str, Any], override: Optional[str]
-) -> str:
+def _resolve_domain(idea: Dict[str, Any], override: Optional[str]) -> str:
     """
     Pick the domain string used to locate the domain supplement.
 
@@ -159,12 +298,12 @@ def _resolve_domain(
     """
     if override:
         return override
-    nested = idea.get('idea', {}) if isinstance(idea, dict) else {}
-    if isinstance(nested, dict) and nested.get('domain'):
-        return nested['domain']
-    if isinstance(idea, dict) and idea.get('domain'):
-        return idea['domain']
-    return 'machine_learning'
+    nested = idea.get("idea", {}) if isinstance(idea, dict) else {}
+    if isinstance(nested, dict) and nested.get("domain"):
+        return nested["domain"]
+    if isinstance(idea, dict) and idea.get("domain"):
+        return idea["domain"]
+    return "machine_learning"
 
 
 def _load_domain_supplement(templates_dir: Path, domain: str) -> str:
@@ -178,7 +317,7 @@ def _load_domain_supplement(templates_dir: Path, domain: str) -> str:
     supplement_path = templates_dir / "domains" / domain / "rule_maker.txt"
     if not supplement_path.exists():
         return ""
-    return supplement_path.read_text(encoding='utf-8')
+    return supplement_path.read_text(encoding="utf-8")
 
 
 def _summarize_resource_outputs(work_dir: Path) -> str:
@@ -206,9 +345,7 @@ def _summarize_resource_outputs(work_dir: Path) -> str:
             entries = sorted(p.name for p in path.iterdir())
             preview = ", ".join(entries[:8])
             extra = "" if len(entries) <= 8 else f", +{len(entries) - 8} more"
-            lines.append(
-                f"  - {label}: {len(entries)} entries [{preview}{extra}]"
-            )
+            lines.append(f"  - {label}: {len(entries)} entries [{preview}{extra}]")
         else:
             size = path.stat().st_size
             lines.append(f"  - {label}: {size} bytes")
@@ -222,9 +359,20 @@ def run_rule_maker(
     templates_dir: Optional[Path] = None,
     timeout: int = 1800,  # 30 min
     full_permissions: bool = True,
+    prompt_suffix: str = "",
+    completion_mode: str = "outputs",
+    log_prefix: str = "rule_maker",
+    include_hitl_outputs: bool = False,
+    env_extra: Optional[Dict[str, str]] = None,
+    prompt_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Launch the rule_maker CLI agent.
+
+    Args:
+        prompt_suffix: Extra text appended to the generated prompt. Used by
+            the eval-verifier retry loop to feed violations back into the
+            rule_maker's second attempt.
 
     Returns:
         Dict with: success, outputs (paths of generated files), issues,
@@ -232,8 +380,7 @@ def run_rule_maker(
     """
     if provider not in CLI_COMMANDS:
         raise ValueError(
-            f"Unsupported provider: {provider}. "
-            f"Choose from: {list(CLI_COMMANDS.keys())}"
+            f"Unsupported provider: {provider}. " f"Choose from: {list(CLI_COMMANDS.keys())}"
         )
 
     if templates_dir is None:
@@ -245,35 +392,38 @@ def run_rule_maker(
     logs_dir = work_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"📐 Starting Rule Maker Agent")
+    print("📐 Starting Rule Maker Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
     print(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
     print("=" * 80)
 
+    # Per-attempt artifact names: the orchestrator re-runs the rule maker
+    # once after a verifier rejection, and fixed names would overwrite the
+    # first attempt's audit trail (prompt, log, and transcript).
+    attempt = next_attempt_number(
+        logs_dir, lambda n: f"{log_prefix}_{provider}_attempt{n}.log")
+
     # Generate prompt and persist it for debugging
-    prompt = generate_rule_maker_prompt(idea, work_dir, templates_dir)
-    prompt_file = logs_dir / "rule_maker_prompt.txt"
-    prompt_file.write_text(prompt, encoding='utf-8')
+    if prompt_override is not None:
+        prompt = prompt_override
+    else:
+        prompt = generate_rule_maker_prompt(idea, work_dir, templates_dir)
+        if prompt_suffix:
+            prompt += prompt_suffix
+    prompt_file = logs_dir / f"{log_prefix}_prompt_attempt{attempt}.txt"
+    prompt_file.parent.mkdir(parents=True, exist_ok=True)
+    prompt_file.write_text(prompt, encoding="utf-8")
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
 
     # Build CLI command
-    cmd = CLI_COMMANDS[provider]
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
 
-    transcript_flag = TRANSCRIPT_FLAGS.get(provider, '')
-    if transcript_flag:
-        cmd += f" {transcript_flag}"
-
-    log_file = logs_dir / f"rule_maker_{provider}.log"
-    transcript_file = logs_dir / f"rule_maker_{provider}_transcript.jsonl"
+    log_file = logs_dir / f"{log_prefix}_{provider}_attempt{attempt}.log"
+    transcript_file = logs_dir / f"{log_prefix}_{provider}_attempt{attempt}_transcript.jsonl"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    transcript_file.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"▶️  Launching {provider} CLI agent...")
     print(f"   Command: {cmd}")
@@ -283,55 +433,39 @@ def run_rule_maker(
     print("RULE MAKER OUTPUT (streaming)")
     print("=" * 80)
 
-    env = os.environ.copy()
-    env['PYTHONUNBUFFERED'] = '1'
-    if provider == "gemini":
-        env['GEMINI_CLI_IDE_DISABLE'] = '1'
+    env = build_agent_environment(provider, env_extra)
 
     start_time = time.time()
+    return_code: Optional[int] = None
 
     try:
-        with open(log_file, 'w', encoding='utf-8') as log_f, \
-                open(transcript_file, 'w', encoding='utf-8') as transcript_f:
-            process = subprocess.Popen(
-                shlex.split(cmd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                text=True,
-                encoding='utf-8',
-                bufsize=1,
-                cwd=str(work_dir),
-            )
-            process.stdin.write(prompt)
-            process.stdin.close()
-
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    sanitized = sanitize_text(line)
-                    print(sanitized, end='')
-                    log_f.write(sanitized)
-                    transcript_f.write(sanitized)
-
-            return_code = process.wait(timeout=timeout)
+        # The shared deadline-aware runner enforces the timeout on wall
+        # clock. Reading stdout to EOF inline would block for as long as the
+        # agent keeps the pipe open, so wait(timeout=...) would never be
+        # reached: HITL workers legitimately stay active while emitting
+        # output, and a wedged ordinary agent must not hang the pipeline.
+        launch = run_prebuilt_cli_agent(
+            command_argv=shlex.split(cmd),
+            prompt=prompt,
+            work_dir=work_dir,
+            log_file=log_file,
+            transcript_file=transcript_file,
+            env=env,
+            timeout=timeout,
+        )
+        return_code = launch["return_code"]
+        if launch["timed_out"]:
+            print(f"\n⏱️  Rule maker timed out after {timeout} seconds")
 
         print()
         print("=" * 80)
         elapsed = time.time() - start_time
-        print(
-            f"⏱️  Rule maker completed in {elapsed:.1f}s "
-            f"({elapsed / 60:.1f} minutes)"
-        )
+        print(f"⏱️  Rule maker completed in {elapsed:.1f}s " f"({elapsed / 60:.1f} minutes)")
 
         if return_code == 0:
             print("✅ Agent process exited cleanly.")
         else:
             print(f"⚠️  Agent exited with return code: {return_code}")
-
-    except subprocess.TimeoutExpired:
-        print(f"\n⏱️  Rule maker timed out after {timeout} seconds")
-        process.kill()
 
     except Exception as e:
         print(f"\n❌ Error during rule_maker execution: {e}")
@@ -341,21 +475,38 @@ def run_rule_maker(
     print()
     print("📦 Validating rule_maker outputs...")
     validation = validate_rule_maker_outputs(work_dir)
-    success = validation['valid']
-    if success:
+    validation_success = validation["valid"]
+    if validation_success:
         print("✅ All required rule_maker outputs present and parseable.")
     else:
         print("⚠️  Rule maker outputs incomplete or invalid:")
-        for issue in validation['issues']:
+        for issue in validation["issues"]:
             print(f"     - {issue}")
 
+    if completion_mode == "hitl_runtime":
+        success = bool(launch.get("success"))
+        print("ℹ️  HITL runtime completion mode; orchestrator will review finish state.")
+    elif completion_mode == "outputs":
+        success = validation_success
+    else:
+        raise ValueError("completion_mode must be 'outputs' or 'hitl_runtime' for rule_maker")
+
+    outputs = dict(validation["found"])
+    if include_hitl_outputs:
+        plan_path = work_dir / "plans" / "rule_maker_plan.md"
+        if plan_path.exists():
+            outputs["hitl_plan"] = str(plan_path)
+
     return {
-        'success': success,
-        'outputs': validation['found'],
-        'issues': validation['issues'],
-        'log_file': str(log_file),
-        'transcript_file': str(transcript_file),
-        'elapsed_time': time.time() - start_time,
+        "success": success,
+        "outputs": outputs,
+        "issues": validation["issues"],
+        "log_file": str(log_file),
+        "transcript_file": str(transcript_file),
+        "elapsed_time": time.time() - start_time,
+        "background_processes_terminated": bool(launch.get("background_processes_terminated"))
+        if completion_mode == "hitl_runtime"
+        else False,
     }
 
 
@@ -377,42 +528,77 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
     found: Dict[str, str] = {}
     issues = []
 
-    eval_path = scoring_dir / RULE_MAKER_OUTPUT_FILES['eval_script']
+    eval_path = scoring_dir / RULE_MAKER_OUTPUT_FILES["eval_script"]
     if not eval_path.exists():
         issues.append(f"missing: {eval_path}")
     else:
         try:
-            ast.parse(eval_path.read_text(encoding='utf-8'))
-            found['eval_script'] = str(eval_path)
+            evaluator_tree = ast.parse(eval_path.read_text(encoding="utf-8"))
+            evaluator_issues = _validate_evaluator_abi(evaluator_tree)
+            if evaluator_issues:
+                issues.extend(evaluator_issues)
+            else:
+                found["eval_script"] = str(eval_path)
         except SyntaxError as e:
             issues.append(f"eval.py has syntax error: {e}")
 
-    targets_path = scoring_dir / RULE_MAKER_OUTPUT_FILES['targets']
+    targets_path = scoring_dir / RULE_MAKER_OUTPUT_FILES["targets"]
     if not targets_path.exists():
         issues.append(f"missing: {targets_path}")
     else:
         try:
-            json.loads(targets_path.read_text(encoding='utf-8'))
-            found['targets'] = str(targets_path)
+            targets = json.loads(targets_path.read_text(encoding="utf-8"))
+            declared_result = (
+                str(targets.get("result_file", "")).strip().replace("\\", "/")
+                if isinstance(targets, dict)
+                else ""
+            )
+            if declared_result and declared_result != _EVALUATOR_RESULTS_PATH:
+                issues.append(
+                    "scoring/targets.json declares a conflicting result_file; "
+                    f"the evaluator ABI requires `{_EVALUATOR_RESULTS_PATH}`."
+                )
+            else:
+                found["targets"] = str(targets_path)
         except json.JSONDecodeError as e:
             issues.append(f"targets.json is not valid JSON: {e}")
 
-    interface_path = scoring_dir / RULE_MAKER_OUTPUT_FILES['interface']
+    interface_path = scoring_dir / RULE_MAKER_OUTPUT_FILES["interface"]
     if not interface_path.exists():
         issues.append(f"missing: {interface_path}")
     elif interface_path.stat().st_size == 0:
         issues.append(f"empty: {interface_path}")
     else:
-        found['interface'] = str(interface_path)
+        # The experiment runner cannot repair this evaluator-owned contract.
+        # Validate the exact grammar while the rule maker still owns it.
+        try:
+            from core.hitl import HitlValidationError, parse_required_artifacts
 
-    rationale_path = scoring_dir / RULE_MAKER_OUTPUT_FILES['rationale_log']
+            artifacts = parse_required_artifacts(interface_path)
+            evaluator_owned = [
+                artifact.path
+                for artifact in artifacts
+                if artifact.path.startswith(_EVALUATOR_OWNED_INTERFACE_PREFIXES)
+            ]
+            if evaluator_owned:
+                issues.append(
+                    "scoring/interface.md assigns evaluator-owned paths to the "
+                    "experiment runner: "
+                    + ", ".join(evaluator_owned)
+                )
+            else:
+                found["interface"] = str(interface_path)
+        except (OSError, HitlValidationError) as exc:
+            issues.append(f"invalid artifact contract in {interface_path}: {exc}")
+
+    rationale_path = scoring_dir / RULE_MAKER_OUTPUT_FILES["rationale_log"]
     if rationale_path.exists():
-        found['rationale_log'] = str(rationale_path)
+        found["rationale_log"] = str(rationale_path)
 
     return {
-        'valid': len(issues) == 0,
-        'found': found,
-        'issues': issues,
+        "valid": len(issues) == 0,
+        "found": found,
+        "issues": issues,
     }
 
 
@@ -428,12 +614,10 @@ def load_interface_for_runner(work_dir: Path) -> str:
         FileNotFoundError: If interface.md is missing -- the pipeline should
         not proceed to experiment_runner without it.
     """
-    interface_path = (
-        Path(work_dir) / "scoring" / RULE_MAKER_OUTPUT_FILES['interface']
-    )
+    interface_path = Path(work_dir) / "scoring" / RULE_MAKER_OUTPUT_FILES["interface"]
     if not interface_path.exists():
         raise FileNotFoundError(
             f"scoring/interface.md not found at {interface_path}. "
             "rule_maker must run successfully before experiment_runner."
         )
-    return interface_path.read_text(encoding='utf-8')
+    return interface_path.read_text(encoding="utf-8")

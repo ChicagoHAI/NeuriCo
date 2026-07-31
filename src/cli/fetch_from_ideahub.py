@@ -282,6 +282,13 @@ def _parse_idea_yaml(yaml_content: str) -> tuple:
         lines.pop()
 
     raise ValueError("no valid 'idea:' YAML document found in the response")
+    # Check for an API key: prefer OpenRouter (the repo default), fall back
+    # to a direct OpenAI key.
+    openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
+    api_key = openrouter_key or os.getenv('OPENAI_API_KEY')
+    if not api_key:
+        print("ℹ️  No OPENROUTER_KEY or OPENAI_API_KEY set — using template-based conversion instead.")
+        return _convert_without_llm(ideahub_content)
 
 
 def _dump_idea_yaml(idea_data: dict) -> str:
@@ -360,6 +367,12 @@ def _convert_with_cli(prompt: str, provider: str, timeout: int = 300) -> dict:
 
     parsed, yaml_content = _parse_idea_yaml(_extract_yaml(result.stdout))
     print("   ✓ Conversion complete")
+    if openrouter_key:
+        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+        model_name = "openai/gpt-4.1"
+    else:
+        client = OpenAI(api_key=api_key)
+        model_name = "gpt-4.1"
 
     return {'parsed': parsed, 'yaml_string': yaml_content}
 
@@ -528,6 +541,45 @@ def convert_to_yaml(ideahub_content: dict, provider: str = None) -> dict:
             print(f"⚠️  GPT API call failed: {e}")
     else:
         print("\nℹ️  OPENAI_API_KEY not set.")
+    try:
+        print("   Calling GPT API...")
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a research assistant that formats research ideas into minimal YAML. Only include information explicitly provided - do not invent datasets, methods, or metrics. Return valid YAML without markdown formatting."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.1,  # Lower temperature for more conservative output
+            max_tokens=2000  # Reduced since we want minimal output
+        )
+
+        yaml_content = response.choices[0].message.content.strip()
+
+        # Remove markdown code fences if present
+        yaml_content = re.sub(r'^```ya?ml\s*\n', '', yaml_content)
+        yaml_content = re.sub(r'\n```\s*$', '', yaml_content)
+        yaml_content = yaml_content.strip()
+
+        print("   ✓ Conversion complete")
+
+        # Parse YAML to validate
+        try:
+            parsed = yaml.safe_load(yaml_content)
+        except yaml.YAMLError as e:
+            print(f"⚠️  Warning: Generated YAML may have issues: {e}")
+            print("   Attempting to fix...")
+            # Try to parse anyway
+            parsed = yaml.safe_load(yaml_content)
+
+        parsed, yaml_content = _drop_placeholder_author(parsed, yaml_content)
+        # Return both parsed data and the raw YAML string
+        return {'parsed': parsed, 'yaml_string': yaml_content}
 
     if cli_provider in CLI_COMMANDS:
         print(f"🤖 Converting to NeuriCo format using the {cli_provider} CLI...")
@@ -541,6 +593,28 @@ def convert_to_yaml(ideahub_content: dict, provider: str = None) -> dict:
 
 
 def save_yaml_file(result: dict, url: str) -> Path:
+def _drop_placeholder_author(parsed: dict, yaml_string: str) -> tuple:
+    """
+    Remove metadata.author when the model emitted the 'Unknown' placeholder
+    despite being told to omit it. Regenerates the YAML string only when a
+    drop actually happened, so faithful conversions stay byte-identical.
+    """
+    try:
+        metadata = parsed['idea']['metadata']
+        author = metadata.get('author')
+    except (KeyError, TypeError):
+        return parsed, yaml_string
+
+    if isinstance(author, str) and author.strip().lower() in ('unknown', ''):
+        del metadata['author']
+        if not metadata:
+            del parsed['idea']['metadata']
+        yaml_string = yaml.dump(parsed, default_flow_style=False,
+                                sort_keys=False, allow_unicode=True)
+    return parsed, yaml_string
+
+
+def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
     """
     Save the idea as a YAML file.
 

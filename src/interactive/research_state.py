@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from core.hitl_util import utc_now
 
 SCHEMA_VERSION = 3
 
@@ -78,7 +79,7 @@ BUILTIN_SECTIONS = ("crux", "current_best", "narrative", "assessment",
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return utc_now(timespec="seconds")
 
 
 def _set_defaults(d: Dict[str, Any], defaults: Dict[str, Any]) -> bool:
@@ -89,6 +90,15 @@ def _set_defaults(d: Dict[str, Any], defaults: Dict[str, Any]) -> bool:
             d[k] = v
             changed = True
     return changed
+
+
+def _merge_links(existing: Optional[List[Any]], additions: Optional[List[Any]]) -> List[Any]:
+    """Merge link metadata without erasing provenance recorded by another writer."""
+    merged = list(existing or [])
+    for link in additions or []:
+        if link not in merged:
+            merged.append(link)
+    return merged
 
 
 class ResearchState:
@@ -169,7 +179,7 @@ class ResearchState:
         for e in self.state.get("experiments", []):
             changed |= _set_defaults(
                 e, {"name": "", "mode": "", "design": "",
-                    "ranBy": e.get("agent", "")})
+                    "ranBy": e.get("agent", ""), "links": []})
         for inc in self.state.get("incidents", []):
             changed |= _set_defaults(inc, {"author": ""})
         for h in self.state.get("hypotheses", []):
@@ -184,9 +194,15 @@ class ResearchState:
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.state, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.state_file)
-        except OSError:
-            pass
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
 
     # -------------------------------------------------------------- mutate
     def _next_id(self, key: str, prefix: str) -> str:
@@ -273,6 +289,9 @@ class ResearchState:
         if kind not in FINDING_KINDS:
             kind = "note"
         for f in self.state["findings"]:
+            if links and any(link in f.get("links", []) for link in links):
+                return f["id"]
+        for f in self.state["findings"]:
             if f["text"].lower() == text.lower():
                 # Enrich an existing finding rather than duplicating it.
                 if insight and not f.get("insight"):
@@ -280,7 +299,7 @@ class ResearchState:
                 if evidence:
                     f["evidence"] = evidence
                 if links:
-                    f["links"] = links
+                    f["links"] = _merge_links(f.get("links"), links)
                 self._save()
                 return f["id"]
         new_id = self._next_id("findings", "F")
@@ -360,6 +379,9 @@ class ResearchState:
         question = (question or "").strip()
         if not question:
             return ""
+        for decision in self.state["decisions"]:
+            if links and any(link in decision.get("links", []) for link in links):
+                return decision["id"]
         layer = layer if layer in DECISION_LAYERS else None
         finding = (finding or "global").strip() or "global"
         new_id = self._next_id("decisions", "D")
@@ -393,18 +415,26 @@ class ResearchState:
 
     def add_experiment(self, agent: str, run_id: str, rationale: str = "",
                        hypothesis: str = "", name: str = "", mode: str = "",
-                       design: str = "") -> str:
+                       design: str = "",
+                       links: Optional[List[Dict[str, Any]]] = None) -> str:
         """Record an investigation. ``name``/``mode``/``design`` describe what it IS
         (domain-general); ``agent`` is the NeuriCo pipeline stage that ran it, kept
         as provenance under ``ranBy`` (``agent`` retained for back-compat)."""
         mode = mode if mode in EXPERIMENT_MODES else ""
+        run_id = (run_id or "").strip()
+        for experiment in self.state["experiments"]:
+            if experiment.get("run_id") == run_id:
+                if links:
+                    experiment["links"] = _merge_links(experiment.get("links"), links)
+                    self._save()
+                return str(experiment["id"])
         new_id = self._next_id("experiments", "E")
         self.state["experiments"].append({
             "id": new_id, "name": (name or "").strip(), "mode": mode,
             "design": (design or "").strip(), "agent": agent, "ranBy": agent,
             "run_id": run_id, "rationale": (rationale or "").strip(),
             "hypothesis": (hypothesis or "").strip(), "status": "running",
-            "result": "", "ts": _now(),
+            "result": "", "links": links or [], "ts": _now(),
         })
         self._save()
         return new_id
@@ -427,6 +457,60 @@ class ResearchState:
                 break
         if changed:
             self._save()
+
+    def replace_experiments_by_link_source(
+        self,
+        source: str,
+        experiments: List[Dict[str, Any]],
+    ) -> None:
+        """Replace one runtime-owned experiment projection without touching others.
+
+        ``ResearchState`` remains shared manager memory, so a runtime projection
+        must be able to refresh its own derived entries without deleting manager
+        or other-agent experiments. ``source`` identifies those entries through
+        their provenance links.
+        """
+        source = (source or "").strip()
+        if not source:
+            return
+
+        def is_owned(experiment: Dict[str, Any]) -> bool:
+            return any(
+                isinstance(link, dict) and link.get("source") == source
+                for link in experiment.get("links", [])
+            )
+
+        existing = {
+            str(experiment.get("run_id", "")): experiment
+            for experiment in self.state["experiments"]
+            if is_owned(experiment)
+        }
+        retained = [
+            experiment for experiment in self.state["experiments"] if not is_owned(experiment)
+        ]
+        replacements: List[Dict[str, Any]] = []
+        for payload in experiments:
+            run_id = str(payload.get("run_id", "")).strip()
+            if not run_id:
+                continue
+            previous = existing.get(run_id, {})
+            record = {**previous, **payload}
+            record["id"] = previous.get("id") or self._next_id("experiments", "E")
+            record["run_id"] = run_id
+            record.setdefault("name", "")
+            record.setdefault("mode", "")
+            record.setdefault("design", "")
+            record.setdefault("agent", "")
+            record.setdefault("ranBy", record["agent"])
+            record.setdefault("rationale", "")
+            record.setdefault("hypothesis", "")
+            record.setdefault("status", "")
+            record.setdefault("result", "")
+            record.setdefault("links", [{"source": source}])
+            record.setdefault("ts", _now())
+            replacements.append(record)
+        self.state["experiments"] = retained + replacements
+        self._save()
 
     def add_assessment(self, situation: str = "", uncertainty: str = "",
                        crux: str = "", decision_pending: str = "",
