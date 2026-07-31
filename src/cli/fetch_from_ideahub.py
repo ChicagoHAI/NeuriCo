@@ -282,13 +282,6 @@ def _parse_idea_yaml(yaml_content: str) -> tuple:
         lines.pop()
 
     raise ValueError("no valid 'idea:' YAML document found in the response")
-    # Check for an API key: prefer OpenRouter (the repo default), fall back
-    # to a direct OpenAI key.
-    openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
-    api_key = openrouter_key or os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        print("ℹ️  No OPENROUTER_KEY or OPENAI_API_KEY set — using template-based conversion instead.")
-        return _convert_without_llm(ideahub_content)
 
 
 def _dump_idea_yaml(idea_data: dict) -> str:
@@ -367,12 +360,6 @@ def _convert_with_cli(prompt: str, provider: str, timeout: int = 300) -> dict:
 
     parsed, yaml_content = _parse_idea_yaml(_extract_yaml(result.stdout))
     print("   ✓ Conversion complete")
-    if openrouter_key:
-        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-        model_name = "openai/gpt-4.1"
-    else:
-        client = OpenAI(api_key=api_key)
-        model_name = "gpt-4.1"
 
     return {'parsed': parsed, 'yaml_string': yaml_content}
 
@@ -480,15 +467,34 @@ idea:
     return prompt
 
 
-def _convert_with_openai(prompt: str, api_key: str) -> dict:
+def _resolve_api_key() -> tuple:
+    """
+    Resolve the LLM API key, preferring OpenRouter (the repo default) over a
+    direct OpenAI key.
+
+    Returns:
+        (api_key, use_openrouter) -- api_key is None when neither is set.
+    """
+    openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
+    if openrouter_key:
+        return openrouter_key, True
+    return os.getenv('OPENAI_API_KEY'), False
+
+
+def _convert_with_openai(prompt: str, api_key: str, use_openrouter: bool = False) -> dict:
     """Convert via the OpenAI API. Raises on auth, quota, or parse failure."""
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key)
+    if use_openrouter:
+        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+        model_name = "openai/gpt-4.1"
+    else:
+        client = OpenAI(api_key=api_key)
+        model_name = "gpt-4.1"
 
     print("   Calling GPT API...")
     response = client.chat.completions.create(
-        model="gpt-4.1",
+        model=model_name,
         messages=[
             {"role": "system", "content": CONVERSION_SYSTEM_PROMPT},
             {"role": "user", "content": prompt}
@@ -509,9 +515,10 @@ def convert_to_yaml(ideahub_content: dict, provider: str = None) -> dict:
     Convert IdeaHub content to NeuriCo YAML format.
 
     Tries three paths in order, falling through on failure:
-      1. The OpenAI API, if OPENAI_API_KEY is set.
+      1. The OpenAI-compatible API, if OPENROUTER_KEY (preferred, the repo
+         default) or OPENAI_API_KEY is set.
       2. The local agent CLI for `provider` (default codex), which uses its own
-         login rather than OPENAI_API_KEY -- so it survives a quota error.
+         login rather than an API key -- so it survives a quota error.
       3. A template-based conversion, which preserves far less of the source
          idea (no citations, keyword-guessed domain).
 
@@ -526,60 +533,31 @@ def convert_to_yaml(ideahub_content: dict, provider: str = None) -> dict:
     cli_provider = provider or "codex"
 
     def _finalize(result: dict) -> dict:
-        """Attach provenance metadata and re-render the YAML from the same dict."""
-        idea_data = _apply_source_metadata(result['parsed'], ideahub_content)
+        """
+        Drop placeholder authors, attach provenance metadata, and re-render the
+        YAML from the same dict.
+
+        The placeholder drop runs before _apply_source_metadata so a scraped
+        author can still fill the slot the model left as 'Unknown'.
+        """
+        idea_data = result['parsed']
+        if 'idea' not in idea_data:
+            idea_data = {'idea': idea_data}
+        idea_data = _drop_placeholder_author(idea_data)
+        idea_data = _apply_source_metadata(idea_data, ideahub_content)
         return {'parsed': idea_data, 'yaml_string': _dump_idea_yaml(idea_data)}
 
-    api_key = os.getenv('OPENAI_API_KEY')
+    api_key, use_openrouter = _resolve_api_key()
     if api_key:
         print("\n🤖 Converting to NeuriCo format using GPT...")
         try:
-            return _finalize(_convert_with_openai(prompt, api_key))
+            return _finalize(_convert_with_openai(prompt, api_key, use_openrouter))
         except ImportError:
             print("⚠️  openai package not installed.")
         except Exception as e:
             print(f"⚠️  GPT API call failed: {e}")
     else:
-        print("\nℹ️  OPENAI_API_KEY not set.")
-    try:
-        print("   Calling GPT API...")
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a research assistant that formats research ideas into minimal YAML. Only include information explicitly provided - do not invent datasets, methods, or metrics. Return valid YAML without markdown formatting."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.1,  # Lower temperature for more conservative output
-            max_tokens=2000  # Reduced since we want minimal output
-        )
-
-        yaml_content = response.choices[0].message.content.strip()
-
-        # Remove markdown code fences if present
-        yaml_content = re.sub(r'^```ya?ml\s*\n', '', yaml_content)
-        yaml_content = re.sub(r'\n```\s*$', '', yaml_content)
-        yaml_content = yaml_content.strip()
-
-        print("   ✓ Conversion complete")
-
-        # Parse YAML to validate
-        try:
-            parsed = yaml.safe_load(yaml_content)
-        except yaml.YAMLError as e:
-            print(f"⚠️  Warning: Generated YAML may have issues: {e}")
-            print("   Attempting to fix...")
-            # Try to parse anyway
-            parsed = yaml.safe_load(yaml_content)
-
-        parsed, yaml_content = _drop_placeholder_author(parsed, yaml_content)
-        # Return both parsed data and the raw YAML string
-        return {'parsed': parsed, 'yaml_string': yaml_content}
+        print("\nℹ️  No OPENROUTER_KEY or OPENAI_API_KEY set.")
 
     if cli_provider in CLI_COMMANDS:
         print(f"🤖 Converting to NeuriCo format using the {cli_provider} CLI...")
@@ -592,29 +570,26 @@ def convert_to_yaml(ideahub_content: dict, provider: str = None) -> dict:
     return _finalize(_convert_without_llm(ideahub_content))
 
 
-def save_yaml_file(result: dict, url: str) -> Path:
-def _drop_placeholder_author(parsed: dict, yaml_string: str) -> tuple:
+def _drop_placeholder_author(idea_data: dict) -> dict:
     """
     Remove metadata.author when the model emitted the 'Unknown' placeholder
-    despite being told to omit it. Regenerates the YAML string only when a
-    drop actually happened, so faithful conversions stay byte-identical.
+    despite being told to omit it. The caller re-renders the YAML from this
+    dict, so only the parsed structure is touched here.
     """
     try:
-        metadata = parsed['idea']['metadata']
+        metadata = idea_data['idea']['metadata']
         author = metadata.get('author')
     except (KeyError, TypeError):
-        return parsed, yaml_string
+        return idea_data
 
     if isinstance(author, str) and author.strip().lower() in ('unknown', ''):
         del metadata['author']
         if not metadata:
-            del parsed['idea']['metadata']
-        yaml_string = yaml.dump(parsed, default_flow_style=False,
-                                sort_keys=False, allow_unicode=True)
-    return parsed, yaml_string
+            del idea_data['idea']['metadata']
+    return idea_data
 
 
-def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
+def save_yaml_file(result: dict, url: str) -> Path:
     """
     Save the idea as a YAML file.
 
