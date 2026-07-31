@@ -284,6 +284,45 @@ def _parse_idea_yaml(yaml_content: str) -> tuple:
     raise ValueError("no valid 'idea:' YAML document found in the response")
 
 
+def _dump_idea_yaml(idea_data: dict) -> str:
+    """
+    Dump idea data back to YAML, keeping multi-line text as literal blocks so the
+    output stays as readable as what the LLM produced.
+    """
+    class _IdeaDumper(yaml.SafeDumper):
+        pass
+
+    def _represent_str(dumper, value):
+        style = '|' if '\n' in value else None
+        return dumper.represent_scalar('tag:yaml.org,2002:str', value, style=style)
+
+    _IdeaDumper.add_representer(str, _represent_str)
+
+    return yaml.dump(idea_data, Dumper=_IdeaDumper, default_flow_style=False,
+                     sort_keys=False, allow_unicode=True)
+
+
+def _apply_source_metadata(idea_data: dict, ideahub_content: dict) -> dict:
+    """
+    Add provenance fields the LLM does not produce (source, source_url, author).
+
+    Applied to the parsed dict before the YAML string is regenerated, so the
+    written file and the dict handed to submit_idea() always agree.
+    """
+    if 'idea' not in idea_data:
+        idea_data = {'idea': idea_data}
+
+    metadata = idea_data['idea'].setdefault('metadata', {})
+    metadata.setdefault('source', 'IdeaHub')
+    metadata.setdefault('source_url', ideahub_content.get('url', ''))
+
+    author = ideahub_content.get('author')
+    if author:
+        metadata.setdefault('author', author)
+
+    return idea_data
+
+
 def _convert_with_cli(prompt: str, provider: str, timeout: int = 300) -> dict:
     """
     Convert via a local agent CLI (codex/claude/gemini).
@@ -473,11 +512,16 @@ def convert_to_yaml(ideahub_content: dict, provider: str = None) -> dict:
     prompt = _build_conversion_prompt(ideahub_content)
     cli_provider = provider or "codex"
 
+    def _finalize(result: dict) -> dict:
+        """Attach provenance metadata and re-render the YAML from the same dict."""
+        idea_data = _apply_source_metadata(result['parsed'], ideahub_content)
+        return {'parsed': idea_data, 'yaml_string': _dump_idea_yaml(idea_data)}
+
     api_key = os.getenv('OPENAI_API_KEY')
     if api_key:
         print("\n🤖 Converting to NeuriCo format using GPT...")
         try:
-            return _convert_with_openai(prompt, api_key)
+            return _finalize(_convert_with_openai(prompt, api_key))
         except ImportError:
             print("⚠️  openai package not installed.")
         except Exception as e:
@@ -488,22 +532,24 @@ def convert_to_yaml(ideahub_content: dict, provider: str = None) -> dict:
     if cli_provider in CLI_COMMANDS:
         print(f"🤖 Converting to NeuriCo format using the {cli_provider} CLI...")
         try:
-            return _convert_with_cli(prompt, cli_provider)
+            return _finalize(_convert_with_cli(prompt, cli_provider))
         except Exception as e:
             print(f"⚠️  {cli_provider} CLI conversion failed: {e}")
 
     print("   Falling back to template-based conversion.")
-    return _convert_without_llm(ideahub_content)
+    return _finalize(_convert_without_llm(ideahub_content))
 
 
-def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
+def save_yaml_file(result: dict, url: str) -> Path:
     """
     Save the idea as a YAML file.
 
+    Provenance metadata (source, source_url, author) is already applied by
+    convert_to_yaml(), so 'yaml_string' here is a faithful rendering of 'parsed'.
+
     Args:
         result: Dictionary with 'parsed' and 'yaml_string' keys
-        url: Original IdeaHub URL
-        author: Optional author name from IdeaHub
+        url: Original IdeaHub URL (used for the filename fallback)
 
     Returns:
         Path to saved file
@@ -525,22 +571,6 @@ def save_yaml_file(result: dict, url: str, author: str = None) -> Path:
             filename = f"ideahub_{match.group(1)}"
         else:
             filename = "ideahub_idea"
-
-    # Add metadata about source to the parsed data (for submission later)
-    if 'idea' not in idea_data:
-        idea_data = {'idea': idea_data}
-
-    if 'metadata' not in idea_data['idea']:
-        idea_data['idea']['metadata'] = {}
-
-    idea_data['idea']['metadata']['source'] = 'IdeaHub'
-    idea_data['idea']['metadata']['source_url'] = url
-
-    if author and 'author' not in idea_data['idea']['metadata']:
-        idea_data['idea']['metadata']['author'] = author
-
-    # Update the result
-    result['parsed'] = idea_data
 
     # Save to ideas/ directory
     ideas_dir = Path(__file__).parent.parent.parent / "ideas"
@@ -677,7 +707,7 @@ def main():
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(result['yaml_string'])
     else:
-        output_path = save_yaml_file(result, args.url, author=ideahub_content.get('author'))
+        output_path = save_yaml_file(result, args.url)
 
     print(f"\n✅ Idea saved to: {output_path}")
 
