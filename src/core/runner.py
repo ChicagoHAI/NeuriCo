@@ -13,10 +13,12 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from functools import wraps
 import inspect
+import shutil
 import subprocess
 import shlex
 import sys
 import os
+import time
 import yaml
 
 # Force UTF-8 stdout/stderr on Windows where the default is cp1252.
@@ -93,6 +95,25 @@ def _with_hitl_workspace_run_ownership(method):
             return method(self, *args, **kwargs)
 
     return owned_run
+
+
+def _move_stale_workspace(work_dir: Path) -> Optional[Path]:
+    """
+    --force-fresh means exactly that: move the previous workspace aside so
+    adoption re-copies the source and the baseline is rebuilt. Without this,
+    adopt_repository resumes on its adoption record and baseline
+    construction returns the existing current-best checkpoint, silently
+    continuing the old run.
+
+    Returns:
+        The timestamped stale path, or None when there was nothing to move.
+    """
+    if not work_dir.exists():
+        return None
+    stale = work_dir.with_name(
+        work_dir.name + time.strftime(".stale-%Y%m%d-%H%M%S"))
+    shutil.move(str(work_dir), str(stale))
+    return stale
 
 
 class ResearchRunner:
@@ -190,7 +211,9 @@ class ResearchRunner:
         paper_timeout: int = 3600,
         no_hash: bool = False,
         private: bool = False,
+        public: bool = False,
         force_fresh: bool = False,
+        prepare_only: bool = False,
         scoring_enabled: bool = False,
         rule_maker_timeout: int = 1800,
         scorer_timeout: int = 600,
@@ -346,8 +369,10 @@ class ResearchRunner:
                 paper_timeout=paper_timeout,
                 compute_backend=compute_backend,
                 private=private,
+                public=public,
                 no_hash=no_hash,
                 force_fresh=force_fresh,
+                prepare_only=prepare_only,
             )
 
         # Setup working directory (GitHub repo or local runs/)
@@ -493,6 +518,16 @@ class ResearchRunner:
         # workspace and rewrite their paths workspace-relative, so no agent
         # ever depends on host paths. Hard error if a declared path is gone.
         stage_local_resources(work_dir, idea)
+
+        if prepare_only:
+            # Two-phase dispatch (sealed resources): this container had the
+            # sealed source mounts; the research container that follows will
+            # not. Exit before any agent runs.
+            print()
+            print("📦 Workspace prepared (setup + staging complete); "
+                  "exiting before agents (--prepare-workspace).")
+            return {"work_dir": work_dir, "github_url": github_url,
+                    "success": True, "prepared": True}
 
         recovered_hitl_attempt = None
         if hitl and continue_autoresearch:
@@ -983,6 +1018,7 @@ https://github.com/ChicagoHAI/neurico
         timeout: int = 1800,
         full_permissions: bool = True,
         compute_backend: str = "local",
+        prepare_only: bool = False,
     ) -> Dict[str, Any]:
         """
         Run comment mode: make targeted improvements based on user comments.
@@ -1051,6 +1087,12 @@ https://github.com/ChicagoHAI/neurico
         print()
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
         stage_local_resources(work_dir, idea)
+
+        if prepare_only:
+            print()
+            print("📦 Workspace prepared (staging complete); "
+                  "exiting before agents (--prepare-workspace).")
+            return {"work_dir": str(work_dir), "success": True, "prepared": True}
 
         # Get GitHub URL if available
         github_url = None
@@ -1155,8 +1197,10 @@ https://github.com/ChicagoHAI/neurico
         paper_timeout: int,
         compute_backend: str,
         private: bool,
+        public: bool,
         no_hash: bool,
         force_fresh: bool,
+        prepare_only: bool = False,
     ) -> Dict[str, Any]:
         """
         Continue-research mode: adopt the continuation source repo, stage
@@ -1176,6 +1220,18 @@ https://github.com/ChicagoHAI/neurico
         idea_spec = idea.get("idea", {})
         continuation = idea_spec.get("continuation", {})
 
+        # A local source repo is unpublished work by default: never let the
+        # NeuriCo backup repo default to public. --public is the explicit
+        # opt-in; remote (URL) sources keep the ordinary default.
+        from core.repo_adoption import is_remote_repo
+        source_repo = str(continuation.get("source_repo") or "")
+        if (self.use_github and source_repo and not is_remote_repo(source_repo)
+                and not private and not public):
+            private = True
+            print()
+            print("🔒 Local source repository: the GitHub backup will be "
+                  "PRIVATE (pass --public to override, --no-github to skip).")
+
         print()
         print("🔀 CONTINUE-RESEARCH MODE")
         print(f"   Source repo: {continuation.get('source_repo')}")
@@ -1189,6 +1245,11 @@ https://github.com/ChicagoHAI/neurico
         result_payload: Dict[str, Any] = {}
 
         try:
+            if force_fresh:
+                stale = _move_stale_workspace(work_dir)
+                if stale is not None:
+                    print(f"🧹 --force-fresh: previous workspace moved to {stale}")
+
             state_file = work_dir / ".neurico" / "autoresearch_state.json"
             resuming = state_file.exists() and not force_fresh
 
@@ -1221,6 +1282,13 @@ https://github.com/ChicagoHAI/neurico
                 # checkpoint so the anchored state includes them
                 stage_local_resources(work_dir, idea)
 
+                if prepare_only:
+                    print()
+                    print("📦 Workspace prepared (adoption + staging complete); "
+                          "exiting before agents (--prepare-workspace).")
+                    return {"work_dir": work_dir, "github_url": github_url,
+                            "success": True, "prepared": True}
+
                 baseline = construct_bootstrap_initial_node(
                     idea=idea,
                     idea_id=idea_id,
@@ -1251,7 +1319,16 @@ https://github.com/ChicagoHAI/neurico
                 print("↩️  Existing AutoResearch checkpoint found; skipping adoption "
                       "and baseline construction.")
 
+            if prepare_only:
+                print()
+                print("📦 Workspace already prepared; exiting before agents "
+                      "(--prepare-workspace).")
+                return {"work_dir": work_dir, "github_url": github_url,
+                        "success": True, "prepared": True}
+
             if autoresearch_iterations > 0:
+                from core.autoresearch import make_isolated_continuation_scorer
+
                 iteration_result = continue_from_current_best(
                     idea=idea,
                     idea_id=idea_id,
@@ -1264,6 +1341,13 @@ https://github.com/ChicagoHAI/neurico
                     autoresearch_history_dir=autoresearch_history_dir,
                     proposer_timeout=proposer_timeout,
                     comment_timeout=comment_timeout,
+                    # Continue-research scores frozen candidates in isolation:
+                    # check commands cannot touch the live workspace, and
+                    # sealed data is materialized only into the scored copy
+                    scorer_override=make_isolated_continuation_scorer(
+                        idea=idea,
+                        scorer_timeout=scorer_timeout,
+                    ),
                 )
                 result_payload["autoresearch"] = iteration_result.get("autoresearch")
                 success = iteration_result.get("success", False)
@@ -1527,6 +1611,11 @@ def main():
         "--private", action="store_true", help="Create private GitHub repository (default: public)"
     )
     parser.add_argument(
+        "--public", action="store_true",
+        help="Continue-research only: allow a PUBLIC GitHub backup for a "
+             "local source repository (which otherwise defaults to private)"
+    )
+    parser.add_argument(
         "--full-permissions",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1687,6 +1776,14 @@ def main():
         action="store_true",
         help="Start HITL web mode without opening the browser automatically.",
     )
+    parser.add_argument(
+        "--prepare-workspace",
+        action="store_true",
+        help="Two-phase dispatch (sealed resources): perform workspace "
+             "setup/adoption and resource staging, then exit before any "
+             "agent runs. docker/run.sh uses this so sealed host sources "
+             "are mounted only in the preparation container.",
+    )
 
     args = parser.parse_args()
     autoresearch_modes = [
@@ -1713,6 +1810,7 @@ def main():
                 timeout=args.timeout,
                 full_permissions=args.full_permissions,
                 compute_backend=args.compute_backend,
+                prepare_only=args.prepare_workspace,
             )
 
             print()
@@ -1750,7 +1848,9 @@ def main():
             paper_timeout=args.paper_timeout,
             no_hash=args.no_hash,
             private=args.private,
+            public=args.public,
             force_fresh=args.force_fresh,
+            prepare_only=args.prepare_workspace,
             scoring_enabled=scoring_enabled,
             rule_maker_timeout=args.rule_maker_timeout,
             scorer_timeout=args.scorer_timeout,

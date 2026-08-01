@@ -53,7 +53,11 @@ from core.hitl_scoring_workspace import (
 )
 from core.hitl_runtime_state import HitlRuntimeState
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
-from core.workspace_manifest import build_manifest, curate_manifest
+from core.workspace_manifest import (
+    append_hidden_sealed_entries,
+    build_manifest,
+    curate_manifest,
+)
 from core.phase_state import (
     check_working_directory,
     validate_outputs,
@@ -1762,7 +1766,9 @@ class ResearchPipelineOrchestrator:
         """
         Run the scorer stage (scoring mode only). Executes scoring/eval.py
         and captures the structured results into scoring/results.json. The
-        trusted idea makes the staged-function integrity check fail closed.
+        trusted idea makes the staged-function integrity check fail closed;
+        sealed data, when the idea declares any, is materialized from the
+        sealed store for exactly this stage (no agent runs during it).
         """
         print()
         print("─" * 80)
@@ -1770,10 +1776,14 @@ class ResearchPipelineOrchestrator:
         print("─" * 80)
         print()
 
+        from core.local_resources import SEALED_STAGING_DIR, sealed_store_for
+        store = sealed_store_for(self.work_dir)
+        sealed_data_dir = store if (store / SEALED_STAGING_DIR).is_dir() else None
+
         self.state.start_stage(SCORER_STAGE, expected_outputs=["scoring/results.json"])
         try:
             result = run_scorer(work_dir=self.work_dir, timeout=timeout,
-                                idea=idea)
+                                idea=idea, sealed_data_dir=sealed_data_dir)
             result["success"] = self.state.complete_stage(SCORER_STAGE, result["success"], result)
             return result
         except Exception as e:
@@ -1823,12 +1833,14 @@ class ResearchPipelineOrchestrator:
     # When bootstrap_mode=True, the workspace was produced by an earlier
     # experiment_runner whose outputs we want to retrofit a scoring protocol
     # around. The bootstrap path runs:
-    #   1. workspace_manifest.build_manifest  (mechanical Pass 1)
+    #   1. workspace_manifest.build_manifest  (mechanical Pass 1; sealed data
+    #      lives in the sealed store, entries synthesized into the manifest)
     #   2. workspace_manifest.curate_manifest (manifest_trimmer agent, Pass 2)
     #   3. seal runtime artifacts             (results/, REPORT.md, etc.)
     #   4. rule_maker_bootstrap               (writes scoring/{interface,eval,targets,log})
     #   5. unseal runtime artifacts
-    #   6. scorer                             (executes scoring/eval.py)
+    #   6. scorer                             (executes scoring/eval.py; sealed
+    #      data materialized from the store for exactly this stage)
     # The forward-mode resource_finder, rule_maker, and experiment_runner are
     # skipped — they already ran in the original session that produced this
     # workspace.
@@ -1973,6 +1985,17 @@ class ResearchPipelineOrchestrator:
 
         try:
             raw_manifest = build_manifest(self.work_dir)
+            # Sealed ground truth lives in the sealed STORE, never in the
+            # workspace, so neither manifest pass can read it. Its entries
+            # are synthesized here by trusted code so the rule maker still
+            # knows the files exist (eval.py reads them, materialized, at
+            # scoring time).
+            from core.local_resources import sealed_store_for
+            hidden = append_hidden_sealed_entries(
+                raw_manifest, sealed_store_for(self.work_dir))
+            if hidden:
+                print(f"🔒 {hidden} sealed ground-truth entries synthesized "
+                      f"(contents live in the sealed store, not the workspace)")
             print(
                 f"📐 Pass 1 (mechanical): {len(raw_manifest['files'])} files indexed, "
                 f"{len(raw_manifest['python_signatures'])} python signatures, "
@@ -2118,10 +2141,10 @@ class ResearchPipelineOrchestrator:
                 sealed_dir.parent.rmdir()
             except OSError:
                 pass
-            print("🔒 Nothing to seal (no runtime artifacts present).")
+            print("🔒 Nothing to seal (none of the sealed paths present).")
             return None
 
-        print(f"🔒 Sealed {len(moved)} runtime artifacts to {sealed_dir}:")
+        print(f"🔒 Sealed {len(moved)} workspace paths to {sealed_dir}:")
         for rel in moved:
             print(f"     - {rel}")
         print(
@@ -2162,7 +2185,7 @@ class ResearchPipelineOrchestrator:
                 errors.append(f"{rel}: {e}")
 
         if restored:
-            print(f"🔓 Restored {len(restored)} runtime artifacts from {sealed_dir}")
+            print(f"🔓 Restored {len(restored)} workspace paths from {sealed_dir}")
         if errors:
             print(f"⚠️  Unseal errors -- sealed dir kept at {sealed_dir} for " "manual recovery:")
             for e in errors:

@@ -660,6 +660,38 @@ def _format_for_extension(ext: str) -> str:
 
 # Public API
 
+def append_hidden_sealed_entries(manifest: dict, sealed_root: Path) -> int:
+    """
+    Record sealed-groundtruth files that live in the sealed store (a
+    workspace sibling) rather than the workspace, so the mechanical scan
+    never sees them. The rule maker must still know these files exist —
+    eval.py reads them, materialized at data/.test, at scoring time — so
+    their paths, formats, and size buckets are synthesized here by trusted
+    code. Extraction is withheld by construction: no agent ever sees the
+    contents.
+
+    Returns the number of entries added.
+    """
+    root = Path(sealed_root) / "data" / ".test"
+    if not root.is_dir():
+        return 0
+    added = 0
+    for file_path in sorted(root.rglob('*')):
+        if not file_path.is_file():
+            continue
+        rel = "data/.test/" + file_path.relative_to(root).as_posix()
+        manifest["files"].append({
+            "path": rel,
+            "role": "sealed_groundtruth",
+            "format": _format_for_extension(file_path.suffix.lower()),
+            "size_bucket": _size_bucket(file_path.stat().st_size),
+            "extraction": "withheld",
+            "content_hidden": True,
+        })
+        added += 1
+    return added
+
+
 def build_manifest(work_dir: Path) -> dict:
     """
     Build a deterministic, value-redacted manifest of a workspace.

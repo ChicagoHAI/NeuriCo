@@ -758,6 +758,11 @@ cmd_continue_research() {
                 provider="${1#*=}"; submit_args+=("$1") ;;
             --full-permissions|--no-full-permissions)
                 run_flags+=("$1"); submit_args+=("$1") ;;
+            # GitHub controls are run-time concerns: forwarded to the
+            # dispatched cmd_run only (the submission container never
+            # touches GitHub for continuations)
+            --no-github|--private|--public)
+                run_flags+=("$1") ;;
             --autoresearch-iterations)
                 if [ -z "${2:-}" ]; then
                     echo -e "${RED}Error: $1 requires a value${NC}"
@@ -1059,23 +1064,66 @@ cmd_run() {
     # time: ideas/mounts/<idea_id>.txt, one absolute host path per line.
     # Mount each existing path read-only at its identical in-container
     # location so adoption/staging works unmodified inside Docker.
+    # Lines prefixed "sealed:" are sources of held-out (sealed) datasets:
+    # they are mounted ONLY in a short-lived preparation container that
+    # stages them into the workspace, never in the research container, so
+    # the agent cannot read held-out data at its original host path.
     local idea_id="$1"
     local mounts_file="$PROJECT_ROOT/ideas/mounts/${idea_id}.txt"
+    local open_mounts=()
+    local sealed_mounts=()
     if [ -f "$mounts_file" ]; then
-        while IFS= read -r host_path; do
-            [ -z "$host_path" ] && continue
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            local is_sealed=false host_path="$line"
+            case "$line" in
+                sealed:*) is_sealed=true; host_path="${line#sealed:}" ;;
+            esac
             if [ -e "$host_path" ]; then
-                docker_args+=( -v "$host_path:$host_path:ro" )
-                echo -e "${BLUE}Mounting local resource:${NC} $host_path"
+                if [ "$is_sealed" = true ]; then
+                    sealed_mounts+=( -v "$host_path:$host_path:ro" )
+                    echo -e "${BLUE}Sealed resource (staging-phase only):${NC} $host_path"
+                else
+                    open_mounts+=( -v "$host_path:$host_path:ro" )
+                    echo -e "${BLUE}Mounting local resource:${NC} $host_path"
+                fi
             else
                 echo -e "${YELLOW}[SKIP]${NC} declared local path not found on this machine: $host_path"
             fi
         done < "$mounts_file"
     fi
 
+    if [ ${#sealed_mounts[@]} -gt 0 ]; then
+        echo -e "${BLUE}Two-phase dispatch: preparing workspace with sealed sources...${NC}"
+        # || captures the status explicitly: under set -e a bare failing
+        # docker would abort before the diagnostic prints
+        local prep_rc=0
+        docker "${docker_args[@]}" \
+            ${open_mounts[@]+"${open_mounts[@]}"} \
+            "${sealed_mounts[@]}" \
+            -w /app "$IMAGE_NAME" \
+            python /app/src/core/runner.py "$@" --prepare-workspace \
+            || prep_rc=$?
+        if [ "$prep_rc" -ne 0 ]; then
+            echo -e "${RED}[ERROR]${NC} workspace preparation failed (exit $prep_rc)"
+            exit "$prep_rc"
+        fi
+        # Phase 1 honored --force-fresh (workspace reset + re-staged); the
+        # research phase must NOT repeat it — sealed sources are no longer
+        # mounted there, so a second fresh adoption could never re-stage them.
+        local phase2_args=()
+        local arg
+        for arg in "$@"; do
+            [ "$arg" = "--force-fresh" ] && continue
+            phase2_args+=("$arg")
+        done
+        set -- ${phase2_args[@]+"${phase2_args[@]}"}
+    fi
+
     echo -e "${BLUE}Running research exploration...${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
 
+    docker_args+=( ${open_mounts[@]+"${open_mounts[@]}"} )
     docker_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "$@" )
     docker "${docker_args[@]}"
 }

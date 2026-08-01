@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 import json
+import os
 import shutil
 import subprocess
 
@@ -32,6 +33,74 @@ ADOPTION_RECORD = ".neurico/adoption.json"
 def is_remote_repo(source: str) -> bool:
     """True when the continuation source is a URL rather than a local path."""
     return str(source).startswith(REMOTE_PREFIXES)
+
+
+def _sealed_entries_inside_repo(idea: Dict[str, Any],
+                                repo_root: Optional[Path]) -> bool:
+    """True when any sealed dataset's source lives inside the repository
+    being adopted (a relative declaration is in-repo by construction)."""
+    from core.local_resources import sealed_dataset_entries
+
+    for entry in sealed_dataset_entries(idea):
+        raw = str(entry.get('source_path') or entry.get('path') or '')
+        if not raw or raw.startswith(('http://', 'https://', 'git@')):
+            continue
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            return True
+        if repo_root is not None:
+            try:
+                path.resolve().relative_to(Path(repo_root).resolve())
+                return True
+            except (ValueError, OSError):
+                continue
+    return False
+
+
+def _warn_external_symlinks(work_dir: Path, source_root: Path) -> None:
+    """
+    Flag copied symlinks that will not survive the move into the workspace.
+
+    Relative links are resolved against their location in the COPY and are
+    fine when they stay inside the workspace (ordinary in-repo links).
+    Absolute links are broken either way: a target outside the source repo
+    is external material that was deliberately NOT copied in, and a target
+    INSIDE the source repo points at the read-only mount during runs and
+    dangles entirely once the source is unmounted or on another machine —
+    it should be declared relative in the source repo instead.
+    """
+    work_resolved = work_dir.resolve()
+    external = []
+    absolute_into_source = []
+    for path in work_dir.rglob('*'):
+        if not path.is_symlink():
+            continue
+        raw_target = Path(os.readlink(path))
+        rel_name = path.relative_to(work_dir)
+        if raw_target.is_absolute():
+            try:
+                raw_target.resolve().relative_to(Path(source_root).resolve())
+                absolute_into_source.append(f"{rel_name} -> {raw_target}")
+            except (ValueError, OSError):
+                external.append(f"{rel_name} -> {raw_target}")
+        else:
+            resolved = (path.parent / raw_target).resolve()
+            try:
+                resolved.relative_to(work_resolved)
+            except ValueError:
+                external.append(f"{rel_name} -> {raw_target}")
+    if external:
+        print("   ⚠️  Symlinks pointing outside the repository were preserved "
+              "as links (their targets are NOT copied in and will not resolve "
+              "in the workspace):")
+        for entry in external:
+            print(f"      - {entry}")
+    if absolute_into_source:
+        print("   ⚠️  Symlinks with ABSOLUTE targets inside the source "
+              "repository will dangle once the source is not mounted; "
+              "consider making them relative in the source repo:")
+        for entry in absolute_into_source:
+            print(f"      - {entry}")
 
 
 def _git(work_dir: Path, *args: str) -> subprocess.CompletedProcess:
@@ -131,7 +200,26 @@ def adopt_repository(
                 f"continuation source {source_resolved} overlaps the workspace "
                 f"{work_dir}; adoption must copy, never adopt in place"
             )
-        shutil.copytree(source_resolved, work_dir, dirs_exist_ok=True)
+        # symlinks=True preserves links as links: dereferencing would turn a
+        # symlink to external material (a private dataset, a config file, a
+        # huge directory) into real workspace content that later commits and
+        # pushes would publish.
+        shutil.copytree(source_resolved, work_dir, dirs_exist_ok=True,
+                        symlinks=True, ignore_dangling_symlinks=True)
+        _warn_external_symlinks(work_dir, source_resolved)
+
+    # A sealed dataset that lives inside the source repository also lives in
+    # its git HISTORY: preserving that history would keep the sealed bytes
+    # readable through git long after staging removes the working copy.
+    # Adopt with a fresh history instead — the checkpoint machinery only
+    # needs an anchor commit.
+    if _sealed_entries_inside_repo(
+            idea, source_resolved if mode == 'copy' else work_dir.resolve()):
+        if (work_dir / ".git").exists():
+            shutil.rmtree(work_dir / ".git")
+        print("   🔒 Sealed data lives inside the source repository; adopting "
+              "with a fresh git history (the original history would retain "
+              "the sealed bytes).")
 
     # Ensure a git anchor for the checkpoint machinery: init when the source
     # was not a repo, and commit any dirty state so the adopted baseline is

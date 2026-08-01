@@ -1075,6 +1075,57 @@ def construct_fresh_initial_node(
     )
 
 
+def unsatisfied_baseline_guardrails(
+    work_dir: Path,
+    idea: Dict[str, Any],
+    summary: "ScoreSummary",
+) -> List[str]:
+    """
+    Names of guardrail properties whose baseline result is missing or
+    unsatisfied, one entry per problem (fail closed on anything unreadable).
+
+    Guardrails are located deterministically: each check invariant's command
+    must appear verbatim as some targets.json property's source_text (the
+    rule-maker contract the eval verifier enforces). A command transcribed
+    nowhere is itself a failure here.
+    """
+    from agents.eval_verifier import extract_eval_contract
+
+    commands = [
+        str(invariant.get("command")).strip()
+        for invariant in extract_eval_contract(idea)["check_invariants"]
+        if invariant.get("command")
+    ]
+    if not commands:
+        return []
+
+    targets_path = Path(work_dir) / "scoring" / "targets.json"
+    try:
+        targets = json.loads(targets_path.read_text(encoding="utf-8"))
+        if not isinstance(targets, dict):
+            raise ValueError("targets.json is not a mapping")
+    except Exception as exc:
+        return [f"cannot read scoring/targets.json to locate guardrails ({exc})"]
+
+    properties = summary.properties or {}
+    failures: List[str] = []
+    for command in commands:
+        names = [
+            name for name, spec in targets.items()
+            if isinstance(spec, dict)
+            and str(spec.get("source_text", "")).strip() == command
+        ]
+        if not names:
+            failures.append(
+                f"no guardrail property transcribes check command {command!r}")
+            continue
+        for name in names:
+            prop = properties.get(name)
+            if not (isinstance(prop, dict) and prop.get("satisfied")):
+                failures.append(name)
+    return sorted(set(failures))
+
+
 def construct_bootstrap_initial_node(
     *,
     idea: Dict[str, Any],
@@ -1206,6 +1257,16 @@ def construct_bootstrap_initial_node(
         if prepare_workspace is not None:
             prepare_workspace(work_dir)
 
+        # Fingerprint protected paths after adoption/staging but before any
+        # agent or check command runs: the bootstrap rule maker and eval.py's
+        # check commands both execute in the live workspace, and a mutation
+        # there must not become part of the accepted baseline checkpoint.
+        from core.local_resources import (
+            protected_path_changes,
+            snapshot_protected_paths,
+        )
+        protected_before = snapshot_protected_paths(work_dir, idea)
+
         pipeline_result = orchestrator.run_pipeline(
             idea=idea,
             provider=provider,
@@ -1219,11 +1280,42 @@ def construct_bootstrap_initial_node(
         scorer_result = pipeline_result.get("stages", {}).get("scorer", {})
         scorer_ok = scorer_result.get("success", False)
 
+        # A structurally successful scorer run is not yet an acceptable
+        # baseline: protected paths must be untouched, and every declared
+        # check-invariant guardrail must actually be satisfied. "Must keep
+        # passing" presumes passing at the baseline; the comparator's
+        # no-lost-satisfied rule only protects satisfied properties, so a
+        # failing guardrail accepted here could persist through every
+        # accepted iteration.
+        baseline_block_reason: Optional[str] = None
         if scorer_ok:
-            child_summary = ScoringResultComparator().load_summary(
-                work_dir / "scoring" / "results.json",
-                source="candidate",
-            )
+            protected_violations = protected_path_changes(
+                protected_before, snapshot_protected_paths(work_dir, idea))
+            if protected_violations:
+                baseline_block_reason = (
+                    "baseline scoring modified user-protected paths: "
+                    + ", ".join(protected_violations))
+            else:
+                child_summary = ScoringResultComparator().load_summary(
+                    work_dir / "scoring" / "results.json",
+                    source="candidate",
+                )
+                failing = unsatisfied_baseline_guardrails(
+                    work_dir, idea, child_summary)
+                if failing:
+                    baseline_block_reason = (
+                        "declared check-invariant guardrail(s) fail on the "
+                        "current repository: " + ", ".join(failing) +
+                        ". A check invariant means the command must KEEP "
+                        "passing; make it pass (or remove the invariant), "
+                        "then re-run.")
+        if baseline_block_reason is not None:
+            scorer_ok = False
+            scorer_result = dict(scorer_result)
+            scorer_result["success"] = False
+            scorer_result["error"] = baseline_block_reason
+
+        if scorer_ok:
             baseline = checkpoints.create_checkpoint("Bootstrap baseline scored workspace")
             baseline_sha = baseline.sha
             child_sha = baseline.sha
@@ -1300,6 +1392,57 @@ def construct_bootstrap_initial_node(
             )
 
 
+def make_isolated_continuation_scorer(
+    *,
+    idea: Dict[str, Any],
+    scorer_timeout: int,
+) -> Callable[[Path], Dict[str, Any]]:
+    """
+    Build the continue-research iteration scorer: eval.py — and the user's
+    check-invariant commands inside it — runs against a FROZEN copy of the
+    candidate, never the live workspace.
+
+    The closure seals the scoring files (restoring HITL's invariant that
+    nothing can tamper with them mid-score), commits the candidate tree to
+    a scoring checkpoint, and hands it to run_isolated_scorer, which checks
+    the frozen sha out into a detached worktree and brings back only the
+    results.json review copy. Sealed data is materialized from the sealed
+    store into that worktree for the scorer's lifetime. Scoring side effects
+    therefore cannot mutate protected paths, and sealed bytes never touch
+    the live workspace.
+    """
+    from core.hitl_scoring_workspace import run_isolated_scorer
+    from core.local_resources import SEALED_STAGING_DIR, sealed_store_for
+    from core.scorer import run_scorer
+
+    def scorer(score_work_dir: Path) -> Dict[str, Any]:
+        score_work_dir = Path(score_work_dir)
+        store = sealed_store_for(score_work_dir)
+        sealed_data = store if (store / SEALED_STAGING_DIR).is_dir() else None
+        checkpoints = CheckpointManager(score_work_dir)
+        sealed_dir = seal_scoring_files(score_work_dir)
+        try:
+            source = checkpoints.create_checkpoint(
+                "Continue-research candidate tree for isolated scoring"
+            )
+            return run_isolated_scorer(
+                work_dir=score_work_dir,
+                source_sha=source.sha,
+                sealed_dir=sealed_dir,
+                scorer=lambda tree: run_scorer(
+                    work_dir=tree,
+                    timeout=scorer_timeout,
+                    idea=idea,
+                    sealed_data_dir=sealed_data,
+                ),
+                temporary_ref="refs/neurico/continue/scoring",
+            )
+        finally:
+            unseal_scoring_files(score_work_dir, sealed_dir)
+
+    return scorer
+
+
 def continue_from_current_best(
     *,
     idea: Dict[str, Any],
@@ -1314,8 +1457,15 @@ def continue_from_current_best(
     proposer_timeout: int,
     comment_timeout: int,
     continue_recover: bool = False,
+    scorer_override: Optional[Callable[[Path], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Validate the current scored node and run Phase 2 AutoResearch search."""
+    """Validate the current scored node and run Phase 2 AutoResearch search.
+
+    scorer_override replaces the default in-workspace run_scorer call:
+    continue-research passes an isolated scorer so eval.py (and the user's
+    check commands inside it) runs against a frozen copy of the candidate
+    with sealed data materialized, never in the live workspace.
+    """
     print()
     print("=" * 80)
     print("🔁 CONTINUE AUTORESEARCH")
@@ -1659,6 +1809,15 @@ class AutoResearchController:
         comment_result: Dict[str, Any] = {}
         pre_scoring_error: Optional[str] = None
         sealed_dir: Optional[Path] = None
+        # Fingerprint the user-protected paths BEFORE any agent or command
+        # runs. The workspace equals the parent checkpoint here, so this is
+        # the state every later comparison protects. A snapshot failure is a
+        # guard failure (fail closed), never a skipped guard.
+        try:
+            protected_before = self._snapshot_protected_paths()
+        except Exception as exc:
+            protected_before = None
+            pre_scoring_error = f"(protected-path guard error: {exc})"
         failure_stage = "scoring seal"
         try:
             sealed_dir = seal_scoring_files(self.work_dir)
@@ -1681,11 +1840,14 @@ class AutoResearchController:
             unseal_scoring_files(self.work_dir, sealed_dir)
 
         # Protected-path guard (continue-research): reject before scoring when
-        # the iteration touched a path the user declared immutable. This is
-        # deterministic (a git diff against the parent checkpoint), so a
-        # violating candidate never even reaches the scorer.
+        # the iteration touched a path the user declared immutable. The
+        # snapshot comparison is filesystem-based, so files git ignores are
+        # covered, and a violating candidate never even reaches the scorer.
+        # No post-scoring re-check is needed: continue-research scores frozen
+        # candidates in an isolated worktree (make_isolated_continuation_
+        # scorer), so scoring cannot mutate the live workspace at all.
         if pre_scoring_error is None:
-            violations = self._protected_path_violations(parent_sha)
+            violations = self._protected_path_violations(protected_before)
             if violations:
                 pre_scoring_error = (
                     "iteration modified user-protected paths: " + ", ".join(violations)
@@ -1908,34 +2070,31 @@ class AutoResearchController:
     def _idea_with_comments(self, proposal: str) -> Dict[str, Any]:
         return idea_with_comments(self.idea, proposal)
 
-    def _protected_path_violations(self, parent_sha: str) -> List[str]:
+    def _snapshot_protected_paths(self) -> Dict[str, Dict[str, str]]:
+        """Fingerprint the user-protected paths (filesystem walk, so files
+        git ignores are covered). Raises on invalid declarations."""
+        from core.local_resources import snapshot_protected_paths
+        return snapshot_protected_paths(self.work_dir, self.idea)
+
+    def _protected_path_violations(
+        self, protected_before: Optional[Dict[str, Dict[str, str]]]
+    ) -> List[str]:
         """
         List user-declared protected paths (idea.continuation.invariants of
-        kind protected_path) that the current working tree changed relative
-        to the parent checkpoint. Covers modified tracked files (git diff)
-        and newly created untracked files. Ideas without protected paths
-        trivially pass.
+        kind protected_path) whose content changed since the iteration-start
+        snapshot. Ideas without protected paths trivially pass; a guard that
+        cannot run must not silently pass.
         """
-        from core.local_resources import protected_path_prefixes
-        protected = protected_path_prefixes(self.idea)
-        if not protected:
+        if protected_before is None:
+            return ["(protected-path guard error: no iteration-start snapshot)"]
+        if not protected_before:
             return []
-
         try:
-            repo = self.checkpoints.repo
-            changed = repo.git.diff("--name-only", parent_sha).splitlines()
-            changed += list(repo.untracked_files)
+            from core.local_resources import protected_path_changes
+            return protected_path_changes(protected_before,
+                                          self._snapshot_protected_paths())
         except Exception as e:
-            # A guard that cannot run must not silently pass
             return [f"(protected-path guard error: {e})"]
-
-        violations = []
-        for changed_path in changed:
-            for prefix in protected:
-                if changed_path == prefix or changed_path.startswith(prefix + "/"):
-                    violations.append(changed_path)
-                    break
-        return sorted(set(violations))
 
     def _clear_stale_results_json(self) -> None:
         clear_stale_results_json(self.work_dir)
@@ -2077,7 +2236,7 @@ def run_autoresearch_loop(
         history_root=history_root,
         proposal_generator=proposal_generator,
         comment_mode=comment_mode,
-        scorer=scorer,
+        scorer=scorer_override or scorer,
     )
     return controller.run(iterations=iterations)
 

@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.config_loader import ConfigLoader
 from core.local_resources import (
     collect_host_paths,
+    staging_only_host_paths,
     validate_continuation,
     validate_evaluation_spec,
     validate_local_resources,
@@ -122,14 +123,24 @@ class IdeaManager:
             yaml.dump(idea_spec, f, default_flow_style=False, sort_keys=False)
 
         # Sidecar for docker/run.sh: host paths this idea depends on, one per
-        # line, so cmd_run can mount them (bash cannot parse the idea YAML)
+        # line, so cmd_run can mount them (bash cannot parse the idea YAML).
+        # Lines prefixed "sealed:" are mounted only in the two-phase
+        # preparation container, never in the research container: sealed
+        # dataset sources themselves, any declared ancestor path that would
+        # re-expose them (mounts expose whole trees), and the continuation
+        # source repo whenever sealed datasets exist at all.
         host_paths = collect_host_paths(idea_spec.get('idea', {}))
         if host_paths:
+            staging_only = set(staging_only_host_paths(idea_spec))
+            lines = [f"sealed:{p}" if p in staging_only else p
+                     for p in host_paths]
             mounts_dir = self.ideas_dir / "mounts"
             mounts_dir.mkdir(parents=True, exist_ok=True)
             (mounts_dir / f"{idea_id}.txt").write_text(
-                "\n".join(host_paths) + "\n", encoding='utf-8')
-            print(f"  Local paths recorded for docker mounts: {len(host_paths)}")
+                "\n".join(lines) + "\n", encoding='utf-8')
+            marked = sum(1 for line in lines if line.startswith("sealed:"))
+            print(f"  Local paths recorded for docker mounts: {len(host_paths)}"
+                  + (f" ({marked} staging-phase only)" if marked else ""))
 
         print(f"✓ Idea submitted successfully: {idea_id}")
         print(f"  Title: {idea_spec['idea'].get('title', 'Untitled')}")

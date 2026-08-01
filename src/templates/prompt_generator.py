@@ -927,13 +927,17 @@ substitutes.
         for invariant in invariants:
             kind = invariant.get('kind')
             if kind == 'protected_path':
-                line = (f"- Do NOT modify {invariant.get('path')}: any change there is "
-                        f"detected by a git diff and the whole iteration is rejected.")
+                line = (f"- Do NOT modify {invariant.get('path')}: any content "
+                        f"change there (including files git ignores) is detected "
+                        f"by a fingerprint comparison and the whole iteration is "
+                        f"rejected.")
             elif kind == 'check':
                 line = (f"- `{invariant.get('command')}` must keep passing: it runs "
                         f"inside the scorer and a failure rejects the iteration.")
             else:
-                line = f"- {str(invariant.get('text', '')).strip()}"
+                line = (f"- {str(invariant.get('text', '')).strip()} "
+                        f"(stated constraint: no mechanical check backs this "
+                        f"one — honoring it is entirely your responsibility.)")
             reason = str(invariant.get('reason', '')).strip()
             if reason:
                 line += f" Reason: {reason}"
@@ -948,8 +952,11 @@ substitutes.
 ⚠️  BINDING INVARIANTS (CONTINUE-RESEARCH)
 ════════════════════════════════════════════════════════════════════════════════
 
-The submitter declared constraints that hold in EVERY iteration. They are
-enforced mechanically; work that violates one is rolled back:
+The submitter declared constraints that hold in EVERY iteration.
+protected_path and check constraints are enforced mechanically: work that
+violates one is rejected and rolled back. Constraints marked "stated
+constraint" are binding instructions to you but have no mechanical
+enforcement — treat them with the same weight regardless:
 
 {listing}
 {goal_line}

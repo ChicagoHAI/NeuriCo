@@ -24,6 +24,7 @@ each piece runs:
    is reachable; the guard is what rejects tampering the source cannot heal.
 """
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import ast
@@ -37,11 +38,24 @@ import shutil
 DATASETS_STAGING_DIR = "datasets/local"
 FUNCTIONS_STAGING_DIR = "code/local"
 
-# Datasets declared sealed: true are staged here instead. The path matches
-# the existing sealed-groundtruth conventions (scoring_seal.SEALED_PATHS and
-# the workspace manifest's sealed_groundtruth role), so sealed datasets are
-# hidden from every agent and readable only by scoring/eval.py.
+# Sealed datasets are read by eval.py at this workspace-relative path, but
+# the path is a MATERIALIZATION, not a location: the bytes live in the
+# sealed store (a sibling of the workspace, see sealed_store_for) and are
+# copied into the tree being scored only while the scorer runs. The
+# workspace itself never contains sealed data, so no agent — manifest
+# trimmer, rule maker, or experiment runner — can ever read it.
 SEALED_STAGING_DIR = "data/.test"
+
+# Sibling directory holding each workspace's sealed data, mirroring the
+# .scoring_sealed / .bootstrap_sealed conventions. Lives under the
+# workspaces root so it rides the same Docker mount in every phase.
+SEALED_STORE_DIRNAME = ".sealed_store"
+
+
+def sealed_store_for(work_dir: Path) -> Path:
+    """Sealed-data store for a workspace: <parent>/.sealed_store/<name>/."""
+    work_dir = Path(work_dir)
+    return work_dir.parent / SEALED_STORE_DIRNAME / work_dir.name
 
 # Invariant kinds accepted in idea.continuation.invariants, with the field
 # each kind requires
@@ -52,13 +66,47 @@ INVARIANT_KINDS = {
 }
 
 
+def normalize_protected_path(raw: str) -> str:
+    """
+    Canonical normalization of one protected_path declaration: exact './'
+    prefixes removed (never a character-set strip, which would eat the
+    leading dot of '.github' or '.env'), trailing slashes dropped.
+
+    Raises ValueError for declarations that cannot name a workspace-relative
+    prefix (empty, '.', absolute, or '..' traversal) so the guard fails
+    closed instead of silently watching the wrong path.
+    """
+    path = str(raw).strip().replace('\\', '/')
+    if path.startswith('/'):
+        raise ValueError(
+            f"protected path {raw!r} is absolute; declare it relative to "
+            f"the workspace root")
+    # Component-wise canonicalization: drops empty ('a//b') and '.' parts,
+    # so equivalent declarations normalize identically, and catches '..'
+    # ANYWHERE — including a trailing 'src/..', which resolves to the
+    # workspace root and would otherwise sail past prefix/substring checks.
+    parts = [part for part in path.split('/') if part not in ('', '.')]
+    if any(part == '..' for part in parts):
+        raise ValueError(
+            f"protected path {raw!r} escapes or renames the workspace root "
+            f"('..' components are not allowed)")
+    if not parts:
+        raise ValueError(
+            f"protected path {raw!r} does not name a workspace-relative "
+            f"prefix (protecting the entire workspace is not supported)")
+    return '/'.join(parts)
+
+
 def protected_path_prefixes(idea: Dict[str, Any]) -> List[str]:
     """
     Normalized workspace-relative prefixes of protected_path invariants.
 
-    One canonical normalization (strip whitespace, leading ./, trailing /)
-    for every consumer of protected paths, so the diff guard and any prompt
-    rendering can never drift on what counts as inside a protected prefix.
+    One canonical normalization for every consumer of protected paths, so
+    the guard and any prompt rendering can never drift on what counts as
+    inside a protected prefix. Raises ValueError (via
+    normalize_protected_path) on declarations that cannot be protected;
+    validate_continuation rejects those at submit time, and a runtime caller
+    treats the exception as a guard failure, never a silent skip.
     """
     idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
     if not isinstance(idea_spec, dict):
@@ -67,12 +115,67 @@ def protected_path_prefixes(idea: Dict[str, Any]) -> List[str]:
     if not isinstance(continuation, dict):
         return []
     return [
-        str(invariant['path']).strip().lstrip('./').rstrip('/')
+        normalize_protected_path(invariant['path'])
         for invariant in (continuation.get('invariants') or [])
         if isinstance(invariant, dict)
         and invariant.get('kind') == 'protected_path'
         and invariant.get('path')
     ]
+
+
+def snapshot_protected_paths(work_dir: Path,
+                             idea: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    """
+    Content fingerprint of every protected prefix: {prefix: {relpath: digest}}.
+
+    Walks the filesystem directly rather than asking git, so files git
+    ignores (model weights, generated configs, .env files) are covered, and
+    symlinks are fingerprinted by their target string rather than followed.
+    A missing prefix snapshots as an empty mapping, so its later appearance
+    is a change like any other. Compare two snapshots with
+    protected_path_changes().
+
+    Args:
+        work_dir: Workspace root directory
+        idea: Full idea specification (or inner idea dict)
+
+    Returns:
+        {prefix: {relpath: digest}} for every protected prefix
+    """
+    work_dir = Path(work_dir)
+    snapshot: Dict[str, Dict[str, str]] = {}
+    for prefix in protected_path_prefixes(idea):
+        files: Dict[str, str] = {}
+        root = work_dir / prefix
+        if root.is_symlink():
+            files[''] = 'link:' + os.readlink(root)
+        elif root.is_file():
+            files[''] = hashlib.sha256(root.read_bytes()).hexdigest()
+        elif root.is_dir():
+            for path in sorted(root.rglob('*')):
+                rel = path.relative_to(root).as_posix()
+                if path.is_symlink():
+                    files[rel] = 'link:' + os.readlink(path)
+                elif path.is_file():
+                    files[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+        snapshot[prefix] = files
+    return snapshot
+
+
+def protected_path_changes(before: Dict[str, Dict[str, str]],
+                           after: Dict[str, Dict[str, str]]) -> List[str]:
+    """
+    Workspace-relative paths whose content changed between two protected
+    snapshots (modified, created, or deleted files alike).
+    """
+    changes: List[str] = []
+    for prefix in before:
+        b = before[prefix]
+        a = after.get(prefix, {})
+        for rel in sorted(set(b) | set(a)):
+            if b.get(rel) != a.get(rel):
+                changes.append(f"{prefix}/{rel}" if rel else prefix)
+    return sorted(set(changes))
 
 # Warn (but proceed) when a single dataset exceeds this many bytes
 LARGE_DATASET_BYTES = 2 * 1024 ** 3
@@ -340,15 +443,19 @@ def _planned_destination(work_dir: Path, kind: str, entry: Dict[str, Any],
     """
     staging_dir = (DATASETS_STAGING_DIR if kind == 'datasets'
                    else FUNCTIONS_STAGING_DIR)
-    # Sealed datasets stage into the sealed-groundtruth location (hidden
-    # from agents by the seal/manifest machinery). Decided before the
+    dest_root = Path(work_dir)
+    # Sealed datasets stage into the sealed STORE (a workspace sibling):
+    # the contract records the eval-facing data/.test/... path, but the
+    # bytes never enter the workspace — they are materialized into the tree
+    # being scored only while the scorer runs. Decided before the
     # already-staged check so a reloaded contract whose path was rewritten
-    # to data/.test/... is recognized as already staged.
+    # to data/.test/... is recognized as already staged (in the store).
     if kind == 'datasets' and entry.get('sealed'):
         staging_dir = SEALED_STAGING_DIR
+        dest_root = sealed_store_for(work_dir)
     entry_path = str(entry.get('path') or '').replace('\\', '/')
     if entry_path.startswith(f"{staging_dir}/"):
-        dst = work_dir / entry_path
+        dst = dest_root / entry_path
         taken.add(dst.name)
         source = entry.get('source_path')
         return dst, (str(source) if source else None)
@@ -357,24 +464,194 @@ def _planned_destination(work_dir: Path, kind: str, entry: Dict[str, Any],
     # with no external source that already exists inside the workspace is
     # its own destination — fingerprinted in place, never copied. A relative
     # path resolving outside the workspace root is NOT in-repo; it falls
-    # through to normal staging, which contains it.
+    # through to normal staging, which contains it. SEALED entries never
+    # take this shortcut: staying at the readable repo location would defeat
+    # the seal, so they route through sealed staging with the workspace file
+    # as the source (staging then removes the original: move semantics).
     if entry_path and not Path(entry_path).is_absolute() \
             and not entry.get('source_path'):
         candidate = (Path(work_dir) / entry_path).resolve()
         try:
             candidate.relative_to(Path(work_dir).resolve())
-            if candidate.exists():
-                return work_dir / entry_path, None
+            in_workspace = candidate.exists()
         except ValueError:
-            pass
+            in_workspace = False
+        if in_workspace:
+            if not (kind == 'datasets' and entry.get('sealed')):
+                return work_dir / entry_path, None
+            requested = entry.get('name') or Path(entry_path).name
+            return _staging_destination(dest_root, staging_dir, requested,
+                                        kind, taken), str(Path(work_dir) / entry_path)
 
     source_str = str(entry.get('source_path') or entry_path)
     if not source_str:
         return None, None
     requested = ((entry.get('name') if kind == 'datasets' else None)
                  or Path(source_str).name)
-    return _staging_destination(work_dir, staging_dir, requested,
+    return _staging_destination(dest_root, staging_dir, requested,
                                 kind, taken), source_str
+
+
+@contextmanager
+def materialized_sealed_data(tree: Path, store: Path):
+    """
+    Copy the sealed store's data/.test into the tree being scored for
+    exactly the scorer's lifetime, then remove it.
+
+    eval.py keeps its workspace-relative data/.test contract; the bytes
+    exist inside an agent-reachable tree only while the (sealed, verified)
+    scorer runs — and no agent runs then. A store without sealed data is a
+    no-op, so unsealed runs pay nothing.
+    """
+    src = Path(store) / SEALED_STAGING_DIR
+    dst = Path(tree) / SEALED_STAGING_DIR
+    if not src.is_dir():
+        yield
+        return
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst)
+    try:
+        yield
+    finally:
+        shutil.rmtree(dst, ignore_errors=True)
+
+
+def _remove_in_workspace_sealed_source(work_dir: Path, src: Path,
+                                       source_repo: str = None) -> None:
+    """
+    Move semantics for a sealed source that exists inside the workspace:
+    after the copy into data/.test, the readable copy is deleted so the
+    research agent cannot read it at its old location. Covers both a
+    workspace-relative source AND a host source living under the adopted
+    continuation source repo — adoption copytrees the whole repo, so the
+    sealed file has a second life at its repo-relative workspace path. The
+    adopted repo's git HISTORY may still contain the bytes; scrubbing
+    history is out of scope. Sources outside both trees (ordinary host
+    paths) are never touched, and the workspace root itself is never a
+    removal target — a sealed declaration naming the whole repo must not
+    delete the freshly adopted workspace.
+    """
+    work_resolved = Path(work_dir).resolve()
+    doomed: List[Path] = []
+    try:
+        resolved = Path(src).resolve()
+    except OSError:
+        return
+    try:
+        resolved.relative_to(work_resolved)
+        doomed.append(resolved)
+    except ValueError:
+        pass
+    if source_repo and not str(source_repo).startswith(
+            ('http://', 'https://', 'git@')):
+        try:
+            rel = resolved.relative_to(Path(source_repo).expanduser().resolve())
+            adopted_copy = (work_resolved / rel)
+            if rel != Path('.') and (adopted_copy.exists()
+                                     or adopted_copy.is_symlink()):
+                doomed.append(adopted_copy)
+        except (ValueError, OSError):
+            pass
+
+    sealed_root = (Path(work_dir) / SEALED_STAGING_DIR).resolve()
+    for target in doomed:
+        if target == work_resolved:
+            continue
+        if target == sealed_root or sealed_root in target.parents:
+            continue
+        if target.is_symlink():
+            target.unlink(missing_ok=True)
+        elif target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink(missing_ok=True)
+        print(f"   🔒 Sealed source removed from the workspace tree: {target}")
+
+
+def sealed_dataset_entries(idea: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """All dataset entries declared sealed (any path form)."""
+    idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
+    if not isinstance(idea_spec, dict):
+        return []
+    resources = idea_spec.get('local_resources')
+    if not isinstance(resources, dict):
+        return []
+    return [entry for entry in resources.get('datasets') or []
+            if isinstance(entry, dict) and entry.get('sealed')]
+
+
+def sealed_host_paths(idea: Dict[str, Any]) -> List[str]:
+    """
+    Absolute host source paths of datasets declared sealed.
+
+    These must be visible ONLY while resources are staged (the two-phase
+    dispatch's preparation container): leaving them mounted in the research
+    container would let the agent read held-out data at its original host
+    path even though the staged copy is hidden under data/.test.
+
+    Args:
+        idea: Full idea specification (or inner idea dict)
+
+    Returns:
+        Deduplicated absolute host paths in declaration order
+    """
+    sealed: List[str] = []
+    for entry in sealed_dataset_entries(idea):
+        raw = str(entry.get('source_path') or entry.get('path') or '')
+        if not raw or raw.startswith(('http://', 'https://', 'git@')):
+            continue
+        expanded = str(Path(raw).expanduser())
+        if Path(expanded).is_absolute() and expanded not in sealed:
+            sealed.append(expanded)
+    return sealed
+
+
+def staging_only_host_paths(idea: Dict[str, Any]) -> List[str]:
+    """
+    Sidecar paths that must be mounted ONLY in the preparation container of
+    the two-phase dispatch, never in the research container.
+
+    Mounts expose whole trees, so a per-path sealed exclusion is not enough:
+    beyond the sealed sources themselves, every declared path that is an
+    ANCESTOR of a sealed source re-exposes the bytes, and whenever any
+    sealed dataset exists at all, the continuation source repo does too
+    (sealed files typically live inside the repo being continued — including
+    in-repo relative declarations that produce no host path of their own).
+    The research container provably does not need these mounts: adoption
+    resumes on its record and staging is idempotent against data/.test.
+
+    Args:
+        idea: Full idea specification (or inner idea dict)
+
+    Returns:
+        Sorted absolute host paths to mount only during preparation
+    """
+    sealed_sources = sealed_host_paths(idea)
+    staging_only = set(sealed_sources)
+
+    for declared in collect_host_paths(idea.get('idea', idea)
+                                       if isinstance(idea, dict) else {}):
+        prefix = declared.rstrip('/')
+        for source in sealed_sources:
+            if source == prefix or source.startswith(prefix + '/'):
+                staging_only.add(declared)
+                break
+
+    if sealed_dataset_entries(idea):
+        idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
+        continuation = idea_spec.get('continuation') \
+            if isinstance(idea_spec, dict) else None
+        if isinstance(continuation, dict):
+            source_repo = str(continuation.get('source_repo') or '')
+            if source_repo and not source_repo.startswith(
+                    ('http://', 'https://', 'git@')):
+                expanded = str(Path(source_repo).expanduser())
+                if Path(expanded).is_absolute():
+                    staging_only.add(expanded)
+
+    return sorted(staging_only)
 
 
 def workspace_contract_copy(idea_spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -457,6 +734,10 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
     if not isinstance(resources, dict):
         return 0
 
+    continuation_repo = str(
+        (idea_spec.get('idea', {}).get('continuation') or {}).get('source_repo')
+        or '') or None
+
     staged = 0
     processed = 0
     for kind, staging_dir in (('datasets', DATASETS_STAGING_DIR),
@@ -492,11 +773,17 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
                     entry['sha256'] = hashlib.sha256(dst.read_bytes()).hexdigest()
             else:
                 if not src_available:
+                    hint = ""
+                    declared_link = Path(work_dir) / entry_path
+                    if declared_link.is_symlink():
+                        hint = (" (the declared path is a symlink whose target "
+                                "is outside the workspace; declare the target's "
+                                "real path instead)")
                     raise FileNotFoundError(
                         f"local_resources.{kind}: declared path does not "
                         f"exist: {src or entry.get('source_path')} "
                         f"(declared as '{entry['path']}') and no staged copy "
-                        f"is present at {dst}"
+                        f"is present at {dst}{hint}"
                     )
                 if kind == 'datasets':
                     size = _tree_size_bytes(src)
@@ -504,10 +791,18 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
                         print(f"   ⚠️  Dataset '{dst.name}' is "
                               f"{size / 1024 ** 3:.1f} GB; copying may take a while")
                     dst.parent.mkdir(parents=True, exist_ok=True)
+                    # Deliberately dereferences symlinks (unlike adoption):
+                    # staged copies must be self-contained, because sealed
+                    # sources are unmounted in the research container and
+                    # a preserved link would dangle exactly when eval.py
+                    # needs the data.
                     if src.is_dir():
                         shutil.copytree(src, dst, dirs_exist_ok=True)
                     else:
                         shutil.copy2(src, dst)
+                    if entry.get('sealed'):
+                        _remove_in_workspace_sealed_source(
+                            work_dir, src, source_repo=continuation_repo)
                 else:
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
@@ -515,13 +810,23 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
                     # function that was edited after staging (gaming guard)
                     entry['sha256'] = hashlib.sha256(dst.read_bytes()).hexdigest()
                 staged += 1
+                if kind == 'datasets' and entry.get('sealed'):
+                    label = ("sealed store: "
+                             + dst.relative_to(sealed_store_for(work_dir)).as_posix())
+                else:
+                    label = dst.relative_to(work_dir).as_posix()
                 print(f"   ✓ Staged {kind[:-1]}: "
-                      f"{entry.get('source_path') or entry['path']} -> "
-                      f"{dst.relative_to(work_dir).as_posix()}")
+                      f"{entry.get('source_path') or entry['path']} -> {label}")
 
             if src is not None:
                 entry.setdefault('source_path', str(src))
-            entry['path'] = str(dst.relative_to(work_dir).as_posix())
+            if kind == 'datasets' and entry.get('sealed'):
+                # Store-relative, i.e. the eval-facing data/.test/... path
+                # the scorer materializes; never a workspace location
+                entry['path'] = str(
+                    dst.relative_to(sealed_store_for(work_dir)).as_posix())
+            else:
+                entry['path'] = str(dst.relative_to(work_dir).as_posix())
             processed += 1
 
     if processed:
@@ -850,9 +1155,11 @@ def validate_continuation(idea: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         required_field = INVARIANT_KINDS[kind]
         if not invariant.get(required_field):
             errors.append(f"{label}: kind '{kind}' requires '{required_field}'")
-        if kind == 'protected_path' and str(invariant.get('path', '')).startswith('/'):
-            warnings.append(f"{label}: protected path should be workspace-relative, "
-                            f"not absolute: {invariant['path']}")
+        if kind == 'protected_path' and invariant.get('path'):
+            try:
+                normalize_protected_path(invariant['path'])
+            except ValueError as exc:
+                errors.append(f"{label}: {exc}")
         if not invariant.get('reason'):
             warnings.append(f"{label}: no 'reason' given; agents follow constraints "
                             f"better when told why they exist")

@@ -50,6 +50,7 @@ def run_scorer(
     python_executable: Optional[str] = None,
     *,
     idea: Dict[str, Any],
+    sealed_data_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Execute scoring/eval.py against the runner's artifact.
@@ -64,6 +65,10 @@ def run_scorer(
         idea: The trusted submitted idea (held by the orchestrator, outside
                   the worker-visible workspace). Required so the staged-
                   function integrity check always fails closed against it.
+        sealed_data_dir: The workspace's sealed store, when the idea declares
+                  sealed datasets. Its data/.test is materialized into
+                  work_dir for exactly this scorer run; the workspace never
+                  holds sealed data otherwise.
 
     Returns:
         Dict with:
@@ -75,6 +80,11 @@ def run_scorer(
           - elapsed_time: float
           - error: str | None -- error message if anything failed
     """
+    if sealed_data_dir is not None:
+        from core.local_resources import materialized_sealed_data
+        with materialized_sealed_data(work_dir, sealed_data_dir):
+            return run_scorer(work_dir, timeout, python_executable, idea=idea)
+
     work_dir = Path(work_dir)
     scoring_dir = work_dir / "scoring"
     eval_script = scoring_dir / EVAL_SCRIPT_NAME

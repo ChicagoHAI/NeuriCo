@@ -125,7 +125,7 @@ def _convert_without_llm(intention_content: dict, repo: str) -> dict:
         print("   add a local_resources block to the YAML by hand (path + usage),")
         print("   or set an API key and re-run the conversion.")
 
-    return {'parsed': idea_data, 'yaml_string': yaml_string}
+    return {'parsed': idea_data, 'yaml_string': yaml_string, 'fallback': True}
 
 
 def convert_to_yaml(intention_content: dict, repo: str) -> dict:
@@ -429,6 +429,20 @@ def main():
             fallback_filename=f"continuation_{intention_file.stem}")
 
     print(f"\n✅ Idea saved to: {output_path}")
+
+    # A template-fallback conversion carries the user's words only as prose:
+    # no invariants and no evaluation metrics were extracted, so nothing in
+    # the intention would be mechanically enforced. Submitting that
+    # automatically would start an unprotected run while KNOWING the
+    # conversion is incomplete — refuse, mirroring the faithfulness gate.
+    if args.submit and result.get('fallback'):
+        print("\n❌ Error: the conversion ran without an LLM, so invariants and")
+        print("   evaluation metrics from the intention were NOT extracted and")
+        print("   would not be enforced. Refusing --submit.")
+        print(f"   Edit {output_path} by hand (add continuation.invariants and")
+        print("   evaluation as needed), then submit the YAML directly:")
+        print(f"   python src/cli/submit.py {output_path}")
+        sys.exit(1)
 
     # Step 4: Optionally submit
     if args.submit:
