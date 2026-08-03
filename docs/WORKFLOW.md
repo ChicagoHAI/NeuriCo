@@ -201,9 +201,6 @@ artifact, the pipeline records the stage as failed rather than starting the
 next stage with an incomplete workspace. The default direction budget is
 three; set `idea.max_directions` to change it for a particular run.
 
-For the full design of the Research Contract, `neurico-check-dir`, and
-`phase_handoffs/`, see [CONTEXT_WORKING_MEMORY.md](CONTEXT_WORKING_MEMORY.md).
-
 ### Step 5: Run Research
 
 ```bash
