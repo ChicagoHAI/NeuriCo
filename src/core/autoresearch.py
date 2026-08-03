@@ -1527,6 +1527,7 @@ def continue_from_current_best(
         proposal_timeout=proposer_timeout,
         comment_timeout=comment_timeout,
         scorer_timeout=scorer_timeout,
+        scorer_override=scorer_override,
     )
     payload = autoresearch_result_payload(autoresearch_result)
     payload["initial_sha"] = lineage_source_sha
@@ -2180,8 +2181,13 @@ def run_autoresearch_loop(
     proposal_timeout: int = 900,
     comment_timeout: int = 1800,
     scorer_timeout: int = 600,
+    scorer_override: Optional[Callable[[Path], Dict[str, Any]]] = None,
 ) -> AutoResearchRunResult:
-    """Run ordinary AutoResearch with NeuriCo's proposer, worker, and scorer."""
+    """Run ordinary AutoResearch with NeuriCo's proposer, worker, and scorer.
+
+    When scorer_override is provided (continue-research isolated scoring), it
+    replaces the default in-workspace run_scorer for every iteration.
+    """
     from agents.autoresearch_proposer import run_autoresearch_proposer
     from agents.comment_handler import run_comment_handler
     from core.scorer import run_scorer
