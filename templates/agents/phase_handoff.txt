@@ -1,0 +1,40 @@
+PHASE HANDOFF FILE
+────────────────────────────────────────────────────────────────────────────────
+
+STATE.md carries the handoff between pipeline stages. Within this session, the
+`phase_handoffs/` directory carries the handoff between your six phases. Keep one
+file per phase at the workspace root:
+
+  phase_handoffs/01_planning.md
+  phase_handoffs/02_setup.md
+  phase_handoffs/03_implementation.md
+  phase_handoffs/04_experiments.md
+  phase_handoffs/05_analysis.md
+  phase_handoffs/06_documentation.md
+
+At the end of each phase, write that phase's own file. Never overwrite or delete
+an earlier phase's file; each one stays as the record of that phase.
+
+Use these five headings:
+- Completed
+- Key decisions and reasons
+- Evidence/files
+- Unresolved issues
+- Next steps
+
+Before beginning the next phase, reread two things:
+
+1. The `## Research Contract` section of STATE.md, so the hypothesis and
+   constraints stay in view.
+2. The immediately previous phase handoff.
+
+Two documents are enough because each handoff carries forward what still
+matters. When you write one, restate the earlier decisions, constraints, and
+unresolved issues that remain relevant to the work ahead, and drop what is
+settled or no longer applies. Phase 5 should not have to reread Phase 1 to learn
+which baseline was chosen and why; Phase 2's handoff should have carried that
+forward, and Phase 3's and Phase 4's after it.
+
+Keep each file short. It is focused context for the next phase, not a log of
+everything that happened. Durable findings that later stages need belong in your
+STATE.md stage notes.

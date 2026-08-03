@@ -56,6 +56,11 @@ dev = [
 # script lets agents invoke it as `whiteboard view` etc. without needing to
 # know PYTHONPATH or the neurico src/ location.
 whiteboard = "src.core.whiteboard:main"
+# `neurico-check-dir` is the working-directory checkpoint the experiment_runner
+# agent runs at each internal phase boundary. It must be on PATH because the
+# agent invokes it from its own shell, which is the only vantage point that can
+# observe where that shell actually is.
+neurico-check-dir = "src.core.directory_check:main"
 
 [project.urls]
 Homepage = "https://github.com/ChicagoHAI/neurico"

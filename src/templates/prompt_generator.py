@@ -822,6 +822,13 @@ and the general workflow, ALWAYS follow the user's instructions.
             self.load_template('agents/state_contract.txt'),
             {'max_directions': max_directions, 'phase_name': phase_name},
         )
+        directory_check = self.render_template(
+            self.load_template('agents/directory_check.txt'),
+            {'work_dir': work_dir},
+        )
+        phase_handoff = self.render_template(
+            self.load_template('agents/phase_handoff.txt'), {}
+        )
 
         # Prepare variables
         variables = {
@@ -834,6 +841,8 @@ and the general workflow, ALWAYS follow the user's instructions.
             'work_dir': work_dir,
             'max_directions': max_directions,
             'state_contract': state_contract,
+            'directory_check': directory_check,
+            'phase_handoff': phase_handoff,
         }
 
         rendered = self.render_template(template, variables)
@@ -841,6 +850,10 @@ and the general workflow, ALWAYS follow the user's instructions.
         # the placeholder. Ensure every experiment runner receives it.
         if 'RESEARCH STATE CONTRACT' not in rendered:
             rendered = state_contract + "\n" + rendered
+        if 'PHASE BOUNDARY DIRECTORY CHECK' not in rendered:
+            rendered = directory_check + "\n" + rendered
+        if 'PHASE HANDOFF FILE' not in rendered:
+            rendered = phase_handoff + "\n" + rendered
         return rendered
 
     def _generate_local_resource_contract(self, idea_spec: Dict[str, Any],

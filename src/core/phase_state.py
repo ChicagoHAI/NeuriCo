@@ -19,6 +19,22 @@ AGENT_NOTES_START = "<!-- NEURICO_AGENT_NOTES_START -->"
 AGENT_NOTES_END = "<!-- NEURICO_AGENT_NOTES_END -->"
 PHASE_NOTES_START_PREFIX = "<!-- NEURICO_AGENT_NOTES_START:"
 PHASE_NOTES_END_PREFIX = "<!-- NEURICO_AGENT_NOTES_END:"
+CONTRACT_START = "<!-- NEURICO_RESEARCH_CONTRACT_START -->"
+CONTRACT_END = "<!-- NEURICO_RESEARCH_CONTRACT_END -->"
+CONTRACT_ANCHOR = (
+    "Treat the Research Contract as the anchor for every stage. Keep all planning, "
+    "implementation, experiments, and analysis aligned with the stated research question "
+    "and constraints. Do not change direction silently. If the evidence contradicts the "
+    "hypothesis, report that honestly rather than trying to support it."
+)
+STAGE_NOTES_FIELDS = (
+    "Completed",
+    "Key decisions and reasons",
+    "Evidence/files",
+    "Unresolved issues",
+    "Next steps",
+)
+STAGE_NOTES_SKELETON = "\n".join(f"- {field}:" for field in STAGE_NOTES_FIELDS)
 
 
 def _phase_notes_start(stage_name: str) -> str:
@@ -81,6 +97,76 @@ def validate_outputs(
     }
 
 
+def build_research_contract(idea: Mapping[str, Any]) -> Dict[str, Any]:
+    """Snapshot the goal-defining fields of an idea so STATE.md can restate them.
+
+    Accepts either a full idea document or the inner ``idea`` spec.
+    """
+    spec = idea.get("idea", idea) or {}
+    outputs = []
+    for item in spec.get("expected_outputs") or []:
+        if not isinstance(item, Mapping):
+            continue
+        label = str(item.get("type") or "output").strip()
+        if item.get("format"):
+            label += f" ({item['format']})"
+        if item.get("description"):
+            label += f" - {str(item['description']).strip()}"
+        outputs.append(label)
+    return {
+        "title": str(spec.get("title") or "").strip(),
+        "hypothesis": str(spec.get("hypothesis") or "").strip(),
+        "constraints": {
+            key: value
+            for key, value in (spec.get("constraints") or {}).items()
+            if value not in (None, "", [], {})
+        },
+        "success_criteria": [
+            str(item).strip() for item in spec.get("evaluation_criteria") or []
+        ],
+        "expected_outputs": outputs,
+    }
+
+
+def _contract_value(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
+
+def _render_contract(contract: Optional[Mapping[str, Any]]) -> list[str]:
+    """Render the NeuriCo-owned contract block, regenerated on every write."""
+    lines = ["## Research Contract", "", CONTRACT_START]
+    if not contract:
+        lines.extend(["Not recorded yet.", CONTRACT_END])
+        return lines
+
+    lines.extend([CONTRACT_ANCHOR, ""])
+    if contract.get("title"):
+        lines.append(f"- Title: {contract['title']}")
+    lines.append(f"- Hypothesis: {contract.get('hypothesis') or 'Not specified.'}")
+
+    constraints = contract.get("constraints") or {}
+    if constraints:
+        lines.append("- Constraints:")
+        lines.extend(
+            f"  - {key}: {_contract_value(value)}" for key, value in constraints.items()
+        )
+    else:
+        lines.append("- Constraints: None specified.")
+
+    for heading, key in (
+        ("Success criteria", "success_criteria"),
+        ("Expected outputs", "expected_outputs"),
+    ):
+        items = contract.get(key) or []
+        lines.append(f"- {heading}:" if items else f"- {heading}: Not specified.")
+        lines.extend(f"  - {item}" for item in items)
+
+    lines.append(CONTRACT_END)
+    return lines
+
+
 def _completed_summary(stages: Mapping[str, Mapping[str, Any]]) -> str:
     completed = []
     for name, stage in stages.items():
@@ -95,7 +181,14 @@ def extract_agent_notes(document: str) -> str:
     if AGENT_NOTES_START not in document or AGENT_NOTES_END not in document:
         return ""
     notes = document.split(AGENT_NOTES_START, 1)[1].split(AGENT_NOTES_END, 1)[0]
-    return notes.strip()
+    # Drop contract markers so a forged pair inside the notes cannot masquerade as
+    # the generated section on the next write.
+    kept = [
+        line
+        for line in notes.splitlines()
+        if CONTRACT_START not in line and CONTRACT_END not in line
+    ]
+    return "\n".join(kept).strip()
 
 
 def extract_phase_notes(document: str) -> Dict[str, str]:
@@ -128,6 +221,8 @@ def render_state_markdown(state: Mapping[str, Any], agent_notes: str = "") -> st
         f"- Current phase: `{current_name}`",
         f"- Pipeline completed: `{bool(state.get('completed'))}`",
         "",
+        *_render_contract(state.get("research_contract")),
+        "",
         "## Previous phases",
         "",
         f"{_completed_summary(stages)}",
@@ -157,11 +252,24 @@ def render_state_markdown(state: Mapping[str, Any], agent_notes: str = "") -> st
                 f"- Expected: `{workspace.get('expected', '')}`",
                 f"- Actual: `{workspace.get('actual', '')}`",
                 f"- Directory usable: `{workspace.get('healthy', False)}`",
-                f"- Current process matches workspace: `{workspace.get('cwd_matches', False)}`",
+                # Names the orchestrator explicitly: it is a different process
+                # from the agent and says nothing about where the agent's shell is.
+                f"- Orchestrator process at workspace root: "
+                f"`{workspace.get('cwd_matches', False)}`",
             ]
         )
     else:
-        lines.append("No phase-boundary workspace check recorded yet.")
+        lines.append("No stage-boundary workspace check recorded yet.")
+
+    checks = current.get("directory_checks")
+    if checks:
+        lines.append(
+            f"- Agent directory checks: {checks['total']} recorded, "
+            f"{checks['nested']} nested, {checks['outside']} outside "
+            f"(last `{checks['last_status']}` after phase {checks['last_phase']})"
+        )
+    else:
+        lines.append("- Agent directory checks: none recorded")
 
     lines.extend(["", "## Output validation", ""])
     if validation:
@@ -193,8 +301,7 @@ def render_state_markdown(state: Mapping[str, Any], agent_notes: str = "") -> st
                 [
                     f"### {stage_name}",
                     _phase_notes_start(stage_name),
-                    phase_notes.get(stage_name)
-                    or f"Update this section at the end of the `{stage_name}` phase.",
+                    phase_notes.get(stage_name) or STAGE_NOTES_SKELETON,
                     _phase_notes_end(stage_name),
                     "",
                 ]
@@ -202,11 +309,20 @@ def render_state_markdown(state: Mapping[str, Any], agent_notes: str = "") -> st
         if legacy_notes:
             lines.extend(["### Legacy notes", legacy_notes, ""])
     else:
-        lines.append(legacy_notes or "No phase notes recorded yet.")
+        lines.append(legacy_notes or "No stage notes recorded yet.")
 
     lines.append(AGENT_NOTES_END)
 
     return "\n".join(lines) + "\n"
+
+
+def stage_notes_written(work_dir: Path, stage_name: str) -> bool:
+    """Report whether a stage replaced its notes skeleton with real notes."""
+    path = Path(work_dir) / STATE_FILENAME
+    if not path.exists():
+        return False
+    notes = extract_phase_notes(path.read_text(encoding="utf-8")).get(stage_name, "")
+    return bool(notes) and notes != STAGE_NOTES_SKELETON
 
 
 def write_state_document(work_dir: Path, state: Mapping[str, Any]) -> Path:
