@@ -123,6 +123,14 @@ def protected_path_prefixes(idea: Dict[str, Any]) -> List[str]:
     ]
 
 
+def _protected_digest(path: Path) -> str:
+    """Content hash plus permission bits, so a chmod-only change to a
+    protected file is detected; content-only hashing would miss a mode
+    change that Git still records in an accepted checkpoint."""
+    mode = path.stat().st_mode & 0o777
+    return f"{mode:04o}:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def snapshot_protected_paths(work_dir: Path,
                              idea: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     """
@@ -150,14 +158,14 @@ def snapshot_protected_paths(work_dir: Path,
         if root.is_symlink():
             files[''] = 'link:' + os.readlink(root)
         elif root.is_file():
-            files[''] = hashlib.sha256(root.read_bytes()).hexdigest()
+            files[''] = _protected_digest(root)
         elif root.is_dir():
             for path in sorted(root.rglob('*')):
                 rel = path.relative_to(root).as_posix()
                 if path.is_symlink():
                     files[rel] = 'link:' + os.readlink(path)
                 elif path.is_file():
-                    files[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    files[rel] = _protected_digest(path)
         snapshot[prefix] = files
     return snapshot
 
