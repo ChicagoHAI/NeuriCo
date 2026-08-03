@@ -260,16 +260,97 @@ def _extract_yaml(text: str) -> str:
     return candidate.strip()
 
 
+REQUIRED_IDEA_FIELDS = ('title', 'domain', 'hypothesis')
+
+# Fields the conversion prompt permits the model to emit. Deliberately much
+# narrower than ideas/schema.yaml: IdeaHub pages carry community-submitted,
+# untrusted content, so anything outside this set is dropped rather than
+# written to disk.
+#
+# The exclusions that matter are the schema blocks that are *contractual*
+# rather than advisory, and so would act on the host if a page's text talked
+# the model into emitting them:
+#   local_resources -- staged into the workspace, and its host paths are
+#                      written to ideas/mounts/<id>.txt for docker/run.sh to
+#                      mount; functions marked required_for_evaluation are
+#                      imported and called
+#   evaluation      -- transcribed verbatim into scoring/targets.json
+#   comments        -- drives --comment-mode edits against an existing workspace
+# methodology/expected_outputs/evaluation_criteria are excluded too: the
+# prompt already tells the model not to produce them, so their presence means
+# the model departed from its instructions.
+CONVERTER_ALLOWED_IDEA_FIELDS = frozenset({
+    'title', 'domain', 'hypothesis', 'background', 'constraints', 'metadata',
+})
+
+
+def _strip_disallowed_fields(parsed: dict) -> list:
+    """
+    Drop any idea field the converter is not allowed to emit, in place.
+
+    Stripping rather than rejecting: a disallowed field means the response is
+    untrustworthy in that specific spot, not that the whole conversion is
+    worthless, and falling through would land on the far lossier template
+    path. Removing the field makes it unreachable while keeping the good
+    conversion. Callers re-render the YAML from this dict, so a stripped field
+    never reaches the file.
+
+    Returns:
+        Sorted list of removed field names (empty when nothing was dropped).
+    """
+    idea = parsed['idea']
+    removed = sorted(set(idea) - CONVERTER_ALLOWED_IDEA_FIELDS)
+    for field in removed:
+        del idea[field]
+    return removed
+
+
+def _is_structurally_complete(parsed) -> bool:
+    """
+    Cheap structural gate used to decide whether a candidate parse is a
+    NeuriCo idea rather than merely well-formed YAML.
+
+    Requires 'idea' to be the *only* top-level key, so a document followed by
+    provider commentary that happens to parse as a mapping ("Total tokens:
+    812") is rejected and the trailing line gets trimmed instead of retained.
+    Then requires every schema-required field to be present and non-empty, so
+    a partial response -- a title-only idea, or one truncated by max_tokens --
+    is rejected and the caller can fall through to the next conversion path.
+    """
+    if not isinstance(parsed, dict) or set(parsed) != {'idea'}:
+        return False
+
+    idea = parsed['idea']
+    if not isinstance(idea, dict):
+        return False
+
+    return all(
+        isinstance(idea.get(field), str) and idea[field].strip()
+        for field in REQUIRED_IDEA_FIELDS
+    )
+
+
 def _parse_idea_yaml(yaml_content: str) -> tuple:
     """
     Parse an idea YAML document, tolerating trailing chatter that CLI agents
     append after the document (token counts, closing remarks). Trims one line
-    at a time from the end until the text parses as a dict containing 'idea'.
+    at a time from the end until the text parses as a structurally complete
+    NeuriCo idea, then validates it against the full schema.
+
+    Conversion validates the resulting idea, not just YAML syntax: an
+    incomplete response raises, and convert_to_yaml() falls through to the
+    next path rather than saving a half-formed idea.
 
     Returns:
         (parsed_dict, cleaned_yaml_string)
+
+    Raises:
+        ValueError: If no complete, valid idea document can be recovered.
     """
+    from core.idea_manager import validate_idea_spec
+
     lines = yaml_content.split("\n")
+    best_candidate = None
     while lines:
         text = "\n".join(lines).strip()
         if text:
@@ -277,10 +358,51 @@ def _parse_idea_yaml(yaml_content: str) -> tuple:
                 parsed = yaml.safe_load(text)
             except yaml.YAMLError:
                 parsed = None
-            if isinstance(parsed, dict) and 'idea' in parsed:
+            if best_candidate is None and isinstance(parsed, dict) and 'idea' in parsed:
+                # Longest text that looked like an idea document; kept only to
+                # explain the failure if nothing turns out to be complete.
+                best_candidate = parsed
+            if _is_structurally_complete(parsed):
+                # Drop fields outside the converter's contract before
+                # validating, so a stripped field can never be what makes the
+                # idea valid.
+                removed = _strip_disallowed_fields(parsed)
+                for field in removed:
+                    print(f"   ⚠️  Dropped disallowed field 'idea.{field}' from "
+                          f"the converted idea (not permitted from fetched "
+                          f"content)")
+                if removed:
+                    # Keep the returned string consistent with the dict; every
+                    # caller re-renders today, but a stale pair is a trap.
+                    text = _dump_idea_yaml(parsed)
+                # Full schema validation runs once, on the winning candidate,
+                # so failures name the offending field instead of degrading
+                # into "no document found".
+                report = validate_idea_spec(parsed)
+                if not report['valid']:
+                    raise ValueError(
+                        "converted idea failed validation: "
+                        + "; ".join(report['errors'])
+                    )
+                # Warnings are deliberately not printed here -- main() prints
+                # them once, against the finalized dict that gets written.
                 return parsed, text
         lines.pop()
 
+    if best_candidate is not None:
+        idea = best_candidate.get('idea')
+        if not isinstance(idea, dict):
+            detail = "'idea' is not a mapping"
+        else:
+            missing = [
+                field for field in REQUIRED_IDEA_FIELDS
+                if not (isinstance(idea.get(field), str) and idea[field].strip())
+            ]
+            detail = f"missing or empty required field(s): {', '.join(missing)}"
+        raise ValueError(
+            f"response contained an 'idea:' document but it was incomplete "
+            f"({detail})"
+        )
     raise ValueError("no valid 'idea:' YAML document found in the response")
 
 
@@ -304,7 +426,18 @@ def _dump_idea_yaml(idea_data: dict) -> str:
 
 def _apply_source_metadata(idea_data: dict, ideahub_content: dict) -> dict:
     """
-    Add provenance fields the LLM does not produce (source, source_url, author).
+    Apply provenance fields the converter -- not the model -- is authoritative
+    for.
+
+    source and source_url are overwritten, never merged: the converter knows
+    it fetched this idea from IdeaHub and knows the exact URL it fetched, so a
+    model-emitted value is at best redundant and at worst a hallucinated URL
+    saved as if it were the real origin. A model value that disagrees is
+    reported before being replaced.
+
+    author is different: it is content, extracted from the page by the model,
+    and the scraped author is only a fallback for the slot the model left
+    empty -- so it keeps setdefault semantics.
 
     Applied to the parsed dict before the YAML string is regenerated, so the
     written file and the dict handed to submit_idea() always agree.
@@ -313,8 +446,17 @@ def _apply_source_metadata(idea_data: dict, ideahub_content: dict) -> dict:
         idea_data = {'idea': idea_data}
 
     metadata = idea_data['idea'].setdefault('metadata', {})
-    metadata.setdefault('source', 'IdeaHub')
-    metadata.setdefault('source_url', ideahub_content.get('url', ''))
+
+    authoritative = {
+        'source': 'IdeaHub',
+        'source_url': ideahub_content.get('url', ''),
+    }
+    for field, value in authoritative.items():
+        existing = metadata.get(field)
+        if existing is not None and existing != value:
+            print(f"   ⚠️  Ignoring model-supplied metadata.{field} "
+                  f"({existing!r}); using {value!r}")
+        metadata[field] = value
 
     author = ideahub_content.get('author')
     if author:
@@ -748,6 +890,19 @@ def main():
     # Step 2: Convert (GPT, then the provider's CLI, then a template)
     result = convert_to_yaml(ideahub_content, provider=args.provider)
 
+    # Step 2b: Validate the finished idea before it is written.
+    #
+    # This runs whether or not --submit was passed. The LLM paths already
+    # validated at parse time, but the template fallback has no further path
+    # to fall through to, and provenance metadata is applied after parsing --
+    # so the last word on validity belongs here, on exactly the dict that is
+    # about to be saved.
+    from core.idea_manager import validate_idea_spec
+
+    report = validate_idea_spec(result['parsed'])
+    for warning in report['warnings']:
+        print(f"⚠️  {warning}")
+
     # Step 3: Save file
     if args.output:
         output_path = Path(args.output)
@@ -757,6 +912,17 @@ def main():
             f.write(result['yaml_string'])
     else:
         output_path = save_yaml_file(result, args.url)
+
+    if not report['valid']:
+        # Written anyway so the incomplete draft can be hand-edited, but never
+        # reported as a success -- and never submitted.
+        print(f"\n📝 Incomplete idea written to: {output_path}")
+        print("\n❌ Conversion did not produce a complete NeuriCo idea:")
+        for error in report['errors']:
+            print(f"   - {error}")
+        print("\n   Fix the file above, then submit it with:")
+        print(f"     python src/cli/submit.py {output_path}")
+        sys.exit(1)
 
     print(f"\n✅ Idea saved to: {output_path}")
 

@@ -28,6 +28,129 @@ from core.local_resources import (
 )
 
 
+def validate_idea_spec(idea_spec: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate an idea specification against the NeuriCo schema.
+
+    Module-level so callers that only need validation (e.g. the IdeaHub
+    converter, which validates before anything is written) can reach it
+    without constructing an IdeaManager -- whose __init__ creates the
+    submitted/in_progress/completed directories as a side effect.
+
+    Args:
+        idea_spec: Idea specification dictionary
+
+    Returns:
+        Dictionary with keys:
+        - 'valid': bool
+        - 'errors': List of error messages
+        - 'warnings': List of warning messages
+    """
+    errors = []
+    warnings = []
+
+    # Check top-level structure
+    if 'idea' not in idea_spec:
+        errors.append("Missing top-level 'idea' key")
+        return {'valid': False, 'errors': errors, 'warnings': warnings}
+
+    idea = idea_spec['idea']
+
+    # Required fields (v1.1 - reduced from v1.0)
+    required_fields = ['title', 'domain', 'hypothesis']
+    for field in required_fields:
+        if field not in idea or not idea[field]:
+            errors.append(f"Missing required field: {field}")
+
+    # Validate domain
+    config_loader = ConfigLoader()
+    valid_domains = config_loader.get_valid_domains()
+    allow_unknown = config_loader.should_allow_unknown_domains()
+
+    if 'domain' in idea and idea['domain'] not in valid_domains:
+        if allow_unknown:
+            default_domain = config_loader.get_default_domain()
+            warnings.append(
+                f"Unknown domain '{idea['domain']}' will be treated as '{default_domain}'. "
+                f"Valid domains: {', '.join(valid_domains)}"
+            )
+        else:
+            errors.append(
+                f"Invalid domain: {idea['domain']}. "
+                f"Must be one of: {', '.join(valid_domains)}"
+            )
+
+    # Validate hypothesis length
+    if 'hypothesis' in idea and len(idea['hypothesis']) < 20:
+        warnings.append("Hypothesis is very short (< 20 characters). "
+                      "Consider providing more detail.")
+
+    if 'max_directions' in idea:
+        max_directions = idea['max_directions']
+        if not isinstance(max_directions, int) or isinstance(max_directions, bool):
+            errors.append("max_directions must be an integer")
+        elif not 1 <= max_directions <= 10:
+            errors.append("max_directions must be between 1 and 10")
+
+    # Validate expected outputs (optional in v1.1)
+    if 'expected_outputs' in idea:
+        if not isinstance(idea['expected_outputs'], list):
+            errors.append("expected_outputs must be a list")
+        elif len(idea['expected_outputs']) == 0:
+            warnings.append("expected_outputs is empty - agent will determine appropriate outputs")
+        else:
+            for idx, output in enumerate(idea['expected_outputs']):
+                if 'type' not in output:
+                    errors.append(f"Output {idx}: missing 'type' field")
+                if 'format' not in output:
+                    errors.append(f"Output {idx}: missing 'format' field")
+    else:
+        warnings.append("No expected_outputs specified - agent will determine appropriate outputs based on research type")
+
+    # Validate constraints
+    if 'constraints' in idea:
+        constraints = idea['constraints']
+
+        if 'compute' in constraints:
+            valid_compute = ['cpu_only', 'gpu_required', 'multi_gpu', 'tpu', 'any']
+            if constraints['compute'] not in valid_compute:
+                errors.append(f"Invalid compute constraint: {constraints['compute']}")
+
+        if 'time_limit' in constraints:
+            if not isinstance(constraints['time_limit'], int):
+                errors.append("time_limit must be an integer (seconds)")
+            elif constraints['time_limit'] < 60:
+                warnings.append("time_limit is very short (< 60 seconds)")
+            elif constraints['time_limit'] > 86400:
+                warnings.append("time_limit is very long (> 24 hours)")
+
+    # Validate evaluation criteria
+    if 'evaluation_criteria' in idea:
+        if not isinstance(idea['evaluation_criteria'], list):
+            errors.append("evaluation_criteria must be a list")
+        elif len(idea['evaluation_criteria']) == 0:
+            warnings.append("No evaluation criteria specified")
+
+    # Validate local resources (contractual: path + usage required,
+    # missing paths are warnings until staging)
+    lr_errors, lr_warnings = validate_local_resources(idea)
+    errors.extend(lr_errors)
+    warnings.extend(lr_warnings)
+
+    # Validate structured evaluation spec
+    ev_errors, ev_warnings = validate_evaluation_spec(idea)
+    errors.extend(ev_errors)
+    warnings.extend(ev_warnings)
+
+    valid = len(errors) == 0
+
+    return {
+        'valid': valid,
+        'errors': errors,
+        'warnings': warnings
+    }
+
+
 def resolve_ideas_dir(project_root: Optional[Path] = None) -> Path:
     """Resolve the ideas directory, honoring the NEURICO_IDEAS override.
 
@@ -140,6 +263,9 @@ class IdeaManager:
         """
         Validate idea specification.
 
+        Delegates to the module-level validate_idea_spec() so the converter
+        and the submit path enforce exactly the same rules.
+
         Args:
             idea_spec: Idea specification dictionary
 
@@ -149,109 +275,7 @@ class IdeaManager:
             - 'errors': List of error messages
             - 'warnings': List of warning messages
         """
-        errors = []
-        warnings = []
-
-        # Check top-level structure
-        if 'idea' not in idea_spec:
-            errors.append("Missing top-level 'idea' key")
-            return {'valid': False, 'errors': errors, 'warnings': warnings}
-
-        idea = idea_spec['idea']
-
-        # Required fields (v1.1 - reduced from v1.0)
-        required_fields = ['title', 'domain', 'hypothesis']
-        for field in required_fields:
-            if field not in idea or not idea[field]:
-                errors.append(f"Missing required field: {field}")
-
-        # Validate domain
-        config_loader = ConfigLoader()
-        valid_domains = config_loader.get_valid_domains()
-        allow_unknown = config_loader.should_allow_unknown_domains()
-
-        if 'domain' in idea and idea['domain'] not in valid_domains:
-            if allow_unknown:
-                default_domain = config_loader.get_default_domain()
-                warnings.append(
-                    f"Unknown domain '{idea['domain']}' will be treated as '{default_domain}'. "
-                    f"Valid domains: {', '.join(valid_domains)}"
-                )
-            else:
-                errors.append(
-                    f"Invalid domain: {idea['domain']}. "
-                    f"Must be one of: {', '.join(valid_domains)}"
-                )
-
-        # Validate hypothesis length
-        if 'hypothesis' in idea and len(idea['hypothesis']) < 20:
-            warnings.append("Hypothesis is very short (< 20 characters). "
-                          "Consider providing more detail.")
-
-        if 'max_directions' in idea:
-            max_directions = idea['max_directions']
-            if not isinstance(max_directions, int) or isinstance(max_directions, bool):
-                errors.append("max_directions must be an integer")
-            elif not 1 <= max_directions <= 10:
-                errors.append("max_directions must be between 1 and 10")
-
-        # Validate expected outputs (optional in v1.1)
-        if 'expected_outputs' in idea:
-            if not isinstance(idea['expected_outputs'], list):
-                errors.append("expected_outputs must be a list")
-            elif len(idea['expected_outputs']) == 0:
-                warnings.append("expected_outputs is empty - agent will determine appropriate outputs")
-            else:
-                for idx, output in enumerate(idea['expected_outputs']):
-                    if 'type' not in output:
-                        errors.append(f"Output {idx}: missing 'type' field")
-                    if 'format' not in output:
-                        errors.append(f"Output {idx}: missing 'format' field")
-        else:
-            warnings.append("No expected_outputs specified - agent will determine appropriate outputs based on research type")
-
-        # Validate constraints
-        if 'constraints' in idea:
-            constraints = idea['constraints']
-
-            if 'compute' in constraints:
-                valid_compute = ['cpu_only', 'gpu_required', 'multi_gpu', 'tpu', 'any']
-                if constraints['compute'] not in valid_compute:
-                    errors.append(f"Invalid compute constraint: {constraints['compute']}")
-
-            if 'time_limit' in constraints:
-                if not isinstance(constraints['time_limit'], int):
-                    errors.append("time_limit must be an integer (seconds)")
-                elif constraints['time_limit'] < 60:
-                    warnings.append("time_limit is very short (< 60 seconds)")
-                elif constraints['time_limit'] > 86400:
-                    warnings.append("time_limit is very long (> 24 hours)")
-
-        # Validate evaluation criteria
-        if 'evaluation_criteria' in idea:
-            if not isinstance(idea['evaluation_criteria'], list):
-                errors.append("evaluation_criteria must be a list")
-            elif len(idea['evaluation_criteria']) == 0:
-                warnings.append("No evaluation criteria specified")
-
-        # Validate local resources (contractual: path + usage required,
-        # missing paths are warnings until staging)
-        lr_errors, lr_warnings = validate_local_resources(idea)
-        errors.extend(lr_errors)
-        warnings.extend(lr_warnings)
-
-        # Validate structured evaluation spec
-        ev_errors, ev_warnings = validate_evaluation_spec(idea)
-        errors.extend(ev_errors)
-        warnings.extend(ev_warnings)
-
-        valid = len(errors) == 0
-
-        return {
-            'valid': valid,
-            'errors': errors,
-            'warnings': warnings
-        }
+        return validate_idea_spec(idea_spec)
 
     def get_idea(self, idea_id: str) -> Optional[Dict[str, Any]]:
         """
