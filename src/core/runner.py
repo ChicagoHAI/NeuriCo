@@ -108,11 +108,22 @@ def _move_stale_workspace(work_dir: Path) -> Optional[Path]:
     Returns:
         The timestamped stale path, or None when there was nothing to move.
     """
-    if not work_dir.exists():
-        return None
-    stale = work_dir.with_name(
-        work_dir.name + time.strftime(".stale-%Y%m%d-%H%M%S"))
-    shutil.move(str(work_dir), str(stale))
+    from core.local_resources import sealed_store_for
+
+    suffix = time.strftime(".stale-%Y%m%d-%H%M%S")
+    stale: Optional[Path] = None
+    if work_dir.exists():
+        stale = work_dir.with_name(work_dir.name + suffix)
+        shutil.move(str(work_dir), str(stale))
+    # The sealed store is a SIBLING of the workspace, not inside it, so moving
+    # the workspace leaves stale held-out data that staging would treat as
+    # already-staged (and could re-expose an in-repo dataset). Move it aside on
+    # the same suffix so --force-fresh re-stages the held-out data fresh.
+    store = sealed_store_for(work_dir)
+    if store.exists():
+        shutil.move(str(store), str(store.with_name(store.name + suffix)))
+        print(f"🧹 --force-fresh: sealed store moved aside "
+              f"({store.name} -> {store.name + suffix})")
     return stale
 
 

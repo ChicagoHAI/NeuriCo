@@ -104,7 +104,53 @@ def decrypt_to(src: Path, dst: Path) -> None:
     dst.write_bytes(decrypt(Path(src).read_bytes()))
 
 
-def require_key_for_sealed(has_sealed_data: bool) -> None:
-    """Fail fast at launch when sealed data is declared but no key is set."""
-    if has_sealed_data and not seal_key_available():
-        _fernet()  # raises SealKeyMissing with actionable guidance
+def default_env_path() -> Path:
+    """The run's .env (install root), matching runner.main()'s dotenv load."""
+    return Path(__file__).resolve().parent.parent.parent / ".env"
+
+
+def _append_seal_key_to_env(env_path: Path, key: str) -> None:
+    """Persist NEURICO_SEAL_KEY=<key> to the .env, without duplicating it."""
+    env_path = Path(env_path)
+    existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    for row in existing.splitlines():
+        if row.strip().startswith(f"{SEAL_KEY_ENV}="):
+            return
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+    with env_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{prefix}{SEAL_KEY_ENV}={key}\n")
+
+
+def ensure_seal_key(env_path: Optional[Path] = None) -> None:
+    """Provision a key when none is set.
+
+    Generate a random per-user key, persist it to the run's .env (the host-only
+    secret store, already stripped from agent env at startup), and load it for
+    this process. A random key, not a shared constant, so nothing secret is
+    baked into the repo, and the user can override by setting their own. A lost
+    key just means re-staging the store from source. Idempotent.
+    """
+    global _key_cache, _key_loaded
+    if seal_key_available():
+        return
+    key = generate_key()
+    target = Path(env_path) if env_path is not None else default_env_path()
+    _append_seal_key_to_env(target, key)
+    # Usable in this process; deliberately NOT written to os.environ, so agent
+    # subprocesses (os.environ.copy()) still never inherit it.
+    _key_cache = key.encode("utf-8")
+    _key_loaded = True
+    print(
+        f"🔑 No {SEAL_KEY_ENV} set; generated one and saved it to {target}. "
+        f"Sealed held-out data is encrypted at rest with it. Keep this key (a "
+        f"lost key means re-staging the store); set your own to override."
+    )
+
+
+def require_key_for_sealed(has_sealed_data: bool,
+                           env_path: Optional[Path] = None) -> None:
+    """When sealed data is declared, ensure a key exists, provisioning a fresh
+    one into the .env if the user set none."""
+    if has_sealed_data:
+        ensure_seal_key(env_path)

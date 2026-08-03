@@ -213,8 +213,9 @@ def adopt_repository(
     # readable through git long after staging removes the working copy.
     # Adopt with a fresh history instead — the checkpoint machinery only
     # needs an anchor commit.
-    if _sealed_entries_inside_repo(
-            idea, source_resolved if mode == 'copy' else work_dir.resolve()):
+    sealed_in_repo = _sealed_entries_inside_repo(
+        idea, source_resolved if mode == 'copy' else work_dir.resolve())
+    if sealed_in_repo:
         if (work_dir / ".git").exists():
             shutil.rmtree(work_dir / ".git")
         print("   🔒 Sealed data lives inside the source repository; adopting "
@@ -235,6 +236,15 @@ def adopt_repository(
         section = "\n# Added at adoption for continue-research checkpoints\n__pycache__/\n*.pyc\n"
         gitignore.write_text(existing.rstrip("\n") + "\n" + section if existing
                              else section.lstrip("\n"), encoding='utf-8')
+    # When sealed data lives inside the adopted repo, extract it to the
+    # (encrypted) store and remove it from the working tree BEFORE the anchor
+    # commit and any GitHub push, so neither ever carries the held-out bytes.
+    # stage_local_resources is idempotent, so the runner's later staging call
+    # becomes a no-op.
+    if sealed_in_repo:
+        from core.local_resources import stage_local_resources
+        stage_local_resources(work_dir, idea)
+
     status = _git(work_dir, "status", "--porcelain")
     if status.stdout.strip():
         _git(work_dir, "add", "-A")
