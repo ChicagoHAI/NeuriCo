@@ -1575,6 +1575,14 @@ def main():
         # python-dotenv not installed, that's okay
         pass
 
+    # Read the sealed-data encryption key out of the environment now, before any
+    # agent subprocess is spawned. load_seal_key() caches it in the sealing
+    # module and pops it from os.environ, so every later os.environ.copy() used
+    # to launch an agent CLI is keyless (the agent can see only ciphertext in
+    # the sealed store, never the key).
+    from core.sealing import load_seal_key
+    load_seal_key()
+
     parser = argparse.ArgumentParser(
         description="Run research experiments with AI agents (with GitHub integration)"
     )

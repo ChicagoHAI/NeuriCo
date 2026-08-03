@@ -500,6 +500,26 @@ def _planned_destination(work_dir: Path, kind: str, entry: Dict[str, Any],
                                 kind, taken), source_str
 
 
+def _encrypt_sealed_store_path(dst: Path) -> None:
+    """Encrypt freshly staged sealed bytes in the store in place.
+
+    Called once per fresh stage (the idempotent already-staged path skips the
+    copy, so bytes are never double-encrypted). Handles both a single-file and
+    a directory dataset. Requires NEURICO_SEAL_KEY; staging of sealed data is
+    gated on it at launch, so a missing key here fails loud rather than leaving
+    plaintext in the store.
+    """
+    from core.sealing import encrypt_file_in_place
+
+    dst = Path(dst)
+    if dst.is_dir():
+        for path in sorted(dst.rglob('*')):
+            if path.is_file() and not path.is_symlink():
+                encrypt_file_in_place(path)
+    elif dst.is_file():
+        encrypt_file_in_place(dst)
+
+
 @contextmanager
 def materialized_sealed_data(tree: Path, store: Path):
     """
@@ -519,7 +539,11 @@ def materialized_sealed_data(tree: Path, store: Path):
     if dst.exists():
         shutil.rmtree(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, dst)
+    # The store holds ciphertext; decrypt each file into the scoring tree.
+    from core.sealing import decrypt_to
+    for path in sorted(src.rglob('*')):
+        if path.is_file() and not path.is_symlink():
+            decrypt_to(path, dst / path.relative_to(src))
     try:
         yield
     finally:
@@ -746,6 +770,12 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
         (idea_spec.get('idea', {}).get('continuation') or {}).get('source_repo')
         or '') or None
 
+    # Sealed held-out data is encrypted at rest in the store; fail fast with
+    # actionable guidance when the key was never provided, rather than part-way
+    # through staging.
+    from core.sealing import require_key_for_sealed
+    require_key_for_sealed(bool(sealed_dataset_entries(idea_spec)))
+
     staged = 0
     processed = 0
     for kind, staging_dir in (('datasets', DATASETS_STAGING_DIR),
@@ -809,6 +839,11 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
                     else:
                         shutil.copy2(src, dst)
                     if entry.get('sealed'):
+                        # The store holds ciphertext: an agent that can see it
+                        # (it rides the workspaces mount into the research
+                        # container) reads only encrypted bytes. The scorer
+                        # decrypts transiently in materialized_sealed_data.
+                        _encrypt_sealed_store_path(dst)
                         _remove_in_workspace_sealed_source(
                             work_dir, src, source_repo=continuation_repo)
                 else:
