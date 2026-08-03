@@ -436,6 +436,7 @@ Paper-finder starts automatically in Docker — no extra setup needed.
 ## Documentation
 
 - **[docs/WORKFLOW.md](docs/WORKFLOW.md)** - Complete workflow guide
+- **[docs/CONTEXT_WORKING_MEMORY.md](docs/CONTEXT_WORKING_MEMORY.md)** - Context management and working memory (STATE.md contract, directory checks, phase handoffs)
 - **[docs/AUTORESEARCH.md](docs/AUTORESEARCH.md)** - Scoring and the AutoResearch iteration loop (fresh, continue, bootstrap)
 - **[INTERACTIVE_MODE_GUIDE.md](INTERACTIVE_MODE_GUIDE.md)** - Interactive mode with the LLM-driven manager
 - **[docs/IDEAHUB_INTEGRATION.md](docs/IDEAHUB_INTEGRATION.md)** - IdeaHub integration
