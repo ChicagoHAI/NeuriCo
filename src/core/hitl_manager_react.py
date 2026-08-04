@@ -450,8 +450,12 @@ class HitlManager:
             "Runtime-authorized MCP tool surface for this turn:",
             rendered,
             "This list is authoritative and these tools are supplied through MCP. "
-            "Do not claim that a listed tool is unavailable, and do not call tools "
-            "outside this list.",
+            "Do not claim that a listed tool is unavailable, and do not call runtime "
+            "tools outside this list.",
+            "If the provider exposes `ToolSearch` and an authorized MCP tool is not yet "
+            "visible, use `ToolSearch` only to discover the runtime tools listed above, "
+            "then retry discovery. `ToolSearch` is a transport helper and does not "
+            "authorize any runtime workflow action.",
             "Invoke tools through the provider's native MCP tool interface. Never print, "
             "quote, describe, or simulate a tool call in assistant text. Markup such as "
             "<function_calls>, <invoke>, <tool_call>, or JSON describing a call is ordinary "

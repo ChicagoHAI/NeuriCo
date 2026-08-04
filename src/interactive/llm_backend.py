@@ -264,11 +264,21 @@ class LLMBackend:
         if self.model:
             cmd.extend(["--model", self.model])
         if use_dedicated_system_prompt and system_prompt:
-            cmd.extend(["--system-prompt", system_prompt])
+            system_prompt_flag = (
+                "--append-system-prompt" if mcp_config_path else "--system-prompt"
+            )
+            cmd.extend([system_prompt_flag, system_prompt])
         if mcp_config_path:
-            names = [str(name).strip() for name in allowed_mcp_tools or [] if str(name).strip()]
+            names = list(
+                dict.fromkeys(
+                    str(name).strip()
+                    for name in allowed_mcp_tools or []
+                    if str(name).strip()
+                )
+            )
+            allowed = ["ToolSearch", *names]
             cmd.extend(["--mcp-config", str(mcp_config_path), "--strict-mcp-config"])
-            cmd.extend(["--tools", "", "--allowedTools", ",".join(names)])
+            cmd.extend(["--tools", "ToolSearch", "--allowedTools", ",".join(allowed)])
             cmd.append("--dangerously-skip-permissions")
         elif disable_native_tools:
             # HITL manager tools are parsed and executed by the runtime. Do
