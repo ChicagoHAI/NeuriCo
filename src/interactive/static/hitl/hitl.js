@@ -3,7 +3,7 @@
 
   const app = document.querySelector("#app");
   const initialRoute = location.pathname === "/research" ? "research" : "conversation";
-  const initialProvider = ["codex", "claude"].includes(localStorage.getItem("neurico-hitl-provider")) ? localStorage.getItem("neurico-hitl-provider") : "codex";
+  const initialProvider = "claude";
   const state = {
     snapshot: null, route: initialRoute, view: "understanding", drawer: null,
     tab: "overview", composer: "", provider: initialProvider,
@@ -197,7 +197,7 @@
   function composer() {
     const context = state.snapshot?.context || {}; const percent = Math.max(0, Math.min(100, Number(context.percent) || 0));
     const area = q("textarea", { placeholder: "Message the manager", "data-focus-key": "composer" }); area.value = state.composer; area.oninput = () => { state.composer = area.value; }; area.onkeydown = (event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitConversation(); } };
-    const provider = q("select", { class: "provider", title: "Choose manager provider", "data-focus-key": "composer-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; localStorage.setItem("neurico-hitl-provider", state.provider); };
+    const provider = q("select", { class: "provider", title: "Choose manager provider", "data-focus-key": "composer-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
     const meter = q("span", { class: "meter" }, [q("span")]); meter.firstChild.style.width = `${Math.max(2, percent)}%`;
     const usedTokens = Number(context.used_tokens || 0);
     const limitTokens = Number(context.limit_tokens || 300000);
@@ -210,7 +210,7 @@
     if (!state.runPanel || state.snapshot?.run?.status === "running") return null;
     const mode = state.snapshot?.autoresearch?.mode === "continue" ? "continue" : "fresh";
     const title = mode === "continue" ? "Continue AutoResearch" : "Fresh AutoResearch";
-    const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; localStorage.setItem("neurico-hitl-provider", state.provider); };
+    const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
     const iterations = q("input", { id: "run-iterations", type: "number", min: "1", max: "100", value: state.runDraft.iterations, "data-focus-key": "run-iterations" }); iterations.oninput = () => { state.runDraft.iterations = iterations.value; };
     const paper = q("input", { id: "run-paper", type: "checkbox", "data-focus-key": "run-paper" }); paper.checked = state.runDraft.writePaper; paper.onchange = () => { state.runDraft.writePaper = paper.checked; };
     const github = q("input", { id: "run-github", type: "checkbox", "data-focus-key": "run-github" }); github.checked = state.runDraft.github; github.onchange = () => { state.runDraft.github = github.checked; };

@@ -551,7 +551,7 @@ class HitlTerminalChannel(UserChannel):
                 self.present_run_status(status)
                 return {"status": "already_running"}
         try:
-            provider = self._read_setting("Worker [codex] (claude/codex/gemini): ", "codex").lower()
+            provider = self._read_setting("Worker [claude] (claude/codex/gemini): ", "claude").lower()
             iterations = self._read_setting("Iterations [2] (1-100): ", "2")
             write_paper = self._read_yes_no("Write paper? [Y/n]: ", default=True)
             paper_style = "auto"
