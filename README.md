@@ -274,6 +274,12 @@ After submitting an idea, choose the workflow that matches the research task:
 See [HITL AutoResearch Design and Workflow](docs/HITL_AUTORESEARCH.md) for the
 manager, human, worker, runtime, scoring, frontier, and recovery model.
 
+The web and terminal clients use the same durable HITL manager conversation and
+requests. In the terminal client, enter `/run` to configure and start a fresh or
+continuing run, `/reply <number>` or `/reply <feedback>` to resolve a displayed
+human request, and ordinary text to talk with NeuriCo. Enter `/help` to show the
+available commands.
+
 ### Run Options
 
 | Option | Description |

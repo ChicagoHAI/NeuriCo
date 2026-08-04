@@ -266,6 +266,34 @@ The human may switch the manager provider between Codex and Claude. One manager
 turn has one provider; the two providers are not combined as simultaneous
 manager backbones.
 
+## Terminal Interface
+
+The terminal client is a conversation-focused alternative to the HITL web
+page. Start it for a submitted idea with:
+
+```bash
+./neurico hitl-cli <idea_id>
+```
+
+Both clients read and update the same durable manager conversation, human
+requests, and workspace run state. The terminal renders only human-visible
+manager replies, requests, user messages, and concise system status. Raw worker
+and provider output is kept out of the conversation and written to
+`logs/hitl_cli_runtime.log` for diagnosis.
+
+| Command | Purpose |
+| --- | --- |
+| `/run` | Configure and start a run. The client detects whether the workspace needs a fresh or continuing HITL AutoResearch run. |
+| `/reply <number>` | Select one of the options shown with the active human request. |
+| `/reply <feedback>` | Resolve the active request with concrete free-form feedback. |
+| `/help` | Show the terminal commands. |
+| `/quit` | Close the terminal client. This is not a manager decision or a reply to a pending request. |
+
+Any other input is recorded as an ordinary human message to NeuriCo. Run setup
+prompts for the worker provider, iteration count, paper-writing options, and
+GitHub publication preference; these configure the research run, not the
+manager conversation backend.
+
 ## Scoring and Integrity Boundary
 
 The rule maker establishes the evaluator authority once. Runtime seals:
@@ -387,7 +415,8 @@ The main implementation entry points are:
 
 | Area | Module |
 | --- | --- |
-| Web entry and automatic fresh/continue detection | `src/cli/hitl_web.py` |
+| Web and terminal entries | `src/cli/hitl_web.py`, `src/cli/hitl_cli.py` |
+| Shared interface run launcher and automatic fresh/continue detection | `src/cli/hitl_launcher.py` |
 | Shared runner integration | `src/core/runner.py` |
 | Worker command runtime and idea log | `src/core/hitl.py` |
 | Initial root and iterative frontier workflow | `src/core/hitl_autoresearch.py` |
