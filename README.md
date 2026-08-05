@@ -78,75 +78,289 @@ claude  # or: codex, gemini
 The final command performs the provider's OAuth login on your machine. API keys
 in `.env` are optional for the basic local-only workflow.
 
-### 2. Write and submit an idea
+### 2. Prepare and submit an idea
 
-Start with an example or create `ideas/my_idea.yaml` using this minimal
-structure:
+Submission records and validates the research idea; it does not choose or start
+a research mode. After submission, NeuriCo prints an `<idea_id>` used by
+Standard, AutoResearch, or HITL AutoResearch.
+
+Choose one of the following input methods.
+
+#### A. Write a YAML idea
+
+For Docker, place new relative idea files under `ideas/` so the mounted
+container can read them. Absolute host paths also work. Local `uv` can read any
+path visible to the host.
+
+Only three fields are required:
 
 ```yaml
+# ideas/my_idea.yaml
 idea:
   title: "Do LLMs distinguish causation from correlation?"
   domain: artificial_intelligence
-  hypothesis: "Explicit causal prompts improve causal-reasoning accuracy."
+  hypothesis: >
+    Explicit causal prompts improve causal-reasoning accuracy compared with
+    otherwise equivalent direct prompts.
 ```
 
-Submit it and keep the printed `<idea_id>` for the next step. The commands below
-use `--no-github`, so no GitHub token is required.
+A useful idea can also specify information NeuriCo should preserve rather than
+discover independently:
 
-| Docker | Local `uv` |
+| Section | Use it for |
 | --- | --- |
-| `./neurico submit ideas/my_idea.yaml --no-github` | `uv run python src/cli/submit.py ideas/my_idea.yaml --no-github` |
+| `max_directions` | Limit how many research directions enter experimentation; default `3` |
+| `background` | Context, papers, datasets, and code references |
+| `methodology` | Required approach, steps, baselines, or metrics |
+| `constraints` | Compute, time, memory, or budget limits |
+| `local_resources` | Host datasets or Python functions that must be staged into the workspace |
+| `evaluation` | User-defined metrics, targets, and required evaluator functions |
+| `evaluation_criteria` | Free-form validity, reproducibility, or quality requirements |
+| `expected_outputs` | Artifacts the completed research should produce |
 
-The provider is selected when you start the research mode. See
-[`ideas/examples/`](ideas/examples/) and [`ideas/schema.yaml`](ideas/schema.yaml)
-for larger idea specifications.
+See [`ideas/examples/`](ideas/examples/) for complete examples and
+[`ideas/schema.yaml`](ideas/schema.yaml) for the authoritative schema. New users
+can follow the [Idea Quickstart](docs/IDEA_QUICKSTART.md); the
+[complete Idea Guide](docs/IDEA_GUIDE.md) explains every supported field.
+
+Submit without GitHub:
+
+```bash
+# Docker
+./neurico submit ideas/my_idea.yaml --no-github
+
+# Local uv
+uv run python src/cli/submit.py ideas/my_idea.yaml --no-github
+```
+
+If `GITHUB_TOKEN` is configured, omit `--no-github` to create and prepare a
+research repository during submission.
+
+Important submission flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `--no-github` | Keep the idea and workspace local |
+| `--github-org ORG` | Create the repository in a specific GitHub organization |
+| `--private` | Create a private repository |
+| `--no-hash` | Omit the random hash from a generated repository name |
+| `--no-validate` | Skip schema validation; use only when diagnosing a malformed or experimental schema |
+
+#### B. Convert a Markdown or text idea
+
+Use `submit-local` when the idea is prose or mentions datasets and functions on
+your machine:
+
+```bash
+# Docker
+./neurico submit-local idea.md --submit --no-github
+
+# Local uv
+uv run python src/cli/submit_local.py idea.md --submit --no-github
+```
+
+Omit `--submit` to generate and review the YAML first. Declared local resources
+are recorded during submission and staged when research starts. Docker mounts
+only those declared host paths and mounts them read-only. See
+[`docs/LOCAL_IDEA_SUBMISSION.md`](docs/LOCAL_IDEA_SUBMISSION.md).
+
+#### C. Import from IdeaHub
+
+```bash
+# Docker
+./neurico fetch <ideahub_url> --submit --no-github
+
+# Local uv
+uv run python src/cli/fetch_from_ideahub.py <ideahub_url> --submit --no-github
+```
+
+Omit `--submit` to review the converted YAML before submission. IdeaHub has a
+template-based conversion fallback; `OPENROUTER_KEY` or `OPENAI_API_KEY` enables
+LLM-assisted conversion. See
+[`docs/IDEAHUB_INTEGRATION.md`](docs/IDEAHUB_INTEGRATION.md).
 
 ### 3. Choose a research mode
 
-Replace `<idea_id>` with the ID printed during submission.
+Replace `<idea_id>` below with the ID printed during submission. Provider
+permissions and paper writing are enabled by default by the current runner;
+use `--no-full-permissions` or `--no-write-paper` to disable them.
 
-| Mode | Docker | Local `uv` |
+#### Standard
+
+Standard runs the multi-agent research pipeline once: resource discovery,
+experiment planning and execution, analysis, and optional paper generation. Use
+it for a complete first pass without iterative improvement.
+
+```bash
+# Docker
+./neurico run <idea_id> --provider claude --no-github
+
+# Local uv
+uv run python src/core/runner.py <idea_id> --provider claude --no-github
+```
+
+Important Standard flags:
+
+| Flag | Default | Meaning |
 | --- | --- | --- |
-| **Standard** | `./neurico run <idea_id> --provider claude --no-github --full-permissions` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --full-permissions` |
-| **AutoResearch** | `./neurico run <idea_id> --provider claude --no-github --full-permissions --autoresearch --autoresearch-iterations 3` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --full-permissions --autoresearch --autoresearch-iterations 3` |
-| **HITL AutoResearch — web** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
-| **HITL AutoResearch — terminal** | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
+| `--provider claude\|codex\|gemini` | `claude` | Provider CLI used by research workers |
+| `--compute-backend local\|dsi-slurm\|modal` | `local` | Where experiment and comment execution runs |
+| `--timeout SECONDS` | `3600` | Experiment-runner timeout |
+| `--no-github` | GitHub enabled | Keep execution local instead of publishing |
+| `--github-org ORG` | `GITHUB_ORG` | GitHub organization for publication |
+| `--private` | public repository | Create a private repository |
+| `--no-full-permissions` | full permissions enabled | Require normal provider permission prompts |
+| `--no-write-paper` | paper enabled | Skip paper generation |
+| `--paper-style neurips\|icml\|acl\|ams` | domain default | Select the paper template |
+| `--paper-timeout SECONDS` | `3600` | Paper-writer timeout |
+| `--force-fresh` | reuse workspace | Ignore an existing workspace and start fresh |
 
-The web and terminal commands are two interfaces for the same HITL AutoResearch
-mode. In either interface, start the research run with `/run`; NeuriCo detects
-whether the workspace needs a fresh run or a continuation.
+Pipeline-control flags:
 
-The Docker web command publishes the selected port only on host loopback. The
-default is `http://localhost:7890`; choose another port with:
+| Flag | Meaning |
+| --- | --- |
+| `--pause-after-resources` | Pause after resource discovery for manual review |
+| `--skip-resource-finder` | Skip resource discovery when the workspace is already prepared |
+| `--resource-finder-timeout SECONDS` | Change the resource-finder timeout; default `2700` |
+| `--use-scribe` | Use the optional notebook-oriented Scribe execution path |
+| `--enable-scoring` | Add a sealed rule-maker/scorer stage to a one-pass Standard run |
+| `--comment-mode` | Apply targeted changes described by comments in the submitted idea |
+
+#### AutoResearch
+
+AutoResearch is NeuriCo's automated iterative mode. It establishes a scored
+best checkpoint, proposes one change per iteration, runs and scores the
+candidate, and accepts it only when it improves the current best.
+
+##### Start fresh
+
+Use this when starting from a submitted idea. It runs the full scored pipeline
+to establish the baseline, followed by the requested number of iterations.
 
 ```bash
-./neurico hitl-web <idea_id> --port 8123
+# Docker
+./neurico run <idea_id> --provider claude --no-github \
+  --autoresearch --autoresearch-iterations 3
+
+# Local uv
+uv run python src/core/runner.py <idea_id> --provider claude --no-github \
+  --autoresearch --autoresearch-iterations 3
 ```
 
-The local equivalent is:
+##### Continue an existing AutoResearch workspace
+
+Use continuation when the workspace already has a scored best checkpoint and
+you want more iterations without rerunning the upstream research stages.
 
 ```bash
-uv run python src/cli/hitl_web.py <idea_id> --port 8123
+# Docker
+./neurico run <idea_id> --provider claude --no-github \
+  --continue-autoresearch --autoresearch-iterations 3
+
+# Local uv
+uv run python src/core/runner.py <idea_id> --provider claude --no-github \
+  --continue-autoresearch --autoresearch-iterations 3
 ```
 
-## Other ways to provide an idea
+Continuation normally requires a clean workspace. Add `--continue-recover` only
+when an interrupted attempt left uncommitted changes that should be discarded
+by restoring the current best checkpoint.
 
-### IdeaHub
+##### Bootstrap an existing unscored workspace
 
-| Docker | Local `uv` |
+Use bootstrap when Standard research already produced useful outputs but the
+workspace does not yet have an AutoResearch scoring baseline:
+
+```bash
+# Docker: construct the scored AutoResearch baseline
+./neurico run <idea_id> --provider claude --no-github \
+  --bootstrap-autoresearch-baseline
+
+# Docker: then begin iterative continuation
+./neurico run <idea_id> --provider claude --no-github \
+  --continue-autoresearch --autoresearch-iterations 3
+```
+
+```bash
+# Local uv: construct the scored AutoResearch baseline
+uv run python src/core/runner.py <idea_id> --provider claude --no-github \
+  --bootstrap-autoresearch-baseline
+
+# Local uv: then begin iterative continuation
+uv run python src/core/runner.py <idea_id> --provider claude --no-github \
+  --continue-autoresearch --autoresearch-iterations 3
+```
+
+Important AutoResearch flags:
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--autoresearch` | off | Create a fresh scored baseline and iterate |
+| `--continue-autoresearch` | off | Continue from the existing best checkpoint |
+| `--bootstrap-autoresearch-baseline` | off | Convert an existing unscored workspace into a continuation-ready baseline |
+| `--autoresearch-iterations N` | `1` | Number of proposal/run/score iterations |
+| `--continue-recover` | off | Restore the current best before continuation after an interrupted attempt |
+| `--autoresearch-history-dir PATH` | `logs/experiment-autoresearch` | Override attempt-history storage |
+| `--proposer-timeout SECONDS` | `900` | Timeout for each proposal-generation stage |
+| `--rule-maker-timeout SECONDS` | `1800` | Timeout while constructing the scoring contract |
+| `--scorer-timeout SECONDS` | `600` | Timeout for each scoring stage |
+| `--manifest-trimmer-timeout SECONDS` | `300` | Timeout for each manifest-trimmer call during bootstrap |
+| `--bootstrap-rule-maker` | off | Lower-level scoring-only retrofit; prefer `--bootstrap-autoresearch-baseline` when the goal is AutoResearch continuation |
+
+Fresh, continue, and bootstrap-baseline are mutually exclusive entry paths.
+Common provider, compute, GitHub, permission, and paper flags from Standard also
+apply. See [`docs/AUTORESEARCH.md`](docs/AUTORESEARCH.md) for checkpoint and
+recovery details.
+
+#### HITL AutoResearch
+
+HITL AutoResearch adds a durable manager conversation, explicit human decision
+points, isolated scoring, and a retained research frontier. Web and terminal
+are two interfaces for the same HITL mode and share the same workspace state.
+
+##### Web interface
+
+```bash
+# Docker
+./neurico hitl-web <idea_id>
+
+# Local uv
+uv run python src/cli/hitl_web.py <idea_id>
+```
+
+The default port is `7890`. Docker publishes it only to `127.0.0.1` on the
+host. Use `--port 8123` to select another port and `--no-browser` to suppress
+automatic browser opening for local `uv`.
+
+##### Terminal interface
+
+```bash
+# Docker
+./neurico hitl-cli <idea_id>
+
+# Local uv
+uv run python src/cli/hitl_cli.py <idea_id>
+```
+
+Opening either interface does not immediately start research. Use `/run` to
+select the worker provider, iteration count, paper options, and GitHub
+preference. NeuriCo automatically detects whether the workspace needs a fresh
+HITL run or continuation.
+
+Important HITL controls:
+
+| Control | Meaning |
 | --- | --- |
-| `./neurico fetch <ideahub_url> --submit --no-github` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url> --submit --no-github` |
+| `--port N` | Web interface port; default `7890` |
+| `--no-browser` | Do not open the web browser automatically; the URL is still printed |
+| `/run` | Configure and start a fresh or continuing HITL run |
+| `/reply <number>` | Select an option for the active human request |
+| `/reply <feedback>` | Resolve the active request with free-form feedback |
+| `/help` | Display interface commands |
+| `/quit` | Close the terminal interface without resolving a pending request |
 
-### Markdown or text file
-
-| Docker | Local `uv` |
-| --- | --- |
-| `./neurico submit-local idea.md --submit --no-github` | `uv run python src/cli/submit_local.py idea.md --submit --no-github` |
-
-Declared local datasets and functions are recorded during submission and staged
-into the research workspace. Docker mounts only those declared host paths and
-mounts them read-only. See
-[`docs/LOCAL_IDEA_SUBMISSION.md`](docs/LOCAL_IDEA_SUBMISSION.md).
+See [`docs/HITL_AUTORESEARCH.md`](docs/HITL_AUTORESEARCH.md) for the manager,
+worker, scoring, frontier, and recovery model.
 
 ## Configuration
 
@@ -204,17 +418,6 @@ workspace:
 The same workspace configuration is used by Docker and local `uv`. Docker
 mounts the configured directory at `/workspaces` inside the container.
 
-## Continuing AutoResearch
-
-Continue a workspace that already has a scored best result:
-
-| Docker | Local `uv` |
-| --- | --- |
-| `./neurico run <idea_id> --provider claude --no-github --full-permissions --continue-autoresearch --autoresearch-iterations 3` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --full-permissions --continue-autoresearch --autoresearch-iterations 3` |
-
-See [`docs/AUTORESEARCH.md`](docs/AUTORESEARCH.md) for recovery, bootstrap, and
-scoring details.
-
 ## Outputs
 
 Each submitted idea receives a workspace under the configured workspace root.
@@ -248,6 +451,8 @@ AutoResearch, or HITL AutoResearch.
 The links below are the supported user documentation:
 
 - [`docs/WORKFLOW.md`](docs/WORKFLOW.md) — the complete setup, submission, and mode workflow
+- [`docs/IDEA_QUICKSTART.md`](docs/IDEA_QUICKSTART.md) — writing and submitting a first idea
+- [`docs/IDEA_GUIDE.md`](docs/IDEA_GUIDE.md) — complete idea fields, domains, and examples
 - [`docs/AUTORESEARCH.md`](docs/AUTORESEARCH.md) — scoring and iterative AutoResearch
 - [`docs/HITL_AUTORESEARCH.md`](docs/HITL_AUTORESEARCH.md) — HITL manager, human decisions, frontier, and recovery
 - [`docs/LOCAL_IDEA_SUBMISSION.md`](docs/LOCAL_IDEA_SUBMISSION.md) — local data, functions, and evaluation contracts

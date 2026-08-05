@@ -12,6 +12,8 @@ These documents describe the current supported NeuriCo workflow.
 | Guide | Purpose |
 | --- | --- |
 | [`WORKFLOW.md`](WORKFLOW.md) | Complete Docker and local `uv` workflow: setup, submission, and mode selection |
+| [`IDEA_QUICKSTART.md`](IDEA_QUICKSTART.md) | Five-minute guide to a first valid idea |
+| [`IDEA_GUIDE.md`](IDEA_GUIDE.md) | Complete field-by-field idea-writing reference |
 | [`AUTORESEARCH.md`](AUTORESEARCH.md) | Starting, continuing, and recovering AutoResearch |
 | [`HITL_AUTORESEARCH.md`](HITL_AUTORESEARCH.md) | HITL interfaces, manager workflow, frontier, and recovery |
 | [`LOCAL_IDEA_SUBMISSION.md`](LOCAL_IDEA_SUBMISSION.md) | Markdown ideas, local datasets, functions, and evaluation contracts |

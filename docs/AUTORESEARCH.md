@@ -5,7 +5,8 @@ scored experiment into an iterative improvement loop. Each iteration proposes
 one change, runs it, scores it against a sealed evaluation protocol, and keeps
 the change only when it improves the current best result.
 
-Continue behavior is part of AutoResearch, not a separate user-facing mode.
+Fresh, continue, and bootstrap are entry paths within AutoResearch, not separate
+user-facing research modes.
 
 ## Start AutoResearch
 
@@ -35,6 +36,38 @@ checkpoint, discards the incomplete attempt, and continues:
 | Docker | Local `uv` |
 | --- | --- |
 | `./neurico run <idea_id> --provider claude --no-github --full-permissions --continue-autoresearch --continue-recover --autoresearch-iterations 3` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --full-permissions --continue-autoresearch --continue-recover --autoresearch-iterations 3` |
+
+## Bootstrap an existing workspace
+
+Bootstrap is for a workspace where Standard research already produced useful
+outputs but no scored AutoResearch baseline exists. The baseline command curates
+the existing workspace manifest, constructs the scoring contract, scores the
+current implementation, creates the best checkpoint, and writes AutoResearch
+continuation state. It does not run improvement iterations.
+
+```bash
+# Docker: create the continuation-ready baseline
+./neurico run <idea_id> --provider claude --no-github \
+  --bootstrap-autoresearch-baseline
+
+# Docker: then run improvements
+./neurico run <idea_id> --provider claude --no-github \
+  --continue-autoresearch --autoresearch-iterations 3
+```
+
+```bash
+# Local uv: create the continuation-ready baseline
+uv run python src/core/runner.py <idea_id> --provider claude --no-github \
+  --bootstrap-autoresearch-baseline
+
+# Local uv: then run improvements
+uv run python src/core/runner.py <idea_id> --provider claude --no-github \
+  --continue-autoresearch --autoresearch-iterations 3
+```
+
+The lower-level `--bootstrap-rule-maker` flag retrofits a scoring protocol and
+runs the scorer, but it is not the preferred entrypoint when the goal is a
+continuation-ready AutoResearch baseline.
 
 ## How the loop works
 
@@ -73,11 +106,18 @@ Rejected attempts remain available in the history directory for review.
 | --- | --- | --- |
 | `--autoresearch` | switch | Create the scored baseline, then enter the AutoResearch loop |
 | `--continue-autoresearch` | switch | Resume from an existing scored best workspace |
+| `--bootstrap-autoresearch-baseline` | switch | Convert an existing unscored workspace into a continuation-ready baseline |
 | `--continue-recover` | switch | Restore the best checkpoint before continuing an interrupted run |
 | `--autoresearch-iterations N` | integer, default `1` | Number of improvement iterations |
 | `--autoresearch-history-dir PATH` | path, default `logs/experiment-autoresearch` | Attempt-history location |
+| `--proposer-timeout SECONDS` | integer, default `900` | Timeout for proposal generation |
+| `--rule-maker-timeout SECONDS` | integer, default `1800` | Timeout for scoring-contract construction |
+| `--scorer-timeout SECONDS` | integer, default `600` | Timeout for scoring |
+| `--manifest-trimmer-timeout SECONDS` | integer, default `300` | Timeout per manifest-trimmer call during bootstrap |
+| `--bootstrap-rule-maker` | switch | Lower-level scoring-only retrofit for an existing workspace |
 
-`--autoresearch` and `--continue-autoresearch` cannot be combined.
+`--autoresearch`, `--continue-autoresearch`, and
+`--bootstrap-autoresearch-baseline` are mutually exclusive entry paths.
 
 ## Outputs
 

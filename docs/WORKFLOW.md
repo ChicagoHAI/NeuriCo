@@ -83,7 +83,9 @@ idea:
 Optional sections can provide papers, datasets, methods, constraints, expected
 outputs, local resources, and evaluation metrics. See
 [`../ideas/schema.yaml`](../ideas/schema.yaml) and
-[`../ideas/examples/`](../ideas/examples/).
+[`../ideas/examples/`](../ideas/examples/). For guided authoring, use the
+[`Idea Quickstart`](IDEA_QUICKSTART.md) or the complete
+[`Idea Guide`](IDEA_GUIDE.md).
 
 ### Submit the idea
 
@@ -142,6 +144,14 @@ To continue an already scored workspace:
 | Docker | Local `uv` |
 | --- | --- |
 | `./neurico run <idea_id> --provider claude --no-github --full-permissions --continue-autoresearch --autoresearch-iterations 3` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --full-permissions --continue-autoresearch --autoresearch-iterations 3` |
+
+To convert an existing unscored Standard workspace into a continuation-ready
+AutoResearch baseline, run `--bootstrap-autoresearch-baseline`, then use the
+continuation command above:
+
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico run <idea_id> --provider claude --no-github --bootstrap-autoresearch-baseline` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --bootstrap-autoresearch-baseline` |
 
 See [`AUTORESEARCH.md`](AUTORESEARCH.md) for scoring, checkpoints, recovery, and
 bootstrap behavior.
