@@ -1,5 +1,10 @@
 # NeuriCo Interactive Mode — How to Run It
 
+> **Legacy document.** The `interactive` command is not part of the current user
+> workflow. Use HITL AutoResearch through `./neurico hitl-web <idea_id>` or
+> `./neurico hitl-cli <idea_id>` instead. See
+> [`docs/HITL_AUTORESEARCH.md`](docs/HITL_AUTORESEARCH.md).
+
 A practical, step-by-step guide to running NeuriCo's **interactive mode** — the
 LLM-driven manager that plans research, runs agents for you, and stops to ask
 *you* at the important decision points. By default it opens a **browser UI**

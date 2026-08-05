@@ -9,16 +9,17 @@ metric rather than searching for its own.
 
 ## Usage
 
-```bash
-# Convert a local idea file into a NeuriCo idea (writes YAML under ideas/)
-./neurico submit-local idea.md
+Choose the command for your execution route:
 
-# Convert and submit it (creates the workspace and, unless --no-github, the repo)
-./neurico submit-local idea.md --submit
+| Action | Docker | Local `uv` |
+| --- | --- | --- |
+| Convert to idea YAML | `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
+| Convert and submit locally | `./neurico submit-local idea.md --submit --no-github` | `uv run python src/cli/submit_local.py idea.md --submit --no-github` |
 
-# Convert, submit, and immediately run the research
-./neurico submit-local idea.md --submit --run --provider claude
-```
+The Docker command runs conversion and submission in the container. The local
+command performs the same work through the local `uv` environment. Choose the
+provider afterward with the Standard, AutoResearch, or HITL AutoResearch command in
+[`WORKFLOW.md`](WORKFLOW.md).
 
 <details>
 <summary><b>Submission pipeline</b></summary>

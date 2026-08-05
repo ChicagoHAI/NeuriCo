@@ -1,5 +1,9 @@
 # Templates
 
+> **Developer/internal document.** This reference is for maintaining and
+> extending NeuriCo's prompt templates and skills. It is not required for normal
+> setup or research execution.
+
 This directory contains all prompt templates that guide NeuriCo's research agents.
 
 ## Directory Structure

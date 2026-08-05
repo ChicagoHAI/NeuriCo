@@ -1,5 +1,9 @@
 # NeuriCo: Architecture & Roadmap
 
+> **Developer/internal document.** This combines architecture and roadmap
+> material and is not part of the supported user setup path. Start with the
+> [`README`](README.md#start-here) for current usage.
+
 > **TL;DR**: NeuriCo is an open-source AI scientist for exploring research ideas with AI agents. This document explains how it works and where we're headed based on lessons learned from running weekly competitions.
 
 ---
