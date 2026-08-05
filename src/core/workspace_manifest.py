@@ -153,9 +153,12 @@ _RAW_ROLE_RULES: list[tuple[str, str]] = [
     ("lakefile.toml", "source_code"),
     ("lean-toolchain", "source_code"),
 
-    # Input data.
+    # Input data. datasets/local/ holds user-declared resources staged by
+    # stage_local_resources (sealed ones go to data/.test/ and match the
+    # sealed_groundtruth rules above).
     ("data/**", "input_data"),
     ("inputs/**", "input_data"),
+    ("datasets/local/**", "input_data"),
 
     # Paper outputs.
     ("paper/**", "paper_output"),
@@ -656,6 +659,43 @@ def _format_for_extension(ext: str) -> str:
 
 
 # Public API
+
+def append_hidden_sealed_entries(manifest: dict, sealed_root: Path) -> int:
+    """
+    Record sealed-groundtruth files that have been sealed out of the
+    workspace (relocated to the .scoring_sealed sibling) and so are invisible
+    to build_manifest. The rule maker must still know these files exist —
+    eval.py reads them at data/.test at scoring time — so their paths,
+    formats, and size buckets are synthesized here by trusted code, skipping
+    any the manifest already carries. Extraction is withheld by construction:
+    the manifest never surfaces the sealed contents (this covers the manifest
+    channel only; it does not by itself stop an agent reading the files — the
+    scoring seal and the deferred isolation work are what limit that).
+
+    Returns the number of entries added.
+    """
+    root = Path(sealed_root) / "data" / ".test"
+    if not root.is_dir():
+        return 0
+    existing = {entry.get("path") for entry in manifest["files"]}
+    added = 0
+    for file_path in sorted(root.rglob('*')):
+        if not file_path.is_file():
+            continue
+        rel = "data/.test/" + file_path.relative_to(root).as_posix()
+        if rel in existing:
+            continue  # build_manifest already indexed it (present in workspace)
+        manifest["files"].append({
+            "path": rel,
+            "role": "sealed_groundtruth",
+            "format": _format_for_extension(file_path.suffix.lower()),
+            "size_bucket": _size_bucket(file_path.stat().st_size),
+            "extraction": "withheld",
+            "content_hidden": True,
+        })
+        added += 1
+    return added
+
 
 def build_manifest(work_dir: Path) -> dict:
     """

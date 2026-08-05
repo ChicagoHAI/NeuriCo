@@ -54,7 +54,11 @@ from core.hitl_scoring_workspace import (
 )
 from core.hitl_runtime_state import HitlRuntimeState
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
-from core.workspace_manifest import build_manifest, curate_manifest
+from core.workspace_manifest import (
+    append_hidden_sealed_entries,
+    build_manifest,
+    curate_manifest,
+)
 from core.phase_state import (
     check_working_directory,
     validate_outputs,
@@ -1543,8 +1547,16 @@ class ResearchPipelineOrchestrator:
                     idea=idea,
                     rule_maker_result=result,
                     provider=provider,
-                    timeout=timeout,
                     full_permissions=full_permissions,
+                    rerun_rule_maker=lambda prompt_suffix: run_rule_maker(
+                        idea=idea,
+                        work_dir=self.work_dir,
+                        provider=provider,
+                        templates_dir=self.templates_dir,
+                        timeout=timeout,
+                        full_permissions=full_permissions,
+                        prompt_suffix=prompt_suffix,
+                    ),
                 )
             result["success"] = self.state.complete_stage(
                 RULE_MAKER_STAGE, result["success"], result.get("outputs")
@@ -1560,18 +1572,24 @@ class ResearchPipelineOrchestrator:
         idea: Dict[str, Any],
         rule_maker_result: Dict[str, Any],
         provider: str,
-        timeout: int,
         full_permissions: bool,
+        rerun_rule_maker,
     ) -> Dict[str, Any]:
         """
         Verify the rule_maker's scoring/ outputs against the user's declared
-        evaluation contract (idea.evaluation, mandated local functions).
+        evaluation contract (idea.evaluation, mandated local functions,
+        continuation check-invariants).
 
         Only runs when the idea actually declares a contract. On a failed
-        verdict the rule_maker is re-run ONCE with the verifier's findings
-        appended to its prompt, then re-verified; if it still fails, the
-        rule_maker stage fails. This runs before sealing, so a rejected
-        harness never reaches the experiment_runner.
+        verdict the rule_maker is re-run ONCE (via rerun_rule_maker, which
+        the caller binds to the forward or bootstrap variant) with the
+        verifier's findings appended to its prompt, then re-verified; if it
+        still fails, the rule_maker stage fails. This runs before sealing,
+        so a rejected harness is never measured or shown to a runner.
+
+        Args:
+            rerun_rule_maker: Callable taking a prompt_suffix string and
+                re-running the appropriate rule_maker variant.
         """
         if not has_user_eval_contract(idea):
             return rule_maker_result
@@ -1596,15 +1614,7 @@ class ResearchPipelineOrchestrator:
         print()
         print("↻ Verifier rejected the scoring contract -- re-running rule maker "
               "once with the findings appended.")
-        retry = run_rule_maker(
-            idea=idea,
-            work_dir=self.work_dir,
-            provider=provider,
-            templates_dir=self.templates_dir,
-            timeout=timeout,
-            full_permissions=full_permissions,
-            prompt_suffix=format_violations_for_retry(verdict.get("violations")),
-        )
+        retry = rerun_rule_maker(format_violations_for_retry(verdict.get("violations")))
         if retry["success"]:
             verdict = run_eval_verifier(
                 idea=idea,
@@ -1757,7 +1767,9 @@ class ResearchPipelineOrchestrator:
         """
         Run the scorer stage (scoring mode only). Executes scoring/eval.py
         and captures the structured results into scoring/results.json. The
-        trusted idea makes the staged-function integrity check fail closed.
+        trusted idea makes the staged-function integrity check fail closed;
+        sealed data, when the idea declares any, is present at data/.test for
+        this stage (unsealed by the runner stage; no agent runs during it).
         """
         print()
         print("─" * 80)
@@ -1765,6 +1777,19 @@ class ResearchPipelineOrchestrator:
         print("─" * 80)
         print()
 
+        # When the idea declares sealed held-out data, isolate the score: seal
+        # data/.test + scoring/* out of the workspace, score a frozen worktree,
+        # and bring back only results.json. This keeps sealed bytes and
+        # eval_log.txt out of the live workspace and the committed baseline
+        # checkpoint (the same path the iteration and HITL scorers use). A run
+        # with no sealed data keeps the cheaper in-workspace score.
+        from core.local_resources import sealed_dataset_entries
+        if idea is not None and sealed_dataset_entries(idea):
+            return self._run_isolated_baseline_scorer(timeout=timeout, idea=idea)
+
+        # Sealed held-out data, when declared, is staged as plaintext at
+        # work_dir/data/.test and is present here (the scorer stage runs after
+        # experiment_runner unsealed it back). No agent runs during scoring.
         self.state.start_stage(SCORER_STAGE, expected_outputs=["scoring/results.json"])
         try:
             result = run_scorer(work_dir=self.work_dir, timeout=timeout,
@@ -1775,6 +1800,47 @@ class ResearchPipelineOrchestrator:
             print(f"❌ Scorer stage failed: {e}")
             self.state.complete_stage(SCORER_STAGE, False)
             raise
+
+    def _run_isolated_baseline_scorer(self, timeout: int,
+                                      idea: Dict[str, Any]) -> Dict[str, Any]:
+        """Score the baseline in a frozen worktree (sealed-data path).
+
+        Mirrors make_isolated_continuation_scorer: seal_scoring_files relocates
+        data/.test and scoring/* out of the workspace, the candidate tree is
+        committed without them, run_isolated_scorer copies the sealed set into
+        a detached worktree, runs eval.py there, and returns only the
+        results.json review copy. Sealed bytes never touch the live workspace
+        or the committed baseline checkpoint.
+        """
+        from core.autoresearch import CheckpointManager
+
+        self.state.start_stage(SCORER_STAGE, expected_outputs=["scoring/results.json"])
+        checkpoints = CheckpointManager(self.work_dir)
+        sealed_dir = seal_scoring_files(self.work_dir)
+        try:
+            source_sha = checkpoints.create_checkpoint(
+                "Bootstrap baseline candidate tree for isolated scoring"
+            ).sha
+            result = run_isolated_scorer(
+                work_dir=self.work_dir,
+                source_sha=source_sha,
+                sealed_dir=sealed_dir,
+                scorer=lambda tree: run_scorer(
+                    work_dir=tree, timeout=timeout, idea=idea),
+                temporary_ref="refs/neurico/bootstrap/scoring",
+            )
+            success = bool(result.get("success")) or (
+                isinstance(result.get("results"), dict)
+                and bool(result.get("scored_checkpoint_sha")))
+            result["success"] = self.state.complete_stage(
+                SCORER_STAGE, success, result)
+            return result
+        except Exception as e:
+            print(f"❌ Scorer stage failed: {e}")
+            self.state.complete_stage(SCORER_STAGE, False)
+            raise
+        finally:
+            unseal_scoring_files(self.work_dir, sealed_dir)
 
     def _sealed_dir_for(self) -> Path:
         """
@@ -1818,12 +1884,14 @@ class ResearchPipelineOrchestrator:
     # When bootstrap_mode=True, the workspace was produced by an earlier
     # experiment_runner whose outputs we want to retrofit a scoring protocol
     # around. The bootstrap path runs:
-    #   1. workspace_manifest.build_manifest  (mechanical Pass 1)
+    #   1. workspace_manifest.build_manifest  (mechanical Pass 1; sealed data
+    #      lives in the sealed store, entries synthesized into the manifest)
     #   2. workspace_manifest.curate_manifest (manifest_trimmer agent, Pass 2)
     #   3. seal runtime artifacts             (results/, REPORT.md, etc.)
     #   4. rule_maker_bootstrap               (writes scoring/{interface,eval,targets,log})
     #   5. unseal runtime artifacts
-    #   6. scorer                             (executes scoring/eval.py)
+    #   6. scorer                             (executes scoring/eval.py; sealed
+    #      data present at data/.test for this stage, no agent running)
     # The forward-mode resource_finder, rule_maker, and experiment_runner are
     # skipped — they already ran in the original session that produced this
     # workspace.
@@ -1875,7 +1943,7 @@ class ResearchPipelineOrchestrator:
         # restores them even if the rule_maker crashes, so the scorer can run.
         sealed_dir = self._seal_bootstrap_inputs()
         try:
-            results["stages"][BOOTSTRAP_RULE_MAKER_STAGE] = self._run_bootstrap_rule_maker(
+            bootstrap_result = self._run_bootstrap_rule_maker(
                 curated_manifest=curated_manifest,
                 provider=provider,
                 timeout=rule_maker_timeout,
@@ -1884,7 +1952,74 @@ class ResearchPipelineOrchestrator:
         finally:
             self._unseal_bootstrap_inputs(sealed_dir)
 
-        if not results["stages"][BOOTSTRAP_RULE_MAKER_STAGE].get("success"):
+        # Verify the harness against the user's declared evaluation contract
+        # (continuation metrics, mandated functions, check-invariants) BEFORE
+        # stage completion is recorded, so a verification failure is never
+        # persisted as a succeeded stage (run -> verify -> gated complete,
+        # matching the forward rule_maker stage). The retry re-runs the
+        # sealed rule maker.
+        if bootstrap_result.get("success"):
+            def rerun_bootstrap_rule_maker(prompt_suffix):
+                sealed_retry = self._seal_bootstrap_inputs()
+                try:
+                    return self._run_bootstrap_rule_maker(
+                        curated_manifest=curated_manifest,
+                        provider=provider,
+                        timeout=rule_maker_timeout,
+                        full_permissions=full_permissions,
+                        prompt_suffix=prompt_suffix,
+                    )
+                finally:
+                    self._unseal_bootstrap_inputs(sealed_retry)
+
+            bootstrap_result = self._verify_eval_contract(
+                idea=idea,
+                rule_maker_result=bootstrap_result,
+                provider=provider,
+                full_permissions=full_permissions,
+                rerun_rule_maker=rerun_bootstrap_rule_maker,
+            )
+
+        # SECURITY: a regeneration must not lower a retained property's target
+        # below its trusted prior/declared value ("extend, keep existing metrics"
+        # must not become "weaken them"). Check against the sealed prior protocol
+        # and the trusted idea; on a violation, rerun the sealed rule maker once
+        # with the violation fed back, then fail closed if it still weakens.
+        if bootstrap_result.get("success"):
+            from agents.rule_maker_bootstrap import check_target_floor
+            floor_violations = check_target_floor(
+                self.work_dir,
+                prior_protocol=getattr(self, "prior_scoring_protocol", None),
+                trusted_idea=getattr(self, "trusted_idea", None))
+            if floor_violations:
+                suffix = ("\n\nTARGET FLOOR VIOLATION: do NOT weaken retained "
+                          "targets. " + " ".join(floor_violations) +
+                          " Set each at least as strict as its prior/declared "
+                          "target.")
+                bootstrap_result = rerun_bootstrap_rule_maker(suffix)
+                if bootstrap_result.get("success"):
+                    if check_target_floor(
+                            self.work_dir,
+                            prior_protocol=getattr(self, "prior_scoring_protocol", None),
+                            trusted_idea=getattr(self, "trusted_idea", None)):
+                        bootstrap_result["success"] = False
+                        bootstrap_result["error"] = (
+                            "regenerated scoring protocol weakens retained "
+                            "targets: " + " ".join(floor_violations))
+
+        bootstrap_result["success"] = self.state.complete_stage(
+            BOOTSTRAP_RULE_MAKER_STAGE,
+            success=bootstrap_result.get("success", False),
+            outputs={
+                "return_code": bootstrap_result.get("return_code"),
+                "outputs_exist": bootstrap_result.get("outputs_exist"),
+                "validation": bootstrap_result.get("validation"),
+                "transcript_file": bootstrap_result.get("transcript_file"),
+                "verification": bool(bootstrap_result.get("verification")),
+            },
+        )
+        results["stages"][BOOTSTRAP_RULE_MAKER_STAGE] = bootstrap_result
+        if not bootstrap_result.get("success"):
             print()
             print("⚠️  Bootstrap rule_maker stage failed -- aborting before scorer.")
             return results
@@ -1928,6 +2063,18 @@ class ResearchPipelineOrchestrator:
 
         try:
             raw_manifest = build_manifest(self.work_dir)
+            # Sealed ground truth at data/.test is classified withheld by
+            # build_manifest when it is present in the workspace (Pass 1 is
+            # trusted mechanical code, before the manifest_trimmer agent runs).
+            # When the scoring seal has already relocated it to .scoring_sealed
+            # (e.g. on resume), build_manifest cannot see it, so its entries are
+            # synthesized here from the sealed dir. Dedupe keeps the two paths
+            # from double-counting.
+            hidden = append_hidden_sealed_entries(
+                raw_manifest, sealed_dir_for(self.work_dir))
+            if hidden:
+                print(f"🔒 {hidden} sealed ground-truth entries synthesized "
+                      f"(contents withheld; sealed out of the workspace)")
             print(
                 f"📐 Pass 1 (mechanical): {len(raw_manifest['files'])} files indexed, "
                 f"{len(raw_manifest['python_signatures'])} python signatures, "
@@ -2000,8 +2147,15 @@ class ResearchPipelineOrchestrator:
         provider: str,
         timeout: int,
         full_permissions: bool,
+        prompt_suffix: str = "",
     ) -> Dict[str, Any]:
-        """Launch the bootstrap rule_maker agent."""
+        """Launch the bootstrap rule_maker agent.
+
+        Deliberately does NOT record stage completion on the success path:
+        the caller verifies the harness against the user's evaluation
+        contract first and records one gated completion afterwards, so a
+        verification failure is never persisted as a succeeded stage.
+        """
         print()
         print("=" * 80)
         print(f"STAGE: {BOOTSTRAP_RULE_MAKER_STAGE}")
@@ -2017,7 +2171,7 @@ class ResearchPipelineOrchestrator:
         )
 
         try:
-            result = run_bootstrap_rule_maker(
+            return run_bootstrap_rule_maker(
                 curated_manifest=curated_manifest,
                 work_dir=self.work_dir,
                 provider=provider,
@@ -2025,23 +2179,18 @@ class ResearchPipelineOrchestrator:
                 timeout=timeout,
                 full_permissions=full_permissions,
                 log_dir=self.work_dir / ".neurico" / "bootstrap_logs",
+                prompt_suffix=prompt_suffix,
+                # Captured before this stage sealed/overwrote scoring/ when the
+                # baseline is regenerating over an existing protocol; None on a
+                # fresh generation.
+                prior_protocol=getattr(self, "prior_scoring_protocol", None),
+                # TRUSTED orchestrator idea (set by construct_bootstrap); the
+                # rule maker's targets derive from it, not the worker-writable
+                # workspace idea.yaml.
+                idea=getattr(self, "trusted_idea", None),
             )
-            result["success"] = self.state.complete_stage(
-                BOOTSTRAP_RULE_MAKER_STAGE,
-                success=result.get("success", False),
-                outputs={
-                    "return_code": result.get("return_code"),
-                    "outputs_exist": result.get("outputs_exist"),
-                    "validation": result.get("validation"),
-                    "transcript_file": result.get("transcript_file"),
-                },
-            )
-            return result
         except Exception as e:
             print(f"❌ Bootstrap rule_maker stage error: {e}")
-            self.state.complete_stage(
-                BOOTSTRAP_RULE_MAKER_STAGE, success=False, outputs={"error": str(e)}
-            )
             return {"success": False, "error": str(e)}
 
     def _bootstrap_sealed_dir_for(self) -> Path:
@@ -2079,10 +2228,10 @@ class ResearchPipelineOrchestrator:
                 sealed_dir.parent.rmdir()
             except OSError:
                 pass
-            print("🔒 Nothing to seal (no runtime artifacts present).")
+            print("🔒 Nothing to seal (none of the sealed paths present).")
             return None
 
-        print(f"🔒 Sealed {len(moved)} runtime artifacts to {sealed_dir}:")
+        print(f"🔒 Sealed {len(moved)} workspace paths to {sealed_dir}:")
         for rel in moved:
             print(f"     - {rel}")
         print(
@@ -2123,7 +2272,7 @@ class ResearchPipelineOrchestrator:
                 errors.append(f"{rel}: {e}")
 
         if restored:
-            print(f"🔓 Restored {len(restored)} runtime artifacts from {sealed_dir}")
+            print(f"🔓 Restored {len(restored)} workspace paths from {sealed_dir}")
         if errors:
             print(f"⚠️  Unseal errors -- sealed dir kept at {sealed_dir} for " "manual recovery:")
             for e in errors:

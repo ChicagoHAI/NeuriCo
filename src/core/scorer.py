@@ -56,7 +56,10 @@ def run_scorer(
 
     Args:
         work_dir: Workspace root containing scoring/eval.py and the
-                  runner's outputs.
+                  runner's outputs. Sealed held-out data, when declared, is
+                  already present under data/.test in the tree handed here:
+                  the scoring seal restores it into the frozen scorer worktree
+                  for exactly this run, and no agent runs against that tree.
         timeout: Max execution time for eval.py in seconds.
         python_executable: Python binary to use. Defaults to the workspace's
                   own .venv interpreter (where the runner installed deps),
