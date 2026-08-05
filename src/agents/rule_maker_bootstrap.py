@@ -28,6 +28,8 @@ import subprocess
 import sys
 import time
 
+import yaml
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -70,28 +72,99 @@ def _summarize_resource_hints(work_dir: Path) -> str:
     return "\n".join(parts)
 
 
-def _read_idea_yaml(work_dir: Path) -> str:
+def _trusted_idea_yaml(idea: Optional[Dict[str, Any]], work_dir: Path) -> str:
     """
-    Read the research idea from .neurico/idea.yaml in the workspace. Returns
-    a short message if absent (some old workspaces may not have one).
+    Serialize the TRUSTED orchestrator idea for the prompt.
+
+    The idea passed here is the orchestrator's in-memory contract, held outside
+    the worker-visible workspace, so the rule maker's targets derive from a
+    source the optimizing agent cannot edit. The workspace .neurico/idea.yaml
+    is worker-writable and is NOT read (a tampered copy there could steer
+    weaker targets). Only when no trusted idea is provided at all (legacy
+    callers) does it fall back to the workspace file, with a warning marker.
     """
+    if isinstance(idea, dict) and idea:
+        try:
+            return yaml.safe_dump(idea, default_flow_style=False, sort_keys=False)
+        except Exception as e:  # pragma: no cover - serialization is trivial
+            return f"(trusted idea could not be serialized: {e})"
     idea_path = Path(work_dir) / ".neurico" / "idea.yaml"
     if not idea_path.exists():
         return "(idea.yaml not present in this workspace — design targets from manifest + literature only)"
     try:
-        return idea_path.read_text(encoding="utf-8")
+        return ("(WARNING: no trusted idea supplied; read from worker-writable "
+                "workspace copy)\n" + idea_path.read_text(encoding="utf-8"))
     except (UnicodeDecodeError, OSError) as e:
         return f"(idea.yaml could not be read: {e})"
+
+
+def read_prior_scoring_protocol(work_dir: Path) -> Optional[Dict[str, str]]:
+    """
+    Return the existing scoring protocol as {'eval','targets','interface'}, or
+    None when no trusted prior exists (first generation / raw adopted repo).
+
+    Read ONLY from the TRUSTED sealed copy under .scoring_sealed (relocated out
+    of the agent-writable workspace during agent phases, i.e. the last
+    validated version). The workspace copy is worker-writable, so it is NOT a
+    fallback: a missing sealed copy means "no prior" and the rule maker
+    regenerates fresh. Feeding an agent-edited eval.py/targets.json into the
+    regeneration prompt could steer weaker targets (the eval-verifier gate is
+    skipped for goal-only ideas), so this reads the trusted copy or nothing.
+    """
+    from core.scoring_seal import sealed_dir_for
+
+    root = sealed_dir_for(work_dir)
+    eval_path = root / "scoring" / "eval.py"
+    targets_path = root / "scoring" / "targets.json"
+    if eval_path.is_file() and targets_path.is_file():
+        interface_path = root / "scoring" / "interface.md"
+        return {
+            "eval": eval_path.read_text(encoding="utf-8", errors="replace"),
+            "targets": targets_path.read_text(encoding="utf-8", errors="replace"),
+            "interface": (interface_path.read_text(encoding="utf-8",
+                                                   errors="replace")
+                          if interface_path.is_file() else ""),
+        }
+    return None
+
+
+def _render_prior_protocol_block(prior: Optional[Dict[str, str]]) -> str:
+    """Render the prior-protocol section for the prompt, or '' when none."""
+    if not prior:
+        return ""
+    return (
+        "\n\n=== PRIOR SCORING PROTOCOL (extend, do not discard) ===\n"
+        "A scoring protocol already exists for this workspace. New evaluation "
+        "materials have been declared, so regenerate a COHERENT protocol that "
+        "extends this one: keep every existing metric unless a newly declared "
+        "metric supersedes it, incorporate the new materials, and preserve the "
+        "existing interface where it still applies. Do NOT read the contents "
+        "of anything under data/.test.\n\n"
+        "--- prior scoring/interface.md ---\n"
+        f"{prior['interface']}\n"
+        "--- prior scoring/targets.json ---\n"
+        f"{prior['targets']}\n"
+        "--- prior scoring/eval.py ---\n"
+        f"{prior['eval']}\n"
+        "=== END PRIOR SCORING PROTOCOL ===\n"
+    )
 
 
 def generate_bootstrap_rule_maker_prompt(
     curated_manifest: Dict[str, Any],
     work_dir: Path,
     templates_dir: Path,
+    prior_protocol: Optional[Dict[str, str]] = None,
+    idea: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Build the bootstrap rule_maker prompt by substituting workspace details,
     the curated manifest, idea, and resource hint into the template.
+
+    When prior_protocol is given (regeneration over an existing protocol after
+    new evaluation materials were supplied), it is rendered into the
+    {prior_scoring_protocol} placeholder so the rule maker extends it coherently
+    rather than starting blind; otherwise that placeholder renders empty.
     """
     work_dir = Path(work_dir)
     templates_dir = Path(templates_dir)
@@ -108,8 +181,9 @@ def generate_bootstrap_rule_maker_prompt(
         "{workspace}": str(work_dir),
         "{scoring_dir}": str(scoring_dir),
         "{curated_manifest_json}": json.dumps(curated_manifest, indent=2),
-        "{idea_yaml}": _read_idea_yaml(work_dir),
+        "{idea_yaml}": _trusted_idea_yaml(idea, work_dir),
         "{resource_listing}": _summarize_resource_hints(work_dir),
+        "{prior_scoring_protocol}": _render_prior_protocol_block(prior_protocol),
     }
 
     prompt = template
@@ -126,9 +200,20 @@ def run_bootstrap_rule_maker(
     timeout: int = 1800,
     full_permissions: bool = True,
     log_dir: Optional[Path] = None,
+    prompt_suffix: str = "",
+    prior_protocol: Optional[Dict[str, str]] = None,
+    idea: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Launch the bootstrap rule_maker agent against a workspace.
+
+    Args:
+        prompt_suffix: Extra text appended to the generated prompt. Used by
+            the eval-verifier retry loop to feed violations back into the
+            rule_maker's second attempt.
+        prior_protocol: An existing scoring protocol ({'eval','targets',
+            'interface'}) to extend when new evaluation materials were
+            supplied; None for a first, fresh generation.
 
     Returns a dict with success, return_code, elapsed_time, transcript_file,
     prompt_file, and a per-output-file existence summary.
@@ -149,7 +234,11 @@ def run_bootstrap_rule_maker(
         curated_manifest=curated_manifest,
         work_dir=work_dir,
         templates_dir=Path(templates_dir),
+        idea=idea,
+        prior_protocol=prior_protocol,
     )
+    if prompt_suffix:
+        prompt += prompt_suffix
 
     if log_dir is not None:
         log_dir = Path(log_dir)
@@ -345,3 +434,85 @@ def validate_bootstrap_outputs(work_dir: Path) -> Dict[str, Any]:
         for key in ("interface", "eval", "targets", "log")
     )
     return result
+
+
+def _target_map(payload: Any) -> Dict[str, Dict[str, Any]]:
+    """{name: {'target': float, 'direction': str}} from a targets.json payload,
+    keeping only entries with a numeric target."""
+    out: Dict[str, Dict[str, Any]] = {}
+    props = payload.get("properties") if isinstance(payload, dict) else None
+    if not isinstance(props, dict):
+        return out
+    for name, spec in props.items():
+        if not isinstance(spec, dict):
+            continue
+        try:
+            target = float(spec.get("target"))
+        except (TypeError, ValueError):
+            continue
+        out[str(name)] = {"target": target, "direction": spec.get("direction")}
+    return out
+
+
+def check_target_floor(work_dir: Path,
+                       prior_protocol: Optional[Dict[str, str]] = None,
+                       trusted_idea: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Reject a regenerated protocol that WEAKENS a retained property's target.
+
+    The "extend, keep existing metrics" instruction must never lower the bar on
+    a property that already had a trusted target. Trusted anchors are the sealed
+    prior targets.json (prior_protocol['targets']) and user-declared numeric
+    targets in the trusted idea's evaluation.metrics. For a property present in
+    both the anchor and the newly written targets.json: direction max requires
+    new >= prior, direction min requires new <= prior. Non-numeric or
+    unknown-direction cases are skipped (nothing to compare safely).
+
+    Returns one message per weakened target; an empty list means no regression.
+    """
+    work_dir = Path(work_dir)
+    try:
+        new_payload = json.loads(
+            (work_dir / "scoring" / "targets.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    new_targets = _target_map(new_payload)
+    if not new_targets:
+        return []
+
+    anchors: Dict[str, Dict[str, Any]] = {}
+    if prior_protocol and prior_protocol.get("targets"):
+        try:
+            anchors.update(_target_map(json.loads(prior_protocol["targets"])))
+        except json.JSONDecodeError:
+            pass
+    # User-declared metric targets from the TRUSTED idea (name -> numeric target)
+    if isinstance(trusted_idea, dict):
+        inner = trusted_idea.get("idea", trusted_idea)
+        metrics = (inner.get("evaluation") or {}).get("metrics") \
+            if isinstance(inner, dict) else None
+        for metric in metrics or []:
+            if not isinstance(metric, dict) or not metric.get("name"):
+                continue
+            try:
+                anchors.setdefault(str(metric["name"]),
+                                   {"target": float(metric["target"]),
+                                    "direction": None})
+            except (TypeError, ValueError, KeyError):
+                continue
+
+    violations: List[str] = []
+    for name, anchor in anchors.items():
+        if name not in new_targets:
+            continue  # a dropped property is a separate concern, not weakening
+        new = new_targets[name]
+        direction = anchor.get("direction") or new.get("direction")
+        prior_t, new_t = anchor["target"], new["target"]
+        if direction == "max" and new_t < prior_t:
+            violations.append(
+                f"property '{name}': regenerated target {new_t} is weaker than "
+                f"the prior target {prior_t} (direction max requires >=)")
+        elif direction == "min" and new_t > prior_t:
+            violations.append(
+                f"property '{name}': regenerated target {new_t} is weaker than "
+                f"the prior target {prior_t} (direction min requires <=)")
+    return violations
