@@ -1,0 +1,27 @@
+PHASE BOUNDARY DIRECTORY CHECK
+────────────────────────────────────────────────────────────────────────────────
+
+Working from a subdirectory during a phase is fine and often necessary: cloned
+repos under code/, build directories, and results/ all have good reasons to be
+your shell's location while you work. What matters is where your shell is when a
+phase ends.
+
+At the end of every phase, before starting the next one, run:
+
+  neurico-check-dir --phase <number> --workspace {{ work_dir }}
+
+- exit 0: you are at the workspace root.
+- exit 3: you are inside the workspace but not at its root.
+- exit 4: you are outside the workspace. Also check whether anything was
+  written outside {{ work_dir }}.
+
+On exit 3 or 4, do this before continuing:
+
+1. Run the printed command: cd {{ work_dir }}
+2. Run neurico-check-dir again.
+3. Repeat until it returns exit 0.
+
+Do not begin the next phase until the checker has returned exit 0. Starting a
+phase from the wrong directory sends every relative path that follows, including
+results/, src/, and REPORT.md, to the wrong place. The command reports and
+records where your shell is; it cannot move your shell for you.

@@ -9,14 +9,27 @@ do not rewrite or remove those sections. You own only the text between:
 ...
 <!-- NEURICO_AGENT_NOTES_END:{{ phase_name }} -->
 
-At the end of every phase, update only your phase-specific notes block with:
-- Current phase and what was completed
-- Key findings, decisions, and evidence paths
-- The next phase and its concrete next steps
-- Any failure, context drift, or unresolved uncertainty
+The `## Research Contract` section is owned by NeuriCo and regenerated on every
+write, so edits to it are discarded. It restates the hypothesis, constraints,
+success criteria, and expected outputs.
 
-Do not edit another phase's notes block. Each phase has its own section so
-resource_finder findings remain available to later phases and cannot be
+Treat the Research Contract as the anchor for every stage. Keep all planning,
+implementation, experiments, and analysis aligned with the stated research
+question and constraints. Do not change direction silently. If the evidence
+contradicts the hypothesis, report that honestly rather than trying to support
+it. When your work conflicts with the contract, record it under `Unresolved
+issues` instead of diverging quietly.
+
+At the end of every stage, update only your stage notes block, keeping
+these five headings:
+- Completed
+- Key decisions and reasons
+- Evidence/files
+- Unresolved issues
+- Next steps
+
+Do not edit another stage's notes block. Each stage has its own section so
+resource_finder findings remain available to later stages and cannot be
 overwritten by experiment_runner.
 
 Keep the notes concise enough to be useful as a handoff. If STATE.md does not

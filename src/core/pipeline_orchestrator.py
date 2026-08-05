@@ -55,8 +55,11 @@ from core.hitl_scoring_workspace import (
 from core.hitl_runtime_state import HitlRuntimeState
 from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
 from core.workspace_manifest import build_manifest, curate_manifest
+from core.directory_check import summarize_directory_checks
 from core.phase_state import (
+    build_research_contract,
     check_working_directory,
+    stage_notes_written,
     validate_outputs,
     write_state_document,
 )
@@ -109,6 +112,11 @@ class PipelineState:
         atomic_write_json(self.state_file, self.state, fsync_parent=False)
         write_state_document(self.work_dir, self.state)
 
+    def set_research_contract(self, idea: Dict[str, Any]):
+        """Record the idea's goal fields so STATE.md restates them every stage."""
+        self.state["research_contract"] = build_research_contract(idea)
+        self._save()
+
     def start_stage(
         self,
         stage_name: str,
@@ -140,6 +148,9 @@ class PipelineState:
         stage = self.state["stages"][stage_name]
         completion_workspace_check = check_working_directory(self.work_dir)
         validation = validate_outputs(self.work_dir, stage.get("expected_outputs", []))
+        # Read before _save() regenerates the document, so this reflects what the
+        # agent actually left behind. Recorded for visibility, not gating.
+        notes_written = stage_notes_written(self.work_dir, stage_name)
         final_success = (
             bool(success)
             and completion_workspace_check["healthy"]
@@ -153,6 +164,8 @@ class PipelineState:
                 "outputs": outputs or {},
                 "workspace_check_at_completion": completion_workspace_check,
                 "output_validation": validation,
+                "notes_written": notes_written,
+                "directory_checks": summarize_directory_checks(self.work_dir),
             }
         )
         self.state["current_stage"] = None
@@ -347,6 +360,8 @@ class ResearchPipelineOrchestrator:
         Returns:
             Dictionary with pipeline execution results
         """
+        self.state.set_research_contract(idea)
+
         if bootstrap_mode:
             return self._run_bootstrap_pipeline(
                 idea=idea,

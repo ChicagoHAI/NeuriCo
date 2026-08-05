@@ -136,6 +136,7 @@ _RAW_ROLE_RULES: list[tuple[str, str]] = [
     ("experiments/**", "runtime_artifact"),
     ("REPORT.md", "runtime_artifact"),
     ("planning.md", "runtime_artifact"),
+    ("phase_handoffs/**", "runtime_artifact"),
     ("artifacts/**", "runtime_artifact"),
 
     # Ephemeral.

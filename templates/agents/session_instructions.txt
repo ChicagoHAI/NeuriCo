@@ -281,6 +281,8 @@ CRITICAL REMINDERS:
 - Even if experiments fail, complete Phase 6 documenting what happened
 - REPORT.md is mandatory - it's the primary deliverable
 
+{{ phase_handoff }}
+
 WORKSPACE DIRECTORY AND DIRECTORY SAFETY:
 ────────────────────────────────────────────────────────────────────────────────
 You are running in the project workspace directory: {{ work_dir }}
@@ -296,17 +298,22 @@ MANDATORY VERIFICATION POINTS - Run `pwd` and verify location:
 ✓ Before creating any new directories (mkdir results, mkdir figures, etc.)
 ✓ Before saving any output files
 ✓ Before running experiments that produce output
-✓ After any cd command - ALWAYS cd back to workspace root afterward
-✓ When starting each new phase of work
+✓ After any cd command - know where you are before writing files
+✓ At each phase boundary, use neurico-check-dir (below) instead of a bare pwd,
+  and return to the workspace root before the next phase begins
 
 SAFE PATTERN FOR DIRECTORY CHANGES:
-If you need to cd into a subdirectory, ALWAYS return immediately:
+Working from a subdirectory during a phase is fine. Before writing files, know
+where you are; at each phase boundary, return to the workspace root (see below).
+A short mid-phase command can still use an immediate return:
   pwd                              # Verify starting location
   cd results && python script.py && cd -   # cd back using "cd -"
-  pwd                              # Verify you're back in workspace root
+  pwd                              # Verify you're back when needed
 
 ⚠️  NEVER create files in parent directory (cd .. is dangerous!)
 ⚠️  All your work MUST stay within this workspace directory
+
+{{ directory_check }}
 
 Remember:
 - READ literature_review.md and resources.md first (they're in your current directory)
