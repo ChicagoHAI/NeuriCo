@@ -269,7 +269,7 @@ class HitlManager:
         self.work_dir = Path(work_dir)
         manager_config = config.get("manager", {}) if isinstance(config.get("manager", {}), dict) else {}
         self._manager_config = manager_config
-        self._provider = str(manager_config.get("hitl_manager_provider", "codex")).strip().lower()
+        self._provider = str(manager_config.get("hitl_manager_provider", "claude")).strip().lower()
         self.backend = self._backend_for_provider(self._provider)
         self.channel = channel or TerminalChannel()
         self.runtime_state = HitlRuntimeState(self.work_dir)
@@ -312,7 +312,7 @@ class HitlManager:
     def _backend_for_provider(self, provider: str) -> Any:
         from interactive.llm_backend import LLMBackend
 
-        provider = str(provider or "codex").strip().lower()
+        provider = str(provider or "claude").strip().lower()
         if provider == "claude":
             return LLMBackend(
                 backend="cli",
@@ -450,8 +450,17 @@ class HitlManager:
             "Runtime-authorized MCP tool surface for this turn:",
             rendered,
             "This list is authoritative and these tools are supplied through MCP. "
-            "Do not claim that a listed tool is unavailable, and do not call tools "
-            "outside this list.",
+            "Do not claim that a listed tool is unavailable, and do not call runtime "
+            "tools outside this list.",
+            "If the provider exposes `ToolSearch` and an authorized MCP tool is not yet "
+            "visible, use `ToolSearch` only to discover the runtime tools listed above, "
+            "then retry discovery. `ToolSearch` is a transport helper and does not "
+            "authorize any runtime workflow action.",
+            "Invoke tools through the provider's native MCP tool interface. Never print, "
+            "quote, describe, or simulate a tool call in assistant text. Markup such as "
+            "<function_calls>, <invoke>, <tool_call>, or JSON describing a call is ordinary "
+            "text and does not invoke the tool. Provider-namespaced MCP names correspond "
+            "to the logical tool names listed here.",
         ]
         scoring_handoff = cls._scoring_handoff_instruction(tools)
         if scoring_handoff:
@@ -473,21 +482,28 @@ class HitlManager:
     def _unresolved_request_reminder(self) -> str:
         """Return a boundary-specific reminder for a text-only manager turn."""
         tools = self._tools_for_current_runtime_boundary()
+        native_retry = (
+            "Your previous response did not invoke a runtime tool. Do not repeat or emit "
+            "function-call markup. Invoke the required tool through the native MCP interface now. "
+        )
         scoring_handoff = self._scoring_handoff_instruction(tools)
         if scoring_handoff:
             return (
-                "The worker request remains unresolved. "
+                native_retry
+                + "The worker request remains unresolved. "
                 f"{scoring_handoff} Direct assistant text cannot advance it."
             )
         completion_name = self._runtime_completion_tool_name(tools)
         if completion_name:
             return (
-                "The worker request remains unresolved. Continue reviewing or consult "
+                native_retry
+                + "The worker request remains unresolved. Continue reviewing or consult "
                 "the human as permitted, then call "
                 f"`{completion_name}`. Direct assistant text cannot complete it."
             )
         return (
-            "The worker request remains unresolved. Follow the exact "
+            native_retry
+            + "The worker request remains unresolved. Follow the exact "
             "runtime-authorized MCP tool surface in the system instruction; direct "
             "assistant text cannot complete it."
         )

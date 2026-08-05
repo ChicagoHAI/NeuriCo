@@ -10,6 +10,8 @@
 #   ./neurico submit-local <idea.md>   # Submit a local idea file
 #   ./neurico submit <idea.yaml>       # Submit an idea
 #   ./neurico run <id> [options]       # Run research
+#   ./neurico hitl-web <id>            # Open the HITL web client
+#   ./neurico hitl-cli <id>            # Open the HITL terminal client
 #   ./neurico shell                    # Interactive shell
 #   ./neurico build                    # Build container
 #   ./neurico bump-version 0.3.0      # Bump version everywhere

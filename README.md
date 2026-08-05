@@ -268,10 +268,18 @@ After submitting an idea, choose the workflow that matches the research task:
 | **Standard run** | `./neurico run <idea_id>` | Run the research pipeline once |
 | **AutoResearch** | `./neurico run <idea_id> --autoresearch --autoresearch-iterations 3` | Build an initial scored experiment, then try iterative improvements |
 | **Continue AutoResearch** | `./neurico run <idea_id> --continue-autoresearch --autoresearch-iterations 3` | Continue improving an existing scored workspace |
-| **HITL AutoResearch** | `./neurico hitl-web <idea_id>` | Use the local manager interface to work closely with NeuriCo|
+| **HITL AutoResearch (web)** | `./neurico hitl-web <idea_id>` | Use the full local workspace and manager interface |
+| **HITL AutoResearch (terminal)** | `./neurico hitl-cli <idea_id>` | Converse with the manager, resolve requests, and launch runs from the terminal |
 
 See [HITL AutoResearch Design and Workflow](docs/HITL_AUTORESEARCH.md) for the
 manager, human, worker, runtime, scoring, frontier, and recovery model.
+
+The web and terminal clients use the same durable HITL manager conversation and
+requests. In the terminal client, enter `/run` to configure and start a fresh or
+continuing run, `/reply <number>` or `/reply <feedback>` to resolve a displayed
+human request, and ordinary text to talk with NeuriCo. Enter `/help` to show the
+available commands.
+
 ### Run Options
 
 | Option | Description |
