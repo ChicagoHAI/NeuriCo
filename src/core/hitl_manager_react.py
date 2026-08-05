@@ -2008,7 +2008,7 @@ class HitlManager:
     def _summarize(self, prior: str, research_state: str, generation: int) -> str:
         from core.hitl import _load_hitl_template
 
-        prompt = _load_hitl_template("manager_conversation_compaction.txt", max_tokens=6000)
+        prompt = _load_hitl_template("manager_conversation_compaction.txt", max_tokens=1600)
         response = self._send(
             [
                 {"role": "system", "content": prompt},

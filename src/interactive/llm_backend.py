@@ -283,7 +283,9 @@ class LLMBackend:
         elif disable_native_tools:
             # HITL manager tools are parsed and executed by the runtime. Do
             # not let the CLI agent gain a second, unmanaged tool surface.
-            cmd.extend(["--bare", "--tools", ""])
+            # Safe mode also suppresses local hooks and project instructions,
+            # while preserving OAuth/keychain authentication for Claude Code.
+            cmd.extend(["--safe-mode", "--tools", ""])
 
         process = subprocess.Popen(
             cmd,
@@ -311,8 +313,11 @@ class LLMBackend:
             self._clear_active_process(process)
 
         if process.returncode != 0:
-            # Try to extract useful error info
-            error_msg = stderr.strip() if stderr else f"claude -p exited with code {process.returncode}"
+            error_msg = self._claude_cli_error_message(
+                stdout=stdout,
+                stderr=stderr,
+                returncode=process.returncode,
+            )
             raise RuntimeError(f"CLI backend error: {error_msg}")
 
         response = self._parse_cli_response(stdout)
@@ -322,6 +327,33 @@ class LLMBackend:
             # ReAct loop must not replay them as legacy XML tool calls.
             response.tool_calls = []
         return response
+
+    @staticmethod
+    def _claude_cli_error_message(*, stdout: str, stderr: str, returncode: int) -> str:
+        """Recover Claude's structured error before falling back to process output."""
+        error_code = ""
+        error_text = ""
+        terminal_reason = ""
+        for raw_line in str(stdout).splitlines():
+            try:
+                event = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("error"):
+                error_code = str(event["error"]).strip()
+            if event.get("type") == "result" and event.get("is_error"):
+                error_text = str(event.get("result", "")).strip()
+                terminal_reason = str(event.get("terminal_reason", "")).strip()
+        if error_text:
+            label = error_code or terminal_reason
+            return f"{label}: {error_text}" if label else error_text
+        if error_code:
+            return error_code
+        if str(stderr).strip():
+            return str(stderr).strip()
+        return f"claude -p exited with code {returncode}"
 
     @staticmethod
     def _terminate_process_group(process: subprocess.Popen[str]) -> None:

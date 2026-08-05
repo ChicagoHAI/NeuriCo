@@ -23,6 +23,8 @@ MICROCOMPACT_MEDIUM_OUTPUT_CHARS = 300
 MICROCOMPACT_LARGE_OUTPUT_CHARS = 1_200
 COMPACTION_MIN_RECENT_MESSAGES = 2
 COMPACTION_MIN_MIDDLE_MESSAGES = 1
+COMPACTION_SUMMARY_MIN_INPUT_TOKENS = 2_500
+COMPACTION_SUMMARY_MAX_INPUT_TOKENS = 64_000
 MAX_ACTIVE_TOOL_RESULT_CHARS = 64_000
 
 
@@ -321,7 +323,11 @@ class HitlManagerContext:
             records[recent_start:],
         )
         summaries: List[Dict[str, Any]] = []
-        for chunk in self._chunks(oldest, limit=10_000):
+        chunk_token_budget = min(
+            COMPACTION_SUMMARY_MAX_INPUT_TOKENS,
+            max(COMPACTION_SUMMARY_MIN_INPUT_TOKENS, self.context_tokens // 4),
+        )
+        for chunk in self._chunks(oldest, limit=chunk_token_budget * 4):
             rendered = self._render(chunk)
             summary = str(summarize(rendered, research_state)).strip()
             if not summary:
