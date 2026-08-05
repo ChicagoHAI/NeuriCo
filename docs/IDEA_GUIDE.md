@@ -317,7 +317,8 @@ idea:
 
 ## Validate and submit
 
-Keep idea files under `ideas/` for the simplest Docker path:
+Keeping idea files under `ideas/` is recommended for organization. Docker and
+local `uv` also accept other relative or absolute host paths:
 
 ```bash
 # Docker

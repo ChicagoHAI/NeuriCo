@@ -20,9 +20,8 @@ metrics, and experimental methodology.
 
 ## 1. Create the idea file
 
-Create `ideas/my_idea.yaml`. Keeping a Docker idea under `ideas/` ensures the
-container can read it through the standard mount. Local `uv` can also use this
-path.
+Create `ideas/my_idea.yaml`. Both Docker and local `uv` accept relative or
+absolute host paths; `ideas/` is simply the recommended project location.
 
 ```yaml
 idea:

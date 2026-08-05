@@ -752,20 +752,24 @@ cmd_submit() {
         shift
     done
 
+    # The idea file always lives on the host. Resolve both relative and
+    # absolute inputs before starting Docker, then mount its containing
+    # directory at a stable container path. Previously, only absolute paths
+    # were mounted; relative paths outside PROJECT_ROOT/ideas were incorrectly
+    # treated as if they existed under /app in the image.
+    if [ ! -f "$idea_file" ]; then
+        echo -e "${RED}Error: idea file not found: $idea_file${NC}"
+        exit 1
+    fi
+    local idea_abs idea_dir idea_name
+    idea_abs=$(cd "$(dirname "$idea_file")" && pwd)/$(basename "$idea_file")
+    idea_dir=$(dirname "$idea_abs")
+    idea_name=$(basename "$idea_abs")
+    local idea_path="/input/$idea_name"
+
     local gpu_flags=$(get_gpu_flags)
     local user_flags=$(get_user_flags)
     local credential_mounts=$(get_cli_credential_mounts)
-
-    # Handle relative vs absolute paths for idea file
-    local idea_path mount_flag=""
-    if [[ "$idea_file" = /* ]]; then
-        local idea_dir=$(dirname "$idea_file")
-        local idea_name=$(basename "$idea_file")
-        mount_flag="-v \"$idea_dir:/input:ro\""
-        idea_path="/input/$idea_name"
-    else
-        idea_path="/app/$idea_file"
-    fi
 
     local workspace_dir=$(get_workspace_dir)
     local tty_flag=$(get_tty_flag)
@@ -773,25 +777,38 @@ cmd_submit() {
     echo -e "${BLUE}Submitting research idea...${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
 
-    # Run submit and capture output so we can extract the idea_id for --run
+    # Build argv as an array so host paths and passthrough options are not
+    # re-parsed as shell syntax.
+    local docker_args=( run $tty_flag --rm )
+    local helper_args=()
+    eval "helper_args=( $gpu_flags $user_flags $credential_mounts )"
+    docker_args+=(
+        "${helper_args[@]}"
+        --env-file "$PROJECT_ROOT/.env"
+        -e NEURICO_WORKSPACE=/workspaces
+        -v "$workspace_dir:/workspaces"
+        -v "$PROJECT_ROOT/ideas:/app/ideas"
+        -v "$PROJECT_ROOT/logs:/app/logs"
+        -v "$PROJECT_ROOT/config:/app/config:ro"
+        -v "$PROJECT_ROOT/templates:/app/templates:ro"
+        -v "$idea_dir:/input:ro"
+        -w /app
+        "$IMAGE_NAME"
+        python /app/src/cli/submit.py "$idea_path"
+        "${submit_args[@]}"
+    )
+
+    # Run submit and capture output so we can extract the idea_id for --run.
+    # Preserve Docker's status even though the output passes through tee.
     local output_file
     output_file=$(mktemp)
-    eval "docker run $tty_flag --rm \
-        $gpu_flags \
-        $user_flags \
-        --env-file \"$PROJECT_ROOT/.env\" \
-        -e NEURICO_WORKSPACE=/workspaces \
-        -v \"$workspace_dir:/workspaces\" \
-        -v \"$PROJECT_ROOT/ideas:/app/ideas\" \
-        -v \"$PROJECT_ROOT/logs:/app/logs\" \
-        -v \"$PROJECT_ROOT/config:/app/config:ro\" \
-        -v \"$PROJECT_ROOT/templates:/app/templates:ro\" \
-        $credential_mounts \
-        $mount_flag \
-        -w /app \
-        \"$IMAGE_NAME\" \
-        python /app/src/cli/submit.py \"$idea_path\" ${submit_args[*]+"${submit_args[*]}"}" \
-        | tee "$output_file"
+    docker "${docker_args[@]}" | tee "$output_file"
+    local submit_rc=${PIPESTATUS[0]}
+    if [ "$submit_rc" -ne 0 ]; then
+        rm -f "$output_file"
+        echo -e "${RED}[ERROR]${NC} submit failed (exit $submit_rc)"
+        exit "$submit_rc"
+    fi
 
     if [ "$do_run" = true ]; then
         local idea_id
