@@ -15,8 +15,7 @@
 
 **NeuriCo** (**Neur**al **Co**-Scientist, inspired by Enrico Fermi) turns a
 testable research idea into a reproducible workspace with code, experiments,
-results, and documentation. It can work independently, improve a scored result
-over several iterations, or pause for human decisions.
+results, and documentation.
 
 Bring a title, a research domain, and a hypothesis. Add papers, datasets,
 methods, or evaluation rules when they matter; otherwise, let the research
@@ -31,10 +30,10 @@ Gemini.
 
 ## Quick start
 
-NeuriCo supports two equal installation routes. Use Docker for a packaged
-runtime or local `uv` when you want NeuriCo to run directly on your machine.
-
 ### 1. Install
+
+Docker and local `uv` are equal routes. Pick one route and use its commands
+throughout the workflow.
 
 #### Docker
 
@@ -49,6 +48,36 @@ cd neurico
 
 The setup wizard prepares the image and provider login. It offers a quick path
 and a full configuration path.
+
+<details>
+<summary>Docker setup alternatives</summary>
+
+Skip the setup choice and use the quick path directly:
+
+```bash
+./neurico setup --quick
+```
+
+Or use the one-line installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash
+```
+
+The repository is required even with the prebuilt image because it supplies
+the launcher, configuration, templates, idea records, and workspace mounts.
+To build the image from the current checkout, run `./neurico build`.
+
+Useful maintenance commands:
+
+```bash
+./neurico config   # Edit settings and optional integrations
+./neurico login    # Repeat provider login
+./neurico update   # Update the checkout and image
+./neurico help     # List available commands
+```
+
+</details>
 
 #### Local `uv`
 
@@ -66,9 +95,13 @@ cp .env.example .env
 claude  # or: codex, gemini
 ```
 
-The last command completes the provider's OAuth login.
+The last command completes the provider's OAuth login. The local route uses
+the same ideas, configuration, templates, and workspace layout as Docker.
 
-### 2. Submit an idea
+If you discovered NeuriCo through the packaged [ClawHub skill](clawskill/SKILL.md),
+choose either Docker or local `uv` here; ClawHub is not a third execution route.
+
+### 2. Write and submit an idea
 
 Create `ideas/my_idea.yaml`:
 
@@ -81,113 +114,8 @@ idea:
     otherwise equivalent direct prompts.
 ```
 
-Then submit it:
-
-| Docker | Local `uv` |
-| --- | --- |
-| `./neurico submit ideas/my_idea.yaml` | `uv run python src/cli/submit.py ideas/my_idea.yaml` |
-
-Submission validates the file and prints an `<idea_id>`. It does not start a
-research run. Relative and absolute idea paths work in both routes.
-
-### 3. Choose a mode
-
-Replace `<idea_id>` with the ID printed during submission.
-
-| Mode | Docker | Local `uv` |
-| --- | --- | --- |
-| **Standard** | `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` |
-| **AutoResearch** | `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` |
-| **HITL AutoResearch** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
-
-Standard runs the research pipeline once. AutoResearch creates a scored
-baseline and tries one improvement by default. HITL opens the manager; use
-`/run` in the interface when you are ready to begin. For a terminal HITL
-interface, use `hitl-cli` instead of `hitl-web`.
-
-## Guides
-
-| Guide | What it covers |
-| --- | --- |
-| [Workflow](docs/WORKFLOW.md) | Complete Docker and local `uv` workflow |
-| [Idea quickstart](docs/IDEA_QUICKSTART.md) | Write and submit a first idea |
-| [Idea guide](docs/IDEA_GUIDE.md) | Full idea schema, fields, and examples |
-| [AutoResearch](docs/AUTORESEARCH.md) | Fresh runs, continuation, recovery, and bootstrap |
-| [HITL AutoResearch](docs/HITL_AUTORESEARCH.md) | Manager workflow, interfaces, frontier, and recovery |
-| [Local files](docs/LOCAL_IDEA_SUBMISSION.md) | Markdown ideas, local datasets, functions, and evaluators |
-| [IdeaHub](docs/IDEAHUB_INTEGRATION.md) | Import ideas from IdeaHub |
-| [GitHub integration](docs/GITHUB_INTEGRATION.md) | Optional repository creation and publishing |
-
-<details>
-<summary><b>Installation and setup details</b></summary>
-
-### Requirements
-
-| | Docker | Local `uv` |
-| --- | --- | --- |
-| Runtime | Docker | Python 3.10+ and `uv` |
-| Provider | Claude Code, Codex, or Gemini in the container | Claude Code, Codex, or Gemini on the host |
-| Authentication | OAuth credentials persisted on the host and mounted into containers | Provider OAuth on the host |
-| GPU | Optional; NVIDIA Container Toolkit | Optional; depends on the experiment |
-
-Provider OAuth is enough for the basic workflow. GitHub and service API keys
-are optional.
-
-### Docker setup
-
-Running `./neurico setup` lets you choose:
-
-- **Quick setup:** pull the current image, create the default configuration,
-  and log in to Claude.
-- **Full setup:** choose a provider and configure GitHub, API keys, and the
-  workspace location.
-
-Skip the choice and use quick setup directly with:
-
-```bash
-./neurico setup --quick
-```
-
-The one-line installer is an equivalent shortcut:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash
-```
-
-The repository is required even when using the prebuilt image. It supplies the
-`./neurico` launcher, configuration, templates, idea records, and workspace
-mounts. To build the image from the current checkout instead:
-
-```bash
-./neurico build
-```
-
-Useful Docker administration commands:
-
-```bash
-./neurico config   # Edit optional integrations and workspace settings
-./neurico login    # Repeat provider login
-./neurico update   # Update the checkout and image
-./neurico help     # List available commands
-```
-
-### Local setup
-
-`uv sync` installs the locked project environment. Provider CLIs are separate
-tools and must be installed and authenticated on the host. The local route uses
-the same `.env`, `config/`, `templates/`, `ideas/`, and workspace layout as the
-Docker route.
-
-</details>
-
-<details>
-<summary><b>Idea inputs and submission options</b></summary>
-
-### YAML ideas
-
 Only `title`, `domain`, and a testable `hypothesis` are required. Optional
-sections let you preserve details that the agents should not choose for
-themselves:
+sections let you keep important choices under your control:
 
 | Section | Purpose |
 | --- | --- |
@@ -198,10 +126,46 @@ themselves:
 | `evaluation` | Metrics, targets, and evaluator functions |
 | `expected_outputs` | Artifacts the completed research should produce |
 
-See [`ideas/schema.yaml`](ideas/schema.yaml) for the authoritative schema and
-[`ideas/examples/`](ideas/examples/) for complete examples.
+See the [Idea quickstart](docs/IDEA_QUICKSTART.md), the complete
+[Idea guide](docs/IDEA_GUIDE.md), [`ideas/schema.yaml`](ideas/schema.yaml), and
+[`ideas/examples/`](ideas/examples/) for more examples.
 
-Submission options:
+Submit the YAML:
+
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico submit ideas/my_idea.yaml` | `uv run python src/cli/submit.py ideas/my_idea.yaml` |
+
+Submission validates the idea and prints an `<idea_id>`. It does not start a
+research run. Relative and absolute idea paths work in both routes.
+
+#### Markdown or text ideas
+
+Use this route when the idea is written as prose or refers to datasets and
+functions already on your machine:
+
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
+
+The basic command creates a YAML draft under `ideas/` for review. Add
+`--submit` to submit it immediately, or `--submit --run` to submit and start a
+Standard run. Declared local resources are mounted read-only when research
+starts. See [Local idea submission](docs/LOCAL_IDEA_SUBMISSION.md).
+
+#### IdeaHub
+
+Fetch and convert an IdeaHub page:
+
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico fetch <ideahub_url>` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url>` |
+
+The basic command creates a YAML draft for review. Add `--submit` or
+`--submit --run` to continue directly to submission or execution. See the
+[IdeaHub guide](docs/IDEAHUB_INTEGRATION.md).
+
+#### Submission options
 
 | Flag | Purpose |
 | --- | --- |
@@ -214,39 +178,34 @@ Submission options:
 When `GITHUB_TOKEN` is configured, submission also creates and prepares a
 research repository. Without it, submission stays local.
 
-### Markdown or text
+### 3. Choose a research mode
 
-Convert a prose idea before submitting it:
+Replace `<idea_id>` with the ID printed during submission.
 
-| Docker | Local `uv` |
-| --- | --- |
-| `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
+| Mode | Docker | Local `uv` |
+| --- | --- | --- |
+| **Standard** | `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` |
+| **AutoResearch** | `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` |
+| **HITL AutoResearch** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
 
-The basic command writes a YAML draft under `ideas/` for review. Add `--submit`
-to submit it immediately, or `--submit --run` to submit and begin a Standard
-run. Local datasets and functions mentioned in the idea are recorded and
-mounted read-only when the research starts.
+The sections below explain what each mode does and the options users are most
+likely to need.
 
-### IdeaHub
+## Research modes
 
-Fetch and convert an IdeaHub page:
-
-| Docker | Local `uv` |
-| --- | --- |
-| `./neurico fetch <ideahub_url>` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url>` |
-
-The basic command writes a YAML draft for review. Add `--submit` or
-`--submit --run` when the converted idea should continue directly to
-submission or execution.
-
-</details>
-
-<details>
-<summary><b>Standard mode options</b></summary>
+### Standard
 
 Standard runs resource discovery, experiment design and execution, analysis,
-and paper writing once. The default provider is Claude, the default compute
-backend is local, and full provider permissions are enabled.
+and paper writing once.
+
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` |
+
+The default provider is Claude, the default compute backend is local, and full
+provider permissions and paper writing are enabled.
+
+#### Common Standard options
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
@@ -257,23 +216,28 @@ backend is local, and full provider permissions are enabled.
 | `--no-write-paper` | paper enabled | Skip paper generation |
 | `--paper-style neurips\|icml\|acl\|ams` | domain default | Select the paper template |
 | `--no-github` | GitHub when configured | Keep the run local |
-| `--pause-after-resources` | off | Review resources before experimentation |
-| `--skip-resource-finder` | off | Use an already prepared workspace |
-| `--enable-scoring` | off | Add a sealed rule-maker and scorer stage |
 | `--force-fresh` | reuse workspace | Ignore an existing workspace and start again |
 
-Run `./neurico help` or the runner with `--help` for the complete command
-reference.
+<details>
+<summary>Advanced Standard pipeline controls</summary>
+
+| Flag | Purpose |
+| --- | --- |
+| `--pause-after-resources` | Review resources before experimentation |
+| `--skip-resource-finder` | Use an already prepared workspace |
+| `--resource-finder-timeout SECONDS` | Change the resource-finder timeout; default `2700` |
+| `--use-scribe` | Use the optional notebook-oriented execution path |
+| `--enable-scoring` | Add a sealed rule-maker and scorer stage |
+| `--comment-mode` | Apply targeted changes from comments in the submitted idea |
 
 </details>
 
-<details>
-<summary><b>AutoResearch: fresh, continue, and bootstrap</b></summary>
+### AutoResearch
 
 AutoResearch keeps a scored best checkpoint. Each iteration proposes one
 change, runs it, scores it, and keeps it only when it improves the current best.
 
-### Fresh AutoResearch
+#### Start fresh
 
 | Docker | Local `uv` |
 | --- | --- |
@@ -282,7 +246,7 @@ change, runs it, scores it, and keeps it only when it improves the current best.
 This runs the full scored pipeline, saves the initial best checkpoint, and
 performs one improvement iteration.
 
-### Continue AutoResearch
+#### Continue an existing AutoResearch workspace
 
 | Docker | Local `uv` |
 | --- | --- |
@@ -291,7 +255,7 @@ performs one improvement iteration.
 Continuation uses an existing scored workspace and skips the upstream research
 stages.
 
-### Bootstrap a Standard workspace
+#### Bootstrap a Standard workspace
 
 | Docker | Local `uv` |
 | --- | --- |
@@ -301,32 +265,40 @@ Bootstrap scores existing Standard work and prepares continuation state. It
 does not run an improvement iteration; continue afterward with
 `--continue-autoresearch`.
 
-### AutoResearch options
+#### Common AutoResearch options
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--autoresearch-iterations N` | `1` | Set the number of improvement iterations |
 | `--continue-recover` | off | Restore the best checkpoint after an interrupted dirty attempt |
 | `--autoresearch-history-dir PATH` | workspace logs | Change attempt-history storage |
-| `--proposer-timeout SECONDS` | `900` | Set proposal-generation timeout |
-| `--rule-maker-timeout SECONDS` | `1800` | Set scoring-contract construction timeout |
-| `--scorer-timeout SECONDS` | `600` | Set scoring timeout |
-| `--manifest-trimmer-timeout SECONDS` | `300` | Set bootstrap manifest-trimmer timeout |
-| `--bootstrap-rule-maker` | off | Retrofit scoring only, without creating AutoResearch continuation state |
 
 Fresh, continue, and bootstrap-baseline are mutually exclusive entry paths.
 Standard provider, compute, permission, paper, and GitHub options also apply.
 
+<details>
+<summary>Advanced AutoResearch and bootstrap controls</summary>
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--proposer-timeout SECONDS` | `900` | Set proposal-generation timeout |
+| `--rule-maker-timeout SECONDS` | `1800` | Set scoring-contract construction timeout |
+| `--scorer-timeout SECONDS` | `600` | Set scoring timeout |
+| `--manifest-trimmer-timeout SECONDS` | `300` | Set bootstrap manifest-trimmer timeout |
+| `--bootstrap-rule-maker` | off | Retrofit scoring without creating AutoResearch continuation state |
+
 </details>
 
-<details>
-<summary><b>HITL AutoResearch</b></summary>
+See the [AutoResearch guide](docs/AUTORESEARCH.md) for checkpoint, scoring, and
+recovery behavior.
+
+### HITL AutoResearch
 
 HITL AutoResearch adds a durable manager conversation, explicit human decision
 points, isolated scoring, and a retained research frontier. Web and terminal
 are two interfaces over the same workspace state.
 
-### Web interface
+#### Web interface
 
 | Docker | Local `uv` |
 | --- | --- |
@@ -336,7 +308,7 @@ The default page is `http://localhost:7890`. Docker publishes it only to
 `127.0.0.1` and prints the host URL. Use `--port N` to choose another port or
 `--no-browser` to print the URL without opening it locally.
 
-### Terminal interface
+#### Terminal interface
 
 | Docker | Local `uv` |
 | --- | --- |
@@ -353,12 +325,18 @@ you are ready:
 | `/help` | Show interface commands |
 | `/quit` | Close the terminal interface |
 
-</details>
+See the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md) for the manager,
+human requests, scoring frontier, and recovery model.
 
-<details>
-<summary><b>Configuration and integrations</b></summary>
+## Configuration
 
-### Environment variables
+### Provider authentication
+
+Claude Code, Codex, and Gemini use their own OAuth login. Docker setup persists
+those credentials on the host and mounts them into containers. Local `uv` uses
+the provider login already available on the host.
+
+### Optional integrations
 
 The `.env` file contains optional integrations. None of these service keys is
 required for provider OAuth or a basic run.
@@ -375,6 +353,17 @@ required for provider OAuth or a basic run.
 | `WANDB_API_KEY` | Weights & Biases tracking |
 
 Docker users can run `./neurico config`; either route can edit `.env` directly.
+See the [GitHub integration guide](docs/GITHUB_INTEGRATION.md) for repository
+creation and publishing.
+
+<details>
+<summary>Paper-finder behavior</summary>
+
+When `S2_API_KEY` and `OPENAI_API_KEY` are configured, paper-finder provides
+ranked Semantic Scholar results. `COHERE_API_KEY` adds optional reranking.
+Without those keys, agents use their normal literature-search tools.
+
+</details>
 
 ### Workspace location
 
@@ -390,29 +379,7 @@ workspace:
 
 Docker mounts that directory at `/workspaces`; local `uv` uses it directly.
 
-### Paper finder
-
-When `S2_API_KEY` and `OPENAI_API_KEY` are configured, paper-finder provides
-ranked Semantic Scholar results. `COHERE_API_KEY` adds optional reranking.
-Without those keys, agents can use their normal literature-search tools.
-
-</details>
-
-<details>
-<summary><b>Outputs and architecture</b></summary>
-
-```mermaid
-flowchart LR
-    A["Idea (YAML, text, or IdeaHub)"] --> B["Submit and validate"]
-    B --> C{"Choose a mode"}
-    C --> D["Standard"]
-    C --> E["AutoResearch"]
-    C --> F["HITL AutoResearch"]
-    D --> G["Research workspace"]
-    E --> G
-    F --> G
-    G --> H["Code, results, logs, scores, and paper"]
-```
+## Outputs
 
 A completed workspace can contain:
 
@@ -431,14 +398,25 @@ workspaces/<research-workspace>/
 Idea records move through `ideas/submitted/`, `ideas/in_progress/`, and
 `ideas/completed/`. Exact artifacts depend on the research mode and options.
 
+<details>
+<summary>System architecture</summary>
+
+```mermaid
+flowchart LR
+    A["Idea (YAML, text, or IdeaHub)"] --> B["Submit and validate"]
+    B --> C{"Choose a mode"}
+    C --> D["Standard"]
+    C --> E["AutoResearch"]
+    C --> F["HITL AutoResearch"]
+    D --> G["Research workspace"]
+    E --> G
+    F --> G
+    G --> H["Code, results, logs, scores, and paper"]
+```
+
 </details>
 
-<details>
-<summary><b>Research-first workflow and supported domains</b></summary>
-
-A minimal idea leaves dataset selection, baselines, metrics, and experimental
-design to the research agents. A fuller idea can lock down any of those choices
-when reproducibility or a particular comparison requires it.
+## Supported domains
 
 | Domain | Examples |
 | --- | --- |
@@ -458,22 +436,21 @@ when reproducibility or a particular comparison requires it.
 
 Domain definitions live in [`config/domains.yaml`](config/domains.yaml).
 
-</details>
-
-<details>
-<summary><b>ClawHub distribution</b></summary>
-
-The packaged [ClawHub skill](clawskill/SKILL.md) is a discovery and onboarding
-layer, not a third runtime. After obtaining NeuriCo through ClawHub, use either
-the Docker or local `uv` commands above.
-
-</details>
-
 ## Documentation
 
+| Guide | What it covers |
+| --- | --- |
+| [Workflow](docs/WORKFLOW.md) | Complete Docker and local `uv` workflow |
+| [Idea quickstart](docs/IDEA_QUICKSTART.md) | Write and submit a first idea |
+| [Idea guide](docs/IDEA_GUIDE.md) | Full idea schema, fields, and examples |
+| [AutoResearch](docs/AUTORESEARCH.md) | Fresh runs, continuation, recovery, and bootstrap |
+| [HITL AutoResearch](docs/HITL_AUTORESEARCH.md) | Manager workflow, interfaces, frontier, and recovery |
+| [Local files](docs/LOCAL_IDEA_SUBMISSION.md) | Markdown ideas, local datasets, functions, and evaluators |
+| [IdeaHub](docs/IDEAHUB_INTEGRATION.md) | Import ideas from IdeaHub |
+| [GitHub integration](docs/GITHUB_INTEGRATION.md) | Optional repository creation and publishing |
+
 The [documentation index](docs/README.md) separates current user guides from
-developer, internal, and legacy material. Developer documents are not required
-for setup or normal use.
+developer, internal, and legacy material.
 
 ## Contributing
 
