@@ -5,7 +5,7 @@ Launches a CLI agent that reviews the rule_maker's scoring/ outputs against
 the user's declared evaluation contract (idea.evaluation and mandated
 functions in idea.local_resources) BEFORE the scoring contract is sealed.
 
-The verifier answers three questions:
+The verifier answers four questions:
 
 1. Routing: does scoring/eval.py actually compute the mandated measurements
    by calling each required_for_evaluation function, rather than
@@ -14,12 +14,16 @@ The verifier answers three questions:
    under its exact name with a faithful target (source: user)?
 3. Format: does the artifact protocol match the user's declared
    results_format, when one was given?
+4. Guardrails: does the harness run each continuation check-invariant's
+   command verbatim and score its exit status faithfully, when the idea
+   declares continuation invariants of kind check?
 
 It writes a verdict to scoring/verification.json. On failure the pipeline
 re-runs the rule_maker once with the violations appended to its prompt.
 
 This agent only runs when the idea actually declares a contract; ideas
-without evaluation.metrics or mandated functions skip it entirely.
+without evaluation.metrics, mandated functions, or check-invariants skip it
+entirely.
 """
 
 from pathlib import Path
@@ -50,6 +54,7 @@ VERDICT_CHECKS = {
     'routing': lambda contract: bool(contract['mandated_functions']),
     'transcription': lambda contract: bool(contract['evaluation'].get('metrics')),
     'format': lambda contract: bool(contract['evaluation'].get('results_format')),
+    'guardrails': lambda contract: bool(contract['check_invariants']),
 }
 VERDICT_CHECK_VALUES = ('pass', 'fail', 'not_applicable')
 
@@ -66,9 +71,11 @@ def has_user_eval_contract(idea: Dict[str, Any]) -> bool:
 def extract_eval_contract(idea: Dict[str, Any]) -> Dict[str, Any]:
     """
     Pull the contract-relevant slices of the idea for the verifier's prompt
-    and for verdict interpretation: the structured evaluation spec plus any
-    mandated evaluation functions. Malformed (non-mapping) slices normalize
-    to empty so the VERDICT_CHECKS predicates never trip on bad input.
+    and for verdict interpretation: the structured evaluation spec, any
+    mandated evaluation functions, and continuation check-invariants (which
+    must appear in targets.json as guardrail properties). Malformed
+    (non-mapping) slices normalize to empty so the VERDICT_CHECKS predicates
+    never trip on bad input.
     """
     idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
     if not isinstance(idea_spec, dict):
@@ -83,9 +90,17 @@ def extract_eval_contract(idea: Dict[str, Any]) -> Dict[str, Any]:
         func for func in (resources.get('functions') or [])
         if isinstance(func, dict) and func.get('required_for_evaluation')
     ]
+    continuation = idea_spec.get('continuation')
+    if not isinstance(continuation, dict):
+        continuation = {}
+    check_invariants = [
+        invariant for invariant in (continuation.get('invariants') or [])
+        if isinstance(invariant, dict) and invariant.get('kind') == 'check'
+    ]
     return {
         'evaluation': evaluation,
         'mandated_functions': mandated,
+        'check_invariants': check_invariants,
     }
 
 

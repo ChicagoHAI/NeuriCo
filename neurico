@@ -8,6 +8,7 @@
 # Usage:
 #   ./neurico fetch <url>              # Fetch from IdeaHub
 #   ./neurico submit-local <idea.md>   # Submit a local idea file
+#   ./neurico continue-research <repo> <intention.md>  # Continue from an existing repo
 #   ./neurico submit <idea.yaml>       # Submit an idea
 #   ./neurico run <id> [options]       # Run research
 #   ./neurico shell                    # Interactive shell

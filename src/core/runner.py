@@ -13,10 +13,12 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from functools import wraps
 import inspect
+import shutil
 import subprocess
 import shlex
 import sys
 import os
+import time
 import yaml
 
 # Force UTF-8 stdout/stderr on Windows where the default is cp1252.
@@ -93,6 +95,36 @@ def _with_hitl_workspace_run_ownership(method):
             return method(self, *args, **kwargs)
 
     return owned_run
+
+
+def _move_stale_workspace(work_dir: Path) -> Optional[Path]:
+    """
+    --force-fresh means exactly that: move the previous workspace aside so
+    adoption re-copies the source and the baseline is rebuilt. Without this,
+    adopt_repository resumes on its adoption record and baseline
+    construction returns the existing current-best checkpoint, silently
+    continuing the old run.
+
+    Returns:
+        The timestamped stale path, or None when there was nothing to move.
+    """
+    from core.scoring_seal import sealed_dir_for
+
+    suffix = time.strftime(".stale-%Y%m%d-%H%M%S")
+    stale: Optional[Path] = None
+    if work_dir.exists():
+        stale = work_dir.with_name(work_dir.name + suffix)
+        shutil.move(str(work_dir), str(stale))
+    # The scoring seal directory (.scoring_sealed) is a SIBLING of the
+    # workspace, so moving the workspace leaves any sealed-away held-out data
+    # behind, which staging would treat as already-staged. Move it aside on the
+    # same suffix so --force-fresh re-stages the held-out data fresh.
+    sealed = sealed_dir_for(work_dir)
+    if sealed.exists():
+        shutil.move(str(sealed), str(sealed.with_name(sealed.name + suffix)))
+        print(f"🧹 --force-fresh: sealed scoring dir moved aside "
+              f"({sealed.name} -> {sealed.name + suffix})")
+    return stale
 
 
 class ResearchRunner:
@@ -190,7 +222,9 @@ class ResearchRunner:
         paper_timeout: int = 3600,
         no_hash: bool = False,
         private: bool = False,
+        public: bool = False,
         force_fresh: bool = False,
+        prepare_only: bool = False,
         scoring_enabled: bool = False,
         rule_maker_timeout: int = 1800,
         scorer_timeout: int = 600,
@@ -321,6 +355,36 @@ class ResearchRunner:
 
         # Update status
         self.idea_manager.update_status(idea_id, "in_progress")
+
+        # Continue-research mode: the idea carries a continuation contract.
+        # Workspace acquisition (repo adoption), baseline scoring (bootstrap
+        # path), and iteration all differ from the forward pipeline, so
+        # branch off before workspace setup.
+        if isinstance(idea_spec.get("continuation"), dict) and \
+                idea_spec["continuation"].get("source_repo"):
+            return self._run_continue_research(
+                idea=idea,
+                idea_id=idea_id,
+                title=title,
+                provider=provider,
+                full_permissions=full_permissions,
+                rule_maker_timeout=rule_maker_timeout,
+                scorer_timeout=scorer_timeout,
+                manifest_trimmer_timeout=manifest_trimmer_timeout,
+                autoresearch_iterations=autoresearch_iterations,
+                autoresearch_history_dir=autoresearch_history_dir,
+                proposer_timeout=proposer_timeout,
+                comment_timeout=timeout,
+                write_paper=write_paper,
+                paper_style=paper_style,
+                paper_timeout=paper_timeout,
+                compute_backend=compute_backend,
+                private=private,
+                public=public,
+                no_hash=no_hash,
+                force_fresh=force_fresh,
+                prepare_only=prepare_only,
+            )
 
         # Setup working directory (GitHub repo or local runs/)
         github_url = None
@@ -466,6 +530,16 @@ class ResearchRunner:
         # workspace and rewrite their paths workspace-relative, so no agent
         # ever depends on host paths. Hard error if a declared path is gone.
         stage_local_resources(work_dir, idea)
+
+        if prepare_only:
+            # Two-phase dispatch (sealed resources): this container had the
+            # sealed source mounts; the research container that follows will
+            # not. Exit before any agent runs.
+            print()
+            print("📦 Workspace prepared (setup + staging complete); "
+                  "exiting before agents (--prepare-workspace).")
+            return {"work_dir": work_dir, "github_url": github_url,
+                    "success": True, "prepared": True}
 
         recovered_hitl_attempt = None
         if hitl and continue_autoresearch:
@@ -956,6 +1030,7 @@ https://github.com/ChicagoHAI/neurico
         timeout: int = 1800,
         full_permissions: bool = True,
         compute_backend: str = "local",
+        prepare_only: bool = False,
     ) -> Dict[str, Any]:
         """
         Run comment mode: make targeted improvements based on user comments.
@@ -1024,6 +1099,12 @@ https://github.com/ChicagoHAI/neurico
         print()
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
         stage_local_resources(work_dir, idea)
+
+        if prepare_only:
+            print()
+            print("📦 Workspace prepared (staging complete); "
+                  "exiting before agents (--prepare-workspace).")
+            return {"work_dir": str(work_dir), "success": True, "prepared": True}
 
         # Get GitHub URL if available
         github_url = None
@@ -1108,6 +1189,238 @@ https://github.com/ChicagoHAI/neurico
         else:
             print(f"\n⚠️  Paper generation failed (research still succeeded)")
         return paper_result
+
+    def _run_continue_research(
+        self,
+        idea: Dict[str, Any],
+        idea_id: str,
+        title: str,
+        provider: str,
+        full_permissions: bool,
+        rule_maker_timeout: int,
+        scorer_timeout: int,
+        manifest_trimmer_timeout: int,
+        autoresearch_iterations: int,
+        autoresearch_history_dir: Optional[Path],
+        proposer_timeout: int,
+        comment_timeout: int,
+        write_paper: bool,
+        paper_style: str,
+        paper_timeout: int,
+        compute_backend: str,
+        private: bool,
+        public: bool,
+        no_hash: bool,
+        force_fresh: bool,
+        prepare_only: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Continue-research mode: adopt the continuation source repo, stage
+        declared local resources, score the current state as an AutoResearch
+        baseline (bootstrap path), then iterate toward the declared goal.
+
+        Resume: a workspace that already carries an AutoResearch checkpoint
+        skips adoption and baseline construction and continues from the
+        current best.
+        """
+        from core.autoresearch import (
+            construct_bootstrap_initial_node,
+            continue_from_current_best,
+        )
+        from core.repo_adoption import adopt_repository
+
+        idea_spec = idea.get("idea", {})
+        continuation = idea_spec.get("continuation", {})
+
+        # A local source repo is unpublished work by default: never let the
+        # NeuriCo backup repo default to public. --public is the explicit
+        # opt-in; remote (URL) sources keep the ordinary default.
+        from core.repo_adoption import is_remote_repo
+        source_repo = str(continuation.get("source_repo") or "")
+        if (self.use_github and source_repo and not is_remote_repo(source_repo)
+                and not private and not public):
+            private = True
+            print()
+            print("🔒 Local source repository: the GitHub backup will be "
+                  "PRIVATE (pass --public to override, --no-github to skip).")
+
+        print()
+        print("🔀 CONTINUE-RESEARCH MODE")
+        print(f"   Source repo: {continuation.get('source_repo')}")
+        print(f"   Goal: {continuation.get('goal')}")
+        print(f"   Iterations: {autoresearch_iterations}")
+        print()
+
+        work_dir = self.runs_dir / idea_id
+        github_url = None
+        success = False
+        result_payload: Dict[str, Any] = {}
+
+        try:
+            if force_fresh:
+                stale = _move_stale_workspace(work_dir)
+                if stale is not None:
+                    print(f"🧹 --force-fresh: previous workspace moved to {stale}")
+
+            state_file = work_dir / ".neurico" / "autoresearch_state.json"
+            resuming = state_file.exists() and not force_fresh
+
+            from core.local_resources import (
+                read_scoring_materials_fingerprint,
+                scoring_materials_fingerprint,
+                scoring_protocol_present,
+            )
+
+            if not resuming:
+                adoption = adopt_repository(
+                    idea,
+                    idea_id,
+                    work_dir,
+                    github_manager=self.github_manager if self.use_github else None,
+                    provider=provider,
+                    private=private,
+                    no_hash=no_hash,
+                )
+                github_url = adoption.get("github_url")
+
+                # Persist workspace path in idea metadata for future runs
+                idea.setdefault("idea", {}).setdefault("metadata", {})[
+                    "local_workspace"
+                ] = str(work_dir)
+                idea_path = self.idea_manager.get_idea_path(idea_id)
+                with open(idea_path, "w", encoding="utf-8") as f:
+                    yaml.dump(
+                        without_runtime_compute_backend(idea),
+                        f,
+                        default_flow_style=False,
+                        sort_keys=False,
+                    )
+
+                # Stage declared local resources before the baseline
+                # checkpoint so the anchored state includes them
+                stage_local_resources(work_dir, idea)
+
+                if prepare_only:
+                    print()
+                    print("📦 Workspace prepared (adoption + staging complete); "
+                          "exiting before agents (--prepare-workspace).")
+                    return {"work_dir": work_dir, "github_url": github_url,
+                            "success": True, "prepared": True}
+
+                need_bootstrap = True
+                force_rebaseline = False
+            else:
+                print("↩️  Existing AutoResearch checkpoint found; skipping "
+                      "adoption.")
+                # Re-stage: idempotent for already-staged resources, and it
+                # picks up any newly declared evaluation material so the
+                # protocol regeneration below sees it.
+                stage_local_resources(work_dir, idea)
+                # Re-run the bootstrap rule maker when the workspace has no
+                # scoring protocol (raw/wiped) OR the declared evaluation
+                # materials changed since the protocol was built. Otherwise
+                # continue from the current best on the existing protocol.
+                protocol_missing = not scoring_protocol_present(work_dir)
+                materials_changed = (
+                    read_scoring_materials_fingerprint(work_dir)
+                    != scoring_materials_fingerprint(idea))
+                need_bootstrap = protocol_missing or materials_changed
+                force_rebaseline = need_bootstrap
+                if protocol_missing:
+                    print("   No scoring protocol present; running the "
+                          "bootstrap rule maker.")
+                elif materials_changed:
+                    print("   New evaluation materials detected; regenerating "
+                          "the scoring protocol and re-baselining.")
+                else:
+                    print("   Scoring protocol is current; continuing from "
+                          "the current best.")
+
+            if need_bootstrap:
+                baseline = construct_bootstrap_initial_node(
+                    idea=idea,
+                    idea_id=idea_id,
+                    work_dir=work_dir,
+                    templates_dir=self.project_root / "templates",
+                    provider=provider,
+                    full_permissions=full_permissions,
+                    rule_maker_timeout=rule_maker_timeout,
+                    scorer_timeout=scorer_timeout,
+                    manifest_trimmer_timeout=manifest_trimmer_timeout,
+                    autoresearch_history_dir=autoresearch_history_dir,
+                    prepare_workspace=lambda bootstrap_work_dir: self._copy_workspace_resources(
+                        bootstrap_work_dir,
+                        compute_backend=compute_backend,
+                    ),
+                    force_rebaseline=force_rebaseline,
+                )
+                result_payload["baseline"] = baseline
+                if not baseline.get("success"):
+                    print()
+                    print("⚠️  Continue-research baseline construction failed -- aborting.")
+                    return {
+                        "work_dir": work_dir,
+                        "github_url": github_url,
+                        "success": False,
+                        **result_payload,
+                    }
+
+            if prepare_only:
+                print()
+                print("📦 Workspace already prepared; exiting before agents "
+                      "(--prepare-workspace).")
+                return {"work_dir": work_dir, "github_url": github_url,
+                        "success": True, "prepared": True}
+
+            if autoresearch_iterations > 0:
+                from core.autoresearch import make_isolated_continuation_scorer
+
+                iteration_result = continue_from_current_best(
+                    idea=idea,
+                    idea_id=idea_id,
+                    work_dir=work_dir,
+                    templates_dir=self.project_root / "templates",
+                    provider=provider,
+                    full_permissions=full_permissions,
+                    scorer_timeout=scorer_timeout,
+                    iterations=autoresearch_iterations,
+                    autoresearch_history_dir=autoresearch_history_dir,
+                    proposer_timeout=proposer_timeout,
+                    comment_timeout=comment_timeout,
+                    # Continue-research scores frozen candidates in isolation:
+                    # check commands cannot touch the live workspace, and
+                    # sealed data is materialized only into the scored copy
+                    scorer_override=make_isolated_continuation_scorer(
+                        idea=idea,
+                        scorer_timeout=scorer_timeout,
+                    ),
+                )
+                result_payload["autoresearch"] = iteration_result.get("autoresearch")
+                success = iteration_result.get("success", False)
+            else:
+                success = True
+
+            if write_paper and success:
+                self._run_paper_writer_stage(
+                    idea=idea,
+                    work_dir=work_dir,
+                    provider=provider,
+                    paper_style=paper_style,
+                    paper_timeout=paper_timeout,
+                    full_permissions=full_permissions,
+                )
+        except Exception as e:
+            print(f"\n❌ Continue-research error: {e}")
+            success = False
+        finally:
+            self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+
+        return {
+            "work_dir": work_dir,
+            "github_url": github_url,
+            "success": success,
+            **result_payload,
+        }
 
     def _copy_workspace_resources(self, work_dir: Path, compute_backend: str = "local"):
         """
@@ -1344,6 +1657,11 @@ def main():
         "--private", action="store_true", help="Create private GitHub repository (default: public)"
     )
     parser.add_argument(
+        "--public", action="store_true",
+        help="Continue-research only: allow a PUBLIC GitHub backup for a "
+             "local source repository (which otherwise defaults to private)"
+    )
+    parser.add_argument(
         "--full-permissions",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1504,6 +1822,14 @@ def main():
         action="store_true",
         help="Start HITL web mode without opening the browser automatically.",
     )
+    parser.add_argument(
+        "--prepare-workspace",
+        action="store_true",
+        help="Two-phase dispatch (sealed resources): perform workspace "
+             "setup/adoption and resource staging, then exit before any "
+             "agent runs. docker/run.sh uses this so sealed host sources "
+             "are mounted only in the preparation container.",
+    )
 
     args = parser.parse_args()
     autoresearch_modes = [
@@ -1530,6 +1856,7 @@ def main():
                 timeout=args.timeout,
                 full_permissions=args.full_permissions,
                 compute_backend=args.compute_backend,
+                prepare_only=args.prepare_workspace,
             )
 
             print()
@@ -1567,7 +1894,9 @@ def main():
             paper_timeout=args.paper_timeout,
             no_hash=args.no_hash,
             private=args.private,
+            public=args.public,
             force_fresh=args.force_fresh,
+            prepare_only=args.prepare_workspace,
             scoring_enabled=scoring_enabled,
             rule_maker_timeout=args.rule_maker_timeout,
             scorer_timeout=args.scorer_timeout,

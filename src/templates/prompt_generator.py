@@ -898,6 +898,72 @@ substitutes.
 
 '''
 
+    def _generate_invariants_banner(self, idea_spec: Dict[str, Any]) -> str:
+        """
+        Build the binding invariants banner for continue-research prompts.
+
+        Reads idea.continuation.invariants and renders each with its
+        enforcement consequence, so agents know violations are rejected
+        mechanically rather than reviewed. Empty string for ideas without
+        invariants, keeping their prompts byte-identical.
+
+        Args:
+            idea_spec: Inner idea dictionary (idea['idea'])
+
+        Returns:
+            Banner string, or empty string when no invariants declared
+        """
+        continuation = idea_spec.get('continuation')
+        if not isinstance(continuation, dict):
+            return ""
+        invariants = [
+            invariant for invariant in (continuation.get('invariants') or [])
+            if isinstance(invariant, dict)
+        ]
+        if not invariants:
+            return ""
+
+        lines = []
+        for invariant in invariants:
+            kind = invariant.get('kind')
+            if kind == 'protected_path':
+                line = (f"- Do NOT modify {invariant.get('path')}: any content "
+                        f"change there (including files git ignores) is detected "
+                        f"by a fingerprint comparison and the whole iteration is "
+                        f"rejected.")
+            elif kind == 'check':
+                line = (f"- `{invariant.get('command')}` must keep passing: it runs "
+                        f"inside the scorer and a failure rejects the iteration.")
+            else:
+                line = (f"- {str(invariant.get('text', '')).strip()} "
+                        f"(stated constraint: no mechanical check backs this "
+                        f"one — honoring it is entirely your responsibility.)")
+            reason = str(invariant.get('reason', '')).strip()
+            if reason:
+                line += f" Reason: {reason}"
+            lines.append(line)
+
+        listing = "\n".join(lines)
+        goal = str(continuation.get('goal', '')).strip()
+        goal_line = f"\nThe optimization goal remains: {goal}\n" if goal else ""
+
+        return f'''
+════════════════════════════════════════════════════════════════════════════════
+⚠️  BINDING INVARIANTS (CONTINUE-RESEARCH)
+════════════════════════════════════════════════════════════════════════════════
+
+The submitter declared constraints that hold in EVERY iteration.
+protected_path and check constraints are enforced mechanically: work that
+violates one is rejected and rolled back. Constraints marked "stated
+constraint" are binding instructions to you but have no mechanical
+enforcement — treat them with the same weight regardless:
+
+{listing}
+{goal_line}
+────────────────────────────────────────────────────────────────────────────────
+
+'''
+
     def _extract_user_instructions(self, prompt: str) -> str:
         """
         Extract user-provided instructions from the prompt.
@@ -1124,7 +1190,8 @@ RESEARCH DOMAIN:
         return full_prompt
 
     def generate_comment_prompt(
-        self, idea: Dict[str, Any], work_dir: Path, provider: str = "claude"
+        self, idea: Dict[str, Any], work_dir: Path, provider: str = "claude",
+        scoring_enabled: bool = False,
     ) -> str:
         """
         Generate comment handler prompt from template.
@@ -1135,6 +1202,9 @@ RESEARCH DOMAIN:
         Args:
             idea: Full idea specification (YAML dict) with 'comments' field
             work_dir: Working directory (existing workspace)
+            scoring_enabled: If True (scored flows, e.g. AutoResearch
+                             continuation iterations), render scoring-only
+                             obligations such as required_for_evaluation
 
         Returns:
             Complete prompt string for comment handler agent
@@ -1152,6 +1222,12 @@ RESEARCH DOMAIN:
         # For comment mode, the comments ARE the user's instructions
         # No need for separate priority section extraction
         priority_section = ""
+
+        # Continue-research iterations carry the binding local-resource
+        # contract and the user's invariants into every comment-mode prompt
+        priority_section += self._generate_local_resource_contract(
+            idea_spec, scoring_enabled=scoring_enabled)
+        priority_section += self._generate_invariants_banner(idea_spec)
 
         # Prepare variables for template
         variables = {

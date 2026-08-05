@@ -95,6 +95,52 @@ licence to propose unbounded training jobs.
     return ""
 
 
+def _generate_continuation_section(idea_spec: Dict[str, Any]) -> str:
+    """Render the continue-research goal and invariants for the proposer.
+
+    Returns an empty string for non-continuation ideas, keeping their
+    prompts byte-identical to the pre-continuation behavior.
+    """
+    continuation = idea_spec.get("continuation")
+    if not isinstance(continuation, dict) or not str(continuation.get("goal", "")).strip():
+        return ""
+
+    lines = [
+        "",
+        "═" * 79,
+        "                     CONTINUE-RESEARCH GOAL (BINDING)",
+        "═" * 79,
+        "",
+        "This workspace continues an existing repository. Every proposal must aim",
+        "at the user's declared goal:",
+        "",
+        f"  {str(continuation['goal']).strip()}",
+    ]
+
+    invariants = [
+        invariant for invariant in (continuation.get("invariants") or [])
+        if isinstance(invariant, dict)
+    ]
+    if invariants:
+        lines.extend(["", "Invariants no proposal may break:"])
+        for invariant in invariants:
+            kind = invariant.get("kind")
+            if kind == "protected_path":
+                description = f"do not modify {invariant.get('path')}"
+            elif kind == "check":
+                description = f"`{invariant.get('command')}` must keep passing"
+            else:
+                description = str(invariant.get("text", "")).strip()
+            reason = str(invariant.get("reason", "")).strip()
+            lines.append(f"- {description}" + (f" ({reason})" if reason else ""))
+        lines.append("")
+        lines.append("A proposal that trades an invariant for goal progress will be rejected")
+        lines.append("by the comparator; do not suggest one.")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def generate_autoresearch_proposal_prompt(
     idea: Dict[str, Any],
     work_dir: Path,
@@ -165,6 +211,7 @@ def generate_autoresearch_proposal_prompt(
         public_context=context,
         whiteboard_active_tips_md=whiteboard_active_tips_md,
         compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
+        continuation_section=_generate_continuation_section(idea_spec),
     )
 
 
