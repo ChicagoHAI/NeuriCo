@@ -174,12 +174,16 @@ With Docker, configure environment variables through the interactive menu:
 
 With local `uv`, edit `.env` directly. Here's what each variable does:
 
-**GitHub** — token required; org optional (uses personal account if empty)
+**GitHub publishing** — `GITHUB_TOKEN` is required only when publishing to
+GitHub; `GITHUB_ORG` is optional (uses the personal account if empty)
 
 | Variable | Required | Description |
 | --- | --- | --- |
 | `GITHUB_TOKEN` | Yes | GitHub Classic Personal Access Token ([create here](https://github.com/settings/tokens/new), select `repo` scope) |
 | `GITHUB_ORG` | No | GitHub org name (default: personal account) |
+
+<details>
+<summary>Optional integrations and experiment API keys</summary>
 
 **Paper Finder** — `S2_API_KEY` and either `OPENROUTER_KEY` or
 `OPENAI_API_KEY` required for full paper-finder; `COHERE_API_KEY` optional
@@ -202,6 +206,8 @@ experiments
 | `OPENROUTER_KEY` | OpenRouter multi-model access |
 | `HF_TOKEN` | Hugging Face model/dataset access |
 | `WANDB_API_KEY` | Weights & Biases experiment tracking |
+
+</details>
 
 ## Idea submission
 
