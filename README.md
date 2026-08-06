@@ -51,11 +51,6 @@ run experiments, analyze results, and document the work.
 - A classic GitHub token with `repo` scope; [create one](https://github.com/settings/tokens/new) and set `GITHUB_TOKEN` in `.env`
 - Skip this when research should remain local
 
-**Optional:**
-
-- API keys for additional integrations
-- A GPU for experiments that require one
-
 ## Quick start
 
 Choose Docker or local `uv` and use the same route throughout.
@@ -69,6 +64,8 @@ git clone https://github.com/ChicagoHAI/neurico.git
 cd neurico
 ./neurico setup --quick
 ```
+
+For Codex or Gemini, run `./neurico setup` instead.
 
 #### Local `uv` (native)
 
@@ -112,69 +109,17 @@ Replace `<idea_id>` with the ID printed during submission.
 That's it—NeuriCo turns your hypothesis into experiments, evidence, and a
 reproducible research project.
 
-## Installation details
+## Configuration
 
-### Docker
+A basic run needs no additional settings. Both routes can edit `.env` directly.
 
-Use quick setup for Claude and the default workspace:
-
-```bash
-./neurico setup --quick
-```
-
-Use `./neurico setup` to choose a provider and configure optional services.
-The one-line installer is also available:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash
-```
-
-### Local `uv` (native)
-
-Install `uv` if needed, then prepare the checkout:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync
-cp .env.example .env
-```
-
-### Provider authentication
-
-| Provider | Docker | Local `uv` |
-| --- | --- | --- |
-| Claude | `./neurico login claude` | `claude` |
-| Codex | `./neurico login codex` | `codex` |
-| Gemini | `./neurico login gemini` | `gemini` |
-
-## Optional configuration
-
-Skip this section for a basic run. Docker users can run `./neurico config`;
-both routes can edit `.env` directly.
-
-### Workspace location
-
-Set `parent_dir` in `config/workspace.yaml`. The default is `workspaces/`.
-
-### GitHub publishing
-
-Set `GITHUB_TOKEN` in `.env`. See the
-[GitHub integration guide](docs/GITHUB_INTEGRATION.md).
-
-### Idea conversion
-
-Set `OPENROUTER_KEY` or `OPENAI_API_KEY` for LLM-assisted conversion and
-repository naming.
-
-### Paper-finder
-
-Set `S2_API_KEY` and either `OPENROUTER_KEY` or `OPENAI_API_KEY`. See the
-[paper-finder guide](config/paper_finder.md).
-
-### Experiment services
-
-Add only the credentials required by the experiment. Available variables are
-listed in [`.env.example`](.env.example).
+| Goal | Configure |
+| --- | --- |
+| Change the workspace location | Set `parent_dir` in `config/workspace.yaml`; default: `workspaces/` |
+| Publish research to GitHub | Set `GITHUB_TOKEN`; see the [GitHub integration guide](docs/GITHUB_INTEGRATION.md) |
+| Use LLM-assisted idea conversion | Set `OPENROUTER_KEY` or `OPENAI_API_KEY` |
+| Enable paper-finder | Set `S2_API_KEY` and a model key; see the [paper-finder guide](config/paper_finder.md) |
+| Connect experiment services | Add only the required variables from [`.env.example`](.env.example) |
 
 ## Writing and submitting ideas
 
@@ -457,6 +402,15 @@ Opening an interface does not start research. Use these manager commands:
 
 See the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md) for the manager,
 human requests, scoring frontier, and recovery model.
+
+## Other Docker commands
+
+```bash
+./neurico config   # Configure API keys and settings
+./neurico shell    # Open a shell in the container
+./neurico login    # Open the provider login shell
+./neurico help     # Show all commands
+```
 
 ## Outputs and architecture
 
