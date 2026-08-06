@@ -48,7 +48,7 @@ run experiments, analyze results, and document the work.
 
 **Recommended for GitHub publishing:**
 
-- A classic GitHub token with `repo` scope; [create one](https://github.com/settings/tokens/new) and set `GITHUB_TOKEN` in `.env`
+- A classic GitHub token with `repo` scope; [create one](https://github.com/settings/tokens/new) and follow [Configuration](#environment-variables-env)
 - Skip this when research should remain local
 
 ## Quick start
@@ -134,19 +134,11 @@ claude  # or: codex, gemini
 
 In Docker mode, credentials are automatically mounted into containers.
 
-With Docker, manage workspace and environment settings through the configuration
-menu:
-
-```bash
-./neurico config
-```
-
-Local `uv` users edit the corresponding files directly.
-
 ### Workspace configuration
 
-Workspaces default to `workspaces/`. To use another location, copy the workspace
-example and edit `parent_dir`:
+Workspaces default to `workspaces/`. With Docker, change the location through
+`./neurico config`. With local `uv`, copy the workspace example and set
+`parent_dir`:
 
 ```bash
 cp config/workspace.yaml.example config/workspace.yaml
@@ -160,7 +152,13 @@ workspace:
 
 ### Environment variables (`.env`)
 
-Here's what each variable does:
+With Docker, configure environment variables through the interactive menu:
+
+```bash
+./neurico config
+```
+
+With local `uv`, edit `.env` directly. Here's what each variable does:
 
 **GitHub** — token required; org optional (uses personal account if empty)
 
