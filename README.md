@@ -52,11 +52,15 @@ agents that turn a structured research idea into an experimental study.
 
 ## Quick start
 
-Use either Docker or local `uv` throughout the workflow.
+1. [Install NeuriCo](#installation-details) with Docker or local `uv`.
+2. [Write and submit an idea](#writing-and-submitting-ideas).
+3. [Choose a research mode](#research-modes).
 
-### 1. Install
+Use the same installation route for all three steps.
 
-#### Docker
+## Installation details
+
+### Docker
 
 ```bash
 git clone https://github.com/ChicagoHAI/neurico.git
@@ -67,7 +71,7 @@ cd neurico
 Quick setup uses Claude. Run `./neurico setup` to choose another provider or
 configure optional services.
 
-#### Local `uv`
+### Local `uv`
 
 Install one provider CLI, then run:
 
@@ -79,7 +83,15 @@ cp .env.example .env
 claude  # or: codex, gemini
 ```
 
-### 2. Submit an idea
+## Optional configuration
+
+Skip this section for a basic run.
+
+- **Docker settings:** run `./neurico config`
+- **Local `uv` settings:** edit `.env`
+- **Workspace location:** edit `config/workspace.yaml`
+
+## Writing and submitting ideas
 
 Create `ideas/my_idea.yaml`:
 
@@ -98,26 +110,64 @@ Submit it and keep the printed `<idea_id>`:
 | --- | --- |
 | `./neurico submit ideas/my_idea.yaml` | `uv run python src/cli/submit.py ideas/my_idea.yaml` |
 
-### 3. Run the idea
+Submission accepts relative or absolute paths and prints the `<idea_id>` used to
+start research. See the [Idea quickstart](docs/IDEA_QUICKSTART.md) for writing
+guidance or the [Idea reference](docs/IDEA_GUIDE.md) for every supported field.
 
-Replace `<idea_id>` with the ID from submission.
+## Research modes
 
-| Mode | Docker | Local `uv` |
-| --- | --- | --- |
-| **Standard** | `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` |
-| **AutoResearch** | `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` |
-| **HITL AutoResearch** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
+Replace `<idea_id>` with the ID printed during submission. Claude is the
+default provider; add `--provider codex` or `--provider gemini` to Standard and
+AutoResearch commands after logging in to that provider.
 
-HITL opens a manager interface; enter `/run` to start research. For a terminal
-interface, use `./neurico hitl-cli <idea_id>` or
+### Standard
+
+Run the research pipeline once.
+
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` |
+
+### AutoResearch
+
+Build a scored baseline and test iterative improvements.
+
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` |
+
+See the [AutoResearch guide](docs/AUTORESEARCH.md) to continue a run or
+bootstrap an existing Standard workspace.
+
+### HITL AutoResearch
+
+Open the manager in a web browser:
+
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
+
+Enter `/run` to start research. For a terminal interface, use
+`./neurico hitl-cli <idea_id>` or
 `uv run python src/cli/hitl_cli.py <idea_id>`.
 
-Claude is the default provider. Add `--provider codex` or `--provider gemini`
-to Standard and AutoResearch commands after logging in to that provider.
+See the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md) for manager
+commands and recovery.
 
 Workspaces are stored under `workspaces/` by default.
 
-## Guides
+## Outputs and architecture
+
+Research output is stored under `workspaces/`. See
+[Architecture and roadmap](docs/ARCHITECTURE_AND_ROADMAP.md) for the system
+design.
+
+## Customizing NeuriCo
+
+Templates control NeuriCo's default research behavior. See the
+[template reference](templates/README.md) before changing them.
+
+## Documentation
 
 Use the focused guides when you need more than the basic workflow:
 
@@ -132,7 +182,6 @@ Use the focused guides when you need more than the basic workflow:
 | Import an IdeaHub idea | [IdeaHub guide](docs/IDEAHUB_INTEGRATION.md) |
 | Publish research to GitHub | [GitHub integration guide](docs/GITHUB_INTEGRATION.md) |
 | Configure paper-finder | [Paper-finder setup](config/paper_finder.md) |
-| Customize agent behavior | [Template reference](templates/README.md) |
 
 See the [documentation index](docs/README.md) for developer and legacy
 references. The [ClawHub skill](clawskill/SKILL.md) provides discovery and
