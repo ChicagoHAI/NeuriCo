@@ -346,8 +346,8 @@ workspace.
 | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
 
 The web interface opens at `http://localhost:7890`. Opening it does not start
-research. Select **Start AutoResearch**, review the run settings, and start the
-run.
+research. Click **Start AutoResearch** in the upper-right corner, review the run
+settings, and start the run.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
@@ -375,37 +375,38 @@ existing workspace.
 For the manager and human review workflow, scoring decisions, and recovery, see
 the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md).
 
-## Other Docker commands
+## Docker utilities
 
 ```bash
-./neurico update   # Update the checkout and Docker image
+./neurico update   # Pull the latest code and Docker image
 ./neurico shell    # Open a shell in the container
 ./neurico help     # Show all commands
 ```
 
-## Outputs and architecture
+## Research outputs
 
 A research workspace can contain:
 
 ```text
 workspaces/<research-workspace>/
-├── README.md
-├── REPORT.md
-├── STATE.md
-├── src/
-├── results/
-├── logs/
-├── artifacts/
-├── scoring/
-├── notebooks/       # With --use-scribe
-└── paper_draft/
+├── README.md         # Project overview
+├── REPORT.md         # Research findings
+├── STATE.md          # Pipeline state
+├── src/              # Experiment code
+├── results/          # Metrics and generated results
+├── logs/             # Run logs and transcripts
+├── artifacts/        # Models and checkpoints
+├── scoring/          # When scoring is enabled
+├── notebooks/        # With --use-scribe
+└── paper_draft/      # When paper writing is enabled
 ```
 
-Ideas move through `ideas/submitted/`, `ideas/in_progress/`, and
-`ideas/completed/`. Workspace contents depend on the mode and run options.
+Submitted idea files move through `ideas/submitted/`, `ideas/in_progress/`, and
+`ideas/completed/` as runs progress. Workspace contents depend on the mode and
+run options.
 
 <details>
-<summary>System architecture</summary>
+<summary>Workflow overview</summary>
 
 ```mermaid
 flowchart LR
@@ -417,18 +418,18 @@ flowchart LR
     D --> G["Research workspace"]
     E --> G
     F --> G
-    G --> H["Code, results, logs, scores, and paper"]
-    G --> I["Optional GitHub publication"]
+    G --> H["Code, results, logs, and reports"]
+    G --> I["Optional scoring and paper"]
+    G --> J["Optional GitHub publication"]
 ```
 
 </details>
 
 ## Customizing NeuriCo
 
-Most users do not need to change the built-in templates. Edit them when a
-research workflow needs different agent instructions, paper structure,
-resource-finding behavior, or domain guidance. Docker mounts templates from the
-repository, so changes do not require an image rebuild.
+Files under `templates/` control NeuriCo's agent behavior. Docker reads these
+files directly from the checkout, so changes take effect without rebuilding the
+image.
 
 | Behavior | File or directory |
 | --- | --- |
@@ -439,18 +440,19 @@ repository, so changes do not require an image rebuild.
 | Domain guidance | `templates/domains/<domain>/core.txt` |
 | Provider skills | `templates/skills/<skill-name>/SKILL.md` |
 
-See [`templates/README.md`](templates/README.md) for the template system.
+For template composition, domain customization, and skill development, see
+[`templates/README.md`](templates/README.md).
 
 ## Documentation
 
 | Guide | What it covers |
 | --- | --- |
-| [Workflow](docs/WORKFLOW.md) | Complete Docker and local `uv` workflow |
-| [Idea quickstart](docs/IDEA_QUICKSTART.md) | Write and submit a first idea |
-| [Idea guide](docs/IDEA_GUIDE.md) | Full idea schema, fields, and examples |
+| [Workflow](docs/WORKFLOW.md) | Setup, idea submission, and research modes for Docker and local `uv` |
+| [Idea quickstart](docs/IDEA_QUICKSTART.md) | Prepare and submit a first idea |
+| [Idea guide](docs/IDEA_GUIDE.md) | All available idea fields and options |
 | [AutoResearch](docs/AUTORESEARCH.md) | Fresh runs, continuation, recovery, and bootstrap |
-| [HITL AutoResearch](docs/HITL_AUTORESEARCH.md) | Manager workflow, interfaces, frontier, and recovery |
-| [Local files](docs/LOCAL_IDEA_SUBMISSION.md) | Markdown ideas, local datasets, functions, and evaluators |
+| [HITL AutoResearch](docs/HITL_AUTORESEARCH.md) | Web and terminal interfaces, human review, and recovery |
+| [Local idea submission](docs/LOCAL_IDEA_SUBMISSION.md) | Convert Markdown or text and use local resources |
 | [IdeaHub](docs/IDEAHUB_INTEGRATION.md) | Import ideas from IdeaHub |
 | [GitHub integration](docs/GITHUB_INTEGRATION.md) | Optional repository creation and publishing |
 | [ClawHub skill](clawskill/SKILL.md) | ClawHub discovery and onboarding package |
