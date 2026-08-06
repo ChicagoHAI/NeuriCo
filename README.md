@@ -183,7 +183,7 @@ GitHub; `GITHUB_ORG` is optional (uses the personal account if empty)
 | `GITHUB_ORG` | No | GitHub org name (default: personal account) |
 
 <details>
-<summary>Optional integrations and experiment API keys</summary>
+<summary>Paper Finder and agent API keys</summary>
 
 **Paper Finder** — `S2_API_KEY` and either `OPENROUTER_KEY` or
 `OPENAI_API_KEY` required for full paper-finder; `COHERE_API_KEY` optional
