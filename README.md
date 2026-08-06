@@ -178,8 +178,8 @@ With local `uv`, edit `.env` directly. Here's what each variable does:
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `OPENROUTER_KEY` | Either model key | OpenRouter access for paper-finder, IdeaHub conversion, and LLM repo naming |
-| `OPENAI_API_KEY` | Either model key | Direct OpenAI access for paper-finder, IdeaHub conversion, and LLM repo naming |
+| `OPENROUTER_KEY` | Yes, unless `OPENAI_API_KEY` is set | OpenRouter access for paper-finder, IdeaHub conversion, and LLM repo naming |
+| `OPENAI_API_KEY` | Yes, unless `OPENROUTER_KEY` is set | Direct OpenAI access for paper-finder, IdeaHub conversion, and LLM repo naming |
 | `S2_API_KEY` | For paper-finder | Semantic Scholar API key ([get here](https://www.semanticscholar.org/product/api)) |
 | `COHERE_API_KEY` | No | Improves paper-finder ranking (~7% boost) |
 
@@ -206,9 +206,9 @@ NeuriCo accepts YAML, Markdown or text, and IdeaHub pages. Follow the
 | [Markdown or text](docs/LOCAL_IDEA_SUBMISSION.md) | `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
 | [IdeaHub](docs/IDEAHUB_INTEGRATION.md) | `./neurico fetch <ideahub_url>` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url>` |
 
-YAML submits immediately. By default, Markdown, text, and IdeaHub commands only
-create a YAML draft. Include `--submit` in the command to submit the draft, or
-include `--submit --run` to submit it and immediately start Standard mode.
+Without `--submit`, Markdown, text, and IdeaHub inputs are converted to a YAML
+draft for review; submit the reviewed draft later with the YAML command above.
+Add `--submit` to submit the converted YAML directly to NeuriCo.
 
 ### Publishing options
 
@@ -226,15 +226,11 @@ research repository.
 
 ### Standard
 
-Standard runs the research pipeline once: resource discovery, experiment
-design, execution, analysis, and paper writing.
+Run the complete research pipeline once.
 
 | Docker | Local `uv` (native) |
 | --- | --- |
 | `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` |
-
-The default provider is Claude, the default compute backend is local, and full
-provider permissions and paper writing are enabled.
 
 #### Common options
 
@@ -249,9 +245,14 @@ provider permissions and paper writing are enabled.
 | `--no-github` | GitHub when configured | Keep the run local |
 | `--force-fresh` | reuse workspace | Ignore an existing workspace and start again |
 
+<details>
+<summary>Remote compute setup</summary>
+
 Modal runs require `modal token new` on the host; Docker mounts
 `~/.modal.toml` into the container. The `dsi-slurm` backend requires University
 of Chicago DSI cluster access and a working `login.ds` SSH alias.
+
+</details>
 
 <details>
 <summary>Advanced Standard pipeline controls</summary>
@@ -269,8 +270,7 @@ of Chicago DSI cluster access and a working `login.ds` SSH alias.
 
 ### AutoResearch
 
-AutoResearch keeps the best scored checkpoint. Each iteration proposes one
-change, runs it, scores it, and keeps it if the score improves.
+Iteratively test changes and retain the best-scoring result.
 
 #### Start fresh
 
@@ -278,35 +278,30 @@ change, runs it, scores it, and keeps it if the score improves.
 | --- | --- |
 | `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` |
 
-This runs the scored pipeline, saves the initial checkpoint, and performs one
-improvement iteration.
-
 #### Continue an existing AutoResearch workspace
+
+Resume an AutoResearch workspace without repeating the initial research stages.
 
 | Docker | Local `uv` (native) |
 | --- | --- |
 | `./neurico run <idea_id> --continue-autoresearch` | `uv run python src/core/runner.py <idea_id> --continue-autoresearch` |
 
-Continuation resumes an existing scored workspace and skips the earlier
-research stages.
-
 #### Bootstrap a Standard workspace
+
+Convert an existing Standard workspace into an AutoResearch baseline, then
+continue with `--continue-autoresearch`.
 
 | Docker | Local `uv` (native) |
 | --- | --- |
 | `./neurico run <idea_id> --bootstrap-autoresearch-baseline` | `uv run python src/core/runner.py <idea_id> --bootstrap-autoresearch-baseline` |
 
-Bootstrap scores an existing Standard workspace and creates the AutoResearch
-continuation state. It does not run an improvement iteration. Continue with
-`--continue-autoresearch`.
+#### Common options
 
-#### Iterations
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--autoresearch-iterations N` | `1` | Set the number of improvement iterations |
 
-AutoResearch runs one improvement iteration by default. Use
-`--autoresearch-iterations N` to run more than one.
-
-Fresh, continue, and bootstrap are mutually exclusive. Standard provider,
-compute, permission, paper, and GitHub options also apply.
+The Standard options above also apply to AutoResearch.
 
 <details>
 <summary>Advanced AutoResearch and bootstrap controls</summary>
@@ -321,14 +316,12 @@ compute, permission, paper, and GitHub options also apply.
 
 </details>
 
-See the [AutoResearch guide](docs/AUTORESEARCH.md) for checkpoint, scoring, and
-recovery behavior.
+See the [AutoResearch guide](docs/AUTORESEARCH.md).
 
 ### HITL AutoResearch
 
-HITL AutoResearch adds a persistent manager conversation, human decision
-points, isolated scoring, and a retained research frontier. The web and
-terminal interfaces share the same workspace state.
+Guide AutoResearch through a web or terminal interface. Both interfaces use the
+same workspace.
 
 #### Web interface
 
@@ -336,10 +329,13 @@ terminal interfaces share the same workspace state.
 | --- | --- |
 | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
 
-The web interface opens at `http://localhost:7890`. Docker binds it to
-`127.0.0.1`. Use `--port N` to choose another port or `--no-browser` to start
-the server without opening a browser. To begin research, open **Start
-AutoResearch**, choose the run settings, and start the fresh or continuing run.
+The web interface opens at `http://localhost:7890`. Select **Start
+AutoResearch** to configure and start a run.
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--port N` | `7890` | Use a different port |
+| `--no-browser` | browser opens | Start the server without opening a browser |
 
 #### Terminal interface
 
@@ -347,8 +343,7 @@ AutoResearch**, choose the run settings, and start the fresh or continuing run.
 | --- | --- |
 | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
 
-Opening the terminal interface does not start research. Enter `/run` to
-configure and start it. The terminal commands are:
+Use `/run` to configure and start research.
 
 | Control | Purpose |
 | --- | --- |
@@ -358,8 +353,7 @@ configure and start it. The terminal commands are:
 | `/help` | Show interface commands |
 | `/quit` | Close the terminal interface |
 
-See the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md) for the manager,
-human requests, scoring frontier, and recovery model.
+See the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md).
 
 ## Other Docker commands
 
