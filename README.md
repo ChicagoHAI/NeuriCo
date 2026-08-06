@@ -109,96 +109,39 @@ Replace `<idea_id>` with the ID printed during submission.
 | **[AutoResearch](#autoresearch)** | `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` | Build a scored baseline and try one improvement |
 | **[HITL AutoResearch](#hitl-autoresearch)** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` | Open the manager; start research with `/run` |
 
-Start with Standard for a first run.
-
 That's it—NeuriCo turns your hypothesis into experiments, evidence, and a
 reproducible research project.
 
 ## Installation details
 
-A basic installation is complete after one provider login. GitHub and API keys
-are not part of the basic setup.
-
 ### Docker
 
-`./neurico setup` offers two paths:
+Use quick setup for Claude and the default workspace:
 
-- **Quick setup** pulls the image, uses `workspaces/`, and opens Claude login.
-- **Full setup** also asks about GitHub, workspace location, OpenAI and
-  Semantic Scholar keys, and which providers to log in to.
+```bash
+./neurico setup --quick
+```
 
-Optional settings in full setup can be skipped and added later with
-`./neurico config`. The image includes the Python environment, provider CLIs,
-LaTeX, and paper-finder. The repository supplies configuration, templates,
-ideas, and workspace mounts.
-
-Run `./neurico setup --quick` to select quick setup without showing the setup
-choice.
-
-<details>
-<summary>Alternative Docker installation</summary>
-
-Use the one-line installer:
+Use `./neurico setup` to choose a provider and configure optional services.
+The one-line installer is also available:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash
 ```
 
-To manage the image manually:
-
-```bash
-# Pull the prebuilt image
-docker pull ghcr.io/chicagohai/neurico:latest
-docker tag ghcr.io/chicagohai/neurico:latest chicagohai/neurico:latest
-
-# Or build from the current checkout
-./neurico build
-```
-
-The repository is required when using the prebuilt image.
-
-</details>
-
-#### GPU support
-
-NVIDIA GPU passthrough requires the
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-CPU-only execution remains available.
-
-#### Docker maintenance
-
-Useful Docker commands:
-
-```bash
-./neurico config   # Edit settings and optional integrations
-./neurico login    # Repeat provider login
-./neurico update   # Update the checkout and image
-./neurico shell    # Open a shell in the container
-./neurico help     # List available commands
-```
-
 ### Local `uv` (native)
 
-The native route runs NeuriCo and the provider CLI directly on the host. It
-does not use `./neurico setup` or `./neurico config`.
-
-Install `uv` if needed:
+Install `uv` if needed, then prepare the checkout:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+cp .env.example .env
 ```
-
-After `uv sync`, no additional native setup is required beyond provider login.
-Native users edit `.env` directly when enabling an optional service.
 
 ### Provider authentication
 
-Claude Code, Codex, and Gemini use OAuth login rather than provider API keys.
-Docker saves host credentials under `~/.claude/`, `~/.codex/`, or `~/.gemini/`
-and mounts them into containers. Native runs use those host credentials
-directly.
-
-| Provider | Docker | Local `uv` (native) |
+| Provider | Docker | Local `uv` |
 | --- | --- | --- |
 | Claude | `./neurico login claude` | `claude` |
 | Codex | `./neurico login codex` | `codex` |
@@ -206,81 +149,32 @@ directly.
 
 ## Optional configuration
 
-Skip this section for a basic run. `./neurico config` covers common Docker
-settings. Both routes can edit `.env` directly; workspace location uses
-`config/workspace.yaml`.
+Skip this section for a basic run. Docker users can run `./neurico config`;
+both routes can edit `.env` directly.
 
-### Change the workspace location
+### Workspace location
 
-Research is stored under `workspaces/` by default. To use another location,
-copy `config/workspace.yaml.example` to `config/workspace.yaml` and set
-`parent_dir`:
+Set `parent_dir` in `config/workspace.yaml`. The default is `workspaces/`.
 
-```yaml
-workspace:
-  parent_dir: "/path/to/your/workspaces"
-  auto_create: true
-```
+### GitHub publishing
 
-Docker mounts the selected directory at `/workspaces`; native runs use it
-directly.
+Set `GITHUB_TOKEN` in `.env`. See the
+[GitHub integration guide](docs/GITHUB_INTEGRATION.md).
 
-### Publish research to GitHub
+### Idea conversion
 
-Set `GITHUB_TOKEN` in `.env` to create and publish research repositories during
-submission and execution. Set `GITHUB_ORG` to use an organization; leave it
-empty to use the token owner's account. Without a token, NeuriCo remains local.
+Set `OPENROUTER_KEY` or `OPENAI_API_KEY` for LLM-assisted conversion and
+repository naming.
 
-See the [GitHub integration guide](docs/GITHUB_INTEGRATION.md) for token scope,
-organization access, and publishing behavior.
+### Paper-finder
 
-### Use LLM-assisted idea conversion
+Set `S2_API_KEY` and either `OPENROUTER_KEY` or `OPENAI_API_KEY`. See the
+[paper-finder guide](config/paper_finder.md).
 
-IdeaHub and Markdown/text conversion work without an API key by producing a
-template-based YAML draft. Set either `OPENROUTER_KEY` or `OPENAI_API_KEY` in
-`.env` to use LLM-assisted conversion and repository naming.
+### Experiment services
 
-### Enable paper-finder
-
-Paper-finder requires `S2_API_KEY` and either `OPENROUTER_KEY` or
-`OPENAI_API_KEY`. Add `COHERE_API_KEY` for additional reranking. Without these
-keys, agents use their normal literature-search tools.
-
-Docker starts paper-finder automatically. Native users must start it
-separately:
-
-<details>
-<summary>Start paper-finder for native runs</summary>
-
-```bash
-cd services/paper-finder
-make sync-dev
-cd agents/mabool/api
-make start-dev
-```
-
-The service listens on `http://localhost:8000`. See
-[`config/paper_finder.md`](config/paper_finder.md) for configuration and
-troubleshooting.
-
-</details>
-
-### Add experiment credentials
-
-Add only the keys required by the experiment:
-
-| Variable | Used for |
-| --- | --- |
-| `ANTHROPIC_API_KEY` | Claude API calls |
-| `GOOGLE_API_KEY` | Google AI API calls |
-| `OPENROUTER_KEY` or `OPENAI_API_KEY` | Model access during experiments |
-| `HF_TOKEN` | Private Hugging Face models and datasets |
-| `WANDB_API_KEY` | Weights & Biases tracking |
-| `AXLE_API_KEY` | Lean verification for the `mathematics_lean` domain |
-| `AXLE_ENV` | Optional Lean environment override; default `lean-4.29.0` |
-
-These settings connect external services. To change NeuriCo's agent
-instructions or domain behavior, see [Customizing NeuriCo](#customizing-neurico).
+Add only the credentials required by the experiment. Available variables are
+listed in [`.env.example`](.env.example).
 
 ## Writing and submitting ideas
 
