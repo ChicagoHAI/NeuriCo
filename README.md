@@ -25,33 +25,36 @@ run experiments, analyze results, and document the work.
 
 | Feature | Description |
 | --- | --- |
-| **Minimal input** | Start with a title, research domain, and testable hypothesis |
-| **Research pipeline** | Resource discovery, experiment design, execution, analysis, and paper writing |
-| **Three research modes** | Standard, iterative AutoResearch, and human-in-the-loop AutoResearch |
-| **Multiple providers** | Claude Code, Codex, and Gemini CLI |
-| **Reproducible workspaces** | Code, results, logs, artifacts, scoring state, and reports stay together |
-| **Domain support** | Built-in guidance for [AI, ML, mathematics, finance, scientific computing, and more](#choose-a-domain) |
-| **Customizable behavior** | Edit [agent instructions, domain guidance, and provider skills](#customizing-neurico) |
-| **Optional integrations** | GitHub publishing, IdeaHub import, paper-finder, Hugging Face, and W&B |
+| **Minimal Input** | Provide a title, domain, and hypothesis; agents handle the research workflow |
+| **Agent-Driven Research** | Finds literature, datasets, and baselines before running experiments |
+| **Multi-Provider Support** | Works with Claude Code, Codex, and Gemini CLI |
+| **AutoResearch** | Iteratively proposes, executes, scores, and checkpoints improvements |
+| **HITL AutoResearch** | Adds a manager and human decision points to AutoResearch |
+| **Domain-Agnostic** | Supports ML, data science, AI, systems, theory, and more |
+| **Smart Documentation** | Produces reports, code, results, and optional papers |
+| **GitHub Integration** | Optionally creates repositories and pushes results |
 
 ## Requirements
 
-Choose either Docker or local `uv` (native):
+**Minimal** (choose one):
 
-- **Docker:** [Git](https://git-scm.com/) and a running
-  [Docker](https://docs.docker.com/get-docker/) installation.
-- **Local `uv` (native):** Git, Python 3.10+, and
-  [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+- **Docker:** [Git](https://git-scm.com/) and a running [Docker](https://docs.docker.com/get-docker/) installation
+- **Local `uv`:** Git, Python 3.10+, and [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 
-Both routes require at least one provider CLI:
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code),
-[Codex](https://github.com/openai/codex), or
-[Gemini CLI](https://github.com/google-gemini/gemini-cli). Provider CLIs use
-their own OAuth login; provider API keys are not required for the basic
-workflow.
+**Provider access:**
 
-GitHub and all API keys are optional. A GPU is only needed for experiments
-that require one.
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), or [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+- Provider login uses OAuth; provider API keys are not required
+
+**Recommended for GitHub publishing:**
+
+- A classic GitHub token with `repo` scope; [create one](https://github.com/settings/tokens/new) and set `GITHUB_TOKEN` in `.env`
+- Skip this when research should remain local
+
+**Optional:**
+
+- API keys for additional integrations
+- A GPU for experiments that require one
 
 ## Quick start
 
