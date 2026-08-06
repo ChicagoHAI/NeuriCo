@@ -35,21 +35,20 @@ agents that turn a structured research idea into an experimental study.
 
 ## Requirements
 
-Choose one installation route:
+### Minimal (choose one)
 
-| Route | Requirements |
-| --- | --- |
-| **Docker** | [Git](https://git-scm.com/) and a running [Docker](https://docs.docker.com/get-docker/) installation |
-| **Local `uv`** | Git, Python 3.10+, [`uv`](https://docs.astral.sh/uv/getting-started/installation/), and a provider CLI |
+- **Docker:** [Git](https://git-scm.com/) and a running [Docker](https://docs.docker.com/get-docker/) installation
+- **Local `uv`:** Git, Python 3.10+, [`uv`](https://docs.astral.sh/uv/getting-started/installation/), and a provider CLI
 
-NeuriCo uses OAuth access to one of these providers:
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code),
-[Codex](https://github.com/openai/codex), or
-[Gemini CLI](https://github.com/google-gemini/gemini-cli).
+### Provider access
 
-For automatic repository creation, use a classic GitHub token with `repo`
-scope. [Create a token](https://github.com/settings/tokens/new) and add it to
-`.env` as `GITHUB_TOKEN`. GitHub is optional.
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), or [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+- Provider login uses OAuth; provider API keys are not required
+
+### Recommended for GitHub publishing
+
+- A classic GitHub token with `repo` scope; [create a token](https://github.com/settings/tokens/new) and set `GITHUB_TOKEN` in `.env`
+- Skip this when research should remain local
 
 ## Quick start
 
