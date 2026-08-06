@@ -67,6 +67,17 @@ cd neurico
 
 For Codex or Gemini, run `./neurico setup` instead.
 
+<details>
+<summary>Install the Docker route with one command</summary>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash
+```
+
+The installer clones NeuriCo into `./neurico` and opens the full setup wizard.
+
+</details>
+
 #### Local `uv` (native)
 
 ```bash
@@ -112,25 +123,68 @@ reproducible research project.
 
 ## Configuration
 
-A basic run needs no additional configuration.
+Docker users can manage settings through the configuration menu:
 
-- **Docker:** run `./neurico config`
-- **Local `uv`:** edit `.env`; set the workspace location in `config/workspace.yaml`
+```bash
+./neurico config
+```
 
-### Optional integrations
+Local `uv` users edit `.env` and `config/workspace.yaml` directly. Provider
+login is required; the remaining settings enable publishing and optional
+services.
 
-| Key | Enables |
+### Provider authentication
+
+Claude Code, Codex, and Gemini CLI use OAuth. Provider API keys are not required
+for ordinary NeuriCo runs.
+
+| Docker | Local `uv` (native) |
 | --- | --- |
-| `OPENROUTER_KEY` or `OPENAI_API_KEY` | LLM-assisted idea conversion, repository naming, and paper-finder |
-| `S2_API_KEY` | Semantic Scholar search through paper-finder |
+| Run `./neurico login`, then start the provider CLI in the login shell | Run `claude`, `codex`, or `gemini` |
+
+Docker stores the OAuth credentials on the host and mounts them into subsequent
+containers.
+
+### GitHub publishing
+
+| Variable | Purpose |
+| --- | --- |
+| `GITHUB_TOKEN` | Create and publish research repositories |
+| `GITHUB_ORG` | Publish to an organization instead of the authenticated user's account |
+
+Use a classic GitHub token with `repo` scope. See the
+[GitHub integration guide](docs/GITHUB_INTEGRATION.md).
+
+### Idea conversion and paper-finder
+
+| Variable | Purpose |
+| --- | --- |
+| `OPENROUTER_KEY` or `OPENAI_API_KEY` | LLM-assisted idea conversion, repository naming, paper-finder, and experiment model access |
+| `S2_API_KEY` | Semantic Scholar literature search through paper-finder |
 | `COHERE_API_KEY` | Optional paper-finder reranking |
+
+Paper-finder requires `S2_API_KEY` and either `OPENROUTER_KEY` or
+`OPENAI_API_KEY`. Without paper-finder, agents use manual literature search
+through sources such as arXiv and Semantic Scholar. See the
+[paper-finder guide](config/paper_finder.md).
+
+### Experiment services
+
+These optional credentials are passed to agents when an experiment needs the
+corresponding service.
+
+| Variable | Purpose |
+| --- | --- |
 | `ANTHROPIC_API_KEY` | Direct Anthropic API access in experiments |
 | `GOOGLE_API_KEY` | Direct Google AI API access in experiments |
 | `HF_TOKEN` | Private Hugging Face models and datasets |
 | `WANDB_API_KEY` | Weights & Biases experiment tracking |
 
-Paper-finder requires `S2_API_KEY` and either `OPENROUTER_KEY` or
-`OPENAI_API_KEY`. See the [paper-finder guide](config/paper_finder.md).
+### Workspace location
+
+Research workspaces are stored under `workspaces/` by default. Set `parent_dir`
+in `config/workspace.yaml` to use another location; the Docker configuration
+menu updates the same setting.
 
 ## Writing and submitting ideas
 
@@ -197,6 +251,9 @@ hypothesis: >
 Leave optional sections out when NeuriCo should choose the papers, datasets,
 methods, baselines, metrics, or outputs. Add them when they record a known
 resource or a requirement that the run must preserve.
+
+When no suitable dataset or baseline is available, agents can construct a
+synthetic alternative unless the idea requires a specific resource.
 
 For example, a complete idea with hard execution and evaluation rules is:
 
@@ -419,9 +476,8 @@ human requests, scoring frontier, and recovery model.
 ## Other Docker commands
 
 ```bash
-./neurico config   # Configure API keys and settings
+./neurico update   # Update the checkout and Docker image
 ./neurico shell    # Open a shell in the container
-./neurico login    # Open the provider login shell
 ./neurico help     # Show all commands
 ```
 
@@ -439,6 +495,7 @@ workspaces/<research-workspace>/
 ├── logs/
 ├── artifacts/
 ├── scoring/
+├── notebooks/       # With --use-scribe
 └── paper_draft/
 ```
 
