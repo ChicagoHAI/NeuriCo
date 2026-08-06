@@ -137,8 +137,13 @@ In Docker mode, credentials are automatically mounted into containers.
 ### Workspace configuration
 
 Workspaces default to `workspaces/`. With Docker, change the location through
-`./neurico config`. With local `uv`, copy the workspace example and set
-`parent_dir`:
+the configuration menu:
+
+```bash
+./neurico config
+```
+
+With local `uv`, copy the workspace example and set `parent_dir`:
 
 ```bash
 cp config/workspace.yaml.example config/workspace.yaml
@@ -189,153 +194,37 @@ experiments
 | `HF_TOKEN` | Hugging Face model/dataset access |
 | `WANDB_API_KEY` | Weights & Biases experiment tracking |
 
-## Writing and submitting ideas
+## Idea submission
 
-### Start with a minimal idea
+NeuriCo accepts structured YAML, Markdown or text, and IdeaHub pages. Use the
+[Idea quickstart](docs/IDEA_QUICKSTART.md) to prepare a first idea or the
+[complete Idea guide](docs/IDEA_GUIDE.md) for fields, domains, local resources,
+and evaluation rules. Reference: [idea schema](ideas/schema.yaml),
+[domain list](config/domains.yaml), and [examples](ideas/examples/).
 
-Create a YAML file under `ideas/`, for example `ideas/my_idea.yaml`:
+| Input | Docker | Local `uv` (native) |
+| --- | --- | --- |
+| YAML | `./neurico submit <idea.yaml>` | `uv run python src/cli/submit.py <idea.yaml>` |
+| Markdown or text | `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
+| [IdeaHub](https://hypogenic.ai/ideahub) | `./neurico fetch <ideahub_url>` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url>` |
 
-```yaml
-idea:
-  title: "Do LLMs distinguish causation from correlation?"
-  domain: artificial_intelligence
-  hypothesis: >
-    Explicit causal prompts improve causal-reasoning accuracy compared with
-    otherwise equivalent direct prompts.
-```
+YAML submission validates the idea and prints its `<idea_id>`. Markdown, text,
+and IdeaHub commands create a YAML draft; add `--submit` to submit it or
+`--submit --run` to start a Standard run as well. See
+[Local idea submission](docs/LOCAL_IDEA_SUBMISSION.md) for host resources and
+the [IdeaHub guide](docs/IDEAHUB_INTEGRATION.md) for IdeaHub imports.
 
-This is a complete idea. The `ideas/` directory is recommended, but submission
-also accepts relative or absolute paths elsewhere. The three required fields
-are:
+### Publishing options
 
-- `title` — a short description of the research question
-- `domain` — the NeuriCo domain that should guide the research
-- `hypothesis` — the claim the experiment should test
-
-### Choose a domain
-
-Use the closest domain key for the methods and evaluation the research will
-use:
-
-| Domain key | Use for |
-| --- | --- |
-| `artificial_intelligence` | LLM evaluation, prompting, agents, and AI benchmarks |
-| `machine_learning` | Model training, prediction, clustering, and evaluation |
-| `data_science` | Statistical analysis, forecasting, and visualization |
-| `systems` | Performance, databases, networks, compilers, and distributed systems |
-| `mathematics` | Pure or applied mathematics and human-written proofs |
-
-These are common choices, not the complete list. See
-[`config/domains.yaml`](config/domains.yaml) for all supported domain keys and
-the [Idea guide](docs/IDEA_GUIDE.md) for selection guidance.
-
-### Write a testable hypothesis
-
-The hypothesis should name what is being compared and what evidence will be
-measured. It must be possible for the result to support, contradict, or qualify
-the claim.
-
-Avoid a task description:
-
-```yaml
-hypothesis: "Study whether LLMs understand causality."
-```
-
-Write a claim that can be tested:
-
-```yaml
-hypothesis: >
-  Explicit causal prompts improve causal-reasoning accuracy compared with
-  otherwise equivalent direct prompts.
-```
-
-### Add details when they matter
-
-Leave optional sections out when NeuriCo should choose the papers, datasets,
-methods, baselines, metrics, or outputs. Add them when they record a known
-resource or a requirement that the run must preserve.
-
-When no suitable dataset or baseline is available, agents can construct a
-synthetic alternative unless the idea requires a specific resource.
-
-For example, a complete idea with hard execution and evaluation rules is:
-
-```yaml
-idea:
-  title: "Do LLMs distinguish causation from correlation?"
-  domain: artificial_intelligence
-  hypothesis: >
-    Explicit causal prompts improve causal-reasoning accuracy compared with
-    otherwise equivalent direct prompts.
-
-  constraints:
-    compute: cpu_only
-    time_limit: 3600
-
-  evaluation_criteria:
-    - "Evaluate both prompt types on the same examples."
-    - "Save per-example predictions and aggregate accuracy."
-```
-
-Use `background` for known papers, datasets, or code; `methodology` for a
-required approach; `local_resources` for files or functions on the host;
-`evaluation` or `evaluation_criteria` for fixed evaluation rules; and
-`expected_outputs` for required deliverables.
-
-The [Idea quickstart](docs/IDEA_QUICKSTART.md) provides a first-idea checklist.
-The complete [Idea guide](docs/IDEA_GUIDE.md) documents every field. The
-authoritative schema and additional examples are under
-[`ideas/schema.yaml`](ideas/schema.yaml) and [`ideas/examples/`](ideas/examples/).
-
-### Submit YAML
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico submit <idea.yaml>` | `uv run python src/cli/submit.py <idea.yaml>` |
-
-Common submission options:
+If `GITHUB_TOKEN` is configured, submission also creates and prepares a
+research repository.
 
 | Flag | Purpose |
 | --- | --- |
-| `--no-validate` | Skip schema validation; intended for development and diagnosis |
 | `--no-github` | Disable repository creation for this submission |
 | `--github-org ORG` | Create the repository in a GitHub organization |
 | `--private` | Create a private repository |
 | `--no-hash` | Omit the random hash from the generated repository name |
-
-If `GITHUB_TOKEN` is set, submission also creates and prepares a research
-repository. Otherwise, the idea remains local.
-
-### Submit Markdown or text
-
-Use `submit-local` for Markdown or text ideas, or when the idea refers to local
-datasets and functions:
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
-
-The command creates a YAML draft under `ideas/`. Add `--submit` to submit it,
-or `--submit --run` to submit it and start a Standard run. Declared local
-resources are mounted read-only during research. Without `OPENROUTER_KEY` or
-`OPENAI_API_KEY`, NeuriCo uses template-based conversion; declare local paths
-in `local_resources` by hand. See
-[Local idea submission](docs/LOCAL_IDEA_SUBMISSION.md).
-
-### Import from IdeaHub
-
-Fetch and convert an [IdeaHub](https://hypogenic.ai/ideahub) page:
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico fetch <ideahub_url>` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url>` |
-
-The command creates a YAML draft. Add `--submit` to submit it, or
-`--submit --run` to submit it and start a Standard run. See the
-[IdeaHub guide](docs/IDEAHUB_INTEGRATION.md).
-
-IdeaHub works without an API key using template-based conversion. Set
-`OPENROUTER_KEY` or `OPENAI_API_KEY` in `.env` for LLM-assisted conversion.
 
 ## Research modes
 
