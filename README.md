@@ -134,15 +134,31 @@ claude  # or: codex, gemini
 
 In Docker mode, credentials are automatically mounted into containers.
 
-### Environment variables (`.env`)
-
-Docker users can configure environment variables through the interactive menu:
+With Docker, manage workspace and environment settings through the configuration
+menu:
 
 ```bash
 ./neurico config
 ```
 
-Local `uv` users edit `.env` directly.
+Local `uv` users edit the corresponding files directly.
+
+### Workspace configuration
+
+Workspaces default to `workspaces/`. To use another location, copy the workspace
+example and edit `parent_dir`:
+
+```bash
+cp config/workspace.yaml.example config/workspace.yaml
+```
+
+```yaml
+workspace:
+  parent_dir: "/path/to/your/workspaces"
+  auto_create: true
+```
+
+### Environment variables (`.env`)
 
 Here's what each variable does:
 
@@ -174,22 +190,6 @@ experiments
 | `OPENROUTER_KEY` | OpenRouter multi-model access |
 | `HF_TOKEN` | Hugging Face model/dataset access |
 | `WANDB_API_KEY` | Weights & Biases experiment tracking |
-
-### Workspace configuration
-
-Workspaces default to `workspaces/`. To change the location, use
-`./neurico config` with Docker; with local `uv`, copy the workspace example and
-edit `parent_dir`:
-
-```bash
-cp config/workspace.yaml.example config/workspace.yaml
-```
-
-```yaml
-workspace:
-  parent_dir: "/path/to/your/workspaces"
-  auto_create: true
-```
 
 ## Writing and submitting ideas
 
