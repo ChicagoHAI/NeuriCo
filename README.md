@@ -226,7 +226,9 @@ research repository.
 
 ### Standard
 
-Run the complete research pipeline once.
+Standard performs one end-to-end research run: it finds resources, designs and
+executes experiments, analyzes the results, and writes a paper draft. Choose it
+when you want one complete pass without iterative improvement.
 
 | Docker | Local `uv` (native) |
 | --- | --- |
@@ -246,11 +248,12 @@ Run the complete research pipeline once.
 | `--force-fresh` | reuse workspace | Ignore an existing workspace and start again |
 
 <details>
-<summary>Remote compute setup</summary>
+<summary>Remote compute backends</summary>
 
-Modal runs require `modal token new` on the host; Docker mounts
-`~/.modal.toml` into the container. The `dsi-slurm` backend requires University
-of Chicago DSI cluster access and a working `login.ds` SSH alias.
+| Backend | Setup |
+| --- | --- |
+| `modal` | Run `modal token new` on the host. Docker automatically mounts `~/.modal.toml`. |
+| `dsi-slurm` | Requires University of Chicago DSI cluster access and an SSH host configured as `login.ds`. |
 
 </details>
 
@@ -270,9 +273,13 @@ of Chicago DSI cluster access and a working `login.ds` SSH alias.
 
 ### AutoResearch
 
-Iteratively test changes and retain the best-scoring result.
+AutoResearch starts from a scored baseline and improves it iteratively. Each
+iteration proposes one change, runs the experiment, and scores the result. The
+change is kept only when it improves the current best score.
 
 #### Start fresh
+
+Create a scored baseline and run one improvement iteration by default.
 
 | Docker | Local `uv` (native) |
 | --- | --- |
@@ -280,7 +287,8 @@ Iteratively test changes and retain the best-scoring result.
 
 #### Continue an existing AutoResearch workspace
 
-Resume an AutoResearch workspace without repeating the initial research stages.
+Resume an earlier AutoResearch run without repeating resource discovery or
+baseline creation.
 
 | Docker | Local `uv` (native) |
 | --- | --- |
@@ -288,12 +296,15 @@ Resume an AutoResearch workspace without repeating the initial research stages.
 
 #### Bootstrap a Standard workspace
 
-Convert an existing Standard workspace into an AutoResearch baseline, then
-continue with `--continue-autoresearch`.
+Use this when a Standard run already has useful results but no AutoResearch
+baseline. NeuriCo scores the existing workspace and prepares it for
+continuation; it does not run an improvement iteration.
 
 | Docker | Local `uv` (native) |
 | --- | --- |
 | `./neurico run <idea_id> --bootstrap-autoresearch-baseline` | `uv run python src/core/runner.py <idea_id> --bootstrap-autoresearch-baseline` |
+
+Continue from the new baseline with `--continue-autoresearch`.
 
 #### Common options
 
@@ -301,7 +312,8 @@ continue with `--continue-autoresearch`.
 | --- | --- | --- |
 | `--autoresearch-iterations N` | `1` | Set the number of improvement iterations |
 
-The Standard options above also apply to AutoResearch.
+The Standard provider, compute, permission, paper, and GitHub options also apply
+to AutoResearch.
 
 <details>
 <summary>Advanced AutoResearch and bootstrap controls</summary>
@@ -316,12 +328,16 @@ The Standard options above also apply to AutoResearch.
 
 </details>
 
-See the [AutoResearch guide](docs/AUTORESEARCH.md).
+For continuation requirements and details about scoring, checkpoints, and
+recovery, see the [AutoResearch guide](docs/AUTORESEARCH.md).
 
 ### HITL AutoResearch
 
-Guide AutoResearch through a web or terminal interface. Both interfaces use the
-same workspace.
+Human-in-the-loop (HITL) AutoResearch adds a manager that coordinates the
+research agents and asks for your input at key decisions. You can review plans
+and proposals, give feedback, and guide which research directions continue.
+The web and terminal interfaces connect to the same manager conversation and
+workspace.
 
 #### Web interface
 
@@ -329,8 +345,9 @@ same workspace.
 | --- | --- |
 | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
 
-The web interface opens at `http://localhost:7890`. Select **Start
-AutoResearch** to configure and start a run.
+The web interface opens at `http://localhost:7890`. Opening it does not start
+research. Select **Start AutoResearch**, review the run settings, and start the
+run.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
@@ -343,7 +360,9 @@ AutoResearch** to configure and start a run.
 | --- | --- |
 | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
 
-Use `/run` to configure and start research.
+Opening the terminal interface does not start research. Enter `/run` and answer
+the prompts. NeuriCo detects whether to start a fresh HITL run or continue the
+existing workspace.
 
 | Control | Purpose |
 | --- | --- |
@@ -353,7 +372,8 @@ Use `/run` to configure and start research.
 | `/help` | Show interface commands |
 | `/quit` | Close the terminal interface |
 
-See the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md).
+For the manager and human review workflow, scoring decisions, and recovery, see
+the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md).
 
 ## Other Docker commands
 
