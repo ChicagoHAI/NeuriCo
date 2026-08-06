@@ -159,7 +159,8 @@ Here's what each variable does:
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `OPENROUTER_KEY` or `OPENAI_API_KEY` | For paper-finder | Used for paper-finder, IdeaHub conversion, and LLM repo naming |
+| `OPENROUTER_KEY` | Either model key | OpenRouter access for paper-finder, IdeaHub conversion, and LLM repo naming |
+| `OPENAI_API_KEY` | Either model key | Direct OpenAI access for paper-finder, IdeaHub conversion, and LLM repo naming |
 | `S2_API_KEY` | For paper-finder | Semantic Scholar API key ([get here](https://www.semanticscholar.org/product/api)) |
 | `COHERE_API_KEY` | No | Improves paper-finder ranking (~7% boost) |
 
@@ -174,19 +175,11 @@ experiments
 | `HF_TOKEN` | Hugging Face model/dataset access |
 | `WANDB_API_KEY` | Weights & Biases experiment tracking |
 
-Without paper-finder, agents use manual literature search through sources such
-as arXiv and Semantic Scholar. See the
-[paper-finder guide](config/paper_finder.md).
-
 ### Workspace configuration
 
-Research workspaces are created in the directory specified by
-`config/workspace.yaml`.
-
-**Default:** `workspaces/` in the project root.
-
-The Docker configuration menu can also change this setting. To edit the file
-directly, copy the example and set `parent_dir`:
+Workspaces default to `workspaces/`. To change the location, use
+`./neurico config` with Docker; with local `uv`, copy the workspace example and
+edit `parent_dir`:
 
 ```bash
 cp config/workspace.yaml.example config/workspace.yaml
