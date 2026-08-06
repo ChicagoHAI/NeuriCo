@@ -196,23 +196,19 @@ experiments
 
 ## Idea submission
 
-NeuriCo accepts structured YAML, Markdown or text, and IdeaHub pages. Use the
-[Idea quickstart](docs/IDEA_QUICKSTART.md) to prepare a first idea or the
-[complete Idea guide](docs/IDEA_GUIDE.md) for fields, domains, local resources,
-and evaluation rules. Reference: [idea schema](ideas/schema.yaml),
-[domain list](config/domains.yaml), and [examples](ideas/examples/).
+NeuriCo accepts YAML, Markdown or text, and IdeaHub pages. Follow the
+[Idea quickstart](docs/IDEA_QUICKSTART.md) to prepare your first idea. See the
+[complete Idea guide](docs/IDEA_GUIDE.md) for the full schema, supported
+domains, local resources, and evaluation rules.
 
 | Input | Docker | Local `uv` (native) |
 | --- | --- | --- |
 | YAML | `./neurico submit <idea.yaml>` | `uv run python src/cli/submit.py <idea.yaml>` |
-| Markdown or text | `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
-| [IdeaHub](https://hypogenic.ai/ideahub) | `./neurico fetch <ideahub_url>` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url>` |
+| [Markdown or text](docs/LOCAL_IDEA_SUBMISSION.md) | `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
+| [IdeaHub](docs/IDEAHUB_INTEGRATION.md) | `./neurico fetch <ideahub_url>` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url>` |
 
-YAML submission validates the idea and prints its `<idea_id>`. Markdown, text,
-and IdeaHub commands create a YAML draft; add `--submit` to submit it or
-`--submit --run` to start a Standard run as well. See
-[Local idea submission](docs/LOCAL_IDEA_SUBMISSION.md) for host resources and
-the [IdeaHub guide](docs/IDEAHUB_INTEGRATION.md) for IdeaHub imports.
+YAML submits immediately. Markdown, text, and IdeaHub create a YAML draft; add
+`--submit` or `--submit --run` when ready.
 
 ### Publishing options
 
