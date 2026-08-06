@@ -32,20 +32,23 @@ merged, or removed during the planned developer-document sweep.
 
 | Document | Classification |
 | --- | --- |
-| [`../ARCHITECTURE_AND_ROADMAP.md`](../ARCHITECTURE_AND_ROADMAP.md) | Architecture, project direction, and roadmap |
+| [`ARCHITECTURE_AND_ROADMAP.md`](ARCHITECTURE_AND_ROADMAP.md) | Architecture, project direction, and roadmap |
 | [`MULTI_AGENT_IMPLEMENTATION.md`](MULTI_AGENT_IMPLEMENTATION.md) | Multi-agent pipeline implementation notes |
 | [`WORKSPACE_DIRECTORY_CONSISTENCY.md`](WORKSPACE_DIRECTORY_CONSISTENCY.md) | Workspace execution-path verification |
 | [`DOCKER_PERMISSIONS.md`](DOCKER_PERMISSIONS.md) | Docker mount and permission design |
 | [`NEXT_STEPS.md`](NEXT_STEPS.md) | Proposed future work |
 | [`../templates/README.md`](../templates/README.md) | Prompt-template and skill implementation reference |
-| [`../INTERACTIVE_WEB_CHANGES.md`](../INTERACTIVE_WEB_CHANGES.md) | Historical implementation notes for the legacy interactive web work |
 
 ## Legacy documentation
 
-[`../INTERACTIVE_MODE_GUIDE.md`](../INTERACTIVE_MODE_GUIDE.md) documents the
-older interactive command. It is retained for historical reference but is not
-part of the current user workflow. Use HITL AutoResearch through `hitl-web` or
-`hitl-cli` instead.
+| Document | Purpose |
+| --- | --- |
+| [`INTERACTIVE_MODE_GUIDE.md`](INTERACTIVE_MODE_GUIDE.md) | Instructions for the older interactive command |
+| [`INTERACTIVE_WEB_CHANGES.md`](INTERACTIVE_WEB_CHANGES.md) | Historical implementation notes for its browser interface |
+
+These documents are retained for historical reference but are not part of the
+current user workflow. Use HITL AutoResearch through `hitl-web` or `hitl-cli`
+instead.
 
 ## Classification policy
 

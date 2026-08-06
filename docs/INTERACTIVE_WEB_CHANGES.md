@@ -2,7 +2,7 @@
 
 > **Developer/historical document.** This records implementation work for the
 > legacy interactive interface. It is not current user guidance; use
-> [`docs/HITL_AUTORESEARCH.md`](docs/HITL_AUTORESEARCH.md) for the supported HITL
+> [`HITL_AUTORESEARCH.md`](HITL_AUTORESEARCH.md) for the supported HITL
 > workflow.
 
 This documents the work to add a browser-based interface to NeuriCo's
