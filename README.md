@@ -144,37 +144,39 @@ Docker users can configure environment variables through the interactive menu:
 
 Local `uv` users edit `.env` directly.
 
-**GitHub publishing** — token required for publishing; organization optional.
+Here's what each variable does:
+
+**GitHub** — token required; org optional (uses personal account if empty)
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `GITHUB_TOKEN` | For GitHub publishing | Classic personal access token with `repo` scope |
-| `GITHUB_ORG` | No | Organization name; defaults to the token owner's account |
+| `GITHUB_TOKEN` | Yes | GitHub Classic Personal Access Token ([create here](https://github.com/settings/tokens/new), select `repo` scope) |
+| `GITHUB_ORG` | No | GitHub org name (default: personal account) |
 
-See the [GitHub integration guide](docs/GITHUB_INTEGRATION.md).
-
-**Idea conversion and paper-finder** — paper-finder requires `S2_API_KEY` and
-one model key; Cohere reranking is optional.
+**Paper Finder** — `S2_API_KEY` and either `OPENROUTER_KEY` or
+`OPENAI_API_KEY` required for full paper-finder; `COHERE_API_KEY` optional
+(improves ranking)
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `OPENROUTER_KEY` or `OPENAI_API_KEY` | For LLM conversion or paper-finder | Idea conversion, repository naming, relevance judgment, and experiment model access |
-| `S2_API_KEY` | For paper-finder | Semantic Scholar literature search |
-| `COHERE_API_KEY` | No | Additional paper-finder reranking |
+| `OPENROUTER_KEY` or `OPENAI_API_KEY` | For paper-finder | Used for paper-finder, IdeaHub conversion, and LLM repo naming |
+| `S2_API_KEY` | For paper-finder | Semantic Scholar API key ([get here](https://www.semanticscholar.org/product/api)) |
+| `COHERE_API_KEY` | No | Improves paper-finder ranking (~7% boost) |
+
+**Agent API Keys** — optional, provided to the agent during automated
+experiments
+
+| Variable | Purpose |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | Claude API access |
+| `GOOGLE_API_KEY` | Google AI / Gemini API access |
+| `OPENROUTER_KEY` | OpenRouter multi-model access |
+| `HF_TOKEN` | Hugging Face model/dataset access |
+| `WANDB_API_KEY` | Weights & Biases experiment tracking |
 
 Without paper-finder, agents use manual literature search through sources such
 as arXiv and Semantic Scholar. See the
 [paper-finder guide](config/paper_finder.md).
-
-**Experiment services** — optional credentials passed to agents during
-experiments.
-
-| Variable | Purpose |
-| --- | --- |
-| `ANTHROPIC_API_KEY` | Direct Anthropic API access in experiments |
-| `GOOGLE_API_KEY` | Direct Google AI API access in experiments |
-| `HF_TOKEN` | Private Hugging Face models and datasets |
-| `WANDB_API_KEY` | Weights & Biases experiment tracking |
 
 ### Workspace configuration
 
