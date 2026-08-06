@@ -135,7 +135,7 @@ idea:
 
   constraints:
     compute: cpu_only  # For AI research
-    budget: "$50-150"  # Typical API costs
+    budget: 150        # Typical API costs, USD (numeric per schema)
 
   expected_outputs: [...]
   evaluation_criteria: [...]

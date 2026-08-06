@@ -185,18 +185,28 @@ def _convert_without_llm(ideahub_content: dict) -> dict:
     Returns:
         Dictionary with 'parsed' and 'yaml_string' keys
     """
-    title = ideahub_content.get('title') or 'Untitled IdeaHub Idea'
+    title = (ideahub_content.get('title') or '').strip() or 'Untitled IdeaHub Idea'
     description = ideahub_content.get('description', '')
     tags = ideahub_content.get('tags', [])
     url = ideahub_content.get('url', '')
 
+    # The schema bounds title at 10..200 characters, and this is the last
+    # resort -- there is no further path to fall through to -- so a scraped
+    # <h1> that is too short or too long has to be made to fit here rather
+    # than failing validation after the fact.
+    if len(title) < 10:
+        title = f"IdeaHub idea: {title}"
+    if len(title) > 200:
+        title = title[:197] + '...'
+
     # Infer domain from content
     domain = _infer_domain(title, description, tags)
 
-    # Use description as hypothesis, ensuring minimum 20 chars
+    # Use description as hypothesis, ensuring the schema's 20-char minimum.
+    # The prefix plus a >=10-char title always clears it.
     hypothesis = description.strip()
     if len(hypothesis) < 20:
-        hypothesis = f"Investigate: {title}"
+        hypothesis = f"Investigate the research question: {title}"
     # Truncate very long hypotheses to keep it reasonable
     if len(hypothesis) > 500:
         hypothesis = hypothesis[:497] + '...'
