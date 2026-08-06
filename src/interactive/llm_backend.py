@@ -260,6 +260,7 @@ class LLMBackend:
         )
 
         # Build command
+        used_bare = False
         cmd = ["claude", "-p", "--verbose", "--output-format", "stream-json"]
         if self.model:
             cmd.extend(["--model", self.model])
@@ -274,6 +275,17 @@ class LLMBackend:
             # HITL manager tools are parsed and executed by the runtime. Do
             # not let the CLI agent gain a second, unmanaged tool surface.
             cmd.extend(["--bare", "--tools", ""])
+            used_bare = True
+
+        # `--bare` authenticates strictly via ANTHROPIC_API_KEY (it skips
+        # keychain/OAuth by design). If NEURICO_HITL_MANAGER_API_KEY is set,
+        # hand it to THIS subprocess only, so the rest of the run keeps using
+        # the user's login/OAuth instead of being forced onto a metered key.
+        child_env = None
+        if used_bare:
+            manager_key = os.environ.get("NEURICO_HITL_MANAGER_API_KEY")
+            if manager_key:
+                child_env = {**os.environ, "ANTHROPIC_API_KEY": manager_key}
 
         process = subprocess.Popen(
             cmd,
@@ -285,6 +297,7 @@ class LLMBackend:
             # Only HITL manager calls request cancellation semantics. Keep
             # ordinary interactive-manager launch behavior unchanged.
             start_new_session=(disable_native_tools and os.name == "posix"),
+            env=child_env,
         )
         self._set_active_process(process)
 
@@ -303,6 +316,15 @@ class LLMBackend:
         if process.returncode != 0:
             # Try to extract useful error info
             error_msg = stderr.strip() if stderr else f"claude -p exited with code {process.returncode}"
+            if used_bare and child_env is None and not os.environ.get("ANTHROPIC_API_KEY"):
+                # `--bare` skips keychain/OAuth, so a logged-in user still hits
+                # "Not logged in" here. Point at the real fix.
+                error_msg += (
+                    " (the HITL manager's conversation-compaction step runs "
+                    "`claude --bare`, which ignores your login/OAuth and needs an "
+                    "API key; set NEURICO_HITL_MANAGER_API_KEY to supply one scoped "
+                    "to just this call)"
+                )
             raise RuntimeError(f"CLI backend error: {error_msg}")
 
         response = self._parse_cli_response(stdout)
