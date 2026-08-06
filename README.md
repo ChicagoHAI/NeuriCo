@@ -88,8 +88,8 @@ cp .env.example .env
 claude  # or: codex, gemini
 ```
 
-After installation, see [Configuration](#configuration) for provider
-authentication, workspace location, and optional services.
+More information about provider authentication, workspace location, and
+optional services is available under [Configuration](#configuration).
 
 ### 2. Write and submit an idea
 
@@ -110,8 +110,8 @@ Submit it and keep the printed `<idea_id>`:
 | --- | --- |
 | `./neurico submit path/to/idea.yaml` | `uv run python src/cli/submit.py path/to/idea.yaml` |
 
-See [Idea submission](#idea-submission) for other input formats and submission
-options.
+Additional input formats and submission options are available under [Idea
+submission](#idea-submission).
 
 ### 3. Choose a research mode
 
@@ -121,10 +121,11 @@ Replace `<idea_id>` with the ID printed during submission.
 | --- | --- | --- | --- |
 | **[Standard](#standard)** | `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` | Run the full pipeline once, from resource discovery to paper |
 | **[AutoResearch](#autoresearch)** | `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` | Build a scored baseline, then test and retain improvements |
-| **[HITL AutoResearch](#hitl-autoresearch) — web** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` | Review plans and guide iterative research in the browser |
-| **[HITL AutoResearch](#hitl-autoresearch) — terminal** | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` | Review plans and guide iterative research in the terminal |
+| **[HITL AutoResearch](#hitl-autoresearch) — web** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` | Participate in iterative research through the browser |
+| **[HITL AutoResearch](#hitl-autoresearch) — terminal** | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` | Participate in iterative research through the terminal |
 
-See [Research modes](#research-modes) for each mode's workflow and options.
+Detailed workflows and options are available under [Research
+modes](#research-modes).
 
 That's it—NeuriCo turns your hypothesis into experiments, evidence, and a
 reproducible research project.
