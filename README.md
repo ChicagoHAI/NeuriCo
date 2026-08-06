@@ -111,6 +111,9 @@ Replace `<idea_id>` with the ID printed during submission.
 
 Start with Standard for a first run.
 
+That's it—NeuriCo turns your hypothesis into experiments, evidence, and a
+reproducible research project.
+
 ## Installation details
 
 A basic installation is complete after one provider login. GitHub and API keys
