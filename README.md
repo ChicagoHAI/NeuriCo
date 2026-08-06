@@ -112,23 +112,12 @@ reproducible research project.
 
 ## Configuration
 
-A basic run needs no additional settings. Configure optional settings through
-the route you installed:
+A basic run needs no additional configuration.
 
-| Route | How to configure |
-| --- | --- |
-| Docker | Run `./neurico config`, or edit `.env` directly |
-| Local `uv` | Edit `.env` directly |
-
-The default workspace is `workspaces/`. Change it through `./neurico config`
-with Docker, or set `parent_dir` in `config/workspace.yaml` with either route.
-For GitHub publishing, set `GITHUB_TOKEN`; see the
-[GitHub integration guide](docs/GITHUB_INTEGRATION.md).
+- **Docker:** run `./neurico config`
+- **Local `uv`:** edit `.env`; set the workspace location in `config/workspace.yaml`
 
 ### Optional integrations
-
-Add only the keys needed for the integrations or experiments you use. See
-[`.env.example`](.env.example) for the complete template.
 
 | Key | Enables |
 | --- | --- |
