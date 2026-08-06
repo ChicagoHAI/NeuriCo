@@ -160,7 +160,8 @@ bootstrap behavior.
 
 HITL AutoResearch has two interfaces backed by the same durable manager and
 workspace state. Starting either interface does not immediately start the
-research run; enter `/run` in the interface to configure and launch it.
+research run. The web interface uses a setup panel; the terminal interface uses
+the `/run` command.
 
 #### Web interface
 
@@ -169,7 +170,8 @@ research run; enter `/run` in the interface to configure and launch it.
 | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
 
 The default page is `http://localhost:7890`. The printed bootstrap URL includes
-the session token. To choose another port:
+the session token. Open **Start AutoResearch** to configure and launch a fresh
+or continuing run. To choose another port:
 
 | Docker | Local `uv` |
 | --- | --- |
@@ -184,7 +186,8 @@ only to `127.0.0.1` on the host.
 | --- | --- |
 | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
 
-Useful terminal commands:
+Enter `/run` to configure and launch a fresh or continuing run. Other useful
+terminal commands are:
 
 | Command | Purpose |
 | --- | --- |

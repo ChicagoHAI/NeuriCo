@@ -21,11 +21,11 @@ human requests, frontier, and workspace run state.
 | Web | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
 | Terminal | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
 
-Opening an interface does not start research automatically. Use `/run` in the
-web or terminal interface to choose the worker provider, iteration count,
-paper-writing preference, and GitHub preference. NeuriCo automatically detects
-whether the workspace needs a fresh HITL run or should continue its existing
-frontier.
+Opening an interface does not start research automatically. In the web
+interface, open **Start AutoResearch**, choose the run settings, and click the
+start button. In the terminal interface, enter `/run` and answer the prompts.
+NeuriCo automatically detects whether the workspace needs a fresh HITL run or
+should continue its existing frontier.
 
 The Docker commands run both the manager and research workers in the container.
 The local commands run both through the local `uv` environment.

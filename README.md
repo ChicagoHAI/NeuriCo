@@ -104,22 +104,44 @@ Replace `<idea_id>` with the ID printed during submission.
 | --- | --- | --- | --- |
 | **[Standard](#standard)** | `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` | Run the research pipeline once |
 | **[AutoResearch](#autoresearch)** | `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` | Build a scored baseline and try one improvement |
-| **[HITL AutoResearch](#hitl-autoresearch)** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` | Open the manager; start research with `/run` |
+| **[HITL AutoResearch](#hitl-autoresearch) — web** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` | Manage research in the browser |
+| **[HITL AutoResearch](#hitl-autoresearch) — terminal** | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` | Manage research in the terminal |
 
 That's it—NeuriCo turns your hypothesis into experiments, evidence, and a
 reproducible research project.
 
 ## Configuration
 
-A basic run needs no additional settings. Both routes can edit `.env` directly.
+A basic run needs no additional settings. Configure optional settings through
+the route you installed:
 
-| Goal | Configure |
+| Route | How to configure |
 | --- | --- |
-| Change the workspace location | Set `parent_dir` in `config/workspace.yaml`; default: `workspaces/` |
-| Publish research to GitHub | Set `GITHUB_TOKEN`; see the [GitHub integration guide](docs/GITHUB_INTEGRATION.md) |
-| Use LLM-assisted idea conversion | Set `OPENROUTER_KEY` or `OPENAI_API_KEY` |
-| Enable paper-finder | Set `S2_API_KEY` and a model key; see the [paper-finder guide](config/paper_finder.md) |
-| Connect experiment services | Add only the required variables from [`.env.example`](.env.example) |
+| Docker | Run `./neurico config`, or edit `.env` directly |
+| Local `uv` | Edit `.env` directly |
+
+The default workspace is `workspaces/`. Change it through `./neurico config`
+with Docker, or set `parent_dir` in `config/workspace.yaml` with either route.
+For GitHub publishing, set `GITHUB_TOKEN`; see the
+[GitHub integration guide](docs/GITHUB_INTEGRATION.md).
+
+### Optional integrations
+
+Add only the keys needed for the integrations or experiments you use. See
+[`.env.example`](.env.example) for the complete template.
+
+| Key | Enables |
+| --- | --- |
+| `OPENROUTER_KEY` or `OPENAI_API_KEY` | LLM-assisted idea conversion, repository naming, and paper-finder |
+| `S2_API_KEY` | Semantic Scholar search through paper-finder |
+| `COHERE_API_KEY` | Optional paper-finder reranking |
+| `ANTHROPIC_API_KEY` | Direct Anthropic API access in experiments |
+| `GOOGLE_API_KEY` | Direct Google AI API access in experiments |
+| `HF_TOKEN` | Private Hugging Face models and datasets |
+| `WANDB_API_KEY` | Weights & Biases experiment tracking |
+
+Paper-finder requires `S2_API_KEY` and either `OPENROUTER_KEY` or
+`OPENAI_API_KEY`. See the [paper-finder guide](config/paper_finder.md).
 
 ## Writing and submitting ideas
 
@@ -382,7 +404,8 @@ terminal interfaces share the same workspace state.
 
 The web interface opens at `http://localhost:7890`. Docker binds it to
 `127.0.0.1`. Use `--port N` to choose another port or `--no-browser` to start
-the server without opening a browser.
+the server without opening a browser. To begin research, open **Start
+AutoResearch**, choose the run settings, and start the fresh or continuing run.
 
 #### Terminal interface
 
@@ -390,7 +413,8 @@ the server without opening a browser.
 | --- | --- |
 | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
 
-Opening an interface does not start research. Use these manager commands:
+Opening the terminal interface does not start research. Enter `/run` to
+configure and start it. The terminal commands are:
 
 | Control | Purpose |
 | --- | --- |
