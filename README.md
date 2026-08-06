@@ -123,55 +123,51 @@ reproducible research project.
 
 ## Configuration
 
-Docker users can manage settings through the configuration menu:
+### CLI authentication
+
+Claude Code, Codex, and Gemini CLI use OAuth login, not API keys. Log in once on
+the host:
+
+```bash
+claude  # or: codex, gemini
+```
+
+In Docker mode, credentials are automatically mounted into containers.
+
+### Environment variables (`.env`)
+
+Docker users can configure environment variables through the interactive menu:
 
 ```bash
 ./neurico config
 ```
 
-Local `uv` users edit `.env` and `config/workspace.yaml` directly. Provider
-login is required; the remaining settings enable publishing and optional
-services.
+Local `uv` users edit `.env` directly.
 
-### Provider authentication
+**GitHub publishing** — token required for publishing; organization optional.
 
-Claude Code, Codex, and Gemini CLI use OAuth. Provider API keys are not required
-for ordinary NeuriCo runs.
+| Variable | Required | Description |
+| --- | --- | --- |
+| `GITHUB_TOKEN` | For GitHub publishing | Classic personal access token with `repo` scope |
+| `GITHUB_ORG` | No | Organization name; defaults to the token owner's account |
 
-| Docker | Local `uv` (native) |
-| --- | --- |
-| Run `./neurico login`, then start the provider CLI in the login shell | Run `claude`, `codex`, or `gemini` |
+See the [GitHub integration guide](docs/GITHUB_INTEGRATION.md).
 
-Docker stores the OAuth credentials on the host and mounts them into subsequent
-containers.
+**Idea conversion and paper-finder** — paper-finder requires `S2_API_KEY` and
+one model key; Cohere reranking is optional.
 
-### GitHub publishing
+| Variable | Required | Description |
+| --- | --- | --- |
+| `OPENROUTER_KEY` or `OPENAI_API_KEY` | For LLM conversion or paper-finder | Idea conversion, repository naming, relevance judgment, and experiment model access |
+| `S2_API_KEY` | For paper-finder | Semantic Scholar literature search |
+| `COHERE_API_KEY` | No | Additional paper-finder reranking |
 
-| Variable | Purpose |
-| --- | --- |
-| `GITHUB_TOKEN` | Create and publish research repositories |
-| `GITHUB_ORG` | Publish to an organization instead of the authenticated user's account |
-
-Use a classic GitHub token with `repo` scope. See the
-[GitHub integration guide](docs/GITHUB_INTEGRATION.md).
-
-### Idea conversion and paper-finder
-
-| Variable | Purpose |
-| --- | --- |
-| `OPENROUTER_KEY` or `OPENAI_API_KEY` | LLM-assisted idea conversion, repository naming, paper-finder, and experiment model access |
-| `S2_API_KEY` | Semantic Scholar literature search through paper-finder |
-| `COHERE_API_KEY` | Optional paper-finder reranking |
-
-Paper-finder requires `S2_API_KEY` and either `OPENROUTER_KEY` or
-`OPENAI_API_KEY`. Without paper-finder, agents use manual literature search
-through sources such as arXiv and Semantic Scholar. See the
+Without paper-finder, agents use manual literature search through sources such
+as arXiv and Semantic Scholar. See the
 [paper-finder guide](config/paper_finder.md).
 
-### Experiment services
-
-These optional credentials are passed to agents when an experiment needs the
-corresponding service.
+**Experiment services** — optional credentials passed to agents during
+experiments.
 
 | Variable | Purpose |
 | --- | --- |
@@ -180,11 +176,25 @@ corresponding service.
 | `HF_TOKEN` | Private Hugging Face models and datasets |
 | `WANDB_API_KEY` | Weights & Biases experiment tracking |
 
-### Workspace location
+### Workspace configuration
 
-Research workspaces are stored under `workspaces/` by default. Set `parent_dir`
-in `config/workspace.yaml` to use another location; the Docker configuration
-menu updates the same setting.
+Research workspaces are created in the directory specified by
+`config/workspace.yaml`.
+
+**Default:** `workspaces/` in the project root.
+
+The Docker configuration menu can also change this setting. To edit the file
+directly, copy the example and set `parent_dir`:
+
+```bash
+cp config/workspace.yaml.example config/workspace.yaml
+```
+
+```yaml
+workspace:
+  parent_dir: "/path/to/your/workspaces"
+  auto_create: true
+```
 
 ## Writing and submitting ideas
 
