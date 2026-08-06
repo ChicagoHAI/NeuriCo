@@ -198,8 +198,7 @@ experiments
 
 NeuriCo accepts YAML, Markdown or text, and IdeaHub pages. Follow the
 [Idea quickstart](docs/IDEA_QUICKSTART.md) to prepare your first idea. See the
-[complete Idea guide](docs/IDEA_GUIDE.md) for the full schema, supported
-domains, local resources, and evaluation rules.
+[complete Idea guide](docs/IDEA_GUIDE.md) for all available fields and options.
 
 | Input | Docker | Local `uv` (native) |
 | --- | --- | --- |
@@ -207,8 +206,9 @@ domains, local resources, and evaluation rules.
 | [Markdown or text](docs/LOCAL_IDEA_SUBMISSION.md) | `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
 | [IdeaHub](docs/IDEAHUB_INTEGRATION.md) | `./neurico fetch <ideahub_url>` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url>` |
 
-YAML submits immediately. Markdown, text, and IdeaHub create a YAML draft; add
-`--submit` or `--submit --run` when ready.
+YAML submits immediately. By default, Markdown, text, and IdeaHub commands only
+create a YAML draft. Include `--submit` in the command to submit the draft, or
+include `--submit --run` to submit it and immediately start Standard mode.
 
 ### Publishing options
 
