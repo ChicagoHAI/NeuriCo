@@ -13,9 +13,8 @@
 
 <!-- agent-summary: NeuriCo is an autonomous and human-in-the-loop research framework. Input: YAML, Markdown/text, or IdeaHub. Modes: Standard, AutoResearch, and HITL AutoResearch. Outputs: code, results, logs, scores, and an optional paper. Providers: Claude Code, Codex, Gemini. Installation: Docker or local uv. License: Apache 2.0. -->
 
-**NeuriCo** (**Neur**al **Co**-Scientist, inspired by Enrico Fermi) takes
-structured research ideas and coordinates agents to find resources, design and
-run experiments, analyze results, and document the work.
+**NeuriCo** (**Neur**al **Co**-Scientist, inspired by Enrico Fermi) coordinates
+agents that turn a structured research idea into an experimental study.
 
 <div align="center">
 <img src="assets/neurico-6x.gif" alt="NeuriCo Demo" width="700"/>
@@ -26,38 +25,35 @@ run experiments, analyze results, and document the work.
 | Feature | Description |
 | --- | --- |
 | **Minimal input** | Start with a title, research domain, and testable hypothesis |
-| **Research pipeline** | Resource discovery, experiment design, execution, analysis, and paper writing |
-| **Three research modes** | Standard, iterative AutoResearch, and human-in-the-loop AutoResearch |
-| **Multiple providers** | Claude Code, Codex, and Gemini CLI |
-| **Reproducible workspaces** | Code, results, logs, artifacts, scoring state, and reports stay together |
-| **Domain support** | Built-in guidance for [AI, ML, mathematics, finance, scientific computing, and more](#choose-a-domain) |
-| **Customizable behavior** | Edit [agent instructions, domain guidance, and provider skills](#customizing-neurico) |
-| **Optional integrations** | GitHub publishing, IdeaHub import, paper-finder, Hugging Face, and W&B |
+| **Agent-driven research** | Carries an idea from resource discovery through experimental analysis |
+| **Multi-provider support** | Works with Claude Code, Codex, and Gemini CLI |
+| **AutoResearch** | Tests iterative improvements and retains the strongest checkpoint |
+| **HITL AutoResearch** | Adds a persistent manager and human decision points |
+| **Domain-agnostic** | Provides guidance across research domains |
+| **Reproducible outputs** | Preserves each run in a self-contained workspace |
+| **GitHub integration** | Optionally creates repositories and publishes results |
 
 ## Requirements
 
-Choose either Docker or local `uv` (native):
+Choose one installation route:
 
-- **Docker:** [Git](https://git-scm.com/) and a running
-  [Docker](https://docs.docker.com/get-docker/) installation.
-- **Local `uv` (native):** Git, Python 3.10+, and
-  [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+| Route | Requirements |
+| --- | --- |
+| **Docker** | [Git](https://git-scm.com/) and a running [Docker](https://docs.docker.com/get-docker/) installation |
+| **Local `uv`** | Git, Python 3.10+, [`uv`](https://docs.astral.sh/uv/getting-started/installation/), and a provider CLI |
 
-Both routes require at least one provider CLI:
+NeuriCo uses OAuth access to one of these providers:
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
 [Codex](https://github.com/openai/codex), or
-[Gemini CLI](https://github.com/google-gemini/gemini-cli). Provider CLIs use
-their own OAuth login; provider API keys are not required for the basic
-workflow.
+[Gemini CLI](https://github.com/google-gemini/gemini-cli).
 
-GitHub and all API keys are optional. A GPU is only needed for experiments
-that require one.
+For automatic repository creation, use a classic GitHub token with `repo`
+scope. [Create a token](https://github.com/settings/tokens/new) and add it to
+`.env` as `GITHUB_TOKEN`. GitHub is optional.
 
 ## Quick start
 
-Install NeuriCo, submit an idea, then choose a research mode. Docker and local
-`uv` (native) support the same workflow; use the commands for the route you
-installed.
+Use either Docker or local `uv` throughout the workflow.
 
 ### 1. Install
 
@@ -66,18 +62,15 @@ installed.
 ```bash
 git clone https://github.com/ChicagoHAI/neurico.git
 cd neurico
-./neurico setup
+./neurico setup --quick
 ```
 
-Choose **Quick setup** when prompted. It uses the default workspace, skips
-optional integrations, and opens Claude login. See
-[Installation details](#installation-details) for full setup, other providers,
-GPU support, and image management. Optional services are covered under
-[Optional configuration](#optional-configuration).
+Quick setup uses Claude. Run `./neurico setup` to choose another provider or
+configure optional services.
 
-#### Local `uv` (native)
+#### Local `uv`
 
-Install one provider CLI on the host, then:
+Install one provider CLI, then run:
 
 ```bash
 git clone https://github.com/ChicagoHAI/neurico.git
@@ -87,12 +80,7 @@ cp .env.example .env
 claude  # or: codex, gemini
 ```
 
-The last command starts provider OAuth login. No GitHub token or API key is
-needed for a basic run. See [Installation details](#installation-details) for
-native setup and [Optional configuration](#optional-configuration) when a
-workflow needs an external service.
-
-### 2. Write and submit an idea
+### 2. Submit an idea
 
 Create `ideas/my_idea.yaml`:
 
@@ -105,560 +93,55 @@ idea:
     otherwise equivalent direct prompts.
 ```
 
-Submit it:
+Submit it and keep the printed `<idea_id>`:
 
-| Docker | Local `uv` (native) |
+| Docker | Local `uv` |
 | --- | --- |
 | `./neurico submit ideas/my_idea.yaml` | `uv run python src/cli/submit.py ideas/my_idea.yaml` |
 
-Submission validates the idea and prints an `<idea_id>`. Research does not
-start until you run the idea. Both routes accept relative and absolute paths.
-See [Writing and submitting ideas](#writing-and-submitting-ideas) for domain
-selection, optional fields, Markdown, and IdeaHub.
+### 3. Run the idea
 
-### 3. Choose a research mode
+Replace `<idea_id>` with the ID from submission.
 
-Replace `<idea_id>` with the ID printed during submission.
-
-| Mode | Docker | Local `uv` (native) | Behavior |
-| --- | --- | --- | --- |
-| **[Standard](#standard)** | `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` | Run the research pipeline once |
-| **[AutoResearch](#autoresearch)** | `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` | Build a scored baseline and try one improvement |
-| **[HITL AutoResearch](#hitl-autoresearch)** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` | Open the manager; start research with `/run` |
-
-Standard is the simplest first run. See [Research modes](#research-modes) for
-mode behavior, continuation, bootstrap, HITL controls, and flags.
-
-## Installation details
-
-A basic installation is complete after one provider login. GitHub and API keys
-are not part of the basic setup.
-
-### Docker
-
-`./neurico setup` offers two paths:
-
-- **Quick setup** pulls the image, uses `workspaces/`, and opens Claude login.
-- **Full setup** also asks about GitHub, workspace location, OpenAI and
-  Semantic Scholar keys, and which providers to log in to.
-
-Optional settings in full setup can be skipped and added later with
-`./neurico config`. The image includes the Python environment, provider CLIs,
-LaTeX, and paper-finder. The repository supplies configuration, templates,
-ideas, and workspace mounts.
-
-Run `./neurico setup --quick` to select quick setup without showing the setup
-choice.
-
-<details>
-<summary>Alternative Docker installation</summary>
-
-Use the one-line installer:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ChicagoHAI/neurico/main/install.sh | bash
-```
-
-To manage the image manually:
-
-```bash
-# Pull the prebuilt image
-docker pull ghcr.io/chicagohai/neurico:latest
-docker tag ghcr.io/chicagohai/neurico:latest chicagohai/neurico:latest
-
-# Or build from the current checkout
-./neurico build
-```
-
-The repository is required when using the prebuilt image.
-
-</details>
-
-#### GPU support
-
-NVIDIA GPU passthrough requires the
-[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
-CPU-only execution remains available.
-
-#### Docker maintenance
-
-Useful Docker commands:
-
-```bash
-./neurico config   # Edit settings and optional integrations
-./neurico login    # Repeat provider login
-./neurico update   # Update the checkout and image
-./neurico shell    # Open a shell in the container
-./neurico help     # List available commands
-```
-
-### Local `uv` (native)
-
-The native route runs NeuriCo and the provider CLI directly on the host. It
-does not use `./neurico setup` or `./neurico config`.
-
-Install `uv` if needed:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-After `uv sync`, no additional native setup is required beyond provider login.
-Native users edit `.env` directly when enabling an optional service.
-
-### Provider authentication
-
-Claude Code, Codex, and Gemini use OAuth login rather than provider API keys.
-Docker saves host credentials under `~/.claude/`, `~/.codex/`, or `~/.gemini/`
-and mounts them into containers. Native runs use those host credentials
-directly.
-
-| Provider | Docker | Local `uv` (native) |
+| Mode | Docker | Local `uv` |
 | --- | --- | --- |
-| Claude | `./neurico login claude` | `claude` |
-| Codex | `./neurico login codex` | `codex` |
-| Gemini | `./neurico login gemini` | `gemini` |
+| **Standard** | `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` |
+| **AutoResearch** | `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` |
+| **HITL AutoResearch** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
 
-## Optional configuration
+HITL opens a manager interface; enter `/run` to start research. For a terminal
+interface, use `./neurico hitl-cli <idea_id>` or
+`uv run python src/cli/hitl_cli.py <idea_id>`.
 
-Skip this section for a basic run. `./neurico config` covers common Docker
-settings. Both routes can edit `.env` directly; workspace location uses
-`config/workspace.yaml`.
+Claude is the default provider. Add `--provider codex` or `--provider gemini`
+to Standard and AutoResearch commands after logging in to that provider.
 
-### Change the workspace location
+Workspaces are stored under `workspaces/` by default.
 
-Research is stored under `workspaces/` by default. To use another location,
-copy `config/workspace.yaml.example` to `config/workspace.yaml` and set
-`parent_dir`:
+## Guides
 
-```yaml
-workspace:
-  parent_dir: "/path/to/your/workspaces"
-  auto_create: true
-```
+Use the focused guides when you need more than the basic workflow:
 
-Docker mounts the selected directory at `/workspaces`; native runs use it
-directly.
-
-### Publish research to GitHub
-
-Set `GITHUB_TOKEN` in `.env` to create and publish research repositories during
-submission and execution. Set `GITHUB_ORG` to use an organization; leave it
-empty to use the token owner's account. Without a token, NeuriCo remains local.
-
-See the [GitHub integration guide](docs/GITHUB_INTEGRATION.md) for token scope,
-organization access, and publishing behavior.
-
-### Use LLM-assisted idea conversion
-
-IdeaHub and Markdown/text conversion work without an API key by producing a
-template-based YAML draft. Set either `OPENROUTER_KEY` or `OPENAI_API_KEY` in
-`.env` to use LLM-assisted conversion and repository naming.
-
-### Enable paper-finder
-
-Paper-finder requires `S2_API_KEY` and either `OPENROUTER_KEY` or
-`OPENAI_API_KEY`. Add `COHERE_API_KEY` for additional reranking. Without these
-keys, agents use their normal literature-search tools.
-
-Docker starts paper-finder automatically. Native users must start it
-separately:
-
-<details>
-<summary>Start paper-finder for native runs</summary>
-
-```bash
-cd services/paper-finder
-make sync-dev
-cd agents/mabool/api
-make start-dev
-```
-
-The service listens on `http://localhost:8000`. See
-[`config/paper_finder.md`](config/paper_finder.md) for configuration and
-troubleshooting.
-
-</details>
-
-### Add experiment credentials
-
-Add only the keys required by the experiment:
-
-| Variable | Used for |
+| Task | Guide |
 | --- | --- |
-| `ANTHROPIC_API_KEY` | Claude API calls |
-| `GOOGLE_API_KEY` | Google AI API calls |
-| `OPENROUTER_KEY` or `OPENAI_API_KEY` | Model access during experiments |
-| `HF_TOKEN` | Private Hugging Face models and datasets |
-| `WANDB_API_KEY` | Weights & Biases tracking |
-| `AXLE_API_KEY` | Lean verification for the `mathematics_lean` domain |
-| `AXLE_ENV` | Optional Lean environment override; default `lean-4.29.0` |
-
-These settings connect external services. To change NeuriCo's agent
-instructions or domain behavior, see [Customizing NeuriCo](#customizing-neurico).
-
-## Writing and submitting ideas
-
-### Start with a minimal idea
-
-Create a YAML file under `ideas/`, for example `ideas/my_idea.yaml`:
-
-```yaml
-idea:
-  title: "Do LLMs distinguish causation from correlation?"
-  domain: artificial_intelligence
-  hypothesis: >
-    Explicit causal prompts improve causal-reasoning accuracy compared with
-    otherwise equivalent direct prompts.
-```
-
-This is a complete idea. The `ideas/` directory is recommended, but submission
-also accepts relative or absolute paths elsewhere. The three required fields
-are:
-
-- `title` — a short description of the research question
-- `domain` — the NeuriCo domain that should guide the research
-- `hypothesis` — the claim the experiment should test
-
-### Choose a domain
-
-Use the closest domain key for the methods and evaluation the research will
-use:
-
-| Domain key | Use for |
-| --- | --- |
-| `artificial_intelligence` | LLM evaluation, prompting, agents, and AI benchmarks |
-| `machine_learning` | Model training, prediction, clustering, and evaluation |
-| `data_science` | Statistical analysis, forecasting, and visualization |
-| `systems` | Performance, databases, networks, compilers, and distributed systems |
-| `mathematics` | Pure or applied mathematics and human-written proofs |
-
-These are common choices, not the complete list. See
-[`config/domains.yaml`](config/domains.yaml) for all supported domain keys and
-the [Idea guide](docs/IDEA_GUIDE.md) for selection guidance.
-
-### Write a testable hypothesis
-
-The hypothesis should name what is being compared and what evidence will be
-measured. It must be possible for the result to support, contradict, or qualify
-the claim.
-
-Avoid a task description:
-
-```yaml
-hypothesis: "Study whether LLMs understand causality."
-```
-
-Write a claim that can be tested:
-
-```yaml
-hypothesis: >
-  Explicit causal prompts improve causal-reasoning accuracy compared with
-  otherwise equivalent direct prompts.
-```
-
-### Add details when they matter
-
-Leave optional sections out when NeuriCo should choose the papers, datasets,
-methods, baselines, metrics, or outputs. Add them when they record a known
-resource or a requirement that the run must preserve.
-
-For example, a complete idea with hard execution and evaluation rules is:
-
-```yaml
-idea:
-  title: "Do LLMs distinguish causation from correlation?"
-  domain: artificial_intelligence
-  hypothesis: >
-    Explicit causal prompts improve causal-reasoning accuracy compared with
-    otherwise equivalent direct prompts.
-
-  constraints:
-    compute: cpu_only
-    time_limit: 3600
-
-  evaluation_criteria:
-    - "Evaluate both prompt types on the same examples."
-    - "Save per-example predictions and aggregate accuracy."
-```
-
-Use `background` for known papers, datasets, or code; `methodology` for a
-required approach; `local_resources` for files or functions on the host;
-`evaluation` or `evaluation_criteria` for fixed evaluation rules; and
-`expected_outputs` for required deliverables.
-
-The [Idea quickstart](docs/IDEA_QUICKSTART.md) provides a first-idea checklist.
-The complete [Idea guide](docs/IDEA_GUIDE.md) documents every field. The
-authoritative schema and additional examples are under
-[`ideas/schema.yaml`](ideas/schema.yaml) and [`ideas/examples/`](ideas/examples/).
-
-### Submit YAML
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico submit <idea.yaml>` | `uv run python src/cli/submit.py <idea.yaml>` |
-
-Common submission options:
-
-| Flag | Purpose |
-| --- | --- |
-| `--no-validate` | Skip schema validation; intended for development and diagnosis |
-| `--no-github` | Disable repository creation for this submission |
-| `--github-org ORG` | Create the repository in a GitHub organization |
-| `--private` | Create a private repository |
-| `--no-hash` | Omit the random hash from the generated repository name |
-
-If `GITHUB_TOKEN` is set, submission also creates and prepares a research
-repository. Otherwise, the idea remains local.
-
-### Submit Markdown or text
-
-Use `submit-local` for Markdown or text ideas, or when the idea refers to local
-datasets and functions:
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
-
-The command creates a YAML draft under `ideas/`. Add `--submit` to submit it,
-or `--submit --run` to submit it and start a Standard run. Declared local
-resources are mounted read-only during research. Without `OPENROUTER_KEY` or
-`OPENAI_API_KEY`, NeuriCo uses template-based conversion; declare local paths
-in `local_resources` by hand. See
-[Local idea submission](docs/LOCAL_IDEA_SUBMISSION.md).
-
-### Import from IdeaHub
-
-Fetch and convert an [IdeaHub](https://hypogenic.ai/ideahub) page:
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico fetch <ideahub_url>` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url>` |
-
-The command creates a YAML draft. Add `--submit` to submit it, or
-`--submit --run` to submit it and start a Standard run. See the
-[IdeaHub guide](docs/IDEAHUB_INTEGRATION.md).
-
-IdeaHub works without an API key using template-based conversion. Set
-`OPENROUTER_KEY` or `OPENAI_API_KEY` in `.env` for LLM-assisted conversion.
-
-## Research modes
-
-### Standard
-
-Standard runs the research pipeline once: resource discovery, experiment
-design, execution, analysis, and paper writing.
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico run <idea_id>` | `uv run python src/core/runner.py <idea_id>` |
-
-The default provider is Claude, the default compute backend is local, and full
-provider permissions and paper writing are enabled.
-
-#### Common options
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--provider claude\|codex\|gemini` | `claude` | Select the research worker provider |
-| `--compute-backend local\|dsi-slurm\|modal` | `local` | Select where experiments execute |
-| `--timeout SECONDS` | `3600` | Set the experiment-runner timeout |
-| `--no-full-permissions` | full permissions | Restore normal provider permission prompts |
-| `--no-write-paper` | paper enabled | Skip paper generation |
-| `--paper-style neurips\|icml\|acl\|ams` | domain default | Select the paper template |
-| `--no-github` | GitHub when configured | Keep the run local |
-| `--force-fresh` | reuse workspace | Ignore an existing workspace and start again |
-
-Modal runs require `modal token new` on the host; Docker mounts
-`~/.modal.toml` into the container. The `dsi-slurm` backend requires University
-of Chicago DSI cluster access and a working `login.ds` SSH alias.
-
-<details>
-<summary>Advanced Standard pipeline controls</summary>
-
-| Flag | Purpose |
-| --- | --- |
-| `--pause-after-resources` | Review resources before experimentation |
-| `--skip-resource-finder` | Use an already prepared workspace |
-| `--resource-finder-timeout SECONDS` | Change the resource-finder timeout; default `2700` |
-| `--use-scribe` | Use the optional notebook-oriented execution path |
-| `--enable-scoring` | Add a sealed rule-maker and scorer stage |
-| `--comment-mode` | Apply targeted changes from comments in the submitted idea |
-
-</details>
-
-### AutoResearch
-
-AutoResearch keeps the best scored checkpoint. Each iteration proposes one
-change, runs it, scores it, and keeps it if the score improves.
-
-#### Start fresh
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` |
-
-This runs the scored pipeline, saves the initial checkpoint, and performs one
-improvement iteration.
-
-#### Continue an existing AutoResearch workspace
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico run <idea_id> --continue-autoresearch` | `uv run python src/core/runner.py <idea_id> --continue-autoresearch` |
-
-Continuation resumes an existing scored workspace and skips the earlier
-research stages.
-
-#### Bootstrap a Standard workspace
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico run <idea_id> --bootstrap-autoresearch-baseline` | `uv run python src/core/runner.py <idea_id> --bootstrap-autoresearch-baseline` |
-
-Bootstrap scores an existing Standard workspace and creates the AutoResearch
-continuation state. It does not run an improvement iteration. Continue with
-`--continue-autoresearch`.
-
-#### Iterations
-
-AutoResearch runs one improvement iteration by default. Use
-`--autoresearch-iterations N` to run more than one.
-
-Fresh, continue, and bootstrap are mutually exclusive. Standard provider,
-compute, permission, paper, and GitHub options also apply.
-
-<details>
-<summary>Advanced AutoResearch and bootstrap controls</summary>
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--proposer-timeout SECONDS` | `900` | Set proposal-generation timeout |
-| `--rule-maker-timeout SECONDS` | `1800` | Set scoring-contract construction timeout |
-| `--scorer-timeout SECONDS` | `600` | Set scoring timeout |
-| `--manifest-trimmer-timeout SECONDS` | `300` | Set bootstrap manifest-trimmer timeout |
-| `--bootstrap-rule-maker` | off | Retrofit scoring without creating AutoResearch continuation state |
-
-</details>
-
-See the [AutoResearch guide](docs/AUTORESEARCH.md) for checkpoint, scoring, and
-recovery behavior.
-
-### HITL AutoResearch
-
-HITL AutoResearch adds a persistent manager conversation, human decision
-points, isolated scoring, and a retained research frontier. The web and
-terminal interfaces share the same workspace state.
-
-#### Web interface
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
-
-The web interface opens at `http://localhost:7890`. Docker binds it to
-`127.0.0.1`. Use `--port N` to choose another port or `--no-browser` to start
-the server without opening a browser.
-
-#### Terminal interface
-
-| Docker | Local `uv` (native) |
-| --- | --- |
-| `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
-
-Opening an interface does not start research. Use these manager commands:
-
-| Control | Purpose |
-| --- | --- |
-| `/run` | Configure and start a fresh or continuing HITL run |
-| `/reply <number>` | Choose an option for the active human request |
-| `/reply <feedback>` | Resolve a request with free-form feedback |
-| `/help` | Show interface commands |
-| `/quit` | Close the terminal interface |
-
-See the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md) for the manager,
-human requests, scoring frontier, and recovery model.
-
-## Outputs and architecture
-
-A research workspace can contain:
-
-```text
-workspaces/<research-workspace>/
-├── README.md
-├── REPORT.md
-├── STATE.md
-├── src/
-├── results/
-├── logs/
-├── artifacts/
-├── scoring/
-└── paper_draft/
-```
-
-Ideas move through `ideas/submitted/`, `ideas/in_progress/`, and
-`ideas/completed/`. Workspace contents depend on the mode and run options.
-
-<details>
-<summary>System architecture</summary>
-
-```mermaid
-flowchart LR
-    A["Idea (YAML, text, or IdeaHub)"] --> B["Submit and validate"]
-    B --> C{"Choose a mode"}
-    C --> D["Standard"]
-    C --> E["AutoResearch"]
-    C --> F["HITL AutoResearch"]
-    D --> G["Research workspace"]
-    E --> G
-    F --> G
-    G --> H["Code, results, logs, scores, and paper"]
-    G --> I["Optional GitHub publication"]
-```
-
-</details>
-
-## Customizing NeuriCo
-
-Most users do not need to change the built-in templates. Edit them when a
-research workflow needs different agent instructions, paper structure,
-resource-finding behavior, or domain guidance. Docker mounts templates from the
-repository, so changes do not require an image rebuild.
-
-| Behavior | File or directory |
-| --- | --- |
-| Experiment workflow | `templates/agents/session_instructions.txt` |
-| Paper writing | `templates/agents/paper_writer.txt` |
-| Resource discovery | `templates/agents/resource_finder.txt` |
-| Base research method | `templates/base/researcher.txt` |
-| Domain guidance | `templates/domains/<domain>/core.txt` |
-| Provider skills | `templates/skills/<skill-name>/SKILL.md` |
-
-See [`templates/README.md`](templates/README.md) for the template system.
-
-## Documentation
-
-| Guide | What it covers |
-| --- | --- |
-| [Workflow](docs/WORKFLOW.md) | Complete Docker and local `uv` workflow |
-| [Idea quickstart](docs/IDEA_QUICKSTART.md) | Write and submit a first idea |
-| [Idea guide](docs/IDEA_GUIDE.md) | Full idea schema, fields, and examples |
-| [AutoResearch](docs/AUTORESEARCH.md) | Fresh runs, continuation, recovery, and bootstrap |
-| [HITL AutoResearch](docs/HITL_AUTORESEARCH.md) | Manager workflow, interfaces, frontier, and recovery |
-| [Local files](docs/LOCAL_IDEA_SUBMISSION.md) | Markdown ideas, local datasets, functions, and evaluators |
-| [IdeaHub](docs/IDEAHUB_INTEGRATION.md) | Import ideas from IdeaHub |
-| [GitHub integration](docs/GITHUB_INTEGRATION.md) | Optional repository creation and publishing |
-| [ClawHub skill](clawskill/SKILL.md) | ClawHub discovery and onboarding package |
-
-ClawHub provides installation and onboarding metadata. Run NeuriCo with Docker
-or local `uv`. The [documentation index](docs/README.md) separates user guides
-from developer, internal, and legacy documents.
+| Follow the complete workflow | [Workflow guide](docs/WORKFLOW.md) |
+| Write a first idea | [Idea quickstart](docs/IDEA_QUICKSTART.md) |
+| Use the complete idea schema | [Idea reference](docs/IDEA_GUIDE.md) |
+| Continue or bootstrap AutoResearch | [AutoResearch guide](docs/AUTORESEARCH.md) |
+| Work with the HITL manager | [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md) |
+| Submit Markdown or local resources | [Local submission guide](docs/LOCAL_IDEA_SUBMISSION.md) |
+| Import an IdeaHub idea | [IdeaHub guide](docs/IDEAHUB_INTEGRATION.md) |
+| Publish research to GitHub | [GitHub integration guide](docs/GITHUB_INTEGRATION.md) |
+| Configure paper-finder | [Paper-finder setup](config/paper_finder.md) |
+| Customize agent behavior | [Template reference](templates/README.md) |
+
+See the [documentation index](docs/README.md) for developer and legacy
+references. The [ClawHub skill](clawskill/SKILL.md) provides discovery and
+onboarding metadata; NeuriCo still runs through Docker or local `uv`.
 
 ## Contributing
 
-Contributions are welcome. Areas of interest include domain templates,
-evaluation contracts, experiment integrations, and research-mode improvements.
-Open an issue before starting a large change.
+Contributions are welcome. Open an issue before starting a large change.
 
 ## Citation
 
