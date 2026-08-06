@@ -58,9 +58,7 @@ run experiments, analyze results, and document the work.
 
 ## Quick start
 
-Install NeuriCo, submit an idea, then choose a research mode. Docker and local
-`uv` (native) support the same workflow; use the commands for the route you
-installed.
+Choose Docker or local `uv` and use the same route throughout.
 
 ### 1. Install
 
@@ -69,18 +67,10 @@ installed.
 ```bash
 git clone https://github.com/ChicagoHAI/neurico.git
 cd neurico
-./neurico setup
+./neurico setup --quick
 ```
 
-Choose **Quick setup** when prompted. It uses the default workspace, skips
-optional integrations, and opens Claude login. See
-[Installation details](#installation-details) for full setup, other providers,
-GPU support, and image management. Optional services are covered under
-[Optional configuration](#optional-configuration).
-
 #### Local `uv` (native)
-
-Install one provider CLI on the host, then:
 
 ```bash
 git clone https://github.com/ChicagoHAI/neurico.git
@@ -90,14 +80,9 @@ cp .env.example .env
 claude  # or: codex, gemini
 ```
 
-The last command starts provider OAuth login. No GitHub token or API key is
-needed for a basic run. See [Installation details](#installation-details) for
-native setup and [Optional configuration](#optional-configuration) when a
-workflow needs an external service.
-
 ### 2. Write and submit an idea
 
-Create `ideas/my_idea.yaml`:
+Create a YAML idea file:
 
 ```yaml
 idea:
@@ -108,16 +93,11 @@ idea:
     otherwise equivalent direct prompts.
 ```
 
-Submit it:
+Submit it and keep the printed `<idea_id>`:
 
 | Docker | Local `uv` (native) |
 | --- | --- |
-| `./neurico submit ideas/my_idea.yaml` | `uv run python src/cli/submit.py ideas/my_idea.yaml` |
-
-Submission validates the idea and prints an `<idea_id>`. Research does not
-start until you run the idea. Both routes accept relative and absolute paths.
-See [Writing and submitting ideas](#writing-and-submitting-ideas) for domain
-selection, optional fields, Markdown, and IdeaHub.
+| `./neurico submit path/to/idea.yaml` | `uv run python src/cli/submit.py path/to/idea.yaml` |
 
 ### 3. Choose a research mode
 
@@ -129,8 +109,7 @@ Replace `<idea_id>` with the ID printed during submission.
 | **[AutoResearch](#autoresearch)** | `./neurico run <idea_id> --autoresearch` | `uv run python src/core/runner.py <idea_id> --autoresearch` | Build a scored baseline and try one improvement |
 | **[HITL AutoResearch](#hitl-autoresearch)** | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` | Open the manager; start research with `/run` |
 
-Standard is the simplest first run. See [Research modes](#research-modes) for
-mode behavior, continuation, bootstrap, HITL controls, and flags.
+Start with Standard for a first run.
 
 ## Installation details
 
