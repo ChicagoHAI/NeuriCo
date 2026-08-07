@@ -136,6 +136,41 @@ def sealed_dir_for(work_dir: Path) -> Path:
     return work_dir.parent / ".scoring_sealed" / work_dir.name
 
 
+def protocol_store_dir_for(work_dir: Path) -> Path:
+    """
+    Return the sibling directory holding the last VALIDATED scoring protocol.
+
+    For a workspace at <workspaces>/<name>/, the store is at
+    <workspaces>/.protocol_store/<name>/. Unlike .scoring_sealed (a transient
+    relocation, removed by every unseal), this store persists across runs so a
+    later regeneration can extend the prior protocol instead of starting
+    fresh. It is written only by trusted runner code at validation time; like
+    the sealed dir it is outside the workspace but on the same mount (the
+    full isolation work is tracked separately).
+    """
+    work_dir = Path(work_dir)
+    return work_dir.parent / ".protocol_store" / work_dir.name
+
+
+def persist_validated_protocol(work_dir: Path) -> None:
+    """Copy the workspace's validated scoring protocol into the durable store.
+
+    Called when a (re)built protocol has passed its gates and the baseline is
+    accepted, i.e. the workspace copy is trusted at this moment. Overwrites
+    any previous store contents.
+    """
+    work_dir = Path(work_dir)
+    store = protocol_store_dir_for(work_dir) / "scoring"
+    store.mkdir(parents=True, exist_ok=True)
+    for name in ("eval.py", "targets.json", "interface.md"):
+        src = work_dir / "scoring" / name
+        if not src.is_file():
+            continue
+        tmp = store / (name + ".tmp")
+        shutil.copy2(src, tmp)
+        os.replace(tmp, store / name)
+
+
 def _public_sealed_paths(work_dir: Path) -> list[str]:
     """Return evaluator paths that must never reappear in a worker workspace."""
     return [

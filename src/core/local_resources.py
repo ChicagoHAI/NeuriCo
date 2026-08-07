@@ -562,7 +562,13 @@ def _sealed_copy_already_staged(work_dir: Path, dst: Path) -> bool:
         rel = dst.relative_to(Path(work_dir))
     except ValueError:
         return False
-    return (sealed_dir_for(work_dir) / rel).exists()
+    if (sealed_dir_for(work_dir) / rel).exists():
+        return True
+    # The bootstrap holdout seal parks data/.test in the bootstrap sealed dir
+    # while setup agents run; a crash in that window leaves it there until the
+    # next pipeline run restores it. Either way it counts as staged.
+    work_dir = Path(work_dir)
+    return (work_dir.parent / '.bootstrap_sealed' / work_dir.name / rel).exists()
 
 
 def _remove_in_workspace_sealed_source(work_dir: Path, src: Path,
@@ -629,7 +635,55 @@ def sealed_dataset_entries(idea: Dict[str, Any]) -> List[Dict[str, Any]]:
             if isinstance(entry, dict) and entry.get('sealed')]
 
 
-def scoring_materials_fingerprint(idea: Dict[str, Any]) -> str:
+def _tree_sha256(path: Path) -> str:
+    """Content hash of a file or directory tree (sorted relpath + bytes)."""
+    path = Path(path)
+    digest = hashlib.sha256()
+    if path.is_file():
+        with path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+    for file_path in sorted(p for p in path.rglob('*') if p.is_file()):
+        digest.update(file_path.relative_to(path).as_posix().encode('utf-8'))
+        with file_path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b''):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sealed_content_state_path(work_dir: Path) -> Path:
+    return Path(work_dir) / '.neurico' / 'sealed_content.json'
+
+
+def read_sealed_content_shas(work_dir: Path) -> Dict[str, str]:
+    """Recorded content hashes of staged sealed datasets, by dataset name.
+
+    Advisory state like the materials fingerprint (see
+    read_scoring_materials_fingerprint's trust note): corruption can only
+    force an extra rebaseline of the validated current best, never launder
+    agent output.
+    """
+    path = _sealed_content_state_path(work_dir)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+
+
+def _record_sealed_content_sha(work_dir: Path, name: str, sha: str) -> None:
+    shas = read_sealed_content_shas(work_dir)
+    shas[str(name)] = str(sha)
+    path = _sealed_content_state_path(work_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(shas, sort_keys=True) + '\n', encoding='utf-8')
+
+
+def scoring_materials_fingerprint(idea: Dict[str, Any],
+                                  work_dir: Optional[Path] = None) -> str:
     """
     Stable fingerprint of the evaluation materials a scoring protocol is built
     against: the set of declared sealed datasets plus the declared metrics and
@@ -638,15 +692,37 @@ def scoring_materials_fingerprint(idea: Dict[str, Any]) -> str:
     dict ordering AND to the declared->staged path rewrite (a sealed entry's
     'path' becomes data/.test/<name> after staging). Datasets are therefore
     identified by name-or-basename, not by their mutable path.
+
+    Each dataset also contributes a CONTENT hash, so replacing a dataset while
+    keeping its name changes the fingerprint and triggers regeneration. The
+    hash comes from the declared source when it is still readable; otherwise
+    from the hash recorded at staging time (the source is removed by staging's
+    move semantics), which keeps the fingerprint stable across resumes.
     """
     idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
     if not isinstance(idea_spec, dict):
         idea_spec = {}
 
-    sealed = sorted(
-        entry.get('name') or Path(str(entry.get('path') or '')).name
-        for entry in sealed_dataset_entries(idea)
-    )
+    # The recorded hash is authoritative: every fingerprint call site runs
+    # after stage_local_resources, which records (and on replacement refreshes)
+    # each staged dataset's content hash. Hashing the declared source directly
+    # is only a fallback for pre-staging callers, and only for absolute paths
+    # (a relative declared path cannot be resolved safely here).
+    recorded = read_sealed_content_shas(work_dir) if work_dir else {}
+    sealed = []
+    for entry in sealed_dataset_entries(idea):
+        name = entry.get('name') or Path(str(entry.get('path') or '')).name
+        content = recorded.get(str(name), '')
+        if not content:
+            source = entry.get('source_path') or entry.get('path') or ''
+            src = Path(str(source)).expanduser() if source else None
+            if src is not None and src.is_absolute() and src.exists():
+                try:
+                    content = _tree_sha256(src)
+                except OSError:
+                    content = ''
+        sealed.append([str(name), content])
+    sealed.sort()
 
     evaluation = idea_spec.get('evaluation')
     metrics_sig: List[List[str]] = []
@@ -703,7 +779,7 @@ def record_scoring_materials_fingerprint(work_dir: Path,
     path = _scoring_materials_state_path(work_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({'fingerprint': scoring_materials_fingerprint(idea)},
+        json.dumps({'fingerprint': scoring_materials_fingerprint(idea, work_dir)},
                    sort_keys=True) + '\n',
         encoding='utf-8',
     )
@@ -912,7 +988,22 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
             staged_present = (_sealed_copy_already_staged(work_dir, dst)
                               if sealed_entry else dst.exists())
 
-            if staged_present and not refresh_function:
+            # Same-name replacement: idempotency is keyed on the destination
+            # path, which cannot see a content change. When the declared
+            # source is still readable and its content differs from the hash
+            # recorded at staging time, refresh the staged copy instead of
+            # silently keeping stale bytes.
+            sealed_refresh = False
+            if sealed_entry and staged_present and src_available:
+                try:
+                    src_sha = _tree_sha256(src)
+                except OSError:
+                    src_sha = None
+                if src_sha is not None:
+                    recorded_sha = read_sealed_content_shas(work_dir).get(dst.name)
+                    sealed_refresh = src_sha != recorded_sha
+
+            if staged_present and not refresh_function and not sealed_refresh:
                 # Idempotent re-stage: keep the existing staged copy. For
                 # datasets this also avoids merging stale files over a
                 # prior copy.
@@ -939,6 +1030,23 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
                               f"{size / 1024 ** 3:.1f} GB; copying may take a while")
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     if sealed_entry:
+                        if sealed_refresh:
+                            # Replacement: drop the stale staged copy, both in
+                            # the workspace and any seal-relocated sibling, so
+                            # the fresh bytes are what scoring sees.
+                            from core.scoring_seal import sealed_dir_for
+                            stale_paths = [dst]
+                            try:
+                                stale_paths.append(
+                                    sealed_dir_for(work_dir)
+                                    / dst.relative_to(Path(work_dir)))
+                            except ValueError:
+                                pass
+                            for stale in stale_paths:
+                                if stale.is_dir():
+                                    shutil.rmtree(stale, ignore_errors=True)
+                                elif stale.exists():
+                                    stale.unlink()
                         # Stage the held-out data as plaintext into the
                         # workspace at data/.test, then remove the readable
                         # source copy (move semantics). The standard scoring
@@ -946,6 +1054,11 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
                         # agents run and feeds it to the scorer, so an agent
                         # never sees it. Symlinks are dereferenced so the
                         # staged copy is self-contained.
+                        # Record the SOURCE content hash before the source is
+                        # removed: the replacement check compares future
+                        # sources against this value.
+                        _record_sealed_content_sha(
+                            work_dir, dst.name, _tree_sha256(src))
                         _stage_sealed_source_plaintext(src, dst)
                         _remove_in_workspace_sealed_source(
                             work_dir, src, source_repo=continuation_repo)

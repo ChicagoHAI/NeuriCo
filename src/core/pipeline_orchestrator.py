@@ -1927,6 +1927,11 @@ class ResearchPipelineOrchestrator:
             "success": False,
         }
 
+        # SECURITY: hide the held-out data from every setup agent below
+        # (manifest trimmer, rule maker, eval verifier). Sealed before Pass 1;
+        # restored at each exit and just before the scorer.
+        holdout_sealed = self._seal_holdout_data()
+
         # STAGE B1: Workspace manifest (Pass 1 mechanical + Pass 2 trimmer agent).
         manifest_result = self._run_bootstrap_manifest(
             provider=provider,
@@ -1937,6 +1942,7 @@ class ResearchPipelineOrchestrator:
         if not manifest_result.get("success"):
             print()
             print("⚠️  Bootstrap manifest stage failed -- aborting.")
+            self._unseal_holdout_data(holdout_sealed)
             return results
 
         curated_manifest = manifest_result["curated_manifest"]
@@ -2025,7 +2031,11 @@ class ResearchPipelineOrchestrator:
         if not bootstrap_result.get("success"):
             print()
             print("⚠️  Bootstrap rule_maker stage failed -- aborting before scorer.")
+            self._unseal_holdout_data(holdout_sealed)
             return results
+
+        # The scorer's own seal expects data/.test in the workspace.
+        self._unseal_holdout_data(holdout_sealed)
 
         # STAGE B3: Scorer (executes scoring/eval.py against the existing artifacts).
         results["stages"][SCORER_STAGE] = self._run_scorer(
@@ -2075,6 +2085,12 @@ class ResearchPipelineOrchestrator:
             # from double-counting.
             hidden = append_hidden_sealed_entries(
                 raw_manifest, sealed_dir_for(self.work_dir))
+            # The holdout seal (see _seal_holdout_data) relocates data/.test to
+            # the bootstrap sealed dir before this stage; synthesize those
+            # entries too so the agents still see the datasets exist. The
+            # helper dedupes, so overlapping locations never double-count.
+            hidden += append_hidden_sealed_entries(
+                raw_manifest, self._bootstrap_sealed_dir_for())
             if hidden:
                 print(f"🔒 {hidden} sealed ground-truth entries synthesized "
                       f"(contents withheld; sealed out of the workspace)")
@@ -2199,6 +2215,57 @@ class ResearchPipelineOrchestrator:
     def _bootstrap_sealed_dir_for(self) -> Path:
         """Sibling sealed dir for bootstrap mode."""
         return self.work_dir.parent / ".bootstrap_sealed" / self.work_dir.name
+
+    def _seal_holdout_data(self) -> Optional[Path]:
+        """
+        Move sealed held-out data (data/.test) out of the workspace BEFORE any
+        bootstrap setup agent runs (manifest trimmer, rule maker, verifier).
+
+        Plaintext held-out data used to sit in the workspace throughout the
+        setup stages, held off only by prompt instructions; an agent that read
+        it could bias the very harness it authors. Pass-1 manifest entries for
+        the sealed data are synthesized from the sealed location, so agents
+        still see that the datasets exist without being able to read them.
+        Restored by _unseal_holdout_data just before the scorer stage.
+        """
+        src = self.work_dir / "data" / ".test"
+        sealed_dir = self._bootstrap_sealed_dir_for()
+        dst = sealed_dir / "data" / ".test"
+        if not src.exists():
+            # A crash inside the sealed window strands the copy here; treat it
+            # as already sealed so the caller's restore points recover it.
+            return sealed_dir if dst.exists() else None
+        if dst.exists():
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        print(f"🔒 Sealed held-out data away from setup agents: {dst}")
+        return sealed_dir
+
+    def _unseal_holdout_data(self, sealed_dir: Optional[Path]) -> None:
+        """Restore data/.test to the workspace (best-effort, like the
+        bootstrap unseal) so the scorer's own seal can pick it up."""
+        if sealed_dir is None:
+            return
+        src = Path(sealed_dir) / "data" / ".test"
+        if not src.exists():
+            return
+        dst = self.work_dir / "data" / ".test"
+        try:
+            if dst.exists():
+                if dst.is_dir():
+                    shutil.rmtree(dst)
+                else:
+                    dst.unlink()
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+            print(f"🔓 Restored held-out data to the workspace: {dst}")
+        except OSError as e:
+            print(f"⚠️  Holdout unseal failed -- sealed copy kept at {src} "
+                  f"for manual recovery: {e}")
 
     def _seal_bootstrap_inputs(self) -> Optional[Path]:
         """

@@ -103,28 +103,31 @@ def read_prior_scoring_protocol(work_dir: Path) -> Optional[Dict[str, str]]:
     Return the existing scoring protocol as {'eval','targets','interface'}, or
     None when no trusted prior exists (first generation / raw adopted repo).
 
-    Read ONLY from the TRUSTED sealed copy under .scoring_sealed (relocated out
-    of the agent-writable workspace during agent phases, i.e. the last
-    validated version). The workspace copy is worker-writable, so it is NOT a
-    fallback: a missing sealed copy means "no prior" and the rule maker
-    regenerates fresh. Feeding an agent-edited eval.py/targets.json into the
-    regeneration prompt could steer weaker targets (the eval-verifier gate is
-    skipped for goal-only ideas), so this reads the trusted copy or nothing.
+    Read ONLY from TRUSTED copies, in order: the .scoring_sealed relocation
+    (freshest, but transient: every unseal removes it) and then the durable
+    .protocol_store sibling (written by trusted runner code each time a
+    protocol is validated, so it survives a completed-run lifecycle). The
+    workspace copy is worker-writable, so it is NOT a fallback: with neither
+    trusted copy present the rule maker regenerates fresh. Feeding an
+    agent-edited eval.py/targets.json into the regeneration prompt could steer
+    weaker targets (the eval-verifier gate is skipped for goal-only ideas), so
+    this reads a trusted copy or nothing.
     """
-    from core.scoring_seal import sealed_dir_for
+    from core.scoring_seal import protocol_store_dir_for, sealed_dir_for
 
-    root = sealed_dir_for(work_dir)
-    eval_path = root / "scoring" / "eval.py"
-    targets_path = root / "scoring" / "targets.json"
-    if eval_path.is_file() and targets_path.is_file():
-        interface_path = root / "scoring" / "interface.md"
-        return {
-            "eval": eval_path.read_text(encoding="utf-8", errors="replace"),
-            "targets": targets_path.read_text(encoding="utf-8", errors="replace"),
-            "interface": (interface_path.read_text(encoding="utf-8",
-                                                   errors="replace")
-                          if interface_path.is_file() else ""),
-        }
+    for root in (sealed_dir_for(work_dir), protocol_store_dir_for(work_dir)):
+        eval_path = root / "scoring" / "eval.py"
+        targets_path = root / "scoring" / "targets.json"
+        if eval_path.is_file() and targets_path.is_file():
+            interface_path = root / "scoring" / "interface.md"
+            return {
+                "eval": eval_path.read_text(encoding="utf-8", errors="replace"),
+                "targets": targets_path.read_text(encoding="utf-8",
+                                                  errors="replace"),
+                "interface": (interface_path.read_text(encoding="utf-8",
+                                                       errors="replace")
+                              if interface_path.is_file() else ""),
+            }
     return None
 
 

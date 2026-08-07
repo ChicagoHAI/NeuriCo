@@ -1323,7 +1323,7 @@ https://github.com/ChicagoHAI/neurico
                 protocol_missing = not scoring_protocol_present(work_dir)
                 materials_changed = (
                     read_scoring_materials_fingerprint(work_dir)
-                    != scoring_materials_fingerprint(idea))
+                    != scoring_materials_fingerprint(idea, work_dir))
                 need_bootstrap = protocol_missing or materials_changed
                 force_rebaseline = need_bootstrap
                 if protocol_missing:

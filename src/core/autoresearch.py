@@ -16,7 +16,11 @@ import shutil
 import tempfile
 
 from core.scorer import load_scoring_results
-from core.scoring_seal import seal_scoring_files, unseal_scoring_files
+from core.scoring_seal import (
+    persist_validated_protocol,
+    seal_scoring_files,
+    unseal_scoring_files,
+)
 from core.dsi_slurm_artifacts import DSI_SLURM_ARTIFACTS_DIR, move_dsi_slurm_artifacts
 from core.autoresearch_common import (
     attempt_id_for,
@@ -1406,6 +1410,12 @@ def construct_bootstrap_initial_node(
             # so a later run re-fires the bootstrap rule maker only when they
             # change (not on incidental idea edits).
             record_scoring_materials_fingerprint(work_dir, idea)
+            # Persist the validated protocol into the durable store, so a later
+            # regeneration can extend it. The transient .scoring_sealed copy is
+            # removed by every unseal, and the workspace copy is wiped by the
+            # rebaseline restore, so without this store the "extend the prior
+            # protocol" path never sees a prior in a completed-run lifecycle.
+            persist_validated_protocol(work_dir)
             print()
             print("✅ Bootstrap AutoResearch baseline is ready.")
             print(f"   Baseline checkpoint: {baseline_sha}")
