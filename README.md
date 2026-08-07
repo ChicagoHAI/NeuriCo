@@ -442,6 +442,21 @@ flowchart LR
 
 ## Customizing NeuriCo
 
+### Selected domains
+
+| Domain | Examples |
+| --- | --- |
+| Artificial Intelligence | LLM evaluation, agents, and benchmarking |
+| Machine Learning | Model training, evaluation, and tuning |
+| Data Science | Statistical analysis and visualization |
+| Mathematics | Proofs and formal verification |
+| Scientific Computing | Numerical methods and simulation |
+
+See the complete [domain definitions](config/domains.yaml) for all supported
+domains and domain keys.
+
+### Templates and skills
+
 Files under `templates/` control NeuriCo's agent behavior. Docker reads these
 files directly from the checkout, so changes take effect without rebuilding the
 image.
@@ -453,10 +468,8 @@ image.
 | Resource discovery | `templates/agents/resource_finder.txt` |
 | Base research method | `templates/base/researcher.txt` |
 | Domain guidance | `templates/domains/<domain>/core.txt` |
-| Provider skills | `templates/skills/<skill-name>/SKILL.md` |
-
-For template composition, domain customization, and skill development, see
-[`templates/README.md`](templates/README.md).
+| Research skills | [`templates/skills/`](templates/skills/) |
+| Domain and skill authoring | [`templates/README.md`](templates/README.md) |
 
 ## Documentation
 
@@ -465,10 +478,11 @@ For template composition, domain customization, and skill development, see
 | [Workflow](docs/WORKFLOW.md) | Setup, idea submission, and research modes for Docker and local `uv` |
 | [Idea quickstart](docs/IDEA_QUICKSTART.md) | Prepare and submit a first idea |
 | [Idea guide](docs/IDEA_GUIDE.md) | All available idea fields and options |
-| [AutoResearch](docs/AUTORESEARCH.md) | Fresh runs, continuation, recovery, and bootstrap |
-| [HITL AutoResearch](docs/HITL_AUTORESEARCH.md) | Web and terminal interfaces, human review, and recovery |
 | [Local idea submission](docs/LOCAL_IDEA_SUBMISSION.md) | Convert Markdown or text and use local resources |
 | [IdeaHub](docs/IDEAHUB_INTEGRATION.md) | Import ideas from IdeaHub |
+| [AutoResearch](docs/AUTORESEARCH.md) | Fresh runs, continuation, recovery, and bootstrap |
+| [HITL AutoResearch](docs/HITL_AUTORESEARCH.md) | Web and terminal interfaces, human review, and recovery |
+| [Architecture and roadmap](docs/ARCHITECTURE_AND_ROADMAP.md) | System architecture, template design, and planned directions |
 | [GitHub integration](docs/GITHUB_INTEGRATION.md) | Optional repository creation and publishing |
 | [ClawHub skill](clawskill/SKILL.md) | ClawHub discovery and onboarding package |
 
