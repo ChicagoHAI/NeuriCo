@@ -1,438 +1,245 @@
 # NeuriCo Workflow Guide
 
-This guide explains the complete workflow for using NeuriCo, from idea submission to results publication.
+NeuriCo has one user journey and two supported execution routes:
 
-## Overview
+1. set up NeuriCo;
+2. write and submit an idea;
+3. run the idea in Standard, AutoResearch, or HITL AutoResearch mode.
 
-NeuriCo uses a **workspace-first** approach where GitHub repositories are created immediately upon idea submission, allowing you to add resources before the AI agent runs.
+Docker and local `uv` are equal routes. Docker commands begin with
+`./neurico`; local commands run the corresponding Python entrypoint with
+`uv run python`. Do not mix the two command columns within one run.
 
-## Complete Workflow
+## 1. Set up NeuriCo
 
-### Step 1: Setup (One-time)
+### Docker route
+
+Prerequisites: Git and a running Docker installation.
 
 ```bash
-# Install uv if not already installed
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Clone and setup NeuriCo
-git clone https://github.com/ChicagoHAI/neurico
+git clone https://github.com/ChicagoHAI/neurico.git
 cd neurico
+./neurico setup --quick
+```
 
-# Install dependencies
+Quick setup pulls the current image, creates minimal configuration, and guides
+you through Claude OAuth login. Run `./neurico setup` instead when you want to
+choose Codex or Gemini during setup, configure GitHub, add API keys, or change
+the workspace location.
+
+You can change configuration later:
+
+```bash
+./neurico config
+./neurico login
+./neurico update
+```
+
+The repository is still required with the prebuilt image. It supplies the
+`./neurico` launcher, idea records, configuration, and templates. The launcher
+mounts those files and the configured workspace into each container.
+
+### Local `uv` route
+
+Prerequisites: Git, [`uv`](https://docs.astral.sh/uv/), and one locally installed
+provider CLI.
+
+```bash
+git clone https://github.com/ChicagoHAI/neurico.git
+cd neurico
 uv sync
-
-# Configure environment
 cp .env.example .env
-# Edit .env and add your GITHUB_TOKEN
+claude  # or: codex, gemini
 ```
 
-### Step 2: Create Research Idea
+The final command performs provider OAuth login. Edit `.env` only for optional
+integrations such as GitHub, IdeaHub conversion, or paper-finder.
 
-Create a YAML file describing your research idea. You have two options:
+### Optional configuration shared by both routes
 
-**Option A: Minimal Specification (v1.1 - Recommended)**
+- `.env` stores optional GitHub and service credentials.
+- `config/workspace.yaml` selects the workspace parent directory.
+- `templates/` controls agent instructions and skills.
 
-Let the agent research details through literature review:
+GitHub is not required. Use `--no-github` during submission and execution for a
+fully local research workspace.
+
+## 2. Write and submit an idea
+
+### Write the idea
+
+Create `ideas/my_experiment.yaml`. Only a title, domain, and testable hypothesis
+are needed:
 
 ```yaml
-# my_experiment.yaml
 idea:
-  title: "Impact of Chain-of-Thought on Math Reasoning"
+  title: "Impact of chain-of-thought on math reasoning"
   domain: artificial_intelligence
-  hypothesis: |
-    Chain-of-thought prompting improves LLM performance on
-    multi-step math problems by 15-30% compared to direct prompting.
-
-  background:
-    papers:
-      - url: "https://arxiv.org/abs/2201.11903"
-        description: "Original Chain-of-Thought paper"
-
-  constraints:
-    compute: cpu_only
-    budget: 50
-    time_limit: 3600
+  hypothesis: >
+    Chain-of-thought prompting improves accuracy on multi-step math problems
+    compared with direct prompting.
 ```
 
-The agent will automatically:
-- Search for appropriate datasets (e.g., GSM8K, MATH)
-- Identify baselines from literature
-- Select standard evaluation metrics
-- Document choices in `resources.md`
+Optional sections can provide papers, datasets, methods, constraints, expected
+outputs, local resources, and evaluation metrics. See
+[`../ideas/schema.yaml`](../ideas/schema.yaml) and
+[`../ideas/examples/`](../ideas/examples/). For guided authoring, use the
+[`Idea Quickstart`](IDEA_QUICKSTART.md) or the complete
+[`Idea Guide`](IDEA_GUIDE.md).
 
-**Option B: Detailed Specification (Traditional)**
+### Submit the idea
 
-Provide full experimental details if you have specific requirements:
+The following commands do not require GitHub:
 
-```yaml
-# my_experiment.yaml
-idea:
-  title: "My Research Title"
-  domain: machine_learning
-  hypothesis: "My testable hypothesis"
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico submit ideas/my_experiment.yaml --no-github` | `uv run python src/cli/submit.py ideas/my_experiment.yaml --no-github` |
 
-  methodology:
-    approach: "High-level strategy"
-    steps: ["Step 1", "Step 2"]
-    baselines: ["Baseline 1", "Baseline 2"]
-    metrics: ["accuracy", "f1_score"]
+Submission validates the idea, assigns an idea ID, records it under `ideas/`,
+and prepares its workspace. Keep the printed `<idea_id>`.
 
-  background:
-    datasets:
-      - name: "Dataset Name"
-        source: "huggingface:org/dataset"
+To use GitHub, set `GITHUB_TOKEN` in `.env` and omit `--no-github`. Submission
+then creates or connects the research repository and prepares its local clone.
 
-  expected_outputs:
-    - type: metrics
-      format: json
-      fields: [accuracy, f1_score]
-```
+### Alternative input: IdeaHub
 
-See `ideas/schema.yaml` for complete specification and `ideas/examples/` for more examples.
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico fetch <ideahub_url> --submit --no-github` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url> --submit --no-github` |
 
-### Step 3: Submit Idea
+### Alternative input: Markdown or text
 
-```bash
-python src/cli/submit.py my_experiment.yaml
-```
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico submit-local idea.md --submit --no-github` | `uv run python src/cli/submit_local.py idea.md --submit --no-github` |
 
-**What happens:**
-1. ✅ Validates your idea against schema
-2. 📦 Creates GitHub repository (personal account or organization)
-3. 📥 Clones repository to `workspace/<repo-name>/`
-4. 📝 Adds research metadata (README, idea.yaml)
-5. 🚀 Commits and pushes initial setup to GitHub
+Use the local-file route when the idea refers to datasets or functions already
+on your machine. Declare those paths in the idea so NeuriCo can validate and
+stage them. See [`LOCAL_IDEA_SUBMISSION.md`](LOCAL_IDEA_SUBMISSION.md).
 
-**Output:**
-```
-✓ Idea submitted successfully: my_experiment_20250103_120000_abc123de
-✓ Repository created: https://github.com/your-username/my-experiment-20250103-120000-abc123de
-✓ Workspace ready at: workspace/my-experiment-20250103-120000-abc123de
+## 3. Choose a research mode
 
-NEXT STEPS:
-1. (Optional) Add resources to workspace:
-   cd workspace/my-experiment-20250103-120000-abc123de
-   # Add datasets, documents, etc.
-2. Run the research:
-   python src/core/runner.py my_experiment_20250103_120000_abc123de
-```
+### Standard
 
-### Step 4: Add Resources (Optional but Recommended)
+Standard mode runs the multi-agent research pipeline once.
 
-Navigate to the workspace and add your resources:
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico run <idea_id> --provider claude --no-github --full-permissions` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --full-permissions` |
 
-```bash
-cd workspace/my-experiment-20250103-120000-abc123de
+Use it when one complete pass is sufficient or when you want to inspect a
+baseline before starting iterative work.
 
-# Create directory structure
-mkdir -p datasets docs code
+### AutoResearch
 
-# Add datasets
-cp ~/data/my_dataset.csv datasets/
-cp ~/data/reference_data.json datasets/
+AutoResearch builds and scores a baseline, then proposes, executes, scores, and
+accepts or rejects iterative improvements.
 
-# Add documentation
-cp ~/papers/related_work.pdf docs/
-echo "# Background Information" > docs/context.md
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico run <idea_id> --provider claude --no-github --full-permissions --autoresearch --autoresearch-iterations 3` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --full-permissions --autoresearch --autoresearch-iterations 3` |
 
-# Add helper code
-cat > code/utils.py << 'EOF'
-import numpy as np
+To continue an already scored workspace:
 
-def preprocess_data(data):
-    """Helper function for preprocessing."""
-    return data
-EOF
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico run <idea_id> --provider claude --no-github --full-permissions --continue-autoresearch --autoresearch-iterations 3` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --full-permissions --continue-autoresearch --autoresearch-iterations 3` |
 
-# Commit and push to GitHub
-git add .
-git commit -m "Add research resources: datasets and utilities"
-git push
+To convert an existing unscored Standard workspace into a continuation-ready
+AutoResearch baseline, run `--bootstrap-autoresearch-baseline`, then use the
+continuation command above:
 
-# Return to project root
-cd ../..
-```
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico run <idea_id> --provider claude --no-github --bootstrap-autoresearch-baseline` | `uv run python src/core/runner.py <idea_id> --provider claude --no-github --bootstrap-autoresearch-baseline` |
 
-**Why add resources?**
+See [`AUTORESEARCH.md`](AUTORESEARCH.md) for scoring, checkpoints, recovery, and
+bootstrap behavior.
 
-| Resource Type | Purpose | Example |
-|--------------|---------|---------|
-| **Datasets** | Large data files for analysis | CSV, JSON, parquet files |
-| **Documents** | Papers, specs, documentation | PDFs, markdown files |
-| **Code** | Helper functions, baselines | Python modules, utilities |
-| **Configs** | Model configurations, hyperparameters | YAML, JSON configs |
+### HITL AutoResearch
 
-The AI agent will have access to all these resources when it runs.
+HITL AutoResearch has two interfaces backed by the same durable manager and
+workspace state. Starting either interface does not immediately start the
+research run. The web interface uses a setup panel; the terminal interface uses
+the `/run` command.
 
-### Phase Handoffs and STATE.md
+#### Web interface
 
-Multi-agent runs maintain a human-readable `STATE.md` in the workspace. The
-pipeline-generated sections record the current phase, prior phase summary,
-workspace check, and expected-output validation. Each research agent should
-update only its own phase-specific notes block:
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
 
-```markdown
-<!-- NEURICO_AGENT_NOTES_START:resource_finder -->
-Phase 1 complete: selected the top three directions.
-Key finding: ...
-Next: implement the strongest direction and validate ...
-<!-- NEURICO_AGENT_NOTES_END:resource_finder -->
-```
+The default page is `http://localhost:7890`. The printed bootstrap URL includes
+the session token. Open **Start AutoResearch** to configure and launch a fresh
+or continuing run. To choose another port:
 
-Keep each handoff concise and evidence-based. If a phase is missing an expected
-artifact, the pipeline records the phase as failed rather than starting the
-next phase with an incomplete workspace. The default direction budget is
-three; set `idea.max_directions` to change it for a particular run.
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico hitl-web <idea_id> --port 8123` | `uv run python src/cli/hitl_web.py <idea_id> --port 8123` |
 
-### Step 5: Run Research
+The Docker route runs the manager inside the container and publishes the port
+only to `127.0.0.1` on the host.
 
-```bash
-python src/core/runner.py my_experiment_20250103_120000_abc123de
+#### Terminal interface
 
-# Options:
-#   --provider claude|gemini|codex  (default: claude)
-#   --timeout SECONDS               (default: 3600)
-#   --no-github                     (run locally without GitHub)
-```
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
 
-**What happens:**
-1. 📥 Pulls latest changes from GitHub (includes your resources)
-2. 📝 Generates comprehensive research prompt
-3. 🤖 Launches AI agent in the workspace
-4. 🔬 Agent executes research (v1.1 workflow):
-   - **Phase 0**: Checks provided resources, identifies gaps
-   - **Research** (if needed): Searches for datasets, baselines, methods (30-60 min)
-   - **Planning**: Designs detailed experimental plan
-   - **Setup**: Creates virtual environment, installs dependencies
-   - **Implementation**: Writes code, runs experiments (uses notebooks)
-   - **Analysis**: Analyzes results, creates visualizations
-   - **Documentation**: Writes REPORT.md, README.md, resources.md
-5. 📤 Commits and pushes all results to GitHub
+Enter `/run` to configure and launch a fresh or continuing run. Other useful
+terminal commands are:
 
-**During execution:**
-- See real-time output in terminal
-- Logs saved to `workspace/<repo-name>/logs/`
-- Agent creates notebooks, results, and artifacts
+| Command | Purpose |
+| --- | --- |
+| `/run` | Configure and start a fresh or continuing HITL run |
+| `/reply <number>` | Choose an option for the active human request |
+| `/reply <feedback>` | Resolve the request with free-form feedback |
+| `/help` | Show available commands |
+| `/quit` | Close the terminal client |
 
-### Step 6: Review Results
+NeuriCo detects existing HITL frontier state and chooses fresh or continue
+behavior automatically. See [`HITL_AUTORESEARCH.md`](HITL_AUTORESEARCH.md) for
+the manager, human, worker, frontier, and recovery model.
 
-All results are available both locally and on GitHub:
+## Review the results
 
-**Local workspace:**
-```
-workspace/<repo-name>/
-├── REPORT.md                   # Main research report (v1.1)
-├── README.md                   # Project overview
-├── resources.md                # Research process documentation (v1.1)
-├── notebooks/
-│   ├── experiments.ipynb       # Experimental code (descriptive names)
-│   └── analysis.ipynb          # Analysis and visualizations
+Workspaces live under the parent configured in `config/workspace.yaml` (default:
+`workspaces/`). Typical artifacts include:
+
+```text
+workspaces/<research-workspace>/
+├── README.md
+├── REPORT.md
+├── STATE.md
 ├── results/
-│   ├── metrics.json            # Quantitative results
-│   └── figures/                # Plots and visualizations
-├── artifacts/
-│   └── *.pt / *.pkl            # Models, checkpoints
 ├── logs/
-│   ├── research_prompt.txt     # Generated prompt
-│   └── execution_claude.log    # Full execution log
-├── datasets/                   # Your datasets
-├── docs/                       # Your documents
-├── code/                       # Your helper code
-└── .neurico/
-    └── idea.yaml               # Original idea spec
+├── artifacts/
+├── scoring/
+└── paper_draft/
 ```
 
-**GitHub repository:**
-- Visit the repository URL shown after submission
-- All results committed and pushed automatically
-- README with research overview
-- Complete version history
+AutoResearch attempt history is stored under
+`logs/experiment-autoresearch/`. HITL control state is stored under
+`.neurico/hitl/` inside the workspace. GitHub-enabled runs can also publish the
+research artifacts to their connected repository.
 
-### Step 7: Iterate (Optional)
+## Common decisions
 
-If you want to extend or improve the research:
+| Situation | Choice |
+| --- | --- |
+| No GitHub token | Add `--no-github` to submission and run commands |
+| Use Codex or Gemini | Replace `--provider claude` with `codex` or `gemini` and log in to that CLI |
+| Write a paper | Add `--write-paper` and optionally `--paper-style neurips\|icml\|acl` |
+| Run without unrestricted provider permissions | Omit `--full-permissions` |
+| Continue ordinary AutoResearch | Use `--continue-autoresearch` |
+| Continue HITL AutoResearch | Reopen `hitl-web` or `hitl-cli`, then use `/run`; continuation is detected automatically |
+
+Run help for the route you selected:
 
 ```bash
-cd workspace/<repo-name>
+# Docker
+./neurico help
 
-# Make changes
-# - Edit notebooks
-# - Add more experiments
-# - Refine analysis
-
-# Commit changes
-git add .
-git commit -m "Extended analysis with additional metrics"
-git push
-
-# Or re-run with different provider
-cd ../..
-python src/core/runner.py my_experiment_id --provider gemini
+# Local uv
+uv run python src/core/runner.py --help
 ```
-
-## Advanced Workflows
-
-### Collaborative Research
-
-**Researcher A submits idea:**
-```bash
-python src/cli/submit.py experiment.yaml
-# Shares idea_id with team
-```
-
-**Researcher B adds domain expertise:**
-```bash
-cd workspace/<repo-name>
-# Add domain-specific datasets
-# Add specialized utilities
-git commit -am "Add domain expertise and resources"
-git push
-```
-
-**Researcher C runs experiment:**
-```bash
-python src/core/runner.py <idea_id>
-# Results available to entire team on GitHub
-```
-
-### Multi-Provider Comparison
-
-Run same experiment with different AI providers:
-
-```bash
-# Run with Claude
-python src/core/runner.py my_experiment --provider claude
-
-# Run with Gemini
-python src/core/runner.py my_experiment --provider gemini
-
-# Compare results in respective run directories
-```
-
-### Local-First Development
-
-Test locally before pushing to GitHub:
-
-```bash
-# Submit without GitHub
-python src/cli/submit.py my_idea.yaml --no-github
-
-# Run locally
-python src/core/runner.py my_idea_id --no-github
-
-# Results saved to runs/ directory instead of workspace/
-```
-
-## Tips and Best Practices
-
-### Resource Management
-
-✅ **DO:**
-- Add datasets that are too large to describe in YAML
-- Include reference implementations for baselines
-- Provide domain-specific documentation
-- Commit resources before running experiments
-
-❌ **DON'T:**
-- Add extremely large files (>100MB) - use Git LFS or external storage
-- Include sensitive data without proper access controls
-- Commit credentials or API keys
-
-### Workspace Organization
-
-Recommended structure for resources:
-
-```
-workspace/<repo-name>/
-├── datasets/
-│   ├── raw/           # Original data
-│   ├── processed/     # Cleaned data
-│   └── README.md      # Dataset documentation
-├── docs/
-│   ├── papers/        # Related papers
-│   ├── specs/         # Specifications
-│   └── notes.md       # Research notes
-├── code/
-│   ├── baselines/     # Baseline implementations
-│   ├── utils/         # Helper functions
-│   └── __init__.py
-└── configs/
-    └── model_config.yaml
-```
-
-### Version Control
-
-- **Commit regularly**: Push resources incrementally
-- **Descriptive messages**: "Add CIFAR-10 dataset" not "Add data"
-- **Use .gitignore**: Exclude large binary files, temporary outputs
-- **Tag releases**: Use git tags for important milestones
-
-### Troubleshooting
-
-**Issue: "No workspace found"**
-```bash
-# Solution: Submit idea first to create workspace
-python src/cli/submit.py my_idea.yaml
-```
-
-**Issue: "Failed to pull latest changes"**
-```bash
-# Solution: Check git status in workspace
-cd workspace/<repo-name>
-git status
-# Resolve any conflicts, then continue
-```
-
-**Issue: "Agent can't find my dataset"**
-```bash
-# Solution: Ensure dataset is committed and pushed
-cd workspace/<repo-name>
-git add datasets/
-git commit -m "Add dataset"
-git push
-```
-
-## FAQ
-
-**Q: When should I add resources vs. describe them in YAML?**
-
-A: Add resources as files when:
-- Datasets are large (>1MB)
-- You have existing code to reuse
-- Documentation is extensive (papers, specs)
-
-Describe in YAML when:
-- You can provide a URL to download
-- Dataset is generated synthetically
-- Code should be written from scratch
-
-**Q: Can I modify the workspace after the agent runs?**
-
-A: Yes! The workspace is a regular git repository. You can:
-- Edit notebooks
-- Add more experiments
-- Refine documentation
-- Commit and push changes
-
-**Q: What if I need to re-run an experiment?**
-
-A: Simply run `python src/core/runner.py <idea_id>` again. The runner will:
-- Use existing workspace
-- Pull latest changes
-- Re-execute research
-- Commit new results
-
-**Q: How do I share results with collaborators?**
-
-A: Just share the GitHub repository URL. Collaborators can:
-- View results on GitHub
-- Clone the repository
-- Add their own contributions
-- Run additional experiments
-
----
-
-**Next Steps:**
-- Review example ideas in `ideas/examples/`
-- See [GitHub Integration Guide](../GITHUB_INTEGRATION.md) for details
-- Check [README](../README.md) for complete documentation

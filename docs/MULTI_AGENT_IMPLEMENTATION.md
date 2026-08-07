@@ -1,5 +1,9 @@
 # Multi-Agent Research Pipeline Implementation
 
+> **Developer/internal document.** This is an implementation reference, not a
+> setup or user workflow guide. See [`WORKFLOW.md`](WORKFLOW.md) for current
+> Docker and local `uv` usage.
+
 ## Overview
 
 This document describes the implementation of the multi-agent research pipeline architecture for the NeuriCo system.

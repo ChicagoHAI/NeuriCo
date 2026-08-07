@@ -1,5 +1,9 @@
 # Workspace Directory Consistency - Verification
 
+> **Developer/internal document.** This is an implementation-verification
+> record, not a user setup guide. Current workspace configuration is documented
+> in [`WORKFLOW.md`](WORKFLOW.md).
+
 ## Summary
 
 Both the Resource Finder and Experiment Runner agents are configured to run in the workspace directory with consistent `cwd` settings and clear instructions.

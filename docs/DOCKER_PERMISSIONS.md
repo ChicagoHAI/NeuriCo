@@ -1,5 +1,9 @@
 # Docker Permissions Design
 
+> **Developer/internal document.** This describes Docker's mount and permission
+> implementation. It is not required for normal setup; use it when maintaining
+> or diagnosing the container boundary.
+
 This document explains how NeuriCo handles file permissions between the host machine and Docker containers, the reasoning behind the current design, and known tradeoffs.
 
 ## The Core Problem

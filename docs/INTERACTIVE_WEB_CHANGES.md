@@ -1,5 +1,10 @@
 # Browser UI for Interactive Mode — Our Changes
 
+> **Developer/historical document.** This records implementation work for the
+> legacy interactive interface. It is not current user guidance; use
+> [`HITL_AUTORESEARCH.md`](HITL_AUTORESEARCH.md) for the supported HITL
+> workflow.
+
 This documents the work to add a browser-based interface to NeuriCo's
 interactive mode — the changes in this PR, on top of #86 and #104.
 

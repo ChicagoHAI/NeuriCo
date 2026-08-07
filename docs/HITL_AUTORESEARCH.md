@@ -11,6 +11,25 @@ reuses NeuriCo's research agents, scoring contract, and Git checkpoints, but
 adds a durable interactive manager, explicit human decision points, a retained
 research frontier, and runtime-mediated recovery.
 
+## Start HITL AutoResearch
+
+HITL AutoResearch has two interfaces backed by the same manager conversation,
+human requests, frontier, and workspace run state.
+
+| Interface | Docker | Local `uv` |
+| --- | --- | --- |
+| Web | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
+| Terminal | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
+
+Opening an interface does not start research automatically. In the web
+interface, open **Start AutoResearch**, choose the run settings, and click the
+start button. In the terminal interface, enter `/run` and answer the prompts.
+NeuriCo automatically detects whether the workspace needs a fresh HITL run or
+should continue its existing frontier.
+
+The Docker commands run both the manager and research workers in the container.
+The local commands run both through the local `uv` environment.
+
 ## Design Goals
 
 The HITL path is organized around five invariants:
@@ -266,14 +285,35 @@ The human may switch the manager provider between Codex and Claude. One manager
 turn has one provider; the two providers are not combined as simultaneous
 manager backbones.
 
-## Terminal Interface
+## User Interfaces
+
+### Web interface
+
+The web interface opens on port `7890` by default. Use the printed bootstrap URL,
+which includes the session token.
+
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
+
+To choose another port:
+
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico hitl-web <idea_id> --port 8123` | `uv run python src/cli/hitl_web.py <idea_id> --port 8123` |
+
+Docker publishes the selected port only to `127.0.0.1` on the host. The manager
+binds inside the container and the browser uses the printed
+`http://localhost:<port>` URL.
+
+### Terminal interface
 
 The terminal client is a conversation-focused alternative to the HITL web
-page. Start it for a submitted idea with:
+page.
 
-```bash
-./neurico hitl-cli <idea_id>
-```
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
 
 Both clients read and update the same durable manager conversation, human
 requests, and workspace run state. The terminal renders only human-visible
@@ -404,7 +444,6 @@ with full local permissions is not an operating-system sandbox.
 | Standard research | Multi-agent pipeline with ordinary stage completion | No iterative frontier |
 | AutoResearch | Automated proposal, execution, scoring, and current-best comparison | Single current-best lineage |
 | HITL AutoResearch | Runtime-mediated workers, durable manager/human conversation, isolated scoring, and manager-owned frontier decisions | Multi-node active frontier |
-| Interactive mode | Human conversation with the ordinary interactive manager | Separate from the HITL runtime |
 
 HITL keeps a separate control path so its durability and authority rules do not
 change ordinary NeuriCo behavior.
