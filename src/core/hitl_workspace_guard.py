@@ -20,6 +20,9 @@ _EXCLUDED_PUBLIC_PREFIXES = {
     ".venv",
     "__pycache__",
     "logs",
+    # Runtime-owned: PipelineState._save() rewrites it during guarded phases,
+    # so snapshotting it turns the runtime's own write into a worker violation.
+    "STATE.md",
 }
 
 
