@@ -1829,9 +1829,12 @@ class ResearchPipelineOrchestrator:
                     work_dir=tree, timeout=timeout, idea=idea),
                 temporary_ref="refs/neurico/bootstrap/scoring",
             )
-            success = bool(result.get("success")) or (
-                isinstance(result.get("results"), dict)
-                and bool(result.get("scored_checkpoint_sha")))
+            # A baseline may miss its targets, but eval.py must have exited
+            # cleanly: run_scorer's success already encodes return_code == 0 with
+            # results present and no error. Trust that rather than accepting any
+            # run that merely left a (possibly partial) results.json behind, so a
+            # crashed evaluator cannot anchor the baseline.
+            success = bool(result.get("success"))
             result["success"] = self.state.complete_stage(
                 SCORER_STAGE, success, result)
             return result

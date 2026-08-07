@@ -457,7 +457,7 @@ def _target_map(payload: Any) -> Dict[str, Dict[str, Any]]:
 def check_target_floor(work_dir: Path,
                        prior_protocol: Optional[Dict[str, str]] = None,
                        trusted_idea: Optional[Dict[str, Any]] = None) -> List[str]:
-    """Reject a regenerated protocol that WEAKENS a retained property's target.
+    """Reject a regenerated protocol that WEAKENS or DROPS a retained property.
 
     The "extend, keep existing metrics" instruction must never lower the bar on
     a property that already had a trusted target. Trusted anchors are the sealed
@@ -503,7 +503,14 @@ def check_target_floor(work_dir: Path,
     violations: List[str] = []
     for name, anchor in anchors.items():
         if name not in new_targets:
-            continue  # a dropped property is a separate concern, not weakening
+            # Dropping a retained property is a form of weakening: the "extend,
+            # keep existing metrics" contract must not silently remove a target
+            # that the prior protocol or the trusted idea already enforced.
+            violations.append(
+                f"property '{name}': present in the prior protocol / declared "
+                f"metrics but dropped from the regenerated targets.json "
+                f"(regeneration must retain every existing metric)")
+            continue
         new = new_targets[name]
         direction = anchor.get("direction") or new.get("direction")
         prior_t, new_t = anchor["target"], new["target"]

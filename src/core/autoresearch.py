@@ -1198,8 +1198,33 @@ def construct_bootstrap_initial_node(
             and checkpoints.checkpoint_exists(saved_current_best_sha)):
         print(f"   Restoring current best {saved_current_best_sha} before "
               "re-baselining under the new protocol.")
-        checkpoints.restore_checkpoint(saved_current_best_sha,
-                                       remove_hidden_scoring=True)
+        # Preserve freshly staged sealed evaluation data across the restore.
+        # remove_hidden_scoring wipes data/.test to stop an agent-mutated tree
+        # from being laundered into the baseline, but on a materials-changed
+        # rebaseline data/.test was just re-staged from the trusted declared
+        # source with no agent in between. Keeping it lets the baseline score
+        # against the intended held-out data instead of a wiped directory; the
+        # scorer seals it out of the workspace immediately after.
+        staged_sealed = work_dir / "data" / ".test"
+        held_sealed = work_dir.parent / f".sealed_staging_hold_{work_dir.name}"
+        # Recover a hold left behind by an interrupted prior restore.
+        if held_sealed.exists() and not staged_sealed.exists():
+            staged_sealed.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(held_sealed), str(staged_sealed))
+        elif held_sealed.exists():
+            shutil.rmtree(held_sealed, ignore_errors=True)
+        preserved = staged_sealed.exists()
+        if preserved:
+            shutil.move(str(staged_sealed), str(held_sealed))
+        try:
+            checkpoints.restore_checkpoint(saved_current_best_sha,
+                                           remove_hidden_scoring=True)
+        finally:
+            if preserved and held_sealed.exists():
+                if staged_sealed.exists():
+                    shutil.rmtree(staged_sealed, ignore_errors=True)
+                staged_sealed.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(held_sealed), str(staged_sealed))
 
     # Capture the existing protocol to extend BEFORE the pipeline seals or
     # overwrites scoring/; None when there is nothing to extend. Read AFTER the
