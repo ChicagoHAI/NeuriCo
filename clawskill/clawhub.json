@@ -1,8 +1,8 @@
 {
   "name": "neurico",
-  "version": "0.2.0",
-  "tagline": "NeuriCo: idea in, paper out. Autonomous agents for research experiments.",
-  "description": "NeuriCo (Neural Co-Scientist) is an autonomous research framework that takes structured research ideas (YAML) and orchestrates AI agents (Claude Code, Codex, Gemini) to design, execute, analyze, and document scientific experiments. It produces runnable code, experimental results with plots, LaTeX papers compiled to PDF, and GitHub repositories -- all from a minimal input of title, domain, and hypothesis. Supports 9 research domains including machine learning, data science, NLP, computer vision, reinforcement learning, systems, theory, scientific computing, and artificial intelligence. Features include automated literature review via Semantic Scholar, dataset discovery, baseline identification, experiment execution with GPU support, and academic paper generation in NeurIPS/ICML/ACL formats.",
+  "version": "0.4.0",
+  "tagline": "NeuriCo: Standard, AutoResearch, and HITL research through Docker or local uv.",
+  "description": "NeuriCo (Neural Co-Scientist) is an autonomous and human-in-the-loop research framework. Users submit a structured research idea and choose Standard, AutoResearch, or HITL AutoResearch. Docker and local uv are equal execution routes. NeuriCo supports Claude Code, Codex, and Gemini and can produce runnable code, scored experimental results, plots, reports, optional LaTeX papers, and optional GitHub repositories.",
   "category": "Research & Science",
   "tags": [
     "autonomous-research",
@@ -13,6 +13,8 @@
     "literature-review",
     "hypothesis-testing",
     "scientific-computing",
+    "human-in-the-loop",
+    "autoresearch",
     "claude-code",
     "codex",
     "gemini",
@@ -34,7 +36,7 @@
   "requirements": {
     "minimal": ["git", "docker"],
     "alternative_minimal": ["git", "python>=3.10", "uv"],
-    "recommended": ["github-token"],
+    "recommended": ["provider-cli-oauth-login"],
     "optional": [
       "openai-api-key",
       "s2-api-key",

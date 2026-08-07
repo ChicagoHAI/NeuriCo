@@ -21,8 +21,9 @@ location is `baselines/`; all other evaluator-owned outputs remain under
 
 Revalidate the approved rule-maker deliverables after the revision:
 `scoring/eval.py`, `scoring/targets.json`, `scoring/interface.md`, and
-`scoring/rule_maker_log.md`. Do not seal them; runtime handles sealing only
-after final approval.
+`scoring/rule_maker_log.md`, plus every private evaluator input declared by
+`scoring/targets.json` under `data/.test/`. Do not seal them; runtime handles
+sealing only after final approval.
 {% endif %}
 
 If another idea requires manager/human feedback, update `{{ plan_path }}`, call

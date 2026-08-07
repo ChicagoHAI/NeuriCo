@@ -11,6 +11,7 @@ scoring/. The harness consists of:
 - scoring/interface.md: visible to the experiment_runner -- describes what
   files the runner must produce and how they will be invoked.
 - scoring/rule_maker_log.md: rationale for the chosen metrics.
+- data/.test/: optional evaluator-owned private inputs declared by targets.json.
 
 This agent runs between resource_finder and experiment_runner. Its outputs
 should be sealed (read-only) before experiment_runner starts so the runner
@@ -24,6 +25,7 @@ import sys
 import time
 import json
 import ast
+import stat
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -44,6 +46,102 @@ RULE_MAKER_OUTPUT_FILES = {
 _DISALLOWED_EVALUATOR_CLI_MODULES = {"argparse", "click", "docopt", "typer"}
 _EVALUATOR_RESULTS_PATH = f"scoring/{RESULTS_FILE_NAME}"
 _EVALUATOR_OWNED_INTERFACE_PREFIXES = ("scoring/", "data/.test/")
+_POST_RESEARCH_ARTIFACT_PREFIXES = ("paper/", "paper_draft/")
+_SEALED_INPUTS_FIELD = "sealed_inputs"
+
+
+def _validate_declared_sealed_inputs(
+    work_dir: Path,
+    targets: Dict[str, Any],
+) -> list[str]:
+    """Validate the rule-maker-owned private inputs before runtime seals them."""
+    declared = targets.get(_SEALED_INPUTS_FIELD)
+    if not isinstance(declared, list):
+        return [
+            "scoring/targets.json must declare `sealed_inputs` as a list; "
+            "use an empty list when the evaluator needs no private inputs."
+        ]
+
+    issues: list[str] = []
+    seen: set[str] = set()
+    root = Path(work_dir).resolve()
+    for index, raw_path in enumerate(declared):
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            issues.append(f"sealed_inputs[{index}] must be a non-empty workspace-relative path.")
+            continue
+        normalized = raw_path.strip().replace("\\", "/")
+        candidate = Path(normalized)
+        if (
+            candidate.is_absolute()
+            or ".." in candidate.parts
+            or len(candidate.parts) < 3
+            or candidate.parts[:2] != ("data", ".test")
+        ):
+            issues.append(
+                f"sealed input `{normalized}` must be a file under `data/.test/`."
+            )
+            continue
+        relative = candidate.as_posix()
+        if relative in seen:
+            issues.append(f"sealed input `{relative}` is declared more than once.")
+            continue
+        seen.add(relative)
+
+        current = root
+        missing = False
+        for part in candidate.parts:
+            current = current / part
+            try:
+                metadata = current.lstat()
+            except FileNotFoundError:
+                issues.append(f"declared sealed input is missing: {relative}")
+                missing = True
+                break
+            except OSError as exc:
+                issues.append(f"declared sealed input is unreadable: {relative}: {exc}")
+                missing = True
+                break
+            if stat.S_ISLNK(metadata.st_mode):
+                issues.append(f"declared sealed input cannot contain a symlink: {relative}")
+                missing = True
+                break
+        if missing:
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            issues.append(f"declared sealed input must be a regular file: {relative}")
+        elif metadata.st_size == 0:
+            issues.append(f"declared sealed input must not be empty: {relative}")
+
+    private_root = root / "data" / ".test"
+    try:
+        private_metadata = private_root.lstat()
+    except FileNotFoundError:
+        return issues
+    except OSError as exc:
+        issues.append(f"private evaluator input directory is unreadable: {exc}")
+        return issues
+    if stat.S_ISLNK(private_metadata.st_mode):
+        issues.append("private evaluator input directory cannot be a symlink: data/.test")
+        return issues
+    if not stat.S_ISDIR(private_metadata.st_mode):
+        issues.append("private evaluator input root must be a directory: data/.test")
+        return issues
+
+    actual_files: set[str] = set()
+    for path in private_root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            issues.append(f"private evaluator input is unreadable: {relative}: {exc}")
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            issues.append(f"private evaluator input cannot contain a symlink: {relative}")
+        elif stat.S_ISREG(metadata.st_mode):
+            actual_files.add(relative)
+    for relative in sorted(actual_files - seen):
+        issues.append(f"private evaluator input is not declared in sealed_inputs: {relative}")
+    return issues
 
 
 def _assigned_expressions(tree: ast.AST) -> dict[str, ast.AST]:
@@ -580,13 +678,26 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
                 for artifact in artifacts
                 if artifact.path.startswith(_EVALUATOR_OWNED_INTERFACE_PREFIXES)
             ]
+            post_research = [
+                artifact.path
+                for artifact in artifacts
+                if artifact.path.startswith(_POST_RESEARCH_ARTIFACT_PREFIXES)
+            ]
             if evaluator_owned:
                 issues.append(
                     "scoring/interface.md assigns evaluator-owned paths to the "
                     "experiment runner: "
                     + ", ".join(evaluator_owned)
                 )
-            else:
+            if post_research:
+                issues.append(
+                    "scoring/interface.md assigns post-research paper outputs to "
+                    "the experiment runner: "
+                    + ", ".join(post_research)
+                    + ". Paper artifacts belong to the later paper_writer stage "
+                    "and cannot be scoring inputs."
+                )
+            if not evaluator_owned and not post_research:
                 found["interface"] = str(interface_path)
         except (OSError, HitlValidationError) as exc:
             issues.append(f"invalid artifact contract in {interface_path}: {exc}")
@@ -600,6 +711,29 @@ def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
         "found": found,
         "issues": issues,
     }
+
+
+def validate_hitl_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
+    """Apply the HITL-only private evaluator input contract."""
+    validation = validate_rule_maker_outputs(work_dir)
+    found = dict(validation["found"])
+    issues = list(validation["issues"])
+    targets_path = Path(work_dir) / "scoring" / RULE_MAKER_OUTPUT_FILES["targets"]
+
+    try:
+        targets = json.loads(targets_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"valid": False, "found": found, "issues": issues}
+
+    target_issues = (
+        ["scoring/targets.json must contain a JSON object."]
+        if not isinstance(targets, dict)
+        else _validate_declared_sealed_inputs(Path(work_dir), targets)
+    )
+    issues.extend(target_issues)
+    if target_issues:
+        found.pop("targets", None)
+    return {"valid": len(issues) == 0, "found": found, "issues": issues}
 
 
 def load_interface_for_runner(work_dir: Path) -> str:

@@ -1,5 +1,9 @@
 # NeuriCo: Next Steps & Future Improvements
 
+> **Developer/internal document.** This file records proposed future work and
+> does not define supported user behavior. See [`WORKFLOW.md`](WORKFLOW.md) for
+> the current workflow.
+
 This document outlines planned enhancements to the automated research pipeline, organized by priority and implementation complexity.
 
 ---

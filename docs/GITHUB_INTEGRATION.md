@@ -1,439 +1,119 @@
-# GitHub Integration Guide
+# GitHub Integration
 
-NeuriCo now automatically creates GitHub repositories for each research experiment and pushes results when complete. This enables:
+GitHub integration is optional. NeuriCo can run entirely locally with
+`--no-github`, or it can create a research repository during submission and
+push run artifacts to it.
 
-- **Transparency**: All research is public by default (private repos supported with `--private`)
-- **Collaboration**: Easy sharing and building on prior work
-- **Reproducibility**: Complete research artifacts in version control
-- **Flexible hosting**: Create repos under your personal account or an organization
+## Configure GitHub
 
-## Quick Setup
+Create a classic personal access token with `repo` scope, then add it to `.env`:
 
-### 1. Create GitHub Personal Access Token (Classic)
-
-We recommend using a **Classic** token for simplicity.
-
-1. Go to https://github.com/settings/tokens/new (direct link to create a Classic token)
-2. Give it a name: "NeuriCo"
-3. Select scopes:
-   - ✅ **repo** (Full control of private repositories — covers personal and org repos)
-4. Click "Generate token"
-5. **Copy the token immediately** (you won't see it again!)
-
-### 2. Configure Environment
-
-**Option A: Using .env file (Recommended)**
-
-```bash
-cd neurico
-cp .env.example .env
-# Edit .env and add your token
-nano .env  # or use your preferred editor
+```dotenv
+GITHUB_TOKEN=your_token
+GITHUB_ORG=
 ```
 
-Add this line:
-```
-GITHUB_TOKEN=ghp_your_token_here
-```
+Leave `GITHUB_ORG` empty to use the token owner's personal account. Set it to an
+organization name only when the token can create repositories in that
+organization.
 
-**Option B: Environment Variable**
+- **Docker:** run `./neurico config` or edit `.env` directly.
+- **Local `uv`:** edit `.env` directly.
 
-```bash
-export GITHUB_TOKEN=ghp_your_token_here
-# Add to your ~/.bashrc or ~/.zshrc to make permanent
-```
+Do not commit `.env` or print the token in logs.
 
-### 3. Install Dependencies
+## Submit with GitHub enabled
 
-```bash
-uv sync  # Installs all dependencies including PyGithub, GitPython
-```
+GitHub is enabled when `GITHUB_TOKEN` is present and `--no-github` is omitted.
 
-### 4. Test Integration
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico submit ideas/my_idea.yaml` | `uv run python src/cli/submit.py ideas/my_idea.yaml` |
 
-```bash
-# Submit an idea (creates GitHub repo and workspace)
-python src/cli/submit.py ideas/examples/ml_regularization_test.yaml
+Submission validates the idea, creates the repository, clones it beneath the
+configured workspace parent, writes research metadata, and prints the
+`<idea_id>`.
 
-# You should see:
-# ✓ Using personal GitHub account: your-username
-# 📦 Creating GitHub repository...
-# ✅ Repository created: https://github.com/your-username/...
-# ✅ Workspace ready at: workspace/...
+Create the repository in a configured organization:
 
-# (Optional) Add resources to workspace
-cd workspace/<repo-name>
-# Add datasets, documents, etc.
-git add . && git commit -m "Add resources" && git push
-cd ../..
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico submit ideas/my_idea.yaml --github-org MyOrg` | `uv run python src/cli/submit.py ideas/my_idea.yaml --github-org MyOrg` |
 
-# Run research (uses existing workspace)
-python src/core/runner.py <idea_id>
-```
+Create a private repository:
 
-## How It Works
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico submit ideas/my_idea.yaml --private` | `uv run python src/cli/submit.py ideas/my_idea.yaml --private` |
 
-### Workflow
+## Run the submitted idea
 
-**New workspace-first workflow:**
+Do not add `--no-github` when you want run artifacts pushed to the connected
+repository.
 
-1. **Repository Creation (on submission)**
-   - Creates repo under your personal account (default) or a specified organization
-   - Use `--private` to create private repos (default: public)
-   - Name generated from research title using LLM
+### Standard
 
-2. **Local Clone (on submission)**
-   - Clones repo to `workspace/<repo_name>/` immediately
-   - Ready for you to add resources before running
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico run <idea_id> --provider claude --full-permissions` | `uv run python src/core/runner.py <idea_id> --provider claude --full-permissions` |
 
-3. **Metadata Initialization (on submission)**
-   - Adds `.neurico/idea.yaml` with full specification
-   - Creates README.md with research overview
-   - Commits: "Initialize research project: {title}"
+### AutoResearch
 
-4. **User Resources (optional, before running)**
-   - You can add datasets, documents, code, etc. to workspace
-   - Commit and push to GitHub
-   - Agent will have access to these resources
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico run <idea_id> --provider claude --full-permissions --autoresearch --autoresearch-iterations 3` | `uv run python src/core/runner.py <idea_id> --provider claude --full-permissions --autoresearch --autoresearch-iterations 3` |
 
-5. **Agent Execution (on run)**
-   - Pulls latest changes from GitHub (including your resources)
-   - AI agent works in the repository directory
-   - Creates notebooks, results, etc. directly in repo
+### HITL AutoResearch
 
-6. **Results Publishing (after run)**
-   - Commits all changes
-   - Pushes to GitHub
-   - Message includes research title and status
+| Interface | Docker | Local `uv` |
+| --- | --- | --- |
+| Web | `./neurico hitl-web <idea_id>` | `uv run python src/cli/hitl_web.py <idea_id>` |
+| Terminal | `./neurico hitl-cli <idea_id>` | `uv run python src/cli/hitl_cli.py <idea_id>` |
 
-### Repository Structure
+Use `/run` in the HITL interface and enable GitHub when prompted.
 
-Each research repository contains:
+## Run without GitHub
 
-```
-repo-name/
-├── README.md                    # Research overview
-├── .gitignore                   # Python gitignore
-├── .neurico/
-│   └── idea.yaml                # Full idea specification
-├── notebooks/
-│   ├── plan_Md.ipynb           # Research plan
-│   ├── documentation_Md.ipynb   # Results and analysis
-│   └── code_walk_Md.ipynb      # Code walkthrough
-├── results/
-│   ├── metrics.json            # Quantitative results
-│   └── *.png                   # Visualizations
-├── artifacts/                   # Models, data, etc.
-└── logs/
-    ├── research_prompt.txt      # Generated prompt
-    └── execution_claude.log     # Execution log
-```
+Add `--no-github` to both submission and ordinary run commands:
 
-## Configuration Options
+| Docker | Local `uv` |
+| --- | --- |
+| `./neurico submit ideas/my_idea.yaml --no-github` | `uv run python src/cli/submit.py ideas/my_idea.yaml --no-github` |
+| `./neurico run <idea_id> --no-github --provider claude --full-permissions` | `uv run python src/core/runner.py <idea_id> --no-github --provider claude --full-permissions` |
 
-### Personal Account vs Organization
+Results remain in the configured local workspace.
 
-By default, repositories are created under **your personal GitHub account**.
+## Existing resources
 
-To use an organization instead:
+After submission, you may add datasets, papers, or helper code to the generated
+workspace before running. Commit and push those files in the workspace
+repository so the remote and local workspace agree before NeuriCo begins.
 
-```bash
-# Via CLI flag
-python src/cli/submit.py idea.yaml --github-org YourOrgName
-
-# Or via environment variable
-export GITHUB_ORG=YourOrgName
-```
-
-If you specify an organization but don't have access to create repos there, neurico will automatically fall back to your personal account with a warning.
-
-### Public vs Private Repos
-
-Creates **public repositories** by default for research transparency.
-
-To create private repositories, use the `--private` flag:
-
-```bash
-# Submit with private repo
-python src/cli/submit.py idea.yaml --private
-
-# Run with private repo (when creating new repos)
-python src/core/runner.py <idea_id> --private
-```
-
-Private repos are supported on all GitHub plans (free accounts have unlimited private repos).
-
-### Disable GitHub Integration
-
-Run locally without GitHub:
-
-```bash
-python src/core/runner.py <idea_id> --no-github
-```
-
-This creates results in `runs/` directory as before.
+For host-local data that should not be committed, declare it through
+`local_resources` and use the workflow in
+[`LOCAL_IDEA_SUBMISSION.md`](LOCAL_IDEA_SUBMISSION.md).
 
 ## Troubleshooting
 
-### "GitHub integration disabled: GITHUB_TOKEN not set"
+### Token is missing or invalid
 
-**Solution**: Set GITHUB_TOKEN environment variable or create .env file
+Confirm `GITHUB_TOKEN` is present in `.env`, uses a classic token with `repo`
+scope, and has not expired or been revoked.
 
-```bash
-# Check if token is set
-echo $GITHUB_TOKEN
+### Organization repository creation fails
 
-# Set for current session
-export GITHUB_TOKEN=ghp_your_token_here
+Confirm the token owner is a member of the organization and that the
+organization permits personal access tokens and repository creation. Try a
+personal repository by leaving `GITHUB_ORG` empty.
 
-# Or create .env file
-cp .env.example .env
-# Edit .env and add your token
-```
+### Repository already exists
 
-### "Cannot access organization 'OrgName'"
+NeuriCo normally includes a short hash in generated repository names. Use
+`--no-hash` only when you intentionally want a stable name and have confirmed
+that it is available.
 
-**Cause**: Your token doesn't have permission to create repos in the organization.
+### Push fails after a run
 
-This is handled automatically — neurico will fall back to your personal account with a warning. If you want to use the organization:
-
-1. Ask the organization admin to invite you
-2. Ensure your token has `repo` scope
-3. Ensure the organization allows members to create repositories
-
-### "PyGithub not installed"
-
-**Solution**:
-```bash
-pip install PyGithub GitPython
-```
-
-### "Repository already exists"
-
-The system will reuse the existing repository if it already exists.
-
-To force a new repo, change the idea_id or delete the existing repo on GitHub.
-
-### "Failed to push to GitHub"
-
-**Common causes**:
-- Token expired → Generate new token
-- Network issues → Check internet connection
-- Permission issues → Verify token scopes
-
-Results are still saved locally in `workspace/`, you can push manually:
-
-```bash
-cd workspace/<repo-name>
-git add .
-git commit -m "Research results"
-git push
-```
-
-## Security Best Practices
-
-### Token Security
-
-✅ **DO**:
-- Store token in .env file (not tracked by git)
-- Use environment variables
-- Generate token with minimal required scopes
-- Regenerate token periodically
-
-❌ **DON'T**:
-- Commit .env file to git
-- Share your token
-- Use overly permissive scopes
-- Hardcode token in code
-
-### .env File Protection
-
-The `.gitignore` file ensures `.env` is never committed:
-
-```bash
-# Verify .env is ignored
-git status
-# Should NOT show .env
-
-# If it does show up:
-git rm --cached .env
-git commit -m "Remove .env from tracking"
-```
-
-## Advanced Usage
-
-### Programmatic Access
-
-```python
-from src.core.github_manager import GitHubManager
-
-# Initialize (personal account)
-manager = GitHubManager()
-
-# Or use an organization
-# manager = GitHubManager(org_name="YourOrgName")
-
-# Create repository (public by default, or private=True)
-repo_info = manager.create_research_repo(
-    idea_id="my_experiment",
-    title="My Research Title",
-    description="Research description",
-    private=False  # Set to True for private repos
-)
-
-# Clone it
-repo = manager.clone_repo(
-    repo_info['clone_url'],
-    repo_info['local_path']
-)
-
-# Work in the repo...
-# ...
-
-# Commit and push
-manager.commit_and_push(
-    repo_info['local_path'],
-    "Add research results"
-)
-```
-
-### Custom Commit Messages
-
-Modify `src/core/runner.py` around line 309 to customize commit messages.
-
-### Adding Collaborators
-
-```python
-from github import Github
-
-g = Github(token)
-repo = g.get_repo("your-username/repo-name")
-
-# Add collaborator
-repo.add_to_collaborators("username", permission="push")
-```
-
-### Creating Pull Requests
-
-```python
-manager = GitHubManager()
-
-pr_url = manager.create_summary_pr(
-    repo_name="repo-name",
-    title="Research Results Summary",
-    body="Summary of findings...",
-    head_branch="results",
-    base_branch="main"
-)
-```
-
-## Benefits of GitHub Integration
-
-### For Researchers
-
-- ✅ Automatic backup of all work
-- ✅ Version control for experiments
-- ✅ Easy sharing with collaborators
-- ✅ Reproducibility guaranteed
-- ✅ Professional portfolio of research
-
-### For Organizations
-
-- ✅ Centralized research repository
-- ✅ Searchable experiment archive
-- ✅ Transparency and accountability
-- ✅ Easy code review and collaboration
-- ✅ Built-in documentation
-
-### For Science
-
-- ✅ Open by default
-- ✅ Complete reproducibility
-- ✅ Building on prior work
-- ✅ Verifiable results
-- ✅ Collaborative improvement
-
-## Examples
-
-### Basic Usage
-
-```bash
-# Create and run experiment with GitHub
-python src/cli/submit.py my_idea.yaml
-python src/core/runner.py my_idea_id
-
-# Results automatically pushed to:
-# https://github.com/your-username/my-idea-id
-```
-
-### Local Development, Later Push
-
-```bash
-# Run locally first
-python src/core/runner.py my_idea_id --no-github
-
-# Later, manually create repo and push
-cd runs/my_idea_id_*/
-git init
-gh repo create my-experiment --public
-git add .
-git commit -m "Research results"
-git push -u origin main
-```
-
-### Collaborative Research
-
-```bash
-# Researcher A runs experiment
-python src/core/runner.py experiment_001
-# Pushed to: github.com/your-username/experiment-001
-
-# Researcher B extends the work
-git clone https://github.com/your-username/experiment-001
-cd experiment-001
-# Make improvements
-git commit -am "Extend analysis with new metrics"
-git push
-```
-
-## FAQ
-
-**Q: Can I use my personal GitHub account instead of an organization?**
-
-A: Yes! This is the default behavior. If `GITHUB_ORG` is not set, repos are created under your personal account. If you specify an org you don't have access to, it falls back to your personal account automatically.
-
-**Q: Can I make repositories private?**
-
-A: Yes! Use the `--private` flag: `python src/cli/submit.py idea.yaml --private`. GitHub Free accounts support unlimited private repos.
-
-**Q: What if I don't want to use GitHub?**
-
-A: Use `--no-github` flag. All research will be saved locally in `runs/`.
-
-**Q: Can I push to an existing repository?**
-
-A: Yes, if a repository with the same name exists, it will be reused.
-
-**Q: How do I delete a repository?**
-
-A: Via GitHub web interface or:
-```bash
-gh repo delete your-username/repo-name
-```
-
-**Q: Can I change the repository name?**
-
-A: Repository name is derived from idea_id. To change it, modify the idea_id.
-
-## Support
-
-For issues:
-1. Check this guide
-2. Review logs in `workspace/<repo-name>/logs/`
-3. Open issue on main NeuriCo repo
-4. Check GitHub API status: https://www.githubstatus.com/
-
----
-
-**Last Updated**: 2025-11-03
-**Maintained by**: ChicagoHAI
+The local workspace still contains the research artifacts. Inspect its Git
+status and remote, resolve authentication or branch protection issues, and push
+manually if necessary.

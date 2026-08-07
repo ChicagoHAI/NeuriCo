@@ -80,6 +80,9 @@ WHAT YOU MUST NOT DO:
   yet — running eval.py would fail and pollute scoring/.
 ✗ Do NOT read or reference files under data/.test/. Their contents are
   sealed; only scoring/eval.py touches them at scorer-execution time.
+✗ Do NOT require, inspect, or score `paper/` or `paper_draft/`. Paper
+  generation belongs to the later paper_writer stage, even when the research
+  idea requests a paper as a final output.
 ✗ Do NOT mention targets, test inputs, or the baseline in
   scoring/interface.md. That file is visible to the runner; leaking
   these defeats the evaluation.
