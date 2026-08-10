@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.config_loader import ConfigLoader
 from core.local_resources import (
     collect_host_paths,
+    validate_continuation,
     validate_evaluation_spec,
     validate_local_resources,
 )
@@ -244,6 +245,11 @@ class IdeaManager:
         ev_errors, ev_warnings = validate_evaluation_spec(idea)
         errors.extend(ev_errors)
         warnings.extend(ev_warnings)
+
+        # Validate continuation spec (continue-research mode)
+        ct_errors, ct_warnings = validate_continuation(idea)
+        errors.extend(ct_errors)
+        warnings.extend(ct_warnings)
 
         valid = len(errors) == 0
 

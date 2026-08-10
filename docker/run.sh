@@ -920,12 +920,52 @@ cmd_run() {
     )
 
     # Ideas that declare host-local resources (local_resources paths, local
-    # papers) get a sidecar written at submit time: ideas/mounts/<idea_id>.txt,
-    # one absolute host path per line. Mount each existing path read-only at
-    # its identical in-container location so staging works unmodified inside
-    # Docker.
+    # papers, a continuation source repo) get a sidecar written at submit
+    # time: ideas/mounts/<idea_id>.txt, one absolute host path per line.
     local idea_id="$1"
     local mounts_file="$PROJECT_ROOT/ideas/mounts/${idea_id}.txt"
+
+    # continue-research runs as two stages under one command. Stage 1 (prepare)
+    # needs the source repo + host materials mounted; Stage 2 (research, where
+    # the optimizing agent runs) must NOT see them. We enforce that with two
+    # containers: a PREPARE container that mounts the materials and runs
+    # `--prepare-only` (Stage 1), then a RESEARCH container that mounts only
+    # the workspace and runs Stage 2. runner.py detects the continuation
+    # contract and skips Stage 1 in the research container (the workspace is
+    # already prepared), so the materials are needed only in the prepare
+    # container. --prepare-only is a no-op on a forward idea, so a
+    # false-positive detection cannot run a forward pipeline with materials
+    # mounted (see run_research).
+    local is_continuation=false
+    if _idea_is_continuation "$idea_id"; then
+        is_continuation=true
+    fi
+
+    if [ "$is_continuation" = true ]; then
+        echo -e "${BLUE}continue-research: Stage 1 (prepare) in a materials-mounted container${NC}"
+        local prep_args=( "${docker_args[@]}" )
+        if [ -f "$mounts_file" ]; then
+            while IFS= read -r host_path; do
+                [ -z "$host_path" ] && continue
+                if [ -e "$host_path" ]; then
+                    prep_args+=( -v "$host_path:$host_path:ro" )
+                    echo -e "${BLUE}Mounting material (prepare only):${NC} $host_path"
+                else
+                    echo -e "${YELLOW}[SKIP]${NC} declared path not found: $host_path"
+                fi
+            done < "$mounts_file"
+        fi
+        prep_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "$@" --prepare-only )
+        docker "${prep_args[@]}" || { echo -e "${RED}Prepare stage failed${NC}"; exit 1; }
+
+        echo -e "${BLUE}continue-research: Stage 2 (research) with NO source materials mounted${NC}"
+        docker_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "$@" )
+        docker "${docker_args[@]}"
+        return
+    fi
+
+    # Forward run: single container, mount declared resources read-only at
+    # their identical in-container location so staging works unmodified.
     if [ -f "$mounts_file" ]; then
         while IFS= read -r host_path; do
             [ -z "$host_path" ] && continue
@@ -943,6 +983,22 @@ cmd_run() {
 
     docker_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "$@" )
     docker "${docker_args[@]}"
+}
+
+# Whether an idea declares a continuation contract (source_repo). Detection is
+# a mount-boundary optimization only; runner.py's contract check is
+# authoritative, and --prepare-only is a no-op on a forward idea, so a
+# false positive here is harmless. Matches a `source_repo:` line inside the
+# idea YAML for this id, wherever IdeaManager stored it under ideas/.
+_idea_is_continuation() {
+    local idea_id="$1"
+    local f
+    while IFS= read -r f; do
+        if grep -qE '^\s*source_repo\s*:' "$f" 2>/dev/null; then
+            return 0
+        fi
+    done < <(grep -rl -- "$idea_id" "$PROJECT_ROOT/ideas" --include='*.yaml' 2>/dev/null)
+    return 1
 }
 
 # -----------------------------------------------------------------------------

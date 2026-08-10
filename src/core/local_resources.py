@@ -762,3 +762,263 @@ def validate_evaluation_spec(idea: Dict[str, Any]) -> Tuple[List[str], List[str]
                     )
 
     return errors, warnings
+
+
+# ==========================================================================
+# Continue-research contract helpers (ported for the two-stage redesign):
+# the continuation contract (goal, invariants) and its validation. No sealed-
+# store / fingerprint / regeneration machinery is ported; held-out staging is
+# a simple copy in the Stage-1 prepare flow (see continuation_prepare.py).
+# ==========================================================================
+
+INVARIANT_KINDS = {
+    'protected_path': 'path',
+    'check': 'command',
+    'statement': 'text',
+}
+
+
+def normalize_protected_path(raw: str) -> str:
+    """
+    Canonical normalization of one protected_path declaration: exact './'
+    prefixes removed (never a character-set strip, which would eat the
+    leading dot of '.github' or '.env'), trailing slashes dropped.
+
+    Raises ValueError for declarations that cannot name a workspace-relative
+    prefix (empty, '.', absolute, or '..' traversal) so the guard fails
+    closed instead of silently watching the wrong path.
+    """
+    path = str(raw).strip().replace('\\', '/')
+    if path.startswith('/'):
+        raise ValueError(
+            f"protected path {raw!r} is absolute; declare it relative to "
+            f"the workspace root")
+    # Component-wise canonicalization: drops empty ('a//b') and '.' parts,
+    # so equivalent declarations normalize identically, and catches '..'
+    # ANYWHERE — including a trailing 'src/..', which resolves to the
+    # workspace root and would otherwise sail past prefix/substring checks.
+    parts = [part for part in path.split('/') if part not in ('', '.')]
+    if any(part == '..' for part in parts):
+        raise ValueError(
+            f"protected path {raw!r} escapes or renames the workspace root "
+            f"('..' components are not allowed)")
+    if not parts:
+        raise ValueError(
+            f"protected path {raw!r} does not name a workspace-relative "
+            f"prefix (protecting the entire workspace is not supported)")
+    return '/'.join(parts)
+
+
+def protected_path_prefixes(idea: Dict[str, Any]) -> List[str]:
+    """
+    Normalized workspace-relative prefixes of protected_path invariants.
+
+    One canonical normalization for every consumer of protected paths, so
+    the guard and any prompt rendering can never drift on what counts as
+    inside a protected prefix. Raises ValueError (via
+    normalize_protected_path) on declarations that cannot be protected;
+    validate_continuation rejects those at submit time, and a runtime caller
+    treats the exception as a guard failure, never a silent skip.
+    """
+    idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
+    if not isinstance(idea_spec, dict):
+        return []
+    continuation = idea_spec.get('continuation')
+    if not isinstance(continuation, dict):
+        return []
+    return [
+        normalize_protected_path(invariant['path'])
+        for invariant in (continuation.get('invariants') or [])
+        if isinstance(invariant, dict)
+        and invariant.get('kind') == 'protected_path'
+        and invariant.get('path')
+    ]
+
+
+def _protected_digest(path: Path) -> str:
+    """Content hash plus permission bits, so a chmod-only change to a
+    protected file is detected; content-only hashing would miss a mode
+    change that Git still records in an accepted checkpoint."""
+    mode = path.stat().st_mode & 0o777
+    return f"{mode:04o}:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def snapshot_protected_paths(work_dir: Path,
+                             idea: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    """
+    Content fingerprint of every protected prefix: {prefix: {relpath: digest}}.
+
+    Walks the filesystem directly rather than asking git, so files git
+    ignores (model weights, generated configs, .env files) are covered, and
+    symlinks are fingerprinted by their target string rather than followed.
+    A missing prefix snapshots as an empty mapping, so its later appearance
+    is a change like any other. Compare two snapshots with
+    protected_path_changes().
+
+    Args:
+        work_dir: Workspace root directory
+        idea: Full idea specification (or inner idea dict)
+
+    Returns:
+        {prefix: {relpath: digest}} for every protected prefix
+    """
+    work_dir = Path(work_dir)
+    snapshot: Dict[str, Dict[str, str]] = {}
+    for prefix in protected_path_prefixes(idea):
+        files: Dict[str, str] = {}
+        root = work_dir / prefix
+        if root.is_symlink():
+            files[''] = 'link:' + os.readlink(root)
+        elif root.is_file():
+            files[''] = _protected_digest(root)
+        elif root.is_dir():
+            for path in sorted(root.rglob('*')):
+                rel = path.relative_to(root).as_posix()
+                if path.is_symlink():
+                    files[rel] = 'link:' + os.readlink(path)
+                elif path.is_file():
+                    files[rel] = _protected_digest(path)
+        snapshot[prefix] = files
+    return snapshot
+
+
+def protected_path_changes(before: Dict[str, Dict[str, str]],
+                           after: Dict[str, Dict[str, str]]) -> List[str]:
+    """
+    Workspace-relative paths whose content changed between two protected
+    snapshots (modified, created, or deleted files alike).
+    """
+    changes: List[str] = []
+    for prefix in before:
+        b = before[prefix]
+        a = after.get(prefix, {})
+        for rel in sorted(set(b) | set(a)):
+            if b.get(rel) != a.get(rel):
+                changes.append(f"{prefix}/{rel}" if rel else prefix)
+    return sorted(set(changes))
+
+
+def sealed_dataset_entries(idea: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """All dataset entries declared sealed (any path form)."""
+    idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
+    if not isinstance(idea_spec, dict):
+        return []
+    resources = idea_spec.get('local_resources')
+    if not isinstance(resources, dict):
+        return []
+    return [entry for entry in resources.get('datasets') or []
+            if isinstance(entry, dict) and entry.get('sealed')]
+
+
+
+def validate_continuation(idea: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """
+    Validate the idea.continuation section (continue-research mode).
+
+    Requires source_repo and goal; each invariant must name a supported kind
+    and carry that kind's field (protected_path: path, check: command,
+    statement: text). A missing reason is a warning: agents obey constraints
+    better when told why they exist.
+
+    Args:
+        idea: The inner idea dictionary (idea_spec['idea'])
+
+    Returns:
+        Tuple of (errors, warnings) message lists
+    """
+    errors = []
+    warnings = []
+
+    continuation = idea.get('continuation')
+    if continuation is None:
+        return errors, warnings
+
+    if not isinstance(continuation, dict):
+        errors.append("continuation must be a mapping with 'source_repo' and 'goal'")
+        return errors, warnings
+
+    if not continuation.get('source_repo'):
+        errors.append("continuation: missing 'source_repo' (repository path or URL)")
+    goal = continuation.get('goal')
+    if not goal or not str(goal).strip():
+        errors.append("continuation: missing 'goal' (what to optimize is required)")
+    elif len(str(goal).strip()) < 10:
+        warnings.append("continuation.goal is very short; state the direction of "
+                        "improvement so proposals stay aimed at it")
+
+    invariants = continuation.get('invariants')
+    if invariants is None:
+        return errors, warnings
+    if not isinstance(invariants, list):
+        errors.append("continuation.invariants must be a list")
+        return errors, warnings
+
+    for idx, invariant in enumerate(invariants):
+        label = f"continuation.invariants[{idx}]"
+        if not isinstance(invariant, dict):
+            errors.append(f"{label}: must be a mapping with 'kind'")
+            continue
+        kind = invariant.get('kind')
+        if kind not in INVARIANT_KINDS:
+            errors.append(f"{label}: unknown kind '{kind}' "
+                          f"(supported: {', '.join(INVARIANT_KINDS)})")
+            continue
+        required_field = INVARIANT_KINDS[kind]
+        if not invariant.get(required_field):
+            errors.append(f"{label}: kind '{kind}' requires '{required_field}'")
+        if kind == 'protected_path' and invariant.get('path'):
+            try:
+                normalize_protected_path(invariant['path'])
+            except ValueError as exc:
+                errors.append(f"{label}: {exc}")
+        if not invariant.get('reason'):
+            warnings.append(f"{label}: no 'reason' given; agents follow constraints "
+                            f"better when told why they exist")
+
+    return errors, warnings
+
+
+def validate_evaluation_spec(idea: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """
+    Validate the idea.evaluation section (structured metrics and format).
+
+    Args:
+        idea: The inner idea dictionary (idea_spec['idea'])
+
+    Returns:
+        Tuple of (errors, warnings) message lists
+    """
+    errors = []
+    warnings = []
+
+    evaluation = idea.get('evaluation')
+    if evaluation is None:
+        return errors, warnings
+
+    if not isinstance(evaluation, dict):
+        errors.append("evaluation must be a mapping with 'metrics' and/or 'results_format'")
+        return errors, warnings
+
+    metrics = evaluation.get('metrics')
+    if metrics is not None:
+        if not isinstance(metrics, list):
+            errors.append("evaluation.metrics must be a list")
+        else:
+            if len(metrics) == 0:
+                warnings.append("evaluation.metrics is empty")
+            for idx, metric in enumerate(metrics):
+                label = f"evaluation.metrics[{idx}]"
+                if not isinstance(metric, dict):
+                    errors.append(f"{label}: must be a mapping with 'name' and 'definition'")
+                    continue
+                if not metric.get('name'):
+                    errors.append(f"{label}: missing 'name'")
+                if not metric.get('definition'):
+                    errors.append(f"{label}: missing 'definition'")
+                if not metric.get('target'):
+                    warnings.append(
+                        f"{label}: no 'target' given; the rule maker will set one "
+                        f"and tag it source: derived"
+                    )
+
+    return errors, warnings
