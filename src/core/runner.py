@@ -74,6 +74,7 @@ def _with_hitl_workspace_run_ownership(method):
             return method(self, *args, **kwargs)
 
         from core.hitl_lock import hitl_workspace_run_lease
+        from core.hitl_runtime_state import HitlRuntimeState
 
         idea_id = str(arguments.arguments["idea_id"])
         work_dir = self._hitl_workspace_for_run_ownership(
@@ -90,7 +91,26 @@ def _with_hitl_workspace_run_ownership(method):
                 "provider": str(arguments.arguments["provider"]),
             },
         ):
-            return method(self, *args, **kwargs)
+            runtime_state = HitlRuntimeState(work_dir)
+            runtime_state.begin_run(
+                {
+                    "idea_id": idea_id,
+                    "interface": str(hitl_interface),
+                    "mode": mode,
+                    "provider": str(arguments.arguments["provider"]),
+                }
+            )
+            try:
+                result = method(self, *args, **kwargs)
+            except BaseException as exc:
+                try:
+                    runtime_state.complete_run(success=False, error=str(exc))
+                except Exception:
+                    pass
+                raise
+            success = bool(result.get("success")) if isinstance(result, dict) else True
+            runtime_state.complete_run(success=success)
+            return result
 
     return owned_run
 

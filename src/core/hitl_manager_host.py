@@ -128,20 +128,20 @@ class HitlWebChannel(WebChannel):
         client_turn_id: str = "",
     ) -> Dict[str, Any]:
         if self._closed.is_set():
-            raise HitlWebInputError("invalid", "The HITL manager host is no longer available.")
+            raise HitlWebInputError("invalid", "NeuriCo is no longer available.")
         if input_kind == _RESOLUTION_REPLY:
             if self._pending_resolution_request is None:
                 raise HitlWebInputError(
-                    "already_resolved", "This HITL request has already been resolved."
+                    "already_resolved", "This request has already been resolved."
                 )
             if self._resolution_reply_handler is None:
                 raise HitlWebInputError(
-                    "stale", "This request is waiting for its manager session to resume."
+                    "stale", "This request will be available when NeuriCo resumes."
                 )
             expected_key = str(self._pending_resolution_request["request_key"])
             if str(request_key or "") != expected_key:
                 raise HitlWebInputError(
-                    "stale", "This reply does not match the active HITL request."
+                    "stale", "This reply does not match the active request."
                 )
             try:
                 selected = next(
@@ -179,7 +179,7 @@ class HitlWebChannel(WebChannel):
             return {"status": "accepted"}
         record = self._inbox.enqueue(text, provider=provider, client_turn_id=client_turn_id)
         if self._conversation is None:
-            raise RuntimeError("The HITL manager conversation is not initialized.")
+            raise RuntimeError("The NeuriCo conversation is not initialized.")
         # Record before queueing: this is the durable source the browser reloads.
         transcript_record = self._conversation.append("human", record["text"])
         self._emit({"event": "workspace_changed", "section": "conversation"})
@@ -220,7 +220,7 @@ class HitlWebChannel(WebChannel):
     def update_queued_input(self, item_id: str, text: str) -> Dict[str, str]:
         if self._inbox is None:
             raise HitlWebInputError(
-                "invalid", "Queued-message editing is only available in the web manager."
+                "invalid", "Queued-message editing is only available in the web interface."
             )
         try:
             text = normalize_human_message(text)
@@ -236,7 +236,7 @@ class HitlWebChannel(WebChannel):
     def remove_queued_input(self, item_id: str) -> None:
         if self._inbox is None:
             raise HitlWebInputError(
-                "invalid", "Queued-message editing is only available in the web manager."
+                "invalid", "Queued-message editing is only available in the web interface."
             )
         try:
             self._inbox.remove(item_id)
@@ -282,6 +282,8 @@ class HitlTerminalChannel(UserChannel):
         self._last_polled_provider = ""
         self._run_launcher: Optional[Any] = None
         self._run_status: Optional[Any] = None
+        self._last_live_signature = ""
+        self._seen_interface_events: set[str] = set()
 
     def set_resolution_reply_handler(self, handler: Any) -> None:
         with self._state_lock:
@@ -380,9 +382,35 @@ class HitlTerminalChannel(UserChannel):
             return
         pending = snapshot.get("inbox", {}).get("pending_request")
         pending_record_id = str((pending or {}).get("conversation_record_id", ""))
+        timeline: List[Dict[str, Any]] = []
         for record in snapshot.get("conversation", []):
             record_id = str(record.get("record_id", record.get("id", "")))
             if pending_record_id and record_id == pending_record_id:
+                continue
+            timeline.append(
+                {
+                    "kind": "message",
+                    "created_at": str(record.get("created_at", "")),
+                    "record": record,
+                }
+            )
+        for notification in snapshot.get("notifications", []):
+            if not isinstance(notification, dict):
+                continue
+            event_id = str(notification.get("id", "")).strip()
+            if event_id:
+                self._seen_interface_events.add(event_id)
+            timeline.append(
+                {
+                    "kind": "notification",
+                    "created_at": str(notification.get("created_at", "")),
+                    "record": notification,
+                }
+            )
+        for entry in sorted(timeline, key=lambda item: str(item.get("created_at", ""))):
+            record = entry["record"]
+            if entry["kind"] == "notification":
+                self._render_interface_notification(record)
                 continue
             speaker = str(record.get("speaker", "manager")).strip().lower()
             content = str(record.get("content", "")).strip()
@@ -404,6 +432,54 @@ class HitlTerminalChannel(UserChannel):
                 "Use /run to resume the workspace before resolving this request.",
                 kind="system",
             )
+
+    def _render_interface_notification(self, notification: Dict[str, Any]) -> None:
+        title = str(notification.get("title", "Research update")).strip()
+        summary = str(notification.get("summary", "")).strip()
+        if notification.get("kind") == "idea":
+            idea_id = str(notification.get("idea_id", "")).strip()
+            prefix = f"[Idea {idea_id}]" if idea_id else "[Idea]"
+        elif notification.get("kind") == "request":
+            prefix = "[Review]"
+        else:
+            prefix = "[Phase]"
+        line = f"{prefix} {title}"
+        if summary:
+            line += f": {summary}"
+        self._write(line)
+
+    def present_interface_notifications(self) -> None:
+        """Render newly persisted interface events exactly once in this client."""
+        if self.work_dir is None:
+            return
+        try:
+            from core.hitl_workspace_view import HitlWorkspaceView
+
+            notifications = HitlWorkspaceView(self.work_dir).notifications()
+        except Exception:
+            return
+        for notification in notifications:
+            event_id = str(notification.get("id", "")).strip()
+            if not event_id or event_id in self._seen_interface_events:
+                continue
+            self._seen_interface_events.add(event_id)
+            with self._output_lock:
+                title = str(notification.get("title", "Research update")).strip()
+                summary = str(notification.get("summary", "")).strip()
+                if notification.get("kind") == "idea":
+                    idea_id = str(notification.get("idea_id", "")).strip()
+                    prefix = f"[Idea {idea_id}]" if idea_id else "[Idea]"
+                elif notification.get("kind") == "request":
+                    prefix = "[Review]"
+                else:
+                    prefix = "[Phase]"
+                line = f"\n{prefix} {title}"
+                if summary:
+                    line += f": {summary}"
+                print(line, file=self._output)
+                if self._reading_input.is_set():
+                    print(f"{self._HUMAN_LABEL} > ", end="", file=self._output)
+                self._output.flush()
 
     def _read_stdin(self) -> None:
         while not self._closed.is_set():
@@ -445,6 +521,12 @@ class HitlTerminalChannel(UserChannel):
             return {"status": "ignored"}
         if input_kind is None and text == "/run":
             return self._launch_run_interactively()
+        if input_kind is None and text == "/status":
+            if self._run_status is None:
+                self.send("Workspace status is unavailable.", kind="system")
+                return {"status": "unavailable"}
+            self.present_run_status(dict(self._run_status()), force=True)
+            return {"status": "accepted"}
         if input_kind is None and text in {"/help", "?"}:
             self.print_help()
             return {"status": "accepted"}
@@ -478,7 +560,7 @@ class HitlTerminalChannel(UserChannel):
             client_turn_id=client_turn_id or f"H{uuid.uuid4().hex}",
         )
         if self._conversation is None:
-            raise RuntimeError("The HITL manager conversation is not initialized.")
+            raise RuntimeError("The NeuriCo conversation is not initialized.")
         transcript_record = self._conversation.append("human", record["text"])
         return {
             "status": "accepted",
@@ -505,13 +587,13 @@ class HitlTerminalChannel(UserChannel):
             return {"status": "stale"}
         if not request or handler is None:
             self.send(
-                "No HITL request is awaiting a reply. Use ordinary text to talk to the manager.",
+                "No review request is awaiting a reply. Use ordinary text to talk to NeuriCo.",
                 kind="system",
             )
             return {"status": "already_resolved"}
         expected_key = str(request["request_key"])
         if request_key is not None and str(request_key) != expected_key:
-            self.send("This reply does not match the active HITL request.", kind="system")
+            self.send("This reply does not match the active request.", kind="system")
             return {"status": "stale"}
 
         choices = list(request.get("options") or [])
@@ -543,15 +625,15 @@ class HitlTerminalChannel(UserChannel):
 
     def _launch_run_interactively(self) -> Dict[str, Any]:
         if self._run_launcher is None:
-            self.send("AutoResearch launch is unavailable for this workspace.", kind="system")
+            self.send("Research launch is unavailable for this workspace.", kind="system")
             return {"status": "unavailable"}
         if self._run_status is not None:
             status = dict(self._run_status())
-            if status.get("status") == "running":
-                self.present_run_status(status)
+            if bool(status.get("active")):
+                self.present_run_status(status, force=True)
                 return {"status": "already_running"}
         try:
-            provider = self._read_setting("Worker [claude] (claude/codex/gemini): ", "claude").lower()
+            provider = self._read_setting("Model [claude] (claude/codex/gemini): ", "claude").lower()
             iterations = self._read_setting("Iterations [2] (1-100): ", "2")
             write_paper = self._read_yes_no("Write paper? [Y/n]: ", default=True)
             paper_style = "auto"
@@ -572,7 +654,7 @@ class HitlTerminalChannel(UserChannel):
         except (ValueError, RuntimeError) as exc:
             self.send(str(exc), kind="system")
             return {"status": "invalid"}
-        self.send(f"Started {result['mode']} HITL AutoResearch.", kind="system")
+        self.send(f"Started {result['mode']} research.", kind="system")
         return dict(result)
 
     def _read_setting(self, label: str, default: str) -> str:
@@ -588,17 +670,24 @@ class HitlTerminalChannel(UserChannel):
             raise ValueError("Answer yes or no when configuring the run.")
         return value in {"y", "yes"}
 
-    def present_run_status(self, status: Dict[str, Any]) -> None:
-        state = str(status.get("status", "unknown"))
-        mode = str(status.get("mode", "")).strip()
-        suffix = f" ({mode})" if mode else ""
-        error = str(status.get("error", "")).strip()
-        self.send(
-            f"AutoResearch: {state}{suffix}" + (f" — {error}" if error else ""), kind="system"
+    def present_run_status(self, status: Dict[str, Any], *, force: bool = False) -> None:
+        signature = "|".join(
+            str(status.get(key, "")).strip()
+            for key in ("state", "stage", "phase", "updated_at", "label")
         )
+        if not force and signature == self._last_live_signature:
+            return
+        self._last_live_signature = signature
+
+        heading = str(status.get("label") or status.get("title") or "Workspace status").strip()
+        with self._output_lock:
+            print(f"\n[Status] {heading}", file=self._output)
+            if self._reading_input.is_set():
+                print(f"{self._HUMAN_LABEL} > ", end="", file=self._output)
+            self._output.flush()
 
     def print_help(self) -> None:
-        self._write("[Commands] /run  /reply <number or feedback>  /help  /quit")
+        self._write("[Commands] /run  /status  /reply <number or feedback>  /help  /quit")
         self._write("[System] Any other text starts a conversation with NeuriCo.")
 
     def _write(self, text: str, *, end: str = "\n") -> None:
@@ -693,7 +782,7 @@ class HitlManagerHost:
         open_browser: bool = True,
     ) -> None:
         if interface not in {"web", "cli"}:
-            raise ValueError("HITL manager interface must be 'web' or 'cli'.")
+            raise ValueError("NeuriCo interface must be 'web' or 'cli'.")
         self.work_dir = Path(work_dir)
         self.interface = interface
         self._stop = threading.Event()
@@ -707,7 +796,7 @@ class HitlManagerHost:
             container_mode = os.environ.get("NEURICO_HITL_WEB_CONTAINER_MODE") == "1"
             if not _is_loopback_host(bind_host) and not (container_mode and bind_host == "0.0.0.0"):
                 raise ValueError(
-                    "HITL web manager must bind to loopback, or use 0.0.0.0 only with "
+                    "NeuriCo web interface must bind to loopback, or use 0.0.0.0 only with "
                     "NEURICO_HITL_WEB_CONTAINER_MODE=1 behind a loopback Docker publish."
                 )
             configured_browser_url = os.environ.get("NEURICO_HITL_BROWSER_URL") or None
@@ -743,18 +832,18 @@ class HitlManagerHost:
             if self._browser_url is not None and self.web_server.port != self._requested_port:
                 self.web_server.stop()
                 raise RuntimeError(
-                    "The requested HITL manager port is unavailable inside the container: "
+                    "The requested NeuriCo interface port is unavailable inside the container: "
                     f"{self._requested_port}. Choose a different --hitl-manager-port."
                 )
             browser_url = self.browser_url
             assert browser_url is not None
-            print(f"\nHITL manager web interface: {browser_url}", flush=True)
+            print(f"\nNeuriCo web interface: {browser_url}", flush=True)
             if self._open_browser and self._browser_url is None:
                 threading.Timer(0.8, lambda: webbrowser.open(browser_url)).start()
-            self.channel.send("HITL manager is available for conversation.", kind="system")
+            self.channel.send("NeuriCo is available.", kind="system")
         else:
             assert isinstance(self.channel, HitlTerminalChannel)
-            self.channel.send("HITL manager CLI is active.", kind="system")
+            self.channel.send("NeuriCo CLI is active.", kind="system")
             self.channel.print_help()
             self.channel.send("NeuriCo is available for conversation.", kind="system")
             self.channel.start()
@@ -790,7 +879,7 @@ class HitlManagerHost:
             if not message:
                 continue
             try:
-                self.channel.status("Manager thinking…", thinking=True)
+                self.channel.status("NeuriCo is thinking…", thinking=True)
                 recorded = getattr(self.channel, "last_polled_input_was_recorded", lambda: False)()
                 provider = getattr(self.channel, "last_polled_provider", lambda: "")()
                 set_provider = getattr(self.manager, "set_provider", None)
@@ -801,12 +890,12 @@ class HitlManagerHost:
                     self.channel.send(reply, kind="manager")
                 else:
                     durable_notice(
-                        "Manager conversation finished without a reply. Your message was recorded; "
-                        "send another message or restart the HITL manager if this repeats.",
+                        "NeuriCo finished without a reply. Your message was recorded; "
+                        "send another message or restart NeuriCo if this repeats.",
                     )
             except Exception as exc:
                 durable_notice(
-                    f"Manager conversation could not complete: {exc}. You can retry your message.",
+                    f"NeuriCo could not complete the conversation: {exc}. You can retry your message.",
                 )
             finally:
                 self.channel.status("Manager idle", thinking=False)

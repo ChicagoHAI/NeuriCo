@@ -49,7 +49,7 @@ def main() -> int:
     )
 
     assert host.web_server is not None
-    host.web_server.set_run_launcher(controller.launch, controller.snapshot)
+    host.web_server.set_run_launcher(controller.launch)
 
     stopping = False
 

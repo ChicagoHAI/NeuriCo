@@ -10,10 +10,11 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from core.hitl import HitlIdeaLog, HitlValidationError
 from core.hitl_frontier import HitlFrontierError, HitlFrontierStore
+from core.hitl_lock import active_hitl_workspace_run
 from core.hitl_manager_history import HitlManagerHistory
 from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_runtime_state import HitlRuntimeState
@@ -61,12 +62,16 @@ class HitlWorkspaceView:
         nodes, attempts, frontier = self._frontier()
         whiteboard = self._whiteboard()
         research = self._research_state()
-        inbox = self._inbox()
+        runtime = HitlRuntimeState(self.work_dir).snapshot()
+        inbox = self._inbox(runtime)
         conversation = self._conversation(inbox)
+        notifications = self._notifications(runtime, ideas)
         return {
             "workspace": self.work_dir.name,
             "autoresearch": self._autoresearch_status(),
+            "live": self._live_status(runtime),
             "conversation": conversation,
+            "notifications": notifications,
             "inbox": inbox,
             "research": research,
             "ideas": ideas,
@@ -78,12 +83,554 @@ class HitlWorkspaceView:
             "context": self._context(),
         }
 
+    def live_status(self) -> Dict[str, Any]:
+        """Project the durable workflow into one interface-neutral live status."""
+        runtime = HitlRuntimeState(self.work_dir).snapshot()
+        return self._live_status(runtime)
+
+    def notifications(self) -> List[Dict[str, Any]]:
+        """Return the shared, user-facing projection of durable interface events."""
+        runtime = HitlRuntimeState(self.work_dir).snapshot()
+        return self._notifications(runtime, self._ideas())
+
+    @staticmethod
+    def _record_timestamp(record: Any) -> str:
+        if not isinstance(record, dict):
+            return ""
+        for key in (
+            "updated_at",
+            "resolved_at",
+            "decision_recorded_at",
+            "created_at",
+            "started_at",
+        ):
+            value = str(record.get(key, "")).strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _stage_label(stage: str) -> str:
+        labels = {
+            "resource_finder": "Resource finding",
+            "rule_maker": "Rule making",
+            "experiment_runner": "Experiment",
+            "paper_writer": "Paper writing",
+        }
+        return labels.get(stage, stage.replace("_", " ").strip().title())
+
+    @staticmethod
+    def _working_phase_label(phase: str) -> str:
+        labels = {
+            "proposal": "Preparing proposal",
+            "plan": "Planning",
+            "execution": "Executing",
+            "review": "Revising",
+        }
+        return labels.get(phase, phase.replace("_", " ").strip().title())
+
+    @staticmethod
+    def _review_phase_label(phase: str) -> str:
+        labels = {
+            "proposal": "Proposal review",
+            "plan": "Plan review",
+            "execution": "Execution review",
+            "review": "Revision review",
+        }
+        return labels.get(phase, f"{phase.replace('_', ' ').strip().title()} review")
+
+    @staticmethod
+    def _next_after_phase(phase: str) -> str:
+        return {
+            "proposal": "Review follows.",
+            "plan": "Review follows.",
+            "execution": "Results are reviewed next.",
+            "review": "The next research step follows.",
+        }.get(phase, "Research continues to the next step.")
+
+    def _pipeline_state(self) -> Dict[str, Any]:
+        path = self.work_dir / ".neurico" / "pipeline_state.json"
+        return _read_object(path, "pipeline state") if path.exists() else {}
+
+    def _live_status(self, runtime: Dict[str, Any]) -> Dict[str, Any]:
+        """Interpret runtime facts once for every HITL user interface."""
+        owner = active_hitl_workspace_run(self.work_dir)
+        pipeline = self._pipeline_state()
+        pending = runtime.get("pending_worker_command")
+        pending = pending if isinstance(pending, dict) else {}
+        continuation = runtime.get("worker_continuation")
+        continuation = continuation if isinstance(continuation, dict) else {}
+        next_action = runtime.get("next_autoresearch_action")
+        next_action = next_action if isinstance(next_action, dict) else {}
+        frontier_transition = runtime.get("frontier_decision_transition")
+        frontier_transition = frontier_transition if isinstance(frontier_transition, dict) else {}
+        root_transition = runtime.get("initial_root_publication_transition")
+        root_transition = root_transition if isinstance(root_transition, dict) else {}
+        cleanup = runtime.get("rejected_whiteboard_cleanup")
+        cleanup = cleanup if isinstance(cleanup, dict) else {}
+        run = runtime.get("run")
+        run = run if isinstance(run, dict) else {}
+
+        stage = str(
+            pending.get("pipeline_stage")
+            or continuation.get("pipeline_stage")
+            or pipeline.get("current_stage")
+            or ""
+        ).strip()
+        phase = str(
+            pending.get("hitl_stage") or continuation.get("hitl_stage") or ""
+        ).strip()
+        stage_label = self._stage_label(stage) if stage else ""
+        phase_label = self._working_phase_label(phase) if phase else ""
+        started_at = str((owner or {}).get("started_at") or run.get("started_at") or "").strip()
+        provider = str((owner or {}).get("provider") or run.get("provider") or "").strip()
+        mode = str((owner or {}).get("mode") or run.get("mode") or "").strip()
+        source = str((owner or {}).get("interface") or run.get("interface") or "").strip()
+
+        def projected(
+            state: str,
+            title: str,
+            detail: str,
+            *,
+            next_step: str,
+            record: Any = None,
+            active: bool = True,
+            display_stage: Optional[str] = None,
+            display_phase: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            visible_stage = stage_label if display_stage is None else display_stage
+            visible_phase = phase_label if display_phase is None else display_phase
+            label = " · ".join(part for part in (visible_stage, visible_phase) if part) or title
+            return {
+                "state": state,
+                "active": active,
+                "can_launch": not active,
+                "title": title,
+                "detail": detail,
+                "stage": stage,
+                "stage_label": visible_stage,
+                "phase": phase,
+                "phase_label": visible_phase,
+                "label": label,
+                "mode": mode,
+                "provider": provider,
+                "source": source,
+                "started_at": started_at,
+                "updated_at": self._record_timestamp(record),
+                "next_action": next_step,
+            }
+
+        unresolved = str(pending.get("status", "")).strip() in {
+            "pending",
+            "scoring_approval_pending",
+            "scoring",
+        }
+        human_request = unresolved and bool(
+            pending.get("human_request_record_id")
+            and str(pending.get("human_request_record_id")).strip()
+        )
+        action_status = str(next_action.get("status", "")).strip()
+        frontier_status = str(frontier_transition.get("status", "")).strip()
+        root_status = str(root_transition.get("status", "")).strip()
+        cleanup_pending = str(cleanup.get("status", "")).strip() == "pending"
+        continuation_status = str(continuation.get("status", "")).strip()
+
+        run_status = str(run.get("status", "")).strip()
+
+        pending_kind = str(pending.get("kind", "")).strip()
+        manager_review_kind = str(pending.get("manager_review_kind", "")).strip()
+
+        def pending_labels() -> tuple[str, str]:
+            if manager_review_kind == "initial_scoring":
+                return "Scoring", "Initial result review"
+            if manager_review_kind == "frontier_scoring":
+                return "Candidate decision", "Accept or reject"
+            if manager_review_kind == "scoring_failure":
+                return "Scoring", "Repair review"
+            if pending_kind == "proposal":
+                return "Experiment", "Proposal review"
+            return stage_label, self._review_phase_label(phase) if phase else "Review"
+
+        def durable_boundary_labels() -> tuple[str, str]:
+            if unresolved:
+                return pending_labels()
+            if action_status in {"pending", "decision_recorded"}:
+                kind = str(next_action.get("kind", "")).strip()
+                if kind == "prune_frontier":
+                    return "Frontier", (
+                        "Pruning" if action_status == "pending" else "Saving prune decision"
+                    )
+                if kind == "select_frontier":
+                    return "Frontier", (
+                        "Selecting next" if action_status == "pending" else "Saving selection"
+                    )
+            if frontier_status not in {"", "completed"}:
+                return "Candidate decision", "Saving result"
+            if root_status not in {"", "completed"}:
+                return "Frontier", "Creating root"
+            if cleanup_pending:
+                return "Candidate decision", "Applying result"
+            if continuation_status in {"replacement_pending", "replacement_running"}:
+                return stage_label, "Revising"
+            if continuation_status:
+                return stage_label, self._working_phase_label(phase) if phase else "Working"
+            if stage_label:
+                return stage_label, "Starting"
+            return "Research", "Starting"
+
+        has_pending_work = bool(
+            unresolved
+            or action_status in {"pending", "decision_recorded"}
+            or frontier_status not in {"", "completed"}
+            or root_status not in {"", "completed"}
+            or cleanup_pending
+            or continuation_status
+            or run_status == "running"
+        )
+        if owner is None:
+            if has_pending_work:
+                record = pending or next_action or frontier_transition or root_transition or cleanup or continuation
+                paused_stage, paused_phase = durable_boundary_labels()
+                return projected(
+                    "paused",
+                    "Paused",
+                    "Progress is saved.",
+                    next_step="Continue when ready.",
+                    record=record,
+                    active=False,
+                    display_stage=paused_stage,
+                    display_phase=f"{paused_phase} paused" if paused_phase else "Paused",
+                )
+            if run_status == "failed":
+                return projected(
+                    "failed",
+                    "Run stopped",
+                    "Research stopped before completing.",
+                    next_step="Review the issue, then continue.",
+                    record=run,
+                    active=False,
+                    display_stage="Run stopped",
+                    display_phase="",
+                )
+            if run_status == "completed":
+                return projected(
+                    "completed",
+                    "Complete",
+                    "Research is ready to inspect.",
+                    next_step=(
+                        "Continue research when ready."
+                        if HitlFrontierStore(self.work_dir).exists()
+                        else "Inspect the completed research artifacts."
+                    ),
+                    record=run,
+                    active=False,
+                    display_stage="Complete",
+                    display_phase="",
+                )
+            if HitlFrontierStore(self.work_dir).exists():
+                return projected(
+                    "idle",
+                    "Ready",
+                    "Previous research is available.",
+                    next_step="Continue research when ready.",
+                    active=False,
+                    display_stage="Ready",
+                    display_phase="",
+                )
+            return projected(
+                "idle",
+                "Ready",
+                "No research run has started yet.",
+                next_step="Start research when ready.",
+                active=False,
+                display_stage="Ready",
+                display_phase="",
+            )
+
+        if human_request:
+            review_stage, review_phase = pending_labels()
+            return projected(
+                "review_needed",
+                "Review needed",
+                "A decision is needed to continue.",
+                next_step="Open the request to approve it or provide feedback.",
+                record=pending,
+                display_stage=review_stage,
+                display_phase=review_phase,
+            )
+
+        pending_status = str(pending.get("status", "")).strip()
+        if pending_status == "scoring_approval_pending":
+            return projected(
+                "evaluating",
+                "Preparing scoring",
+                "The approved result is being prepared for scoring.",
+                next_step="Scoring begins automatically.",
+                record=pending,
+                display_stage="Scoring",
+                display_phase="Preparing",
+            )
+        if pending_status == "scoring":
+            return projected(
+                "evaluating",
+                "Scoring",
+                "Evaluating the latest result.",
+                next_step="The score is reviewed next.",
+                record=pending,
+                display_stage="Scoring",
+                display_phase="Evaluating results",
+            )
+        if pending_status == "pending":
+            review_stage, review_phase = pending_labels()
+            return projected(
+                "reviewing",
+                "Reviewing",
+                "Checking the latest research.",
+                next_step="Research continues or a decision is requested.",
+                record=pending,
+                display_stage=review_stage,
+                display_phase=review_phase,
+            )
+
+        if action_status in {"pending", "decision_recorded"}:
+            action_stage, action_phase = durable_boundary_labels()
+            if action_status == "pending":
+                return projected(
+                    "reviewing",
+                    "Reviewing",
+                    "Choosing the next research direction.",
+                    next_step="Research continues from the selected direction.",
+                    record=next_action,
+                    display_stage=action_stage,
+                    display_phase=action_phase,
+                )
+            return projected(
+                "saving",
+                "Saving progress",
+                "Updating the research direction.",
+                next_step="Research continues from the selected direction.",
+                record=next_action,
+                display_stage=action_stage,
+                display_phase=action_phase,
+            )
+
+        transition = frontier_transition if frontier_status not in {"", "completed"} else root_transition
+        transition_status = frontier_status if transition is frontier_transition else root_status
+        if transition_status not in {"", "completed"}:
+            transition_stage, transition_phase = durable_boundary_labels()
+            return projected(
+                "saving",
+                "Saving progress",
+                "Recording the latest research.",
+                next_step="Research continues from the saved progress.",
+                record=transition,
+                display_stage=transition_stage,
+                display_phase=transition_phase,
+            )
+
+        if cleanup_pending or continuation_status in {"replacement_pending", "replacement_running"}:
+            record = cleanup or continuation
+            resume_stage, resume_phase = durable_boundary_labels()
+            return projected(
+                "resuming",
+                "Resuming",
+                "Continuing from saved progress.",
+                next_step="Research resumes automatically.",
+                record=record,
+                display_stage=resume_stage,
+                display_phase=resume_phase,
+            )
+
+        if continuation_status:
+            working_stage, working_phase = durable_boundary_labels()
+            return projected(
+                "researching",
+                "Researching",
+                "Working on the current research step.",
+                next_step=self._next_after_phase(phase),
+                record=continuation,
+                display_stage=working_stage,
+                display_phase=working_phase,
+            )
+
+        current_stage = str(pipeline.get("current_stage", "")).strip()
+        if current_stage:
+            stage = current_stage
+            stage_label = self._stage_label(stage)
+            stage_record = (pipeline.get("stages") or {}).get(stage, {})
+            return projected(
+                "researching",
+                "Researching",
+                "Working on the current research step.",
+                next_step="Review follows when this step is ready.",
+                record=stage_record,
+                display_phase="Starting",
+            )
+
+        return projected(
+            "starting",
+            "Starting",
+            "Preparing the research.",
+            next_step="Research begins shortly.",
+            record=owner,
+            display_stage="Research",
+            display_phase="Starting",
+        )
+
     def _autoresearch_status(self) -> Dict[str, Any]:
         has_frontier_state = HitlFrontierStore(self.work_dir).exists()
         return {
             "mode": "continue" if has_frontier_state else "fresh",
             "has_frontier_state": has_frontier_state,
         }
+
+    @staticmethod
+    def _compact_notification_text(value: Any, limit: int = 220) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= limit:
+            return text
+        shortened = text[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:")
+        return f"{shortened or text[: limit - 1]}…"
+
+    @staticmethod
+    def _decision_option_text(idea: Dict[str, Any]) -> str:
+        selected = str(idea.get("decision", "")).strip()
+        for option in idea.get("options", []):
+            if isinstance(option, str):
+                option_id = option_text = option
+            elif isinstance(option, dict):
+                option_id = str(option.get("option_id", "")).strip()
+                option_text = str(option.get("text", "")).strip()
+            else:
+                continue
+            if selected and selected in {option_id, option_text}:
+                return option_text
+        return selected
+
+    def _phase_notification(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        stage = str(event.get("stage", "")).strip()
+        phase = str(event.get("phase", "")).strip()
+        activity = str(event.get("activity", "")).strip()
+        stage_labels = {
+            "research": "Research",
+            "scoring": "Scoring",
+            "candidate_decision": "Candidate decision",
+            "frontier": "Frontier",
+        }
+        title = stage_labels.get(stage, self._stage_label(stage) if stage else "Research")
+
+        special_summaries = {
+            "starting": "Starting.",
+            "completed": "Run completed.",
+            "stopped": "Run stopped.",
+            "initial_result_review": "Reviewing the initial score.",
+            "accept_or_reject": "Reviewing whether to accept or reject the latest result.",
+            "repair_review": "Reviewing a scoring issue.",
+            "preparing": "Preparing the approved result for scoring.",
+            "evaluating_results": "Evaluating the latest result.",
+            "pruning": "Pruning the frontier.",
+            "selecting_next": "Selecting the next research basis.",
+            "saving_prune_decision": "Saving the prune decision.",
+            "saving_selection": "Saving the frontier selection.",
+            "saving_result": "Saving the candidate decision.",
+            "creating_root": "Creating the initial frontier root.",
+            "applying_result": "Applying the candidate decision.",
+        }
+        summary = special_summaries.get(phase, "")
+        if not summary:
+            if activity == "reviewing":
+                phase_label = self._review_phase_label(phase)
+            elif activity == "revising":
+                phase_label = "Revising" if phase == "review" else f"Revising {phase.replace('_', ' ')}"
+            else:
+                phase_label = self._working_phase_label(phase)
+            summary = f"{phase_label} started." if phase_label else "Research advanced."
+        return {
+            "id": str(event.get("id", "")),
+            "kind": "phase",
+            "created_at": str(event.get("created_at", "")),
+            "tone": "neutral",
+            "title": title,
+            "summary": summary,
+        }
+
+    def _idea_notification(
+        self,
+        event: Dict[str, Any],
+        idea: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        idea_type = str(idea.get("idea_type", "")).strip()
+        idea_id = str(idea.get("idea_id", "")).strip()
+        if idea_type == "decision":
+            title = "Decision made"
+            question = self._compact_notification_text(idea.get("decision_needed"), 120)
+            decision = self._compact_notification_text(self._decision_option_text(idea), 160)
+            if question and decision:
+                summary = f"About {question}: {decision}"
+            else:
+                summary = decision or question or "A research decision was recorded."
+            tone = "decision"
+        elif idea_type == "evidence":
+            title = "Evidence recorded"
+            summary = self._compact_notification_text(
+                idea.get("evidence") or idea.get("context") or "New research evidence was recorded."
+            )
+            tone = "evidence"
+        else:
+            title = "Proposal generated"
+            summary = self._compact_notification_text(
+                idea.get("proposal") or idea.get("context") or "A new research proposal was generated."
+            )
+            tone = "proposal"
+        return {
+            "id": str(event.get("id", "")),
+            "kind": "idea",
+            "created_at": str(event.get("created_at", "")),
+            "tone": tone,
+            "title": title,
+            "summary": summary,
+            "idea_id": idea_id,
+            "idea_type": idea_type,
+        }
+
+    def _request_notification(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        outcome = str(event.get("outcome", "")).strip().lower()
+        summaries = {
+            "approved": "Approved. Research continues.",
+            "feedback": "Feedback recorded. Revision follows.",
+            "rejected": "Not approved. Research continues from saved progress.",
+        }
+        return {
+            "id": str(event.get("id", "")),
+            "kind": "request",
+            "created_at": str(event.get("created_at", "")),
+            "tone": "resolved",
+            "title": "Review resolved",
+            "summary": summaries.get(outcome, "Response recorded. Research continues."),
+        }
+
+    def _notifications(
+        self,
+        runtime: Dict[str, Any],
+        ideas: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        events = runtime.get("interface_events", [])
+        if not isinstance(events, list):
+            return []
+        ideas_by_id = {str(idea.get("idea_id", "")): idea for idea in ideas}
+        projected: List[Dict[str, Any]] = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("kind") == "phase_transition":
+                projected.append(self._phase_notification(event))
+            elif event.get("kind") == "idea_created":
+                idea = ideas_by_id.get(str(event.get("idea_id", "")))
+                if idea is not None:
+                    projected.append(self._idea_notification(event, idea))
+            elif event.get("kind") == "request_resolved":
+                projected.append(self._request_notification(event))
+        return sorted(projected, key=lambda item: str(item.get("created_at", "")))
 
     def _ideas(self) -> List[Dict[str, Any]]:
         log = HitlIdeaLog(self.work_dir)
@@ -204,7 +751,7 @@ class HitlWorkspaceView:
         try:
             return HitlManagerContext(manager_dir).usage()
         except Exception as exc:
-            raise HitlWorkspaceViewError("Could not read manager prompt context.") from exc
+            raise HitlWorkspaceViewError("Could not read NeuriCo conversation context.") from exc
 
     @staticmethod
     def _artifact_timestamp(path: Path) -> str:
@@ -272,7 +819,7 @@ class HitlWorkspaceView:
         try:
             records = HitlManagerHistory.read_messages(manager_dir)
         except Exception as exc:
-            raise HitlWorkspaceViewError("Could not read manager conversation history.") from exc
+            raise HitlWorkspaceViewError("Could not read NeuriCo conversation history.") from exc
         # A request is a manager conversation turn with an additional structured
         # action surface.  Keep it in the durable transcript; the browser hides
         # that exact turn only while its request panel remains unresolved.
@@ -297,16 +844,17 @@ class HitlWorkspaceView:
             conversation.append(normalized)
         return conversation
 
-    def _inbox(self) -> Dict[str, Any]:
+    def _inbox(self, runtime: Dict[str, Any]) -> Dict[str, Any]:
         try:
             payload = HitlManagerInbox(self.work_dir).snapshot()
         except Exception as exc:
-            raise HitlWorkspaceViewError("Could not read the manager input state.") from exc
-        queue = _as_records(payload.get("queue", []), "manager input queue")
+            raise HitlWorkspaceViewError("Could not read the NeuriCo input state.") from exc
+        queue = _as_records(payload.get("queue", []), "NeuriCo input queue")
         for entry in queue:
             if not str(entry.get("id", "")).strip() or not str(entry.get("text", "")).strip():
-                raise HitlWorkspaceViewError("Every queued manager message requires id and text.")
-        pending = HitlRuntimeState(self.work_dir).pending_worker_command()
+                raise HitlWorkspaceViewError("Every queued NeuriCo message requires id and text.")
+        pending = runtime.get("pending_worker_command")
+        pending = pending if isinstance(pending, dict) else None
         record_id = str((pending or {}).get("human_request_record_id") or "").strip()
         request = None
         if record_id:
@@ -318,7 +866,7 @@ class HitlWorkspaceView:
                     if str(item.get("record_id", "")) == record_id
                 )
             except StopIteration as exc:
-                raise HitlWorkspaceViewError("Runtime pending request is missing its transcript record.") from exc
+                raise HitlWorkspaceViewError("The pending request is missing its conversation record.") from exc
             metadata = record.get("metadata")
             if (
                 not request_key
@@ -326,10 +874,10 @@ class HitlWorkspaceView:
                 or metadata.get("kind") != "human_request"
                 or str(metadata.get("request_key", "")) != request_key
             ):
-                raise HitlWorkspaceViewError("Runtime pending request is incomplete.")
+                raise HitlWorkspaceViewError("The pending request is incomplete.")
             options = metadata.get("options")
             if not isinstance(options, list):
-                raise HitlWorkspaceViewError("Runtime pending request options are invalid.")
+                raise HitlWorkspaceViewError("The pending request options are invalid.")
             request = {
                 "request_key": request_key,
                 "message": str(record.get("content", "")).strip(),

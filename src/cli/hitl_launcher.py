@@ -12,6 +12,7 @@ import yaml
 from core.config_loader import ConfigLoader
 from core.hitl_frontier import HitlFrontierStore
 from core.hitl_lock import HitlWorkspaceRunActiveError, active_hitl_workspace_run
+from core.hitl_workspace_view import HitlWorkspaceView
 from core.idea_manager import IdeaManager
 from core.runner import ResearchRunner
 
@@ -60,7 +61,7 @@ class HitlRunController:
         on_status_change: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         if interface not in {"web", "cli"}:
-            raise ValueError("HITL run interface must be 'web' or 'cli'.")
+            raise ValueError("NeuriCo run interface must be 'web' or 'cli'.")
         self.idea_id = str(idea_id)
         self.work_dir = Path(work_dir)
         self.project_root = Path(project_root)
@@ -69,27 +70,14 @@ class HitlRunController:
         self.on_status_change = on_status_change
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
-        self._status: Dict[str, Any] = {"status": "idle"}
 
     def snapshot(self) -> Dict[str, Any]:
-        with self._lock:
-            local_status = dict(self._status)
-            local_running = self._thread is not None and self._thread.is_alive()
-        if local_running:
-            return {"status": "running", "source": self.interface}
-        external_owner = active_hitl_workspace_run(self.work_dir)
-        if external_owner is not None:
-            return {
-                "status": "running",
-                "source": "external",
-                "owner": external_owner,
-            }
-        return local_status
+        return HitlWorkspaceView(self.work_dir).live_status()
 
     def launch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         provider = str(payload.get("provider", "")).strip().lower()
         if provider not in {"claude", "codex", "gemini"}:
-            raise ValueError("Choose Claude, Codex, or Gemini as the worker.")
+            raise ValueError("Choose Claude, Codex, or Gemini as the research model.")
         try:
             iterations = int(payload.get("iterations", 1))
         except (TypeError, ValueError) as exc:
@@ -102,7 +90,7 @@ class HitlRunController:
 
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
-                raise RuntimeError("An HITL AutoResearch run is already active for this workspace.")
+                raise RuntimeError("Research is already active for this workspace.")
             external_owner = active_hitl_workspace_run(self.work_dir)
             if external_owner is not None:
                 raise HitlWorkspaceRunActiveError(self.work_dir, external_owner)
@@ -134,18 +122,8 @@ class HitlRunController:
                                 result = execute()
                     else:
                         result = execute()
-                    next_status = "completed" if result.get("success") else "failed"
-                    error = ""
-                except HitlWorkspaceRunActiveError as exc:
-                    next_status = "idle"
-                    error = str(exc)
-                except Exception as exc:
-                    next_status = "failed"
-                    error = str(exc)
-                with self._lock:
-                    self._status = {"status": next_status}
-                    if error:
-                        self._status["error"] = error
+                except Exception:
+                    pass
                 self._publish_status()
 
             self._thread = threading.Thread(
@@ -153,10 +131,6 @@ class HitlRunController:
                 name="hitl-autoresearch-launch",
                 daemon=True,
             )
-            self._status = {
-                "status": "running",
-                "mode": "continue" if continuation else "fresh",
-            }
             self._thread.start()
         self._publish_status()
         return {
@@ -166,6 +140,4 @@ class HitlRunController:
 
     def _publish_status(self) -> None:
         if self.on_status_change is not None:
-            with self._lock:
-                status = dict(self._status)
-            self.on_status_change(status)
+            self.on_status_change(self.snapshot())

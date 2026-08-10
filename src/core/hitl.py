@@ -494,6 +494,17 @@ class HitlIdeaLog:
                 ordered["idea_id"],
                 exc_info=True,
             )
+        try:
+            from core.hitl_runtime_state import HitlRuntimeState
+
+            HitlRuntimeState(self.work_dir).record_interface_idea(ordered["idea_id"])
+        except Exception:
+            LOGGER.warning(
+                "HITL interface notification failed after idea %s was finalized; "
+                "the authoritative idea record remains available.",
+                ordered["idea_id"],
+                exc_info=True,
+            )
         return ordered
 
     def append_many(self, ideas: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

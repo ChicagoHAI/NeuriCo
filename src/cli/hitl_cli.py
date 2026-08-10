@@ -42,7 +42,6 @@ def main() -> int:
         project_root=PROJECT_ROOT,
         host=host,
         interface="cli",
-        on_status_change=host.channel.present_run_status,
     )
     host.channel.set_run_launcher(controller.launch, controller.snapshot)
 
@@ -59,7 +58,8 @@ def main() -> int:
     host.start()
     try:
         while not stopping and not host.channel.is_closed():
-            time.sleep(0.25)
+            host.channel.present_interface_notifications()
+            time.sleep(0.5)
     finally:
         host.stop()
     return 0

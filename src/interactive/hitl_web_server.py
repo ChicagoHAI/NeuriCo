@@ -70,7 +70,6 @@ def _handler(
     workspace: Path,
     title: str,
     run_launcher: Callable[[dict[str, Any]], dict[str, Any]],
-    run_status: Callable[[], dict[str, Any]],
     access_token: str,
     session_cookie_name: str,
 ):
@@ -188,7 +187,6 @@ def _handler(
             if path == "/api/snapshot":
                 try:
                     snapshot = HitlWorkspaceView(workspace).snapshot()
-                    snapshot["run"] = run_status()
                     self._json(snapshot)
                 except HitlWorkspaceViewError as exc:
                     self._json({"error": str(exc)}, 409)
@@ -308,7 +306,6 @@ class HitlWebServer:
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._run_launcher: Callable[[dict[str, Any]], dict[str, Any]] = self._run_unavailable
-        self._run_status: Callable[[], dict[str, Any]] = lambda: {"status": "unavailable"}
 
     @staticmethod
     def _run_unavailable(_payload: dict[str, Any]) -> dict[str, Any]:
@@ -317,11 +314,8 @@ class HitlWebServer:
     def set_run_launcher(
         self,
         launcher: Callable[[dict[str, Any]], dict[str, Any]],
-        status: Optional[Callable[[], dict[str, Any]]] = None,
     ) -> None:
         self._run_launcher = launcher
-        if status is not None:
-            self._run_status = status
 
     @property
     def url(self) -> str:
@@ -336,7 +330,6 @@ class HitlWebServer:
             self.workspace,
             self.title,
             lambda payload: self._run_launcher(payload),
-            lambda: self._run_status(),
             self.access_token,
             self.session_cookie_name,
         )
