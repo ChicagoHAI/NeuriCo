@@ -244,7 +244,6 @@ class HitlWorkspaceView:
         started_at = str((owner or {}).get("started_at") or run.get("started_at") or "").strip()
         provider = str((owner or {}).get("provider") or run.get("provider") or "").strip()
         mode = str((owner or {}).get("mode") or run.get("mode") or "").strip()
-        source = str((owner or {}).get("interface") or run.get("interface") or "").strip()
         latest_phase_event = self._latest_phase_event(runtime, started_at)
         latest_phase_started_at = str(latest_phase_event.get("created_at", "")).strip()
         paper_phase = bool(
@@ -280,7 +279,6 @@ class HitlWorkspaceView:
                 "label": label,
                 "mode": mode,
                 "provider": provider,
-                "source": source,
                 "started_at": started_at,
                 "phase_started_at": (
                     phase_started_at
@@ -715,19 +713,20 @@ class HitlWorkspaceView:
             return []
         ideas_by_id = {str(idea.get("idea_id", "")): idea for idea in ideas}
         projected: List[Dict[str, Any]] = []
+        last_phase_signature: Optional[tuple[str, str]] = None
         for event in events:
             if not isinstance(event, dict):
                 continue
             if event.get("kind") == "phase_transition":
                 notification = self._phase_notification(event)
                 if notification is not None:
-                    if (
-                        projected
-                        and projected[-1].get("kind") == "phase"
-                        and projected[-1].get("title") == notification.get("title")
-                        and projected[-1].get("summary") == notification.get("summary")
-                    ):
+                    phase_signature = (
+                        str(notification.get("title", "")),
+                        str(notification.get("summary", "")),
+                    )
+                    if phase_signature == last_phase_signature:
                         continue
+                    last_phase_signature = phase_signature
                     projected.append(notification)
             elif event.get("kind") == "idea_created":
                 idea = ideas_by_id.get(str(event.get("idea_id", "")))

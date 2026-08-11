@@ -328,6 +328,48 @@ def test_hidden_replacement_does_not_duplicate_visible_phase_notification(
     assert len(matching) == 1
 
 
+def test_hidden_replacement_does_not_duplicate_phase_across_idea_notification(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "rule_maker",
+            "hitl_stage": "plan",
+            "prompt_block": "continue",
+        }
+    )
+    runtime.mark_worker_replacement()
+    idea = HitlIdeaLog(work_dir).append(
+        {
+            "pipeline_stage": "rule_maker",
+            "hitl_stage": "plan",
+            "level": "C",
+            "actor": "rule_maker",
+            "idea_type": "evidence",
+            "idea_category": "implementation_fact",
+            "context": "Scoring plan review",
+            "evidence": "The scoring contract preserves macro-F1 as the primary metric.",
+            "raised": False,
+        }
+    )
+    runtime.update_worker_continuation(status="running")
+
+    notifications = HitlWorkspaceView(work_dir).notifications()
+    matching_phases = [
+        item
+        for item in notifications
+        if item["kind"] == "phase"
+        and item["title"] == "Rule making"
+        and item["summary"] == "Planning started."
+    ]
+
+    assert len(matching_phases) == 1
+    assert any(
+        item["kind"] == "idea" and item["idea_id"] == idea["idea_id"]
+        for item in notifications
+    )
+
+
 def test_visible_transition_preserves_later_matching_phase_notification(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
@@ -650,6 +692,41 @@ def test_run_controller_returns_shared_workspace_projection(tmp_path):
     assert actual == expected
 
 
+def test_public_projection_is_independent_of_launch_interface(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.begin_run(
+        {
+            "idea_id": "idea",
+            "interface": "web",
+            "mode": "fresh",
+            "provider": "claude",
+        }
+    )
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+            "prompt_block": "continue",
+        }
+    )
+
+    with patch(
+        "core.hitl_workspace_view.active_hitl_workspace_run",
+        return_value=_owner(interface="web"),
+    ):
+        web_snapshot = HitlWorkspaceView(work_dir).snapshot()
+    with patch(
+        "core.hitl_workspace_view.active_hitl_workspace_run",
+        return_value=_owner(interface="cli"),
+    ):
+        cli_snapshot = HitlWorkspaceView(work_dir).snapshot()
+
+    assert "source" not in web_snapshot["live"]
+    assert cli_snapshot["live"] == web_snapshot["live"]
+    assert cli_snapshot["notifications"] == web_snapshot["notifications"]
+
+
 def test_terminal_renders_transitions_once_and_status_on_demand():
     output = io.StringIO()
     channel = HitlTerminalChannel(output=output)
@@ -666,7 +743,6 @@ def test_terminal_renders_transitions_once_and_status_on_demand():
         "next_action": "Research continues or a decision is requested.",
         "provider": "claude",
         "mode": "continue",
-        "source": "cli",
         "active": True,
     }
     channel.set_run_launcher(lambda _payload: {}, lambda: dict(live))
@@ -887,6 +963,38 @@ def test_terminal_toolbar_uses_shared_live_status_and_phase_time():
 
     rendered = "".join(text for _style, text in toolbar)
     assert rendered == "  ● Resource finding · Planning  2:14 "
+
+
+def test_terminal_launch_flushes_first_durable_update_before_reopening_prompt():
+    output = io.StringIO()
+    channel = HitlTerminalChannel(output=output)
+    answers = iter(["claude", "1", "n", "n"])
+
+    class PromptAnswers:
+        @staticmethod
+        def prompt(_message):
+            return next(answers)
+
+    live = {"state": "idle", "active": False, "label": "Ready"}
+
+    def launch(_payload):
+        live.update(
+            {
+                "state": "researching",
+                "active": True,
+                "label": "Resource finding · Planning",
+            }
+        )
+        return {"status": "accepted", "mode": "fresh"}
+
+    channel._prompt_session = PromptAnswers()
+    channel.set_run_launcher(launch, lambda: dict(live))
+
+    with patch.object(channel, "present_interface_notifications") as present:
+        result = channel._launch_run_interactively()
+
+    assert result["status"] == "accepted"
+    present.assert_called_once_with()
 
 
 def test_terminal_startup_messages_use_compact_spacing():
