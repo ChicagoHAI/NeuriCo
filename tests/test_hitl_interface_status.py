@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from cli.hitl_launcher import HitlRunController  # noqa: E402
@@ -277,6 +279,76 @@ def test_replacement_activity_remains_normal_execution_and_silent(tmp_path):
     assert live["label"] == "Rule making · Executing"
     rendered = HitlWorkspaceView(work_dir).notifications()
     assert all("revis" not in item["summary"].lower() for item in rendered)
+
+
+@pytest.mark.parametrize(
+    ("pipeline_stage", "hitl_stage", "expected_title", "expected_summary"),
+    [
+        ("resource_finder", "plan", "Resource finding", "Planning started."),
+        ("rule_maker", "execution", "Rule making", "Executing started."),
+        ("experiment_runner", "execution", "Experiment", "Executing started."),
+    ],
+)
+def test_hidden_replacement_does_not_duplicate_visible_phase_notification(
+    tmp_path,
+    pipeline_stage,
+    hitl_stage,
+    expected_title,
+    expected_summary,
+):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": pipeline_stage,
+            "hitl_stage": hitl_stage,
+            "prompt_block": "continue",
+        }
+    )
+    runtime.mark_worker_replacement()
+    runtime.update_worker_continuation(status="running")
+
+    matching = [
+        item
+        for item in HitlWorkspaceView(work_dir).notifications()
+        if item["kind"] == "phase"
+        and item["title"] == expected_title
+        and item["summary"] == expected_summary
+    ]
+
+    assert len(matching) == 1
+
+
+def test_visible_transition_preserves_later_matching_phase_notification(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.record_interface_phase(
+        stage="rule_maker",
+        phase="plan",
+        activity="working",
+    )
+    runtime.record_interface_phase(
+        stage="rule_maker",
+        phase="plan",
+        activity="reviewing",
+    )
+    runtime.record_interface_phase(
+        stage="rule_maker",
+        phase="plan",
+        activity="working",
+    )
+
+    phase_lines = [
+        (item["title"], item["summary"])
+        for item in HitlWorkspaceView(work_dir).notifications()
+        if item["kind"] == "phase"
+    ]
+
+    assert phase_lines == [
+        ("Rule making", "Planning started."),
+        ("Rule making", "Plan review started."),
+        ("Rule making", "Planning started."),
+    ]
 
 
 def test_paper_writing_is_projected_from_durable_phase_event(tmp_path):

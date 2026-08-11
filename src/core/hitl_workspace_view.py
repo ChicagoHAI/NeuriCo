@@ -721,6 +721,13 @@ class HitlWorkspaceView:
             if event.get("kind") == "phase_transition":
                 notification = self._phase_notification(event)
                 if notification is not None:
+                    if (
+                        projected
+                        and projected[-1].get("kind") == "phase"
+                        and projected[-1].get("title") == notification.get("title")
+                        and projected[-1].get("summary") == notification.get("summary")
+                    ):
+                        continue
                     projected.append(notification)
             elif event.get("kind") == "idea_created":
                 idea = ideas_by_id.get(str(event.get("idea_id", "")))
