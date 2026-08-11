@@ -566,6 +566,7 @@ class ResearchRunner:
                         paper_style=paper_style,
                         paper_timeout=paper_timeout,
                         full_permissions=full_permissions,
+                        hitl_enabled=bool(hitl),
                     )
             except Exception as e:
                 print(f"\n❌ Continue AutoResearch error: {e}")
@@ -783,6 +784,7 @@ class ResearchRunner:
                         paper_style=paper_style,
                         paper_timeout=paper_timeout,
                         full_permissions=full_permissions,
+                        hitl_enabled=bool(hitl),
                     )
 
             except Exception as e:
@@ -1104,12 +1106,22 @@ https://github.com/ChicagoHAI/neurico
         paper_style: Optional[str],
         paper_timeout: int,
         full_permissions: bool,
+        hitl_enabled: bool = False,
     ) -> Dict[str, Any]:
         print()
         print("=" * 80)
         print("📝 STAGE: Paper Writing")
         print("=" * 80)
         print()
+
+        if hitl_enabled:
+            from core.hitl_runtime_state import HitlRuntimeState
+
+            HitlRuntimeState(work_dir).record_interface_phase(
+                stage="paper_writer",
+                phase="drafting",
+                activity="working",
+            )
 
         from agents.paper_writer import run_paper_writer
 

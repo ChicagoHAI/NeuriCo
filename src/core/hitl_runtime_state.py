@@ -141,6 +141,8 @@ class HitlRuntimeState:
             stage, phase = "candidate_decision", "accept_or_reject"
         elif review_kind == "scoring_failure":
             stage, phase = "scoring", "repair_review"
+        elif str(command.get("kind", "")).strip() == "proposal":
+            stage, phase = str(command.get("pipeline_stage", "")), "proposal"
         elif status == "scoring_approval_pending":
             stage, phase = "scoring", "preparing"
         elif status == "scoring":
@@ -189,6 +191,24 @@ class HitlRuntimeState:
         if not isinstance(events, list):
             return []
         return [self._copy(event) for event in events if isinstance(event, dict)]
+
+    def record_interface_phase(
+        self,
+        *,
+        stage: str,
+        phase: str,
+        activity: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Record a user-facing phase transition without changing workflow state."""
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            event = self._record_phase_transition_unlocked(
+                stage=stage,
+                phase=phase,
+                activity=activity,
+            )
+            self._save_unlocked()
+            return self._copy(event) if event is not None else None
 
     def begin_run(self, run: Dict[str, Any]) -> Dict[str, Any]:
         """Record the one active HITL run independently of its user interface."""

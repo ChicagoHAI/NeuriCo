@@ -12,6 +12,7 @@ from core.hitl import HitlIdeaLog  # noqa: E402
 from core.hitl_runtime_state import MAX_INTERFACE_EVENTS, HitlRuntimeState  # noqa: E402
 from core.hitl_workspace_view import HitlWorkspaceView  # noqa: E402
 from core.hitl_manager_host import HitlTerminalChannel  # noqa: E402
+from core.runner import ResearchRunner  # noqa: E402
 
 
 def _workspace(tmp_path):
@@ -220,7 +221,41 @@ def test_resolved_request_does_not_supply_paused_boundary(tmp_path):
         live = HitlWorkspaceView(work_dir).live_status()
 
     assert live["label"] == "Resource finding · Executing paused"
-    assert live["phase_started_at"] == runtime.worker_continuation()["started_at"]
+    assert live["phase_started_at"] == runtime.interface_events()[-1]["created_at"]
+
+
+def test_phase_timer_uses_latest_durable_phase_transition(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.begin_run(
+        {
+            "idea_id": "idea",
+            "interface": "web",
+            "mode": "fresh",
+            "provider": "claude",
+        }
+    )
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+            "prompt_block": "plan",
+        }
+    )
+    original_started_at = runtime.worker_continuation()["started_at"]
+    runtime.update_worker_continuation(
+        hitl_stage="execution",
+        prompt_block="execute",
+        status="running",
+    )
+    execution_event = runtime.interface_events()[-1]
+
+    with patch("core.hitl_workspace_view.active_hitl_workspace_run", return_value=_owner()):
+        live = HitlWorkspaceView(work_dir).live_status()
+
+    assert live["label"] == "Resource finding · Executing"
+    assert live["phase_started_at"] == execution_event["created_at"]
+    assert live["phase_started_at"] != original_started_at
 
 
 def test_replacement_activity_remains_normal_execution_and_silent(tmp_path):
@@ -244,7 +279,7 @@ def test_replacement_activity_remains_normal_execution_and_silent(tmp_path):
     assert all("revis" not in item["summary"].lower() for item in rendered)
 
 
-def test_paper_writing_is_projected_from_current_run_artifacts(tmp_path):
+def test_paper_writing_is_projected_from_durable_phase_event(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
     runtime.begin_run(
@@ -256,9 +291,11 @@ def test_paper_writing_is_projected_from_current_run_artifacts(tmp_path):
         }
     )
     run = runtime.snapshot()["run"]
-    logs = work_dir / "logs"
-    logs.mkdir()
-    (logs / "paper_writer_prompt.txt").write_text("write the paper", encoding="utf-8")
+    paper_event = runtime.record_interface_phase(
+        stage="paper_writer",
+        phase="drafting",
+        activity="working",
+    )
 
     with patch(
         "core.hitl_workspace_view.active_hitl_workspace_run",
@@ -267,7 +304,7 @@ def test_paper_writing_is_projected_from_current_run_artifacts(tmp_path):
         live = HitlWorkspaceView(work_dir).live_status()
 
     assert live["label"] == "Paper writing · Drafting"
-    assert live["phase_started_at"]
+    assert live["phase_started_at"] == paper_event["created_at"]
     paper_events = [
         item
         for item in HitlWorkspaceView(work_dir).notifications()
@@ -277,7 +314,7 @@ def test_paper_writing_is_projected_from_current_run_artifacts(tmp_path):
     assert paper_events[0]["summary"] == "Drafting started."
 
 
-def test_active_continuation_outranks_existing_paper_artifacts(tmp_path):
+def test_paper_notification_survives_a_later_run(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
     runtime.begin_run(
@@ -288,25 +325,68 @@ def test_active_continuation_outranks_existing_paper_artifacts(tmp_path):
             "provider": "claude",
         }
     )
-    run = runtime.snapshot()["run"]
-    logs = work_dir / "logs"
-    logs.mkdir()
-    (logs / "paper_writer_prompt.txt").write_text("old paper log", encoding="utf-8")
-    runtime.record_worker_continuation(
+    runtime.record_interface_phase(
+        stage="paper_writer",
+        phase="drafting",
+        activity="working",
+    )
+    runtime.complete_run(success=True)
+    runtime.begin_run(
         {
-            "pipeline_stage": "experiment_runner",
-            "hitl_stage": "execution",
-            "prompt_block": "execute",
+            "idea_id": "idea",
+            "interface": "web",
+            "mode": "continue",
+            "provider": "claude",
         }
     )
 
-    with patch(
-        "core.hitl_workspace_view.active_hitl_workspace_run",
-        return_value=_owner(started_at=run["started_at"]),
-    ):
-        live = HitlWorkspaceView(work_dir).live_status()
+    paper_events = [
+        item
+        for item in HitlWorkspaceView(work_dir).notifications()
+        if item["title"] == "Paper writing"
+    ]
 
-    assert live["label"] == "Experiment · Executing"
+    assert len(paper_events) == 1
+
+
+def test_paper_stage_records_interface_event_only_for_hitl(tmp_path):
+    runner = ResearchRunner.__new__(ResearchRunner)
+    hitl_work_dir = _workspace(tmp_path / "hitl")
+    runtime = HitlRuntimeState(hitl_work_dir)
+    runtime.begin_run(
+        {
+            "idea_id": "idea",
+            "interface": "web",
+            "mode": "fresh",
+            "provider": "claude",
+        }
+    )
+    ordinary_work_dir = tmp_path / "ordinary"
+    ordinary_work_dir.mkdir()
+    paper_result = {"success": True, "draft_dir": "paper_draft"}
+
+    with patch("agents.paper_writer.run_paper_writer", return_value=paper_result):
+        runner._run_paper_writer_stage(
+            idea={"idea": {"domain": "general"}},
+            work_dir=hitl_work_dir,
+            provider="claude",
+            paper_style="neurips",
+            paper_timeout=60,
+            full_permissions=True,
+            hitl_enabled=True,
+        )
+        runner._run_paper_writer_stage(
+            idea={"idea": {"domain": "general"}},
+            work_dir=ordinary_work_dir,
+            provider="claude",
+            paper_style="neurips",
+            paper_timeout=60,
+            full_permissions=True,
+            hitl_enabled=False,
+        )
+
+    assert runtime.interface_events()[-1]["stage"] == "paper_writer"
+    assert not (ordinary_work_dir / ".neurico" / "hitl" / "runtime.json").exists()
 
 
 def test_projection_never_exposes_none_as_a_stage(tmp_path):
@@ -521,6 +601,25 @@ def test_terminal_renders_transitions_once_and_status_on_demand():
     assert output.getvalue().count("Experiment · Execution review") == 2
 
 
+def test_terminal_does_not_repeat_status_for_metadata_only_updates():
+    output = io.StringIO()
+    channel = HitlTerminalChannel(output=output)
+    live = {
+        "state": "researching",
+        "stage": "resource_finder",
+        "phase": "execution",
+        "phase_started_at": "2026-08-10T10:00:00Z",
+        "updated_at": "2026-08-10T10:01:00Z",
+        "label": "Resource finding · Executing",
+        "active": True,
+    }
+
+    channel.present_run_status(live)
+    channel.present_run_status({**live, "updated_at": "2026-08-10T10:02:00Z"})
+
+    assert output.getvalue().count("Resource finding · Executing") == 1
+
+
 def test_phase_notifications_are_durable_and_retry_safe(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
@@ -559,6 +658,40 @@ def test_phase_notifications_are_durable_and_retry_safe(tmp_path):
         ("Resource finding", "Planning started."),
         ("Resource finding", "Plan review started."),
     ]
+
+
+def test_proposal_review_phase_is_never_empty(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.begin_worker_command(
+        {
+            "request_key": "proposal:review",
+            "kind": "proposal",
+            "pipeline_stage": "experiment_runner",
+        }
+    )
+
+    event = runtime.interface_events()[-1]
+    notification = HitlWorkspaceView(work_dir).notifications()[-1]
+
+    assert event["stage"] == "experiment_runner"
+    assert event["phase"] == "proposal"
+    assert notification["title"] == "Experiment"
+    assert notification["summary"] == "Proposal review started."
+
+
+def test_legacy_empty_proposal_review_event_is_rendered_cleanly(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.record_interface_phase(
+        stage="experiment_runner",
+        phase="",
+        activity="reviewing",
+    )
+
+    notification = HitlWorkspaceView(work_dir).notifications()[-1]
+
+    assert notification["summary"] == "Proposal review started."
 
 
 def test_idea_notifications_use_authoritative_idea_content(tmp_path):
@@ -663,3 +796,25 @@ def test_review_resolution_notification_waits_for_authoritative_completion(tmp_p
     assert len(resolved) == 1
     assert resolved[0]["title"] == "Review resolved"
     assert resolved[0]["summary"] == "Approved. Research continues."
+
+
+def test_manager_only_resolution_is_not_presented_as_a_human_review(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    request_key = "resource_finder:plan:manager-only"
+    runtime.begin_worker_command(
+        {
+            "request_key": request_key,
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+        }
+    )
+    runtime.complete_worker_command(
+        request_key,
+        {"status": "approved", "context": "Manager approved."},
+    )
+
+    assert all(
+        notification["kind"] != "request"
+        for notification in HitlWorkspaceView(work_dir).notifications()
+    )

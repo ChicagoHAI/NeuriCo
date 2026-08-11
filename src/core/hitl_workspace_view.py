@@ -140,30 +140,26 @@ class HitlWorkspaceView:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
 
-    @staticmethod
-    def _mtime_timestamp(path: Path) -> tuple[datetime, str]:
-        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-        return modified, modified.isoformat().replace("+00:00", "Z")
-
-    def _paper_writer_evidence(self, run_started_at: str) -> Dict[str, Any]:
-        """Project paper activity from files the existing paper writer already creates."""
+    def _latest_phase_event(
+        self,
+        runtime: Dict[str, Any],
+        run_started_at: str,
+    ) -> Dict[str, Any]:
+        """Return the latest visible phase transition from the current durable run."""
         run_start = self._parse_timestamp(run_started_at)
-        if run_start is None:
+        events = runtime.get("interface_events", [])
+        if not isinstance(events, list):
             return {}
-        candidates = [self.work_dir / "logs" / "paper_writer_prompt.txt"]
-        candidates.extend(sorted((self.work_dir / "logs").glob("paper_writer_*.log")))
-        observed: list[tuple[datetime, str]] = []
-        for path in candidates:
-            try:
-                modified, timestamp = self._mtime_timestamp(path)
-            except OSError:
+        for event in reversed(events):
+            if not isinstance(event, dict) or event.get("kind") != "phase_transition":
                 continue
-            if modified >= run_start:
-                observed.append((modified, timestamp))
-        if not observed:
-            return {}
-        _, started_at = min(observed, key=lambda item: item[0])
-        return {"started_at": started_at, "created_at": started_at}
+            if str(event.get("activity", "")).strip() == "revising":
+                continue
+            created_at = self._parse_timestamp(event.get("created_at"))
+            if run_start is not None and (created_at is None or created_at < run_start):
+                continue
+            return event
+        return {}
 
     @staticmethod
     def _stage_label(stage: str) -> str:
@@ -249,7 +245,12 @@ class HitlWorkspaceView:
         provider = str((owner or {}).get("provider") or run.get("provider") or "").strip()
         mode = str((owner or {}).get("mode") or run.get("mode") or "").strip()
         source = str((owner or {}).get("interface") or run.get("interface") or "").strip()
-        paper_evidence = self._paper_writer_evidence(started_at)
+        latest_phase_event = self._latest_phase_event(runtime, started_at)
+        latest_phase_started_at = str(latest_phase_event.get("created_at", "")).strip()
+        paper_phase = bool(
+            self._workflow_token(latest_phase_event.get("stage")) == "paper_writer"
+            and self._workflow_token(latest_phase_event.get("phase")) == "drafting"
+        )
 
         def projected(
             state: str,
@@ -284,7 +285,9 @@ class HitlWorkspaceView:
                 "phase_started_at": (
                     phase_started_at
                     if phase_started_at is not None
-                    else self._phase_start_timestamp(record) or started_at
+                    else latest_phase_started_at
+                    or self._phase_start_timestamp(record)
+                    or started_at
                 ),
                 "updated_at": self._record_timestamp(record),
                 "next_action": next_step,
@@ -337,7 +340,7 @@ class HitlWorkspaceView:
                 return "Candidate decision", "Applying result"
             if continuation_status:
                 return stage_label, self._working_phase_label(phase) if phase else "Working"
-            if paper_evidence:
+            if paper_phase:
                 return "Paper writing", "Drafting"
             if stage_label:
                 return stage_label, "Starting"
@@ -530,16 +533,16 @@ class HitlWorkspaceView:
                 display_phase=working_phase,
             )
 
-        if paper_evidence:
+        if paper_phase:
             return projected(
                 "researching",
                 "Writing paper",
                 "Preparing the research paper.",
                 next_step="The completed research is available when writing finishes.",
-                record=paper_evidence,
+                record=latest_phase_event,
                 display_stage="Paper writing",
                 display_phase="Drafting",
-                phase_started_at=str(paper_evidence.get("started_at", "")),
+                phase_started_at=latest_phase_started_at,
             )
 
         current_stage = self._workflow_token(pipeline.get("current_stage", ""))
@@ -628,6 +631,8 @@ class HitlWorkspaceView:
             "applying_result": "Applying the candidate decision.",
         }
         summary = special_summaries.get(phase, "")
+        if not summary and not phase and stage == "experiment_runner" and activity == "reviewing":
+            summary = "Proposal review started."
         if not summary:
             if activity == "reviewing":
                 phase_label = self._review_phase_label(phase)
@@ -643,22 +648,6 @@ class HitlWorkspaceView:
             "tone": "neutral",
             "title": title,
             "summary": summary,
-        }
-
-    def _paper_notification(self, runtime: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        run = runtime.get("run")
-        run = run if isinstance(run, dict) else {}
-        evidence = self._paper_writer_evidence(str(run.get("started_at", "")))
-        started_at = str(evidence.get("started_at", "")).strip()
-        if not started_at:
-            return None
-        return {
-            "id": f"paper:{started_at}",
-            "kind": "phase",
-            "created_at": started_at,
-            "tone": "neutral",
-            "title": "Paper writing",
-            "summary": "Drafting started.",
         }
 
     def _idea_notification(
@@ -738,10 +727,8 @@ class HitlWorkspaceView:
                 if idea is not None:
                     projected.append(self._idea_notification(event, idea))
             elif event.get("kind") == "request_resolved":
-                projected.append(self._request_notification(event))
-        paper_notification = self._paper_notification(runtime)
-        if paper_notification is not None:
-            projected.append(paper_notification)
+                if bool(event.get("human_involved")):
+                    projected.append(self._request_notification(event))
         return sorted(projected, key=lambda item: str(item.get("created_at", "")))
 
     def _ideas(self) -> List[Dict[str, Any]]:

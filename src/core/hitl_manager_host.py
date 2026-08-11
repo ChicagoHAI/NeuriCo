@@ -697,7 +697,6 @@ class HitlTerminalChannel(UserChannel):
                 "stage",
                 "phase",
                 "phase_started_at",
-                "updated_at",
                 "label",
             )
         )
