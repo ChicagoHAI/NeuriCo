@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from functools import wraps
 import inspect
+import logging
 import subprocess
 import shlex
 import sys
@@ -50,6 +51,9 @@ from core.compute_backend import (
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
+
+LOGGER = logging.getLogger(__name__)
+
 try:
     from core.github_manager import GitHubManager
 
@@ -74,7 +78,6 @@ def _with_hitl_workspace_run_ownership(method):
             return method(self, *args, **kwargs)
 
         from core.hitl_lock import hitl_workspace_run_lease
-        from core.hitl_runtime_state import HitlRuntimeState
 
         idea_id = str(arguments.arguments["idea_id"])
         work_dir = self._hitl_workspace_for_run_ownership(
@@ -91,26 +94,7 @@ def _with_hitl_workspace_run_ownership(method):
                 "provider": str(arguments.arguments["provider"]),
             },
         ):
-            runtime_state = HitlRuntimeState(work_dir)
-            runtime_state.begin_run(
-                {
-                    "idea_id": idea_id,
-                    "interface": str(hitl_interface),
-                    "mode": mode,
-                    "provider": str(arguments.arguments["provider"]),
-                }
-            )
-            try:
-                result = method(self, *args, **kwargs)
-            except BaseException as exc:
-                try:
-                    runtime_state.complete_run(success=False, error=str(exc))
-                except Exception:
-                    pass
-                raise
-            success = bool(result.get("success")) if isinstance(result, dict) else True
-            runtime_state.complete_run(success=success)
-            return result
+            return method(self, *args, **kwargs)
 
     return owned_run
 
@@ -1117,11 +1101,17 @@ https://github.com/ChicagoHAI/neurico
         if hitl_enabled:
             from core.hitl_runtime_state import HitlRuntimeState
 
-            HitlRuntimeState(work_dir).record_interface_phase(
-                stage="paper_writer",
-                phase="drafting",
-                activity="working",
-            )
+            try:
+                HitlRuntimeState(work_dir).record_interface_phase(
+                    stage="paper_writer",
+                    phase="drafting",
+                    activity="working",
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Unable to record the paper-writing interface phase.",
+                    exc_info=True,
+                )
 
         from agents.paper_writer import run_paper_writer
 

@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import re
 import shutil
+import threading
 import textwrap
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from prompt_toolkit.formatted_text import ANSI, FormattedText
+from prompt_toolkit.application import Application
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.formatted_text import ANSI, FormattedText, to_formatted_text
+from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import BufferControl, ConditionalContainer, FormattedTextControl
+from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.styles import Style
 
 
@@ -35,6 +45,7 @@ TERMINAL_STYLE = Style.from_dict(
         "status.failed": "bg:#3a2024 #f28b82 bold",
         "status.complete": "bg:#173128 #82d7bd bold",
         "status.timer": "bg:#17201e #95a39f",
+        "toolbar": "reverse",
     }
 )
 
@@ -50,6 +61,181 @@ def terminal_key_bindings() -> KeyBindings:
             event.current_buffer.validate_and_handle()
 
     return bindings
+
+
+class HitlTerminalViewport:
+    """One foreground renderer for the interactive terminal surface."""
+
+    def __init__(
+        self,
+        *,
+        on_submit: Callable[[str], None],
+        input_allowed: Callable[[], bool],
+        toolbar: Callable[[], Any],
+        rprompt: Callable[[], Any],
+        history: Optional[InMemoryHistory] = None,
+    ) -> None:
+        self._on_submit = on_submit
+        self._input_allowed = input_allowed
+        self._toolbar = toolbar
+        self._rprompt = rprompt
+        self._blocks: List[tuple[bool, List[str]]] = []
+        self._fragment_lock = threading.Lock()
+        self._prompt: Any = FormattedText([("class:prompt", "› ")])
+        self._thinking = False
+
+        completer = WordCompleter(
+            ["/run", "/status", "/activity", "/idea", "/reply", "/help", "/quit"],
+            sentence=True,
+        )
+        self.buffer = Buffer(
+            history=history or InMemoryHistory(),
+            auto_suggest=AutoSuggestFromHistory(),
+            completer=completer,
+            complete_while_typing=False,
+            read_only=Condition(lambda: not self._input_allowed()),
+        )
+        bindings = KeyBindings()
+
+        @bindings.add("c-j")
+        @bindings.add("c-m")
+        def submit(event: Any) -> None:
+            text = self.buffer.text.strip()
+            if not text or not self._input_allowed():
+                return
+            self.buffer.append_to_history()
+            self.buffer.reset()
+            self._on_submit(text)
+            event.app.invalidate()
+
+        @bindings.add("c-c")
+        def clear_input(event: Any) -> None:
+            self.buffer.reset()
+            event.app.invalidate()
+
+        history_control = FormattedTextControl(
+            self._history_fragments,
+            get_cursor_position=self._history_cursor,
+            show_cursor=False,
+        )
+        self.history_window = Window(
+            history_control,
+            wrap_lines=True,
+            always_hide_cursor=True,
+            dont_extend_height=True,
+        )
+        input_control = BufferControl(buffer=self.buffer)
+        input_row = VSplit(
+            [
+                Window(
+                    FormattedTextControl(lambda: self._prompt),
+                    dont_extend_width=True,
+                    height=1,
+                ),
+                Window(input_control, height=1),
+                Window(
+                    FormattedTextControl(self._rprompt),
+                    dont_extend_width=True,
+                    height=1,
+                ),
+            ],
+            height=1,
+        )
+        thinking_row = ConditionalContainer(
+            Window(
+                FormattedTextControl(
+                    lambda: FormattedText(
+                        [("class:rprompt", "  NeuriCo is thinking…")]
+                    )
+                ),
+                height=1,
+            ),
+            filter=Condition(lambda: self._thinking),
+        )
+        toolbar_row = Window(
+            FormattedTextControl(self._toolbar_fragments),
+            height=1,
+            style="class:toolbar",
+        )
+        root = HSplit(
+            [
+                self.history_window,
+                thinking_row,
+                input_row,
+                Window(),
+                toolbar_row,
+            ]
+        )
+        self.app: Application[None] = Application(
+            layout=Layout(root, focused_element=input_control),
+            key_bindings=bindings,
+            full_screen=True,
+            style=TERMINAL_STYLE,
+            refresh_interval=1.0,
+            terminal_size_polling_interval=0.1,
+        )
+
+    def _history_fragments(self) -> FormattedText:
+        with self._fragment_lock:
+            blocks = [(blank, list(lines)) for blank, lines in self._blocks]
+        width = max(1, self.app.output.get_size().columns)
+        fragments: List[tuple[str, str]] = []
+        for blank_before, lines in blocks:
+            if blank_before:
+                fragments.append(("", "\n"))
+            for line in lines:
+                parsed = list(to_formatted_text(ANSI(line)))
+                visible = "".join(fragment[1] for fragment in parsed)
+                if visible and not visible.strip("─"):
+                    style = next((fragment[0] for fragment in parsed if fragment[1]), "")
+                    parsed = [(style, "─" * width)]
+                fragments.extend(parsed)
+                fragments.append(("", "\n"))
+        return FormattedText(fragments)
+
+    def _history_cursor(self) -> Point:
+        with self._fragment_lock:
+            line_count = sum(len(lines) + int(blank) for blank, lines in self._blocks)
+            last_line = self._blocks[-1][1][-1] if self._blocks and self._blocks[-1][1] else ""
+        visible = "".join(fragment[1] for fragment in to_formatted_text(ANSI(last_line)))
+        return Point(x=len(visible), y=max(0, line_count - 1))
+
+    def _toolbar_fragments(self) -> FormattedText:
+        return FormattedText(
+            [("class:toolbar", fragment[1]) for fragment in to_formatted_text(self._toolbar())]
+        )
+
+    def append(self, lines: List[str], *, blank_before: bool = False) -> None:
+        with self._fragment_lock:
+            self._blocks.append((blank_before, list(lines)))
+        self.invalidate()
+
+    def set_prompt(self, prompt: Any) -> None:
+        self._prompt = prompt
+        self.invalidate()
+
+    def set_thinking(self, thinking: bool) -> None:
+        self._thinking = bool(thinking)
+        self.invalidate()
+
+    def invalidate(self) -> None:
+        if self.app.is_running:
+            self.app.invalidate()
+
+    def run(self) -> None:
+        def prepare_screen() -> None:
+            output = self.app.output
+            output.enter_alternate_screen()
+            output.erase_screen()
+            output.cursor_goto(0, 0)
+            output.flush()
+
+        self.app.run(pre_run=prepare_screen)
+
+    def stop(self) -> None:
+        loop = self.app.loop
+        if self.app.is_running and loop is not None:
+            loop.call_soon_threadsafe(self.app.exit)
 
 
 class HitlTerminalUI:
@@ -70,7 +256,7 @@ class HitlTerminalUI:
 
     @property
     def content_width(self) -> int:
-        return max(24, min(100, self._width() - 4))
+        return max(24, self._width() - 4)
 
     def _style(self, text: str, *styles: str) -> str:
         if not self.interactive or not text:
@@ -177,14 +363,13 @@ class HitlTerminalUI:
     def startup(self, workspace: Path | None, live: Dict[str, Any]) -> List[str]:
         name = workspace.name if workspace is not None else "workspace"
         name = self._middle_ellipsis(name, max(16, self.content_width - 12))
-        label = str(live.get("label") or live.get("title") or "Ready").strip()
         heading = f"NeuriCo  ·  {name}"
         hint = "/status for details  ·  /help for commands"
         if not bool(live.get("active")):
             hint = "/run to start  ·  /help for commands"
         return [
             self._style(heading, "bold", "mint"),
-            f"{self._style(label, 'bold')}  {self._style(f'·  {hint}', 'muted')}",
+            self._style(hint, "muted"),
             self._rule(),
         ]
 
@@ -463,6 +648,11 @@ class HitlTerminalUI:
     @staticmethod
     def setting_prompt(label: str) -> ANSI:
         return ANSI(f"\x1b[38;5;246m{label}\x1b[0m")
+
+    def setting_response(self, label: str, value: str) -> List[str]:
+        return [
+            f"{self._style(label, 'muted')}{value}",
+        ]
 
     def toolbar(
         self,

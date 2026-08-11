@@ -153,6 +153,8 @@ class HitlWorkspaceView:
         for event in reversed(events):
             if not isinstance(event, dict) or event.get("kind") != "phase_transition":
                 continue
+            if self._retired_run_event(event):
+                continue
             if str(event.get("activity", "")).strip() == "revising":
                 continue
             created_at = self._parse_timestamp(event.get("created_at"))
@@ -160,6 +162,14 @@ class HitlWorkspaceView:
                 continue
             return event
         return {}
+
+    @classmethod
+    def _retired_run_event(cls, event: Dict[str, Any]) -> bool:
+        return (
+            cls._workflow_token(event.get("stage")) == "research"
+            and cls._workflow_token(event.get("phase"))
+            in {"starting", "completed", "stopped"}
+        )
 
     @staticmethod
     def _stage_label(stage: str) -> str:
@@ -220,9 +230,6 @@ class HitlWorkspaceView:
         root_transition = root_transition if isinstance(root_transition, dict) else {}
         cleanup = runtime.get("rejected_whiteboard_cleanup")
         cleanup = cleanup if isinstance(cleanup, dict) else {}
-        run = runtime.get("run")
-        run = run if isinstance(run, dict) else {}
-
         pending_status = str(pending.get("status", "")).strip()
         unresolved = pending_status in {
             "pending",
@@ -241,9 +248,9 @@ class HitlWorkspaceView:
         )
         stage_label = self._stage_label(stage) if stage else ""
         phase_label = self._working_phase_label(phase) if phase else ""
-        started_at = str((owner or {}).get("started_at") or run.get("started_at") or "").strip()
-        provider = str((owner or {}).get("provider") or run.get("provider") or "").strip()
-        mode = str((owner or {}).get("mode") or run.get("mode") or "").strip()
+        started_at = str((owner or {}).get("started_at") or "").strip()
+        provider = str((owner or {}).get("provider") or "").strip()
+        mode = str((owner or {}).get("mode") or "").strip()
         latest_phase_event = self._latest_phase_event(runtime, started_at)
         latest_phase_started_at = str(latest_phase_event.get("created_at", "")).strip()
         paper_phase = bool(
@@ -301,8 +308,6 @@ class HitlWorkspaceView:
         cleanup_pending = str(cleanup.get("status", "")).strip() == "pending"
         continuation_status = str(continuation.get("status", "")).strip()
 
-        run_status = str(run.get("status", "")).strip()
-
         pending_kind = str(pending.get("kind", "")).strip()
         manager_review_kind = str(pending.get("manager_review_kind", "")).strip()
 
@@ -351,7 +356,6 @@ class HitlWorkspaceView:
             or root_status not in {"", "completed"}
             or cleanup_pending
             or continuation_status
-            or run_status == "running"
         )
         if owner is None:
             if has_pending_work:
@@ -367,8 +371,6 @@ class HitlWorkspaceView:
                     record = cleanup
                 elif continuation_status:
                     record = continuation
-                else:
-                    record = run
                 paused_stage, paused_phase = durable_boundary_labels()
                 return projected(
                     "paused",
@@ -380,18 +382,7 @@ class HitlWorkspaceView:
                     display_stage=paused_stage,
                     display_phase=f"{paused_phase} paused" if paused_phase else "Paused",
                 )
-            if run_status == "failed":
-                return projected(
-                    "failed",
-                    "Run stopped",
-                    "Research stopped before completing.",
-                    next_step="Review the issue, then continue.",
-                    record=run,
-                    active=False,
-                    display_stage="Run stopped",
-                    display_phase="",
-                )
-            if run_status == "completed":
+            if bool(pipeline.get("completed")):
                 return projected(
                     "completed",
                     "Complete",
@@ -401,10 +392,11 @@ class HitlWorkspaceView:
                         if HitlFrontierStore(self.work_dir).exists()
                         else "Inspect the completed research artifacts."
                     ),
-                    record=run,
+                    record=pipeline,
                     active=False,
                     display_stage="Complete",
                     display_phase="",
+                    phase_started_at=str(pipeline.get("completed_at", "")),
                 )
             if HitlFrontierStore(self.work_dir).exists():
                 return projected(
@@ -714,10 +706,36 @@ class HitlWorkspaceView:
         ideas_by_id = {str(idea.get("idea_id", "")): idea for idea in ideas}
         projected: List[Dict[str, Any]] = []
         last_phase_signature: Optional[tuple[str, str]] = None
+        first_phase_event = next(
+            (
+                event
+                for event in events
+                if isinstance(event, dict)
+                and event.get("kind") == "phase_transition"
+                and not self._retired_run_event(event)
+            ),
+            None,
+        )
+        if first_phase_event is not None and not (
+            self._workflow_token(first_phase_event.get("stage")) == "research"
+            and self._workflow_token(first_phase_event.get("phase")) == "starting"
+        ):
+            projected.append(
+                {
+                    "id": f"start:{first_phase_event.get('id', '')}",
+                    "kind": "phase",
+                    "created_at": str(first_phase_event.get("created_at", "")),
+                    "tone": "phase",
+                    "title": "Research",
+                    "summary": "Starting.",
+                }
+            )
         for event in events:
             if not isinstance(event, dict):
                 continue
             if event.get("kind") == "phase_transition":
+                if self._retired_run_event(event):
+                    continue
                 notification = self._phase_notification(event)
                 if notification is not None:
                     phase_signature = (

@@ -1,6 +1,7 @@
 """Shared live-status projection tests for the HITL web and CLI interfaces."""
 
 import io
+import json
 import sys
 import threading
 import time
@@ -238,14 +239,6 @@ def test_resolved_request_does_not_supply_paused_boundary(tmp_path):
 def test_phase_timer_uses_latest_durable_phase_transition(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
-    runtime.begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "web",
-            "mode": "fresh",
-            "provider": "claude",
-        }
-    )
     runtime.record_worker_continuation(
         {
             "pipeline_stage": "resource_finder",
@@ -391,6 +384,7 @@ def test_visible_transition_preserves_later_matching_phase_notification(tmp_path
     ]
 
     assert phase_lines == [
+        ("Research", "Starting."),
         ("Rule making", "Planning started."),
         ("Rule making", "Plan review started."),
         ("Rule making", "Planning started."),
@@ -400,15 +394,6 @@ def test_visible_transition_preserves_later_matching_phase_notification(tmp_path
 def test_paper_writing_is_projected_from_durable_phase_event(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
-    runtime.begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "web",
-            "mode": "fresh",
-            "provider": "claude",
-        }
-    )
-    run = runtime.snapshot()["run"]
     paper_event = runtime.record_interface_phase(
         stage="paper_writer",
         phase="drafting",
@@ -417,7 +402,7 @@ def test_paper_writing_is_projected_from_durable_phase_event(tmp_path):
 
     with patch(
         "core.hitl_workspace_view.active_hitl_workspace_run",
-        return_value=_owner(started_at=run["started_at"]),
+        return_value=_owner(),
     ):
         live = HitlWorkspaceView(work_dir).live_status()
 
@@ -435,27 +420,15 @@ def test_paper_writing_is_projected_from_durable_phase_event(tmp_path):
 def test_paper_notification_survives_a_later_run(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
-    runtime.begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "web",
-            "mode": "fresh",
-            "provider": "claude",
-        }
-    )
     runtime.record_interface_phase(
         stage="paper_writer",
         phase="drafting",
         activity="working",
     )
-    runtime.complete_run(success=True)
-    runtime.begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "web",
-            "mode": "continue",
-            "provider": "claude",
-        }
+    runtime.record_interface_phase(
+        stage="experiment_runner",
+        phase="proposal",
+        activity="reviewing",
     )
 
     paper_events = [
@@ -471,14 +444,6 @@ def test_paper_stage_records_interface_event_only_for_hitl(tmp_path):
     runner = ResearchRunner.__new__(ResearchRunner)
     hitl_work_dir = _workspace(tmp_path / "hitl")
     runtime = HitlRuntimeState(hitl_work_dir)
-    runtime.begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "web",
-            "mode": "fresh",
-            "provider": "claude",
-        }
-    )
     ordinary_work_dir = tmp_path / "ordinary"
     ordinary_work_dir.mkdir()
     paper_result = {"success": True, "draft_dir": "paper_draft"}
@@ -507,17 +472,35 @@ def test_paper_stage_records_interface_event_only_for_hitl(tmp_path):
     assert not (ordinary_work_dir / ".neurico" / "hitl" / "runtime.json").exists()
 
 
+def test_paper_stage_continues_when_interface_observation_fails(tmp_path):
+    runner = ResearchRunner.__new__(ResearchRunner)
+    work_dir = _workspace(tmp_path)
+    paper_result = {"success": True, "draft_dir": "paper_draft"}
+
+    with (
+        patch(
+            "core.hitl_runtime_state.HitlRuntimeState.record_interface_phase",
+            side_effect=RuntimeError("display unavailable"),
+        ),
+        patch("agents.paper_writer.run_paper_writer", return_value=paper_result) as writer,
+    ):
+        result = runner._run_paper_writer_stage(
+            idea={"idea": {"domain": "general"}},
+            work_dir=work_dir,
+            provider="claude",
+            paper_style="neurips",
+            paper_timeout=60,
+            full_permissions=True,
+            hitl_enabled=True,
+        )
+
+    assert result == paper_result
+    writer.assert_called_once()
+
+
 def test_projection_never_exposes_none_as_a_stage(tmp_path):
     work_dir = _workspace(tmp_path)
-    runtime = HitlRuntimeState(work_dir)
-    runtime.begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "web",
-            "mode": "fresh",
-            "provider": "claude",
-        }
-    )
+    HitlRuntimeState(work_dir)
     (work_dir / ".neurico" / "pipeline_state.json").write_text(
         '{"current_stage": "None"}',
         encoding="utf-8",
@@ -613,54 +596,72 @@ def test_durable_work_without_owner_is_paused(tmp_path):
     assert live["label"] == "Rule making · Executing paused"
 
 
-def test_interrupted_durable_run_without_owner_is_paused(tmp_path):
+def test_legacy_run_shadow_does_not_override_canonical_idle_state(tmp_path):
     work_dir = _workspace(tmp_path)
-    HitlRuntimeState(work_dir).begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "cli",
-            "mode": "continue",
-            "provider": "claude",
-        }
-    )
+    runtime = HitlRuntimeState(work_dir)
+    payload = runtime.snapshot()
+    payload["run"] = {
+        "idea_id": "idea",
+        "interface": "cli",
+        "mode": "continue",
+        "provider": "claude",
+        "status": "failed",
+    }
+    runtime.path.write_text(json.dumps(payload), encoding="utf-8")
 
     with patch("core.hitl_workspace_view.active_hitl_workspace_run", return_value=None):
         live = HitlWorkspaceView(work_dir).live_status()
 
-    assert live["state"] == "paused"
-    assert live["mode"] == "continue"
-    assert live["provider"] == "claude"
+    assert live["state"] == "idle"
+    assert live["label"] == "Ready"
+    assert live["mode"] == ""
+    assert live["provider"] == ""
 
 
-def test_completed_and_failed_runs_are_projected_from_durable_state(tmp_path):
+def test_legacy_run_shadow_is_removed_when_runtime_state_is_loaded(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
-    runtime.begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "web",
-            "mode": "fresh",
-            "provider": "codex",
-        }
+    payload = runtime.snapshot()
+    payload["run"] = {"status": "failed", "error": "stale interface state"}
+    runtime.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = HitlRuntimeState(work_dir).snapshot()
+
+    assert "run" not in restored
+    assert "run" not in json.loads(runtime.path.read_text(encoding="utf-8"))
+
+
+def test_completion_is_projected_from_canonical_pipeline_state(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    pipeline_path = work_dir / ".neurico" / "pipeline_state.json"
+    pipeline_path.write_text(
+        '{"current_stage": null, "completed": false}',
+        encoding="utf-8",
     )
-    runtime.complete_run(success=False, error="provider unavailable")
 
     with patch("core.hitl_workspace_view.active_hitl_workspace_run", return_value=None):
-        failed = HitlWorkspaceView(work_dir).live_status()
+        ready = HitlWorkspaceView(work_dir).live_status()
 
-    assert failed["state"] == "failed"
-    assert failed["detail"] == "Research stopped before completing."
-    assert failed["label"] == "Run stopped"
+    assert ready["state"] == "idle"
+    assert ready["label"] == "Ready"
 
-    runtime.begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "web",
-            "mode": "fresh",
-            "provider": "codex",
-        }
+    completed_at = "2026-08-10T12:00:00Z"
+    pipeline_path.write_text(
+        json.dumps(
+            {
+                "current_stage": None,
+                "completed": True,
+                "completed_at": completed_at,
+            }
+        ),
+        encoding="utf-8",
     )
-    runtime.complete_run(success=True)
+    runtime.record_interface_phase(
+        stage="research",
+        phase="stopped",
+        activity="failed",
+    )
 
     with patch("core.hitl_workspace_view.active_hitl_workspace_run", return_value=None):
         completed = HitlWorkspaceView(work_dir).live_status()
@@ -668,6 +669,8 @@ def test_completed_and_failed_runs_are_projected_from_durable_state(tmp_path):
     assert completed["state"] == "completed"
     assert completed["can_launch"] is True
     assert completed["label"] == "Complete"
+    assert completed["phase_started_at"] == completed_at
+    assert HitlWorkspaceView(work_dir).notifications() == []
 
 
 def test_run_controller_returns_shared_workspace_projection(tmp_path):
@@ -687,17 +690,42 @@ def test_run_controller_returns_shared_workspace_projection(tmp_path):
     assert actual == expected
 
 
+def test_run_controller_logs_background_failure_without_shadow_status(tmp_path):
+    work_dir = _workspace(tmp_path)
+    published = []
+    controller = HitlRunController(
+        idea_id="idea",
+        work_dir=work_dir,
+        project_root=tmp_path,
+        host=object(),
+        interface="web",
+        on_status_change=published.append,
+    )
+
+    with (
+        patch("cli.hitl_launcher.active_hitl_workspace_run", return_value=None),
+        patch("cli.hitl_launcher.ResearchRunner") as runner_class,
+        patch("cli.hitl_launcher.LOGGER.exception") as log_exception,
+    ):
+        runner_class.return_value.run_research.side_effect = RuntimeError("provider unavailable")
+        controller.launch(
+            {
+                "provider": "claude",
+                "iterations": 1,
+                "paper_style": "auto",
+            }
+        )
+        controller._thread.join(timeout=2)
+
+    log_exception.assert_called_once()
+    assert published
+    assert all("error" not in snapshot for snapshot in published)
+    assert published[-1] == HitlWorkspaceView(work_dir).live_status()
+
+
 def test_public_projection_is_independent_of_launch_interface(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
-    runtime.begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "web",
-            "mode": "fresh",
-            "provider": "claude",
-        }
-    )
     runtime.record_worker_continuation(
         {
             "pipeline_stage": "resource_finder",
@@ -779,13 +807,10 @@ def test_terminal_does_not_repeat_status_for_metadata_only_updates():
 def test_phase_notifications_are_durable_and_retry_safe(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
-    runtime.begin_run(
-        {
-            "idea_id": "idea",
-            "interface": "web",
-            "mode": "fresh",
-            "provider": "claude",
-        }
+    runtime.record_interface_phase(
+        stage="research",
+        phase="starting",
+        activity="starting",
     )
     continuation = {
         "pipeline_stage": "resource_finder",
@@ -814,6 +839,76 @@ def test_phase_notifications_are_durable_and_retry_safe(tmp_path):
         ("Resource finding", "Planning started."),
         ("Resource finding", "Plan review started."),
     ]
+
+
+def test_first_durable_phase_derives_one_research_start_notification(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+            "prompt_block": "continue",
+        }
+    )
+
+    phase_lines = [
+        (item["title"], item["summary"])
+        for item in HitlWorkspaceView(work_dir).notifications()
+        if item["kind"] == "phase"
+    ]
+
+    assert phase_lines == [
+        ("Research", "Starting."),
+        ("Resource finding", "Planning started."),
+    ]
+
+
+def test_phase_observation_failure_does_not_block_runtime_transition(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+
+    with patch.object(
+        runtime,
+        "_append_interface_event_unlocked",
+        side_effect=RuntimeError("display unavailable"),
+    ):
+        runtime.record_worker_continuation(
+            {
+                "pipeline_stage": "resource_finder",
+                "hitl_stage": "plan",
+                "prompt_block": "continue",
+            }
+        )
+
+    assert runtime.worker_continuation()["status"] == "running"
+    runtime.update_worker_continuation(status="running")
+    assert runtime.interface_events()[-1]["stage"] == "resource_finder"
+
+
+def test_request_observation_failure_does_not_block_resolution(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    request_key = "resource_finder:plan:finish"
+    runtime.begin_worker_command(
+        {
+            "request_key": request_key,
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+        }
+    )
+
+    with patch.object(
+        runtime,
+        "_append_interface_event_unlocked",
+        side_effect=RuntimeError("display unavailable"),
+    ):
+        runtime.complete_worker_command(
+            request_key,
+            {"status": "approved", "context": "Plan approved."},
+        )
+
+    assert runtime.pending_worker_command()["status"] == "resolved"
 
 
 def test_proposal_review_phase_is_never_empty(tmp_path):
@@ -973,7 +1068,7 @@ def test_terminal_startup_messages_use_compact_spacing():
     rendered = output.getvalue()
     assert "\n\n" not in rendered
     assert rendered.splitlines()[0] == "NeuriCo  ·  example"
-    assert rendered.splitlines()[1] == "Ready  ·  /run to start  ·  /help for commands"
+    assert rendered.splitlines()[1] == "/run to start  ·  /help for commands"
     assert len(rendered.splitlines()) == 3
 
 
@@ -1058,6 +1153,12 @@ def test_terminal_review_surface_adapts_to_narrow_terminals():
     assert "Review needed" in lines
     assert "Rule making / Plan review" in lines
     assert all(len(line) <= ui.content_width for line in lines)
+
+
+def test_terminal_content_uses_available_wide_screen_space():
+    ui = HitlTerminalUI(interactive=False, width=lambda: 180)
+
+    assert ui.content_width == 176
 
 
 def test_terminal_thinking_indicator_is_transient():

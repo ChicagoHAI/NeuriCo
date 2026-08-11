@@ -8,6 +8,7 @@ manager process restart.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
@@ -30,6 +31,7 @@ UNRESOLVED_WORKER_COMMAND_STATUSES = frozenset(
     }
 )
 MAX_INTERFACE_EVENTS = 500
+LOGGER = logging.getLogger(__name__)
 
 
 def worker_command_requires_resume(command: Any) -> bool:
@@ -82,7 +84,6 @@ class HitlRuntimeState:
     @staticmethod
     def _default() -> Dict[str, Any]:
         return {
-            "run": None,
             "worker_continuation": None,
             "pending_worker_command": None,
             "next_autoresearch_action": None,
@@ -118,19 +119,28 @@ class HitlRuntimeState:
         phase: str,
         activity: str,
     ) -> Optional[Dict[str, Any]]:
-        normalized = tuple(str(value or "").strip() for value in (stage, phase, activity))
-        if not any(normalized):
+        previous_phase_key = str(self._state.get("interface_phase_key", ""))
+        try:
+            normalized = tuple(str(value or "").strip() for value in (stage, phase, activity))
+            if not any(normalized):
+                return None
+            phase_key = ":".join(normalized)
+            if previous_phase_key == phase_key:
+                return None
+            self._state["interface_phase_key"] = phase_key
+            return self._append_interface_event_unlocked(
+                "phase_transition",
+                stage=normalized[0],
+                phase=normalized[1],
+                activity=normalized[2],
+            )
+        except Exception:
+            self._state["interface_phase_key"] = previous_phase_key
+            LOGGER.warning(
+                "Unable to record observational HITL phase metadata.",
+                exc_info=True,
+            )
             return None
-        phase_key = ":".join(normalized)
-        if str(self._state.get("interface_phase_key", "")) == phase_key:
-            return None
-        self._state["interface_phase_key"] = phase_key
-        return self._append_interface_event_unlocked(
-            "phase_transition",
-            stage=normalized[0],
-            phase=normalized[1],
-            activity=normalized[2],
-        )
 
     def _record_worker_command_phase_unlocked(self, command: Dict[str, Any]) -> None:
         review_kind = str(command.get("manager_review_kind", ""))
@@ -210,50 +220,6 @@ class HitlRuntimeState:
             self._save_unlocked()
             return self._copy(event) if event is not None else None
 
-    def begin_run(self, run: Dict[str, Any]) -> Dict[str, Any]:
-        """Record the one active HITL run independently of its user interface."""
-        record = self._copy(run)
-        for key in ("idea_id", "interface", "mode", "provider"):
-            if not str(record.get(key, "")).strip():
-                raise HitlRuntimeStateError(f"HITL run requires {key}")
-        record["status"] = "running"
-        record["started_at"] = _now()
-        with self._locked():
-            self._state = self._load_unlocked() or self._default()
-            self._state["run"] = record
-            self._state["interface_phase_key"] = ""
-            self._record_phase_transition_unlocked(
-                stage="research",
-                phase="starting",
-                activity="starting",
-            )
-            self._save_unlocked()
-            return self._copy(record)
-
-    def complete_run(self, *, success: bool, error: str = "") -> Dict[str, Any]:
-        """Persist the terminal result of the active HITL run."""
-        with self._locked():
-            self._state = self._load_unlocked() or self._default()
-            record = self._state.get("run")
-            if not isinstance(record, dict) or record.get("status") != "running":
-                raise HitlRuntimeStateError("No active HITL run can be completed")
-            record["status"] = "completed" if success else "failed"
-            record["completed_at"] = _now()
-            record["updated_at"] = record["completed_at"]
-            message = str(error).strip()
-            if message:
-                record["error"] = message[:1000]
-            else:
-                record.pop("error", None)
-            self._state["run"] = record
-            self._record_phase_transition_unlocked(
-                stage="research",
-                phase="completed" if success else "stopped",
-                activity="completed" if success else "failed",
-            )
-            self._save_unlocked()
-            return self._copy(record)
-
     def _locked(self) -> Iterator[None]:
         return exclusive_file_lock(self.lock_path)
 
@@ -272,6 +238,8 @@ class HitlRuntimeState:
             raise HitlRuntimeStateError("HITL runtime state must be a JSON object")
         merged = self._default()
         merged.update(payload)
+        # Ignore the retired interface-owned run shadow in existing workspaces.
+        merged.pop("run", None)
         return merged
 
     def _save_unlocked(self) -> None:
@@ -436,14 +404,20 @@ class HitlRuntimeState:
                 for event in events
             )
             if not already_recorded:
-                self._append_interface_event_unlocked(
-                    "request_resolved",
-                    request_key=str(request_key),
-                    stage=str(command.get("pipeline_stage", "")),
-                    phase=str(command.get("hitl_stage", "")),
-                    outcome=str(response.get("status", "")).strip(),
-                    human_involved=bool(command.get("human_reply_record_ids")),
-                )
+                try:
+                    self._append_interface_event_unlocked(
+                        "request_resolved",
+                        request_key=str(request_key),
+                        stage=str(command.get("pipeline_stage", "")),
+                        phase=str(command.get("hitl_stage", "")),
+                        outcome=str(response.get("status", "")).strip(),
+                        human_involved=bool(command.get("human_reply_record_ids")),
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "Unable to record observational HITL request metadata.",
+                        exc_info=True,
+                    )
             self._save_unlocked()
 
     def cancel_pending_worker_command(

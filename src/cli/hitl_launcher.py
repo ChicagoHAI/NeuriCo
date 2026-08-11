@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+import logging
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -15,6 +16,9 @@ from core.hitl_lock import HitlWorkspaceRunActiveError, active_hitl_workspace_ru
 from core.hitl_workspace_view import HitlWorkspaceView
 from core.idea_manager import IdeaManager
 from core.runner import ResearchRunner
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def workspace_for_idea(project_root: Path, idea_id: str) -> Path:
@@ -119,11 +123,14 @@ class HitlRunController:
                         log_path.parent.mkdir(parents=True, exist_ok=True)
                         with log_path.open("a", encoding="utf-8") as output:
                             with redirect_stdout(output), redirect_stderr(output):
-                                result = execute()
+                                execute()
                     else:
-                        result = execute()
+                        execute()
                 except Exception:
-                    pass
+                    LOGGER.exception(
+                        "HITL AutoResearch launch failed for workspace %s",
+                        self.work_dir,
+                    )
                 self._publish_status()
 
             self._thread = threading.Thread(
