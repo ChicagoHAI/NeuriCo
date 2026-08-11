@@ -338,6 +338,7 @@ class HitlTerminalChannel(UserChannel):
         self._run_status: Optional[Any] = None
         self._last_live_signature = ""
         self._seen_interface_events: set[str] = set()
+        self._latest_activity = ""
         self._startup_rendered = False
         self._thinking_stop = threading.Event()
         self._thinking_thread: Optional[threading.Thread] = None
@@ -436,31 +437,10 @@ class HitlTerminalChannel(UserChannel):
             content = str(record.get("content", "")).strip()
             if speaker == "human" and content and self._prompt_history is not None:
                 self._prompt_history.append_string(content)
-        notifications = [
-            notification
-            for notification in snapshot.get("notifications", [])
-            if isinstance(notification, dict)
-        ]
-        timeline = [
-            {
-                "kind": "conversation",
-                "created_at": str(record.get("created_at", "")),
-                "record": record,
-            }
-            for record in conversation[-6:]
-        ]
-        timeline.extend(
-            {
-                "kind": "notification",
-                "created_at": str(notification.get("created_at", "")),
-                "record": notification,
-            }
-            for notification in notifications[-12:]
-        )
-        for entry in sorted(timeline, key=lambda item: item["created_at"]):
-            record = entry["record"]
-            if entry["kind"] == "notification":
-                self._render_interface_notification(record)
+        visible_conversation = conversation[-6:]
+        for record in visible_conversation:
+            record_id = str(record.get("record_id", record.get("id", "")))
+            if pending_record_id and record_id == pending_record_id:
                 continue
             speaker = str(record.get("speaker", "manager")).strip().lower()
             content = str(record.get("content", "")).strip()
@@ -469,12 +449,20 @@ class HitlTerminalChannel(UserChannel):
                     self._ui.conversation("human" if speaker == "human" else "manager", content),
                     blank_before=True,
                 )
-        for notification in notifications:
+        for notification in snapshot.get("notifications", []):
             if not isinstance(notification, dict):
                 continue
             event_id = str(notification.get("id", "")).strip()
             if event_id:
                 self._seen_interface_events.add(event_id)
+            self._latest_activity = self._notification_activity(notification)
+        notifications = list(snapshot.get("notifications") or [])
+        if notifications:
+            self._write_block(
+                self._ui.system(
+                    f"{len(notifications)} research updates are available with /activity."
+                )
+            )
         if isinstance(pending, dict):
             request = {
                 "message": str(pending.get("message", "")),
@@ -494,9 +482,8 @@ class HitlTerminalChannel(UserChannel):
 
     def _render_interface_notification(self, notification: Dict[str, Any]) -> None:
         kind = str(notification.get("kind", "")).strip()
-        if kind == "phase":
-            self._write_block(self._ui.phase(notification))
-        elif kind == "idea":
+        self._latest_activity = self._notification_activity(notification)
+        if kind == "idea":
             self._write_block(self._ui.idea(notification))
         elif kind == "request":
             self._write_block(self._ui.resolved_request(notification))
@@ -533,6 +520,7 @@ class HitlTerminalChannel(UserChannel):
                             bottom_toolbar=self._terminal_status_toolbar,
                             rprompt=self._terminal_rprompt,
                             refresh_interval=1.0,
+                            erase_when_done=True,
                         )
                     except KeyboardInterrupt:
                         continue
@@ -789,6 +777,7 @@ class HitlTerminalChannel(UserChannel):
         return self._ui.toolbar(
             status,
             elapsed=elapsed,
+            latest_activity=self._latest_activity,
         )
 
     def _terminal_rprompt(self) -> Any:
@@ -872,6 +861,15 @@ class HitlTerminalChannel(UserChannel):
             return
         self._startup_rendered = True
         self._write_block(self._ui.startup(self.work_dir, self._live_snapshot()))
+
+    @staticmethod
+    def _notification_activity(notification: Dict[str, Any]) -> str:
+        kind = str(notification.get("kind", "")).strip()
+        title = str(notification.get("title", "Research update")).strip()
+        if kind == "idea":
+            idea_id = str(notification.get("idea_id", "")).strip()
+            return " ".join(part for part in (idea_id, title) if part)
+        return title
 
     def _write_block(
         self,
