@@ -12,8 +12,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.patch_stdout import StdoutProxy
+
 from interactive.channel import UserChannel, WebChannel, _SHUTDOWN
 from interactive.hitl_web_server import HitlWebServer
+from interactive.hitl_terminal_ui import (
+    HitlTerminalUI,
+    TERMINAL_STYLE,
+    terminal_key_bindings,
+)
 
 from core.hitl_manager_inbox import (
     HitlManagerInbox,
@@ -270,11 +281,6 @@ class HitlWebChannel(WebChannel):
 class HitlTerminalChannel(UserChannel):
     """Durable terminal renderer for one HITL manager workspace."""
 
-    _HUMAN_LABEL = "You"
-    _MANAGER_LABEL = "NeuriCo"
-    _REQUEST_LABEL = "NeuriCo request"
-    _SYSTEM_LABEL = "System"
-
     def __init__(
         self,
         work_dir: Optional[Path] = None,
@@ -282,7 +288,36 @@ class HitlTerminalChannel(UserChannel):
         output: Optional[TextIO] = None,
     ) -> None:
         self.work_dir = Path(work_dir) if work_dir is not None else None
-        self._output = output if output is not None else sys.stdout
+        terminal_output = output if output is not None else sys.stdout
+        self._terminal_output = terminal_output
+        self._prompt_session: Optional[PromptSession[str]] = None
+        self._prompt_output: Optional[StdoutProxy] = None
+        self._prompt_history: Optional[InMemoryHistory] = None
+        interactive = output is None and sys.stdin.isatty() and terminal_output.isatty()
+        self._ui = HitlTerminalUI(interactive=interactive)
+        if interactive:
+            self._prompt_history = InMemoryHistory()
+            self._prompt_session = PromptSession(
+                style=TERMINAL_STYLE,
+                history=self._prompt_history,
+                auto_suggest=AutoSuggestFromHistory(),
+                completer=WordCompleter(
+                    [
+                        "/run",
+                        "/status",
+                        "/activity",
+                        "/idea",
+                        "/reply",
+                        "/help",
+                        "/quit",
+                    ],
+                    sentence=True,
+                ),
+                complete_while_typing=False,
+                key_bindings=terminal_key_bindings(),
+            )
+            self._prompt_output = StdoutProxy(sleep_between_writes=0.05, raw=True)
+        self._output = terminal_output
         self._output_lock = threading.Lock()
         self._inbox = HitlManagerInbox(self.work_dir) if self.work_dir is not None else None
         self._memory_input: "queue.Queue[Any]" = queue.Queue()
@@ -303,6 +338,10 @@ class HitlTerminalChannel(UserChannel):
         self._run_status: Optional[Any] = None
         self._last_live_signature = ""
         self._seen_interface_events: set[str] = set()
+        self._latest_activity = ""
+        self._startup_rendered = False
+        self._thinking_stop = threading.Event()
+        self._thinking_thread: Optional[threading.Thread] = None
 
     def set_resolution_reply_handler(self, handler: Any) -> None:
         with self._state_lock:
@@ -340,25 +379,11 @@ class HitlTerminalChannel(UserChannel):
             self._render_resolution_request(request, actionable=True)
 
     def _render_resolution_request(self, request: Dict[str, Any], *, actionable: bool) -> None:
-        with self._output_lock:
-            print(
-                f"\n{self._REQUEST_LABEL} > {request['message']}",
-                file=self._output,
-            )
-            for index, option in enumerate(request.get("options") or [], 1):
-                print(f"  [{index}] {option['text']}", file=self._output)
-            if actionable:
-                print(
-                    "Reply with /reply <number> or /reply <feedback>.",
-                    file=self._output,
-                )
-            if actionable and self._reading_input.is_set():
-                print(
-                    f"{self._HUMAN_LABEL} > ",
-                    end="",
-                    file=self._output,
-                )
-            self._output.flush()
+        live = self._live_snapshot()
+        self._write_block(
+            self._ui.request(request, live=live, actionable=actionable),
+            blank_before=True,
+        )
 
     def clear_resolution_request(self) -> None:
         """Remove a request invalidated by runtime recovery."""
@@ -381,6 +406,7 @@ class HitlTerminalChannel(UserChannel):
     def start(self) -> None:
         if self._reader is not None:
             return
+        self._render_startup()
         self._replay_durable_state()
         self._reader = threading.Thread(
             target=self._read_stdin,
@@ -401,41 +427,42 @@ class HitlTerminalChannel(UserChannel):
             return
         pending = snapshot.get("inbox", {}).get("pending_request")
         pending_record_id = str((pending or {}).get("conversation_record_id", ""))
-        timeline: List[Dict[str, Any]] = []
-        for record in snapshot.get("conversation", []):
+        conversation = [
+            record
+            for record in snapshot.get("conversation", [])
+            if str(record.get("record_id", record.get("id", ""))) != pending_record_id
+        ]
+        for record in conversation:
+            speaker = str(record.get("speaker", "manager")).strip().lower()
+            content = str(record.get("content", "")).strip()
+            if speaker == "human" and content and self._prompt_history is not None:
+                self._prompt_history.append_string(content)
+        visible_conversation = conversation[-6:]
+        for record in visible_conversation:
             record_id = str(record.get("record_id", record.get("id", "")))
             if pending_record_id and record_id == pending_record_id:
                 continue
-            timeline.append(
-                {
-                    "kind": "message",
-                    "created_at": str(record.get("created_at", "")),
-                    "record": record,
-                }
-            )
+            speaker = str(record.get("speaker", "manager")).strip().lower()
+            content = str(record.get("content", "")).strip()
+            if content:
+                self._write_block(
+                    self._ui.conversation("human" if speaker == "human" else "manager", content),
+                    blank_before=True,
+                )
         for notification in snapshot.get("notifications", []):
             if not isinstance(notification, dict):
                 continue
             event_id = str(notification.get("id", "")).strip()
             if event_id:
                 self._seen_interface_events.add(event_id)
-            timeline.append(
-                {
-                    "kind": "notification",
-                    "created_at": str(notification.get("created_at", "")),
-                    "record": notification,
-                }
+            self._latest_activity = self._notification_activity(notification)
+        notifications = list(snapshot.get("notifications") or [])
+        if notifications:
+            self._write_block(
+                self._ui.system(
+                    f"{len(notifications)} research updates are available with /activity."
+                )
             )
-        for entry in sorted(timeline, key=lambda item: str(item.get("created_at", ""))):
-            record = entry["record"]
-            if entry["kind"] == "notification":
-                self._render_interface_notification(record)
-                continue
-            speaker = str(record.get("speaker", "manager")).strip().lower()
-            content = str(record.get("content", "")).strip()
-            if content:
-                label = self._HUMAN_LABEL if speaker == "human" else self._MANAGER_LABEL
-                self._write(f"{label} > {content}\n")
         if isinstance(pending, dict):
             request = {
                 "message": str(pending.get("message", "")),
@@ -447,25 +474,19 @@ class HitlTerminalChannel(UserChannel):
                 self._resolution_ready = False
                 self._displayed_request_key = request["request_key"]
             self._render_resolution_request(request, actionable=False)
-            self.send(
-                "Use /run to resume the workspace before resolving this request.",
-                kind="system",
+            self._write_block(
+                self._ui.system(
+                    "Use /run to resume before resolving this review.", tone="review"
+                )
             )
 
     def _render_interface_notification(self, notification: Dict[str, Any]) -> None:
-        title = str(notification.get("title", "Research update")).strip()
-        summary = str(notification.get("summary", "")).strip()
-        if notification.get("kind") == "idea":
-            idea_id = str(notification.get("idea_id", "")).strip()
-            prefix = f"[Idea {idea_id}]" if idea_id else "[Idea]"
-        elif notification.get("kind") == "request":
-            prefix = "[Review]"
-        else:
-            prefix = "[Phase]"
-        line = f"{prefix} {title}"
-        if summary:
-            line += f": {summary}"
-        self._write(line)
+        kind = str(notification.get("kind", "")).strip()
+        self._latest_activity = self._notification_activity(notification)
+        if kind == "idea":
+            self._write_block(self._ui.idea(notification))
+        elif kind == "request":
+            self._write_block(self._ui.resolved_request(notification))
 
     def present_interface_notifications(self) -> None:
         """Render newly persisted interface events exactly once in this client."""
@@ -482,23 +503,7 @@ class HitlTerminalChannel(UserChannel):
             if not event_id or event_id in self._seen_interface_events:
                 continue
             self._seen_interface_events.add(event_id)
-            with self._output_lock:
-                title = str(notification.get("title", "Research update")).strip()
-                summary = str(notification.get("summary", "")).strip()
-                if notification.get("kind") == "idea":
-                    idea_id = str(notification.get("idea_id", "")).strip()
-                    prefix = f"[Idea {idea_id}]" if idea_id else "[Idea]"
-                elif notification.get("kind") == "request":
-                    prefix = "[Review]"
-                else:
-                    prefix = "[Phase]"
-                line = f"\n{prefix} {title}"
-                if summary:
-                    line += f": {summary}"
-                print(line, file=self._output)
-                if self._reading_input.is_set():
-                    print(f"{self._HUMAN_LABEL} > ", end="", file=self._output)
-                self._output.flush()
+            self._render_interface_notification(notification)
 
     def _read_stdin(self) -> None:
         while not self._closed.is_set():
@@ -506,21 +511,38 @@ class HitlTerminalChannel(UserChannel):
                 pass
             if self._closed.is_set():
                 return
-            with self._output_lock:
-                self._reading_input.set()
-                print(
-                    f"{self._HUMAN_LABEL} > ",
-                    end="",
-                    file=self._output,
-                    flush=True,
-                )
+            self._reading_input.set()
             try:
-                line = sys.stdin.readline()
+                if self._prompt_session is not None:
+                    try:
+                        line = self._prompt_session.prompt(
+                            self._ui.prompt_message(),
+                            bottom_toolbar=self._terminal_status_toolbar,
+                            rprompt=self._terminal_rprompt,
+                            refresh_interval=1.0,
+                            erase_when_done=True,
+                        )
+                    except KeyboardInterrupt:
+                        continue
+                    except EOFError:
+                        line = None
+                else:
+                    with self._output_lock:
+                        print(
+                            "› ",
+                            end="",
+                            file=self._output,
+                            flush=True,
+                        )
+                    raw_line = sys.stdin.readline()
+                    line = None if raw_line == "" else raw_line
             finally:
                 self._reading_input.clear()
-            if line == "":
+            if line is None:
                 self.close()
                 return
+            if not line.strip():
+                continue
             self.submit_input(line.rstrip("\n"))
 
     def submit_input(
@@ -546,18 +568,31 @@ class HitlTerminalChannel(UserChannel):
                 return {"status": "unavailable"}
             self.present_run_status(dict(self._run_status()), force=True)
             return {"status": "accepted"}
+        if input_kind is None and text == "/activity":
+            self.present_activity()
+            return {"status": "accepted"}
+        if input_kind is None and (text == "/idea" or text.startswith("/idea ")):
+            idea_id = text[len("/idea") :].strip()
+            self.present_idea(idea_id)
+            return {"status": "accepted"}
         if input_kind is None and text in {"/help", "?"}:
             self.print_help()
             return {"status": "accepted"}
         if input_kind is None and text == "/quit":
             self.close()
             return {"status": "accepted"}
-        if input_kind is None and text.startswith("/reply"):
+        if input_kind is None and (text == "/reply" or text.startswith("/reply ")):
             input_kind = _RESOLUTION_REPLY
             text = text[len("/reply") :].strip()
             if not text:
                 self.send("Reply with /reply <number> or /reply <feedback>.", kind="system")
                 return {"status": "invalid"}
+        if input_kind is None and text.startswith("/"):
+            self._write_block(
+                self._ui.system(f"Unknown command: {text.split()[0]}. Use /help.", tone="error"),
+                blank_before=True,
+            )
+            return {"status": "invalid"}
         if input_kind is None:
             input_kind = _CONVERSATION
         if input_kind == _RESOLUTION_REPLY:
@@ -570,6 +605,8 @@ class HitlTerminalChannel(UserChannel):
             self._input_ready.set()
             self.send(str(exc), kind="system")
             return {"status": "invalid"}
+        if self._ui.interactive:
+            self._write_block(self._ui.conversation("human", text), blank_before=True)
         if self._inbox is None:
             self._memory_input.put(text)
             return {"status": "accepted"}
@@ -636,6 +673,8 @@ class HitlTerminalChannel(UserChannel):
                 kind="system",
             )
             return {"status": "invalid"}
+        if self._ui.interactive:
+            self._write_block(self._ui.conversation("human", response), blank_before=True)
         with self._state_lock:
             self._pending_resolution_request = None
             self._resolution_ready = False
@@ -652,6 +691,10 @@ class HitlTerminalChannel(UserChannel):
                 self.present_run_status(status, force=True)
                 return {"status": "already_running"}
         try:
+            self._write_block(
+                self._ui.section("Start research"),
+                blank_before=True,
+            )
             provider = self._read_setting("Model [claude] (claude/codex/gemini): ", "claude").lower()
             iterations = self._read_setting("Iterations [2] (1-100): ", "2")
             write_paper = self._read_yes_no("Write paper? [Y/n]: ", default=True)
@@ -671,12 +714,22 @@ class HitlTerminalChannel(UserChannel):
                 }
             )
         except (ValueError, RuntimeError) as exc:
-            self.send(str(exc), kind="system")
+            self._write_block(self._ui.system(str(exc), tone="error"), blank_before=True)
             return {"status": "invalid"}
-        self.send(f"Started {result['mode']} research.", kind="system")
+        self._write_block(
+            self._ui.system(f"Started {result['mode']} research.", tone="success"),
+        )
         return dict(result)
 
     def _read_setting(self, label: str, default: str) -> str:
+        if self._prompt_session is not None:
+            try:
+                value = self._prompt_session.prompt(self._ui.setting_prompt(label))
+            except EOFError as exc:
+                raise RuntimeError("Terminal input closed before the run was configured.") from exc
+            except KeyboardInterrupt as exc:
+                raise RuntimeError("Run configuration was cancelled.") from exc
+            return value.strip() or default
         self._write(label, end="")
         value = sys.stdin.readline()
         if value == "":
@@ -703,25 +756,184 @@ class HitlTerminalChannel(UserChannel):
         if not force and signature == self._last_live_signature:
             return
         self._last_live_signature = signature
+        if not force:
+            return
+        visible = dict(status)
+        visible["elapsed"] = _elapsed_phase_time(status.get("phase_started_at"))
+        self._write_block(self._ui.expanded_status(visible), blank_before=True)
 
-        heading = str(status.get("label") or status.get("title") or "Workspace status").strip()
+    def _live_snapshot(self) -> Dict[str, Any]:
+        if self._run_status is None:
+            return {"state": "idle", "active": False, "label": "Ready"}
+        try:
+            return dict(self._run_status())
+        except Exception:
+            return {"state": "idle", "active": False, "label": "Ready"}
+
+    def _terminal_status_toolbar(self) -> Any:
+        """Render live phase time from the shared workspace projection."""
+        status = self._live_snapshot()
         elapsed = _elapsed_phase_time(status.get("phase_started_at"))
-        if status.get("active") and elapsed:
-            heading = f"{heading} · {elapsed}"
-        with self._output_lock:
-            print(f"\n[Status] {heading}", file=self._output)
-            if self._reading_input.is_set():
-                print(f"{self._HUMAN_LABEL} > ", end="", file=self._output)
-            self._output.flush()
+        return self._ui.toolbar(
+            status,
+            elapsed=elapsed,
+            latest_activity=self._latest_activity,
+        )
+
+    def _terminal_rprompt(self) -> Any:
+        return self._ui.rprompt(self._live_snapshot())
+
+    def _current_output(self) -> TextIO:
+        """Route only asynchronous output through prompt-safe redraw."""
+        if (
+            self._prompt_output is not None
+            and self._reading_input.is_set()
+            and threading.current_thread() is not self._reader
+        ):
+            return self._prompt_output
+        return self._terminal_output
+
+    def _restore_plain_prompt(self, output: TextIO) -> None:
+        """Restore the prompt only for streams without managed prompt redraw."""
+        if self._prompt_session is None and self._reading_input.is_set():
+            print("› ", end="", file=output)
 
     def print_help(self) -> None:
-        self._write("[Commands] /run  /status  /reply <number or feedback>  /help  /quit")
-        self._write("[System] Any other text starts a conversation with NeuriCo.")
+        self._write_block(self._ui.help(), blank_before=True)
+
+    def present_activity(self) -> None:
+        if self.work_dir is None:
+            self._write_block(self._ui.activity([]), blank_before=True)
+            return
+        try:
+            from core.hitl_workspace_view import HitlWorkspaceView
+
+            notifications = HitlWorkspaceView(self.work_dir).notifications()
+        except Exception as exc:
+            self._write_block(
+                self._ui.system(f"Research activity could not be loaded: {exc}", tone="error"),
+                blank_before=True,
+            )
+            return
+        self._write_block(self._ui.activity(notifications), blank_before=True)
+
+    def present_idea(self, idea_id: str) -> None:
+        normalized_id = str(idea_id).strip().upper()
+        if not normalized_id:
+            self._write_block(
+                self._ui.system("Use /idea <ID>, for example /idea I7.", tone="review"),
+                blank_before=True,
+            )
+            return
+        if self.work_dir is None:
+            self._write_block(self._ui.system("No idea records are available."))
+            return
+        try:
+            from core.hitl_workspace_view import HitlWorkspaceView
+
+            ideas = list(HitlWorkspaceView(self.work_dir).snapshot().get("ideas") or [])
+        except Exception as exc:
+            self._write_block(
+                self._ui.system(f"The idea could not be loaded: {exc}", tone="error"),
+                blank_before=True,
+            )
+            return
+        idea = next(
+            (
+                item
+                for item in ideas
+                if str(item.get("idea_id", "")).strip().upper() == normalized_id
+            ),
+            None,
+        )
+        if idea is None:
+            available = ", ".join(str(item.get("idea_id", "")) for item in ideas[-8:])
+            detail = f" Recent ideas: {available}." if available else ""
+            self._write_block(
+                self._ui.system(f"Idea {normalized_id} was not found.{detail}", tone="error"),
+                blank_before=True,
+            )
+            return
+        self._write_block(self._ui.idea_detail(idea), blank_before=True)
+
+    def _render_startup(self) -> None:
+        if self._startup_rendered:
+            return
+        self._startup_rendered = True
+        self._write_block(self._ui.startup(self.work_dir, self._live_snapshot()))
+
+    @staticmethod
+    def _notification_activity(notification: Dict[str, Any]) -> str:
+        kind = str(notification.get("kind", "")).strip()
+        title = str(notification.get("title", "Research update")).strip()
+        if kind == "idea":
+            idea_id = str(notification.get("idea_id", "")).strip()
+            return " ".join(part for part in (idea_id, title) if part)
+        return title
+
+    def _write_block(
+        self,
+        lines: List[str],
+        *,
+        blank_before: bool = False,
+    ) -> None:
+        if not lines:
+            return
+        with self._output_lock:
+            output = self._current_output()
+            if blank_before:
+                print(file=output)
+            for line in lines:
+                print(line, file=output)
+            self._restore_plain_prompt(output)
+            output.flush()
+
+    def _start_thinking_indicator(self) -> None:
+        if not self._ui.interactive:
+            return
+        if self._thinking_thread is not None and self._thinking_thread.is_alive():
+            return
+        self._thinking_stop.clear()
+
+        def animate() -> None:
+            frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+            index = 0
+            while not self._thinking_stop.is_set():
+                with self._output_lock:
+                    output = self._current_output()
+                    print(
+                        f"\r\x1b[2K{self._ui.thinking(frames[index % len(frames)])}",
+                        end="",
+                        file=output,
+                        flush=True,
+                    )
+                index += 1
+                self._thinking_stop.wait(0.12)
+
+        self._thinking_thread = threading.Thread(
+            target=animate,
+            daemon=True,
+            name="neurico-hitl-cli-thinking",
+        )
+        self._thinking_thread.start()
+
+    def _stop_thinking_indicator(self) -> None:
+        thread = self._thinking_thread
+        if thread is None:
+            return
+        self._thinking_stop.set()
+        if thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=0.5)
+        self._thinking_thread = None
+        if self._ui.interactive:
+            with self._output_lock:
+                output = self._current_output()
+                print("\r\x1b[2K", end="", file=output, flush=True)
 
     def _write(self, text: str, *, end: str = "\n") -> None:
         """Write only channel-approved content to the original terminal stream."""
         with self._output_lock:
-            print(text, end=end, file=self._output, flush=True)
+            print(text, end=end, file=self._current_output(), flush=True)
 
     def send(
         self,
@@ -732,10 +944,15 @@ class HitlTerminalChannel(UserChannel):
         del meta
         if not text:
             return
+        if kind in {"manager", "system"}:
+            self._stop_thinking_indicator()
         if kind == "manager":
-            self._write(f"\n{self._MANAGER_LABEL} > {text}")
+            self._write_block(self._ui.conversation("manager", text), blank_before=True)
         elif kind == "system":
-            self._write(f"\n[{self._SYSTEM_LABEL}] {text}")
+            tone = "error" if any(
+                token in text.lower() for token in ("failed", "error", "could not")
+            ) else "neutral"
+            self._write_block(self._ui.system(text, tone=tone))
         else:
             self._write(text)
 
@@ -750,7 +967,9 @@ class HitlTerminalChannel(UserChannel):
         del label, waiting, phase
         if thinking:
             self._input_ready.clear()
+            self._start_thinking_indicator()
         else:
+            self._stop_thinking_indicator()
             self._input_ready.set()
 
     def poll_input(self, timeout: float = 0.0) -> Optional[str]:
@@ -790,9 +1009,12 @@ class HitlTerminalChannel(UserChannel):
     def close(self) -> None:
         if self._closed.is_set():
             return
+        self._stop_thinking_indicator()
         self._closed.set()
         self._input_ready.set()
         self._memory_input.put(_SHUTDOWN)
+        if self._prompt_output is not None:
+            self._prompt_output.close()
 
 
 class HitlManagerHost:
@@ -871,9 +1093,6 @@ class HitlManagerHost:
             self.channel.send("NeuriCo is available.", kind="system")
         else:
             assert isinstance(self.channel, HitlTerminalChannel)
-            self.channel.send("NeuriCo CLI is active.", kind="system")
-            self.channel.print_help()
-            self.channel.send("NeuriCo is available for conversation.", kind="system")
             self.channel.start()
         self._conversation_thread = threading.Thread(
             target=self._run_conversation_loop,

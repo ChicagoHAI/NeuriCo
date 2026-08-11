@@ -41,6 +41,7 @@ dependencies = [
     "numpy>=2.2.6",
     "pandas>=2.3.3",
     "matplotlib>=3.10.9",
+    "prompt-toolkit>=3.0.52",
 ]
 
 [project.optional-dependencies]

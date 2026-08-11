@@ -53,8 +53,6 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
-    host.channel.present_run_status(controller.snapshot())
-    host.channel.send(f"Workspace: {work_dir}", kind="system")
     host.start()
     try:
         while not stopping and not host.channel.is_closed():

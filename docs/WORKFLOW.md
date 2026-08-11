@@ -192,6 +192,9 @@ terminal commands are:
 | Command | Purpose |
 | --- | --- |
 | `/run` | Configure and start a fresh or continuing HITL run |
+| `/status` | Show the current research stage, phase, timer, and next step |
+| `/activity` | Show recent durable research activity |
+| `/idea <ID>` | Show the complete record for a specific idea |
 | `/reply <number>` | Choose an option for the active human request |
 | `/reply <feedback>` | Resolve the request with free-form feedback |
 | `/help` | Show available commands |

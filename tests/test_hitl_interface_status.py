@@ -2,10 +2,15 @@
 
 import io
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from prompt_toolkit import PromptSession
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -15,6 +20,10 @@ from core.hitl_runtime_state import MAX_INTERFACE_EVENTS, HitlRuntimeState  # no
 from core.hitl_workspace_view import HitlWorkspaceView  # noqa: E402
 from core.hitl_manager_host import HitlTerminalChannel  # noqa: E402
 from core.runner import ResearchRunner  # noqa: E402
+from interactive.hitl_terminal_ui import (  # noqa: E402
+    HitlTerminalUI,
+    terminal_key_bindings,
+)
 
 
 def _workspace(tmp_path):
@@ -664,13 +673,15 @@ def test_terminal_renders_transitions_once_and_status_on_demand():
 
     channel.present_run_status(live)
     channel.present_run_status(live)
-    assert output.getvalue().count("Experiment · Execution review") == 1
+    assert output.getvalue() == ""
     assert "manager" not in output.getvalue().lower()
     assert "worker" not in output.getvalue().lower()
     assert "runtime" not in output.getvalue().lower()
 
     channel.submit_input("/status")
-    assert output.getvalue().count("Experiment · Execution review") == 2
+    assert output.getvalue().count("Experiment · Execution review") == 1
+    assert "Checking the latest research." in output.getvalue()
+    assert "Next: Research continues or a decision is requested." in output.getvalue()
 
 
 def test_terminal_does_not_repeat_status_for_metadata_only_updates():
@@ -689,6 +700,8 @@ def test_terminal_does_not_repeat_status_for_metadata_only_updates():
     channel.present_run_status(live)
     channel.present_run_status({**live, "updated_at": "2026-08-10T10:02:00Z"})
 
+    assert output.getvalue() == ""
+    channel.present_run_status(live, force=True)
     assert output.getvalue().count("Resource finding · Executing") == 1
 
 
@@ -829,9 +842,188 @@ def test_terminal_renders_new_interface_notifications_once(tmp_path):
     channel.present_interface_notifications()
     channel.present_interface_notifications()
 
-    assert output.getvalue().count("[Phase] Rule making: Executing started.") == 1
+    assert output.getvalue() == ""
+    channel.present_activity()
+    assert output.getvalue().count("Rule making  Executing started.") == 1
     assert "worker" not in output.getvalue().lower()
     assert "runtime" not in output.getvalue().lower()
+
+
+def test_managed_terminal_prompt_is_not_repeated_after_notifications(tmp_path):
+    work_dir = _workspace(tmp_path)
+    output = io.StringIO()
+    channel = HitlTerminalChannel(work_dir, output=output)
+    channel._prompt_session = object()
+    channel._reading_input.set()
+    runtime = HitlRuntimeState(work_dir)
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+            "prompt_block": "continue",
+        }
+    )
+
+    channel.present_interface_notifications()
+
+    assert output.getvalue() == ""
+    assert "You >" not in output.getvalue()
+
+
+def test_terminal_toolbar_uses_shared_live_status_and_phase_time():
+    output = io.StringIO()
+    channel = HitlTerminalChannel(output=output)
+    channel.set_run_launcher(
+        lambda _payload: {},
+        lambda: {
+            "active": True,
+            "label": "Resource finding · Planning",
+            "phase_started_at": "2026-08-10T10:00:00Z",
+        },
+    )
+
+    with patch("core.hitl_manager_host._elapsed_phase_time", return_value="2:14"):
+        toolbar = channel._terminal_status_toolbar()
+
+    rendered = "".join(text for _style, text in toolbar)
+    assert rendered == "  ● Resource finding · Planning  2:14 "
+
+
+def test_terminal_startup_messages_use_compact_spacing():
+    output = io.StringIO()
+    channel = HitlTerminalChannel(Path("/tmp/example"), output=output)
+    channel.set_run_launcher(
+        lambda _payload: {},
+        lambda: {"state": "idle", "active": False, "label": "Ready"},
+    )
+
+    channel._render_startup()
+
+    rendered = output.getvalue()
+    assert "\n\n" not in rendered
+    assert rendered.splitlines()[0] == "NeuriCo  ·  example"
+    assert rendered.splitlines()[1] == "Ready  ·  /run to start  ·  /help for commands"
+    assert len(rendered.splitlines()) == 3
+
+
+def test_terminal_request_is_a_focused_review_surface():
+    output = io.StringIO()
+    channel = HitlTerminalChannel(output=output)
+    channel.set_run_launcher(
+        lambda _payload: {},
+        lambda: {
+            "state": "review_needed",
+            "stage_label": "Rule making",
+            "phase_label": "Plan review",
+            "label": "Rule making · Plan review",
+            "active": True,
+        },
+    )
+
+    channel.present_resolution_request(
+        "The scoring plan is ready for review.",
+        ["Approve plan.", "Provide feedback."],
+        request_key="rule-maker-plan",
+    )
+
+    rendered = output.getvalue()
+    assert "Review needed  ·  Rule making / Plan review" in rendered
+    assert "1  Approve plan." in rendered
+    assert "2  Provide feedback." in rendered
+    assert "Choose" in rendered and "/reply <number>" in rendered
+    assert "Revise" in rendered and "/reply <feedback>" in rendered
+    assert "NeuriCo request >" not in rendered
+
+
+def test_terminal_idea_notification_is_compact_and_not_a_raw_dump(tmp_path):
+    work_dir = _workspace(tmp_path)
+    output = io.StringIO()
+    channel = HitlTerminalChannel(work_dir, output=output)
+    idea = HitlIdeaLog(work_dir).append(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "execution",
+            "level": "C",
+            "actor": "resource_finder",
+            "idea_type": "evidence",
+            "idea_category": "dataset_property",
+            "context": "SciFact data inspection",
+            "evidence": "SciFact provides labeled claim and evidence pairs for verification.",
+            "raised": False,
+        }
+    )
+
+    channel.present_interface_notifications()
+    rendered = output.getvalue()
+
+    assert f"{idea['idea_id']} Evidence recorded" in rendered
+    assert "SciFact provides labeled claim and evidence pairs" in rendered
+    assert "[Idea" not in rendered
+
+    output.seek(0)
+    output.truncate(0)
+    channel.submit_input(f"/idea {idea['idea_id'].lower()}")
+    detail = output.getvalue()
+    assert f"{idea['idea_id']}  ·  Evidence  ·  Level C" in detail
+    assert "Recorded by NeuriCo" in detail
+    assert "SciFact provides labeled claim and evidence pairs" in detail
+
+
+def test_terminal_review_surface_adapts_to_narrow_terminals():
+    ui = HitlTerminalUI(interactive=False, width=lambda: 32)
+
+    lines = ui.request(
+        {
+            "message": "Review this deliberately long scoring plan summary before research continues.",
+            "options": [
+                {"text": "Approve the current scoring plan."},
+                {"text": "Provide concrete revision feedback."},
+            ],
+        },
+        live={"stage_label": "Rule making", "phase_label": "Plan review"},
+        actionable=True,
+    )
+
+    assert "Review needed" in lines
+    assert "Rule making / Plan review" in lines
+    assert all(len(line) <= ui.content_width for line in lines)
+
+
+def test_terminal_thinking_indicator_is_transient():
+    output = io.StringIO()
+    channel = HitlTerminalChannel(output=output)
+    channel._ui.interactive = True
+
+    channel.status("NeuriCo is thinking…", thinking=True)
+    time.sleep(0.15)
+    channel.status("Ready", thinking=False)
+
+    rendered = output.getvalue()
+    assert "NeuriCo is thinking…" in rendered
+    assert "\x1b[2K" in rendered
+    assert channel._thinking_thread is None
+
+
+def test_terminal_empty_enter_does_not_submit_or_close_prompt():
+    result = []
+    with create_pipe_input() as pipe_input:
+        session = PromptSession(
+            input=pipe_input,
+            output=DummyOutput(),
+            key_bindings=terminal_key_bindings(),
+        )
+        reader = threading.Thread(target=lambda: result.append(session.prompt("› ")))
+        reader.start()
+
+        pipe_input.send_text("\r\n")
+        time.sleep(0.05)
+        assert reader.is_alive()
+
+        pipe_input.send_text("hello\r")
+        reader.join(timeout=1)
+
+    assert not reader.is_alive()
+    assert result == ["hello"]
 
 
 def test_review_resolution_notification_waits_for_authoritative_completion(tmp_path):
