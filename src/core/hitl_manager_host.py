@@ -8,6 +8,7 @@ import threading
 import webbrowser
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO
 
@@ -24,6 +25,24 @@ from core.hitl_manager_react import HitlManager
 
 _RESOLUTION_REPLY = "resolution_reply"
 _CONVERSATION = "conversation"
+
+
+def _elapsed_phase_time(started_at: Any) -> str:
+    text = str(started_at or "").strip()
+    if not text:
+        return ""
+    try:
+        started = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -673,13 +692,23 @@ class HitlTerminalChannel(UserChannel):
     def present_run_status(self, status: Dict[str, Any], *, force: bool = False) -> None:
         signature = "|".join(
             str(status.get(key, "")).strip()
-            for key in ("state", "stage", "phase", "updated_at", "label")
+            for key in (
+                "state",
+                "stage",
+                "phase",
+                "phase_started_at",
+                "updated_at",
+                "label",
+            )
         )
         if not force and signature == self._last_live_signature:
             return
         self._last_live_signature = signature
 
         heading = str(status.get("label") or status.get("title") or "Workspace status").strip()
+        elapsed = _elapsed_phase_time(status.get("phase_started_at"))
+        if status.get("active") and elapsed:
+            heading = f"{heading} · {elapsed}"
         with self._output_lock:
             print(f"\n[Status] {heading}", file=self._output)
             if self._reading_input.is_set():

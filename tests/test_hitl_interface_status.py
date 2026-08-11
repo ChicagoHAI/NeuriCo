@@ -130,6 +130,228 @@ def test_active_stage_distinguishes_work_from_review(tmp_path):
     assert reviewing["label"] == "Rule making · Execution review"
 
 
+def test_resolved_plan_request_does_not_override_active_execution(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    request_key = "resource_finder:plan:finish"
+    runtime.begin_worker_command(
+        {
+            "request_key": request_key,
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+        }
+    )
+    runtime.complete_worker_command(
+        request_key,
+        {"status": "approved", "context": "Plan approved."},
+    )
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "execution",
+            "prompt_block": "execute",
+        }
+    )
+
+    with patch("core.hitl_workspace_view.active_hitl_workspace_run", return_value=_owner()):
+        live = HitlWorkspaceView(work_dir).live_status()
+
+    assert live["state"] == "researching"
+    assert live["stage"] == "resource_finder"
+    assert live["phase"] == "execution"
+    assert live["label"] == "Resource finding · Executing"
+
+
+def test_resolved_execution_request_does_not_override_next_stage_plan(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    request_key = "resource_finder:execution:finish"
+    runtime.begin_worker_command(
+        {
+            "request_key": request_key,
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "execution",
+        }
+    )
+    runtime.complete_worker_command(
+        request_key,
+        {"status": "approved", "context": "Execution approved."},
+    )
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "rule_maker",
+            "hitl_stage": "plan",
+            "prompt_block": "plan",
+        }
+    )
+
+    with patch("core.hitl_workspace_view.active_hitl_workspace_run", return_value=_owner()):
+        live = HitlWorkspaceView(work_dir).live_status()
+
+    assert live["stage"] == "rule_maker"
+    assert live["phase"] == "plan"
+    assert live["label"] == "Rule making · Planning"
+
+
+def test_resolved_request_does_not_supply_paused_boundary(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    request_key = "resource_finder:plan:finish"
+    runtime.begin_worker_command(
+        {
+            "request_key": request_key,
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+        }
+    )
+    runtime.complete_worker_command(
+        request_key,
+        {"status": "approved", "context": "Plan approved."},
+    )
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "execution",
+            "prompt_block": "execute",
+        }
+    )
+
+    with patch("core.hitl_workspace_view.active_hitl_workspace_run", return_value=None):
+        live = HitlWorkspaceView(work_dir).live_status()
+
+    assert live["label"] == "Resource finding · Executing paused"
+    assert live["phase_started_at"] == runtime.worker_continuation()["started_at"]
+
+
+def test_replacement_activity_remains_normal_execution_and_silent(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "rule_maker",
+            "hitl_stage": "execution",
+            "prompt_block": "continue",
+        }
+    )
+    runtime.mark_worker_replacement()
+
+    with patch("core.hitl_workspace_view.active_hitl_workspace_run", return_value=_owner()):
+        live = HitlWorkspaceView(work_dir).live_status()
+
+    assert live["state"] == "researching"
+    assert live["label"] == "Rule making · Executing"
+    rendered = HitlWorkspaceView(work_dir).notifications()
+    assert all("revis" not in item["summary"].lower() for item in rendered)
+
+
+def test_paper_writing_is_projected_from_current_run_artifacts(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.begin_run(
+        {
+            "idea_id": "idea",
+            "interface": "web",
+            "mode": "fresh",
+            "provider": "claude",
+        }
+    )
+    run = runtime.snapshot()["run"]
+    logs = work_dir / "logs"
+    logs.mkdir()
+    (logs / "paper_writer_prompt.txt").write_text("write the paper", encoding="utf-8")
+
+    with patch(
+        "core.hitl_workspace_view.active_hitl_workspace_run",
+        return_value=_owner(started_at=run["started_at"]),
+    ):
+        live = HitlWorkspaceView(work_dir).live_status()
+
+    assert live["label"] == "Paper writing · Drafting"
+    assert live["phase_started_at"]
+    paper_events = [
+        item
+        for item in HitlWorkspaceView(work_dir).notifications()
+        if item["title"] == "Paper writing"
+    ]
+    assert len(paper_events) == 1
+    assert paper_events[0]["summary"] == "Drafting started."
+
+
+def test_active_continuation_outranks_existing_paper_artifacts(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.begin_run(
+        {
+            "idea_id": "idea",
+            "interface": "web",
+            "mode": "fresh",
+            "provider": "claude",
+        }
+    )
+    run = runtime.snapshot()["run"]
+    logs = work_dir / "logs"
+    logs.mkdir()
+    (logs / "paper_writer_prompt.txt").write_text("old paper log", encoding="utf-8")
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "execution",
+            "prompt_block": "execute",
+        }
+    )
+
+    with patch(
+        "core.hitl_workspace_view.active_hitl_workspace_run",
+        return_value=_owner(started_at=run["started_at"]),
+    ):
+        live = HitlWorkspaceView(work_dir).live_status()
+
+    assert live["label"] == "Experiment · Executing"
+
+
+def test_projection_never_exposes_none_as_a_stage(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.begin_run(
+        {
+            "idea_id": "idea",
+            "interface": "web",
+            "mode": "fresh",
+            "provider": "claude",
+        }
+    )
+    (work_dir / ".neurico" / "pipeline_state.json").write_text(
+        '{"current_stage": "None"}',
+        encoding="utf-8",
+    )
+
+    with patch("core.hitl_workspace_view.active_hitl_workspace_run", return_value=_owner()):
+        live = HitlWorkspaceView(work_dir).live_status()
+
+    assert live["label"] == "Research · Starting"
+    assert "None" not in live["label"]
+
+
+def test_status_projection_does_not_modify_runtime_state(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "execution",
+            "prompt_block": "continue",
+        }
+    )
+    before = runtime.path.read_bytes()
+
+    with patch("core.hitl_workspace_view.active_hitl_workspace_run", return_value=_owner()):
+        view = HitlWorkspaceView(work_dir)
+        assert view.live_status()["phase_started_at"]
+        view.notifications()
+
+    assert runtime.path.read_bytes() == before
+
+
 def test_scored_candidate_decision_has_its_own_stage(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)

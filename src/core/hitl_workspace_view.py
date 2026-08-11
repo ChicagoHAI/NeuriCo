@@ -17,9 +17,8 @@ from core.hitl_frontier import HitlFrontierError, HitlFrontierStore
 from core.hitl_lock import active_hitl_workspace_run
 from core.hitl_manager_history import HitlManagerHistory
 from core.hitl_manager_inbox import HitlManagerInbox
-from core.hitl_runtime_state import HitlRuntimeState
 from core.hitl_manager_context import HitlManagerContext
-from core.hitl_paths import hitl_state_dir
+from core.hitl_paths import hitl_runtime_state_path, hitl_state_dir
 from core.hitl_whiteboard import hitl_whiteboard_path
 from core.whiteboard import MAX_TIP_CONTENT_CHARS
 
@@ -62,7 +61,7 @@ class HitlWorkspaceView:
         nodes, attempts, frontier = self._frontier()
         whiteboard = self._whiteboard()
         research = self._research_state()
-        runtime = HitlRuntimeState(self.work_dir).snapshot()
+        runtime = self._runtime_state()
         inbox = self._inbox(runtime)
         conversation = self._conversation(inbox)
         notifications = self._notifications(runtime, ideas)
@@ -85,13 +84,17 @@ class HitlWorkspaceView:
 
     def live_status(self) -> Dict[str, Any]:
         """Project the durable workflow into one interface-neutral live status."""
-        runtime = HitlRuntimeState(self.work_dir).snapshot()
+        runtime = self._runtime_state()
         return self._live_status(runtime)
 
     def notifications(self) -> List[Dict[str, Any]]:
         """Return the shared, user-facing projection of durable interface events."""
-        runtime = HitlRuntimeState(self.work_dir).snapshot()
+        runtime = self._runtime_state()
         return self._notifications(runtime, self._ideas())
+
+    def _runtime_state(self) -> Dict[str, Any]:
+        path = hitl_runtime_state_path(self.work_dir)
+        return _read_object(path, "HITL runtime state") if path.exists() else {}
 
     @staticmethod
     def _record_timestamp(record: Any) -> str:
@@ -108,6 +111,59 @@ class HitlWorkspaceView:
             if value:
                 return value
         return ""
+
+    @staticmethod
+    def _phase_start_timestamp(record: Any) -> str:
+        if not isinstance(record, dict):
+            return ""
+        for key in ("started_at", "created_at", "updated_at", "resolved_at"):
+            value = str(record.get(key, "")).strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _workflow_token(value: Any) -> str:
+        token = str(value or "").strip()
+        return "" if token.lower() in {"none", "null"} else token
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> Optional[datetime]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _mtime_timestamp(path: Path) -> tuple[datetime, str]:
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        return modified, modified.isoformat().replace("+00:00", "Z")
+
+    def _paper_writer_evidence(self, run_started_at: str) -> Dict[str, Any]:
+        """Project paper activity from files the existing paper writer already creates."""
+        run_start = self._parse_timestamp(run_started_at)
+        if run_start is None:
+            return {}
+        candidates = [self.work_dir / "logs" / "paper_writer_prompt.txt"]
+        candidates.extend(sorted((self.work_dir / "logs").glob("paper_writer_*.log")))
+        observed: list[tuple[datetime, str]] = []
+        for path in candidates:
+            try:
+                modified, timestamp = self._mtime_timestamp(path)
+            except OSError:
+                continue
+            if modified >= run_start:
+                observed.append((modified, timestamp))
+        if not observed:
+            return {}
+        _, started_at = min(observed, key=lambda item: item[0])
+        return {"started_at": started_at, "created_at": started_at}
 
     @staticmethod
     def _stage_label(stage: str) -> str:
@@ -171,21 +227,29 @@ class HitlWorkspaceView:
         run = runtime.get("run")
         run = run if isinstance(run, dict) else {}
 
-        stage = str(
-            pending.get("pipeline_stage")
+        pending_status = str(pending.get("status", "")).strip()
+        unresolved = pending_status in {
+            "pending",
+            "scoring_approval_pending",
+            "scoring",
+        }
+        active_pending = pending if unresolved else {}
+        stage = self._workflow_token(
+            active_pending.get("pipeline_stage")
             or continuation.get("pipeline_stage")
             or pipeline.get("current_stage")
             or ""
-        ).strip()
-        phase = str(
-            pending.get("hitl_stage") or continuation.get("hitl_stage") or ""
-        ).strip()
+        )
+        phase = self._workflow_token(
+            active_pending.get("hitl_stage") or continuation.get("hitl_stage") or ""
+        )
         stage_label = self._stage_label(stage) if stage else ""
         phase_label = self._working_phase_label(phase) if phase else ""
         started_at = str((owner or {}).get("started_at") or run.get("started_at") or "").strip()
         provider = str((owner or {}).get("provider") or run.get("provider") or "").strip()
         mode = str((owner or {}).get("mode") or run.get("mode") or "").strip()
         source = str((owner or {}).get("interface") or run.get("interface") or "").strip()
+        paper_evidence = self._paper_writer_evidence(started_at)
 
         def projected(
             state: str,
@@ -197,6 +261,7 @@ class HitlWorkspaceView:
             active: bool = True,
             display_stage: Optional[str] = None,
             display_phase: Optional[str] = None,
+            phase_started_at: Optional[str] = None,
         ) -> Dict[str, Any]:
             visible_stage = stage_label if display_stage is None else display_stage
             visible_phase = phase_label if display_phase is None else display_phase
@@ -216,15 +281,15 @@ class HitlWorkspaceView:
                 "provider": provider,
                 "source": source,
                 "started_at": started_at,
+                "phase_started_at": (
+                    phase_started_at
+                    if phase_started_at is not None
+                    else self._phase_start_timestamp(record) or started_at
+                ),
                 "updated_at": self._record_timestamp(record),
                 "next_action": next_step,
             }
 
-        unresolved = str(pending.get("status", "")).strip() in {
-            "pending",
-            "scoring_approval_pending",
-            "scoring",
-        }
         human_request = unresolved and bool(
             pending.get("human_request_record_id")
             and str(pending.get("human_request_record_id")).strip()
@@ -270,10 +335,10 @@ class HitlWorkspaceView:
                 return "Frontier", "Creating root"
             if cleanup_pending:
                 return "Candidate decision", "Applying result"
-            if continuation_status in {"replacement_pending", "replacement_running"}:
-                return stage_label, "Revising"
             if continuation_status:
                 return stage_label, self._working_phase_label(phase) if phase else "Working"
+            if paper_evidence:
+                return "Paper writing", "Drafting"
             if stage_label:
                 return stage_label, "Starting"
             return "Research", "Starting"
@@ -289,7 +354,20 @@ class HitlWorkspaceView:
         )
         if owner is None:
             if has_pending_work:
-                record = pending or next_action or frontier_transition or root_transition or cleanup or continuation
+                if unresolved:
+                    record = pending
+                elif action_status in {"pending", "decision_recorded"}:
+                    record = next_action
+                elif frontier_status not in {"", "completed"}:
+                    record = frontier_transition
+                elif root_status not in {"", "completed"}:
+                    record = root_transition
+                elif cleanup_pending:
+                    record = cleanup
+                elif continuation_status:
+                    record = continuation
+                else:
+                    record = run
                 paused_stage, paused_phase = durable_boundary_labels()
                 return projected(
                     "paused",
@@ -359,7 +437,6 @@ class HitlWorkspaceView:
                 display_phase=review_phase,
             )
 
-        pending_status = str(pending.get("status", "")).strip()
         if pending_status == "scoring_approval_pending":
             return projected(
                 "evaluating",
@@ -428,8 +505,8 @@ class HitlWorkspaceView:
                 display_phase=transition_phase,
             )
 
-        if cleanup_pending or continuation_status in {"replacement_pending", "replacement_running"}:
-            record = cleanup or continuation
+        if cleanup_pending:
+            record = cleanup
             resume_stage, resume_phase = durable_boundary_labels()
             return projected(
                 "resuming",
@@ -453,7 +530,19 @@ class HitlWorkspaceView:
                 display_phase=working_phase,
             )
 
-        current_stage = str(pipeline.get("current_stage", "")).strip()
+        if paper_evidence:
+            return projected(
+                "researching",
+                "Writing paper",
+                "Preparing the research paper.",
+                next_step="The completed research is available when writing finishes.",
+                record=paper_evidence,
+                display_stage="Paper writing",
+                display_phase="Drafting",
+                phase_started_at=str(paper_evidence.get("started_at", "")),
+            )
+
+        current_stage = self._workflow_token(pipeline.get("current_stage", ""))
         if current_stage:
             stage = current_stage
             stage_label = self._stage_label(stage)
@@ -507,10 +596,12 @@ class HitlWorkspaceView:
                 return option_text
         return selected
 
-    def _phase_notification(self, event: Dict[str, Any]) -> Dict[str, Any]:
-        stage = str(event.get("stage", "")).strip()
-        phase = str(event.get("phase", "")).strip()
+    def _phase_notification(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        stage = self._workflow_token(event.get("stage", ""))
+        phase = self._workflow_token(event.get("phase", ""))
         activity = str(event.get("activity", "")).strip()
+        if activity == "revising":
+            return None
         stage_labels = {
             "research": "Research",
             "scoring": "Scoring",
@@ -552,6 +643,22 @@ class HitlWorkspaceView:
             "tone": "neutral",
             "title": title,
             "summary": summary,
+        }
+
+    def _paper_notification(self, runtime: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        run = runtime.get("run")
+        run = run if isinstance(run, dict) else {}
+        evidence = self._paper_writer_evidence(str(run.get("started_at", "")))
+        started_at = str(evidence.get("started_at", "")).strip()
+        if not started_at:
+            return None
+        return {
+            "id": f"paper:{started_at}",
+            "kind": "phase",
+            "created_at": started_at,
+            "tone": "neutral",
+            "title": "Paper writing",
+            "summary": "Drafting started.",
         }
 
     def _idea_notification(
@@ -623,13 +730,18 @@ class HitlWorkspaceView:
             if not isinstance(event, dict):
                 continue
             if event.get("kind") == "phase_transition":
-                projected.append(self._phase_notification(event))
+                notification = self._phase_notification(event)
+                if notification is not None:
+                    projected.append(notification)
             elif event.get("kind") == "idea_created":
                 idea = ideas_by_id.get(str(event.get("idea_id", "")))
                 if idea is not None:
                     projected.append(self._idea_notification(event, idea))
             elif event.get("kind") == "request_resolved":
                 projected.append(self._request_notification(event))
+        paper_notification = self._paper_notification(runtime)
+        if paper_notification is not None:
+            projected.append(paper_notification)
         return sorted(projected, key=lambda item: str(item.get("created_at", "")))
 
     def _ideas(self) -> List[Dict[str, Any]]:

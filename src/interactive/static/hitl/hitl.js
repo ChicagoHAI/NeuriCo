@@ -10,6 +10,7 @@
     notice: "", thinking: false, stale: "", selectedOption: "", requestFeedback: "",
     editingQueueId: "", queueDraft: "", runPanel: false, snapshotSig: "", scrollToBottom: false,
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
+    conversationScroll: { top: 0, nearBottom: true, captured: false },
     runDraft: { iterations: 2, writePaper: true, paperStyle: "auto", github: false },
   };
   let refreshPromise = null;
@@ -80,13 +81,24 @@
     return `${kind}:${id || "unknown"}:${state.tab}`;
   }
 
+  function captureConversationScroll() {
+    if (state.route !== "conversation") return;
+    state.conversationScroll = {
+      top: window.scrollY,
+      nearBottom: window.innerHeight + window.scrollY >= document.body.scrollHeight - 80,
+      captured: true,
+    };
+  }
+
   function navigate(route) {
+    const previousRoute = state.route;
+    if (previousRoute === "conversation" && route !== "conversation") captureConversationScroll();
     state.route = route;
     state.drawer = null;
     state.runPanel = false;
     const path = route === "research" ? "/research" : "/";
     if (location.pathname !== path) history.pushState({}, "", path);
-    render();
+    render({ restoreConversation: route === "conversation" && previousRoute !== "conversation" });
   }
 
   function markdown(value) {
@@ -144,6 +156,22 @@
     if (state.route !== "conversation") navigate("conversation");
     requestAnimationFrame(() => document.querySelector(".resolution-controls")?.scrollIntoView({ behavior: "smooth", block: "center" }));
   }
+  function formatElapsed(startedAt) {
+    const started = Date.parse(String(startedAt || ""));
+    if (!Number.isFinite(started)) return "";
+    const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remainder = seconds % 60;
+    return hours > 0
+      ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+      : `${minutes}:${String(remainder).padStart(2, "0")}`;
+  }
+  function updatePhaseTimer() {
+    document.querySelectorAll("[data-phase-started-at]").forEach((element) => {
+      element.textContent = formatElapsed(element.dataset.phaseStartedAt);
+    });
+  }
   function workspaceStatus() {
     const live = state.snapshot?.live;
     const stateName = live?.state || "unavailable";
@@ -155,7 +183,10 @@
     const text = stage
       ? [q("span", { class: "workspace-state-stage", text: stage }), step ? q("span", { class: "workspace-state-step", text: step }) : null]
       : [q("span", { class: "workspace-state-stage", text: label })];
-    const content = [q("span", { class: "workspace-state-dot", "aria-hidden": "true" }), q("span", { class: "workspace-state-text" }, text)];
+    const timer = live?.active && live?.phase_started_at
+      ? q("span", { class: "workspace-state-time", "data-phase-started-at": live.phase_started_at, text: formatElapsed(live.phase_started_at) })
+      : null;
+    const content = [q("span", { class: "workspace-state-dot", "aria-hidden": "true" }), q("span", { class: "workspace-state-text" }, text), timer];
     const attrs = { class: `workspace-state ${stateName}`, title: tooltip || label, "aria-label": label, "aria-live": stateName === "review_needed" ? "assertive" : "polite" };
     return stateName === "review_needed"
       ? q("button", { ...attrs, onclick: focusPendingRequest, "aria-label": `${label}. Open review request.` }, content)
@@ -394,6 +425,7 @@
     captureDrawerScroll();
     const focusedControl = captureFocusedControl();
     const preserveScroll = Boolean(options.preserveScroll);
+    const restoreConversation = Boolean(options.restoreConversation);
     const previousY = window.scrollY;
     const wasNearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
     document.querySelectorAll(".drawer-shade,.drawer").forEach((element) => element.remove());
@@ -403,15 +435,26 @@
     if (activeDrawer?.dataset.drawerKey && Object.prototype.hasOwnProperty.call(state.drawerScroll, activeDrawer.dataset.drawerKey)) {
       activeDrawer.scrollTop = state.drawerScroll[activeDrawer.dataset.drawerKey];
     }
-    if (state.scrollToBottom || (preserveScroll && state.route === "conversation" && wasNearBottom)) {
+    if (restoreConversation && state.conversationScroll.captured) {
+      window.scrollTo({ top: state.conversationScroll.nearBottom ? document.body.scrollHeight : state.conversationScroll.top });
+    } else if (state.scrollToBottom || (preserveScroll && state.route === "conversation" && wasNearBottom)) {
       window.scrollTo({ top: document.body.scrollHeight });
       state.scrollToBottom = false;
     } else if (preserveScroll) {
       window.scrollTo({ top: previousY });
     }
     restoreFocusedControl(focusedControl);
+    updatePhaseTimer();
   }
-  window.addEventListener("popstate", () => { state.route = location.pathname === "/research" ? "research" : "conversation"; state.drawer = null; state.runPanel = false; render(); });
+  window.addEventListener("popstate", () => {
+    const previousRoute = state.route;
+    const nextRoute = location.pathname === "/research" ? "research" : "conversation";
+    if (previousRoute === "conversation" && nextRoute !== "conversation") captureConversationScroll();
+    state.route = nextRoute;
+    state.drawer = null;
+    state.runPanel = false;
+    render({ restoreConversation: nextRoute === "conversation" && previousRoute !== "conversation" });
+  });
   async function drainRefreshes() {
     while (refreshPending) {
       refreshPending = false;
@@ -445,5 +488,5 @@
     }
     return refreshPromise;
   }
-  const events = new EventSource("/stream"); events.addEventListener("status", (event) => { try { const thinking = Boolean(JSON.parse(event.data).thinking); if (state.thinking !== thinking) { state.thinking = thinking; render({ preserveScroll: true }); } } catch (_) {} }); ["message", "refresh", "workspace_changed", "resolution_cleared"].forEach((name) => events.addEventListener(name, refresh)); setInterval(refresh, 5000); refresh();
+  const events = new EventSource("/stream"); events.addEventListener("status", (event) => { try { const thinking = Boolean(JSON.parse(event.data).thinking); if (state.thinking !== thinking) { state.thinking = thinking; render({ preserveScroll: true }); } } catch (_) {} }); ["message", "refresh", "workspace_changed", "resolution_cleared"].forEach((name) => events.addEventListener(name, refresh)); setInterval(refresh, 5000); setInterval(updatePhaseTimer, 1000); refresh();
 })();
