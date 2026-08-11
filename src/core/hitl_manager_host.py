@@ -338,7 +338,6 @@ class HitlTerminalChannel(UserChannel):
         self._run_status: Optional[Any] = None
         self._last_live_signature = ""
         self._seen_interface_events: set[str] = set()
-        self._latest_activity = ""
         self._startup_rendered = False
         self._thinking_stop = threading.Event()
         self._thinking_thread: Optional[threading.Thread] = None
@@ -455,7 +454,6 @@ class HitlTerminalChannel(UserChannel):
             event_id = str(notification.get("id", "")).strip()
             if event_id:
                 self._seen_interface_events.add(event_id)
-            self._latest_activity = self._notification_activity(notification)
         notifications = list(snapshot.get("notifications") or [])
         if notifications:
             self._write_block(
@@ -482,8 +480,9 @@ class HitlTerminalChannel(UserChannel):
 
     def _render_interface_notification(self, notification: Dict[str, Any]) -> None:
         kind = str(notification.get("kind", "")).strip()
-        self._latest_activity = self._notification_activity(notification)
-        if kind == "idea":
+        if kind == "phase":
+            self._write_block(self._ui.phase(notification))
+        elif kind == "idea":
             self._write_block(self._ui.idea(notification))
         elif kind == "request":
             self._write_block(self._ui.resolved_request(notification))
@@ -520,7 +519,6 @@ class HitlTerminalChannel(UserChannel):
                             bottom_toolbar=self._terminal_status_toolbar,
                             rprompt=self._terminal_rprompt,
                             refresh_interval=1.0,
-                            erase_when_done=True,
                         )
                     except KeyboardInterrupt:
                         continue
@@ -605,8 +603,6 @@ class HitlTerminalChannel(UserChannel):
             self._input_ready.set()
             self.send(str(exc), kind="system")
             return {"status": "invalid"}
-        if self._ui.interactive:
-            self._write_block(self._ui.conversation("human", text), blank_before=True)
         if self._inbox is None:
             self._memory_input.put(text)
             return {"status": "accepted"}
@@ -673,8 +669,6 @@ class HitlTerminalChannel(UserChannel):
                 kind="system",
             )
             return {"status": "invalid"}
-        if self._ui.interactive:
-            self._write_block(self._ui.conversation("human", response), blank_before=True)
         with self._state_lock:
             self._pending_resolution_request = None
             self._resolution_ready = False
@@ -777,7 +771,6 @@ class HitlTerminalChannel(UserChannel):
         return self._ui.toolbar(
             status,
             elapsed=elapsed,
-            latest_activity=self._latest_activity,
         )
 
     def _terminal_rprompt(self) -> Any:
@@ -861,15 +854,6 @@ class HitlTerminalChannel(UserChannel):
             return
         self._startup_rendered = True
         self._write_block(self._ui.startup(self.work_dir, self._live_snapshot()))
-
-    @staticmethod
-    def _notification_activity(notification: Dict[str, Any]) -> str:
-        kind = str(notification.get("kind", "")).strip()
-        title = str(notification.get("title", "Research update")).strip()
-        if kind == "idea":
-            idea_id = str(notification.get("idea_id", "")).strip()
-            return " ".join(part for part in (idea_id, title) if part)
-        return title
 
     def _write_block(
         self,

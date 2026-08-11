@@ -328,6 +328,43 @@ def test_hidden_replacement_does_not_duplicate_visible_phase_notification(
     assert len(matching) == 1
 
 
+def test_hidden_replacement_does_not_duplicate_phase_across_idea_notification(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "rule_maker",
+            "hitl_stage": "plan",
+            "prompt_block": "continue",
+        }
+    )
+    runtime.mark_worker_replacement()
+    HitlIdeaLog(work_dir).append(
+        {
+            "pipeline_stage": "rule_maker",
+            "hitl_stage": "plan",
+            "level": "C",
+            "actor": "rule_maker",
+            "idea_type": "evidence",
+            "idea_category": "implementation_fact",
+            "context": "Scoring plan review",
+            "evidence": "The scoring contract preserves macro-F1.",
+            "raised": False,
+        }
+    )
+    runtime.update_worker_continuation(status="running")
+
+    matching = [
+        item
+        for item in HitlWorkspaceView(work_dir).notifications()
+        if item["kind"] == "phase"
+        and item["title"] == "Rule making"
+        and item["summary"] == "Planning started."
+    ]
+
+    assert len(matching) == 1
+
+
 def test_visible_transition_preserves_later_matching_phase_notification(tmp_path):
     work_dir = _workspace(tmp_path)
     runtime = HitlRuntimeState(work_dir)
@@ -650,6 +687,40 @@ def test_run_controller_returns_shared_workspace_projection(tmp_path):
     assert actual == expected
 
 
+def test_public_projection_is_independent_of_launch_interface(tmp_path):
+    work_dir = _workspace(tmp_path)
+    runtime = HitlRuntimeState(work_dir)
+    runtime.begin_run(
+        {
+            "idea_id": "idea",
+            "interface": "web",
+            "mode": "fresh",
+            "provider": "claude",
+        }
+    )
+    runtime.record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+            "prompt_block": "continue",
+        }
+    )
+
+    with patch(
+        "core.hitl_workspace_view.active_hitl_workspace_run",
+        return_value=_owner(interface="web"),
+    ):
+        web_snapshot = HitlWorkspaceView(work_dir).snapshot()
+    with patch(
+        "core.hitl_workspace_view.active_hitl_workspace_run",
+        return_value=_owner(interface="cli"),
+    ):
+        cli_snapshot = HitlWorkspaceView(work_dir).snapshot()
+
+    assert "source" not in web_snapshot["live"]
+    assert cli_snapshot == web_snapshot
+
+
 def test_terminal_renders_transitions_once_and_status_on_demand():
     output = io.StringIO()
     channel = HitlTerminalChannel(output=output)
@@ -842,7 +913,7 @@ def test_terminal_renders_new_interface_notifications_once(tmp_path):
     channel.present_interface_notifications()
     channel.present_interface_notifications()
 
-    assert output.getvalue() == ""
+    assert output.getvalue().count("Rule making · Executing started.") == 1
     channel.present_activity()
     assert output.getvalue().count("Rule making  Executing started.") == 1
     assert "worker" not in output.getvalue().lower()
@@ -866,8 +937,8 @@ def test_managed_terminal_prompt_is_not_repeated_after_notifications(tmp_path):
 
     channel.present_interface_notifications()
 
-    assert output.getvalue() == ""
-    assert "You >" not in output.getvalue()
+    assert output.getvalue().count("Resource finding · Planning started.") == 1
+    assert "›" not in output.getvalue()
 
 
 def test_terminal_toolbar_uses_shared_live_status_and_phase_time():
@@ -1024,6 +1095,44 @@ def test_terminal_empty_enter_does_not_submit_or_close_prompt():
 
     assert not reader.is_alive()
     assert result == ["hello"]
+
+
+def test_terminal_does_not_echo_live_conversation_input_twice():
+    output = io.StringIO()
+    channel = HitlTerminalChannel(output=output)
+    channel._ui.interactive = True
+
+    result = channel.submit_input("hello")
+
+    assert result["status"] == "accepted"
+    assert output.getvalue() == ""
+
+
+def test_terminal_replayed_human_message_matches_live_prompt():
+    ui = HitlTerminalUI(interactive=False)
+
+    assert ui.conversation("human", "hello") == ["› hello"]
+
+
+def test_terminal_does_not_echo_live_resolution_input_twice():
+    output = io.StringIO()
+    channel = HitlTerminalChannel(output=output)
+    channel._ui.interactive = True
+    replies = []
+    channel.set_resolution_reply_handler(replies.append)
+    channel.present_resolution_request(
+        "Review the plan.",
+        ["Approve plan.", "Provide feedback."],
+        request_key="plan-review",
+    )
+    output.seek(0)
+    output.truncate(0)
+
+    result = channel.submit_input("/reply 1")
+
+    assert result["status"] == "accepted"
+    assert replies == ["Approve plan."]
+    assert output.getvalue() == ""
 
 
 def test_review_resolution_notification_waits_for_authoritative_completion(tmp_path):

@@ -35,7 +35,6 @@ TERMINAL_STYLE = Style.from_dict(
         "status.failed": "bg:#3a2024 #f28b82 bold",
         "status.complete": "bg:#173128 #82d7bd bold",
         "status.timer": "bg:#17201e #95a39f",
-        "status.activity": "bg:#17201e #95a39f",
     }
 )
 
@@ -190,9 +189,13 @@ class HitlTerminalUI:
         ]
 
     def conversation(self, speaker: str, text: str) -> List[str]:
-        label = "You" if speaker == "human" else "NeuriCo"
-        label_style = "blue" if speaker == "human" else "mint"
-        return [self._style(label, "bold", label_style), *self._render_body(text)]
+        if speaker == "human":
+            lines = str(text).splitlines() or [""]
+            return [
+                f"{self._style('›', 'bold', 'mint')} {lines[0]}",
+                *[f"  {line}" for line in lines[1:]],
+            ]
+        return [self._style("NeuriCo", "bold", "mint"), *self._render_body(text)]
 
     def system(self, text: str, *, tone: str = "neutral") -> List[str]:
         color = {"error": "red", "success": "mint", "review": "amber"}.get(tone, "muted")
@@ -272,6 +275,11 @@ class HitlTerminalUI:
         if not summary:
             return [first]
         return [first, *[self._style(line, "muted") for line in self._wrap_paragraph(summary, indent="   ")]]
+
+    def phase(self, notification: Dict[str, Any]) -> List[str]:
+        title = str(notification.get("title", "Research")).strip()
+        summary = str(notification.get("summary", "")).strip()
+        return self.system(" · ".join(part for part in (title, summary) if part))
 
     def resolved_request(self, notification: Dict[str, Any]) -> List[str]:
         summary = str(notification.get("summary", "Response recorded.")).strip()
@@ -461,7 +469,6 @@ class HitlTerminalUI:
         live: Dict[str, Any],
         *,
         elapsed: str,
-        latest_activity: str,
     ) -> FormattedText:
         state = str(live.get("state", "idle")).strip()
         label = str(live.get("label") or live.get("title") or "Ready").strip()
@@ -473,13 +480,6 @@ class HitlTerminalUI:
         parts: List[tuple[str, str]] = [(status_class, f"  ● {label} ")]
         if elapsed and bool(live.get("active")):
             parts.append(("class:status.timer", f" {elapsed} "))
-        if latest_activity:
-            available = max(0, self._width() - len(label) - len(elapsed) - 12)
-            activity = latest_activity
-            if available and len(activity) > available:
-                activity = f"{activity[: max(1, available - 1)]}…"
-            if available >= 12:
-                parts.append(("class:status.activity", f" · {activity} "))
         return FormattedText(parts)
 
     def rprompt(self, live: Dict[str, Any]) -> FormattedText:
