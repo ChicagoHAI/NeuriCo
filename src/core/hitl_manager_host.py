@@ -338,6 +338,7 @@ class HitlTerminalChannel(UserChannel):
         self._run_status: Optional[Any] = None
         self._last_live_signature = ""
         self._seen_interface_events: set[str] = set()
+        self._latest_activity = ""
         self._startup_rendered = False
         self._thinking_stop = threading.Event()
         self._thinking_thread: Optional[threading.Thread] = None
@@ -454,6 +455,7 @@ class HitlTerminalChannel(UserChannel):
             event_id = str(notification.get("id", "")).strip()
             if event_id:
                 self._seen_interface_events.add(event_id)
+            self._latest_activity = self._notification_activity(notification)
         notifications = list(snapshot.get("notifications") or [])
         if notifications:
             self._write_block(
@@ -480,6 +482,7 @@ class HitlTerminalChannel(UserChannel):
 
     def _render_interface_notification(self, notification: Dict[str, Any]) -> None:
         kind = str(notification.get("kind", "")).strip()
+        self._latest_activity = self._notification_activity(notification)
         if kind == "idea":
             self._write_block(self._ui.idea(notification))
         elif kind == "request":
@@ -716,23 +719,7 @@ class HitlTerminalChannel(UserChannel):
         self._write_block(
             self._ui.system(f"Started {result['mode']} research.", tone="success"),
         )
-        self._synchronize_launched_projection()
         return dict(result)
-
-    def _synchronize_launched_projection(self) -> None:
-        """Flush the first durable run update before reopening the composer."""
-        if self._run_status is None:
-            return
-        for _ in range(20):
-            status = self._live_snapshot()
-            if bool(status.get("active")) or str(status.get("state", "")) in {
-                "completed",
-                "failed",
-            }:
-                self.present_interface_notifications()
-                return
-            if self._closed.wait(0.05):
-                return
 
     def _read_setting(self, label: str, default: str) -> str:
         if self._prompt_session is not None:
@@ -790,6 +777,7 @@ class HitlTerminalChannel(UserChannel):
         return self._ui.toolbar(
             status,
             elapsed=elapsed,
+            latest_activity=self._latest_activity,
         )
 
     def _terminal_rprompt(self) -> Any:
@@ -873,6 +861,15 @@ class HitlTerminalChannel(UserChannel):
             return
         self._startup_rendered = True
         self._write_block(self._ui.startup(self.work_dir, self._live_snapshot()))
+
+    @staticmethod
+    def _notification_activity(notification: Dict[str, Any]) -> str:
+        kind = str(notification.get("kind", "")).strip()
+        title = str(notification.get("title", "Research update")).strip()
+        if kind == "idea":
+            idea_id = str(notification.get("idea_id", "")).strip()
+            return " ".join(part for part in (idea_id, title) if part)
+        return title
 
     def _write_block(
         self,

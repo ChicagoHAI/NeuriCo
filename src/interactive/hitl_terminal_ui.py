@@ -35,6 +35,7 @@ TERMINAL_STYLE = Style.from_dict(
         "status.failed": "bg:#3a2024 #f28b82 bold",
         "status.complete": "bg:#173128 #82d7bd bold",
         "status.timer": "bg:#17201e #95a39f",
+        "status.activity": "bg:#17201e #95a39f",
     }
 )
 
@@ -460,6 +461,7 @@ class HitlTerminalUI:
         live: Dict[str, Any],
         *,
         elapsed: str,
+        latest_activity: str,
     ) -> FormattedText:
         state = str(live.get("state", "idle")).strip()
         label = str(live.get("label") or live.get("title") or "Ready").strip()
@@ -471,6 +473,13 @@ class HitlTerminalUI:
         parts: List[tuple[str, str]] = [(status_class, f"  ● {label} ")]
         if elapsed and bool(live.get("active")):
             parts.append(("class:status.timer", f" {elapsed} "))
+        if latest_activity:
+            available = max(0, self._width() - len(label) - len(elapsed) - 12)
+            activity = latest_activity
+            if available and len(activity) > available:
+                activity = f"{activity[: max(1, available - 1)]}…"
+            if available >= 12:
+                parts.append(("class:status.activity", f" · {activity} "))
         return FormattedText(parts)
 
     def rprompt(self, live: Dict[str, Any]) -> FormattedText:
