@@ -292,13 +292,16 @@ def adopt_repository(
             print("   Continuing with the local workspace only.")
             github_url = None
 
-    # Record the adoption. The record keeps only the repo's name for a local
-    # source (full URLs are remote provenance and stay). The canonical
+    # Record the adoption. .neurico/ is committed (only __pycache__ is
+    # gitignored) and rides into the GitHub backup, so the record must not
+    # carry a re-usable pointer back to the source: keep only the repo's bare
+    # name, for a remote URL as well as a local path. Nothing reads source_repo
+    # back from this record; it is provenance only. The canonical
     # .neurico/idea.yaml is written by the caller (continuation_prepare) AFTER
     # held-out staging rewrites the sealed paths, so it is not written here
     # (a pre-staging copy would only be clobbered).
     record = {
-        'source_repo': source if is_remote_repo(source) else Path(source).name,
+        'source_repo': Path(source.rstrip('/')).name,
         'mode': mode,
         'adopted_at': datetime.now().isoformat(),
         'github_url': github_url,

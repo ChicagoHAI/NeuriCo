@@ -52,21 +52,53 @@ def _gitignore_add(work_dir: Path, line: str) -> None:
         gitignore.write_text(prefix + line + "\n", encoding="utf-8")
 
 
-def _hash_protected_path(root: Path) -> str:
-    """sha256 of a protected file, or of a directory tree (sorted relpath+bytes).
+def _hash_entry(digest: "hashlib._Hash", rel: str, path: Path) -> None:
+    """Fold one filesystem entry into digest, covering the kinds of change a
+    protected-path guardrail must catch: content, permission bits, symlink
+    identity, and the existence of (even empty) directories.
 
-    A directory hash folds in each file's relative path and content so adding,
-    removing, renaming, or editing any file under a protected prefix changes it.
+    The generated eval.py MUST mirror this exactly (see
+    templates/agents/rule_maker_bootstrap.txt), or the baseline written here and
+    the runtime recomputation would disagree.
+    """
+    import os
+    import stat as stat_mod
+
+    digest.update(rel.encode("utf-8"))
+    digest.update(b"\0")
+    lst = path.lstat()
+    if stat_mod.S_ISLNK(lst.st_mode):
+        # Symlink identity: the target string, not the target's bytes. A
+        # repointed symlink is a change even if the new target reads the same.
+        digest.update(b"link\0")
+        digest.update(os.readlink(path).encode("utf-8"))
+    elif path.is_dir():
+        # Record directory existence so an added/removed EMPTY directory counts.
+        digest.update(b"dir\0")
+        digest.update(f"{stat_mod.S_IMODE(lst.st_mode):04o}".encode("utf-8"))
+    else:
+        digest.update(b"file\0")
+        digest.update(f"{stat_mod.S_IMODE(lst.st_mode):04o}".encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+
+
+def _hash_protected_path(root: Path) -> str:
+    """Change-detecting hash of a protected file or directory tree.
+
+    Covers content, permission bits, symlink identity, and empty directories,
+    so a chmod, a repointed symlink, or an added/removed empty directory under a
+    protected prefix all change the hash (bytes-only hashing missed all three).
+    A directory folds in every entry's relative path so adding, removing,
+    renaming, or editing anything under the prefix changes it.
     """
     root = Path(root)
     digest = hashlib.sha256()
-    if root.is_file():
-        digest.update(root.read_bytes())
+    if root.is_symlink() or root.is_file() or not root.is_dir():
+        _hash_entry(digest, "", root)
         return digest.hexdigest()
-    for path in sorted(p for p in root.rglob("*") if p.is_file()):
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
+    for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
+        _hash_entry(digest, path.relative_to(root).as_posix(), path)
     return digest.hexdigest()
 
 
@@ -112,6 +144,35 @@ def _resolve_source(raw: str, work_dir: Path, base_dir: Optional[Path]) -> Path:
     return Path(work_dir) / p
 
 
+def _content_signature(root: Path) -> str:
+    """sha256 of a file's bytes, or of a directory tree (sorted relpath+bytes)."""
+    root = Path(root)
+    digest = hashlib.sha256()
+    if root.is_file():
+        digest.update(root.read_bytes())
+        return digest.hexdigest()
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _same_content(a: Path, b: Path) -> bool:
+    """True when two paths hold identical content (file bytes, or dir tree).
+
+    Used to accept an already-staged held-out destination only when it still
+    matches its declared source, so a partial, stale, or wrong existing copy is
+    re-staged instead of trusted on existence alone.
+    """
+    a, b = Path(a), Path(b)
+    if a.is_dir() != b.is_dir():
+        return False
+    if a.is_file() and a.stat().st_size != b.stat().st_size:
+        return False
+    return _content_signature(a) == _content_signature(b)
+
+
 def stage_held_out_data(idea: Dict[str, Any], work_dir: Path,
                         base_dir: Optional[Path] = None) -> List[str]:
     """Copy declared held-out (sealed) datasets into gitignored data/.test.
@@ -130,6 +191,7 @@ def stage_held_out_data(idea: Dict[str, Any], work_dir: Path,
     dest_root = Path(work_dir) / "data" / ".test"
     dest_root.mkdir(parents=True, exist_ok=True)
     staged: List[str] = []
+    taken: set = set()
     for entry in entries:
         raw = str(entry.get("source_path") or entry.get("path") or "").strip()
         if not raw:
@@ -141,22 +203,41 @@ def stage_held_out_data(idea: Dict[str, Any], work_dir: Path,
         if not name or name in (".", ".."):
             raise ValueError(
                 f"held-out dataset has an unusable name: {entry.get('name')!r}")
+        # Disambiguate a basename collision: two declared sources with the same
+        # basename would otherwise map to the same data/.test/<name>, and the
+        # second would silently resolve to the first's bytes. Suffix later
+        # collisions (name.jsonl -> name-2.jsonl) so every source keeps its own
+        # copy. An already-rewritten eval-facing path keeps its resolved name.
+        already_rewritten = raw.replace("\\", "/").startswith(
+            SEALED_STAGING_DIR + "/")
+        if already_rewritten:
+            name = Path(raw).name
+        elif name in taken:
+            stem, suffix = Path(name).stem, Path(name).suffix
+            n = 2
+            while f"{stem}-{n}{suffix}" in taken:
+                n += 1
+            name = f"{stem}-{n}{suffix}"
+        taken.add(name)
         dst = dest_root / name
         rewritten = f"{SEALED_STAGING_DIR}/{name}"
+        src = None if already_rewritten else _resolve_source(raw, work_dir, base_dir)
         # Idempotent re-prepare: the path was already rewritten to the
-        # eval-facing form, OR the destination already holds the staged copy
-        # (a resume after Stage 1 partially completed -- e.g. baseline scoring
-        # failed after the move). In both cases the move is done; just
-        # (re)assert the eval-facing path so the in-memory idea is consistent.
-        if raw.replace("\\", "/").startswith(SEALED_STAGING_DIR + "/") or dst.exists():
+        # eval-facing form, OR an existing destination already matches the
+        # declared source (a resume after Stage 1 partially completed). Accept
+        # the existing copy only when it is VERIFIED against the source, so a
+        # partial or stale destination is never mistaken for a complete stage.
+        if already_rewritten or (
+                dst.exists() and src is not None and src.exists()
+                and _same_content(src, dst)):
             entry.setdefault("source_path", raw)
             entry["path"] = rewritten
             staged.append(name)
             continue
-        src = _resolve_source(raw, work_dir, base_dir)
-        if not src.exists():
+        if src is None or not src.exists():
             raise FileNotFoundError(
-                f"held-out dataset source not found: {raw} (resolved {src})")
+                f"held-out dataset source not found: {raw} "
+                f"(resolved {src if src is not None else raw})")
         if src.resolve() != dst.resolve():
             if src.is_dir():
                 if dst.exists():
@@ -223,6 +304,79 @@ def _write_workspace_idea(idea: Dict[str, Any], work_dir: Path) -> None:
                   default_flow_style=False, sort_keys=False)
 
 
+def verify_invariant_guardrails(idea: Dict[str, Any], work_dir: Path) -> None:
+    """Confirm the generated eval.py actually enforces every declared invariant.
+
+    The eval_verifier only checks routing/transcription/format, so a generated
+    eval.py could silently omit or misimplement a `protected_path` or `check`
+    guardrail. This is a mechanical, behavioral cross-check run in Stage 1 (no
+    optimizing agent): after the baseline is scored, every declared invariant
+    must have produced its guardrail property AND passed at baseline (nothing
+    has changed yet, and the check command is expected to pass on the adopted
+    repo). A missing or failing guardrail fails Stage 1 loudly rather than
+    letting an unenforced invariant reach optimization.
+    """
+    from core.local_resources import (
+        protected_path_prefixes,
+        continuation_check_commands,
+    )
+
+    work_dir = Path(work_dir)
+    protected = protected_path_prefixes(idea)
+    checks = continuation_check_commands(idea)
+    if not protected and not checks:
+        return
+
+    def _load(rel: str) -> Dict[str, Any]:
+        try:
+            payload = json.loads((work_dir / rel).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"continuation invariant check: cannot read {rel}: {exc}")
+        props = payload.get("properties")
+        return props if isinstance(props, dict) else {}
+
+    targets = _load("scoring/targets.json")
+    results = _load("scoring/results.json")
+    problems: List[str] = []
+
+    if protected:
+        prop = results.get("protected_paths_unchanged")
+        if prop is None:
+            problems.append(
+                "declared protected_path invariant(s) but the generated eval.py "
+                "produced no 'protected_paths_unchanged' property")
+        elif not prop.get("satisfied"):
+            problems.append(
+                "'protected_paths_unchanged' did not pass at baseline "
+                f"(value {prop.get('value')!r}); nothing has changed, so the "
+                "generated protected-path check is misimplemented")
+
+    # Each declared check command must appear as a user guardrail property
+    # (matched by source_text) and pass at baseline.
+    scored_by_cmd = {
+        str(spec.get("source_text")).strip(): name
+        for name, spec in targets.items()
+        if isinstance(spec, dict) and spec.get("source") == "user"
+        and spec.get("source_text")
+    }
+    for cmd in checks:
+        name = scored_by_cmd.get(cmd)
+        if name is None:
+            problems.append(
+                f"check invariant not encoded as a guardrail property: {cmd!r}")
+            continue
+        prop = results.get(name)
+        if prop is None or not prop.get("satisfied"):
+            problems.append(
+                f"check guardrail {name!r} for {cmd!r} did not pass at baseline")
+
+    if problems:
+        raise RuntimeError(
+            "continuation invariants are not correctly enforced by the "
+            "generated eval.py:\n  - " + "\n  - ".join(problems))
+
+
 def prepare_continuation_workspace(
     idea: Dict[str, Any],
     idea_id: str,
@@ -232,6 +386,8 @@ def prepare_continuation_workspace(
     provider: str = "claude",
     full_permissions: bool = True,
     github_manager=None,
+    private: bool = False,
+    no_hash: bool = False,
     rule_maker_timeout: int = 1800,
     scorer_timeout: int = 600,
     manifest_trimmer_timeout: int = 300,
@@ -263,6 +419,7 @@ def prepare_continuation_workspace(
     #    plaintext -- readable by the Stage 2 agent through `git show`.
     adoption = adopt_repository(
         idea, idea_id, work_dir, github_manager=github_manager, provider=provider,
+        private=private, no_hash=no_hash,
         pre_commit_hook=lambda wd: stage_held_out_data(idea, wd, base_dir=base_dir))
 
     # Re-assert the eval-facing held-out paths in this process. On a fresh
@@ -309,6 +466,12 @@ def prepare_continuation_workspace(
         raise RuntimeError(
             f"continuation prepare: baseline construction failed: "
             f"{baseline.get('reason') or baseline}")
+
+    # 5b. Mechanical cross-check that the generated eval.py actually enforces
+    #    every declared invariant (the eval_verifier does not). Runs here, in
+    #    the trusted phase, so an omitted or misimplemented guardrail fails
+    #    Stage 1 rather than silently reaching optimization.
+    verify_invariant_guardrails(idea, work_dir)
 
     # Trusted "Stage 1 complete" marker. The runner uses it (together with a
     # check that the source materials are no longer readable) as a

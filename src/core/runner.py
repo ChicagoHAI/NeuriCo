@@ -351,6 +351,7 @@ class ResearchRunner:
                 paper_style=paper_style,
                 paper_timeout=paper_timeout,
                 prepare_only=prepare_only,
+                force_fresh=force_fresh,
             )
 
         # --prepare-only is meaningful only for a continuation idea (it splits
@@ -1164,6 +1165,7 @@ https://github.com/ChicagoHAI/neurico
         paper_style: Optional[str],
         paper_timeout: int,
         prepare_only: bool,
+        force_fresh: bool = False,
     ) -> Dict[str, Any]:
         """continue-research dispatch: Stage 1 (prepare) then Stage 2 (plain
         continuation).
@@ -1192,6 +1194,24 @@ https://github.com/ChicagoHAI/neurico
         work_dir = (self.runs_dir / idea_id).resolve()
         github_manager = self.github_manager if self.use_github else None
         github_url = None
+
+        # --force-fresh: discard any prepared or in-progress continuation
+        # workspace so Stage 1 re-adopts from scratch. Without this, an existing
+        # adoption record plus a recorded current_best makes already_prepared
+        # true below and Stage 1 is skipped, silently continuing from stale
+        # repo/held-out/evaluator/baseline state against the user's explicit
+        # request. Move rather than delete, mirroring the forward path's
+        # treatment of a superseded workspace.
+        if force_fresh and work_dir.exists():
+            import shutil
+            stale = work_dir.with_name(f"{work_dir.name}.superseded")
+            n = 1
+            while stale.exists():
+                n += 1
+                stale = work_dir.with_name(f"{work_dir.name}.superseded-{n}")
+            shutil.move(str(work_dir), str(stale))
+            print(f"🧹 --force-fresh: previous continuation workspace moved to "
+                  f"{stale}")
 
         # Skip Stage 1 when the workspace is already a prepared, scored
         # NeuriCo workspace (adoption record + a recorded current_best). This
@@ -1234,6 +1254,8 @@ https://github.com/ChicagoHAI/neurico
                 provider=provider,
                 full_permissions=full_permissions,
                 github_manager=github_manager,
+                private=private,
+                no_hash=no_hash,
                 rule_maker_timeout=rule_maker_timeout,
                 scorer_timeout=scorer_timeout,
                 manifest_trimmer_timeout=manifest_trimmer_timeout,

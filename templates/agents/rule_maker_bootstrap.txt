@@ -245,13 +245,27 @@ The idea may carry structured declarations that BIND your design. Check
      rejects any iteration that breaks one.
    ✓ Each invariant of kind `protected_path` MUST become a guardrail property
      named `protected_paths_unchanged`. A trusted file `scoring/protected_baseline.json`
-     (already present) maps each protected path to its sha256 recorded at preparation
-     time. eval.py MUST recompute the sha256 of every path in that file (hashing a
-     directory as sorted relpath + bytes so any add/remove/edit under it counts) and
-     compare to the recorded hash. Set the property value to 1.0 only if ALL protected
-     paths match their recorded hash, otherwise 0.0. Use target 1.0, direction max.
-     This makes "the agent must not modify these paths" a HARD scoring guardrail that
-     fails the iteration on any change.
+     (already present) maps each protected path to a hash recorded at preparation
+     time. eval.py MUST recompute each path's hash with the EXACT algorithm below
+     and compare to the recorded hash. Set the property value to 1.0 only if ALL
+     protected paths match their recorded hash, otherwise 0.0. Use target 1.0,
+     direction max. This makes "the agent must not modify these paths" a HARD scoring
+     guardrail that fails the iteration on any change.
+
+     The hash MUST match this algorithm byte-for-byte (a plain content-only hash
+     will disagree with the baseline and always report 0.0). For each protected
+     root, feed a single sha256 with, per entry, in this order:
+       - the entry's relative path (posix, "" for a file/symlink root), then a NUL;
+       - if it is a symlink: b"link\0" then os.readlink(path) (its TARGET STRING,
+         not the target's bytes);
+       - elif it is a directory: b"dir\0" then its 4-digit octal permission bits
+         (records even EMPTY directories);
+       - else (a file): b"file\0", its 4-digit octal permission bits, a NUL, then
+         the file bytes.
+     For a directory root, iterate every entry under it (os.walk / rglob) sorted by
+     relative posix path and fold each in as above; for a file or symlink root, fold
+     the single entry with relative path "". This covers content, permission bits,
+     symlink identity, and empty directories.
    ✓ Invariants of kind `statement` are NOT properties (not mechanically checkable);
      do not encode them in targets.json.
 

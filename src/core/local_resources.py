@@ -327,6 +327,14 @@ def workspace_contract_copy(idea_spec: Dict[str, Any]) -> Dict[str, Any]:
     source_path values and the submitting file's metadata.source_path —
     must not leak into it. The submitted yaml under ideas/ keeps them; only
     the workspace copy is redacted.
+
+    For a continuation idea this file is also the optimizing agent's task
+    description, so it must not hand the agent a pointer back to the original
+    source. continuation.source_repo (the host path or clone URL of the repo
+    the held-out data came from) is dropped: leaving it would let a Stage 2
+    agent re-read the local repo or re-clone the URL and recover the held-out
+    data or its history. (Native runs share the host and remain a trusted
+    boundary regardless; this removes the easy, incidental signpost.)
     """
     import copy
 
@@ -345,6 +353,10 @@ def workspace_contract_copy(idea_spec: Dict[str, Any]) -> Dict[str, Any]:
             for entry in resources.get(kind) or []:
                 if isinstance(entry, dict):
                     entry.pop('source_path', None)
+
+    continuation = idea.get('continuation')
+    if isinstance(continuation, dict):
+        continuation.pop('source_repo', None)
     return clean
 
 
@@ -715,6 +727,14 @@ def collect_host_paths(idea: Dict[str, Any]) -> List[str]:
             if isinstance(paper, dict):
                 add(paper.get('path'))
 
+    # Continue-research: the Stage 1 prepare container adopts the source repo by
+    # reading it from the container filesystem, so a LOCAL source_repo must be
+    # mounted. add() skips remote URLs (http/https/git@), which are cloned and
+    # need no mount.
+    continuation = idea.get('continuation')
+    if isinstance(continuation, dict):
+        add(continuation.get('source_repo'))
+
     return paths
 
 
@@ -832,6 +852,27 @@ def protected_path_prefixes(idea: Dict[str, Any]) -> List[str]:
         if isinstance(invariant, dict)
         and invariant.get('kind') == 'protected_path'
         and invariant.get('path')
+    ]
+
+
+def continuation_check_commands(idea: Dict[str, Any]) -> List[str]:
+    """The command strings of every `check` invariant, in declaration order.
+
+    Used to confirm the generated eval.py encoded each declared check as a
+    guardrail property (a companion to protected_path_prefixes).
+    """
+    idea_spec = idea.get('idea', idea) if isinstance(idea, dict) else {}
+    if not isinstance(idea_spec, dict):
+        return []
+    continuation = idea_spec.get('continuation')
+    if not isinstance(continuation, dict):
+        return []
+    return [
+        str(invariant['command']).strip()
+        for invariant in (continuation.get('invariants') or [])
+        if isinstance(invariant, dict)
+        and invariant.get('kind') == 'check'
+        and invariant.get('command')
     ]
 
 

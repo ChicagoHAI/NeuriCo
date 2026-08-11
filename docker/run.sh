@@ -720,6 +720,108 @@ cmd_submit_local() {
 }
 
 # -----------------------------------------------------------------------------
+# continue-research: convert <repo> <intention.md> into a continuation idea.
+# Mirrors submit-local's container mount setup. The conversion validates a
+# LOCAL repo path (it must exist and is resolved to absolute), so the repo is
+# mounted read-only at its identical host path; a remote URL needs no mount.
+# Actually running the idea is a separate `./neurico run <idea>` (which applies
+# the two-container prepare/research split), so --run is not handled here.
+# -----------------------------------------------------------------------------
+cmd_continue_research() {
+    if [ -z "$1" ] || [ -z "$2" ]; then
+        echo -e "${RED}Usage: $0 continue-research <repo> <intention.md> [--submit] [--provider claude|codex|gemini]${NC}"
+        exit 1
+    fi
+
+    ensure_directories
+    check_env_file
+    warn_if_outdated
+
+    local repo="$1"
+    local intention_file="$2"
+    shift 2
+
+    local passthrough=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --run)
+                echo -e "${YELLOW}Note: --run is not handled by the container wrapper.${NC}"
+                echo -e "      Convert (optionally with --submit), then run separately:"
+                echo -e "        ./neurico run <idea_id>"
+                ;;
+            *) passthrough+=("$1") ;;
+        esac
+        shift
+    done
+
+    if [ ! -f "$intention_file" ]; then
+        echo -e "${RED}Error: intention file not found: $intention_file${NC}"
+        exit 1
+    fi
+    local intention_abs intention_dir intention_name
+    intention_abs=$(cd "$(dirname "$intention_file")" && pwd)/$(basename "$intention_file")
+    intention_dir=$(dirname "$intention_abs")
+    intention_name=$(basename "$intention_abs")
+
+    local gpu_flags=$(get_gpu_flags)
+    local user_flags=$(get_user_flags)
+    local credential_mounts=$(get_cli_credential_mounts)
+    local workspace_dir=$(get_workspace_dir)
+    local tty_flag=$(get_tty_flag)
+
+    local docker_args=( run $tty_flag --rm )
+    local helper_args=()
+    eval "helper_args=( $gpu_flags $user_flags $credential_mounts )"
+    docker_args+=(
+        "${helper_args[@]}"
+        --env-file "$PROJECT_ROOT/.env"
+        -e NEURICO_WORKSPACE=/workspaces
+        -v "$workspace_dir:/workspaces"
+        -v "$PROJECT_ROOT/ideas:/app/ideas"
+        -v "$PROJECT_ROOT/logs:/app/logs"
+        -v "$PROJECT_ROOT/config:/app/config:ro"
+        -v "$PROJECT_ROOT/templates:/app/templates:ro"
+        -v "$intention_dir:/input:ro"
+    )
+
+    # A LOCAL repo must be readable in-container at its identical host path, so
+    # continue_research.py's exists()/resolve() succeeds and the source_repo it
+    # records matches the path `./neurico run` will later mount. A remote URL
+    # (http/https/git@) is cloned at adoption time and needs no mount.
+    case "$repo" in
+        http://*|https://*|git@*) ;;
+        *)
+            if [ ! -e "$repo" ]; then
+                echo -e "${RED}Error: repository path not found: $repo${NC}"
+                exit 1
+            fi
+            local repo_abs
+            repo_abs=$(cd "$repo" 2>/dev/null && pwd || echo "")
+            if [ -z "$repo_abs" ]; then
+                echo -e "${RED}Error: repository path is not a directory: $repo${NC}"
+                exit 1
+            fi
+            docker_args+=( -v "$repo_abs:$repo_abs:ro" )
+            repo="$repo_abs"
+            ;;
+    esac
+
+    # Host cwd at its identical path, so any relative paths in the intention
+    # resolve and canonicalize the same way they would natively.
+    if [ "$PWD" != "/" ] && [ "$PWD" != "$PROJECT_ROOT" ]; then
+        docker_args+=( -v "$PWD:$PWD:ro" )
+    fi
+    docker_args+=( -e NEURICO_HOST_CWD="$PWD" -e NEURICO_IN_DOCKER=1 )
+
+    docker_args+=( -w /app "$IMAGE_NAME"
+                   python /app/src/cli/continue_research.py "$repo" "/input/$intention_name"
+                   "${passthrough[@]}" )
+
+    echo -e "${BLUE}Converting continuation intention...${NC}"
+    docker "${docker_args[@]}"
+}
+
+# -----------------------------------------------------------------------------
 # Submit a research idea
 # -----------------------------------------------------------------------------
 cmd_submit() {
@@ -2205,6 +2307,7 @@ cmd_help() {
     echo "  shell                     Start an interactive shell"
     echo "  fetch <url> [--submit]    Fetch idea from IdeaHub"
     echo "  submit-local <idea.md> [--submit]  Convert a local idea file (markdown/text)"
+    echo "  continue-research <repo> <intention.md> [--submit]  Adopt-and-optimize an existing repo"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
     echo "  hitl-web <id>             Open the containerized HITL workspace page"
@@ -2267,6 +2370,9 @@ case "$ACTION" in
         ;;
     submit-local)
         cmd_submit_local "$@"
+        ;;
+    continue-research)
+        cmd_continue_research "$@"
         ;;
     submit)
         cmd_submit "$@"
