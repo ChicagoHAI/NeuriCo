@@ -517,7 +517,6 @@ class HitlTerminalChannel(UserChannel):
                             bottom_toolbar=self._terminal_status_toolbar,
                             rprompt=self._terminal_rprompt,
                             refresh_interval=1.0,
-                            erase_when_done=True,
                         )
                     except KeyboardInterrupt:
                         continue
