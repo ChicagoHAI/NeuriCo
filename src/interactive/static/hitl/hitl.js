@@ -15,6 +15,7 @@
   };
   let refreshPromise = null;
   let refreshPending = false;
+  let composerObserver = null;
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
   const q = (tag, attrs = {}, children = []) => {
     const element = document.createElement(tag);
@@ -41,6 +42,18 @@
   const icon = (symbol, title, action, className = "") => q("button", { class: `icon-button ${className}`, title, "aria-label": title, onclick: action, text: symbol });
   const humanize = (value) => String(value || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   const shortSha = (sha) => String(sha || "").slice(0, 7);
+  function autoSizeTextarea(area) {
+    const resize = () => {
+      if (!area.isConnected) return;
+      area.style.height = "auto";
+      const maxHeight = Number.parseFloat(getComputedStyle(area).maxHeight);
+      const height = Number.isFinite(maxHeight) ? Math.min(area.scrollHeight, maxHeight) : area.scrollHeight;
+      area.style.height = `${height}px`;
+      area.style.overflowY = area.scrollHeight > height ? "auto" : "hidden";
+    };
+    if (area.isConnected) resize();
+    else requestAnimationFrame(resize);
+  }
   const ideaById = (id) => state.snapshot?.ideas?.find((idea) => idea.idea_id === id);
   const requestDraftKey = (request) => `neurico-hitl-request:${request?.request_key || "none"}`;
   function loadRequestDraft(request) { try { return JSON.parse(sessionStorage.getItem(requestDraftKey(request)) || "{}"); } catch (_) { return {}; } }
@@ -211,9 +224,11 @@
     }, [q("span", { class: "option-mark", text: selectedOption === option.id ? "✓" : "" }), q("span", { text: option.text })])));
     const feedback = q("textarea", { class: "resolution-feedback", placeholder: "Add feedback", "data-focus-key": `request-feedback:${request.request_key}` });
     feedback.value = requestFeedback;
+    autoSizeTextarea(feedback);
     feedback.oninput = () => {
       state.requestFeedback = feedback.value;
       saveRequestDraft(request, { requestFeedback: feedback.value });
+      autoSizeTextarea(feedback);
     };
     const feedbackRow = q("div", { class: "resolution-feedback-row" }, [
       feedback,
@@ -296,7 +311,7 @@
   }
   function composer() {
     const context = state.snapshot?.context || {}; const percent = Math.max(0, Math.min(100, Number(context.percent) || 0));
-    const area = q("textarea", { placeholder: "Message NeuriCo", "data-focus-key": "composer" }); area.value = state.composer; area.oninput = () => { state.composer = area.value; }; area.onkeydown = (event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitConversation(); } };
+    const area = q("textarea", { placeholder: "Message NeuriCo", "data-focus-key": "composer" }); area.value = state.composer; autoSizeTextarea(area); area.oninput = () => { state.composer = area.value; autoSizeTextarea(area); }; area.onkeydown = (event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submitConversation(); } };
     const provider = q("select", { class: "provider", title: "Choose conversation model", "data-focus-key": "composer-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
     const meter = q("span", { class: "meter" }, [q("span")]); meter.firstChild.style.width = `${Math.max(2, percent)}%`;
     const usedTokens = Number(context.used_tokens || 0);
@@ -331,6 +346,21 @@
     if (state.thinking) thread.append(q("div", { class: "thinking", text: "NeuriCo is thinking " }, [q("i"), q("i"), q("i")]));
     shell.append(thread); if (state.notice) shell.append(q("p", { class: "notice", text: state.notice }));
     return q("div", { class: `conversation-page ${state.runPanel ? "run-open" : ""}` }, [shell, runPanel(), composer()]);
+  }
+
+  function observeComposerSpace() {
+    composerObserver?.disconnect();
+    const page = document.querySelector(".conversation-page");
+    const wrap = document.querySelector(".composer-wrap");
+    if (!page || !wrap) return;
+    const update = () => {
+      const wasAtEnd = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 80;
+      page.style.setProperty("--composer-space", `${Math.ceil(wrap.getBoundingClientRect().height) + 38}px`);
+      if (wasAtEnd) requestAnimationFrame(() => window.scrollTo({ top: document.body.scrollHeight }));
+    };
+    composerObserver = new ResizeObserver(update);
+    composerObserver.observe(wrap);
+    update();
   }
 
   function sidebar() { const nav = [["understanding", "U", "Understanding"], ["ideas", "I", "Ideas"], ["nodes", "N", "Nodes"], ["whiteboard", "W", "Whiteboard"], ["activity", "A", "Activity"]]; return q("aside", { class: `research-sidebar ${state.sidebarCollapsed ? "collapsed" : ""}` }, [q("div", { class: "sidebar-head" }, [q("div", { class: "sidebar-top", text: "Research" }), q("button", { class: "sidebar-toggle", title: state.sidebarCollapsed ? "Expand research panel" : "Collapse research panel", "aria-label": state.sidebarCollapsed ? "Expand research panel" : "Collapse research panel", onclick: () => { state.sidebarCollapsed = !state.sidebarCollapsed; render({ preserveScroll: true }); }, text: state.sidebarCollapsed ? "→" : "←" })]), ...nav.map(([id, key, label]) => q("button", { class: `nav-item ${state.view === id ? "active" : ""}`, title: label, onclick: () => { state.view = id; state.drawer = null; render(); } }, [q("span", { class: "nav-key", text: key }), q("span", { class: "nav-label", text: label })]))]); }
@@ -430,6 +460,8 @@
     const wasNearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
     document.querySelectorAll(".drawer-shade,.drawer").forEach((element) => element.remove());
     app.replaceChildren(topbar(), state.route === "conversation" ? conversation() : research());
+    if (state.route === "conversation") observeComposerSpace();
+    else composerObserver?.disconnect();
     drawer().forEach((element) => document.body.append(element));
     const activeDrawer = document.querySelector(".drawer[data-drawer-key]");
     if (activeDrawer?.dataset.drawerKey && Object.prototype.hasOwnProperty.call(state.drawerScroll, activeDrawer.dataset.drawerKey)) {

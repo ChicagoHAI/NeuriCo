@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_paths import hitl_manager_dir
@@ -111,6 +111,24 @@ class HitlManagerInbox:
         if not isinstance(value, dict) or not str(value.get("text", "")).strip():
             raise RuntimeError("HITL manager queue contains an invalid message.")
         return {key: str(value.get(key, "")) for key in ("id", "text", "provider", "created_at")}
+
+    def consume(self, publish: Callable[[Dict[str, str]], None]) -> Optional[Dict[str, str]]:
+        """Publish and remove the next message as one durable queue claim."""
+        with exclusive_file_lock(self.lock_path):
+            state = self._load()
+            if not state["queue"]:
+                return None
+            value = state["queue"][0]
+            if not isinstance(value, dict) or not str(value.get("text", "")).strip():
+                raise RuntimeError("HITL manager queue contains an invalid message.")
+            record = {
+                key: str(value.get(key, ""))
+                for key in ("id", "text", "provider", "created_at")
+            }
+            publish(record)
+            state["queue"].pop(0)
+            self._write(state)
+            return record
 
     def update(self, item_id: str, text: str) -> Dict[str, str]:
         """Replace one queued message without changing its place in the queue."""

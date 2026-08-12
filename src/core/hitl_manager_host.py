@@ -204,14 +204,8 @@ class HitlWebChannel(WebChannel):
             self._memory_input.put(text)
             return {"status": "accepted"}
         record = self._inbox.enqueue(text, provider=provider, client_turn_id=client_turn_id)
-        if self._conversation is None:
-            raise RuntimeError("The NeuriCo conversation is not initialized.")
-        # Record before queueing: this is the durable source the browser reloads.
-        transcript_record = self._conversation.append("human", record["text"])
-        self._emit({"event": "workspace_changed", "section": "conversation"})
         return {
             "status": "accepted",
-            "message_id": str(transcript_record["id"]),
             "client_turn_id": record["id"],
         }
 
@@ -226,7 +220,16 @@ class HitlWebChannel(WebChannel):
             self._last_polled_input_recorded = False
             self._last_polled_provider = ""
             return str(value).strip()
-        value = self._inbox.pop()
+        def publish(record: Dict[str, str]) -> None:
+            if self._conversation is None:
+                raise RuntimeError("The NeuriCo conversation is not initialized.")
+            self._conversation.append(
+                "human",
+                record["text"],
+                record_id=record["id"],
+            )
+
+        value = self._inbox.consume(publish)
         if value is None:
             self._last_polled_input_recorded = False
             self._last_polled_provider = ""

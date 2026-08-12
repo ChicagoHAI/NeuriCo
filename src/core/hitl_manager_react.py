@@ -783,8 +783,8 @@ class HitlManager:
     def chat(self, message: str, *, input_recorded: bool = False) -> str:
         """Run one ordinary human conversation turn.
 
-        Web input is recorded before it enters the durable inbox so refreshes
-        never lose it. Terminal input still uses the normal record-on-turn path.
+        A durable web input is recorded when the web queue claims it for this
+        turn. Terminal input still uses the normal record-on-turn path.
         """
         turn = self._new_turn(
             "human", str(message), done=threading.Event(), input_recorded=input_recorded
