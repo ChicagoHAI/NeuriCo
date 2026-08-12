@@ -334,6 +334,7 @@ class HitlTerminalChannel(UserChannel):
         self._thinking_stop = threading.Event()
         self._thinking_thread: Optional[threading.Thread] = None
         self._started = False
+        self._plain_prompt_until_activity = False
 
     def set_resolution_reply_handler(self, handler: Any) -> None:
         with self._state_lock:
@@ -462,6 +463,12 @@ class HitlTerminalChannel(UserChannel):
             for index, notification in enumerate(notifications)
         )
         timeline.sort(key=lambda entry: (entry["timestamp"], entry["order"]))
+        self._plain_prompt_until_activity = bool(
+            self._interactive
+            and not timeline
+            and not isinstance(pending, dict)
+            and not bool(self._live_snapshot().get("active"))
+        )
         for entry in timeline:
             if entry["kind"] == "notification":
                 notification = entry["notification"]
@@ -529,7 +536,10 @@ class HitlTerminalChannel(UserChannel):
                 return
             self._reading_input.set()
             try:
-                if self._prompt_session is not None:
+                if (
+                    self._prompt_session is not None
+                    and not self._plain_prompt_until_activity
+                ):
                     try:
                         line = self._prompt_session.prompt(
                             self._ui.prompt_message(),
@@ -558,6 +568,7 @@ class HitlTerminalChannel(UserChannel):
                 return
             if not line.strip():
                 continue
+            self._plain_prompt_until_activity = False
             self.submit_input(line.rstrip("\n"))
 
     def submit_input(
@@ -797,6 +808,7 @@ class HitlTerminalChannel(UserChannel):
         """Route asynchronous output through prompt-safe redraw."""
         if (
             self._prompt_output is not None
+            and not self._plain_prompt_until_activity
             and self._reading_input.is_set()
             and threading.current_thread() is not self._reader
         ):
@@ -805,7 +817,10 @@ class HitlTerminalChannel(UserChannel):
 
     def _restore_plain_prompt(self, output: TextIO) -> None:
         """Restore the prompt only for streams without managed prompt redraw."""
-        if self._prompt_session is None and self._reading_input.is_set():
+        if (
+            (self._prompt_session is None or self._plain_prompt_until_activity)
+            and self._reading_input.is_set()
+        ):
             print("› ", end="", file=output)
 
     def print_help(self) -> None:
