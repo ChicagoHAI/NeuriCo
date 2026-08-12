@@ -37,10 +37,13 @@ from typing import Any, Callable, Dict, List, Optional
 # the workspace while agents run (the same protection every NeuriCo run gets).
 SEALED_STAGING_DIR = "data/.test"
 
-# Trusted baseline of protected-path content, written by Stage 1 and read by the
+# Trusted baseline of the protected paths, written by Stage 1 and read by the
 # generated eval.py to enforce `protected_path` invariants as a hard scoring
 # guardrail (the `protected_paths_unchanged` property). Written in this trusted
-# phase before the optimizing agent exists, so its hashes cannot be forged.
+# phase before the optimizing agent exists. Records the git commit the protected
+# paths were captured in, not a hash: git is the single source of truth for
+# whether they changed, so there is no hand-rolled hash for eval.py to mirror
+# (and drift from).
 PROTECTED_BASELINE_FILE = "scoring/protected_baseline.json"
 
 
@@ -52,92 +55,53 @@ def _gitignore_add(work_dir: Path, line: str) -> None:
         gitignore.write_text(prefix + line + "\n", encoding="utf-8")
 
 
-def _hash_entry(digest: "hashlib._Hash", rel: str, path: Path) -> None:
-    """Fold one filesystem entry into digest, covering the kinds of change a
-    protected-path guardrail must catch: content, permission bits, symlink
-    identity, and the existence of (even empty) directories.
-
-    The generated eval.py MUST mirror this exactly (see
-    templates/agents/rule_maker_bootstrap.txt), or the baseline written here and
-    the runtime recomputation would disagree.
-    """
-    import os
-    import stat as stat_mod
-
-    digest.update(rel.encode("utf-8"))
-    digest.update(b"\0")
-    lst = path.lstat()
-    if stat_mod.S_ISLNK(lst.st_mode):
-        # Symlink: record BOTH its identity (target string, so a repointed link
-        # counts even if the new target reads the same) AND the content behind
-        # it (so a change to the target's bytes under an unchanged link counts).
-        # Cycle-safe: _content_signature walks real files via rglob, which does
-        # not follow symlinked directories.
-        digest.update(b"link\0")
-        digest.update(os.readlink(path).encode("utf-8"))
-        try:
-            resolved = path.resolve()
-            if resolved.is_file() or resolved.is_dir():
-                digest.update(b"\0target\0")
-                digest.update(_content_signature(resolved).encode("utf-8"))
-        except (OSError, RuntimeError):
-            pass  # broken or cyclic link: identity string already recorded
-    elif path.is_dir():
-        # Record directory existence so an added/removed EMPTY directory counts.
-        digest.update(b"dir\0")
-        digest.update(f"{stat_mod.S_IMODE(lst.st_mode):04o}".encode("utf-8"))
-    else:
-        digest.update(b"file\0")
-        digest.update(f"{stat_mod.S_IMODE(lst.st_mode):04o}".encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-
-
-def _hash_protected_path(root: Path) -> str:
-    """Change-detecting hash of a protected file or directory tree.
-
-    Covers content, permission bits, symlink identity, and empty directories,
-    so a chmod, a repointed symlink, or an added/removed empty directory under a
-    protected prefix all change the hash (bytes-only hashing missed all three).
-    A directory folds in every entry's relative path so adding, removing,
-    renaming, or editing anything under the prefix changes it.
-    """
-    root = Path(root)
-    digest = hashlib.sha256()
-    if root.is_symlink() or root.is_file() or not root.is_dir():
-        _hash_entry(digest, "", root)
-        return digest.hexdigest()
-    # A real directory root: fold in the root's OWN mode first (a chmod on the
-    # protected directory itself must count), then every descendant.
-    _hash_entry(digest, "", root)
-    for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
-        _hash_entry(digest, path.relative_to(root).as_posix(), path)
-    return digest.hexdigest()
-
-
-def write_protected_baseline(idea: Dict[str, Any], work_dir: Path) -> Dict[str, str]:
-    """Record sha256 of each declared `protected_path` into the trusted baseline.
+def write_protected_baseline(idea: Dict[str, Any], work_dir: Path) -> Dict[str, Any]:
+    """Anchor the `protected_path` invariants to a git baseline commit.
 
     Written in Stage 1 (no optimizing agent) so the generated eval.py can flag
-    any change to a protected path. Returns the {path: sha256} map (empty when
-    no protected_path invariants are declared, in which case no file is written).
+    any change to a protected path. We use git purely as an IMMUTABLE, content-
+    addressed baseline STORE: force-add each declared protected path (so even a
+    gitignored one is captured), commit if that staged anything, and record the
+    resulting commit sha. eval.py reads the baseline objects back with
+    `git ls-tree` / `git cat-file blob` (which the agent cannot forge at a fixed
+    sha) and compares them to the real filesystem with plain Python reads.
+
+    It deliberately does NOT record a hand-rolled hash (that had to be mirrored
+    in eval.py byte-for-byte and drifted), and eval.py deliberately does NOT use
+    `git diff` / `git ls-files` to detect change: the Stage 2 agent controls the
+    workspace .git (index skip bits, clean filters, core.fileMode, .gitignore),
+    each of which can make git's working-tree view report a modified protected
+    file as clean. Reading immutable blobs + raw filesystem bytes is immune to
+    all of those, and the comparison lives only in eval.py, so nothing drifts.
+
+    Returns {"baseline_ref": <sha>, "paths": [...]} (empty, and no file written,
+    when no protected_path invariants are declared).
     """
     from core.local_resources import protected_path_prefixes
+    from core.repo_adoption import _git
 
     work_dir = Path(work_dir)
-    baseline: Dict[str, str] = {}
-    for rel in protected_path_prefixes(idea):
-        target = work_dir / rel
-        if target.exists():
-            baseline[rel] = _hash_protected_path(target)
-        # A declared protected path that is absent at prepare time is recorded
-        # as a sentinel, so its later CREATION is also a guardrail violation.
-        else:
-            baseline[rel] = "__absent__"
-    if baseline:
-        dst = work_dir / PROTECTED_BASELINE_FILE
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(json.dumps(baseline, indent=2, sort_keys=True), encoding="utf-8")
+    paths = list(protected_path_prefixes(idea))
+    if not paths:
+        return {}
+
+    # Force-add every declared path that exists (-f so a gitignored protected
+    # path is still tracked in the baseline). A path absent at prepare time is
+    # still recorded: its later creation shows up as a diff or an untracked file.
+    for rel in paths:
+        if (work_dir / rel).exists():
+            _git(work_dir, "add", "-f", "--", rel)
+    # Commit only if force-adding staged something new; otherwise the current
+    # HEAD (the anchor commit) already captures the protected paths.
+    if _git(work_dir, "diff", "--cached", "--quiet").returncode != 0:
+        _git(work_dir, "commit", "-m",
+             "continue-research: protected-path baseline")
+    baseline_ref = _git(work_dir, "rev-parse", "HEAD").stdout.strip()
+
+    baseline: Dict[str, Any] = {"baseline_ref": baseline_ref, "paths": paths}
+    dst = work_dir / PROTECTED_BASELINE_FILE
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(json.dumps(baseline, indent=2, sort_keys=True), encoding="utf-8")
     return baseline
 
 
@@ -457,10 +421,11 @@ def prepare_continuation_workspace(
     #    goal + invariants + the data/.test held-out reference.
     _write_workspace_idea(idea, work_dir)
 
-    # 4b. Record the trusted baseline hashes of every declared protected_path,
-    #    computed here (no optimizing agent) from the adopted+staged tree. The
-    #    generated eval.py compares against this to enforce protected_path
-    #    invariants as the hard `protected_paths_unchanged` scoring guardrail.
+    # 4b. Anchor every declared protected_path to a git baseline commit here (no
+    #    optimizing agent), from the adopted+staged tree. The generated eval.py
+    #    asks git whether any protected path differs from this ref to enforce
+    #    protected_path invariants as the hard `protected_paths_unchanged`
+    #    scoring guardrail.
     write_protected_baseline(idea, work_dir)
 
     # 5. Generate the scorer AND score the baseline, all in this trusted phase,

@@ -1892,8 +1892,8 @@ class ResearchPipelineOrchestrator:
         # STAGE B2b: Eval verifier. The bootstrap rule_maker just generated the
         # scoring harness; when the idea declares an evaluation contract or
         # continuation invariants, independently review that eval.py actually
-        # enforces them (reads protected_baseline and recomputes hashes, runs
-        # check commands) before the scorer runs. On a failed verdict the rule
+        # enforces them (checks protected paths against the git baseline_ref,
+        # runs check commands) before the scorer runs. On a failed verdict the rule
         # maker is re-run once with the findings, then re-verified; still failing
         # aborts before the scorer.
         verified = self._verify_bootstrap_eval_contract(

@@ -1084,7 +1084,21 @@ cmd_run() {
         done
         research_docker_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "${research_args[@]}" )
         docker "${research_docker_args[@]}"
-        return
+        local _rc=$?
+        # Stage 2 ran with the ideas/ mount dropped, so the runner's in-container
+        # "completed" status update no-oped and the idea would stay in_progress
+        # forever. Finalize it here on success, in a throwaway container that
+        # mounts ONLY ideas/ (never the workspace or source), so the idea is
+        # archived to ideas/completed while the source URL stays unreadable to
+        # the optimizing agent. A failed run is deliberately left in_progress for
+        # inspection/resume, matching runner.py's own policy.
+        if [ "$_rc" -eq 0 ]; then
+            docker run --rm -e PYTHONPATH=/app/src:/app \
+                -v "$PROJECT_ROOT/ideas:/app/ideas" -w /app "$IMAGE_NAME" \
+                python -c "from pathlib import Path; from core.idea_manager import IdeaManager; IdeaManager(Path('/app/ideas')).update_status('${idea_id}', 'completed')" \
+                || echo -e "${YELLOW}Note: could not finalize idea status; left in_progress${NC}"
+        fi
+        return "$_rc"
     fi
 
     # Forward run: single container, mount declared resources read-only at

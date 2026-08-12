@@ -242,18 +242,23 @@ def adopt_repository(
     if not (work_dir / ".git").exists():
         _git(work_dir, "init")
 
-    # Keep Python bytecode out of iteration checkpoints; adopted repos often
-    # have no .gitignore of their own
+    # Keep Python bytecode and the transient Stage-1 marker out of iteration
+    # checkpoints; adopted repos often have no .gitignore of their own. Each
+    # rule is added independently of the others: an adopted repo that ALREADY
+    # ignores __pycache__/ must still get the marker rule, otherwise the prepared
+    # marker lands as an untracked file, the continuation validator sees a dirty
+    # tree, and Stage 2 can be rejected. (.neurico/idea.yaml stays tracked -- it
+    # is the redacted contract Stage 2 and the backup use.)
     gitignore = work_dir / ".gitignore"
     existing = gitignore.read_text(encoding='utf-8') if gitignore.exists() else ""
-    if "__pycache__/" not in existing.splitlines():
-        # The prepared marker is a transient Stage-1 signal, not part of the
-        # tracked workspace: leaving it untracked would make the continuation
-        # validator see a dirty tree and could reject Stage 2. (.neurico/idea.yaml
-        # stays tracked -- it is the redacted contract Stage 2 and the backup use.)
+    lines = existing.splitlines()
+    needed = [r for r in ("__pycache__/", "*.pyc",
+                          ".neurico/continuation_prepared.json")
+              if r not in lines]
+    if needed:
         section = ("\n# Added at adoption for continue-research checkpoints\n"
-                   "__pycache__/\n*.pyc\n.neurico/continuation_prepared.json\n")
-        gitignore.write_text(existing.rstrip("\n") + "\n" + section if existing
+                   + "\n".join(needed) + "\n")
+        gitignore.write_text((existing.rstrip("\n") + "\n" + section) if existing
                              else section.lstrip("\n"), encoding='utf-8')
     # Move in-repo held-out data into gitignored data/.test BEFORE the anchor
     # commit, so the plaintext never lands in the fresh history (which the
