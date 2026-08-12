@@ -1889,6 +1889,27 @@ class ResearchPipelineOrchestrator:
             print("⚠️  Bootstrap rule_maker stage failed -- aborting before scorer.")
             return results
 
+        # STAGE B2b: Eval verifier. The bootstrap rule_maker just generated the
+        # scoring harness; when the idea declares an evaluation contract or
+        # continuation invariants, independently review that eval.py actually
+        # enforces them (reads protected_baseline and recomputes hashes, runs
+        # check commands) before the scorer runs. On a failed verdict the rule
+        # maker is re-run once with the findings, then re-verified; still failing
+        # aborts before the scorer.
+        verified = self._verify_bootstrap_eval_contract(
+            idea=idea,
+            curated_manifest=curated_manifest,
+            provider=provider,
+            timeout=rule_maker_timeout,
+            full_permissions=full_permissions,
+        )
+        results["stages"][BOOTSTRAP_RULE_MAKER_STAGE]["verification"] = verified
+        if not verified.get("passed", True):
+            print()
+            print("⚠️  Eval verifier rejected the bootstrap scoring contract "
+                  "after retry -- aborting before scorer.")
+            return results
+
         # STAGE B3: Scorer (executes scoring/eval.py against the existing artifacts).
         results["stages"][SCORER_STAGE] = self._run_scorer(
             timeout=scorer_timeout, idea=idea)
@@ -2043,6 +2064,66 @@ class ResearchPipelineOrchestrator:
                 BOOTSTRAP_RULE_MAKER_STAGE, success=False, outputs={"error": str(e)}
             )
             return {"success": False, "error": str(e)}
+
+    def _verify_bootstrap_eval_contract(
+        self,
+        idea: Dict[str, Any],
+        curated_manifest: Dict[str, Any],
+        provider: str,
+        timeout: int,
+        full_permissions: bool,
+    ) -> Dict[str, Any]:
+        """Review the bootstrap-generated scoring harness against the idea's
+        evaluation contract and continuation invariants.
+
+        The bootstrap path (used by continue-research Stage 1) never invoked the
+        eval verifier, so a generated eval.py that omitted or faked a
+        protected_path / check guardrail was never independently reviewed. This
+        runs the same verifier + one-retry loop the non-bootstrap rule maker
+        uses. Returns {'passed': bool, ...}; a True passthrough when the idea
+        declares no contract keeps the previous behavior for plain ideas.
+        """
+        if not has_user_eval_contract(idea):
+            return {"passed": True, "skipped": True}
+
+        print()
+        print("─" * 80)
+        print("STAGE: EVAL VERIFIER (bootstrap; evaluation contract / invariants declared)")
+        print("─" * 80)
+
+        verdict = run_eval_verifier(
+            idea=idea, work_dir=self.work_dir, provider=provider,
+            templates_dir=self.templates_dir, full_permissions=full_permissions)
+        if verdict.get("success") and verdict.get("passed"):
+            return {"passed": True, "verdict": verdict}
+
+        print()
+        print("↻ Verifier rejected the bootstrap scoring contract -- re-running "
+              "the bootstrap rule maker once with the findings appended.")
+        sealed_dir = self._seal_bootstrap_inputs()
+        try:
+            retry = run_bootstrap_rule_maker(
+                curated_manifest=curated_manifest,
+                work_dir=self.work_dir,
+                provider=provider,
+                templates_dir=self.templates_dir,
+                timeout=timeout,
+                full_permissions=full_permissions,
+                log_dir=self.work_dir / ".neurico" / "bootstrap_logs",
+                prompt_suffix=format_violations_for_retry(
+                    verdict.get("violations")),
+            )
+        finally:
+            self._unseal_bootstrap_inputs(sealed_dir)
+        if not retry.get("success"):
+            return {"passed": False, "verdict": verdict,
+                    "retry_generation_failed": True}
+
+        verdict = run_eval_verifier(
+            idea=idea, work_dir=self.work_dir, provider=provider,
+            templates_dir=self.templates_dir, full_permissions=full_permissions)
+        return {"passed": bool(verdict.get("success") and verdict.get("passed")),
+                "verdict": verdict}
 
     def _bootstrap_sealed_dir_for(self) -> Path:
         """Sibling sealed dir for bootstrap mode."""

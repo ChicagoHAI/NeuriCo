@@ -247,7 +247,12 @@ def adopt_repository(
     gitignore = work_dir / ".gitignore"
     existing = gitignore.read_text(encoding='utf-8') if gitignore.exists() else ""
     if "__pycache__/" not in existing.splitlines():
-        section = "\n# Added at adoption for continue-research checkpoints\n__pycache__/\n*.pyc\n"
+        # The prepared marker is a transient Stage-1 signal, not part of the
+        # tracked workspace: leaving it untracked would make the continuation
+        # validator see a dirty tree and could reject Stage 2. (.neurico/idea.yaml
+        # stays tracked -- it is the redacted contract Stage 2 and the backup use.)
+        section = ("\n# Added at adoption for continue-research checkpoints\n"
+                   "__pycache__/\n*.pyc\n.neurico/continuation_prepared.json\n")
         gitignore.write_text(existing.rstrip("\n") + "\n" + section if existing
                              else section.lstrip("\n"), encoding='utf-8')
     # Move in-repo held-out data into gitignored data/.test BEFORE the anchor

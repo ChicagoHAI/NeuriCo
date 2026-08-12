@@ -1061,8 +1061,29 @@ cmd_run() {
         docker "${prep_args[@]}" || { echo -e "${RED}Prepare stage failed${NC}"; exit 1; }
 
         echo -e "${BLUE}continue-research: Stage 2 (research) with NO source materials mounted${NC}"
-        docker_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "$@" )
-        docker "${docker_args[@]}"
+        # --force-fresh belongs to the prepare stage only: it already moved any
+        # stale workspace aside and Stage 1 re-adopted. Passing it to the
+        # research container would move the freshly prepared workspace aside too,
+        # and Stage 2 cannot re-prepare (the source is deliberately not mounted
+        # here). Strip it from the research invocation.
+        local research_args=()
+        for a in "$@"; do
+            [ "$a" = "--force-fresh" ] && continue
+            research_args+=( "$a" )
+        done
+        # Drop the host ideas/ mount from the research container: the submitted
+        # YAML there retains the source repo URL, which the optimizing agent
+        # must not be able to read. Stage 2 loads the redacted contract from the
+        # workspace's .neurico/idea.yaml instead.
+        local research_docker_args=() _i=0 _arr=( "${docker_args[@]}" )
+        while [ $_i -lt ${#_arr[@]} ]; do
+            if [ "${_arr[$_i]}" = "-v" ] && [[ "${_arr[$((_i+1))]}" == *":/app/ideas" ]]; then
+                _i=$((_i+2)); continue
+            fi
+            research_docker_args+=( "${_arr[$_i]}" ); _i=$((_i+1))
+        done
+        research_docker_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "${research_args[@]}" )
+        docker "${research_docker_args[@]}"
         return
     fi
 

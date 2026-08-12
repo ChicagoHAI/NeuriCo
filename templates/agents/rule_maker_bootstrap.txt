@@ -256,8 +256,11 @@ The idea may carry structured declarations that BIND your design. Check
      will disagree with the baseline and always report 0.0). For each protected
      root, feed a single sha256 with, per entry, in this order:
        - the entry's relative path (posix, "" for a file/symlink root), then a NUL;
-       - if it is a symlink: b"link\0" then os.readlink(path) (its TARGET STRING,
-         not the target's bytes);
+       - if it is a symlink: b"link\0" then os.readlink(path) (its target
+         STRING); then, if the resolved target exists, b"\0target\0" followed by
+         a content signature of the target (sha256 of the file's bytes, or of
+         the resolved directory tree as sorted "relpath\0bytes"), so a change to
+         the content behind an unchanged link is caught too;
        - elif it is a directory: b"dir\0" then its 4-digit octal permission bits
          (records even EMPTY directories);
        - else (a file): b"file\0", its 4-digit octal permission bits, a NUL, then

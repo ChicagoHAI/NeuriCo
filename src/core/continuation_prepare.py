@@ -68,10 +68,20 @@ def _hash_entry(digest: "hashlib._Hash", rel: str, path: Path) -> None:
     digest.update(b"\0")
     lst = path.lstat()
     if stat_mod.S_ISLNK(lst.st_mode):
-        # Symlink identity: the target string, not the target's bytes. A
-        # repointed symlink is a change even if the new target reads the same.
+        # Symlink: record BOTH its identity (target string, so a repointed link
+        # counts even if the new target reads the same) AND the content behind
+        # it (so a change to the target's bytes under an unchanged link counts).
+        # Cycle-safe: _content_signature walks real files via rglob, which does
+        # not follow symlinked directories.
         digest.update(b"link\0")
         digest.update(os.readlink(path).encode("utf-8"))
+        try:
+            resolved = path.resolve()
+            if resolved.is_file() or resolved.is_dir():
+                digest.update(b"\0target\0")
+                digest.update(_content_signature(resolved).encode("utf-8"))
+        except (OSError, RuntimeError):
+            pass  # broken or cyclic link: identity string already recorded
     elif path.is_dir():
         # Record directory existence so an added/removed EMPTY directory counts.
         digest.update(b"dir\0")
@@ -97,6 +107,9 @@ def _hash_protected_path(root: Path) -> str:
     if root.is_symlink() or root.is_file() or not root.is_dir():
         _hash_entry(digest, "", root)
         return digest.hexdigest()
+    # A real directory root: fold in the root's OWN mode first (a chmod on the
+    # protected directory itself must count), then every descendant.
+    _hash_entry(digest, "", root)
     for path in sorted(root.rglob("*"), key=lambda p: p.relative_to(root).as_posix()):
         _hash_entry(digest, path.relative_to(root).as_posix(), path)
     return digest.hexdigest()
@@ -222,12 +235,20 @@ def stage_held_out_data(idea: Dict[str, Any], work_dir: Path,
         dst = dest_root / name
         rewritten = f"{SEALED_STAGING_DIR}/{name}"
         src = None if already_rewritten else _resolve_source(raw, work_dir, base_dir)
-        # Idempotent re-prepare: the path was already rewritten to the
-        # eval-facing form, OR an existing destination already matches the
-        # declared source (a resume after Stage 1 partially completed). Accept
-        # the existing copy only when it is VERIFIED against the source, so a
-        # partial or stale destination is never mistaken for a complete stage.
-        if already_rewritten or (
+        # Accept the already-staged destination in three idempotent cases:
+        #   - the path was already rewritten to the eval-facing form;
+        #   - the source is GONE and the destination exists: this is an in-repo
+        #     sealed source that the pre-commit-hook pass already MOVED (the
+        #     source is removed only AFTER a complete copy, so source-absent +
+        #     destination-present means the move finished). stage_held_out_data
+        #     runs twice per prepare (in the hook, then again after), so the
+        #     second pass MUST accept the moved copy rather than fail;
+        #   - the source is still present AND its content matches the staged
+        #     copy (an interrupted-then-resumed prepare).
+        # A destination that exists but MISMATCHES a still-present source is a
+        # partial/stale copy and falls through to re-stage.
+        moved_source = dst.exists() and src is not None and not src.exists()
+        if already_rewritten or moved_source or (
                 dst.exists() and src is not None and src.exists()
                 and _same_content(src, dst)):
             entry.setdefault("source_path", raw)

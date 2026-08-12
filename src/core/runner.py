@@ -306,8 +306,17 @@ class ResearchRunner:
             print("   Bootstrap AutoResearch baseline: enabled")
         print("=" * 80)
 
-        # Load idea
+        # Load idea. The continuation research container does NOT mount the host
+        # ideas/ directory (its submitted YAML retains the source repo URL, which
+        # the optimizing agent must not see), so fall back to the redacted
+        # contract the prepare stage wrote into the workspace. That copy has
+        # source_repo stripped but keeps the goal + invariants Stage 2 needs.
         idea = self.idea_manager.get_idea(idea_id)
+        if idea is None:
+            import yaml as _yaml
+            workspace_idea = (self.runs_dir / idea_id / ".neurico" / "idea.yaml")
+            if workspace_idea.exists():
+                idea = _yaml.safe_load(workspace_idea.read_text(encoding="utf-8"))
         if idea is None:
             raise ValueError(f"Idea not found: {idea_id}")
         attach_runtime_compute_backend(idea, compute_backend)
@@ -329,8 +338,14 @@ class ResearchRunner:
         # optimizing agent) prepares a scored standard NeuriCo workspace; Stage
         # 2 is a plain continuation on it. Detected here, before the forward
         # workspace setup, because Stage 1's adoption needs an empty work_dir.
-        if isinstance(idea_spec.get("continuation"), dict) and \
-                idea_spec["continuation"].get("source_repo"):
+        # source_repo marks a fresh continuation; on the research-stage re-entry
+        # the redacted workspace idea has no source_repo, so the prepared marker
+        # (written by Stage 1) is the signal that this is a continuation to
+        # resume into Stage 2.
+        from core.continuation_prepare import PREPARED_MARKER as _PREP_MARKER
+        _cont = idea_spec.get("continuation")
+        _prepared = (self.runs_dir / idea_id / _PREP_MARKER).exists()
+        if isinstance(_cont, dict) and (_cont.get("source_repo") or _prepared):
             return self._run_continuation(
                 idea=idea,
                 idea_id=idea_id,
@@ -1190,6 +1205,7 @@ https://github.com/ChicagoHAI/neurico
             autoresearch_state_current_best_sha,
         )
         from core.repo_adoption import ADOPTION_RECORD
+        from core.continuation_prepare import PREPARED_MARKER
 
         work_dir = (self.runs_dir / idea_id).resolve()
         github_manager = self.github_manager if self.use_github else None
@@ -1213,15 +1229,20 @@ https://github.com/ChicagoHAI/neurico
             print(f"🧹 --force-fresh: previous continuation workspace moved to "
                   f"{stale}")
 
-        # Skip Stage 1 when the workspace is already a prepared, scored
-        # NeuriCo workspace (adoption record + a recorded current_best). This
-        # makes the two-container Docker flow clean: the prepare container runs
-        # Stage 1 with --prepare-only, and the research container -- which does
-        # NOT mount the source materials -- re-enters here, finds the workspace
-        # prepared, and runs only Stage 2. Native single-process runs fall
-        # through and prepare a fresh workspace.
+        # Skip Stage 1 only when Stage 1 FULLY completed: adoption record, a
+        # recorded current_best, AND the prepared marker. The marker is written
+        # last, after invariant verification passes, so it is the authoritative
+        # "prepare finished cleanly" signal. Keying only on adoption +
+        # current_best would treat a workspace whose invariant verification
+        # FAILED (after current_best was already recorded) as prepared, skip
+        # verification on retry, and continue with the rejected evaluator. The
+        # marker closes that: a failed prepare leaves no marker, so the next run
+        # re-runs Stage 1 and re-verifies. Enables the clean two-container Docker
+        # flow the same way (the prepare container writes the marker; the
+        # research container sees it and runs only Stage 2).
         already_prepared = (
             (work_dir / ADOPTION_RECORD).exists()
+            and (work_dir / PREPARED_MARKER).exists()
             and autoresearch_state_current_best_sha(
                 read_autoresearch_state(work_dir)) is not None
         )
