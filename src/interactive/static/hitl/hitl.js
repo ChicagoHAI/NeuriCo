@@ -8,7 +8,7 @@
     snapshot: null, route: initialRoute, view: "understanding", drawer: null,
     tab: "overview", composer: "", provider: initialProvider,
     notice: "", thinking: false, stale: "", selectedOption: "", requestFeedback: "",
-    editingQueueId: "", queueDraft: "", runPanel: false, snapshotSig: "", scrollToBottom: false,
+    runPanel: false, snapshotSig: "", scrollToBottom: false,
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
     conversationScroll: { top: 0, nearBottom: true, captured: false },
     runDraft: { iterations: 2, writePaper: true, paperStyle: "auto", github: false },
@@ -302,10 +302,8 @@
     if (!queue.length) return null;
     const list = q("div", { class: "queue" });
     queue.forEach((item) => {
-      const editing = state.editingQueueId === item.id;
-      const input = q("input", { class: "queue-editor", value: editing ? state.queueDraft : item.text, readonly: editing ? null : "readonly", "data-focus-key": `queue:${item.id}` });
-      if (editing) { input.removeAttribute("readonly"); input.oninput = () => { state.queueDraft = input.value; }; input.onkeydown = (event) => { if (event.key === "Enter") updateQueued(item.id); if (event.key === "Escape") { state.editingQueueId = ""; render(); } }; }
-      list.append(q("div", { class: "queue-row" }, [input, editing ? icon("✓", "Save queued message", () => updateQueued(item.id), "small-icon") : icon("✎", "Edit queued message", () => { state.editingQueueId = item.id; state.queueDraft = item.text; render(); }, "small-icon"), icon("×", "Remove queued message", () => removeQueued(item.id), "small-icon")]));
+      const input = q("input", { class: "queue-editor", value: item.text, readonly: "readonly" });
+      list.append(q("div", { class: "queue-row" }, [input, icon("✎", "Edit queued message", () => editQueued(item), "small-icon"), icon("×", "Remove queued message", () => removeQueued(item.id), "small-icon")]));
     });
     return list;
   }
@@ -447,7 +445,21 @@
   async function submitConversation() { const text = state.composer.trim(); if (!text) return; state.composer = ""; state.notice = ""; state.scrollToBottom = true; render(); try { await post("/input", { text, input_kind: "conversation", provider: state.provider, client_turn_id: crypto.randomUUID() }); await refresh(); } catch (error) { state.notice = error.message; render(); } }
   async function submitRequest(request, feedback) { const draft = loadRequestDraft(request); const selectedOption = state.selectedOption || draft.selectedOption || ""; const text = String(feedback || draft.requestFeedback || "").trim(); if (!selectedOption && !text) { state.notice = "Choose an option or add feedback before submitting."; render(); return; } try { await post("/input", { text, input_kind: "resolution_reply", request_key: request.request_key, option_id: selectedOption, provider: state.provider, client_turn_id: crypto.randomUUID() }); clearRequestDraft(request); await refresh(); } catch (error) { state.notice = error.message; render(); } }
   async function removeQueued(id) { try { await post("/api/queue", { action: "remove", id }); await refresh(); } catch (error) { state.notice = error.message; render(); } }
-  async function updateQueued(id) { if (!state.queueDraft.trim()) return; try { await post("/api/queue", { action: "update", id, text: state.queueDraft }); state.editingQueueId = ""; await refresh(); } catch (error) { state.notice = error.message; render(); } }
+  async function editQueued(item) {
+    try {
+      await post("/api/queue", { action: "remove", id: item.id });
+      state.composer = String(item.text || "");
+      state.notice = "";
+      await refresh();
+      requestAnimationFrame(() => {
+        const area = document.querySelector('textarea[data-focus-key="composer"]');
+        if (!(area instanceof HTMLTextAreaElement)) return;
+        area.focus();
+        area.setSelectionRange(area.value.length, area.value.length);
+        autoSizeTextarea(area);
+      });
+    } catch (error) { state.notice = error.message; render(); }
+  }
   async function cancelTurn() { state.notice = "Cancellation is not available yet."; render(); }
   async function launchRun(payload) { try { await post("/api/run", payload); state.runPanel = false; state.notice = ""; await refresh(); } catch (error) { state.notice = error.message; render(); } }
   function render(options = {}) {
