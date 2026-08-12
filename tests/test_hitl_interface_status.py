@@ -9,9 +9,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from prompt_toolkit import PromptSession
-from prompt_toolkit.input import create_pipe_input
-from prompt_toolkit.output import DummyOutput
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -19,12 +16,12 @@ from cli.hitl_launcher import HitlRunController  # noqa: E402
 from core.hitl import HitlIdeaLog  # noqa: E402
 from core.hitl_runtime_state import MAX_INTERFACE_EVENTS, HitlRuntimeState  # noqa: E402
 from core.hitl_workspace_view import HitlWorkspaceView  # noqa: E402
-from core.hitl_manager_host import HitlTerminalChannel  # noqa: E402
+from core.hitl_manager_context import HitlManagerTranscript  # noqa: E402
+from core.hitl_manager_history import HitlManagerHistory  # noqa: E402
+from core.hitl_manager_host import HitlTerminalChannel, HitlWebChannel  # noqa: E402
 from core.runner import ResearchRunner  # noqa: E402
-from interactive.hitl_terminal_ui import (  # noqa: E402
-    HitlTerminalUI,
-    terminal_key_bindings,
-)
+from interactive.hitl_terminal_ui import HitlTerminalUI  # noqa: E402
+from interactive.native_terminal import NativeTerminalComposer  # noqa: E402
 
 
 def _workspace(tmp_path):
@@ -42,6 +39,63 @@ def _owner(**updates):
         "interface": "web",
         **updates,
     }
+
+
+def test_web_queue_is_only_published_when_each_message_is_consumed(tmp_path):
+    work_dir = _workspace(tmp_path)
+    manager_dir = work_dir / ".neurico" / "hitl" / "manager"
+    channel = HitlWebChannel(work_dir)
+    channel.bind_conversation(HitlManagerTranscript(manager_dir))
+
+    first = channel.submit_input("first", client_turn_id="first")
+    second = channel.submit_input("second", client_turn_id="second")
+    third = channel.submit_input("third", client_turn_id="third")
+
+    assert HitlManagerHistory.read_messages(manager_dir) == []
+    assert [item["text"] for item in channel._inbox.snapshot()["queue"]] == [
+        "first",
+        "second",
+        "third",
+    ]
+
+    assert channel.poll_input() == "first"
+    assert [record["content"] for record in HitlManagerHistory.read_messages(manager_dir)] == [
+        "first"
+    ]
+
+    channel.update_queued_input(second["client_turn_id"], "second edited")
+    channel.remove_queued_input(third["client_turn_id"])
+
+    assert [item["text"] for item in channel._inbox.snapshot()["queue"]] == [
+        "second edited"
+    ]
+    assert [record["content"] for record in HitlManagerHistory.read_messages(manager_dir)] == [
+        "first"
+    ]
+
+    assert channel.poll_input() == "second edited"
+    assert [record["content"] for record in HitlManagerHistory.read_messages(manager_dir)] == [
+        "first",
+        "second edited",
+    ]
+    assert channel._inbox.snapshot()["queue"] == []
+
+
+def test_web_queue_publish_is_idempotent_after_interrupted_claim(tmp_path):
+    work_dir = _workspace(tmp_path)
+    manager_dir = work_dir / ".neurico" / "hitl" / "manager"
+    channel = HitlWebChannel(work_dir)
+    transcript = HitlManagerTranscript(manager_dir)
+    channel.bind_conversation(transcript)
+    channel.submit_input("retry me", client_turn_id="stable-turn")
+
+    transcript.append("human", "retry me", record_id="stable-turn")
+
+    assert channel.poll_input() == "retry me"
+    assert [record["content"] for record in HitlManagerHistory.read_messages(manager_dir)] == [
+        "retry me"
+    ]
+    assert channel._inbox.snapshot()["queue"] == []
 
 
 def test_idle_workspace_is_ready_for_fresh_run(tmp_path):
@@ -1036,7 +1090,7 @@ def test_managed_terminal_prompt_is_not_repeated_after_notifications(tmp_path):
     assert "›" not in output.getvalue()
 
 
-def test_terminal_toolbar_uses_shared_live_status_and_phase_time():
+def test_terminal_status_uses_shared_live_status_and_phase_time():
     output = io.StringIO()
     channel = HitlTerminalChannel(output=output)
     channel.set_run_launcher(
@@ -1049,10 +1103,10 @@ def test_terminal_toolbar_uses_shared_live_status_and_phase_time():
     )
 
     with patch("core.hitl_manager_host._elapsed_phase_time", return_value="2:14"):
-        toolbar = channel._terminal_status_toolbar()
+        state, text = channel._terminal_status_text()
 
-    rendered = "".join(text for _style, text in toolbar)
-    assert rendered == "  ● Resource finding · Planning  2:14 "
+    assert state == "idle"
+    assert text == "● Resource finding · Planning  2:14"
 
 
 def test_terminal_startup_messages_use_compact_spacing():
@@ -1177,25 +1231,17 @@ def test_terminal_thinking_indicator_is_transient():
 
 
 def test_terminal_empty_enter_does_not_submit_or_close_prompt():
-    result = []
-    with create_pipe_input() as pipe_input:
-        session = PromptSession(
-            input=pipe_input,
-            output=DummyOutput(),
-            key_bindings=terminal_key_bindings(),
-        )
-        reader = threading.Thread(target=lambda: result.append(session.prompt("› ")))
-        reader.start()
+    composer = NativeTerminalComposer(
+        output=io.StringIO(),
+        lock=threading.RLock(),
+        status=lambda: ("idle", "● Ready"),
+    )
+    composer._active = True
 
-        pipe_input.send_text("\r\n")
-        time.sleep(0.05)
-        assert reader.is_alive()
-
-        pipe_input.send_text("hello\r")
-        reader.join(timeout=1)
-
-    assert not reader.is_alive()
-    assert result == ["hello"]
+    assert composer._consume(b"\r") is None
+    assert composer.active
+    assert composer._consume(b"hello\r") == "hello"
+    assert not composer.active
 
 
 def test_terminal_does_not_echo_live_conversation_input_twice():

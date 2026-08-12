@@ -8,11 +8,6 @@ import textwrap
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 
-from prompt_toolkit.formatted_text import ANSI, FormattedText
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.styles import Style
-
-
 _ANSI = {
     "reset": "\x1b[0m",
     "bold": "\x1b[1m",
@@ -24,32 +19,6 @@ _ANSI = {
     "muted": "\x1b[38;5;246m",
     "rule": "\x1b[38;5;239m",
 }
-
-
-TERMINAL_STYLE = Style.from_dict(
-    {
-        "prompt": "bold #8bd5ca",
-        "rprompt": "#7f8c8d",
-        "status": "bg:#17201e #d8e2df",
-        "status.review": "bg:#332b16 #f1c75b bold",
-        "status.failed": "bg:#3a2024 #f28b82 bold",
-        "status.complete": "bg:#173128 #82d7bd bold",
-        "status.timer": "bg:#17201e #95a39f",
-    }
-)
-
-
-def terminal_key_bindings() -> KeyBindings:
-    """Keep an empty Enter inside the active composer instead of submitting it."""
-    bindings = KeyBindings()
-
-    @bindings.add("c-j")
-    @bindings.add("c-m")
-    def accept_nonempty(event: Any) -> None:
-        if event.current_buffer.text.strip():
-            event.current_buffer.validate_and_handle()
-
-    return bindings
 
 
 class HitlTerminalUI:
@@ -437,38 +406,7 @@ class HitlTerminalUI:
     def thinking(self, frame: str) -> str:
         return f"{self._style(frame, 'mint')}  {self._style('NeuriCo is thinking…', 'muted')}"
 
-    @staticmethod
-    def prompt_message() -> ANSI:
-        return ANSI("\x1b[1;38;5;115m›\x1b[0m ")
-
-    @staticmethod
-    def setting_prompt(label: str) -> ANSI:
-        return ANSI(f"\x1b[38;5;246m{label}\x1b[0m")
-
     def setting_response(self, label: str, value: str) -> List[str]:
         return [
             f"{self._style(label, 'muted')}{value}",
         ]
-
-    def toolbar(
-        self,
-        live: Dict[str, Any],
-        *,
-        elapsed: str,
-    ) -> FormattedText:
-        state = str(live.get("state", "idle")).strip()
-        label = str(live.get("label") or live.get("title") or "Ready").strip()
-        status_class = {
-            "review_needed": "class:status.review",
-            "failed": "class:status.failed",
-            "completed": "class:status.complete",
-        }.get(state, "class:status")
-        parts: List[tuple[str, str]] = [(status_class, f"  ● {label} ")]
-        if elapsed and bool(live.get("active")):
-            parts.append(("class:status.timer", f" {elapsed} "))
-        return FormattedText(parts)
-
-    def rprompt(self, live: Dict[str, Any]) -> FormattedText:
-        if str(live.get("state", "")) == "review_needed":
-            return FormattedText([("class:rprompt", "review pending")])
-        return FormattedText([])
