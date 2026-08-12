@@ -4,22 +4,12 @@ from __future__ import annotations
 
 import re
 import shutil
-import threading
 import textwrap
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List
 
-from prompt_toolkit.application import Application
-from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.data_structures import Point
-from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import ANSI, FormattedText, to_formatted_text
-from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.formatted_text import ANSI, FormattedText
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import BufferControl, ConditionalContainer, FormattedTextControl
-from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.styles import Style
 
 
@@ -45,7 +35,6 @@ TERMINAL_STYLE = Style.from_dict(
         "status.failed": "bg:#3a2024 #f28b82 bold",
         "status.complete": "bg:#173128 #82d7bd bold",
         "status.timer": "bg:#17201e #95a39f",
-        "toolbar": "reverse",
     }
 )
 
@@ -61,181 +50,6 @@ def terminal_key_bindings() -> KeyBindings:
             event.current_buffer.validate_and_handle()
 
     return bindings
-
-
-class HitlTerminalViewport:
-    """One foreground renderer for the interactive terminal surface."""
-
-    def __init__(
-        self,
-        *,
-        on_submit: Callable[[str], None],
-        input_allowed: Callable[[], bool],
-        toolbar: Callable[[], Any],
-        rprompt: Callable[[], Any],
-        history: Optional[InMemoryHistory] = None,
-    ) -> None:
-        self._on_submit = on_submit
-        self._input_allowed = input_allowed
-        self._toolbar = toolbar
-        self._rprompt = rprompt
-        self._blocks: List[tuple[bool, List[str]]] = []
-        self._fragment_lock = threading.Lock()
-        self._prompt: Any = FormattedText([("class:prompt", "› ")])
-        self._thinking = False
-
-        completer = WordCompleter(
-            ["/run", "/status", "/activity", "/idea", "/reply", "/help", "/quit"],
-            sentence=True,
-        )
-        self.buffer = Buffer(
-            history=history or InMemoryHistory(),
-            auto_suggest=AutoSuggestFromHistory(),
-            completer=completer,
-            complete_while_typing=False,
-            read_only=Condition(lambda: not self._input_allowed()),
-        )
-        bindings = KeyBindings()
-
-        @bindings.add("c-j")
-        @bindings.add("c-m")
-        def submit(event: Any) -> None:
-            text = self.buffer.text.strip()
-            if not text or not self._input_allowed():
-                return
-            self.buffer.append_to_history()
-            self.buffer.reset()
-            self._on_submit(text)
-            event.app.invalidate()
-
-        @bindings.add("c-c")
-        def clear_input(event: Any) -> None:
-            self.buffer.reset()
-            event.app.invalidate()
-
-        history_control = FormattedTextControl(
-            self._history_fragments,
-            get_cursor_position=self._history_cursor,
-            show_cursor=False,
-        )
-        self.history_window = Window(
-            history_control,
-            wrap_lines=True,
-            always_hide_cursor=True,
-            dont_extend_height=True,
-        )
-        input_control = BufferControl(buffer=self.buffer)
-        input_row = VSplit(
-            [
-                Window(
-                    FormattedTextControl(lambda: self._prompt),
-                    dont_extend_width=True,
-                    height=1,
-                ),
-                Window(input_control, height=1),
-                Window(
-                    FormattedTextControl(self._rprompt),
-                    dont_extend_width=True,
-                    height=1,
-                ),
-            ],
-            height=1,
-        )
-        thinking_row = ConditionalContainer(
-            Window(
-                FormattedTextControl(
-                    lambda: FormattedText(
-                        [("class:rprompt", "  NeuriCo is thinking…")]
-                    )
-                ),
-                height=1,
-            ),
-            filter=Condition(lambda: self._thinking),
-        )
-        toolbar_row = Window(
-            FormattedTextControl(self._toolbar_fragments),
-            height=1,
-            style="class:toolbar",
-        )
-        root = HSplit(
-            [
-                self.history_window,
-                thinking_row,
-                input_row,
-                Window(),
-                toolbar_row,
-            ]
-        )
-        self.app: Application[None] = Application(
-            layout=Layout(root, focused_element=input_control),
-            key_bindings=bindings,
-            full_screen=True,
-            style=TERMINAL_STYLE,
-            refresh_interval=1.0,
-            terminal_size_polling_interval=0.1,
-        )
-
-    def _history_fragments(self) -> FormattedText:
-        with self._fragment_lock:
-            blocks = [(blank, list(lines)) for blank, lines in self._blocks]
-        width = max(1, self.app.output.get_size().columns)
-        fragments: List[tuple[str, str]] = []
-        for blank_before, lines in blocks:
-            if blank_before:
-                fragments.append(("", "\n"))
-            for line in lines:
-                parsed = list(to_formatted_text(ANSI(line)))
-                visible = "".join(fragment[1] for fragment in parsed)
-                if visible and not visible.strip("─"):
-                    style = next((fragment[0] for fragment in parsed if fragment[1]), "")
-                    parsed = [(style, "─" * width)]
-                fragments.extend(parsed)
-                fragments.append(("", "\n"))
-        return FormattedText(fragments)
-
-    def _history_cursor(self) -> Point:
-        with self._fragment_lock:
-            line_count = sum(len(lines) + int(blank) for blank, lines in self._blocks)
-            last_line = self._blocks[-1][1][-1] if self._blocks and self._blocks[-1][1] else ""
-        visible = "".join(fragment[1] for fragment in to_formatted_text(ANSI(last_line)))
-        return Point(x=len(visible), y=max(0, line_count - 1))
-
-    def _toolbar_fragments(self) -> FormattedText:
-        return FormattedText(
-            [("class:toolbar", fragment[1]) for fragment in to_formatted_text(self._toolbar())]
-        )
-
-    def append(self, lines: List[str], *, blank_before: bool = False) -> None:
-        with self._fragment_lock:
-            self._blocks.append((blank_before, list(lines)))
-        self.invalidate()
-
-    def set_prompt(self, prompt: Any) -> None:
-        self._prompt = prompt
-        self.invalidate()
-
-    def set_thinking(self, thinking: bool) -> None:
-        self._thinking = bool(thinking)
-        self.invalidate()
-
-    def invalidate(self) -> None:
-        if self.app.is_running:
-            self.app.invalidate()
-
-    def run(self) -> None:
-        def prepare_screen() -> None:
-            output = self.app.output
-            output.enter_alternate_screen()
-            output.erase_screen()
-            output.cursor_goto(0, 0)
-            output.flush()
-
-        self.app.run(pre_run=prepare_screen)
-
-    def stop(self) -> None:
-        loop = self.app.loop
-        if self.app.is_running and loop is not None:
-            loop.call_soon_threadsafe(self.app.exit)
 
 
 class HitlTerminalUI:
@@ -288,6 +102,8 @@ class HitlTerminalUI:
         cleaned = self._clean_inline_markdown(" ".join(text.split()))
         if not cleaned:
             return []
+        if self.interactive:
+            return [f"{indent}{cleaned}"]
         return textwrap.wrap(
             cleaned,
             width=self.content_width,
@@ -331,28 +147,22 @@ class HitlTerminalUI:
                 rendered.append(self._style(f"  {self._clean_inline_markdown(heading.group(1))}", "bold"))
             elif bullet:
                 flush_paragraph()
-                wrapped = textwrap.wrap(
-                    self._clean_inline_markdown(bullet.group(1)),
-                    width=self.content_width - 2,
-                    initial_indent="  • ",
-                    subsequent_indent="    ",
-                    break_long_words=False,
+                cleaned = self._clean_inline_markdown(bullet.group(1))
+                wrapped = [f"  • {cleaned}"] if self.interactive else textwrap.wrap(
+                    cleaned, width=self.content_width - 2, initial_indent="  • ",
+                    subsequent_indent="    ", break_long_words=False,
                     break_on_hyphens=False,
                 )
                 rendered.extend(wrapped)
             elif numbered:
                 flush_paragraph()
                 marker = f"  {numbered.group(1)}. "
-                rendered.extend(
-                    textwrap.wrap(
-                        self._clean_inline_markdown(numbered.group(2)),
-                        width=self.content_width - 2,
-                        initial_indent=marker,
-                        subsequent_indent=" " * len(marker),
-                        break_long_words=False,
-                        break_on_hyphens=False,
-                    )
-                )
+                cleaned = self._clean_inline_markdown(numbered.group(2))
+                rendered.extend([f"{marker}{cleaned}"] if self.interactive else textwrap.wrap(
+                    cleaned, width=self.content_width - 2, initial_indent=marker,
+                    subsequent_indent=" " * len(marker), break_long_words=False,
+                    break_on_hyphens=False,
+                ))
             else:
                 paragraph.append(stripped)
         flush_paragraph()
@@ -384,13 +194,10 @@ class HitlTerminalUI:
 
     def system(self, text: str, *, tone: str = "neutral") -> List[str]:
         color = {"error": "red", "success": "mint", "review": "amber"}.get(tone, "muted")
-        wrapped = textwrap.wrap(
-            " ".join(str(text).split()),
-            width=self.content_width - 2,
-            initial_indent="  ",
-            subsequent_indent="  ",
-            break_long_words=False,
-            break_on_hyphens=False,
+        cleaned = " ".join(str(text).split())
+        wrapped = [f"  {cleaned}"] if self.interactive and cleaned else textwrap.wrap(
+            cleaned, width=self.content_width - 2, initial_indent="  ",
+            subsequent_indent="  ", break_long_words=False, break_on_hyphens=False,
         )
         if not wrapped:
             return []
@@ -423,12 +230,9 @@ class HitlTerminalUI:
             for index, option in enumerate(options, 1):
                 option_text = str(option.get("text", "")).strip()
                 prefix = f"  {index}  "
-                wrapped = textwrap.wrap(
-                    option_text,
-                    width=self.content_width,
-                    initial_indent=prefix,
-                    subsequent_indent=" " * len(prefix),
-                    break_long_words=False,
+                wrapped = [f"{prefix}{option_text}".rstrip()] if self.interactive else textwrap.wrap(
+                    option_text, width=self.content_width, initial_indent=prefix,
+                    subsequent_indent=" " * len(prefix), break_long_words=False,
                     break_on_hyphens=False,
                 ) or [prefix.rstrip()]
                 if self.interactive:
@@ -489,12 +293,9 @@ class HitlTerminalUI:
             if len(summary) > 100:
                 summary = f"{summary[:99].rsplit(' ', 1)[0]}…"
             entry = f"{title}  {summary}".strip()
-            wrapped = textwrap.wrap(
-                entry,
-                width=self.content_width,
-                initial_indent="  • ",
-                subsequent_indent="    ",
-                break_long_words=False,
+            wrapped = [f"  • {entry}".rstrip()] if self.interactive else textwrap.wrap(
+                entry, width=self.content_width, initial_indent="  • ",
+                subsequent_indent="    ", break_long_words=False,
                 break_on_hyphens=False,
             ) or ["  •"]
             lines.extend(wrapped)
@@ -567,12 +368,10 @@ class HitlTerminalUI:
                 else:
                     continue
                 marker = "✓" if selected in {option_id, option_text} else "•"
-                wrapped = textwrap.wrap(
-                    option_text or option_id,
-                    width=self.content_width,
-                    initial_indent=f"  {marker} ",
-                    subsequent_indent="    ",
-                    break_long_words=False,
+                value = option_text or option_id
+                wrapped = [f"  {marker} {value}"] if self.interactive else textwrap.wrap(
+                    value, width=self.content_width, initial_indent=f"  {marker} ",
+                    subsequent_indent="    ", break_long_words=False,
                     break_on_hyphens=False,
                 )
                 lines.extend(wrapped)
@@ -621,12 +420,9 @@ class HitlTerminalUI:
         lines = [self._style("Commands", "bold"), self._rule()]
         for command, description in commands:
             prefix = f"  {command:<10} "
-            wrapped = textwrap.wrap(
-                description,
-                width=self.content_width,
-                initial_indent=prefix,
-                subsequent_indent=" " * len(prefix),
-                break_long_words=False,
+            wrapped = [f"{prefix}{description}"] if self.interactive else textwrap.wrap(
+                description, width=self.content_width, initial_indent=prefix,
+                subsequent_indent=" " * len(prefix), break_long_words=False,
                 break_on_hyphens=False,
             ) or [prefix.rstrip()]
             if self.interactive:

@@ -1215,6 +1215,70 @@ def test_terminal_replayed_human_message_matches_live_prompt():
     assert ui.conversation("human", "hello") == ["› hello"]
 
 
+def test_interactive_terminal_leaves_wrapping_to_the_terminal():
+    ui = HitlTerminalUI(interactive=True, width=lambda: 32)
+    message = "This complete sentence must remain one logical line for terminal reflow."
+
+    lines = ui.conversation("manager", message)
+
+    assert len(lines) == 2
+    assert "NeuriCo" in lines[0]
+    assert lines[1] == f"  {message}"
+
+
+def test_terminal_restart_replays_complete_durable_timeline(tmp_path):
+    work_dir = _workspace(tmp_path)
+    output = io.StringIO()
+    channel = HitlTerminalChannel(work_dir, output=output)
+    snapshot = {
+        "conversation": [
+            {
+                "record_id": "human-1",
+                "speaker": "human",
+                "content": "Keep every durable word.",
+                "created_at": "2026-08-11T10:02:00Z",
+            },
+            {
+                "record_id": "manager-1",
+                "speaker": "manager",
+                "content": "Every durable word is still here.",
+                "created_at": "2026-08-11T10:04:00Z",
+            },
+        ],
+        "notifications": [
+            {
+                "id": "N1",
+                "kind": "phase",
+                "title": "Resource finding",
+                "summary": "Planning started.",
+                "created_at": "2026-08-11T10:01:00Z",
+            },
+            {
+                "id": "N2",
+                "kind": "idea",
+                "idea_id": "I1",
+                "title": "Evidence recorded",
+                "summary": "A durable finding.",
+                "created_at": "2026-08-11T10:03:00Z",
+            },
+        ],
+        "inbox": {"pending_request": None},
+    }
+
+    with patch("core.hitl_workspace_view.HitlWorkspaceView.snapshot", return_value=snapshot):
+        channel._replay_durable_state()
+
+    rendered = output.getvalue()
+    positions = [
+        rendered.index("Resource finding"),
+        rendered.index("Keep every durable word."),
+        rendered.index("I1 Evidence recorded"),
+        rendered.index("Every durable word is still here."),
+    ]
+    assert positions == sorted(positions)
+    assert "research updates are available" not in rendered
+
+
 def test_terminal_does_not_echo_live_resolution_input_twice():
     output = io.StringIO()
     channel = HitlTerminalChannel(output=output)

@@ -12,14 +12,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.patch_stdout import StdoutProxy
 
 from interactive.channel import UserChannel, WebChannel, _SHUTDOWN
 from interactive.hitl_web_server import HitlWebServer
-from interactive.hitl_terminal_ui import (
-    HitlTerminalViewport,
-    HitlTerminalUI,
-)
+from interactive.hitl_terminal_ui import HitlTerminalUI, TERMINAL_STYLE, terminal_key_bindings
 
 from core.hitl_manager_inbox import (
     HitlManagerInbox,
@@ -285,11 +286,26 @@ class HitlTerminalChannel(UserChannel):
         self.work_dir = Path(work_dir) if work_dir is not None else None
         terminal_output = output if output is not None else sys.stdout
         self._terminal_output = terminal_output
-        self._prompt_session: Optional[Any] = None
+        self._prompt_session: Optional[PromptSession[str]] = None
+        self._prompt_output: Optional[StdoutProxy] = None
         self._prompt_history: Optional[InMemoryHistory] = None
         interactive = output is None and sys.stdin.isatty() and terminal_output.isatty()
         self._interactive = interactive
         self._ui = HitlTerminalUI(interactive=interactive)
+        if interactive:
+            self._prompt_history = InMemoryHistory()
+            self._prompt_session = PromptSession(
+                style=TERMINAL_STYLE,
+                history=self._prompt_history,
+                auto_suggest=AutoSuggestFromHistory(),
+                completer=WordCompleter(
+                    ["/run", "/status", "/activity", "/idea", "/reply", "/help", "/quit"],
+                    sentence=True,
+                ),
+                complete_while_typing=False,
+                key_bindings=terminal_key_bindings(),
+            )
+            self._prompt_output = StdoutProxy(sleep_between_writes=0.05, raw=True)
         self._output = terminal_output
         self._output_lock = threading.Lock()
         self._inbox = HitlManagerInbox(self.work_dir) if self.work_dir is not None else None
@@ -314,18 +330,7 @@ class HitlTerminalChannel(UserChannel):
         self._startup_rendered = False
         self._thinking_stop = threading.Event()
         self._thinking_thread: Optional[threading.Thread] = None
-        self._terminal_input: "queue.Queue[Any]" = queue.Queue()
-        self._setting_label = ""
-        self._viewport: Optional[HitlTerminalViewport] = None
-        if interactive:
-            self._prompt_history = InMemoryHistory()
-            self._viewport = HitlTerminalViewport(
-                on_submit=self._queue_terminal_input,
-                input_allowed=self._input_ready.is_set,
-                toolbar=self._terminal_status_toolbar,
-                rprompt=self._terminal_rprompt,
-                history=self._prompt_history,
-            )
+        self._started = False
 
     def set_resolution_reply_handler(self, handler: Any) -> None:
         with self._state_lock:
@@ -388,35 +393,30 @@ class HitlTerminalChannel(UserChannel):
         )
 
     def start(self) -> None:
-        if self._reader is not None:
+        if self._started:
             return
+        self._started = True
         self._render_startup()
         self._replay_durable_state()
+        if self._interactive:
+            return
         self._reader = threading.Thread(
-            target=self._read_terminal_input if self._viewport is not None else self._read_stdin,
+            target=self._read_stdin,
             daemon=True,
             name="neurico-hitl-cli-input",
         )
         self._reader.start()
 
     def run_foreground(self) -> None:
-        """Run the interactive renderer on the terminal's main thread."""
-        if self._viewport is not None:
-            self._viewport.run()
-
-    def _queue_terminal_input(self, text: str) -> None:
-        if self._setting_label:
-            self._write_block(self._ui.setting_response(self._setting_label, text))
-        else:
-            self._write_block(self._ui.conversation("human", text), blank_before=True)
-        self._terminal_input.put(text)
-
-    def _read_terminal_input(self) -> None:
-        while not self._closed.is_set():
-            value = self._terminal_input.get()
-            if value is _SHUTDOWN:
-                return
-            self.submit_input(str(value))
+        """Own the interactive prompt on the process's main terminal thread."""
+        if not self._started:
+            self.start()
+        if not self._interactive:
+            if self._reader is not None:
+                self._reader.join()
+            return
+        self._reader = threading.current_thread()
+        self._read_stdin()
 
     def _replay_durable_state(self) -> None:
         if self.work_dir is None:
@@ -429,21 +429,45 @@ class HitlTerminalChannel(UserChannel):
             self.send(f"Conversation history could not be loaded: {exc}", kind="system")
             return
         pending = snapshot.get("inbox", {}).get("pending_request")
-        pending_record_id = str((pending or {}).get("conversation_record_id", ""))
-        conversation = [
-            record
-            for record in snapshot.get("conversation", [])
-            if str(record.get("record_id", record.get("id", ""))) != pending_record_id
-        ]
+        conversation = list(snapshot.get("conversation", []))
         for record in conversation:
             speaker = str(record.get("speaker", "manager")).strip().lower()
             content = str(record.get("content", "")).strip()
             if speaker == "human" and content and self._prompt_history is not None:
                 self._prompt_history.append_string(content)
-        for record in conversation:
-            record_id = str(record.get("record_id", record.get("id", "")))
-            if pending_record_id and record_id == pending_record_id:
+        timeline = [
+            {
+                "kind": "message",
+                "record": record,
+                "timestamp": str(record.get("created_at", "")),
+                "order": index,
+            }
+            for index, record in enumerate(conversation)
+        ]
+        notifications = [
+            notification
+            for notification in snapshot.get("notifications", [])
+            if isinstance(notification, dict)
+        ]
+        timeline.extend(
+            {
+                "kind": "notification",
+                "notification": notification,
+                "timestamp": str(notification.get("created_at", "")),
+                "order": len(conversation) + index,
+            }
+            for index, notification in enumerate(notifications)
+        )
+        timeline.sort(key=lambda entry: (entry["timestamp"], entry["order"]))
+        for entry in timeline:
+            if entry["kind"] == "notification":
+                notification = entry["notification"]
+                event_id = str(notification.get("id", "")).strip()
+                if event_id:
+                    self._seen_interface_events.add(event_id)
+                self._render_interface_notification(notification)
                 continue
+            record = entry["record"]
             speaker = str(record.get("speaker", "manager")).strip().lower()
             content = str(record.get("content", "")).strip()
             if content:
@@ -451,19 +475,6 @@ class HitlTerminalChannel(UserChannel):
                     self._ui.conversation("human" if speaker == "human" else "manager", content),
                     blank_before=True,
                 )
-        for notification in snapshot.get("notifications", []):
-            if not isinstance(notification, dict):
-                continue
-            event_id = str(notification.get("id", "")).strip()
-            if event_id:
-                self._seen_interface_events.add(event_id)
-        notifications = list(snapshot.get("notifications") or [])
-        if notifications:
-            self._write_block(
-                self._ui.system(
-                    f"{len(notifications)} research updates are available with /activity."
-                )
-            )
         if isinstance(pending, dict):
             request = {
                 "message": str(pending.get("message", "")),
@@ -719,17 +730,14 @@ class HitlTerminalChannel(UserChannel):
         return dict(result)
 
     def _read_setting(self, label: str, default: str) -> str:
-        if self._viewport is not None:
-            self._setting_label = label
-            self._viewport.set_prompt(self._ui.setting_prompt(label))
+        if self._prompt_session is not None:
             try:
-                value = self._terminal_input.get()
-            finally:
-                self._setting_label = ""
-                self._viewport.set_prompt(self._ui.prompt_message())
-            if value is _SHUTDOWN:
-                raise RuntimeError("Terminal input closed before the run was configured.")
-            return str(value).strip() or default
+                value = self._prompt_session.prompt(self._ui.setting_prompt(label))
+            except EOFError as exc:
+                raise RuntimeError("Terminal input closed before the run was configured.") from exc
+            except KeyboardInterrupt as exc:
+                raise RuntimeError("Run configuration was cancelled.") from exc
+            return value.strip() or default
         self._write(label, end="")
         value = sys.stdin.readline()
         if value == "":
@@ -783,16 +791,18 @@ class HitlTerminalChannel(UserChannel):
         return self._ui.rprompt(self._live_snapshot())
 
     def _current_output(self) -> TextIO:
-        """Return the plain output used by non-interactive channels."""
+        """Route asynchronous output through prompt-safe redraw."""
+        if (
+            self._prompt_output is not None
+            and self._reading_input.is_set()
+            and threading.current_thread() is not self._reader
+        ):
+            return self._prompt_output
         return self._terminal_output
 
     def _restore_plain_prompt(self, output: TextIO) -> None:
         """Restore the prompt only for streams without managed prompt redraw."""
-        if (
-            self._viewport is None
-            and self._prompt_session is None
-            and self._reading_input.is_set()
-        ):
+        if self._prompt_session is None and self._reading_input.is_set():
             print("› ", end="", file=output)
 
     def print_help(self) -> None:
@@ -867,9 +877,6 @@ class HitlTerminalChannel(UserChannel):
     ) -> None:
         if not lines:
             return
-        if self._viewport is not None:
-            self._viewport.append(lines, blank_before=blank_before)
-            return
         with self._output_lock:
             output = self._current_output()
             if blank_before:
@@ -881,9 +888,6 @@ class HitlTerminalChannel(UserChannel):
 
     def _start_thinking_indicator(self) -> None:
         if not self._ui.interactive:
-            return
-        if self._viewport is not None:
-            self._viewport.set_thinking(True)
             return
         if self._thinking_thread is not None and self._thinking_thread.is_alive():
             return
@@ -912,9 +916,6 @@ class HitlTerminalChannel(UserChannel):
         self._thinking_thread.start()
 
     def _stop_thinking_indicator(self) -> None:
-        if self._viewport is not None:
-            self._viewport.set_thinking(False)
-            return
         thread = self._thinking_thread
         if thread is None:
             return
@@ -1010,9 +1011,8 @@ class HitlTerminalChannel(UserChannel):
         self._closed.set()
         self._input_ready.set()
         self._memory_input.put(_SHUTDOWN)
-        self._terminal_input.put(_SHUTDOWN)
-        if self._viewport is not None:
-            self._viewport.stop()
+        if self._prompt_output is not None:
+            self._prompt_output.close()
 
 
 class HitlManagerHost:
