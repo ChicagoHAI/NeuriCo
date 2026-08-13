@@ -16,6 +16,8 @@ import tty
 from collections.abc import Callable, Iterable
 from typing import Optional, TextIO
 
+from wcwidth import iter_graphemes, iter_graphemes_reverse, wcswidth
+
 from interactive.hitl_terminal_ui import terminal_safe_text
 
 
@@ -23,6 +25,67 @@ _RESET = "\x1b[0m"
 _MINT = "\x1b[1;38;5;115m"
 _MUTED = "\x1b[38;5;246m"
 _CLEAR_LINE = "\x1b[2K"
+
+
+def _cell_width(text: str) -> int:
+    """Return the terminal cells occupied by already-sanitized text."""
+    return max(0, wcswidth(text))
+
+
+def _clip_cells(text: str, limit: int) -> str:
+    """Clip text at a grapheme boundary without exceeding ``limit`` cells."""
+    if limit <= 0:
+        return ""
+    rendered: list[str] = []
+    width = 0
+    for grapheme in iter_graphemes(text):
+        grapheme_width = _cell_width(grapheme)
+        if width + grapheme_width > limit:
+            break
+        rendered.append(grapheme)
+        width += grapheme_width
+    return "".join(rendered)
+
+
+def _suffix_start(text: str, end: int, limit: int) -> int:
+    """Find the longest suffix ending at ``end`` that fits in ``limit`` cells."""
+    start = end
+    width = 0
+    for grapheme in iter_graphemes_reverse(text[:end]):
+        grapheme_width = _cell_width(grapheme)
+        if width + grapheme_width > limit:
+            break
+        start -= len(grapheme)
+        width += grapheme_width
+    return start
+
+
+def _input_window(text: str, cursor: int, limit: int) -> tuple[str, int]:
+    """Return a cell-bounded input window and the cursor cell within it."""
+    if _cell_width(text) <= limit:
+        return text, _cell_width(text[:cursor])
+
+    start = _suffix_start(text, cursor, limit)
+    if start:
+        start = _suffix_start(text, cursor, max(0, limit - 1))
+    left_hidden = start > 0
+    content_limit = max(0, limit - int(left_hidden))
+    content = _clip_cells(text[start:], content_limit)
+    end = start + len(content)
+
+    if end < len(text):
+        content_limit = max(0, limit - int(left_hidden) - 1)
+        while start < cursor and _cell_width(text[start:cursor]) > content_limit:
+            start += len(next(iter_graphemes(text[start:cursor])))
+            left_hidden = start > 0
+            content_limit = max(0, limit - int(left_hidden) - 1)
+        content = _clip_cells(text[start:], content_limit)
+        end = start + len(content)
+
+    right_hidden = end < len(text)
+    visible = f"{'‹' if left_hidden else ''}{content}{'›' if right_hidden else ''}"
+    cursor_cell = int(left_hidden) + _cell_width(text[start:cursor])
+    return visible, cursor_cell
 
 
 class NativeTerminalComposer:
@@ -380,25 +443,20 @@ class NativeTerminalComposer:
         status = terminal_safe_text(status)
         self._last_width = width
         self._last_status = (state, status)
-        status = status[: max(1, width - 2)]
+        status = _clip_cells(status, max(1, width - 3))
         status_style = {
             "review_needed": "\x1b[30;48;5;221m",
             "failed": "\x1b[30;48;5;203m",
             "completed": "\x1b[30;48;5;115m",
         }.get(state, "\x1b[30;47m")
-        prompt_width = len(self._prompt)
+        prompt_width = _cell_width(self._prompt)
         available = max(4, width - prompt_width - 1)
         safe_buffer = terminal_safe_text("".join(self._buffer))
         safe_cursor = len(terminal_safe_text("".join(self._buffer[: self._cursor])))
-        start = max(0, safe_cursor - available + 1)
-        visible = safe_buffer[start : start + available]
-        if start:
-            visible = f"‹{visible[1:]}" if visible else "‹"
-        if start + available < len(safe_buffer) and visible:
-            visible = f"{visible[:-1]}›"
+        visible, cursor_cell = _input_window(safe_buffer, safe_cursor, available)
         self._write(f"\r{_CLEAR_LINE}{_MINT}{self._prompt}{_RESET}{visible}\r\n")
         self._write(f"\r{_CLEAR_LINE}{status_style} {status} \x1b[K{_RESET}")
-        cursor_column = prompt_width + safe_cursor - start
+        cursor_column = prompt_width + cursor_cell
         cursor_column = min(max(prompt_width, cursor_column), width - 1)
         self._write(f"\r\x1b[1A\x1b[{cursor_column}C")
         self._output.flush()
