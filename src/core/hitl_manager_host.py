@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, TextIO
 
 from interactive.channel import UserChannel, WebChannel, _SHUTDOWN
 from interactive.hitl_web_server import HitlWebServer
-from interactive.hitl_terminal_ui import HitlTerminalUI
+from interactive.hitl_terminal_ui import HitlTerminalUI, terminal_safe_text
 from interactive.native_terminal import NativeTerminalComposer
 
 from core.hitl_manager_inbox import (
@@ -770,7 +770,9 @@ class HitlTerminalChannel(UserChannel):
 
     def _terminal_status_text(self) -> tuple[str, str]:
         status = self._live_snapshot()
-        label = str(status.get("label") or status.get("title") or "Ready").strip()
+        label = terminal_safe_text(
+            status.get("label") or status.get("title") or "Ready"
+        ).strip()
         elapsed = _elapsed_phase_time(status.get("phase_started_at"))
         if elapsed and bool(status.get("active")):
             label = f"● {label}  {elapsed}"
@@ -927,7 +929,7 @@ class HitlTerminalChannel(UserChannel):
             ) else "neutral"
             self._write_block(self._ui.system(text, tone=tone))
         else:
-            self._write(text)
+            self._write(terminal_safe_text(text))
 
     def status(
         self,

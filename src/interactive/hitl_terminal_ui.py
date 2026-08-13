@@ -21,6 +21,20 @@ _ANSI = {
 }
 
 
+def terminal_safe_text(value: Any) -> str:
+    """Make stored content inert while preserving it visibly in terminal output."""
+    rendered: List[str] = []
+    for character in str(value):
+        codepoint = ord(character)
+        if character == "\n":
+            rendered.append(character)
+        elif codepoint < 32 or codepoint == 127 or 0x80 <= codepoint <= 0x9F:
+            rendered.append(f"\\x{codepoint:02x}")
+        else:
+            rendered.append(character)
+    return "".join(rendered)
+
+
 class HitlTerminalUI:
     """Render shared HITL projections without interpreting workflow state."""
 
@@ -52,6 +66,7 @@ class HitlTerminalUI:
 
     @staticmethod
     def _middle_ellipsis(text: str, limit: int) -> str:
+        text = terminal_safe_text(text)
         if len(text) <= limit:
             return text
         if limit < 9:
@@ -62,13 +77,14 @@ class HitlTerminalUI:
 
     @staticmethod
     def _clean_inline_markdown(text: str) -> str:
+        text = terminal_safe_text(text)
         text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
         text = re.sub(r"__(.+?)__", r"\1", text)
         text = re.sub(r"`([^`]+)`", r"\1", text)
         return text
 
     def _wrap_paragraph(self, text: str, *, indent: str = "  ") -> List[str]:
-        cleaned = self._clean_inline_markdown(" ".join(text.split()))
+        cleaned = self._clean_inline_markdown(" ".join(terminal_safe_text(text).split()))
         if not cleaned:
             return []
         if self.interactive:
@@ -93,7 +109,7 @@ class HitlTerminalUI:
                 rendered.extend(self._wrap_paragraph(" ".join(paragraph)))
                 paragraph.clear()
 
-        for raw_line in str(text).splitlines():
+        for raw_line in terminal_safe_text(text).splitlines():
             line = raw_line.rstrip()
             stripped = line.strip()
             if stripped.startswith("```"):
@@ -154,7 +170,7 @@ class HitlTerminalUI:
 
     def conversation(self, speaker: str, text: str) -> List[str]:
         if speaker == "human":
-            lines = str(text).splitlines() or [""]
+            lines = terminal_safe_text(text).splitlines() or [""]
             return [
                 f"{self._style('›', 'bold', 'mint')} {lines[0]}",
                 *[f"  {line}" for line in lines[1:]],
@@ -163,7 +179,7 @@ class HitlTerminalUI:
 
     def system(self, text: str, *, tone: str = "neutral") -> List[str]:
         color = {"error": "red", "success": "mint", "review": "amber"}.get(tone, "muted")
-        cleaned = " ".join(str(text).split())
+        cleaned = " ".join(terminal_safe_text(text).split())
         wrapped = [f"  {cleaned}"] if self.interactive and cleaned else textwrap.wrap(
             cleaned, width=self.content_width - 2, initial_indent="  ",
             subsequent_indent="  ", break_long_words=False, break_on_hyphens=False,
@@ -180,8 +196,8 @@ class HitlTerminalUI:
         live: Dict[str, Any],
         actionable: bool,
     ) -> List[str]:
-        stage = str(live.get("stage_label") or "Research").strip()
-        phase = str(live.get("phase_label") or "Review").strip()
+        stage = terminal_safe_text(live.get("stage_label") or "Research").strip()
+        phase = terminal_safe_text(live.get("phase_label") or "Review").strip()
         context = " / ".join(part for part in (stage, phase) if part)
         heading = "Review needed"
         heading_with_context = f"{heading}  ·  {context}" if context else heading
@@ -197,7 +213,7 @@ class HitlTerminalUI:
         if options:
             lines.append("")
             for index, option in enumerate(options, 1):
-                option_text = str(option.get("text", "")).strip()
+                option_text = terminal_safe_text(option.get("text", "")).strip()
                 prefix = f"  {index}  "
                 wrapped = [f"{prefix}{option_text}".rstrip()] if self.interactive else textwrap.wrap(
                     option_text, width=self.content_width, initial_indent=prefix,
@@ -223,9 +239,9 @@ class HitlTerminalUI:
         return lines
 
     def idea(self, notification: Dict[str, Any]) -> List[str]:
-        idea_id = str(notification.get("idea_id", "")).strip()
-        title = str(notification.get("title", "Research update")).strip()
-        summary = " ".join(str(notification.get("summary", "")).split())
+        idea_id = terminal_safe_text(notification.get("idea_id", "")).strip()
+        title = terminal_safe_text(notification.get("title", "Research update")).strip()
+        summary = " ".join(terminal_safe_text(notification.get("summary", "")).split())
         if len(summary) > 130:
             summary = f"{summary[:129].rsplit(' ', 1)[0]}…"
         identity = " ".join(part for part in (idea_id, title) if part)
@@ -235,12 +251,12 @@ class HitlTerminalUI:
         return [first, *[self._style(line, "muted") for line in self._wrap_paragraph(summary, indent="   ")]]
 
     def phase(self, notification: Dict[str, Any]) -> List[str]:
-        title = str(notification.get("title", "Research")).strip()
-        summary = str(notification.get("summary", "")).strip()
+        title = terminal_safe_text(notification.get("title", "Research")).strip()
+        summary = terminal_safe_text(notification.get("summary", "")).strip()
         return self.system(" · ".join(part for part in (title, summary) if part))
 
     def resolved_request(self, notification: Dict[str, Any]) -> List[str]:
-        summary = str(notification.get("summary", "Response recorded.")).strip()
+        summary = terminal_safe_text(notification.get("summary", "Response recorded.")).strip()
         lines = [f"{self._style('✓', 'mint')}  {self._style('Review resolved', 'bold')}"]
         lines.extend(self._wrap_paragraph(summary, indent="   "))
         return lines
@@ -254,11 +270,12 @@ class HitlTerminalUI:
         for item in items:
             kind = str(item.get("kind", "")).strip()
             if kind == "idea":
-                idea_id = str(item.get("idea_id", "")).strip()
-                title = " ".join(part for part in (idea_id, str(item.get("title", ""))) if part)
+                idea_id = terminal_safe_text(item.get("idea_id", "")).strip()
+                item_title = terminal_safe_text(item.get("title", ""))
+                title = " ".join(part for part in (idea_id, item_title) if part)
             else:
-                title = str(item.get("title", "Research update")).strip()
-            summary = " ".join(str(item.get("summary", "")).split())
+                title = terminal_safe_text(item.get("title", "Research update")).strip()
+            summary = " ".join(terminal_safe_text(item.get("summary", "")).split())
             if len(summary) > 100:
                 summary = f"{summary[:99].rsplit(' ', 1)[0]}…"
             entry = f"{title}  {summary}".strip()
@@ -271,9 +288,9 @@ class HitlTerminalUI:
         return lines
 
     def idea_detail(self, idea: Dict[str, Any]) -> List[str]:
-        idea_id = str(idea.get("idea_id", "Idea")).strip()
-        idea_type = str(idea.get("idea_type", "idea")).strip().lower()
-        level = str(idea.get("level", "?")).strip()
+        idea_id = terminal_safe_text(idea.get("idea_id", "Idea")).strip()
+        idea_type = terminal_safe_text(idea.get("idea_type", "idea")).strip().lower()
+        level = terminal_safe_text(idea.get("level", "?")).strip()
         actor = "Human" if str(idea.get("actor", "")).strip().lower() == "human" else "NeuriCo"
         heading = f"{idea_id}  ·  {idea_type.title()}  ·  Level {level}"
         lines = [self._style(heading, "bold", "mint"), self._style(f"Recorded by {actor}", "muted"), self._rule()]
@@ -337,7 +354,7 @@ class HitlTerminalUI:
                 else:
                     continue
                 marker = "✓" if selected in {option_id, option_text} else "•"
-                value = option_text or option_id
+                value = terminal_safe_text(option_text or option_id)
                 wrapped = [f"  {marker} {value}"] if self.interactive else textwrap.wrap(
                     value, width=self.content_width, initial_indent=f"  {marker} ",
                     subsequent_indent="    ", break_long_words=False,
@@ -364,10 +381,10 @@ class HitlTerminalUI:
         return lines
 
     def expanded_status(self, live: Dict[str, Any]) -> List[str]:
-        label = str(live.get("label") or live.get("title") or "Ready").strip()
-        detail = str(live.get("detail") or "").strip()
-        next_action = str(live.get("next_action") or "").strip()
-        elapsed = str(live.get("elapsed") or "").strip()
+        label = terminal_safe_text(live.get("label") or live.get("title") or "Ready").strip()
+        detail = terminal_safe_text(live.get("detail") or "").strip()
+        next_action = terminal_safe_text(live.get("next_action") or "").strip()
+        elapsed = terminal_safe_text(live.get("elapsed") or "").strip()
         heading = label if not elapsed else f"{label}  ·  {elapsed}"
         lines = [self._style("Research status", "bold"), self._rule(), f"  {self._style(heading, 'bold')}"]
         if detail:
@@ -401,12 +418,12 @@ class HitlTerminalUI:
         return lines
 
     def section(self, title: str) -> List[str]:
-        return [self._style(title, "bold"), self._rule()]
+        return [self._style(terminal_safe_text(title), "bold"), self._rule()]
 
     def thinking(self, frame: str) -> str:
         return f"{self._style(frame, 'mint')}  {self._style('NeuriCo is thinking…', 'muted')}"
 
     def setting_response(self, label: str, value: str) -> List[str]:
         return [
-            f"{self._style(label, 'muted')}{value}",
+            f"{self._style(terminal_safe_text(label), 'muted')}{terminal_safe_text(value)}",
         ]

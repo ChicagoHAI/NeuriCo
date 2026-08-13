@@ -16,6 +16,8 @@ import tty
 from collections.abc import Callable, Iterable
 from typing import Optional, TextIO
 
+from interactive.hitl_terminal_ui import terminal_safe_text
+
 
 _RESET = "\x1b[0m"
 _MINT = "\x1b[1;38;5;115m"
@@ -115,7 +117,8 @@ class NativeTerminalComposer:
                     if result is not None:
                         return result
                 width = self._width()
-                status = self._status()
+                state, status_text = self._status()
+                status = (state, terminal_safe_text(status_text))
                 if width != self._last_width or status != self._last_status:
                     with self._lock:
                         self._erase_locked()
@@ -172,7 +175,9 @@ class NativeTerminalComposer:
                 self.add_history(text)
                 with self._lock:
                     self._erase_locked()
-                    self._write(f"{_MINT}{self._prompt}{_RESET}{text}\r\n")
+                    self._write(
+                        f"{_MINT}{self._prompt}{_RESET}{terminal_safe_text(text)}\r\n"
+                    )
                     self._output.flush()
                     self._active = False
                 return text
@@ -342,6 +347,7 @@ class NativeTerminalComposer:
     def _draw_locked(self) -> None:
         width = self._width()
         state, status = self._status()
+        status = terminal_safe_text(status)
         self._last_width = width
         self._last_status = (state, status)
         status = status[: max(1, width - 2)]
@@ -352,15 +358,17 @@ class NativeTerminalComposer:
         }.get(state, "\x1b[30;47m")
         prompt_width = len(self._prompt)
         available = max(4, width - prompt_width - 1)
-        start = max(0, self._cursor - available + 1)
-        visible = "".join(self._buffer[start : start + available])
+        safe_buffer = terminal_safe_text("".join(self._buffer))
+        safe_cursor = len(terminal_safe_text("".join(self._buffer[: self._cursor])))
+        start = max(0, safe_cursor - available + 1)
+        visible = safe_buffer[start : start + available]
         if start:
             visible = f"‹{visible[1:]}" if visible else "‹"
-        if start + available < len(self._buffer) and visible:
+        if start + available < len(safe_buffer) and visible:
             visible = f"{visible[:-1]}›"
         self._write(f"\r{_CLEAR_LINE}{_MINT}{self._prompt}{_RESET}{visible}\r\n")
         self._write(f"\r{_CLEAR_LINE}{status_style} {status} \x1b[K{_RESET}")
-        cursor_column = prompt_width + self._cursor - start
+        cursor_column = prompt_width + safe_cursor - start
         cursor_column = min(max(prompt_width, cursor_column), width - 1)
         self._write(f"\r\x1b[1A\x1b[{cursor_column}C")
         self._output.flush()
