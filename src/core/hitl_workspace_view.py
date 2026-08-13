@@ -19,6 +19,7 @@ from core.hitl_manager_history import HitlManagerHistory
 from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_manager_context import HitlManagerContext
 from core.hitl_paths import (
+    hitl_idea_log_path,
     hitl_launch_status_path,
     hitl_runtime_state_path,
     hitl_state_dir,
@@ -55,6 +56,10 @@ class HitlWorkspaceView:
     def __init__(self, work_dir: Path):
         self.work_dir = Path(work_dir)
         self.root = hitl_state_dir(self.work_dir)
+        self._interface_revision: Optional[tuple[Any, ...]] = None
+        self._interface_projection: Optional[Dict[str, Any]] = None
+        self._idea_revision: Optional[tuple[int, int, int]] = None
+        self._projected_ideas: Optional[List[Dict[str, Any]]] = None
 
     def snapshot(self) -> Dict[str, Any]:
         if not self.root.is_dir():
@@ -95,6 +100,51 @@ class HitlWorkspaceView:
         """Return the shared, user-facing projection of durable interface events."""
         runtime = self._runtime_state()
         return self._notifications(runtime, self._ideas())
+
+    def interface_projection(self) -> Dict[str, Any]:
+        """Return cached live status and notifications for passive UI refreshes."""
+        owner = active_hitl_workspace_run(self.work_dir)
+        idea_revision = self._path_revision(hitl_idea_log_path(self.work_dir))
+        revision = (
+            self._path_revision(hitl_runtime_state_path(self.work_dir)),
+            self._path_revision(self.work_dir / ".neurico" / "pipeline_state.json"),
+            self._path_revision(hitl_launch_status_path(self.work_dir)),
+            idea_revision,
+            self._path_revision(self.root / "autoresearch_state.json"),
+            json.dumps(owner, sort_keys=True) if owner is not None else "",
+        )
+        if revision == self._interface_revision and self._interface_projection is not None:
+            return {
+                "live": dict(self._interface_projection["live"]),
+                "notifications": [
+                    dict(record) for record in self._interface_projection["notifications"]
+                ],
+            }
+
+        runtime = self._runtime_state()
+        if idea_revision != self._idea_revision or self._projected_ideas is None:
+            self._projected_ideas = self._ideas()
+            self._idea_revision = idea_revision
+        projection = {
+            "live": self._live_status(runtime, owner=owner, owner_checked=True),
+            "notifications": self._notifications(runtime, self._projected_ideas),
+        }
+        self._interface_revision = revision
+        self._interface_projection = projection
+        return {
+            "live": dict(projection["live"]),
+            "notifications": [dict(record) for record in projection["notifications"]],
+        }
+
+    @staticmethod
+    def _path_revision(path: Path) -> Optional[tuple[int, int, int]]:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+        return stat.st_ino, stat.st_mtime_ns, stat.st_size
 
     def _runtime_state(self) -> Dict[str, Any]:
         path = hitl_runtime_state_path(self.work_dir)
@@ -222,9 +272,16 @@ class HitlWorkspaceView:
         path = self.work_dir / ".neurico" / "pipeline_state.json"
         return _read_object(path, "pipeline state") if path.exists() else {}
 
-    def _live_status(self, runtime: Dict[str, Any]) -> Dict[str, Any]:
+    def _live_status(
+        self,
+        runtime: Dict[str, Any],
+        *,
+        owner: Optional[Dict[str, Any]] = None,
+        owner_checked: bool = False,
+    ) -> Dict[str, Any]:
         """Interpret runtime facts once for every HITL user interface."""
-        owner = active_hitl_workspace_run(self.work_dir)
+        if not owner_checked:
+            owner = active_hitl_workspace_run(self.work_dir)
         pipeline = self._pipeline_state()
         pending = runtime.get("pending_worker_command")
         pending = pending if isinstance(pending, dict) else {}

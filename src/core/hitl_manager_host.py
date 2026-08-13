@@ -320,6 +320,13 @@ class HitlTerminalChannel(UserChannel):
         self._last_polled_provider = ""
         self._run_launcher: Optional[Any] = None
         self._run_status: Optional[Any] = None
+        self._interface_view: Optional[Any] = None
+        self._projection_lock = threading.Lock()
+        self._cached_live_status: Dict[str, Any] = {
+            "state": "idle",
+            "active": False,
+            "label": "Ready",
+        }
         self._last_live_signature = ""
         self._seen_interface_events: set[str] = set()
         self._startup_rendered = False
@@ -337,6 +344,11 @@ class HitlTerminalChannel(UserChannel):
     def set_run_launcher(self, launcher: Any, status: Any) -> None:
         self._run_launcher = launcher
         self._run_status = status
+        live, error = self._read_run_status()
+        if live is not None:
+            self._cache_live_status(live)
+        elif error:
+            self._cache_live_status(self._unavailable_live_status(error))
 
     def present_resolution_request(
         self,
@@ -363,6 +375,9 @@ class HitlTerminalChannel(UserChannel):
             self._render_resolution_request(request, actionable=True)
 
     def _render_resolution_request(self, request: Dict[str, Any], *, actionable: bool) -> None:
+        status, _error = self._read_run_status()
+        if status is not None:
+            self._cache_live_status(status)
         live = self._live_snapshot()
         self._write_block(
             self._ui.request(request, live=live, actionable=actionable),
@@ -503,9 +518,18 @@ class HitlTerminalChannel(UserChannel):
         try:
             from core.hitl_workspace_view import HitlWorkspaceView
 
-            notifications = HitlWorkspaceView(self.work_dir).notifications()
+            if self._interface_view is None:
+                self._interface_view = HitlWorkspaceView(self.work_dir)
+            projection = self._interface_view.interface_projection()
         except Exception:
+            live, error = self._read_run_status()
+            if live is not None:
+                self._cache_live_status(live)
+            elif error:
+                self._cache_live_status(self._unavailable_live_status(error))
             return
+        self._cache_live_status(projection["live"])
+        notifications = projection["notifications"]
         for notification in notifications:
             event_id = str(notification.get("id", "")).strip()
             if not event_id or event_id in self._seen_interface_events:
@@ -750,6 +774,7 @@ class HitlTerminalChannel(UserChannel):
         return value in {"y", "yes"}
 
     def present_run_status(self, status: Dict[str, Any], *, force: bool = False) -> None:
+        self._cache_live_status(status)
         signature = "|".join(
             str(status.get(key, "")).strip()
             for key in (
@@ -779,11 +804,15 @@ class HitlTerminalChannel(UserChannel):
             return None, f"Workspace status could not be read: {detail}"
 
     def _live_snapshot(self) -> Dict[str, Any]:
-        if self._run_status is None:
-            return {"state": "idle", "active": False, "label": "Ready"}
-        status, error = self._read_run_status()
-        if status is not None:
-            return status
+        with self._projection_lock:
+            return dict(self._cached_live_status)
+
+    def _cache_live_status(self, status: Dict[str, Any]) -> None:
+        with self._projection_lock:
+            self._cached_live_status = dict(status)
+
+    @staticmethod
+    def _unavailable_live_status(error: str) -> Dict[str, Any]:
         return {
             "state": "unavailable",
             "active": False,
