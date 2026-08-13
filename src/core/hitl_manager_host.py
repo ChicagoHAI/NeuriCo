@@ -200,6 +200,7 @@ class HitlWebChannel(WebChannel):
             self._memory_input.put(text)
             return {"status": "accepted"}
         record = self._inbox.enqueue(text, provider=provider, client_turn_id=client_turn_id)
+        self._emit({"event": "workspace_changed", "section": "inbox"})
         return {
             "status": "accepted",
             "client_turn_id": record["client_turn_id"],
