@@ -272,8 +272,38 @@ class NativeTerminalComposer:
                 return name
         if any(raw.startswith(self._input_bytes) for raw in known):
             return "incomplete"
-        self._input_bytes = self._input_bytes[1:]
+
+        # Unsupported terminal keys are still complete input events. Consume the
+        # whole CSI/SS3 sequence so its printable tail cannot enter the draft.
+        if self._input_bytes.startswith(b"\x1b[["):
+            if len(self._input_bytes) < 4:
+                return "incomplete"
+            self._input_bytes = self._input_bytes[4:]
+            return "unknown"
+        if self._input_bytes.startswith(b"\x1b["):
+            end = self._control_sequence_end(self._input_bytes, start=2)
+            if end is None:
+                return "incomplete"
+            self._input_bytes = self._input_bytes[end:]
+            return "unknown"
+        if self._input_bytes.startswith(b"\x1bO"):
+            end = self._control_sequence_end(self._input_bytes, start=2)
+            if end is None:
+                return "incomplete"
+            self._input_bytes = self._input_bytes[end:]
+            return "unknown"
+
+        if len(self._input_bytes) == 1:
+            return "incomplete"
+        self._input_bytes = self._input_bytes[2:]
         return "unknown"
+
+    @staticmethod
+    def _control_sequence_end(raw: bytes, *, start: int) -> Optional[int]:
+        for index in range(start, len(raw)):
+            if 0x40 <= raw[index] <= 0x7E:
+                return index + 1
+        return None
 
     def _apply_escape(self, name: str) -> bool:
         if name == "left" and self._cursor:
