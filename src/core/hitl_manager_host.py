@@ -565,10 +565,14 @@ class HitlTerminalChannel(UserChannel):
         if input_kind is None and text == "/run":
             return self._launch_run_interactively()
         if input_kind is None and text == "/status":
-            if self._run_status is None:
-                self.send("Workspace status is unavailable.", kind="system")
+            status, error = self._read_run_status()
+            if status is None:
+                self._write_block(
+                    self._ui.system(error, tone="error"),
+                    blank_before=True,
+                )
                 return {"status": "unavailable"}
-            self.present_run_status(dict(self._run_status()), force=True)
+            self.present_run_status(status, force=True)
             return {"status": "accepted"}
         if input_kind is None and text == "/activity":
             self.present_activity()
@@ -683,11 +687,16 @@ class HitlTerminalChannel(UserChannel):
         if self._run_launcher is None:
             self.send("Research launch is unavailable for this workspace.", kind="system")
             return {"status": "unavailable"}
-        if self._run_status is not None:
-            status = dict(self._run_status())
-            if bool(status.get("active")):
-                self.present_run_status(status, force=True)
-                return {"status": "already_running"}
+        status, error = self._read_run_status()
+        if status is None:
+            self._write_block(
+                self._ui.system(error, tone="error"),
+                blank_before=True,
+            )
+            return {"status": "unavailable"}
+        if bool(status.get("active")):
+            self.present_run_status(status, force=True)
+            return {"status": "already_running"}
         try:
             self._write_block(
                 self._ui.section("Start research"),
@@ -760,13 +769,27 @@ class HitlTerminalChannel(UserChannel):
         visible["elapsed"] = _elapsed_phase_time(status.get("phase_started_at"))
         self._write_block(self._ui.expanded_status(visible), blank_before=True)
 
+    def _read_run_status(self) -> tuple[Optional[Dict[str, Any]], str]:
+        if self._run_status is None:
+            return None, "Workspace status is unavailable."
+        try:
+            return dict(self._run_status()), ""
+        except Exception as exc:
+            detail = str(exc).strip() or exc.__class__.__name__
+            return None, f"Workspace status could not be read: {detail}"
+
     def _live_snapshot(self) -> Dict[str, Any]:
         if self._run_status is None:
             return {"state": "idle", "active": False, "label": "Ready"}
-        try:
-            return dict(self._run_status())
-        except Exception:
-            return {"state": "idle", "active": False, "label": "Ready"}
+        status, error = self._read_run_status()
+        if status is not None:
+            return status
+        return {
+            "state": "unavailable",
+            "active": False,
+            "label": "Status unavailable",
+            "detail": error,
+        }
 
     def _terminal_status_text(self) -> tuple[str, str]:
         status = self._live_snapshot()
