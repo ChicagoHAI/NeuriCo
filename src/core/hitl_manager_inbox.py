@@ -108,9 +108,9 @@ class HitlManagerInbox:
         self, text: str, *, provider: str = "", client_turn_id: str = ""
     ) -> Dict[str, str]:
         text = normalize_human_message(text)
-        supplied_id = str(client_turn_id).strip()
         record = {
-            "id": supplied_id or f"H{uuid.uuid4().hex}",
+            "id": f"H{uuid.uuid4().hex}",
+            "client_turn_id": str(client_turn_id).strip(),
             "text": text,
             "provider": str(provider).strip(),
             "created_at": _now(),
@@ -138,7 +138,10 @@ class HitlManagerInbox:
                 raise HitlManagerInboxMalformedRecordError(reason)
             state["queue"].pop(0)
             self._write(state)
-        return {key: str(value.get(key, "")) for key in ("id", "text", "provider", "created_at")}
+        return {
+            key: str(value.get(key, ""))
+            for key in ("id", "client_turn_id", "text", "provider", "created_at")
+        }
 
     def consume(self, publish: Callable[[Dict[str, str]], None]) -> Optional[Dict[str, str]]:
         """Publish and remove the next message as one durable queue claim."""
@@ -153,7 +156,7 @@ class HitlManagerInbox:
                 raise HitlManagerInboxMalformedRecordError(reason)
             record = {
                 key: str(value.get(key, ""))
-                for key in ("id", "text", "provider", "created_at")
+                for key in ("id", "client_turn_id", "text", "provider", "created_at")
             }
             publish(record)
             state["queue"].pop(0)
@@ -174,7 +177,13 @@ class HitlManagerInbox:
                     self._write(state)
                     return {
                         key: str(item.get(key, ""))
-                        for key in ("id", "text", "provider", "created_at")
+                        for key in (
+                            "id",
+                            "client_turn_id",
+                            "text",
+                            "provider",
+                            "created_at",
+                        )
                     }
         raise ValueError("That queued message is no longer available.")
 

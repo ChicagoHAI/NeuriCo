@@ -202,7 +202,7 @@ class HitlWebChannel(WebChannel):
         record = self._inbox.enqueue(text, provider=provider, client_turn_id=client_turn_id)
         return {
             "status": "accepted",
-            "client_turn_id": record["id"],
+            "client_turn_id": record["client_turn_id"],
         }
 
     def poll_input(self, timeout: float = 0.0) -> Optional[str]:
@@ -219,10 +219,14 @@ class HitlWebChannel(WebChannel):
         def publish(record: Dict[str, str]) -> None:
             if self._conversation is None:
                 raise RuntimeError("The NeuriCo conversation is not initialized.")
+            metadata = {"visibility": "human", "kind": "human_message"}
+            if record["client_turn_id"]:
+                metadata["client_turn_id"] = record["client_turn_id"]
             self._conversation.append(
                 "human",
                 record["text"],
                 record_id=record["id"],
+                metadata=metadata,
             )
 
         value = self._inbox.consume(publish)
@@ -617,7 +621,7 @@ class HitlTerminalChannel(UserChannel):
         return {
             "status": "accepted",
             "message_id": str(transcript_record["id"]),
-            "client_turn_id": record["id"],
+            "client_turn_id": record["client_turn_id"],
         }
 
     def _submit_resolution(
