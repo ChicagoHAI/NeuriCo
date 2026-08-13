@@ -19,6 +19,7 @@ from interactive.native_terminal import NativeTerminalComposer
 
 from core.hitl_manager_inbox import (
     HitlManagerInbox,
+    HitlManagerInboxMalformedRecordError,
     HitlWebInputError,
     normalize_human_message,
 )
@@ -1087,10 +1088,28 @@ class HitlManagerHost:
                     append("manager", text)
                 except Exception:
                     pass
-            self.channel.send(text, kind="system")
+            try:
+                self.channel.send(text, kind="system")
+            except Exception:
+                pass
 
         while not self._stop.is_set():
-            message = self.channel.poll_input(timeout=0.5)
+            try:
+                message = self.channel.poll_input(timeout=0.5)
+            except HitlManagerInboxMalformedRecordError:
+                durable_notice(
+                    "NeuriCo skipped a malformed queued message and preserved it "
+                    "for inspection. Conversation processing will continue.",
+                )
+                self._stop.wait(0.5)
+                continue
+            except Exception as exc:
+                durable_notice(
+                    f"NeuriCo could not read the next queued message: {exc}. "
+                    "The message remains queued and NeuriCo will retry.",
+                )
+                self._stop.wait(0.5)
+                continue
             if not message:
                 continue
             try:

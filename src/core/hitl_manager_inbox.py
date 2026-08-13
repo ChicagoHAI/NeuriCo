@@ -43,6 +43,10 @@ class HitlWebInputError(ValueError):
         self.status = status
 
 
+class HitlManagerInboxMalformedRecordError(RuntimeError):
+    """A malformed persisted queue record that was removed from active delivery."""
+
+
 class HitlManagerInbox:
     """Atomic queue for ordinary human messages to one manager workspace."""
 
@@ -53,7 +57,7 @@ class HitlManagerInbox:
 
     @staticmethod
     def _empty() -> Dict[str, Any]:
-        return {"version": 2, "queue": []}
+        return {"version": 2, "queue": [], "quarantine": []}
 
     def _load(self) -> Dict[str, Any]:
         if not self.path.exists():
@@ -64,7 +68,28 @@ class HitlManagerInbox:
             raise RuntimeError(f"Could not read HITL manager inbox: {exc}") from exc
         if not isinstance(payload, dict) or not isinstance(payload.get("queue", []), list):
             raise RuntimeError("HITL manager inbox is malformed.")
+        if not isinstance(payload.get("quarantine", []), list):
+            raise RuntimeError("HITL manager inbox quarantine is malformed.")
         return payload
+
+    def _quarantine_head(self, state: Dict[str, Any], value: Any, reason: str) -> None:
+        state["queue"].pop(0)
+        state.setdefault("quarantine", []).append(
+            {
+                "record": value,
+                "reason": reason,
+                "quarantined_at": _now(),
+            }
+        )
+        self._write(state)
+
+    @staticmethod
+    def _record_is_valid(value: Any) -> bool:
+        return (
+            isinstance(value, dict)
+            and bool(str(value.get("id", "")).strip())
+            and bool(str(value.get("text", "")).strip())
+        )
 
     def _write(self, payload: Dict[str, Any]) -> None:
         atomic_write_json(
@@ -106,10 +131,13 @@ class HitlManagerInbox:
             state = self._load()
             if not state["queue"]:
                 return None
-            value = state["queue"].pop(0)
+            value = state["queue"][0]
+            if not self._record_is_valid(value):
+                reason = "HITL manager queue contains an invalid message."
+                self._quarantine_head(state, value, reason)
+                raise HitlManagerInboxMalformedRecordError(reason)
+            state["queue"].pop(0)
             self._write(state)
-        if not isinstance(value, dict) or not str(value.get("text", "")).strip():
-            raise RuntimeError("HITL manager queue contains an invalid message.")
         return {key: str(value.get(key, "")) for key in ("id", "text", "provider", "created_at")}
 
     def consume(self, publish: Callable[[Dict[str, str]], None]) -> Optional[Dict[str, str]]:
@@ -119,8 +147,10 @@ class HitlManagerInbox:
             if not state["queue"]:
                 return None
             value = state["queue"][0]
-            if not isinstance(value, dict) or not str(value.get("text", "")).strip():
-                raise RuntimeError("HITL manager queue contains an invalid message.")
+            if not self._record_is_valid(value):
+                reason = "HITL manager queue contains an invalid message."
+                self._quarantine_head(state, value, reason)
+                raise HitlManagerInboxMalformedRecordError(reason)
             record = {
                 key: str(value.get(key, ""))
                 for key in ("id", "text", "provider", "created_at")
