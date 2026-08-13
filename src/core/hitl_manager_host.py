@@ -295,6 +295,7 @@ class HitlTerminalChannel(UserChannel):
         self._ui = HitlTerminalUI(interactive=interactive)
         self._output = terminal_output
         self._output_lock = threading.RLock()
+        self._presentation_lock = threading.RLock()
         self._terminal_composer = (
             NativeTerminalComposer(
                 output=terminal_output,
@@ -330,6 +331,7 @@ class HitlTerminalChannel(UserChannel):
         }
         self._seen_interface_events: set[str] = set()
         self._startup_rendered = False
+        self._thinking_requested = threading.Event()
         self._thinking_stop = threading.Event()
         self._thinking_thread: Optional[threading.Thread] = None
         self._started = False
@@ -889,58 +891,71 @@ class HitlTerminalChannel(UserChannel):
     ) -> None:
         if not lines:
             return
-        if self._terminal_composer is not None and self._terminal_composer.active:
-            self._terminal_composer.write_block(lines, blank_before=blank_before)
-            return
-        with self._output_lock:
-            output = self._terminal_output
-            if blank_before:
-                print(file=output)
-            for line in lines:
-                print(line, file=output)
-            output.flush()
-
-    def _start_thinking_indicator(self) -> None:
-        if not self._ui.interactive:
-            return
-        if self._thinking_thread is not None and self._thinking_thread.is_alive():
-            return
-        self._thinking_stop.clear()
-
-        def animate() -> None:
-            frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-            index = 0
-            while not self._thinking_stop.is_set():
+        with self._presentation_lock:
+            resume_thinking = (
+                self._thinking_thread is not None
+                and self._thinking_thread.is_alive()
+            )
+            if resume_thinking:
+                self._stop_thinking_indicator()
+            try:
+                if self._terminal_composer is not None and self._terminal_composer.active:
+                    self._terminal_composer.write_block(lines, blank_before=blank_before)
+                    return
                 with self._output_lock:
                     output = self._terminal_output
-                    print(
-                        f"\r\x1b[2K{self._ui.thinking(frames[index % len(frames)])}",
-                        end="",
-                        file=output,
-                        flush=True,
-                    )
-                index += 1
-                self._thinking_stop.wait(0.12)
+                    if blank_before:
+                        print(file=output)
+                    for line in lines:
+                        print(line, file=output)
+                    output.flush()
+            finally:
+                if resume_thinking and self._thinking_requested.is_set():
+                    self._start_thinking_indicator()
 
-        self._thinking_thread = threading.Thread(
-            target=animate,
-            daemon=True,
-            name="neurico-hitl-cli-thinking",
-        )
-        self._thinking_thread.start()
+    def _start_thinking_indicator(self) -> None:
+        with self._presentation_lock:
+            if not self._ui.interactive:
+                return
+            if self._thinking_thread is not None and self._thinking_thread.is_alive():
+                return
+            self._thinking_stop.clear()
+
+            def animate() -> None:
+                frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+                index = 0
+                while not self._thinking_stop.is_set():
+                    with self._output_lock:
+                        output = self._terminal_output
+                        print(
+                            f"\r\x1b[2K{self._ui.thinking(frames[index % len(frames)])}",
+                            end="",
+                            file=output,
+                            flush=True,
+                        )
+                    index += 1
+                    self._thinking_stop.wait(0.12)
+
+            self._thinking_thread = threading.Thread(
+                target=animate,
+                daemon=True,
+                name="neurico-hitl-cli-thinking",
+            )
+            self._thinking_thread.start()
 
     def _stop_thinking_indicator(self) -> None:
-        thread = self._thinking_thread
-        if thread is None:
-            return
-        self._thinking_stop.set()
-        if thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=0.5)
-        self._thinking_thread = None
-        if self._ui.interactive:
-            with self._output_lock:
-                output = self._terminal_output
-                print("\r\x1b[2K", end="", file=output, flush=True)
+        with self._presentation_lock:
+            thread = self._thinking_thread
+            if thread is None:
+                return
+            self._thinking_stop.set()
+            if thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=0.5)
+            self._thinking_thread = None
+            if self._ui.interactive:
+                with self._output_lock:
+                    output = self._terminal_output
+                    print("\r\x1b[2K", end="", file=output, flush=True)
 
     def _write(self, text: str, *, end: str = "\n") -> None:
         """Write only channel-approved content to the original terminal stream."""
@@ -957,6 +972,7 @@ class HitlTerminalChannel(UserChannel):
         if not text:
             return
         if kind in {"manager", "system"}:
+            self._thinking_requested.clear()
             self._stop_thinking_indicator()
         if kind == "manager":
             self._write_block(self._ui.conversation("manager", text), blank_before=True)
@@ -979,8 +995,10 @@ class HitlTerminalChannel(UserChannel):
         del label, waiting, phase
         if thinking:
             self._input_ready.clear()
+            self._thinking_requested.set()
             self._start_thinking_indicator()
         else:
+            self._thinking_requested.clear()
             self._stop_thinking_indicator()
             self._input_ready.set()
 
@@ -1021,6 +1039,7 @@ class HitlTerminalChannel(UserChannel):
     def close(self) -> None:
         if self._closed.is_set():
             return
+        self._thinking_requested.clear()
         self._stop_thinking_indicator()
         self._closed.set()
         self._input_ready.set()
