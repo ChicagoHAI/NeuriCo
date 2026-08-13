@@ -18,7 +18,11 @@ from core.hitl_lock import active_hitl_workspace_run
 from core.hitl_manager_history import HitlManagerHistory
 from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_manager_context import HitlManagerContext
-from core.hitl_paths import hitl_runtime_state_path, hitl_state_dir
+from core.hitl_paths import (
+    hitl_launch_status_path,
+    hitl_runtime_state_path,
+    hitl_state_dir,
+)
 from core.hitl_whiteboard import hitl_whiteboard_path
 from core.whiteboard import MAX_TIP_CONTENT_CHARS
 
@@ -95,6 +99,10 @@ class HitlWorkspaceView:
     def _runtime_state(self) -> Dict[str, Any]:
         path = hitl_runtime_state_path(self.work_dir)
         return _read_object(path, "HITL runtime state") if path.exists() else {}
+
+    def _launch_status(self) -> Dict[str, Any]:
+        path = hitl_launch_status_path(self.work_dir)
+        return _read_object(path, "HITL launch status") if path.exists() else {}
 
     @staticmethod
     def _record_timestamp(record: Any) -> str:
@@ -307,6 +315,7 @@ class HitlWorkspaceView:
         root_status = str(root_transition.get("status", "")).strip()
         cleanup_pending = str(cleanup.get("status", "")).strip() == "pending"
         continuation_status = str(continuation.get("status", "")).strip()
+        launch_status = self._launch_status()
 
         pending_kind = str(pending.get("kind", "")).strip()
         manager_review_kind = str(pending.get("manager_review_kind", "")).strip()
@@ -358,6 +367,20 @@ class HitlWorkspaceView:
             or continuation_status
         )
         if owner is None:
+            if str(launch_status.get("status", "")).strip() == "failed":
+                mode = str(launch_status.get("mode", "")).strip()
+                provider = str(launch_status.get("provider", "")).strip()
+                return projected(
+                    "failed",
+                    "Unable to start",
+                    str(launch_status.get("message", "")).strip()
+                    or "Research could not start.",
+                    next_step="Review the issue, then try again.",
+                    record=launch_status,
+                    active=False,
+                    display_stage="Start failed",
+                    display_phase="",
+                )
             if has_pending_work:
                 if unresolved:
                     record = pending

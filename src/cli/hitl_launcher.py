@@ -13,6 +13,8 @@ import yaml
 from core.config_loader import ConfigLoader
 from core.hitl_frontier import HitlFrontierStore
 from core.hitl_lock import HitlWorkspaceRunActiveError, active_hitl_workspace_run
+from core.hitl_paths import hitl_launch_status_path
+from core.hitl_util import atomic_write_json, utc_now
 from core.hitl_workspace_view import HitlWorkspaceView
 from core.idea_manager import IdeaManager
 from core.runner import ResearchRunner
@@ -78,6 +80,30 @@ class HitlRunController:
     def snapshot(self) -> Dict[str, Any]:
         return HitlWorkspaceView(self.work_dir).live_status()
 
+    def _clear_launch_failure(self) -> None:
+        hitl_launch_status_path(self.work_dir).unlink(missing_ok=True)
+
+    def _record_launch_failure(
+        self,
+        error: Exception,
+        *,
+        provider: str,
+        mode: str,
+    ) -> None:
+        detail = str(error).strip() or error.__class__.__name__
+        failed_at = utc_now()
+        atomic_write_json(
+            hitl_launch_status_path(self.work_dir),
+            {
+                "status": "failed",
+                "failed_at": failed_at,
+                "updated_at": failed_at,
+                "mode": mode,
+                "provider": provider,
+                "message": f"Research could not start: {detail}",
+            },
+        )
+
     def launch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         provider = str(payload.get("provider", "")).strip().lower()
         if provider not in {"claude", "codex", "gemini"}:
@@ -99,6 +125,7 @@ class HitlRunController:
             if external_owner is not None:
                 raise HitlWorkspaceRunActiveError(self.work_dir, external_owner)
             continuation = HitlFrontierStore(self.work_dir).exists()
+            mode = "continue" if continuation else "fresh"
             runner = ResearchRunner(
                 project_root=self.project_root,
                 use_github=bool(payload.get("github", False)),
@@ -126,13 +153,25 @@ class HitlRunController:
                                 execute()
                     else:
                         execute()
-                except Exception:
+                except Exception as exc:
                     LOGGER.exception(
                         "HITL AutoResearch launch failed for workspace %s",
                         self.work_dir,
                     )
+                    try:
+                        self._record_launch_failure(
+                            exc,
+                            provider=provider,
+                            mode=mode,
+                        )
+                    except Exception:
+                        LOGGER.exception(
+                            "Unable to record HITL AutoResearch launch failure for workspace %s",
+                            self.work_dir,
+                        )
                 self._publish_status()
 
+            self._clear_launch_failure()
             self._thread = threading.Thread(
                 target=run,
                 name="hitl-autoresearch-launch",
@@ -142,7 +181,7 @@ class HitlRunController:
         self._publish_status()
         return {
             "status": "accepted",
-            "mode": "continue" if continuation else "fresh",
+            "mode": mode,
         }
 
     def _publish_status(self) -> None:
