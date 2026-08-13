@@ -13,10 +13,11 @@ import sys
 import termios
 import threading
 import tty
+import unicodedata
 from collections.abc import Callable, Iterable
 from typing import Optional, TextIO
 
-from wcwidth import iter_graphemes, iter_graphemes_reverse, wcswidth
+from wcwidth import wcswidth
 
 from interactive.hitl_terminal_ui import terminal_safe_text
 
@@ -25,6 +26,39 @@ _RESET = "\x1b[0m"
 _MINT = "\x1b[1;38;5;115m"
 _MUTED = "\x1b[38;5;246m"
 _CLEAR_LINE = "\x1b[2K"
+
+
+def _iter_graphemes(text: str) -> Iterable[str]:
+    """Yield display clusters without relying on non-public wcwidth helpers."""
+    cluster = ""
+    regional_indicators = 0
+    join_next = False
+    for character in text:
+        codepoint = ord(character)
+        is_regional_indicator = 0x1F1E6 <= codepoint <= 0x1F1FF
+        extends_cluster = (
+            bool(cluster)
+            and (
+                join_next
+                or character == "\u200d"
+                or unicodedata.combining(character) != 0
+                or 0xFE00 <= codepoint <= 0xFE0F
+                or 0x1F3FB <= codepoint <= 0x1F3FF
+                or (is_regional_indicator and regional_indicators == 1)
+            )
+        )
+        if cluster and not extends_cluster:
+            yield cluster
+            cluster = ""
+            regional_indicators = 0
+        cluster += character
+        if is_regional_indicator:
+            regional_indicators += 1
+        elif character != "\u200d":
+            regional_indicators = 0
+        join_next = character == "\u200d"
+    if cluster:
+        yield cluster
 
 
 def _cell_width(text: str) -> int:
@@ -38,7 +72,7 @@ def _clip_cells(text: str, limit: int) -> str:
         return ""
     rendered: list[str] = []
     width = 0
-    for grapheme in iter_graphemes(text):
+    for grapheme in _iter_graphemes(text):
         grapheme_width = _cell_width(grapheme)
         if width + grapheme_width > limit:
             break
@@ -51,7 +85,7 @@ def _suffix_start(text: str, end: int, limit: int) -> int:
     """Find the longest suffix ending at ``end`` that fits in ``limit`` cells."""
     start = end
     width = 0
-    for grapheme in iter_graphemes_reverse(text[:end]):
+    for grapheme in reversed(list(_iter_graphemes(text[:end]))):
         grapheme_width = _cell_width(grapheme)
         if width + grapheme_width > limit:
             break
@@ -76,7 +110,7 @@ def _input_window(text: str, cursor: int, limit: int) -> tuple[str, int]:
     if end < len(text):
         content_limit = max(0, limit - int(left_hidden) - 1)
         while start < cursor and _cell_width(text[start:cursor]) > content_limit:
-            start += len(next(iter_graphemes(text[start:cursor])))
+            start += len(next(iter(_iter_graphemes(text[start:cursor]))))
             left_hidden = start > 0
             content_limit = max(0, limit - int(left_hidden) - 1)
         content = _clip_cells(text[start:], content_limit)
