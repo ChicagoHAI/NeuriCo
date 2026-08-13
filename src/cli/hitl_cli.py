@@ -45,11 +45,7 @@ def main() -> int:
     )
     host.channel.set_run_launcher(controller.launch, controller.snapshot)
 
-    stopping = False
-
     def stop(*_unused: object) -> None:
-        nonlocal stopping
-        stopping = True
         host.channel.close()
 
     signal.signal(signal.SIGINT, stop)

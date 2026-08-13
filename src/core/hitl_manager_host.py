@@ -328,7 +328,6 @@ class HitlTerminalChannel(UserChannel):
             "active": False,
             "label": "Ready",
         }
-        self._last_live_signature = ""
         self._seen_interface_events: set[str] = set()
         self._startup_rendered = False
         self._thinking_stop = threading.Event()
@@ -597,7 +596,7 @@ class HitlTerminalChannel(UserChannel):
                     blank_before=True,
                 )
                 return {"status": "unavailable"}
-            self.present_run_status(status, force=True)
+            self.present_run_status(status)
             return {"status": "accepted"}
         if input_kind is None and text == "/activity":
             self.present_activity()
@@ -720,7 +719,7 @@ class HitlTerminalChannel(UserChannel):
             )
             return {"status": "unavailable"}
         if bool(status.get("active")):
-            self.present_run_status(status, force=True)
+            self.present_run_status(status)
             return {"status": "already_running"}
         try:
             self._write_block(
@@ -774,23 +773,8 @@ class HitlTerminalChannel(UserChannel):
             raise ValueError("Answer yes or no when configuring the run.")
         return value in {"y", "yes"}
 
-    def present_run_status(self, status: Dict[str, Any], *, force: bool = False) -> None:
+    def present_run_status(self, status: Dict[str, Any]) -> None:
         self._cache_live_status(status)
-        signature = "|".join(
-            str(status.get(key, "")).strip()
-            for key in (
-                "state",
-                "stage",
-                "phase",
-                "phase_started_at",
-                "label",
-            )
-        )
-        if not force and signature == self._last_live_signature:
-            return
-        self._last_live_signature = signature
-        if not force:
-            return
         visible = dict(status)
         visible["elapsed"] = _elapsed_phase_time(status.get("phase_started_at"))
         self._write_block(self._ui.expanded_status(visible), blank_before=True)
