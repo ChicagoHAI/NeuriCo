@@ -11,6 +11,7 @@
     runPanel: false, snapshotSig: "", scrollToBottom: false,
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
     conversationScroll: { top: 0, nearBottom: true, captured: false },
+    directTurn: null,
     runDraft: { iterations: 2, writePaper: true, paperStyle: "auto", github: false },
   };
   let refreshPromise = null;
@@ -287,6 +288,22 @@
     const messages = visibleConversation(state.snapshot?.conversation).map((record, index) => ({
       kind: "message", record, timestamp: String(record.created_at || ""), order: index,
     }));
+    const directTurn = state.directTurn;
+    const directRecorded = directTurn && messages.some(({ record }) => record.metadata?.client_turn_id === directTurn.clientTurnId);
+    if (directTurn && !directRecorded) {
+      messages.push({
+        kind: "message",
+        record: {
+          record_id: `pending:${directTurn.clientTurnId}`,
+          speaker: "human",
+          content: directTurn.text,
+          created_at: directTurn.createdAt,
+          metadata: { client_turn_id: directTurn.clientTurnId },
+        },
+        timestamp: directTurn.createdAt,
+        order: messages.length,
+      });
+    }
     const notifications = (state.snapshot?.notifications || []).map((notification, index) => ({
       kind: "notification", notification, timestamp: String(notification.created_at || ""), order: messages.length + index,
     }));
@@ -298,7 +315,7 @@
     });
   }
   function queueView() {
-    const queue = state.snapshot?.inbox?.queue || [];
+    const queue = (state.snapshot?.inbox?.queue || []).filter((item) => item.client_turn_id !== state.directTurn?.clientTurnId);
     if (!queue.length) return null;
     const list = q("div", { class: "queue" });
     queue.forEach((item) => {
@@ -442,7 +459,26 @@
   function drawer() { if (!state.drawer) return []; const shade = q("div", { class: "drawer-shade", onclick: () => { state.drawer = null; render(); } }); const panel = q("aside", { class: "drawer", "data-drawer-key": drawerKey() }); panel.append(icon("×", "Close details", () => { state.drawer = null; render(); }, "drawer-close")); const { kind, source } = state.drawer; if (kind === "idea") renderIdeaDrawer(panel, source); else if (kind === "whiteboard") renderWhiteboardDrawer(panel, source); else renderNodeDrawer(panel, source, kind === "attempt"); return [shade, panel]; }
 
   async function post(path, payload) { const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Could not submit."); return data; }
-  async function submitConversation() { const text = state.composer.trim(); if (!text) return; const queueWasIdle = !state.thinking && !(state.snapshot?.inbox?.queue || []).length; state.composer = ""; state.notice = ""; state.scrollToBottom = true; render(); try { await post("/input", { text, input_kind: "conversation", provider: state.provider, client_turn_id: crypto.randomUUID() }); if (queueWasIdle) setTimeout(refresh, 650); else await refresh(); } catch (error) { state.notice = error.message; render(); } }
+  async function submitConversation() {
+    const text = state.composer.trim();
+    if (!text) return;
+    const clientTurnId = crypto.randomUUID();
+    const directDispatch = !state.thinking && !state.directTurn && !(state.snapshot?.inbox?.queue || []).length;
+    if (directDispatch) state.directTurn = { clientTurnId, text, createdAt: new Date().toISOString() };
+    state.composer = "";
+    state.notice = "";
+    state.scrollToBottom = true;
+    render();
+    try {
+      await post("/input", { text, input_kind: "conversation", provider: state.provider, client_turn_id: clientTurnId });
+      await refresh();
+    } catch (error) {
+      if (state.directTurn?.clientTurnId === clientTurnId) state.directTurn = null;
+      state.composer = text;
+      state.notice = error.message;
+      render();
+    }
+  }
   async function submitRequest(request, feedback) { const draft = loadRequestDraft(request); const selectedOption = state.selectedOption || draft.selectedOption || ""; const text = String(feedback || draft.requestFeedback || "").trim(); if (!selectedOption && !text) { state.notice = "Choose an option or add feedback before submitting."; render(); return; } try { await post("/input", { text, input_kind: "resolution_reply", request_key: request.request_key, option_id: selectedOption, provider: state.provider, client_turn_id: crypto.randomUUID() }); clearRequestDraft(request); await refresh(); } catch (error) { state.notice = error.message; render(); } }
   async function removeQueued(id) { try { await post("/api/queue", { action: "remove", id }); await refresh(); } catch (error) { state.notice = error.message; render(); } }
   async function editQueued(item) {
@@ -518,9 +554,13 @@
       if (result.error) {
         state.stale = result.error;
       } else {
+        const directTurnRecorded = state.directTurn && (result.data?.conversation || []).some(
+          (record) => record.metadata?.client_turn_id === state.directTurn.clientTurnId,
+        );
         state.snapshot = result.data;
         state.snapshotSig = result.signature;
         state.stale = "";
+        if (directTurnRecorded) state.directTurn = null;
       }
       if (changed) render({ preserveScroll: true });
     }
