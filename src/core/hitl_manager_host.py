@@ -1111,6 +1111,7 @@ class HitlManagerHost:
         title: str,
         port: int = 7890,
         open_browser: bool = True,
+        serve_web: bool = True,
     ) -> None:
         if interface not in {"web", "cli"}:
             raise ValueError("NeuriCo interface must be 'web' or 'cli'.")
@@ -1132,17 +1133,20 @@ class HitlManagerHost:
                     "NeuriCo web interface must bind to loopback, or use 0.0.0.0 only with "
                     "NEURICO_HITL_WEB_CONTAINER_MODE=1 behind a loopback Docker publish."
                 )
-            configured_browser_url = os.environ.get("NEURICO_HITL_BROWSER_URL") or None
-            self._browser_url = configured_browser_url
-            self.web_server = HitlWebServer(
-                channel=self.channel,
-                workspace=self.work_dir,
-                project_root=project_root,
-                title=title,
-                port=port,
-                host=bind_host,
-            )
-            self._open_browser = open_browser
+            if serve_web:
+                configured_browser_url = os.environ.get("NEURICO_HITL_BROWSER_URL") or None
+                self._browser_url = configured_browser_url
+                self.web_server = HitlWebServer(
+                    channel=self.channel,
+                    workspace=self.work_dir,
+                    project_root=project_root,
+                    title=title,
+                    port=port,
+                    host=bind_host,
+                )
+                self._open_browser = open_browser
+            else:
+                self._open_browser = False
         else:
             self.channel = HitlTerminalChannel(self.work_dir)
             self._open_browser = False
@@ -1187,9 +1191,10 @@ class HitlManagerHost:
                 if self._open_browser and self._browser_url is None:
                     threading.Timer(0.8, lambda: webbrowser.open(browser_url)).start()
                 self.channel.send("NeuriCo is available.", kind="system")
-            else:
-                assert isinstance(self.channel, HitlTerminalChannel)
+            elif isinstance(self.channel, HitlTerminalChannel):
                 self.channel.start()
+            else:
+                self.channel.send("NeuriCo is available.", kind="system")
             self._conversation_thread = threading.Thread(
                 target=self._run_conversation_loop,
                 daemon=True,

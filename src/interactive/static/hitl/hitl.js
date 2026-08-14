@@ -4,6 +4,8 @@
   const app = document.querySelector("#app");
   const initialRoute = location.pathname === "/research" ? "research" : "conversation";
   const initialProvider = "claude";
+  const initialIdeaId = new URLSearchParams(location.search).get("idea") || "";
+  const initialPortalSidebarCollapsed = localStorage.getItem("neurico-hitl-ideas-collapsed") === "1";
   const state = {
     snapshot: null, route: initialRoute, view: "understanding", drawer: null,
     tab: "overview", composer: "", provider: initialProvider, providerTouched: false,
@@ -14,10 +16,15 @@
     directTurn: null,
     managerStatusSeq: -1,
     runDraft: { iterations: 2, writePaper: true, paperStyle: "auto", github: false },
+    portal: null, ideas: [], selectedIdeaId: initialIdeaId, catalogBusy: false,
+    creatingIdea: false, ideaSchema: null, ideaDraft: {}, ideaSubmitError: "",
+    renamingIdeaId: "", draggedIdeaId: "",
+    portalSidebarCollapsed: initialPortalSidebarCollapsed,
   };
   let refreshPromise = null;
   let refreshPending = false;
   let composerObserver = null;
+  let events = null;
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
   const q = (tag, attrs = {}, children = []) => {
     const element = document.createElement(tag);
@@ -101,7 +108,7 @@
   function drawerKey() {
     if (!state.drawer) return "";
     const { kind, source } = state.drawer;
-    const id = kind === "idea" ? source.idea_id : kind === "whiteboard" ? source.id : source.node_sha;
+    const id = kind === "idea" || kind === "submitted_idea" ? source.idea_id : kind === "whiteboard" ? source.id : source.node_sha;
     return `${kind}:${id || "unknown"}:${state.tab}`;
   }
 
@@ -121,8 +128,21 @@
     state.drawer = null;
     state.runPanel = false;
     const path = route === "research" ? "/research" : "/";
-    if (location.pathname !== path) history.pushState({}, "", path);
+    const next = new URL(location.href);
+    next.pathname = path;
+    if (state.portal && state.selectedIdeaId) next.searchParams.set("idea", state.selectedIdeaId);
+    if (location.pathname !== path) history.pushState({}, "", `${next.pathname}${next.search}`);
     render({ restoreConversation: route === "conversation" && previousRoute !== "conversation" });
+  }
+
+  const encodedIdeaId = () => encodeURIComponent(state.selectedIdeaId || "");
+  function workspaceApi(suffix) {
+    if (state.portal) return `/api/ideas/${encodedIdeaId()}${suffix}`;
+    if (suffix === "/snapshot") return "/api/snapshot";
+    if (suffix === "/stream") return "/stream";
+    if (suffix === "/queue") return "/api/queue";
+    if (suffix === "/run") return "/api/run";
+    return suffix;
   }
 
   function markdown(value) {
@@ -152,9 +172,423 @@
   }
   function md(value, className = "") { const element = q("div", { class: `markdown ${className}` }); element.innerHTML = markdown(value); return element; }
   async function copy(text) { try { await navigator.clipboard.writeText(text); } catch (_) {} }
+  async function requestJson(path, payload, method = "POST") {
+    const response = await fetch(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Could not submit.");
+    return data;
+  }
+
+  const displayIdeaStatus = (idea) => idea.live?.label || humanize(idea.status || "submitted");
+  function updateIdeaUrl(replace = false) {
+    const next = new URL(location.href);
+    if (state.selectedIdeaId) next.searchParams.set("idea", state.selectedIdeaId);
+    else next.searchParams.delete("idea");
+    const method = replace ? "replaceState" : "pushState";
+    history[method]({}, "", `${next.pathname}${next.search}`);
+  }
+  function connectWorkspaceEvents() {
+    events?.close();
+    events = null;
+    if (state.portal && !state.selectedIdeaId) return;
+    events = new EventSource(workspaceApi("/stream"));
+    events.addEventListener("status", (event) => {
+      try {
+        if (applyManagerStatus(JSON.parse(event.data))) render({ preserveScroll: true });
+      } catch (_) {}
+    });
+    ["message", "refresh", "workspace_changed", "resolution_cleared"].forEach((name) => events.addEventListener(name, async () => {
+      await refresh();
+      if (state.portal) { await loadCatalog(); render({ preserveScroll: true }); }
+    }));
+  }
+  async function loadCatalog(options = {}) {
+    try {
+      const response = await fetch("/api/ideas", { cache: "no-store" });
+      if (response.status === 404) { state.portal = false; return false; }
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Ideas unavailable.");
+      state.portal = true;
+      state.ideas = Array.isArray(data.ideas) ? data.ideas : [];
+      const selectedExists = state.ideas.some((idea) => idea.idea_id === state.selectedIdeaId);
+      if (!selectedExists) state.selectedIdeaId = state.ideas[0]?.idea_id || "";
+      if (options.updateUrl) updateIdeaUrl(true);
+      return true;
+    } catch (error) {
+      state.stale = error.message;
+      return false;
+    }
+  }
+  async function selectIdea(ideaId, replace = false) {
+    const nextId = String(ideaId || "");
+    if (!nextId) return;
+    if (nextId === state.selectedIdeaId && !state.creatingIdea) return;
+    captureConversationScroll();
+    state.selectedIdeaId = nextId;
+    state.snapshot = null;
+    state.snapshotSig = "";
+    state.thinking = false;
+    state.managerStatusSeq = -1;
+    state.notice = "";
+    state.creatingIdea = false;
+    state.drawer = null;
+    updateIdeaUrl(replace);
+    connectWorkspaceEvents();
+    render();
+    await refresh();
+  }
+  function ideaSidebar() {
+    const sidebar = q("aside", { class: `portal-sidebar ${state.portalSidebarCollapsed ? "collapsed" : ""}` });
+    sidebar.append(q("div", { class: "portal-sidebar-head" }, [
+      q("strong", { text: "Ideas" }),
+      q("div", { class: "portal-sidebar-actions" }, [
+        icon("+", "New idea", async () => {
+          state.creatingIdea = true;
+          state.ideaSubmitError = "";
+          if (!state.ideaSchema) await loadIdeaSchema();
+          render();
+        }, "portal-new"),
+        icon("‹", "Hide ideas", () => {
+          state.portalSidebarCollapsed = true;
+          localStorage.setItem("neurico-hitl-ideas-collapsed", "1");
+          render({ preserveScroll: true });
+        }, "portal-collapse"),
+      ]),
+    ]));
+    const list = q("div", { class: "portal-idea-list" });
+    state.ideas.forEach((idea) => {
+      const selected = idea.idea_id === state.selectedIdeaId && !state.creatingIdea;
+      const row = q("div", {
+        class: `portal-idea ${selected ? "selected" : ""}`,
+        draggable: "true",
+        ondragstart: (event) => { state.draggedIdeaId = idea.idea_id; event.dataTransfer.effectAllowed = "move"; },
+        ondragover: (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; },
+        ondrop: (event) => { event.preventDefault(); reorderIdeas(state.draggedIdeaId, idea.idea_id); },
+        ondragend: () => { state.draggedIdeaId = ""; },
+      });
+      let content;
+      if (state.renamingIdeaId === idea.idea_id) {
+        content = q("div", { class: "portal-idea-select editing" });
+        const input = q("input", { class: "portal-name-input", value: idea.display_name, maxlength: "160", "aria-label": "Idea name" });
+        let finished = false;
+        const finish = async () => {
+          if (finished) return;
+          finished = true;
+          await renameIdea(idea.idea_id, input.value);
+          state.renamingIdeaId = "";
+          render();
+        };
+        input.onkeydown = (event) => {
+          if (event.key === "Enter") { event.preventDefault(); finish(); }
+          if (event.key === "Escape") { event.preventDefault(); finished = true; state.renamingIdeaId = ""; render(); }
+        };
+        input.onblur = finish;
+        content.append(input);
+        requestAnimationFrame(() => { input.focus(); input.select(); });
+      } else {
+        content = q("button", { class: "portal-idea-select", title: idea.title || idea.idea_id, onclick: () => selectIdea(idea.idea_id) });
+        content.append(
+          q("span", { class: "portal-idea-name", text: idea.display_name || idea.idea_id }),
+          q("span", { class: "portal-idea-meta" }, [
+            q("i", { class: `portal-status ${String(idea.live?.state || idea.status || "").toLowerCase()}` }),
+            q("span", { text: displayIdeaStatus(idea) }),
+          ]),
+        );
+      }
+      row.append(
+        q("span", { class: "portal-drag", title: "Reorder", text: "⠿" }),
+        content,
+        icon("▤", "View submitted idea", () => openSubmittedIdea(idea), "portal-view"),
+        icon("✎", "Rename idea", () => { state.renamingIdeaId = idea.idea_id; render(); }, "portal-rename"),
+      );
+      list.append(row);
+    });
+    if (!state.ideas.length) list.append(q("p", { class: "portal-empty", text: "No ideas" }));
+    sidebar.append(list);
+    return sidebar;
+  }
+  async function openSubmittedIdea(idea) {
+    try {
+      if (!state.ideaSchema) state.ideaSchema = await fetchIdeaSchema();
+      const response = await fetch(`/api/ideas/${encodeURIComponent(idea.idea_id)}/definition`, { cache: "no-store" });
+      const definition = await response.json();
+      if (!response.ok) throw new Error(definition.error || "Idea unavailable.");
+      state.drawer = { kind: "submitted_idea", source: { ...idea, ...definition } };
+      state.tab = "overview";
+      render({ preserveScroll: true });
+    } catch (error) { state.notice = error.message; render({ preserveScroll: true }); }
+  }
+  async function renameIdea(ideaId, displayName) {
+    try {
+      await requestJson(`/api/ideas/${encodeURIComponent(ideaId)}/presentation`, { display_name: displayName }, "PATCH");
+      await loadCatalog();
+    } catch (error) { state.notice = error.message; }
+  }
+  async function reorderIdeas(sourceId, targetId) {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    const order = state.ideas.map((idea) => idea.idea_id);
+    const sourceIndex = order.indexOf(sourceId);
+    const targetIndex = order.indexOf(targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    order.splice(targetIndex, 0, order.splice(sourceIndex, 1)[0]);
+    const byId = new Map(state.ideas.map((idea) => [idea.idea_id, idea]));
+    state.ideas = order.map((ideaId) => byId.get(ideaId));
+    render({ preserveScroll: true });
+    try { await requestJson("/api/ideas/order", { order }, "PUT"); }
+    catch (error) { state.notice = error.message; await loadCatalog(); render(); }
+  }
+
+  const sectionFields = [
+    ["Idea", ["title", "domain", "hypothesis"]],
+    ["Background", ["background"]],
+    ["Method", ["methodology"]],
+    ["Constraints", ["constraints"]],
+    ["Outputs", ["expected_outputs"]],
+    ["Evaluation", ["evaluation_criteria", "evaluation"]],
+    ["Resources", ["local_resources"]],
+    ["Metadata", ["metadata"]],
+  ];
+  const pathKey = (path) => path.join(".");
+  function draftValue(path) {
+    return path.reduce((value, key) => value == null ? undefined : value[key], state.ideaDraft);
+  }
+  function setDraftValue(path, value) {
+    let current = state.ideaDraft;
+    path.forEach((key, index) => {
+      if (index === path.length - 1) current[key] = value;
+      else {
+        const arrayNext = typeof path[index + 1] === "number";
+        if (current[key] == null || typeof current[key] !== "object") current[key] = arrayNext ? [] : {};
+        current = current[key];
+      }
+    });
+  }
+  function emptyForSchema(schema) {
+    if (schema?.type === "object") return {};
+    if (schema?.type === "array") return [];
+    if (schema?.type === "integer" || schema?.type === "number") return schema.default ?? "";
+    if (schema?.type === "boolean") return Boolean(schema.default);
+    return schema?.default ?? "";
+  }
+  function schemaItem(schema, current) {
+    if (!schema?.oneOf) return schema || {};
+    if (current && typeof current === "object" && current.path) return schema.oneOf.find((entry) => entry.properties?.path) || schema.oneOf[0];
+    return schema.oneOf.find((entry) => entry.properties?.url) || schema.oneOf[0];
+  }
+  function fieldLabel(name) { return humanize(name).replace("Url", "URL"); }
+  function arrayItemLabel(name) {
+    const labels = {
+      papers: "Paper", datasets: "Dataset", code_references: "Code reference",
+      steps: "Step", baselines: "Baseline", metrics: "Metric",
+      dependencies: "Dependency", expected_outputs: "Output",
+      fields: "Field", evaluation_criteria: "Criterion", functions: "Function",
+      objectives: "Objective", tags: "Tag", related_ideas: "Related idea",
+    };
+    if (labels[name]) return labels[name];
+    const singular = name.endsWith("ies") ? `${name.slice(0, -3)}y` : name.endsWith("s") ? name.slice(0, -1) : name;
+    return fieldLabel(singular || "Item");
+  }
+  function formField(name, schema, path, required = false) {
+    const label = fieldLabel(name);
+    const value = draftValue(path);
+    if (schema.type === "object") {
+      const body = q("div", { class: "idea-object" });
+      Object.entries(schema.properties || {}).forEach(([childName, childSchema]) => body.append(formField(childName, childSchema, [...path, childName], (schema.required || []).includes(childName))));
+      return q("fieldset", { class: "idea-fieldset" }, [q("legend", { text: label }), body]);
+    }
+    if (schema.type === "array") {
+      const values = Array.isArray(value) ? value : [];
+      const itemName = arrayItemLabel(name);
+      const list = q("div", { class: "idea-array-list" });
+      values.forEach((entry, index) => {
+        const itemSchema = schemaItem(schema.items, entry);
+        const item = q("div", { class: "idea-array-item" });
+        item.append(q("div", { class: "idea-array-item-title", text: `${itemName} ${index + 1}` }));
+        if (schema.items?.oneOf) {
+          const variant = q("select", { class: "idea-variant", "aria-label": `${label} type` });
+          schema.items.oneOf.forEach((option, optionIndex) => variant.append(q("option", { value: String(optionIndex), text: option.properties?.path ? "Local file" : "URL" })));
+          variant.value = String(schema.items.oneOf.indexOf(itemSchema));
+          variant.onchange = () => { setDraftValue([...path, index], emptyForSchema(schema.items.oneOf[Number(variant.value)])); render({ preserveScroll: true }); };
+          item.append(variant);
+        }
+        if (itemSchema.type === "object") {
+          Object.entries(itemSchema.properties || {}).forEach(([childName, childSchema]) => item.append(formField(childName, childSchema, [...path, index, childName], (itemSchema.required || []).includes(childName))));
+        } else {
+          item.append(formField(itemName, itemSchema, [...path, index], false));
+        }
+        item.append(icon("×", `Remove ${itemName}`, () => { const next = [...values]; next.splice(index, 1); setDraftValue(path, next); render({ preserveScroll: true }); }, "idea-remove"));
+        list.append(item);
+      });
+      const add = q("button", { class: "idea-add", text: `+ ${itemName}`, onclick: () => { const next = [...values, emptyForSchema(schemaItem(schema.items, null))]; setDraftValue(path, next); render({ preserveScroll: true }); } });
+      return q("div", { class: "idea-array" }, [list, add]);
+    }
+    const attrs = {
+      class: "idea-control",
+      "aria-label": label,
+      "data-idea-path": pathKey(path),
+      ...(required ? { required: "required" } : {}),
+      ...(schema.minLength != null ? { minlength: String(schema.minLength) } : {}),
+      ...(schema.maxLength != null ? { maxlength: String(schema.maxLength) } : {}),
+      ...(schema.pattern ? { pattern: schema.pattern } : {}),
+    };
+    let control;
+    if (schema.type === "boolean") {
+      control = q("input", { ...attrs, type: "checkbox" });
+      control.checked = Boolean(value);
+      control.onchange = () => setDraftValue(path, control.checked);
+      return q("label", { class: "idea-field idea-boolean" }, [control, q("span", { text: `${label}${required ? " *" : ""}` })]);
+    } else if (name === "domain" && state.ideaSchema?.domains?.length) {
+      control = q("select", attrs);
+      control.append(q("option", { value: "", text: "Domain" }));
+      state.ideaSchema.domains.forEach((domain) => control.append(q("option", { value: domain.id, text: domain.name })));
+      control.value = value ?? "";
+    } else if (schema.enum) {
+      control = q("select", attrs);
+      control.append(q("option", { value: "", text: label }));
+      schema.enum.forEach((option) => control.append(q("option", { value: option, text: humanize(option) })));
+      control.value = value ?? "";
+    } else if (schema.type === "integer" || schema.type === "number") {
+      control = q("input", { ...attrs, type: "number", min: schema.minimum ?? "", max: schema.maximum ?? "", step: schema.type === "integer" ? "1" : "any", placeholder: label, value: value ?? "" });
+    } else if (["hypothesis", "description", "approach", "definition", "usage"].includes(name)) {
+      control = q("textarea", { ...attrs, placeholder: label, rows: "3" }); control.value = value ?? "";
+    } else {
+      control = q("input", { ...attrs, type: schema.format === "uri" ? "url" : "text", placeholder: label, value: value ?? "" });
+    }
+    control.oninput = () => setDraftValue(path, schema.type === "integer" ? (control.value === "" ? "" : Number(control.value)) : schema.type === "number" ? (control.value === "" ? "" : Number(control.value)) : control.value);
+    control.onchange = control.oninput;
+    return q("label", { class: "idea-field" }, [q("span", { text: `${label}${required ? " *" : ""}` }), control]);
+  }
+  function hasIdeaContent(value) {
+    if (value == null || value === "") return false;
+    if (Array.isArray(value)) return value.some(hasIdeaContent);
+    if (typeof value === "object") return Object.values(value).some(hasIdeaContent);
+    return true;
+  }
+  function submittedScalar(name, schema, value) {
+    let display = value;
+    if (schema.type === "boolean") display = value ? "Yes" : "No";
+    else if (name === "domain") {
+      display = state.ideaSchema?.domains?.find((domain) => domain.id === value)?.name || value;
+    } else if (schema.enum) display = humanize(value);
+    const text = String(display ?? "");
+    if (schema.format === "uri" && /^https?:\/\//i.test(text)) {
+      return q("a", { class: "submitted-idea-value submitted-idea-link", href: text, target: "_blank", rel: "noreferrer", text });
+    }
+    return q("div", { class: "submitted-idea-value", text });
+  }
+  function submittedIdeaField(name, schema, value) {
+    if (!hasIdeaContent(value)) return null;
+    const label = fieldLabel(name);
+    if (schema.type === "object") {
+      const body = q("div", { class: "idea-object submitted-idea-object" });
+      Object.entries(schema.properties || {}).forEach(([childName, childSchema]) => {
+        const child = submittedIdeaField(childName, childSchema, value?.[childName]);
+        if (child) body.append(child);
+      });
+      if (!body.childElementCount) return null;
+      return q("fieldset", { class: "idea-fieldset submitted-idea-fieldset" }, [q("legend", { text: label }), body]);
+    }
+    if (schema.type === "array") {
+      const values = Array.isArray(value) ? value : [];
+      const itemName = arrayItemLabel(name);
+      const list = q("div", { class: "idea-array-list" });
+      values.forEach((entry, index) => {
+        if (!hasIdeaContent(entry)) return;
+        const itemSchema = schemaItem(schema.items, entry);
+        const item = q("div", { class: "idea-array-item submitted-idea-array-item" }, [
+          q("div", { class: "idea-array-item-title", text: `${itemName} ${index + 1}` }),
+        ]);
+        if (itemSchema.type === "object") {
+          Object.entries(itemSchema.properties || {}).forEach(([childName, childSchema]) => {
+            const child = submittedIdeaField(childName, childSchema, entry?.[childName]);
+            if (child) item.append(child);
+          });
+        } else {
+          item.append(submittedScalar(itemName, itemSchema, entry));
+        }
+        list.append(item);
+      });
+      if (!list.childElementCount) return null;
+      return q("div", { class: "idea-array submitted-idea-array" }, [
+        q("div", { class: "submitted-idea-group-label", text: label }),
+        list,
+      ]);
+    }
+    return q("div", { class: "idea-field submitted-idea-field" }, [
+      q("span", { text: label }),
+      submittedScalar(name, schema, value),
+    ]);
+  }
+  function cleanIdeaValue(value) {
+    if (Array.isArray(value)) return value.map(cleanIdeaValue).filter((entry) => !(entry === "" || entry == null || (Array.isArray(entry) && !entry.length) || (typeof entry === "object" && !Array.isArray(entry) && !Object.keys(entry).length)));
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, cleanIdeaValue(entry)]).filter(([, entry]) => !(entry === "" || entry == null || (Array.isArray(entry) && !entry.length) || (typeof entry === "object" && !Array.isArray(entry) && !Object.keys(entry).length))));
+    }
+    return value;
+  }
+  async function fetchIdeaSchema() {
+    const response = await fetch("/api/idea-schema", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Idea schema unavailable.");
+    return data;
+  }
+  async function loadIdeaSchema() {
+    try {
+      state.ideaSchema = await fetchIdeaSchema();
+      state.ideaDraft = {};
+    } catch (error) { state.ideaSubmitError = error.message; }
+  }
+  async function submitIdea() {
+    state.ideaSubmitError = "";
+    const invalid = [...document.querySelectorAll(".idea-create .idea-control, .idea-create .idea-variant")]
+      .find((control) => typeof control.checkValidity === "function" && !control.checkValidity());
+    if (invalid) {
+      invalid.reportValidity();
+      return;
+    }
+    try {
+      const result = await requestJson("/api/ideas", { idea: cleanIdeaValue(state.ideaDraft) }, "POST");
+      await loadCatalog();
+      state.creatingIdea = false;
+      state.selectedIdeaId = result.idea_id;
+      state.snapshot = null;
+      state.snapshotSig = "";
+      state.thinking = false;
+      state.managerStatusSeq = -1;
+      updateIdeaUrl();
+      connectWorkspaceEvents();
+      render();
+      await refresh();
+    } catch (error) { state.ideaSubmitError = error.message; render({ preserveScroll: true }); }
+  }
+  function ideaCreationPage() {
+    const main = q("main", { class: "idea-create" });
+    main.append(q("header", { class: "idea-create-head" }, [q("h1", { text: "New idea" }), icon("×", "Close", () => { state.creatingIdea = false; render(); })]));
+    if (!state.ideaSchema) {
+      main.append(q("p", { class: "empty", text: state.ideaSubmitError || "Loading" }));
+      return main;
+    }
+    const properties = state.ideaSchema.schema?.properties || {};
+    const required = state.ideaSchema.schema?.required || [];
+    sectionFields.forEach(([sectionName, names]) => {
+      const visibleNames = names.filter((name) => properties[name] && Object.keys(properties[name].properties || { value: true }).length);
+      if (!visibleNames.length) return;
+      const section = q("section", { class: "idea-form-section" }, [q("h2", { text: sectionName })]);
+      visibleNames.forEach((name) => section.append(formField(name, properties[name], [name], required.includes(name))));
+      main.append(section);
+    });
+    if (state.ideaSubmitError) main.append(q("p", { class: "idea-form-error", text: state.ideaSubmitError }));
+    main.append(q("div", { class: "idea-form-actions" }, [q("button", { class: "idea-cancel", text: "Cancel", onclick: () => { state.creatingIdea = false; render(); } }), q("button", { class: "idea-submit", text: "Submit idea", onclick: submitIdea })]));
+    return main;
+  }
 
   function topbar() {
-    const workspace = state.snapshot?.workspace || "NeuriCo workspace";
+    const selectedIdea = state.ideas.find((idea) => idea.idea_id === state.selectedIdeaId);
+    const workspace = selectedIdea?.display_name || state.snapshot?.workspace || "NeuriCo workspace";
     const live = state.snapshot?.live || {};
     const runIsActive = Boolean(live.active);
     const runCanLaunch = Boolean(live.can_launch);
@@ -264,7 +698,11 @@
     state.drawer = { kind: "idea", source: idea };
     state.tab = "overview";
     state.runPanel = false;
-    if (location.pathname !== "/research") history.pushState({}, "", "/research");
+    if (location.pathname !== "/research") {
+      const next = new URL(location.href);
+      next.pathname = "/research";
+      history.pushState({}, "", `${next.pathname}${next.search}`);
+    }
     render({ preserveScroll: true });
   }
   function systemNotification(notification) {
@@ -462,15 +900,27 @@
   function links(ids) { const row = q("div", { class: "link-row" }); ids.forEach((id) => row.append(q("button", { class: "idea-link", text: id, onclick: () => { const idea = ideaById(id); if (idea) openDrawer("idea", idea); } }))); return row; }
   function artifactList(items) { return q("div", { class: "artifact-list" }, (items || []).map((item) => q("div", { class: "artifact-item" }, [q("code", { class: "artifact-path", text: item.path || String(item) }), item.description ? q("span", { class: "artifact-desc", text: item.description }) : null]))); }
   function renderIdeaDrawer(drawer, idea) { const source = String(idea.actor || "").toLowerCase() === "human" ? "Human" : "NeuriCo"; const verb = idea.idea_type === "decision" ? "Resolved" : "Recorded"; drawer.append(q("h1", { text: `${idea.idea_id} · ${idea.level || "?"} ${idea.idea_type}` }), q("p", { class: "detail-meta", text: `${verb} by ${source}.` })); const selectedDecision = idea.idea_type === "decision" ? optionText(idea) || idea.decision : ""; const content = idea.idea_type === "decision" ? selectedDecision || idea.decision_needed || idea.context || "" : idea.idea_type === "proposal" ? displayProposal(idea.proposal || idea.context) : idea.evidence || idea.proposal || idea.context || ""; drawer.append(detail(idea.idea_type === "decision" ? "Decision" : "Content", content)); if (idea.idea_type === "decision" && idea.decision_needed && content !== idea.decision_needed) drawer.append(detail("Question", idea.decision_needed)); if (idea.context && content !== idea.context) drawer.append(detail("Context", idea.context)); if (idea.options?.length) { const options = q("div", { class: "option-list" }); idea.options.forEach((option) => { const text = typeof option === "string" ? option : option.text || option.option_id || ""; const id = typeof option === "string" ? option : option.option_id; options.append(q("div", { class: `option-card ${idea.decision === id || idea.decision === text ? "selected" : ""}`, text })); }); drawer.append(detail("Options", options)); } if (idea.premises?.length) drawer.append(detail("Premises", links(idea.premises))); if (idea.related_artifacts?.length) drawer.append(detail("Artifacts", artifactList(idea.related_artifacts))); }
+  function renderSubmittedIdeaDrawer(drawer, record) {
+    drawer.append(q("h1", { text: record.display_name || record.idea_id }), q("p", { class: "detail-meta", text: record.idea_id }));
+    const idea = record.idea && typeof record.idea === "object" ? record.idea : {};
+    const properties = state.ideaSchema?.schema?.properties || {};
+    const sections = q("div", { class: "submitted-idea-sections" });
+    sectionFields.forEach(([sectionName, names]) => {
+      const fields = names.map((name) => properties[name] ? submittedIdeaField(name, properties[name], idea[name]) : null).filter(Boolean);
+      if (!fields.length) return;
+      sections.append(q("section", { class: "idea-form-section submitted-idea-section" }, [q("h2", { text: sectionName }), ...fields]));
+    });
+    drawer.append(sections.childElementCount ? sections : q("p", { class: "empty", text: "No submitted fields" }));
+  }
   function scoreRows(score) { const root = score?.results || score?.scorer_result?.results || score || {}; if (root.properties && typeof root.properties === "object") return Object.entries(root.properties).map(([metric, value]) => ({ metric, ...(value || {}) })); if (Array.isArray(root.metrics)) return root.metrics; return Object.entries(root).filter(([, value]) => value && typeof value === "object" && !Array.isArray(value)).map(([metric, value]) => ({ metric, ...value })); }
   function scoreTable(score) { const rows = scoreRows(score); if (!rows.length) return md("No structured objective score is available."); const table = q("table", { class: "score-table" }); table.append(q("thead", {}, [q("tr", {}, ["Metric", "Value", "Target", "Direction", "Result"].map((name) => q("th", { text: name })))])); const body = q("tbody"); rows.forEach((row) => { const result = row.result ?? row.passed ?? row.satisfied ?? row.status ?? ""; const pass = result === true || ["pass", "passed", "met", "true"].includes(String(result).toLowerCase()); const fail = result === false || ["fail", "failed", "not met", "false"].includes(String(result).toLowerCase()); body.append(q("tr", {}, [q("td", { text: row.metric || row.name || "metric" }), q("td", { text: String(row.value ?? row.score ?? row.actual ?? "") }), q("td", { text: String(row.target ?? row.threshold ?? "") }), q("td", { text: String(row.direction || "") }), q("td", { class: pass ? "score-good" : fail ? "score-bad" : "", text: typeof result === "boolean" ? (result ? "Met" : "Not met") : String(result) })])); }); table.append(body); return table; }
   function displayPlan(plan) { return String(plan || "").replace(/^\s*#?\s*EXPERIMENT RUNNER PLAN(?:\s*(?::|[—-])\s*[^\n]*)?\s*\n+/i, "").trim() || "No saved plan."; }
   function displayProposal(proposal) { return String(proposal || "").replace(/^\s*#?\s*AUTORESEARCH PROPOSAL\s*\n+/i, "").trim() || "Proposal record unavailable."; }
   function renderNodeDrawer(drawer, item, attempt) { const accepted = attempt ? item.accepted : true; drawer.append(q("h1", { text: attempt ? `${accepted ? "Accepted" : "Rejected"} ${item.proposal_type || "research"}` : item.selected ? "Selected research node" : "Research node" }), q("p", { class: "detail-meta", text: attempt ? `Candidate ${shortSha(item.node_sha)} from ${shortSha(item.parent_node_sha)}` : `${item.active ? "Active frontier" : "Retained"} · ${shortSha(item.node_sha)}${item.parent_node_sha ? ` · from ${shortSha(item.parent_node_sha)}` : ""}` })); tabs(drawer, attempt ? ["overview", "proposal", "score"] : ["overview", "plan", "score"]); if (state.tab === "overview") { const reason = item.reason_for_acceptance || item.reason_for_rejection; if (reason) drawer.append(detail(item.accepted === false ? "Reason for rejection" : "Reason for acceptance", reason)); if (attempt && item.proposal_idea_id) drawer.append(detail("Proposal", links([item.proposal_idea_id]))); if (!attempt) { const attempts = (state.snapshot?.attempts || []).filter((a) => a.parent_node_sha === item.node_sha); if (attempts.length) drawer.append(detail("Attempts from this node", q("div", { class: "attempt-list" }, attempts.map((a) => q("button", { class: "attempt-link", text: `${a.accepted ? "Accepted" : "Rejected"} ${a.proposal_type || "research"}${a.proposal_idea_id ? ` · ${a.proposal_idea_id}` : ""}`, onclick: () => openDrawer("attempt", a) }))))); } } else if (state.tab === "plan") drawer.append(detail("Experiment plan", displayPlan(item.plan))); else if (state.tab === "proposal") { const proposal = ideaById(item.proposal_idea_id); drawer.append(detail("Proposal", displayProposal(proposal?.proposal || proposal?.content))); } else drawer.append(detail("Objective score", scoreTable(item.objective_score))); }
   function renderWhiteboardDrawer(drawer, tip) { drawer.append(q("h1", { text: `${tip.id} ${tip.category || "note"}` }), q("p", { class: "detail-meta", text: tip.status || "active" }), detail("Note", tip.content)); if (tip.affects?.length) drawer.append(detail("Artifacts", artifactList(tip.affects))); }
-  function drawer() { if (!state.drawer) return []; const shade = q("div", { class: "drawer-shade", onclick: () => { state.drawer = null; render(); } }); const panel = q("aside", { class: "drawer", "data-drawer-key": drawerKey() }); panel.append(icon("×", "Close details", () => { state.drawer = null; render(); }, "drawer-close")); const { kind, source } = state.drawer; if (kind === "idea") renderIdeaDrawer(panel, source); else if (kind === "whiteboard") renderWhiteboardDrawer(panel, source); else renderNodeDrawer(panel, source, kind === "attempt"); return [shade, panel]; }
+  function drawer() { if (!state.drawer) return []; const shade = q("div", { class: "drawer-shade", onclick: () => { state.drawer = null; render(); } }); const panel = q("aside", { class: "drawer", "data-drawer-key": drawerKey() }); panel.append(icon("×", "Close details", () => { state.drawer = null; render(); }, "drawer-close")); const { kind, source } = state.drawer; if (kind === "idea") renderIdeaDrawer(panel, source); else if (kind === "submitted_idea") renderSubmittedIdeaDrawer(panel, source); else if (kind === "whiteboard") renderWhiteboardDrawer(panel, source); else renderNodeDrawer(panel, source, kind === "attempt"); return [shade, panel]; }
 
-  async function post(path, payload) { const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || "Could not submit."); return data; }
+  const post = (path, payload) => requestJson(path, payload, "POST");
   async function submitConversation() {
     const text = state.composer.trim();
     if (!text) return;
@@ -480,7 +930,7 @@
     state.scrollToBottom = true;
     render();
     try {
-      const result = await post("/input", { text, input_kind: "conversation", provider: state.provider, client_turn_id: clientTurnId });
+      const result = await post(workspaceApi("/input"), { text, input_kind: "conversation", provider: state.provider, client_turn_id: clientTurnId });
       if (result.disposition === "direct") {
         state.directTurn = {
           clientTurnId,
@@ -496,11 +946,11 @@
       render();
     }
   }
-  async function submitRequest(request, feedback) { const draft = loadRequestDraft(request); const selectedOption = state.selectedOption || draft.selectedOption || ""; const text = String(feedback || draft.requestFeedback || "").trim(); if (!selectedOption && !text) { state.notice = "Choose an option or add feedback before submitting."; render(); return; } try { await post("/input", { text, input_kind: "resolution_reply", request_key: request.request_key, option_id: selectedOption, provider: state.provider, client_turn_id: crypto.randomUUID() }); clearRequestDraft(request); await refresh(); } catch (error) { state.notice = error.message; render(); } }
-  async function removeQueued(id) { try { await post("/api/queue", { action: "remove", id }); await refresh(); } catch (error) { state.notice = error.message; render(); } }
+  async function submitRequest(request, feedback) { const draft = loadRequestDraft(request); const selectedOption = state.selectedOption || draft.selectedOption || ""; const text = String(feedback || draft.requestFeedback || "").trim(); if (!selectedOption && !text) { state.notice = "Choose an option or add feedback before submitting."; render(); return; } try { await post(workspaceApi("/input"), { text, input_kind: "resolution_reply", request_key: request.request_key, option_id: selectedOption, provider: state.provider, client_turn_id: crypto.randomUUID() }); clearRequestDraft(request); await refresh(); } catch (error) { state.notice = error.message; render(); } }
+  async function removeQueued(id) { try { await post(workspaceApi("/queue"), { action: "remove", id }); await refresh(); } catch (error) { state.notice = error.message; render(); } }
   async function editQueued(item) {
     try {
-      await post("/api/queue", { action: "remove", id: item.id });
+      await post(workspaceApi("/queue"), { action: "remove", id: item.id });
       state.composer = String(item.text || "");
       state.notice = "";
       await refresh();
@@ -514,7 +964,31 @@
     } catch (error) { state.notice = error.message; render(); }
   }
   async function cancelTurn() { state.notice = "Cancellation is not available yet."; render(); }
-  async function launchRun(payload) { try { await post("/api/run", payload); state.runPanel = false; state.notice = ""; await refresh(); } catch (error) { state.notice = error.message; render(); } }
+  async function launchRun(payload) { try { await post(workspaceApi("/run"), payload); state.runPanel = false; state.notice = ""; await refresh(); if (state.portal) await loadCatalog(); } catch (error) { state.notice = error.message; render(); } }
+  function portalWorkspace() {
+    const workspace = q("section", { class: "portal-workspace" });
+    if (state.portalSidebarCollapsed) {
+      workspace.append(icon("☰", "Show ideas", () => {
+        state.portalSidebarCollapsed = false;
+        localStorage.setItem("neurico-hitl-ideas-collapsed", "0");
+        render({ preserveScroll: true });
+      }, "portal-expand"));
+    }
+    if (state.creatingIdea) {
+      workspace.append(ideaCreationPage());
+      return workspace;
+    }
+    if (!state.selectedIdeaId) {
+      workspace.append(q("div", { class: "portal-empty-state", text: "No ideas" }));
+      return workspace;
+    }
+    if (!state.snapshot) {
+      workspace.append(q("div", { class: "portal-loading", text: "Loading" }));
+      return workspace;
+    }
+    workspace.append(topbar(), state.route === "conversation" ? conversation() : research());
+    return workspace;
+  }
   function render(options = {}) {
     captureGraphScroll();
     captureDrawerScroll();
@@ -524,8 +998,11 @@
     const previousY = window.scrollY;
     const wasNearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
     document.querySelectorAll(".drawer-shade,.drawer").forEach((element) => element.remove());
-    app.replaceChildren(topbar(), state.route === "conversation" ? conversation() : research());
-    if (state.route === "conversation") observeComposerSpace();
+    if (state.portal) {
+      app.replaceChildren(q("div", { class: `portal-shell ${state.portalSidebarCollapsed ? "portal-sidebar-collapsed" : ""}` }, [ideaSidebar(), portalWorkspace()]));
+    }
+    else app.replaceChildren(topbar(), state.route === "conversation" ? conversation() : research());
+    if (state.route === "conversation" && !state.creatingIdea && state.snapshot) observeComposerSpace();
     else composerObserver?.disconnect();
     drawer().forEach((element) => document.body.append(element));
     const activeDrawer = document.querySelector(".drawer[data-drawer-key]");
@@ -546,10 +1023,21 @@
   window.addEventListener("popstate", () => {
     const previousRoute = state.route;
     const nextRoute = location.pathname === "/research" ? "research" : "conversation";
+    const nextIdeaId = new URLSearchParams(location.search).get("idea") || "";
     if (previousRoute === "conversation" && nextRoute !== "conversation") captureConversationScroll();
     state.route = nextRoute;
     state.drawer = null;
     state.runPanel = false;
+    if (state.portal && nextIdeaId && nextIdeaId !== state.selectedIdeaId) {
+      state.selectedIdeaId = nextIdeaId;
+      state.snapshot = null;
+      state.snapshotSig = "";
+      state.thinking = false;
+      state.managerStatusSeq = -1;
+      state.creatingIdea = false;
+      connectWorkspaceEvents();
+      refresh();
+    }
     render({ restoreConversation: nextRoute === "conversation" && previousRoute !== "conversation" });
   });
   async function drainRefreshes() {
@@ -557,7 +1045,11 @@
       refreshPending = false;
       let result;
       try {
-        const response = await fetch("/api/snapshot", { cache: "no-store" });
+        if (state.portal && !state.selectedIdeaId) {
+          result = { data: null, signature: "", error: "" };
+          continue;
+        }
+        const response = await fetch(workspaceApi("/snapshot"), { cache: "no-store" });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Workspace data unavailable.");
         result = { data, signature: JSON.stringify(data), error: "" };
@@ -595,5 +1087,19 @@
     }
     return refreshPromise;
   }
-  const events = new EventSource("/stream"); events.addEventListener("status", (event) => { try { if (applyManagerStatus(JSON.parse(event.data))) render({ preserveScroll: true }); } catch (_) {} }); ["message", "refresh", "workspace_changed", "resolution_cleared"].forEach((name) => events.addEventListener(name, refresh)); setInterval(refresh, 5000); setInterval(updatePhaseTimer, 1000); refresh();
+  async function boot() {
+    await loadCatalog({ updateUrl: true });
+    render();
+    connectWorkspaceEvents();
+    if (!state.portal || state.selectedIdeaId) await refresh();
+  }
+  setInterval(refresh, 5000);
+  setInterval(updatePhaseTimer, 1000);
+  setInterval(async () => {
+    if (!state.portal) return;
+    const before = JSON.stringify(state.ideas);
+    await loadCatalog();
+    if (before !== JSON.stringify(state.ideas)) render({ preserveScroll: true });
+  }, 10000);
+  boot();
 })();

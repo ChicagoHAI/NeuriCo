@@ -16,7 +16,7 @@ from core.hitl_lock import HitlWorkspaceRunActiveError, active_hitl_workspace_ru
 from core.hitl_paths import hitl_launch_status_path
 from core.hitl_util import atomic_write_json, utc_now
 from core.hitl_workspace_view import HitlWorkspaceView
-from core.idea_manager import IdeaManager
+from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.runner import ResearchRunner
 
 
@@ -25,7 +25,7 @@ LOGGER = logging.getLogger(__name__)
 
 def workspace_for_idea(project_root: Path, idea_id: str) -> Path:
     """Resolve or initialize the local workspace recorded for an idea."""
-    idea_manager = IdeaManager(Path(project_root) / "ideas")
+    idea_manager = IdeaManager(resolve_ideas_dir(Path(project_root)))
     idea = idea_manager.get_idea(idea_id)
     if idea is None:
         raise ValueError(f"Idea not found: {idea_id}")

@@ -2046,7 +2046,10 @@ hitl_direct_web_port_from_args() {
 cmd_hitl_container() {
     local interface="$1"
     shift
-    local idea_id="$1"
+    local idea_id=""
+    if [ -n "$1" ] && [[ "$1" != --* ]]; then
+        idea_id="$1"
+    fi
 
     ensure_directories
     check_env_file
@@ -2088,8 +2091,11 @@ cmd_hitl_container() {
 
     # Match `run`: make declared host-local resources available at their
     # identical paths inside the container without re-parsing path data.
-    local mounts_file="$PROJECT_ROOT/ideas/mounts/${idea_id}.txt"
-    if [ -f "$mounts_file" ]; then
+    local mounts_file=""
+    if [ -n "$idea_id" ]; then
+        mounts_file="$PROJECT_ROOT/ideas/mounts/${idea_id}.txt"
+    fi
+    if [ -n "$mounts_file" ] && [ -f "$mounts_file" ]; then
         while IFS= read -r host_path; do
             [ -z "$host_path" ] && continue
             if [ -e "$host_path" ]; then
@@ -2113,11 +2119,6 @@ cmd_hitl_container() {
 # HITL workspace page: launch the containerized manager for an existing idea.
 # -----------------------------------------------------------------------------
 cmd_hitl_web() {
-    if [ -z "$1" ]; then
-        echo -e "${RED}Usage: $0 hitl-web <idea_id> [--port N] [--no-browser]${NC}"
-        exit 1
-    fi
-
     cmd_hitl_container web "$@"
 }
 
@@ -2151,7 +2152,7 @@ cmd_help() {
     echo "  submit-local <idea.md> [--submit]  Convert a local idea file (markdown/text)"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
-    echo "  hitl-web <id>             Open the containerized HITL workspace page"
+    echo "  hitl-web [id]             Open the containerized HITL idea portal"
     echo "  hitl-cli <id>             Open the containerized HITL terminal client"
     echo "  update-tools              Update Claude/Codex/Gemini to latest versions"
     echo "  bump-version <version>    Bump version across all files (e.g., 0.3.0)"
