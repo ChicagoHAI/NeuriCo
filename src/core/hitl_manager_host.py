@@ -67,6 +67,14 @@ class HitlWebChannel(WebChannel):
         self._pending_resolution_request: Optional[Dict[str, Any]] = None
         self._dispatch_lock = threading.Lock()
         self._turn_active = False
+        self._manager_status: Dict[str, Any] = {
+            "event": "status",
+            "label": "Manager idle",
+            "thinking": False,
+            "waiting": False,
+            "phase": "",
+            "seq": 0,
+        }
 
     def set_resolution_reply_handler(self, handler: Any) -> None:
         self._resolution_reply_handler = handler
@@ -86,9 +94,16 @@ class HitlWebChannel(WebChannel):
         """Notify live browsers without creating a second history store."""
         with self._lock:
             self._seq += 1
-            event["seq"] = self._seq
+            event = {**event, "seq": self._seq}
+            if event.get("event") == "status":
+                self._manager_status = {**self._manager_status, **event}
             for subscriber in self._subscribers:
                 subscriber.put(event)
+
+    def presentation_status(self) -> Dict[str, Any]:
+        """Return the current manager presentation state for late renderers."""
+        with self._lock:
+            return dict(self._manager_status)
 
     def present_resolution_request(
         self,

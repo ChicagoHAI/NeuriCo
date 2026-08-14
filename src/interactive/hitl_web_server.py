@@ -187,6 +187,9 @@ def _handler(
             if path == "/api/snapshot":
                 try:
                     snapshot = HitlWorkspaceView(workspace).snapshot()
+                    presentation_status = getattr(channel, "presentation_status", None)
+                    if callable(presentation_status):
+                        snapshot["manager_status"] = presentation_status()
                     self._json(snapshot)
                 except HitlWorkspaceViewError as exc:
                     self._json({"error": str(exc)}, 409)

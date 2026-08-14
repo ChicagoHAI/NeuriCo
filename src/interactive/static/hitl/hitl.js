@@ -12,6 +12,7 @@
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
     conversationScroll: { top: 0, nearBottom: true, captured: false },
     directTurn: null,
+    managerStatusSeq: -1,
     runDraft: { iterations: 2, writePaper: true, paperStyle: "auto", github: false },
   };
   let refreshPromise = null;
@@ -43,6 +44,15 @@
   const icon = (symbol, title, action, className = "") => q("button", { class: `icon-button ${className}`, title, "aria-label": title, onclick: action, text: symbol });
   const humanize = (value) => String(value || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   const shortSha = (sha) => String(sha || "").slice(0, 7);
+  function applyManagerStatus(status) {
+    const seq = Number(status?.seq);
+    if (Number.isFinite(seq) && seq < state.managerStatusSeq) return false;
+    if (Number.isFinite(seq)) state.managerStatusSeq = seq;
+    const thinking = Boolean(status?.thinking);
+    if (state.thinking === thinking) return false;
+    state.thinking = thinking;
+    return true;
+  }
   function autoSizeTextarea(area) {
     const resize = () => {
       if (!area.isConnected) return;
@@ -559,6 +569,7 @@
       if (result.error) {
         state.stale = result.error;
       } else {
+        const thinkingChanged = applyManagerStatus(result.data?.manager_status);
         const directTurnRecorded = state.directTurn && (result.data?.conversation || []).some(
           (record) => record.metadata?.client_turn_id === state.directTurn.clientTurnId,
         );
@@ -566,6 +577,7 @@
         state.snapshotSig = result.signature;
         state.stale = "";
         if (directTurnRecorded) state.directTurn = null;
+        if (thinkingChanged) state.scrollToBottom = true;
       }
       if (changed) render({ preserveScroll: true });
     }
@@ -577,5 +589,5 @@
     }
     return refreshPromise;
   }
-  const events = new EventSource("/stream"); events.addEventListener("status", (event) => { try { const thinking = Boolean(JSON.parse(event.data).thinking); if (state.thinking !== thinking) { state.thinking = thinking; render({ preserveScroll: true }); } } catch (_) {} }); ["message", "refresh", "workspace_changed", "resolution_cleared"].forEach((name) => events.addEventListener(name, refresh)); setInterval(refresh, 5000); setInterval(updatePhaseTimer, 1000); refresh();
+  const events = new EventSource("/stream"); events.addEventListener("status", (event) => { try { if (applyManagerStatus(JSON.parse(event.data))) render({ preserveScroll: true }); } catch (_) {} }); ["message", "refresh", "workspace_changed", "resolution_cleared"].forEach((name) => events.addEventListener(name, refresh)); setInterval(refresh, 5000); setInterval(updatePhaseTimer, 1000); refresh();
 })();
