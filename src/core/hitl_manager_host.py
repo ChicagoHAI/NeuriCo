@@ -24,6 +24,7 @@ from core.hitl_manager_inbox import (
     normalize_human_message,
 )
 from core.hitl_manager_context import HitlManagerTranscript
+from core.hitl_lock import hitl_manager_consumer_lease
 from core.hitl_manager_react import HitlManager
 
 _RESOLUTION_REPLY = "resolution_reply"
@@ -1068,6 +1069,8 @@ class HitlManagerHost:
         self.interface = interface
         self._stop = threading.Event()
         self._conversation_thread: Optional[threading.Thread] = None
+        self._manager_consumer_lease: Optional[Any] = None
+        self._started = False
         self.web_server: Optional[HitlWebServer] = None
         self._browser_url: Optional[str] = None
         self._requested_port = port
@@ -1108,29 +1111,48 @@ class HitlManagerHost:
         return self.web_server.url
 
     def start(self) -> None:
-        if self.web_server is not None:
-            self.web_server.start()
-            if self._browser_url is not None and self.web_server.port != self._requested_port:
+        if self._started:
+            return
+        lease: Optional[Any] = None
+        try:
+            owner: Dict[str, Any] = {"interface": self.interface}
+            if self.web_server is not None:
+                owner["port"] = self._requested_port
+            lease = hitl_manager_consumer_lease(self.work_dir, owner=owner)
+            lease.__enter__()
+            self._manager_consumer_lease = lease
+
+            if self.web_server is not None:
+                self.web_server.start()
+                if self._browser_url is not None and self.web_server.port != self._requested_port:
+                    self.web_server.stop()
+                    raise RuntimeError(
+                        "The requested NeuriCo interface port is unavailable inside the container: "
+                        f"{self._requested_port}. Choose a different --hitl-manager-port."
+                    )
+                browser_url = self.browser_url
+                assert browser_url is not None
+                print(f"\nNeuriCo web interface: {browser_url}", flush=True)
+                if self._open_browser and self._browser_url is None:
+                    threading.Timer(0.8, lambda: webbrowser.open(browser_url)).start()
+                self.channel.send("NeuriCo is available.", kind="system")
+            else:
+                assert isinstance(self.channel, HitlTerminalChannel)
+                self.channel.start()
+            self._conversation_thread = threading.Thread(
+                target=self._run_conversation_loop,
+                daemon=True,
+                name="neurico-hitl-manager-conversation",
+            )
+            self._conversation_thread.start()
+            self._started = True
+        except Exception:
+            if self.web_server is not None:
                 self.web_server.stop()
-                raise RuntimeError(
-                    "The requested NeuriCo interface port is unavailable inside the container: "
-                    f"{self._requested_port}. Choose a different --hitl-manager-port."
-                )
-            browser_url = self.browser_url
-            assert browser_url is not None
-            print(f"\nNeuriCo web interface: {browser_url}", flush=True)
-            if self._open_browser and self._browser_url is None:
-                threading.Timer(0.8, lambda: webbrowser.open(browser_url)).start()
-            self.channel.send("NeuriCo is available.", kind="system")
-        else:
-            assert isinstance(self.channel, HitlTerminalChannel)
-            self.channel.start()
-        self._conversation_thread = threading.Thread(
-            target=self._run_conversation_loop,
-            daemon=True,
-            name="neurico-hitl-manager-conversation",
-        )
-        self._conversation_thread.start()
+            if self._manager_consumer_lease is not None:
+                self._manager_consumer_lease.__exit__(*sys.exc_info())
+                self._manager_consumer_lease = None
+            raise
 
     def stop(self) -> None:
         self._stop.set()
@@ -1140,6 +1162,10 @@ class HitlManagerHost:
         self.manager.stop()
         if self.web_server is not None:
             self.web_server.stop()
+        if self._manager_consumer_lease is not None:
+            self._manager_consumer_lease.__exit__(None, None, None)
+            self._manager_consumer_lease = None
+        self._started = False
 
     def _run_conversation_loop(self) -> None:
         def durable_notice(text: str) -> None:
