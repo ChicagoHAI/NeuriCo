@@ -106,7 +106,7 @@ class HitlManagerInbox:
 
     def enqueue(
         self, text: str, *, provider: str = "", client_turn_id: str = ""
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Any]:
         text = normalize_human_message(text)
         record = {
             "id": f"H{uuid.uuid4().hex}",
@@ -122,9 +122,10 @@ class HitlManagerInbox:
                     "The manager input queue is full. Wait for the manager to "
                     "consume a message or remove one before sending another."
                 )
+            queue_position = len(state["queue"])
             state["queue"].append(record)
             self._write(state)
-        return record
+        return {**record, "queue_position": queue_position}
 
     def pop(self) -> Optional[Dict[str, str]]:
         with exclusive_file_lock(self.lock_path):

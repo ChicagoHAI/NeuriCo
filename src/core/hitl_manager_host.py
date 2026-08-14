@@ -65,6 +65,8 @@ class HitlWebChannel(WebChannel):
         self._last_polled_provider = ""
         self._resolution_reply_handler: Optional[Any] = None
         self._pending_resolution_request: Optional[Dict[str, Any]] = None
+        self._dispatch_lock = threading.Lock()
+        self._turn_active = False
 
     def set_resolution_reply_handler(self, handler: Any) -> None:
         self._resolution_reply_handler = handler
@@ -198,22 +200,44 @@ class HitlWebChannel(WebChannel):
             return {"status": "accepted", "request_key": expected_key}
         text = normalize_human_message(text)
         if self._inbox is None:
-            self._memory_input.put(text)
-            return {"status": "accepted"}
-        record = self._inbox.enqueue(text, provider=provider, client_turn_id=client_turn_id)
-        self._emit({"event": "workspace_changed", "section": "inbox"})
+            with self._dispatch_lock:
+                disposition = (
+                    "queued"
+                    if self._turn_active or not self._memory_input.empty()
+                    else "direct"
+                )
+                self._memory_input.put(text)
+            return {"status": "accepted", "disposition": disposition}
+        with self._dispatch_lock:
+            record = self._inbox.enqueue(
+                text,
+                provider=provider,
+                client_turn_id=client_turn_id,
+            )
+            disposition = (
+                "queued"
+                if self._turn_active or int(record.get("queue_position", 0)) > 0
+                else "direct"
+            )
+        if disposition == "queued":
+            self._emit({"event": "workspace_changed", "section": "inbox"})
         return {
             "status": "accepted",
+            "disposition": disposition,
             "client_turn_id": record["client_turn_id"],
+            "created_at": record["created_at"],
         }
 
     def poll_input(self, timeout: float = 0.0) -> Optional[str]:
         if self._inbox is None:
             try:
-                value = self._memory_input.get(timeout=max(0.0, timeout))
+                with self._dispatch_lock:
+                    value = self._memory_input.get_nowait()
+                    self._turn_active = True
             except queue.Empty:
                 self._last_polled_input_recorded = False
                 self._last_polled_provider = ""
+                self._closed.wait(max(0.0, timeout))
                 return None
             self._last_polled_input_recorded = False
             self._last_polled_provider = ""
@@ -231,7 +255,10 @@ class HitlWebChannel(WebChannel):
                 metadata=metadata,
             )
 
-        value = self._inbox.consume(publish)
+        with self._dispatch_lock:
+            value = self._inbox.consume(publish)
+            if value is not None:
+                self._turn_active = True
         if value is None:
             self._last_polled_input_recorded = False
             self._last_polled_provider = ""
@@ -241,6 +268,11 @@ class HitlWebChannel(WebChannel):
         self._last_polled_provider = str(value.get("provider", "")).strip().lower()
         self._emit({"event": "workspace_changed", "section": "conversation"})
         return str(value["text"]).strip()
+
+    def finish_active_turn(self) -> None:
+        """Mark the claimed conversation turn complete for future submissions."""
+        with self._dispatch_lock:
+            self._turn_active = False
 
     def last_polled_input_was_recorded(self) -> bool:
         return self._last_polled_input_recorded
@@ -258,7 +290,8 @@ class HitlWebChannel(WebChannel):
         except ValueError as exc:
             raise HitlWebInputError("invalid", str(exc)) from exc
         try:
-            updated = self._inbox.update(item_id, text)
+            with self._dispatch_lock:
+                updated = self._inbox.update(item_id, text)
         except ValueError as exc:
             raise HitlWebInputError("stale", str(exc)) from exc
         self._emit({"event": "workspace_changed", "section": "inbox"})
@@ -270,7 +303,8 @@ class HitlWebChannel(WebChannel):
                 "invalid", "Queued-message editing is only available in the web interface."
             )
         try:
-            self._inbox.remove(item_id)
+            with self._dispatch_lock:
+                self._inbox.remove(item_id)
         except ValueError as exc:
             raise HitlWebInputError("stale", str(exc)) from exc
         self._emit({"event": "workspace_changed", "section": "inbox"})
@@ -1229,4 +1263,7 @@ class HitlManagerHost:
                     f"NeuriCo could not complete the conversation: {exc}. You can retry your message.",
                 )
             finally:
+                finish_active_turn = getattr(self.channel, "finish_active_turn", None)
+                if callable(finish_active_turn):
+                    finish_active_turn()
                 self.channel.status("Manager idle", thinking=False)

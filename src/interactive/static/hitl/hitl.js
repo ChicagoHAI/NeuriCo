@@ -463,14 +463,19 @@
     const text = state.composer.trim();
     if (!text) return;
     const clientTurnId = crypto.randomUUID();
-    const directDispatch = !state.thinking && !state.directTurn && !(state.snapshot?.inbox?.queue || []).length;
-    if (directDispatch) state.directTurn = { clientTurnId, text, createdAt: new Date().toISOString() };
     state.composer = "";
     state.notice = "";
     state.scrollToBottom = true;
     render();
     try {
-      await post("/input", { text, input_kind: "conversation", provider: state.provider, client_turn_id: clientTurnId });
+      const result = await post("/input", { text, input_kind: "conversation", provider: state.provider, client_turn_id: clientTurnId });
+      if (result.disposition === "direct") {
+        state.directTurn = {
+          clientTurnId,
+          text,
+          createdAt: result.created_at || new Date().toISOString(),
+        };
+      }
       await refresh();
     } catch (error) {
       if (state.directTurn?.clientTurnId === clientTurnId) state.directTurn = null;
