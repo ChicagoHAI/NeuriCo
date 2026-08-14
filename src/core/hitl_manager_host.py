@@ -24,7 +24,7 @@ from core.hitl_manager_inbox import (
     normalize_human_message,
 )
 from core.hitl_manager_context import HitlManagerTranscript
-from core.hitl_lock import hitl_manager_consumer_lease
+from core.hitl_lock import hitl_manager_consumer_lease, resolve_hitl_manager_provider
 from core.hitl_manager_react import HitlManager
 
 _RESOLUTION_REPLY = "resolution_reply"
@@ -1147,6 +1147,8 @@ class HitlManagerHost:
             self.channel = HitlTerminalChannel(self.work_dir)
             self._open_browser = False
         self.manager = HitlManager(config, work_dir=self.work_dir, channel=self.channel)
+        if self.web_server is not None:
+            self.web_server.set_manager_provider_getter(lambda: self.manager.provider)
         bind_conversation = getattr(self.channel, "bind_conversation", None)
         if callable(bind_conversation):
             bind_conversation(self.manager.conversation)
@@ -1264,7 +1266,7 @@ class HitlManagerHost:
                 provider = getattr(self.channel, "last_polled_provider", lambda: "")()
                 set_provider = getattr(self.manager, "set_provider", None)
                 if callable(set_provider) and provider:
-                    set_provider(str(provider))
+                    set_provider(resolve_hitl_manager_provider(self.work_dir, str(provider)))
                 reply = self.manager.chat(message, input_recorded=bool(recorded))
                 if reply:
                     self.channel.send(reply, kind="manager")

@@ -266,6 +266,11 @@ class ResearchRunner:
         if len(selected_hitl_modes) > 1:
             raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
         hitl = hitl_autoresearch or hitl_continue_autoresearch
+        if hitl and provider not in {"claude", "codex"}:
+            raise ValueError(
+                "HITL AutoResearch requires Claude or Codex so its workers and "
+                "manager use the same backend."
+            )
         if continue_recover and not continue_autoresearch:
             raise ValueError(
                 "--continue-recover only applies with --continue-autoresearch."
@@ -498,6 +503,10 @@ class ResearchRunner:
                 )
                 hitl_host.start()
                 owns_hitl_host = True
+            set_manager_provider = getattr(hitl_host.manager, "set_provider", None)
+            if not callable(set_manager_provider):
+                raise RuntimeError("The HITL host cannot select a manager backend.")
+            set_manager_provider(provider)
 
         if continue_autoresearch:
             success = False

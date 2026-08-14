@@ -106,8 +106,11 @@ class HitlRunController:
 
     def launch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         provider = str(payload.get("provider", "")).strip().lower()
-        if provider not in {"claude", "codex", "gemini"}:
-            raise ValueError("Choose Claude, Codex, or Gemini as the research model.")
+        if provider not in {"claude", "codex"}:
+            raise ValueError(
+                "Choose Claude or Codex for HITL research so the workers and manager "
+                "can use the same backend."
+            )
         try:
             iterations = int(payload.get("iterations", 1))
         except (TypeError, ValueError) as exc:
@@ -124,6 +127,11 @@ class HitlRunController:
             external_owner = active_hitl_workspace_run(self.work_dir)
             if external_owner is not None:
                 raise HitlWorkspaceRunActiveError(self.work_dir, external_owner)
+            manager = getattr(self.host, "manager", None)
+            set_manager_provider = getattr(manager, "set_provider", None)
+            if not callable(set_manager_provider):
+                raise RuntimeError("The HITL host cannot select a manager backend.")
+            set_manager_provider(provider)
             continuation = HitlFrontierStore(self.work_dir).exists()
             mode = "continue" if continuation else "fresh"
             runner = ResearchRunner(

@@ -339,6 +339,11 @@ class HitlManager:
             self._provider = provider
             self.backend = backend
 
+    @property
+    def provider(self) -> str:
+        with self._turn_lock:
+            return self._provider
+
     @staticmethod
     def _load_tools() -> List[Dict[str, Any]]:
         import yaml

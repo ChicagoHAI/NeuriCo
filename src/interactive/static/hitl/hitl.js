@@ -6,7 +6,7 @@
   const initialProvider = "claude";
   const state = {
     snapshot: null, route: initialRoute, view: "understanding", drawer: null,
-    tab: "overview", composer: "", provider: initialProvider,
+    tab: "overview", composer: "", provider: initialProvider, providerTouched: false,
     notice: "", thinking: false, stale: "", selectedOption: "", requestFeedback: "",
     runPanel: false, snapshotSig: "", scrollToBottom: false,
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
@@ -337,7 +337,9 @@
   function composer() {
     const context = state.snapshot?.context || {}; const percent = Math.max(0, Math.min(100, Number(context.percent) || 0));
     const area = q("textarea", { placeholder: "Message NeuriCo", "data-focus-key": "composer" }); area.value = state.composer; autoSizeTextarea(area); area.oninput = () => { state.composer = area.value; autoSizeTextarea(area); }; area.onkeydown = (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); submitConversation(); } };
-    const provider = q("select", { class: "provider", title: "Choose conversation model", "data-focus-key": "composer-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
+    const providerLocked = Boolean(state.snapshot?.manager?.provider_locked);
+    const providerTitle = providerLocked ? "The active run controls the manager model" : "Choose conversation model";
+    const provider = q("select", { class: "provider", title: providerTitle, "aria-label": providerTitle, "data-focus-key": "composer-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.disabled = providerLocked; provider.onchange = () => { state.provider = provider.value; state.providerTouched = true; };
     const meter = q("span", { class: "meter" }, [q("span")]); meter.firstChild.style.width = `${Math.max(2, percent)}%`;
     const usedTokens = Number(context.used_tokens || 0);
     const limitTokens = Number(context.limit_tokens || 300000);
@@ -350,7 +352,7 @@
     if (!state.runPanel || state.snapshot?.live?.active) return null;
     const mode = state.snapshot?.autoresearch?.mode === "continue" ? "continue" : "fresh";
     const title = mode === "continue" ? "Continue AutoResearch" : "Fresh AutoResearch";
-    const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
+    const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; state.providerTouched = true; };
     const iterations = q("input", { id: "run-iterations", type: "number", min: "1", max: "100", value: state.runDraft.iterations, "data-focus-key": "run-iterations" }); iterations.oninput = () => { state.runDraft.iterations = iterations.value; };
     const paper = q("input", { id: "run-paper", type: "checkbox", "data-focus-key": "run-paper" }); paper.checked = state.runDraft.writePaper; paper.onchange = () => { state.runDraft.writePaper = paper.checked; };
     const github = q("input", { id: "run-github", type: "checkbox", "data-focus-key": "run-github" }); github.checked = state.runDraft.github; github.onchange = () => { state.runDraft.github = github.checked; };
@@ -570,6 +572,10 @@
         state.stale = result.error;
       } else {
         const thinkingChanged = applyManagerStatus(result.data?.manager_status);
+        const managerProvider = String(result.data?.manager?.provider || "").toLowerCase();
+        if (["claude", "codex"].includes(managerProvider) && (result.data?.manager?.provider_locked || !state.providerTouched)) {
+          state.provider = managerProvider;
+        }
         const directTurnRecorded = state.directTurn && (result.data?.conversation || []).some(
           (record) => record.metadata?.client_turn_id === state.directTurn.clientTurnId,
         );

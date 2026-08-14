@@ -22,6 +22,7 @@ HITL_RUN_LOCK = Path(".neurico") / "hitl" / "run.lock"
 # Keep the established path so a host started by an earlier build still conflicts
 # with a current host. The lease now covers every manager-consuming interface.
 HITL_MANAGER_CONSUMER_LOCK = Path(".neurico") / "hitl" / "manager" / "web.lock"
+HITL_MANAGER_PROVIDERS = frozenset({"claude", "codex"})
 
 
 class HitlWorkspaceRunActiveError(RuntimeError):
@@ -99,6 +100,20 @@ def active_hitl_workspace_run(work_dir: Path) -> dict[str, Any] | None:
             return _read_run_owner(handle)
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     return None
+
+
+def resolve_hitl_manager_provider(work_dir: Path, requested_provider: str) -> str:
+    """Return the requested provider unless an active run owns that choice."""
+    requested = str(requested_provider or "").strip().lower()
+    if requested not in HITL_MANAGER_PROVIDERS:
+        raise ValueError("Choose Claude or Codex for the HITL manager.")
+    owner = active_hitl_workspace_run(work_dir)
+    if owner is None:
+        return requested
+    locked = str(owner.get("provider") or "").strip().lower()
+    if locked not in HITL_MANAGER_PROVIDERS:
+        raise RuntimeError("The active HITL run does not declare a supported manager backend.")
+    return locked
 
 
 @contextmanager
