@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from cli.hitl_web_portal import HitlWebWorkspaceRegistry
-from core.hitl_lock import HitlWorkspaceRunActiveError
+from core.hitl_lock import HitlWorkspaceRunActiveError, resolve_hitl_manager_provider
 from core.hitl_manager_inbox import HitlWebInputError
 from core.hitl_workspace_view import HitlWorkspaceViewError
 from interactive.hitl_web_server import (
@@ -131,7 +131,8 @@ def _handler(
             return initial_idea_id
 
         def _workspace_input(self, idea_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-            channel = registry.session(idea_id).channel
+            session = registry.session(idea_id)
+            channel = session.channel
             input_kind = str(payload.get("input_kind", "conversation"))
             text = str(payload.get("text", "")).strip()
             if not text and not (
@@ -143,7 +144,10 @@ def _handler(
                 input_kind=input_kind,
                 request_key=payload.get("request_key"),
                 option_id=payload.get("option_id"),
-                provider=str(payload.get("provider", "")),
+                provider=resolve_hitl_manager_provider(
+                    session.work_dir,
+                    str(payload.get("provider", "")),
+                ),
                 client_turn_id=str(payload.get("client_turn_id", "")),
             )
 

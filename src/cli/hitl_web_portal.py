@@ -292,7 +292,16 @@ class HitlWebWorkspaceRegistry:
 
     def snapshot(self, idea_id: str) -> Dict[str, Any]:
         session = self.session(idea_id)
-        return HitlWorkspaceView(session.work_dir).snapshot()
+        snapshot = HitlWorkspaceView(session.work_dir).snapshot()
+        snapshot["manager_status"] = session.channel.presentation_status()
+        live = snapshot.get("live") if isinstance(snapshot.get("live"), dict) else {}
+        current_provider = str(session.host.manager.provider or "").strip().lower()
+        locked_provider = str(live.get("provider") or "").strip().lower()
+        snapshot["manager"] = {
+            "provider": locked_provider if live.get("active") else current_provider,
+            "provider_locked": bool(live.get("active")),
+        }
+        return snapshot
 
     def rename(self, idea_id: str, display_name: str) -> None:
         self.require_idea(idea_id)

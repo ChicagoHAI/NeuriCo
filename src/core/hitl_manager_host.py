@@ -1231,7 +1231,11 @@ class HitlManagerHost:
             append = getattr(conversation, "append", None)
             if callable(append):
                 try:
-                    append("manager", text)
+                    append(
+                        "manager",
+                        text,
+                        metadata={"visibility": "human", "kind": "manager_reply"},
+                    )
                 except Exception:
                     pass
             try:

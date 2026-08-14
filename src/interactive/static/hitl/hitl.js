@@ -52,6 +52,7 @@
   const humanize = (value) => String(value || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
   const shortSha = (sha) => String(sha || "").slice(0, 7);
   function applyManagerStatus(status) {
+    if (!status || typeof status !== "object") return false;
     const seq = Number(status?.seq);
     if (Number.isFinite(seq) && seq < state.managerStatusSeq) return false;
     if (Number.isFinite(seq)) state.managerStatusSeq = seq;
@@ -234,6 +235,7 @@
     state.thinking = false;
     state.managerStatusSeq = -1;
     state.notice = "";
+    state.stale = "";
     state.creatingIdea = false;
     state.drawer = null;
     updateIdeaUrl(replace);
@@ -262,10 +264,15 @@
     const list = q("div", { class: "portal-idea-list" });
     state.ideas.forEach((idea) => {
       const selected = idea.idea_id === state.selectedIdeaId && !state.creatingIdea;
+      const dragDisabled = Boolean(state.renamingIdeaId);
       const row = q("div", {
-        class: `portal-idea ${selected ? "selected" : ""}`,
-        draggable: "true",
-        ondragstart: (event) => { state.draggedIdeaId = idea.idea_id; event.dataTransfer.effectAllowed = "move"; },
+        class: `portal-idea ${selected ? "selected" : ""} ${dragDisabled ? "drag-disabled" : ""}`,
+        draggable: dragDisabled ? "false" : "true",
+        ondragstart: (event) => {
+          if (dragDisabled) { event.preventDefault(); return; }
+          state.draggedIdeaId = idea.idea_id;
+          event.dataTransfer.effectAllowed = "move";
+        },
         ondragover: (event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; },
         ondrop: (event) => { event.preventDefault(); reorderIdeas(state.draggedIdeaId, idea.idea_id); },
         ondragend: () => { state.draggedIdeaId = ""; },
@@ -559,6 +566,7 @@
       state.snapshotSig = "";
       state.thinking = false;
       state.managerStatusSeq = -1;
+      state.stale = "";
       updateIdeaUrl();
       connectWorkspaceEvents();
       render();
@@ -983,7 +991,25 @@
       return workspace;
     }
     if (!state.snapshot) {
-      workspace.append(q("div", { class: "portal-loading", text: "Loading" }));
+      if (state.stale) {
+        const ownershipConflict = /already manages workspace/i.test(state.stale);
+        workspace.append(q("div", {
+          class: "portal-empty-state portal-workspace-error",
+          role: "alert",
+        }, [
+          q("strong", {
+            text: ownershipConflict ? "Open in another interface" : "Workspace unavailable",
+          }),
+          q("p", { text: state.stale }),
+          q("span", {
+            text: ownershipConflict
+              ? "Continue in that interface, stop it, or select another idea."
+              : "NeuriCo will retry automatically.",
+          }),
+        ]));
+      } else {
+        workspace.append(q("div", { class: "portal-loading", text: "Loading" }));
+      }
       return workspace;
     }
     workspace.append(topbar(), state.route === "conversation" ? conversation() : research());
@@ -1034,6 +1060,7 @@
       state.snapshotSig = "";
       state.thinking = false;
       state.managerStatusSeq = -1;
+      state.stale = "";
       state.creatingIdea = false;
       connectWorkspaceEvents();
       refresh();

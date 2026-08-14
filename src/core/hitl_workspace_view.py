@@ -1029,9 +1029,25 @@ class HitlWorkspaceView:
         del inbox
         conversation: List[Dict[str, str]] = []
         for record in records:
+            content = str(record.get("content") or "").strip()
             metadata = record.get("metadata")
             if not isinstance(metadata, dict) or metadata.get("visibility") != "human":
-                continue
+                # Older manager hosts persisted these user-facing notices before
+                # tagging them for the workspace renderer.  Recover only the
+                # exact NeuriCo notice family; ordinary untagged manager context
+                # remains private.
+                legacy_notice = str(record.get("speaker") or "") == "manager" and any(
+                    content.startswith(prefix)
+                    for prefix in (
+                        "NeuriCo skipped a malformed queued message",
+                        "NeuriCo could not read the next queued message",
+                        "NeuriCo finished without a reply",
+                        "NeuriCo could not complete the conversation",
+                    )
+                )
+                if not legacy_notice:
+                    continue
+                metadata = {"visibility": "human", "kind": "manager_reply"}
             if metadata.get("kind") not in {
                 "human_message",
                 "human_reply",
@@ -1039,11 +1055,11 @@ class HitlWorkspaceView:
                 "manager_reply",
             }:
                 continue
-            content = str(record.get("content") or "").strip()
             if not content or content.lower() == "null":
                 continue
             normalized = dict(record)
             normalized["content"] = content
+            normalized["metadata"] = metadata
             conversation.append(normalized)
         return conversation
 
