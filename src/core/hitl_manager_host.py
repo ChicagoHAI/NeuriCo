@@ -1168,6 +1168,8 @@ class HitlManagerHost:
         self._started = False
 
     def _run_conversation_loop(self) -> None:
+        active_poll_error: Optional[tuple[str, str]] = None
+
         def durable_notice(text: str) -> None:
             conversation = getattr(self.manager, "conversation", None)
             append = getattr(conversation, "append", None)
@@ -1184,18 +1186,25 @@ class HitlManagerHost:
         while not self._stop.is_set():
             try:
                 message = self.channel.poll_input(timeout=0.5)
-            except HitlManagerInboxMalformedRecordError:
-                durable_notice(
-                    "NeuriCo skipped a malformed queued message and preserved it "
-                    "for inspection. Conversation processing will continue.",
-                )
+                active_poll_error = None
+            except HitlManagerInboxMalformedRecordError as exc:
+                signature = ("malformed", str(exc))
+                if active_poll_error != signature:
+                    durable_notice(
+                        "NeuriCo skipped a malformed queued message and preserved it "
+                        "for inspection. Conversation processing will continue.",
+                    )
+                    active_poll_error = signature
                 self._stop.wait(0.5)
                 continue
             except Exception as exc:
-                durable_notice(
-                    f"NeuriCo could not read the next queued message: {exc}. "
-                    "The message remains queued and NeuriCo will retry.",
-                )
+                signature = (type(exc).__name__, str(exc))
+                if active_poll_error != signature:
+                    durable_notice(
+                        f"NeuriCo could not read the next queued message: {exc}. "
+                        "The message remains queued and NeuriCo will retry.",
+                    )
+                    active_poll_error = signature
                 self._stop.wait(0.5)
                 continue
             if not message:

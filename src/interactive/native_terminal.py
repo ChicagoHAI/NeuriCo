@@ -12,6 +12,7 @@ import shutil
 import sys
 import termios
 import threading
+import time
 import tty
 import unicodedata
 from collections.abc import Callable, Iterable
@@ -26,6 +27,7 @@ _RESET = "\x1b[0m"
 _MINT = "\x1b[1;38;5;115m"
 _MUTED = "\x1b[38;5;246m"
 _CLEAR_LINE = "\x1b[2K"
+_ESCAPE_TIMEOUT_SECONDS = 0.05
 
 
 def _iter_graphemes(text: str) -> Iterable[str]:
@@ -144,6 +146,7 @@ class NativeTerminalComposer:
         self._history_index: Optional[int] = None
         self._history_draft = ""
         self._input_bytes = b""
+        self._standalone_escape_at: Optional[float] = None
         self._paste_mode = False
         self._last_width = 0
         self._last_status = ("", "")
@@ -196,6 +199,7 @@ class NativeTerminalComposer:
         self._history_index = None
         self._history_draft = ""
         self._input_bytes = b""
+        self._standalone_escape_at = None
         self._paste_mode = False
         self._closed.clear()
         try:
@@ -207,12 +211,15 @@ class NativeTerminalComposer:
             while not self._closed.is_set():
                 ready, _, _ = select.select([fd], [], [], 0.1)
                 if ready:
+                    self._expire_standalone_escape()
                     data = os.read(fd, 256)
                     if not data:
                         raise EOFError
                     result = self._consume(data)
                     if result is not None:
                         return result
+                else:
+                    self._expire_standalone_escape()
                 width = self._width()
                 state, status_text = self._status()
                 status = (state, terminal_safe_text(status_text))
@@ -349,7 +356,13 @@ class NativeTerminalComposer:
 
     def _escape_sequence(self) -> str:
         if not self._input_bytes.startswith(b"\x1b"):
+            self._standalone_escape_at = None
             return ""
+        if len(self._input_bytes) == 1:
+            if self._standalone_escape_at is None:
+                self._standalone_escape_at = time.monotonic()
+            return "incomplete"
+        self._standalone_escape_at = None
         known = {
             b"\x1b[A": "up",
             b"\x1b[B": "down",
@@ -390,10 +403,21 @@ class NativeTerminalComposer:
             self._input_bytes = self._input_bytes[end:]
             return "unknown"
 
-        if len(self._input_bytes) == 1:
-            return "incomplete"
-        self._input_bytes = self._input_bytes[2:]
+        # Treat an unsupported Alt/Option modifier as transparent. Removing
+        # only ESC leaves the following complete UTF-8 character for the
+        # ordinary decoder instead of splitting its byte sequence.
+        self._input_bytes = self._input_bytes[1:]
         return "unknown"
+
+    def _expire_standalone_escape(self) -> bool:
+        """Discard a lone Escape after the terminal sequence window closes."""
+        if self._input_bytes != b"\x1b" or self._standalone_escape_at is None:
+            return False
+        if time.monotonic() - self._standalone_escape_at < _ESCAPE_TIMEOUT_SECONDS:
+            return False
+        self._input_bytes = b""
+        self._standalone_escape_at = None
+        return True
 
     @staticmethod
     def _control_sequence_end(raw: bytes, *, start: int) -> Optional[int]:
