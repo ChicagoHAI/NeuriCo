@@ -1290,7 +1290,6 @@ class HitlManagerHost:
             self.channel = HitlWebChannel(self.work_dir)
             self._open_browser = False
         self.manager: Optional[HitlManager] = None
-        self._bind_passive_conversation()
         if self.web_server is not None:
             self.web_server.set_manager_provider_getter(self.manager_provider)
 
@@ -1334,6 +1333,7 @@ class HitlManagerHost:
                 renderer = hitl_renderer_lease(self.work_dir, owner=owner)
                 renderer.__enter__()
                 self._renderer_lease = renderer
+                self._bind_passive_conversation()
 
             if self.web_server is not None:
                 self.web_server.start()

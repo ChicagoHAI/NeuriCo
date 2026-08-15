@@ -203,12 +203,6 @@ class HitlWebWorkspaceRegistry:
             summary = by_id[idea_id]
             idea = self.require_idea(idea_id)
             workspace = self._workspace_path(idea_id, idea)
-            live: Dict[str, Any] = {}
-            if workspace.is_dir():
-                try:
-                    live = HitlWorkspaceView(workspace).live_status()
-                except Exception:
-                    live = {}
             items.append(
                 {
                     "idea_id": idea_id,
@@ -218,7 +212,7 @@ class HitlWebWorkspaceRegistry:
                     "status": str(summary.get("status", "unknown")),
                     "created_at": str(summary.get("created_at", "")),
                     "workspace_exists": workspace.is_dir(),
-                    "live": live,
+                    "live": {},
                 }
             )
         return {"ideas": items, "order": list(presentation["order"])}

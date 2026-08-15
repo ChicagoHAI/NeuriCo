@@ -8,8 +8,8 @@
   const initialPortalSidebarCollapsed = localStorage.getItem("neurico-hitl-ideas-collapsed") === "1";
   const state = {
     snapshot: null, route: initialRoute, view: "understanding", drawer: null,
-    tab: "overview", composer: "", provider: initialProvider, providerTouched: false,
-    notice: "", thinking: false, stale: "", selectedOption: "", requestFeedback: "",
+    tab: "overview", provider: initialProvider, providerTouched: false,
+    thinking: false, stale: "",
     runPanel: false, snapshotSig: "", scrollToBottom: false,
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
     conversationScroll: { top: 0, nearBottom: true, captured: false },
@@ -24,6 +24,28 @@
   let refreshPending = false;
   let composerObserver = null;
   let events = null;
+  let workspaceGeneration = 0;
+  const workspaceTransient = new Map();
+  function workspaceKey(ideaId = state.selectedIdeaId, portal = state.portal) {
+    return portal ? `idea:${String(ideaId || "")}` : "workspace";
+  }
+  function transientFor(key = workspaceKey()) {
+    if (!workspaceTransient.has(key)) workspaceTransient.set(key, { composer: "", notice: "", selectedOption: "", requestFeedback: "" });
+    return workspaceTransient.get(key);
+  }
+  function workspaceOperation(suffix) {
+    const ideaId = state.selectedIdeaId;
+    const portal = Boolean(state.portal);
+    return {
+      ideaId,
+      key: workspaceKey(ideaId, portal),
+      generation: workspaceGeneration,
+      path: workspaceApi(suffix, ideaId, portal),
+    };
+  }
+  function operationIsCurrent(operation) {
+    return operation.generation === workspaceGeneration && operation.key === workspaceKey();
+  }
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
   const q = (tag, attrs = {}, children = []) => {
     const element = document.createElement(tag);
@@ -73,10 +95,10 @@
     else requestAnimationFrame(resize);
   }
   const ideaById = (id) => state.snapshot?.ideas?.find((idea) => idea.idea_id === id);
-  const requestDraftKey = (request) => `neurico-hitl-request:${request?.request_key || "none"}`;
-  function loadRequestDraft(request) { try { return JSON.parse(sessionStorage.getItem(requestDraftKey(request)) || "{}"); } catch (_) { return {}; } }
-  function saveRequestDraft(request, patch) { const draft = { ...loadRequestDraft(request), ...patch }; sessionStorage.setItem(requestDraftKey(request), JSON.stringify(draft)); }
-  function clearRequestDraft(request) { sessionStorage.removeItem(requestDraftKey(request)); state.selectedOption = ""; state.requestFeedback = ""; }
+  const requestDraftKey = (request, key = workspaceKey()) => `neurico-hitl-request:${key}:${request?.request_key || "none"}`;
+  function loadRequestDraft(request, key = workspaceKey()) { try { return JSON.parse(sessionStorage.getItem(requestDraftKey(request, key)) || "{}"); } catch (_) { return {}; } }
+  function saveRequestDraft(request, patch, key = workspaceKey()) { const draft = { ...loadRequestDraft(request, key), ...patch }; sessionStorage.setItem(requestDraftKey(request, key), JSON.stringify(draft)); }
+  function clearRequestDraft(request, key = workspaceKey()) { sessionStorage.removeItem(requestDraftKey(request, key)); const transient = transientFor(key); transient.selectedOption = ""; transient.requestFeedback = ""; }
   function captureGraphScroll() { const scroller = document.querySelector(".graph-scroll"); if (scroller) state.graphScroll[state.view] = { left: scroller.scrollLeft, top: scroller.scrollTop }; }
   function captureFocusedControl() {
     const element = document.activeElement;
@@ -135,9 +157,9 @@
     render({ restoreConversation: route === "conversation" && previousRoute !== "conversation" });
   }
 
-  const encodedIdeaId = () => encodeURIComponent(state.selectedIdeaId || "");
-  function workspaceApi(suffix) {
-    if (state.portal) return `/api/ideas/${encodedIdeaId()}${suffix}`;
+  const encodedIdeaId = (ideaId = state.selectedIdeaId) => encodeURIComponent(ideaId || "");
+  function workspaceApi(suffix, ideaId = state.selectedIdeaId, portal = state.portal) {
+    if (portal) return `/api/ideas/${encodedIdeaId(ideaId)}${suffix}`;
     if (suffix === "/snapshot") return "/api/snapshot";
     if (suffix === "/stream") return "/stream";
     if (suffix === "/queue") return "/api/queue";
@@ -195,15 +217,17 @@
     events?.close();
     events = null;
     if (state.portal && !state.selectedIdeaId) return;
-    events = new EventSource(workspaceApi("/stream"));
+    const operation = workspaceOperation("/stream");
+    events = new EventSource(operation.path);
     events.addEventListener("status", (event) => {
+      if (!operationIsCurrent(operation)) return;
       try {
         if (applyManagerStatus(JSON.parse(event.data))) render({ preserveScroll: true });
       } catch (_) {}
     });
     ["message", "refresh", "workspace_changed", "resolution_cleared"].forEach((name) => events.addEventListener(name, async () => {
+      if (!operationIsCurrent(operation)) return;
       await refresh();
-      if (state.portal) { await loadCatalog(); render({ preserveScroll: true }); }
     }));
   }
   async function loadCatalog(options = {}) {
@@ -213,9 +237,16 @@
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Ideas unavailable.");
       state.portal = true;
-      state.ideas = Array.isArray(data.ideas) ? data.ideas : [];
+      const priorLive = new Map(state.ideas.map((idea) => [idea.idea_id, idea.live || {}]));
+      state.ideas = (Array.isArray(data.ideas) ? data.ideas : []).map((idea) => ({
+        ...idea,
+        live: Object.keys(idea.live || {}).length ? idea.live : priorLive.get(idea.idea_id) || {},
+      }));
       const selectedExists = state.ideas.some((idea) => idea.idea_id === state.selectedIdeaId);
-      if (!selectedExists) state.selectedIdeaId = state.ideas[0]?.idea_id || "";
+      if (!selectedExists) {
+        workspaceGeneration += 1;
+        state.selectedIdeaId = state.ideas[0]?.idea_id || "";
+      }
       if (options.updateUrl) updateIdeaUrl(true);
       return true;
     } catch (error) {
@@ -228,12 +259,12 @@
     if (!nextId) return;
     if (nextId === state.selectedIdeaId && !state.creatingIdea) return;
     captureConversationScroll();
+    workspaceGeneration += 1;
     state.selectedIdeaId = nextId;
     state.snapshot = null;
     state.snapshotSig = "";
     state.thinking = false;
     state.managerStatusSeq = -1;
-    state.notice = "";
     state.stale = "";
     state.creatingIdea = false;
     state.drawer = null;
@@ -326,13 +357,13 @@
       state.drawer = { kind: "submitted_idea", source: { ...idea, ...definition } };
       state.tab = "overview";
       render({ preserveScroll: true });
-    } catch (error) { state.notice = error.message; render({ preserveScroll: true }); }
+    } catch (error) { transientFor().notice = error.message; render({ preserveScroll: true }); }
   }
   async function renameIdea(ideaId, displayName) {
     try {
       await requestJson(`/api/ideas/${encodeURIComponent(ideaId)}/presentation`, { display_name: displayName }, "PATCH");
       await loadCatalog();
-    } catch (error) { state.notice = error.message; }
+    } catch (error) { transientFor().notice = error.message; }
   }
   async function reorderIdeas(sourceId, targetId) {
     if (!sourceId || !targetId || sourceId === targetId) return;
@@ -345,7 +376,7 @@
     state.ideas = order.map((ideaId) => byId.get(ideaId));
     render({ preserveScroll: true });
     try { await requestJson("/api/ideas/order", { order }, "PUT"); }
-    catch (error) { state.notice = error.message; await loadCatalog(); render(); }
+    catch (error) { transientFor().notice = error.message; await loadCatalog(); render(); }
   }
 
   const sectionFields = [
@@ -560,6 +591,7 @@
       const result = await requestJson("/api/ideas", { idea: cleanIdeaValue(state.ideaDraft) }, "POST");
       await loadCatalog();
       state.creatingIdea = false;
+      workspaceGeneration += 1;
       state.selectedIdeaId = result.idea_id;
       state.snapshot = null;
       state.snapshotSig = "";
@@ -659,9 +691,10 @@
   }
 
   function requestControls(request) {
+    const transient = transientFor();
     const draft = loadRequestDraft(request);
-    const selectedOption = state.selectedOption || draft.selectedOption || "";
-    const requestFeedback = state.requestFeedback || draft.requestFeedback || "";
+    const selectedOption = transient.selectedOption || draft.selectedOption || "";
+    const requestFeedback = transient.requestFeedback || draft.requestFeedback || "";
     const controls = q("div", { class: "resolution-controls" });
     const options = q("div", { class: "resolution-options" });
     (request.options || []).forEach((option) => options.append(q("button", {
@@ -669,7 +702,7 @@
       "aria-pressed": selectedOption === option.id ? "true" : "false",
       "data-focus-key": `request-option:${request.request_key}:${option.id}`,
       onclick: () => {
-        state.selectedOption = option.id;
+        transient.selectedOption = option.id;
         saveRequestDraft(request, { selectedOption: option.id });
         render({ preserveScroll: true });
       },
@@ -678,7 +711,7 @@
     feedback.value = requestFeedback;
     autoSizeTextarea(feedback);
     feedback.oninput = () => {
-      state.requestFeedback = feedback.value;
+      transient.requestFeedback = feedback.value;
       saveRequestDraft(request, { requestFeedback: feedback.value });
       autoSizeTextarea(feedback);
     };
@@ -781,7 +814,8 @@
   }
   function composer() {
     const context = state.snapshot?.context || {}; const percent = Math.max(0, Math.min(100, Number(context.percent) || 0));
-    const area = q("textarea", { placeholder: "Message NeuriCo", "data-focus-key": "composer" }); area.value = state.composer; autoSizeTextarea(area); area.oninput = () => { state.composer = area.value; autoSizeTextarea(area); }; area.onkeydown = (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); submitConversation(); } };
+    const transient = transientFor();
+    const area = q("textarea", { placeholder: "Message NeuriCo", "data-focus-key": "composer" }); area.value = transient.composer; autoSizeTextarea(area); area.oninput = () => { transient.composer = area.value; autoSizeTextarea(area); }; area.onkeydown = (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); submitConversation(); } };
     const providerLocked = Boolean(state.snapshot?.manager?.provider_locked);
     const providerTitle = providerLocked ? "The active run controls the manager model" : "Choose conversation model";
     const provider = q("select", { class: "provider", title: providerTitle, "aria-label": providerTitle, "data-focus-key": "composer-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.disabled = providerLocked; provider.onchange = () => { state.provider = provider.value; state.providerTouched = true; };
@@ -816,7 +850,8 @@
       thread.append(message(record, requestId && String(record.record_id || record.id || "") === requestId ? request : null));
     });
     if (state.thinking) thread.append(q("div", { class: "thinking", text: "NeuriCo is thinking " }, [q("i"), q("i"), q("i")]));
-    shell.append(thread); if (state.notice) shell.append(q("p", { class: "notice", text: state.notice }));
+    const notice = transientFor().notice;
+    shell.append(thread); if (notice) shell.append(q("p", { class: "notice", text: notice }));
     return q("div", { class: `conversation-page ${state.runPanel ? "run-open" : ""}` }, [shell, runPanel(), composer()]);
   }
 
@@ -929,29 +964,35 @@
 
   const post = (path, payload) => requestJson(path, payload, "POST");
   async function submitConversation() {
-    const text = state.composer.trim();
+    const operation = workspaceOperation("/input");
+    const transient = transientFor(operation.key);
+    const text = transient.composer.trim();
     if (!text) return;
     const clientTurnId = crypto.randomUUID();
-    state.composer = "";
-    state.notice = "";
+    transient.composer = "";
+    transient.notice = "";
     state.scrollToBottom = true;
     render();
     try {
-      await post(workspaceApi("/input"), { text, input_kind: "conversation", provider: state.provider, client_turn_id: clientTurnId });
-      await refresh();
+      await post(operation.path, { text, input_kind: "conversation", provider: state.provider, client_turn_id: clientTurnId });
+      if (operationIsCurrent(operation)) await refresh();
     } catch (error) {
-      state.composer = text;
-      state.notice = error.message;
+      if (!operationIsCurrent(operation)) return;
+      if (!transient.composer.trim()) transient.composer = text;
+      transient.notice = error.message;
       render();
     }
   }
-  async function submitRequest(request, feedback) { const draft = loadRequestDraft(request); const selectedOption = state.selectedOption || draft.selectedOption || ""; const text = String(feedback || draft.requestFeedback || "").trim(); if (!selectedOption && !text) { state.notice = "Choose an option or add feedback before submitting."; render(); return; } try { await post(workspaceApi("/input"), { text, input_kind: "resolution_reply", request_key: request.request_key, option_id: selectedOption, provider: state.provider, client_turn_id: crypto.randomUUID() }); clearRequestDraft(request); await refresh(); } catch (error) { state.notice = error.message; render(); } }
-  async function removeQueued(id) { try { await post(workspaceApi("/queue"), { action: "remove", id }); await refresh(); } catch (error) { state.notice = error.message; render(); } }
+  async function submitRequest(request, feedback) { const operation = workspaceOperation("/input"); const transient = transientFor(operation.key); const draft = loadRequestDraft(request, operation.key); const selectedOption = transient.selectedOption || draft.selectedOption || ""; const text = String(feedback || draft.requestFeedback || "").trim(); if (!selectedOption && !text) { transient.notice = "Choose an option or add feedback before submitting."; render(); return; } try { await post(operation.path, { text, input_kind: "resolution_reply", request_key: request.request_key, option_id: selectedOption, provider: state.provider, client_turn_id: crypto.randomUUID() }); clearRequestDraft(request, operation.key); if (operationIsCurrent(operation)) await refresh(); } catch (error) { if (!operationIsCurrent(operation)) return; transient.notice = error.message; render(); } }
+  async function removeQueued(id) { const operation = workspaceOperation("/queue"); const transient = transientFor(operation.key); try { await post(operation.path, { action: "remove", id }); if (operationIsCurrent(operation)) await refresh(); } catch (error) { if (!operationIsCurrent(operation)) return; transient.notice = error.message; render(); } }
   async function editQueued(item) {
+    const operation = workspaceOperation("/queue");
+    const transient = transientFor(operation.key);
     try {
-      await post(workspaceApi("/queue"), { action: "remove", id: item.id });
-      state.composer = String(item.text || "");
-      state.notice = "";
+      await post(operation.path, { action: "remove", id: item.id });
+      if (!operationIsCurrent(operation)) return;
+      transient.composer = String(item.text || "");
+      transient.notice = "";
       await refresh();
       requestAnimationFrame(() => {
         const area = document.querySelector('textarea[data-focus-key="composer"]');
@@ -960,10 +1001,10 @@
         area.setSelectionRange(area.value.length, area.value.length);
         autoSizeTextarea(area);
       });
-    } catch (error) { state.notice = error.message; render(); }
+    } catch (error) { if (!operationIsCurrent(operation)) return; transient.notice = error.message; render(); }
   }
-  async function cancelTurn() { state.notice = "Cancellation is not available yet."; render(); }
-  async function launchRun(payload) { try { await post(workspaceApi("/run"), payload); state.runPanel = false; state.notice = ""; await refresh(); if (state.portal) await loadCatalog(); } catch (error) { state.notice = error.message; render(); } }
+  async function cancelTurn() { transientFor().notice = "Cancellation is not available yet."; render(); }
+  async function launchRun(payload) { const operation = workspaceOperation("/run"); const transient = transientFor(operation.key); try { await post(operation.path, payload); if (!operationIsCurrent(operation)) return; state.runPanel = false; transient.notice = ""; await refresh(); } catch (error) { if (!operationIsCurrent(operation)) return; transient.notice = error.message; render(); } }
   function portalWorkspace() {
     const workspace = q("section", { class: "portal-workspace" });
     if (state.portalSidebarCollapsed) {
@@ -1046,6 +1087,7 @@
     state.drawer = null;
     state.runPanel = false;
     if (state.portal && nextIdeaId && nextIdeaId !== state.selectedIdeaId) {
+      workspaceGeneration += 1;
       state.selectedIdeaId = nextIdeaId;
       state.snapshot = null;
       state.snapshotSig = "";
@@ -1061,18 +1103,23 @@
   async function drainRefreshes() {
     while (refreshPending) {
       refreshPending = false;
+      const operation = workspaceOperation("/snapshot");
       let result;
       try {
         if (state.portal && !state.selectedIdeaId) {
           result = { data: null, signature: "", error: "" };
           continue;
         }
-        const response = await fetch(workspaceApi("/snapshot"), { cache: "no-store" });
+        const response = await fetch(operation.path, { cache: "no-store" });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Workspace data unavailable.");
         result = { data, signature: JSON.stringify(data), error: "" };
       } catch (error) {
         result = { data: null, signature: "", error: error.message };
+      }
+      if (!operationIsCurrent(operation)) {
+        refreshPending = true;
+        continue;
       }
       if (refreshPending) continue;
       const changed = result.error
@@ -1094,6 +1141,10 @@
         state.snapshot = result.data;
         state.snapshotSig = result.signature;
         state.stale = "";
+        if (state.portal) {
+          const selectedIdea = state.ideas.find((idea) => idea.idea_id === operation.ideaId);
+          if (selectedIdea) selectedIdea.live = result.data?.live || {};
+        }
         if (thinkingChanged) state.scrollToBottom = true;
       }
       if (changed) render({ preserveScroll: true });
@@ -1114,11 +1165,5 @@
   }
   setInterval(refresh, 5000);
   setInterval(updatePhaseTimer, 1000);
-  setInterval(async () => {
-    if (!state.portal) return;
-    const before = JSON.stringify(state.ideas);
-    await loadCatalog();
-    if (before !== JSON.stringify(state.ideas)) render({ preserveScroll: true });
-  }, 10000);
   boot();
 })();
