@@ -269,6 +269,10 @@ class HitlManager:
         self.work_dir = Path(work_dir)
         manager_config = config.get("manager", {}) if isinstance(config.get("manager", {}), dict) else {}
         self._manager_config = manager_config
+        self._backend_state_lock = threading.Lock()
+        # Keep provider replacement separate from transcript/tool state. MCP
+        # callbacks re-enter _turn_lock while a backend call is active.
+        self._backend_lifecycle_lock = threading.RLock()
         self._provider = str(manager_config.get("hitl_manager_provider", "claude")).strip().lower()
         self.backend = self._backend_for_provider(self._provider)
         self.channel = channel or TerminalChannel()
@@ -331,17 +335,21 @@ class HitlManager:
 
     def set_provider(self, provider: str) -> None:
         provider = str(provider or "").strip().lower()
-        if not provider or provider == self._provider:
+        if not provider:
             return
-        backend = self._backend_for_provider(provider)
-        with self._turn_lock:
+        with self._backend_lifecycle_lock:
+            with self._backend_state_lock:
+                if provider == self._provider:
+                    return
+            backend = self._backend_for_provider(provider)
             self._stop_cli_mcp_bridge()
-            self._provider = provider
-            self.backend = backend
+            with self._backend_state_lock:
+                self._provider = provider
+                self.backend = backend
 
     @property
     def provider(self) -> str:
-        with self._turn_lock:
+        with self._backend_state_lock:
             return self._provider
 
     @staticmethod
@@ -2041,20 +2049,21 @@ class HitlManager:
         return text
 
     def _send(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None) -> Any:
-        last: Optional[Exception] = None
-        for attempt in range(self.max_backend_retries):
-            try:
-                return self._send_once(messages, tools, backend=backend)
-            except Exception as exc:
-                last = exc
-                if self._stop.is_set():
-                    raise RuntimeError("HITL manager stopped during its provider turn.") from exc
-                if attempt + 1 < self.max_backend_retries:
-                    if self._stop.wait(self.backend_retry_delay_seconds):
-                        raise RuntimeError(
-                            "HITL manager stopped during its provider turn."
-                        ) from exc
-        raise RuntimeError("Manager backend was unavailable") from last
+        with self._backend_lifecycle_lock:
+            last: Optional[Exception] = None
+            for attempt in range(self.max_backend_retries):
+                try:
+                    return self._send_once(messages, tools, backend=backend)
+                except Exception as exc:
+                    last = exc
+                    if self._stop.is_set():
+                        raise RuntimeError("HITL manager stopped during its provider turn.") from exc
+                    if attempt + 1 < self.max_backend_retries:
+                        if self._stop.wait(self.backend_retry_delay_seconds):
+                            raise RuntimeError(
+                                "HITL manager stopped during its provider turn."
+                            ) from exc
+            raise RuntimeError("Manager backend was unavailable") from last
 
     def _send_once(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None) -> Any:
         """Run one manager provider turn without a wall-clock deadline."""
