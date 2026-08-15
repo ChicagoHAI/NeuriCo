@@ -427,6 +427,7 @@ class HitlTerminalChannel(UserChannel):
         self._claimed_active_id = ""
         self._run_launcher: Optional[Any] = None
         self._run_status: Optional[Any] = None
+        self._run_stopper: Optional[Any] = None
         self._interface_view: Optional[Any] = None
         self._projection_lock = threading.Lock()
         self._cached_live_status: Dict[str, Any] = {
@@ -448,9 +449,10 @@ class HitlTerminalChannel(UserChannel):
     def bind_conversation(self, conversation: HitlManagerTranscript) -> None:
         self._conversation = conversation
 
-    def set_run_launcher(self, launcher: Any, status: Any) -> None:
+    def set_run_launcher(self, launcher: Any, status: Any, stopper: Any = None) -> None:
         self._run_launcher = launcher
         self._run_status = status
+        self._run_stopper = stopper
         live, error = self._read_run_status()
         if live is not None:
             self._cache_live_status(live)
@@ -728,6 +730,26 @@ class HitlTerminalChannel(UserChannel):
             return {"status": "ignored"}
         if input_kind is None and text == "/run":
             return self._launch_run_interactively()
+        if input_kind is None and text == "/stop":
+            if not callable(self._run_stopper):
+                self._write_block(
+                    self._ui.system("Run stopping is unavailable in this client.", tone="error"),
+                    blank_before=True,
+                )
+                return {"status": "unavailable"}
+            try:
+                result = self._run_stopper()
+            except Exception as exc:
+                self._write_block(
+                    self._ui.system(str(exc), tone="error"),
+                    blank_before=True,
+                )
+                return {"status": "invalid"}
+            self._write_block(
+                self._ui.system("Stop requested. NeuriCo is restoring saved progress.", tone="review"),
+                blank_before=True,
+            )
+            return dict(result)
         if input_kind is None and text == "/status":
             status, error = self._read_run_status()
             if status is None:

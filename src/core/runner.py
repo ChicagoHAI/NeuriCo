@@ -92,6 +92,7 @@ def _with_hitl_workspace_run_ownership(method):
                 "interface": str(hitl_interface),
                 "mode": mode,
                 "provider": str(arguments.arguments["provider"]),
+                "request_id": str(os.environ.get("NEURICO_HITL_REQUEST_ID", "")).strip(),
             },
         ):
             return method(self, *args, **kwargs)
@@ -1122,6 +1123,14 @@ https://github.com/ChicagoHAI/neurico
 
         from agents.paper_writer import run_paper_writer
 
+        paper_checkpoint_sha = ""
+        if hitl_enabled:
+            from core.autoresearch import CheckpointManager
+
+            paper_checkpoint_sha = CheckpointManager(work_dir).create_checkpoint(
+                "Before HITL paper writing"
+            ).sha
+
         domain = idea.get("idea", {}).get("domain", "general")
         paper_result = run_paper_writer(
             work_dir=work_dir,
@@ -1131,6 +1140,17 @@ https://github.com/ChicagoHAI/neurico
             full_permissions=full_permissions,
             domain=domain,
         )
+
+        if hitl_enabled and paper_result.get("stopped"):
+            from core.autoresearch import CheckpointManager
+            from core.hitl_run_control import HitlRunStopRequested
+
+            CheckpointManager(work_dir).restore_checkpoint(
+                paper_checkpoint_sha,
+                clean_untracked_public=True,
+                preserve_paper_outputs=False,
+            )
+            raise HitlRunStopRequested("HITL paper writing stopped by the user.")
 
         if paper_result.get("success"):
             print(f"\n✅ Paper generated: {paper_result['draft_dir']}/main.tex")

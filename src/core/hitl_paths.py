@@ -30,6 +30,14 @@ def hitl_launch_status_path(work_dir: Path) -> Path:
     return hitl_state_dir(work_dir) / "launch.json"
 
 
+def hitl_run_control_dir(work_dir: Path) -> Path:
+    return hitl_state_dir(work_dir) / "control"
+
+
+def hitl_stop_request_path(work_dir: Path, request_id: str) -> Path:
+    return hitl_run_control_dir(work_dir) / f"stop.{request_id}.json"
+
+
 def hitl_launch_requests_dir(workspace_root: Path) -> Path:
     return Path(workspace_root) / ".neurico" / "hitl-launch-requests"
 

@@ -396,6 +396,7 @@ class HitlTerminalUI:
     def help(self) -> List[str]:
         commands = [
             ("/run", "Start or continue research"),
+            ("/stop", "Stop research and restore saved progress"),
             ("/status", "Show current research status"),
             ("/activity", "Show recent research activity"),
             ("/idea", "Show one idea by ID, for example /idea I7"),

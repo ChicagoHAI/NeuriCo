@@ -860,6 +860,9 @@ class HitlAutoResearchController:
         """
         if iterations < 0:
             raise ValueError("iterations must be non-negative")
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        raise_if_hitl_run_stop_requested()
 
         resumed_results: list[AutoResearchIterationResult] = []
         resumed_frontier_selection_required = False
@@ -920,6 +923,7 @@ class HitlAutoResearchController:
 
         first_iteration = len(resumed_results) + 1
         for iteration in range(first_iteration, iterations + 1):
+            raise_if_hitl_run_stop_requested()
             result = self._run_iteration_until_scored(iteration, current_best_sha)
             iteration_results.append(result)
             if bool(getattr(result, "terminal_failure", False)):
@@ -944,12 +948,15 @@ class HitlAutoResearchController:
         parent_sha: str,
     ) -> AutoResearchIterationResult:
         """Relaunch a rolled-back HITL iteration from its selected parent."""
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
         while True:
             result = self.run_iteration(iteration, parent_sha)
             if bool(getattr(result, "terminal_failure", False)) or self._is_normal_scored_iteration(
                 result
             ):
                 return result
+            raise_if_hitl_run_stop_requested()
             print(
                 "↻ HITL AutoResearch attempt rollback completed; "
                 "relaunching from the selected parent frontier node."

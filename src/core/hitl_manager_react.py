@@ -806,7 +806,9 @@ class HitlManager:
         )
         self.start()
         self._turns.put(turn)
-        turn.done.wait()
+        from core.hitl_run_control import wait_for_event_or_hitl_stop
+
+        wait_for_event_or_hitl_stop(turn.done)
         if turn.error is not None:
             raise turn.error
         return turn.reply
@@ -899,7 +901,9 @@ class HitlManager:
         else:
             self.notify_runtime(prompt, request_key=request_key)
         resolution = self._resolutions[request_key]
-        resolution.completed.wait()
+        from core.hitl_run_control import wait_for_event_or_hitl_stop
+
+        wait_for_event_or_hitl_stop(resolution.completed)
         completed = self.runtime_state.pending_worker_command()
         if isinstance(completed, dict) and completed.get("request_key") == request_key:
             if completed.get("status") == "cancelled":
@@ -916,6 +920,9 @@ class HitlManager:
     def wait_for_worker_request(self, request_key: str) -> Dict[str, Any]:
         """Wait for an already-attached worker request to receive its response."""
         while True:
+            from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+            raise_if_hitl_run_stop_requested()
             pending = self.runtime_state.pending_worker_command()
             if not isinstance(pending, dict) or pending.get("request_key") != request_key:
                 raise HitlRuntimeStateError(
@@ -1383,7 +1390,9 @@ class HitlManager:
             manager_review_kind=manager_review_kind,
         )
         self.notify_runtime(prompt, request_key=request_key)
-        resolution.completed.wait()
+        from core.hitl_run_control import wait_for_event_or_hitl_stop
+
+        wait_for_event_or_hitl_stop(resolution.completed)
         completed = self.runtime_state.pending_worker_command()
         if isinstance(completed, dict) and completed.get("request_key") == request_key:
             if completed.get("status") == "cancelled":
@@ -1625,6 +1634,9 @@ class HitlManager:
         self.notify_runtime(prompt, runtime_action_kind="select_frontier")
         # The controller is the sole executor of the recorded manager choice.
         while True:
+            from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+            raise_if_hitl_run_stop_requested()
             current = self.runtime_state.snapshot().get("next_autoresearch_action")
             if (
                 isinstance(current, dict)
@@ -1671,6 +1683,9 @@ class HitlManager:
         self.notify_runtime(prompt, runtime_action_kind="prune_frontier")
         # The controller is the sole executor of the recorded manager choice.
         while True:
+            from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+            raise_if_hitl_run_stop_requested()
             current = self.runtime_state.snapshot().get("next_autoresearch_action")
             if (
                 isinstance(current, dict)

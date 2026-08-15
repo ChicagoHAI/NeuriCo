@@ -21,8 +21,10 @@ from core.hitl_manager_context import HitlManagerContext
 from core.hitl_paths import (
     hitl_idea_log_path,
     hitl_launch_status_path,
+    hitl_run_control_dir,
     hitl_runtime_state_path,
     hitl_state_dir,
+    hitl_stop_request_path,
 )
 from core.hitl_whiteboard import hitl_whiteboard_path
 from core.whiteboard import MAX_TIP_CONTENT_CHARS
@@ -107,6 +109,7 @@ class HitlWorkspaceView:
             self._path_revision(hitl_runtime_state_path(self.work_dir)),
             self._path_revision(self.work_dir / ".neurico" / "pipeline_state.json"),
             self._path_revision(hitl_launch_status_path(self.work_dir)),
+            self._path_revision(hitl_run_control_dir(self.work_dir)),
             self._path_revision(self.root / "manager" / "inbox.json"),
             idea_revision,
             self._path_revision(self.root / "autoresearch_state.json"),
@@ -370,6 +373,29 @@ class HitlWorkspaceView:
         cleanup_pending = str(cleanup.get("status", "")).strip() == "pending"
         continuation_status = str(continuation.get("status", "")).strip()
         launch_status = self._launch_status()
+        launch_state = str(launch_status.get("status", "")).strip()
+        launch_request_id = str(launch_status.get("request_id", "")).strip()
+        launch_updated_at = self._parse_timestamp(
+            launch_status.get("updated_at") or launch_status.get("created_at")
+        )
+        launch_is_recent = bool(
+            launch_updated_at is not None
+            and (datetime.now(timezone.utc) - launch_updated_at).total_seconds() < 30
+        )
+        stop_requested = bool(
+            launch_request_id
+            and hitl_stop_request_path(self.work_dir, launch_request_id).is_file()
+        )
+
+        if launch_status:
+            mode = str(launch_status.get("mode", mode)).strip()
+            provider = str(launch_status.get("provider", provider)).strip()
+            if not started_at:
+                started_at = str(
+                    launch_status.get("started_at")
+                    or launch_status.get("created_at")
+                    or ""
+                ).strip()
 
         pending_kind = str(pending.get("kind", "")).strip()
         manager_review_kind = str(pending.get("manager_review_kind", "")).strip()
@@ -420,10 +446,18 @@ class HitlWorkspaceView:
             or cleanup_pending
             or continuation_status
         )
+        if owner is not None and stop_requested:
+            return projected(
+                "stopping",
+                "Stopping research",
+                "NeuriCo is restoring the latest saved progress.",
+                next_step="The run will stop after recovery finishes.",
+                record=launch_status,
+                display_stage="Stopping",
+                display_phase="Restoring progress",
+            )
         if owner is None:
-            if str(launch_status.get("status", "")).strip() in {"starting", "running"}:
-                mode = str(launch_status.get("mode", "")).strip()
-                provider = str(launch_status.get("provider", "")).strip()
+            if launch_state == "starting" and launch_is_recent:
                 return projected(
                     "starting",
                     "Starting research",
@@ -433,9 +467,29 @@ class HitlWorkspaceView:
                     display_stage="Starting",
                     display_phase="",
                 )
-            if str(launch_status.get("status", "")).strip() == "failed":
-                mode = str(launch_status.get("mode", "")).strip()
-                provider = str(launch_status.get("provider", "")).strip()
+            if launch_state in {"starting", "running"}:
+                return projected(
+                    "interrupted",
+                    "Research interrupted",
+                    "The saved run no longer has an active workspace owner.",
+                    next_step="Continue from the latest recoverable progress.",
+                    record=launch_status,
+                    active=False,
+                    display_stage="Interrupted",
+                    display_phase="",
+                )
+            if launch_state == "stopped":
+                return projected(
+                    "stopped",
+                    "Stopped",
+                    "The run stopped and recoverable progress was preserved.",
+                    next_step="Continue research when ready.",
+                    record=launch_status,
+                    active=False,
+                    display_stage="Stopped",
+                    display_phase="",
+                )
+            if launch_state == "failed":
                 return projected(
                     "failed",
                     "Unable to start",

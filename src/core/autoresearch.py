@@ -379,6 +379,7 @@ class CheckpointManager:
         *,
         clean_untracked_public: bool = False,
         remove_hidden_scoring: bool = False,
+        preserve_paper_outputs: bool = True,
     ) -> None:
         """
         Restore tracked workspace files to a checkpoint.
@@ -389,9 +390,10 @@ class CheckpointManager:
         files so failed transforms do not contaminate the original unscored
         checkpoint.
         """
-        preserved_paths = self._copy_preserved_paths_to_temp(
-            AUTORESEARCH_LOG_PATTERNS + PAPER_OUTPUT_PATTERNS
-        )
+        preserved_patterns = list(AUTORESEARCH_LOG_PATTERNS)
+        if preserve_paper_outputs:
+            preserved_patterns.extend(PAPER_OUTPUT_PATTERNS)
+        preserved_paths = self._copy_preserved_paths_to_temp(preserved_patterns)
         try:
             self.repo.git.reset("--hard", sha)
             if clean_untracked_public:

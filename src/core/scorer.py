@@ -12,8 +12,8 @@ it writes.
 
 from pathlib import Path
 from typing import Optional, Dict, Any
-import subprocess
 import json
+import os
 import sys
 import time
 
@@ -127,33 +127,28 @@ def run_scorer(
     return_code: Optional[int] = None
     error: Optional[str] = None
 
+    stopped = False
     try:
-        completed = subprocess.run(
-            cmd,
-            cwd=str(work_dir),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+        from core.agent_runner import run_prebuilt_cli_agent
+
+        launch = run_prebuilt_cli_agent(
+            command_argv=cmd,
+            prompt="",
+            work_dir=work_dir,
+            log_file=log_path,
+            transcript_file=scoring_dir / "eval_transcript.txt",
+            env=os.environ.copy(),
             timeout=timeout,
-            text=True,
-            encoding='utf-8',
         )
-        log_path.write_text(completed.stdout or "", encoding='utf-8')
-        return_code = completed.returncode
+        return_code = launch.get("return_code")
+        stopped = bool(launch.get("stopped"))
+        if stopped:
+            error = "scorer stopped by the user"
+        elif launch.get("timed_out"):
+            error = f"scorer timed out after {timeout}s"
+            print(f"⏱️  {error}")
         if return_code != 0:
-            error = f"eval.py exited with non-zero code {return_code}"
-    except subprocess.TimeoutExpired as e:
-        error = f"scorer timed out after {timeout}s"
-        print(f"⏱️  {error}")
-        partial = ""
-        if e.stdout:
-            partial = (
-                e.stdout
-                if isinstance(e.stdout, str)
-                else e.stdout.decode('utf-8', errors='replace')
-            )
-        log_path.write_text(
-            f"{partial}\n[TIMEOUT after {timeout}s]\n", encoding='utf-8'
-        )
+            error = error or f"eval.py exited with non-zero code {return_code}"
     except Exception as e:
         error = f"scorer exception: {e}"
         print(f"❌ {error}")
@@ -186,6 +181,7 @@ def run_scorer(
         'log_path': str(log_path),
         'elapsed_time': elapsed,
         'error': error,
+        'stopped': stopped,
     }
 
 

@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -18,6 +19,7 @@ from core.hitl_frontier import HitlFrontierStore
 from core.hitl_lock import HitlWorkspaceRunActiveError, active_hitl_workspace_run
 from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path
+from core.hitl_run_control import request_hitl_run_stop
 from core.hitl_util import atomic_write_json, utc_now
 from core.hitl_workspace_view import HitlWorkspaceView
 from core.idea_manager import IdeaManager, resolve_ideas_dir
@@ -110,8 +112,25 @@ class HitlRunController:
                     launch_state = json.loads(launch_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     launch_state = {}
-                if str(launch_state.get("status", "")).strip() in {"starting", "running"}:
-                    raise RuntimeError("Research is already starting for this workspace.")
+                saved_status = str(launch_state.get("status", "")).strip()
+                if saved_status in {"starting", "running"}:
+                    try:
+                        launch_age = max(0.0, time.time() - launch_path.stat().st_mtime)
+                    except OSError:
+                        launch_age = 0.0
+                    handoff_grace = 30.0 if saved_status == "starting" else 5.0
+                    if launch_age < handoff_grace:
+                        raise RuntimeError("Research is already starting for this workspace.")
+                    stale_request_id = str(launch_state.get("request_id", "")).strip()
+                    if stale_request_id:
+                        requests_dir = hitl_launch_requests_dir(
+                            ConfigLoader().get_workspace_parent_dir()
+                        )
+                        for suffix in (".json", ".json.claimed"):
+                            stale_request = requests_dir / (
+                                f"request.{self.idea_id}.{stale_request_id}{suffix}"
+                            )
+                            stale_request.unlink(missing_ok=True)
             continuation = HitlFrontierStore(self.work_dir).exists()
             mode = "continue" if continuation else "fresh"
             request_id = uuid.uuid4().hex
@@ -178,6 +197,16 @@ class HitlRunController:
             "status": "accepted",
             "mode": mode,
         }
+
+    def stop(self) -> Dict[str, Any]:
+        """Request a clean stop through the workspace-owned run protocol."""
+        with self._lock:
+            result = request_hitl_run_stop(
+                self.work_dir,
+                requested_by=self.interface,
+            )
+        self._publish_status()
+        return result
 
     def _publish_status(self) -> None:
         if self.on_status_change is not None:

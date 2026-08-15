@@ -635,7 +635,13 @@
       ? "Continue AutoResearch"
       : "Start AutoResearch";
     const runControl = runIsActive
-      ? q("button", { class: "icon-button toolbar-action run-active", title: live.title || "AutoResearch is running", "aria-label": live.title || "AutoResearch is running", disabled: "disabled", text: "■" })
+      ? q("button", {
+          class: "icon-button toolbar-action run-active",
+          title: live.state === "stopping" ? "Stopping AutoResearch" : "Stop AutoResearch",
+          "aria-label": live.state === "stopping" ? "Stopping AutoResearch" : "Stop AutoResearch",
+          ...(live.state === "stopping" ? { disabled: "disabled" } : { onclick: stopRun }),
+          text: "■",
+        })
       : runCanLaunch
         ? icon("▶", runActionTitle, () => { state.runPanel = !state.runPanel; render(); }, "toolbar-action")
         : null;
@@ -1005,6 +1011,20 @@
   }
   async function cancelTurn() { transientFor().notice = "Cancellation is not available yet."; render(); }
   async function launchRun(payload) { const operation = workspaceOperation("/run"); const transient = transientFor(operation.key); try { await post(operation.path, payload); if (!operationIsCurrent(operation)) return; state.runPanel = false; transient.notice = ""; await refresh(); } catch (error) { if (!operationIsCurrent(operation)) return; transient.notice = error.message; render(); } }
+  async function stopRun() {
+    const operation = workspaceOperation("/run/stop");
+    const transient = transientFor(operation.key);
+    try {
+      await post(operation.path, {});
+      if (!operationIsCurrent(operation)) return;
+      transient.notice = "Stop requested. Restoring saved progress.";
+      await refresh();
+    } catch (error) {
+      if (!operationIsCurrent(operation)) return;
+      transient.notice = error.message;
+      render();
+    }
+  }
   function portalWorkspace() {
     const workspace = q("section", { class: "portal-workspace" });
     if (state.portalSidebarCollapsed) {

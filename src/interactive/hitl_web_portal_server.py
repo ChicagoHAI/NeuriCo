@@ -288,6 +288,10 @@ def _handler(
                 if method == "POST" and idea_id is not None:
                     self._json(self._workspace_queue(idea_id, payload), 202)
                     return
+                idea_id = self._scoped_idea(path, "/run/stop")
+                if method == "POST" and idea_id is not None:
+                    self._json(registry.session(idea_id).controller.stop(), 202)
+                    return
                 idea_id = self._scoped_idea(path, "/run")
                 if method == "POST" and idea_id is not None:
                     self._json(registry.session(idea_id).controller.launch(payload), 202)
@@ -300,6 +304,10 @@ def _handler(
                     return
                 if method == "POST" and path == "/api/run":
                     result = registry.session(self._alias_idea()).controller.launch(payload)
+                    self._json(result, 202)
+                    return
+                if method == "POST" and path == "/api/run/stop":
+                    result = registry.session(self._alias_idea()).controller.stop()
                     self._json(result, 202)
                     return
                 self.send_error(404)

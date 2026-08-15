@@ -2333,6 +2333,28 @@ cmd_hitl_cli() {
     cmd_hitl_container cli "$@"
 }
 
+# -----------------------------------------------------------------------------
+# HITL run control: request cooperative cancellation without an interface.
+# -----------------------------------------------------------------------------
+cmd_hitl_stop() {
+    if [ -z "$1" ]; then
+        echo -e "${RED}Usage: $0 hitl-stop <idea_id>${NC}"
+        exit 1
+    fi
+
+    ensure_directories
+    local workspace_dir
+    workspace_dir=$(get_workspace_dir)
+    docker run --rm \
+        -e NEURICO_WORKSPACE=/workspaces \
+        -v "$workspace_dir:/workspaces" \
+        -v "$PROJECT_ROOT/ideas:/app/ideas" \
+        -v "$PROJECT_ROOT/config:/app/config:ro" \
+        -w /app \
+        "$IMAGE_NAME" \
+        python /app/src/cli/hitl_stop.py "$1"
+}
+
 cmd_help() {
     show_banner
     show_status
@@ -2353,6 +2375,7 @@ cmd_help() {
     echo "  run <id> [options]        Run research exploration"
     echo "  hitl-web [id]             Open the containerized HITL idea portal"
     echo "  hitl-cli <id>             Open the containerized HITL terminal client"
+    echo "  hitl-stop <id>            Stop HITL research and preserve saved progress"
     echo "  update-tools              Update Claude/Codex/Gemini to latest versions"
     echo "  bump-version <version>    Bump version across all files (e.g., 0.3.0)"
     echo "  up                        Start container in background (compose)"
@@ -2371,6 +2394,7 @@ cmd_help() {
     echo "  $0 run my-idea-id --provider claude --autoresearch --autoresearch-iterations 3"
     echo "  $0 hitl-web my-idea-id"
     echo "  $0 hitl-cli my-idea-id"
+    echo "  $0 hitl-stop my-idea-id"
     echo ""
 }
 
@@ -2435,6 +2459,9 @@ case "$ACTION" in
         ;;
     hitl-cli)
         cmd_hitl_cli "$@"
+        ;;
+    hitl-stop)
+        cmd_hitl_stop "$@"
         ;;
     update-tools)
         cmd_update_tools

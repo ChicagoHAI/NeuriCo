@@ -283,9 +283,13 @@ class ResearchPipelineOrchestrator:
         run_stage: Callable[[], Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Relaunch a HITL stage only after its runtime rollback completed."""
+        from core.hitl_run_control import hitl_run_stop_requested
+
         restart_count = 0
         while True:
             result = run_stage()
+            if hitl_run_stop_requested():
+                return {**result, "success": False, "stopped": True}
             if (
                 result.get("success")
                 or result.get("hitl_terminal_failure")
