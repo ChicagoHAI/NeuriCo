@@ -19,6 +19,7 @@
     creatingIdea: false, ideaSchema: null, ideaDraft: {}, ideaSubmitError: "",
     renamingIdeaId: "", draggedIdeaId: "",
     portalSidebarCollapsed: initialPortalSidebarCollapsed,
+    stopConfirmation: null,
   };
   let refreshPromise = null;
   let refreshPending = false;
@@ -272,6 +273,7 @@
     state.stale = "";
     state.creatingIdea = false;
     state.drawer = null;
+    state.stopConfirmation = null;
     updateIdeaUrl(replace);
     connectWorkspaceEvents();
     render();
@@ -643,7 +645,7 @@
           class: "icon-button toolbar-action run-active",
           title: live.state === "stopping" ? "Stopping AutoResearch" : "Stop AutoResearch",
           "aria-label": live.state === "stopping" ? "Stopping AutoResearch" : "Stop AutoResearch",
-          ...(live.state === "stopping" ? { disabled: "disabled" } : { onclick: stopRun }),
+          ...(live.state === "stopping" ? { disabled: "disabled" } : { onclick: requestRunStopConfirmation }),
           text: "■",
         })
       : runCanLaunch
@@ -1043,19 +1045,90 @@
   }
   async function cancelTurn() { transientFor().notice = "Cancellation is not available yet."; render(); }
   async function launchRun(payload) { const operation = workspaceOperation("/run"); const transient = transientFor(operation.key); try { await post(operation.path, payload); if (!operationIsCurrent(operation)) return; state.runPanel = false; transient.notice = ""; await refresh(); } catch (error) { if (!operationIsCurrent(operation)) return; transient.notice = error.message; render(); } }
+  function requestRunStopConfirmation() {
+    state.stopConfirmation = {
+      ...workspaceOperation("/run/stop"),
+      submitting: false,
+    };
+    render({ preserveScroll: true });
+  }
+  function cancelRunStop() {
+    if (!state.stopConfirmation || state.stopConfirmation.submitting) return;
+    state.stopConfirmation = null;
+    render({ preserveScroll: true });
+  }
   async function stopRun() {
-    const operation = workspaceOperation("/run/stop");
+    const operation = state.stopConfirmation;
+    if (!operation || operation.submitting) return;
+    operation.submitting = true;
+    render({ preserveScroll: true });
     const transient = transientFor(operation.key);
     try {
       await post(operation.path, {});
+      if (state.stopConfirmation === operation) state.stopConfirmation = null;
       if (!operationIsCurrent(operation)) return;
-      transient.notice = "Stop requested. Restoring saved progress.";
+      transient.notice = "";
       await refresh();
     } catch (error) {
+      if (state.stopConfirmation === operation) state.stopConfirmation = null;
       if (!operationIsCurrent(operation)) return;
       transient.notice = error.message;
       render();
     }
+  }
+  function stopConfirmationWindow() {
+    const confirmation = state.stopConfirmation;
+    if (!confirmation) return null;
+    const modal = q("section", {
+      class: "stop-confirmation",
+      role: "dialog",
+      "aria-modal": "true",
+      "aria-labelledby": "stop-confirmation-title",
+      "aria-describedby": "stop-confirmation-description",
+      onkeydown: (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          cancelRunStop();
+        } else if (event.key === "Tab") {
+          const controls = [...modal.querySelectorAll("button:not(:disabled)")];
+          if (!controls.length) return;
+          const first = controls[0];
+          const last = controls[controls.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }
+      },
+    }, [
+      q("h2", { id: "stop-confirmation-title", text: "Stop AutoResearch?" }),
+      q("p", {
+        id: "stop-confirmation-description",
+        text: "NeuriCo will restore the latest saved checkpoint. Work after that checkpoint will be discarded.",
+      }),
+      q("div", { class: "stop-confirmation-actions" }, [
+        q("button", {
+          class: "stop-confirm-cancel",
+          text: "Cancel",
+          ...(confirmation.submitting ? { disabled: "disabled" } : { onclick: cancelRunStop }),
+        }),
+        q("button", {
+          class: "stop-confirm-primary",
+          text: confirmation.submitting ? "Stopping…" : "Stop and restore",
+          ...(confirmation.submitting ? { disabled: "disabled" } : { onclick: stopRun }),
+        }),
+      ]),
+    ]);
+    const shade = q("div", {
+      class: "stop-confirmation-shade",
+      onclick: (event) => {
+        if (event.target === shade) cancelRunStop();
+      },
+    }, [modal]);
+    return shade;
   }
   function portalWorkspace() {
     const workspace = q("section", { class: "portal-workspace" });
@@ -1107,7 +1180,7 @@
     const restoreConversation = Boolean(options.restoreConversation);
     const previousY = window.scrollY;
     const wasNearBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
-    document.querySelectorAll(".drawer-shade,.drawer").forEach((element) => element.remove());
+    document.querySelectorAll(".drawer-shade,.drawer,.stop-confirmation-shade").forEach((element) => element.remove());
     if (state.portal) {
       app.replaceChildren(q("div", { class: `portal-shell ${state.portalSidebarCollapsed ? "portal-sidebar-collapsed" : ""}` }, [ideaSidebar(), portalWorkspace()]));
     }
@@ -1115,6 +1188,9 @@
     if (state.route === "conversation" && !state.creatingIdea && state.snapshot) observeComposerSpace();
     else composerObserver?.disconnect();
     drawer().forEach((element) => document.body.append(element));
+    const stopWindow = stopConfirmationWindow();
+    if (stopWindow) document.body.append(stopWindow);
+    app.inert = Boolean(stopWindow);
     const activeDrawer = document.querySelector(".drawer[data-drawer-key]");
     if (activeDrawer?.dataset.drawerKey && Object.prototype.hasOwnProperty.call(state.drawerScroll, activeDrawer.dataset.drawerKey)) {
       activeDrawer.scrollTop = state.drawerScroll[activeDrawer.dataset.drawerKey];
@@ -1128,6 +1204,8 @@
       window.scrollTo({ top: previousY });
     }
     restoreFocusedControl(focusedControl);
+    const stopFocus = document.querySelector(".stop-confirmation .stop-confirm-primary");
+    if (stopFocus instanceof HTMLElement && !stopFocus.disabled) stopFocus.focus();
     updatePhaseTimer();
   }
   window.addEventListener("popstate", () => {
@@ -1138,6 +1216,7 @@
     state.route = nextRoute;
     state.drawer = null;
     state.runPanel = false;
+    state.stopConfirmation = null;
     if (state.portal && nextIdeaId && nextIdeaId !== state.selectedIdeaId) {
       workspaceGeneration += 1;
       state.selectedIdeaId = nextIdeaId;

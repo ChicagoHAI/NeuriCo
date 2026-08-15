@@ -772,6 +772,16 @@ class HitlTerminalChannel(UserChannel):
                 )
                 return {"status": "unavailable"}
             try:
+                confirmed = self._read_yes_no(
+                    "Stop AutoResearch and restore the latest saved checkpoint? [y/N]: ",
+                    default=False,
+                )
+                if not confirmed:
+                    self._write_block(
+                        self._ui.system("Stop cancelled."),
+                        blank_before=True,
+                    )
+                    return {"status": "cancelled"}
                 result = self._run_stopper()
             except Exception as exc:
                 self._write_block(
@@ -959,20 +969,20 @@ class HitlTerminalChannel(UserChannel):
             try:
                 value = self._terminal_composer.readline(label)
             except EOFError as exc:
-                raise RuntimeError("Terminal input closed before the run was configured.") from exc
+                raise RuntimeError("Terminal input closed before the prompt was answered.") from exc
             except KeyboardInterrupt as exc:
-                raise RuntimeError("Run configuration was cancelled.") from exc
+                raise RuntimeError("Input was cancelled.") from exc
             return value.strip() or default
         self._write(label, end="")
         value = sys.stdin.readline()
         if value == "":
-            raise RuntimeError("Terminal input closed before the run was configured.")
+            raise RuntimeError("Terminal input closed before the prompt was answered.")
         return value.strip() or default
 
     def _read_yes_no(self, label: str, *, default: bool) -> bool:
         value = self._read_setting(label, "y" if default else "n").lower()
         if value not in {"y", "yes", "n", "no"}:
-            raise ValueError("Answer yes or no when configuring the run.")
+            raise ValueError("Answer yes or no.")
         return value in {"y", "yes"}
 
     def present_run_status(self, status: Dict[str, Any]) -> None:
