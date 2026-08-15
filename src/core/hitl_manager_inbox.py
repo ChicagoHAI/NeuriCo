@@ -57,7 +57,7 @@ class HitlManagerInbox:
     @staticmethod
     def _empty() -> Dict[str, Any]:
         return {
-            "version": 3,
+            "version": 4,
             "active": None,
             "queue": [],
             "resolution_reply": None,
@@ -85,11 +85,15 @@ class HitlManagerInbox:
         payload = {
             **self._empty(),
             **payload,
-            "version": 3,
+            "version": 4,
         }
         if version < 3 and payload["active"] is None and payload["queue"]:
             payload["active"] = payload["queue"].pop(0)
             payload["active"]["status"] = "pending"
+        records = [payload.get("active"), *payload["queue"]]
+        for record in records:
+            if isinstance(record, dict):
+                record.pop("provider", None)
         return payload
 
     def _quarantine_head(self, state: Dict[str, Any], value: Any, reason: str) -> None:
@@ -124,13 +128,12 @@ class HitlManagerInbox:
         with exclusive_file_lock(self.lock_path):
             return self._load()
 
-    def enqueue(self, text: str, *, provider: str = "", client_turn_id: str = "") -> Dict[str, Any]:
+    def enqueue(self, text: str, *, client_turn_id: str = "") -> Dict[str, Any]:
         text = normalize_human_message(text)
         record = {
             "id": f"H{uuid.uuid4().hex}",
             "client_turn_id": str(client_turn_id).strip(),
             "text": text,
-            "provider": str(provider).strip(),
             "created_at": _now(),
         }
         with exclusive_file_lock(self.lock_path):
@@ -140,7 +143,17 @@ class HitlManagerInbox:
                     "The manager input queue is full. Wait for the manager to "
                     "consume a message or remove one before sending another."
                 )
-            if state["active"] is None:
+            active = state.get("active")
+            retry_active_id = ""
+            if isinstance(active, dict) and str(active.get("status", "")).strip() == "failed":
+                # A new user submission is an explicit retry signal for the
+                # unfinished head-of-line turn. Provider resolution happens
+                # later, when the manager actually claims that turn.
+                active["status"] = "pending"
+                active.pop("error", None)
+                active.pop("failed_at", None)
+                retry_active_id = str(active.get("id", ""))
+            if active is None:
                 record["status"] = "pending"
                 state["active"] = record
                 queue_position = 0
@@ -148,7 +161,11 @@ class HitlManagerInbox:
                 queue_position = len(state["queue"]) + 1
                 state["queue"].append(record)
             self._write(state)
-        return {**record, "queue_position": queue_position}
+        return {
+            **record,
+            "queue_position": queue_position,
+            "retry_active_id": retry_active_id,
+        }
 
     def claim(self, publish: Callable[[Dict[str, str]], None]) -> Optional[Dict[str, str]]:
         """Claim the active message without removing it from durable state."""
@@ -168,9 +185,11 @@ class HitlManagerInbox:
                 )
                 self._write(state)
                 raise HitlManagerInboxMalformedRecordError(reason)
+            if str(value.get("status", "")).strip() == "failed":
+                return None
             record = {
                 key: str(value.get(key, ""))
-                for key in ("id", "client_turn_id", "text", "provider", "created_at")
+                for key in ("id", "client_turn_id", "text", "created_at")
             }
             publish(record)
             value["status"] = "processing"
@@ -207,6 +226,20 @@ class HitlManagerInbox:
             active["error"] = str(error).strip()
             active["failed_at"] = _now()
             self._write(state)
+
+    def retry_failed(self) -> str:
+        """Make the unfinished active message claimable after an explicit retry trigger."""
+        with exclusive_file_lock(self.lock_path):
+            state = self._load()
+            active = state.get("active")
+            if not isinstance(active, dict) or str(active.get("status", "")).strip() != "failed":
+                return ""
+            active["status"] = "pending"
+            active.pop("error", None)
+            active.pop("failed_at", None)
+            item_id = str(active.get("id", ""))
+            self._write(state)
+            return item_id
 
     def submit_resolution_reply(self, request_key: str, response: str) -> Dict[str, str]:
         request_key = str(request_key).strip()
@@ -266,7 +299,6 @@ class HitlManagerInbox:
                             "id",
                             "client_turn_id",
                             "text",
-                            "provider",
                             "created_at",
                         )
                     }

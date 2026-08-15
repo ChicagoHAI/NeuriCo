@@ -16,7 +16,11 @@ import yaml
 
 from core.config_loader import ConfigLoader
 from core.hitl_frontier import HitlFrontierStore
-from core.hitl_lock import HitlWorkspaceRunActiveError, active_hitl_workspace_run
+from core.hitl_lock import (
+    HitlWorkspaceRunActiveError,
+    active_hitl_workspace_run,
+    select_hitl_manager_provider,
+)
 from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path
 from core.hitl_run_control import request_hitl_run_stop
@@ -131,6 +135,7 @@ class HitlRunController:
                                 f"request.{self.idea_id}.{stale_request_id}{suffix}"
                             )
                             stale_request.unlink(missing_ok=True)
+            select_hitl_manager_provider(self.work_dir, provider)
             continuation = HitlFrontierStore(self.work_dir).exists()
             mode = "continue" if continuation else "fresh"
             request_id = uuid.uuid4().hex

@@ -32,11 +32,13 @@ from core.hitl_lock import (
     hitl_manager_consumer_lease,
     hitl_renderer_lease,
     resolve_hitl_manager_provider,
+    select_hitl_manager_provider,
 )
 from core.hitl_manager_react import HitlManager
 
 _RESOLUTION_REPLY = "resolution_reply"
 _CONVERSATION = "conversation"
+_RUN_CONSUMER_HANDOFF_TIMEOUT_SECONDS = 5.0
 
 
 def _elapsed_phase_time(started_at: Any) -> str:
@@ -71,7 +73,6 @@ class HitlWebChannel(WebChannel):
         self._memory_input: "queue.Queue[Any]" = queue.Queue()
         self._conversation: Optional[HitlManagerTranscript] = None
         self._last_polled_input_recorded = False
-        self._last_polled_provider = ""
         self._resolution_reply_handler: Optional[Any] = None
         self._pending_resolution_request: Optional[Dict[str, Any]] = None
         self._dispatch_lock = threading.Lock()
@@ -174,7 +175,6 @@ class HitlWebChannel(WebChannel):
         input_kind: str = _CONVERSATION,
         request_key: Optional[str] = None,
         option_id: Optional[str] = None,
-        provider: str = "",
         client_turn_id: str = "",
     ) -> Dict[str, Any]:
         if self._closed.is_set():
@@ -234,7 +234,6 @@ class HitlWebChannel(WebChannel):
         with self._dispatch_lock:
             record = self._inbox.enqueue(
                 text,
-                provider=provider,
                 client_turn_id=client_turn_id,
             )
             disposition = "queued" if int(record.get("queue_position", 0)) > 0 else "direct"
@@ -255,11 +254,9 @@ class HitlWebChannel(WebChannel):
                     self._turn_active = True
             except queue.Empty:
                 self._last_polled_input_recorded = False
-                self._last_polled_provider = ""
                 self._closed.wait(max(0.0, timeout))
                 return None
             self._last_polled_input_recorded = False
-            self._last_polled_provider = ""
             return str(value).strip()
 
         def publish(record: Dict[str, str]) -> None:
@@ -285,11 +282,9 @@ class HitlWebChannel(WebChannel):
                 self._claimed_active_id = str(value["id"])
         if value is None:
             self._last_polled_input_recorded = False
-            self._last_polled_provider = ""
             self._closed.wait(max(0.0, timeout))
             return None
         self._last_polled_input_recorded = True
-        self._last_polled_provider = str(value.get("provider", "")).strip().lower()
         self._emit({"event": "workspace_changed", "section": "conversation"})
         return str(value["text"]).strip()
 
@@ -304,6 +299,8 @@ class HitlWebChannel(WebChannel):
                     self._turn_active = False
                 else:
                     self._inbox.fail(item_id, error)
+                    self._claimed_active_id = ""
+                    self._turn_active = False
             else:
                 self._turn_active = False
         self._emit({"event": "workspace_changed", "section": "inbox"})
@@ -327,9 +324,6 @@ class HitlWebChannel(WebChannel):
 
     def last_polled_input_was_recorded(self) -> bool:
         return self._last_polled_input_recorded
-
-    def last_polled_provider(self) -> str:
-        return self._last_polled_provider
 
     def update_queued_input(self, item_id: str, text: str) -> Dict[str, str]:
         if self._inbox is None:
@@ -405,7 +399,6 @@ class HitlTerminalChannel(UserChannel):
         self._reader: Optional[threading.Thread] = None
         self._state_lock = threading.Lock()
         self._last_polled_input_recorded = False
-        self._last_polled_provider = ""
         self._claimed_active_id = ""
         self._run_launcher: Optional[Any] = None
         self._run_status: Optional[Any] = None
@@ -753,7 +746,6 @@ class HitlTerminalChannel(UserChannel):
         input_kind: Optional[str] = None,
         request_key: Optional[str] = None,
         option_id: Optional[str] = None,
-        provider: str = "",
         client_turn_id: str = "",
     ) -> Dict[str, Any]:
         text = str(text).strip()
@@ -846,7 +838,6 @@ class HitlTerminalChannel(UserChannel):
             return {"status": "accepted"}
         record = self._inbox.enqueue(
             text,
-            provider=provider,
             client_turn_id=client_turn_id or f"H{uuid.uuid4().hex}",
         )
         if self._interactive:
@@ -1235,10 +1226,8 @@ class HitlTerminalChannel(UserChannel):
                 )
             except queue.Empty:
                 self._last_polled_input_recorded = False
-                self._last_polled_provider = ""
                 return None
             self._last_polled_input_recorded = False
-            self._last_polled_provider = ""
             return None if value is _SHUTDOWN else str(value)
         if self._claimed_active_id:
             self._closed.wait(max(0.0, timeout))
@@ -1260,11 +1249,9 @@ class HitlTerminalChannel(UserChannel):
         value = self._inbox.claim(publish)
         if value is None:
             self._last_polled_input_recorded = False
-            self._last_polled_provider = ""
             self._closed.wait(max(0.0, timeout))
             return None
         self._last_polled_input_recorded = True
-        self._last_polled_provider = str(value.get("provider", "")).strip().lower()
         self._claimed_active_id = str(value["id"])
         return str(value["text"]).strip()
 
@@ -1276,6 +1263,7 @@ class HitlTerminalChannel(UserChannel):
                 self._claimed_active_id = ""
             else:
                 self._inbox.fail(item_id, error)
+                self._claimed_active_id = ""
         self._input_ready.set()
 
     def consume_resolution_reply(self) -> bool:
@@ -1290,9 +1278,6 @@ class HitlTerminalChannel(UserChannel):
 
     def last_polled_input_was_recorded(self) -> bool:
         return self._last_polled_input_recorded
-
-    def last_polled_provider(self) -> str:
-        return self._last_polled_provider
 
     def is_closed(self) -> bool:
         return self._closed.is_set()
@@ -1376,6 +1361,7 @@ class HitlManagerHost:
         self.manager: Optional[HitlManager] = None
         if self.web_server is not None:
             self.web_server.set_manager_provider_getter(self.manager_provider)
+            self.web_server.set_manager_provider_setter(self.select_manager_provider)
 
     def _bind_passive_conversation(self) -> None:
         bind_conversation = getattr(self.channel, "bind_conversation", None)
@@ -1383,20 +1369,44 @@ class HitlManagerHost:
             bind_conversation(HitlManagerTranscript(hitl_manager_dir(self.work_dir)))
 
     def _new_manager(self) -> HitlManager:
-        manager = HitlManager(self._config, work_dir=self.work_dir, channel=self.channel)
+        preferred_provider = resolve_hitl_manager_provider(
+            self.work_dir,
+            self._configured_manager_provider(),
+        )
+        config = dict(self._config)
+        manager_config = config.get("manager", {})
+        if not isinstance(manager_config, dict):
+            manager_config = {}
+        config["manager"] = {
+            **manager_config,
+            "hitl_manager_provider": preferred_provider,
+        }
+        manager = HitlManager(config, work_dir=self.work_dir, channel=self.channel)
         bind_conversation = getattr(self.channel, "bind_conversation", None)
         if callable(bind_conversation):
             bind_conversation(manager.conversation)
         self._manager_stopped = False
         return manager
 
-    def manager_provider(self) -> str:
-        if self.manager is not None:
-            return self.manager.provider
+    def _configured_manager_provider(self) -> str:
         manager_config = self._config.get("manager", {})
         if not isinstance(manager_config, dict):
             manager_config = {}
         return str(manager_config.get("hitl_manager_provider", "claude")).strip().lower()
+
+    def manager_provider(self) -> str:
+        return resolve_hitl_manager_provider(
+            self.work_dir,
+            self._configured_manager_provider(),
+        )
+
+    def select_manager_provider(self, provider: str) -> str:
+        selected = select_hitl_manager_provider(self.work_dir, provider)
+        HitlManagerInbox(self.work_dir).retry_failed()
+        emit = getattr(self.channel, "_emit", None)
+        if callable(emit):
+            emit({"event": "workspace_changed", "section": "manager"})
+        return selected
 
     @property
     def browser_url(self) -> Optional[str]:
@@ -1498,7 +1508,18 @@ class HitlManagerHost:
             if self._stop.is_set() or self._manager_consumer_lease is not None:
                 return self._manager_consumer_lease is not None
             owner = {"interface": "run" if self.interface == "headless" else self.interface}
-            lease = hitl_manager_consumer_lease(self.work_dir, owner=owner)
+            lease = hitl_manager_consumer_lease(
+                self.work_dir,
+                owner=owner,
+                # Another passive renderer may still own the idle consumer when
+                # this run acquires run.lock. Its monitor releases that consumer
+                # as soon as it observes the run, so allow that bounded handoff.
+                timeout_seconds=(
+                    _RUN_CONSUMER_HANDOFF_TIMEOUT_SECONDS
+                    if self.interface == "headless"
+                    else 0.0
+                ),
+            )
             try:
                 lease.__enter__()
             except HitlManagerConsumerActiveError:
@@ -1507,6 +1528,7 @@ class HitlManagerHost:
                 return False
             if self.manager is None or self._manager_stopped:
                 self.manager = self._new_manager()
+            HitlManagerInbox(self.work_dir).retry_failed()
             self._consumer_stop = threading.Event()
             self._manager_consumer_lease = lease
             self._conversation_thread = threading.Thread(
@@ -1622,10 +1644,14 @@ class HitlManagerHost:
             try:
                 self.channel.status("NeuriCo is thinking…", thinking=True)
                 recorded = getattr(self.channel, "last_polled_input_was_recorded", lambda: False)()
-                provider = getattr(self.channel, "last_polled_provider", lambda: "")()
                 set_provider = getattr(manager, "set_provider", None)
-                if callable(set_provider) and provider:
-                    set_provider(resolve_hitl_manager_provider(self.work_dir, str(provider)))
+                if callable(set_provider):
+                    set_provider(
+                        resolve_hitl_manager_provider(
+                            self.work_dir,
+                            self._configured_manager_provider(),
+                        )
+                    )
                 reply = manager.chat(message, input_recorded=bool(recorded))
                 if reply:
                     self.channel.send(reply, kind="manager")

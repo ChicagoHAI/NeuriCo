@@ -9,12 +9,11 @@ import secrets
 import threading
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 from cli.hitl_web_portal import HitlWebWorkspaceRegistry
-from core.hitl_lock import HitlWorkspaceRunActiveError, resolve_hitl_manager_provider
+from core.hitl_lock import HitlWorkspaceRunActiveError
 from core.hitl_manager_inbox import HitlWebInputError
 from core.hitl_workspace_view import HitlWorkspaceViewError
 from interactive.hitl_web_server import (
@@ -144,10 +143,6 @@ def _handler(
                 input_kind=input_kind,
                 request_key=payload.get("request_key"),
                 option_id=payload.get("option_id"),
-                provider=resolve_hitl_manager_provider(
-                    session.work_dir,
-                    str(payload.get("provider", "")),
-                ),
                 client_turn_id=str(payload.get("client_turn_id", "")),
             )
 
@@ -280,6 +275,13 @@ def _handler(
                     registry.rename(idea_id, str(payload.get("display_name", "")))
                     self._json({"status": "accepted"})
                     return
+                idea_id = self._scoped_idea(path, "/manager")
+                if method == "PATCH" and idea_id is not None:
+                    selected = registry.select_manager_provider(
+                        idea_id, str(payload.get("provider", ""))
+                    )
+                    self._json({"status": "accepted", "provider": selected}, 202)
+                    return
                 idea_id = self._scoped_idea(path, "/input")
                 if method == "POST" and idea_id is not None:
                     self._json(self._workspace_input(idea_id, payload), 202)
@@ -298,6 +300,12 @@ def _handler(
                     return
                 if method == "POST" and path == "/input":
                     self._json(self._workspace_input(self._alias_idea(), payload), 202)
+                    return
+                if method == "PATCH" and path == "/api/manager":
+                    selected = registry.select_manager_provider(
+                        self._alias_idea(), str(payload.get("provider", ""))
+                    )
+                    self._json({"status": "accepted", "provider": selected}, 202)
                     return
                 if method == "POST" and path == "/api/queue":
                     self._json(self._workspace_queue(self._alias_idea(), payload), 202)

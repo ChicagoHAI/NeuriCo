@@ -489,6 +489,11 @@ class ResearchRunner:
         if hitl:
             if not multi_agent:
                 raise ValueError("HITL AutoResearch requires the multi-agent pipeline.")
+            from core.hitl_lock import select_hitl_manager_provider
+
+            # Recovery may restore an older runtime.json. Record the selected
+            # run backend after recovery and before the manager starts.
+            select_hitl_manager_provider(work_dir, provider)
             if hitl_host is None:
                 from core.hitl_manager_host import HitlManagerHost
                 from interactive.manager import load_config as load_manager_config

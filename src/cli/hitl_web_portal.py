@@ -301,6 +301,9 @@ class HitlWebWorkspaceRegistry:
         self.require_idea(idea_id)
         self.presentation.rename(idea_id, display_name)
 
+    def select_manager_provider(self, idea_id: str, provider: str) -> str:
+        return self.session(idea_id).host.select_manager_provider(provider)
+
     def reorder(self, order: list[str]) -> None:
         self.presentation.reorder(order, self.known_ids())
 

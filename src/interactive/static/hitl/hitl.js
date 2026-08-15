@@ -8,7 +8,7 @@
   const initialPortalSidebarCollapsed = localStorage.getItem("neurico-hitl-ideas-collapsed") === "1";
   const state = {
     snapshot: null, route: initialRoute, view: "understanding", drawer: null,
-    tab: "overview", provider: initialProvider, providerTouched: false,
+    tab: "overview", provider: initialProvider,
     thinking: false, stale: "",
     runPanel: false, snapshotSig: "", scrollToBottom: false,
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
@@ -31,7 +31,7 @@
     return portal ? `idea:${String(ideaId || "")}` : "workspace";
   }
   function transientFor(key = workspaceKey()) {
-    if (!workspaceTransient.has(key)) workspaceTransient.set(key, { composer: "", notice: "", selectedOption: "", requestFeedback: "" });
+    if (!workspaceTransient.has(key)) workspaceTransient.set(key, { composer: "", notice: "", selectedOption: "", requestFeedback: "", providerPending: "" });
     return workspaceTransient.get(key);
   }
   function workspaceOperation(suffix) {
@@ -830,7 +830,7 @@
     const area = q("textarea", { placeholder: "Message NeuriCo", "data-focus-key": "composer" }); area.value = transient.composer; autoSizeTextarea(area); area.oninput = () => { transient.composer = area.value; autoSizeTextarea(area); }; area.onkeydown = (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); submitConversation(); } };
     const providerLocked = Boolean(state.snapshot?.manager?.provider_locked);
     const providerTitle = providerLocked ? "The active run controls the manager model" : "Choose conversation model";
-    const provider = q("select", { class: "provider", title: providerTitle, "aria-label": providerTitle, "data-focus-key": "composer-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.disabled = providerLocked; provider.onchange = () => { state.provider = provider.value; state.providerTouched = true; };
+    const provider = q("select", { class: "provider", title: providerTitle, "aria-label": providerTitle, "data-focus-key": "composer-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = transient.providerPending || state.provider; provider.disabled = providerLocked || Boolean(transient.providerPending); provider.onchange = () => selectManagerProvider(provider.value);
     const meter = q("span", { class: "meter" }, [q("span")]); meter.firstChild.style.width = `${Math.max(2, percent)}%`;
     const usedTokens = Number(context.used_tokens || 0);
     const limitTokens = Number(context.limit_tokens || 300000);
@@ -843,7 +843,7 @@
     if (!state.runPanel || state.snapshot?.live?.active) return null;
     const mode = state.snapshot?.autoresearch?.mode === "continue" ? "continue" : "fresh";
     const title = mode === "continue" ? "Continue AutoResearch" : "Fresh AutoResearch";
-    const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; state.providerTouched = true; };
+    const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
     const iterations = q("input", { id: "run-iterations", type: "number", min: "1", max: "100", value: state.runDraft.iterations, "data-focus-key": "run-iterations" }); iterations.oninput = () => { state.runDraft.iterations = iterations.value; };
     const paper = q("input", { id: "run-paper", type: "checkbox", "data-focus-key": "run-paper" }); paper.checked = state.runDraft.writePaper; paper.onchange = () => { state.runDraft.writePaper = paper.checked; };
     const github = q("input", { id: "run-github", type: "checkbox", "data-focus-key": "run-github" }); github.checked = state.runDraft.github; github.onchange = () => { state.runDraft.github = github.checked; };
@@ -975,6 +975,24 @@
   function drawer() { if (!state.drawer) return []; const shade = q("div", { class: "drawer-shade", onclick: () => { state.drawer = null; render(); } }); const panel = q("aside", { class: "drawer", "data-drawer-key": drawerKey() }); panel.append(icon("×", "Close details", () => { state.drawer = null; render(); }, "drawer-close")); const { kind, source } = state.drawer; if (kind === "idea") renderIdeaDrawer(panel, source); else if (kind === "submitted_idea") renderSubmittedIdeaDrawer(panel, source); else if (kind === "whiteboard") renderWhiteboardDrawer(panel, source); else renderNodeDrawer(panel, source, kind === "attempt"); return [shade, panel]; }
 
   const post = (path, payload) => requestJson(path, payload, "POST");
+  async function selectManagerProvider(provider) {
+    const operation = workspaceOperation("/manager");
+    const transient = transientFor(operation.key);
+    transient.providerPending = provider;
+    transient.notice = "";
+    render();
+    try {
+      await requestJson(operation.path, { provider }, "PATCH");
+      transient.providerPending = "";
+      if (!operationIsCurrent(operation)) return;
+      await refresh();
+    } catch (error) {
+      transient.providerPending = "";
+      if (!operationIsCurrent(operation)) return;
+      transient.notice = error.message;
+      await refresh();
+    }
+  }
   async function submitConversation() {
     const operation = workspaceOperation("/input");
     const transient = transientFor(operation.key);
@@ -986,7 +1004,7 @@
     state.scrollToBottom = true;
     render();
     try {
-      await post(operation.path, { text, input_kind: "conversation", provider: state.provider, client_turn_id: clientTurnId });
+      await post(operation.path, { text, input_kind: "conversation", client_turn_id: clientTurnId });
       if (operationIsCurrent(operation)) await refresh();
     } catch (error) {
       if (!operationIsCurrent(operation)) return;
@@ -1007,7 +1025,7 @@
       return;
     }
     try {
-      await post(operation.path, { text, input_kind: "resolution_reply", request_key: request.request_key, option_id: selectedOption, provider: state.provider, client_turn_id: crypto.randomUUID() });
+      await post(operation.path, { text, input_kind: "resolution_reply", request_key: request.request_key, option_id: selectedOption, client_turn_id: crypto.randomUUID() });
       clearRequestDraft(request, operation.key);
       if (!operationIsCurrent(operation)) return;
       transient.notice = "";
@@ -1266,7 +1284,7 @@
           thinking: durableThinking,
         });
         const managerProvider = String(result.data?.manager?.provider || "").toLowerCase();
-        if (["claude", "codex"].includes(managerProvider) && (result.data?.manager?.provider_locked || !state.providerTouched)) {
+        if (["claude", "codex"].includes(managerProvider)) {
           state.provider = managerProvider;
         }
         state.snapshot = result.data;

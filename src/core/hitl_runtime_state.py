@@ -78,12 +78,15 @@ class HitlRuntimeState:
         self.lock_path = self.hitl_dir / "runtime.lock"
         self.hitl_dir.mkdir(parents=True, exist_ok=True)
         with self._locked():
-            self._state = self._load_unlocked() or self._default()
-            self._save_unlocked()
+            loaded = self._load_unlocked()
+            self._state = loaded or self._default()
+            if loaded is None:
+                self._save_unlocked()
 
     @staticmethod
     def _default() -> Dict[str, Any]:
         return {
+            "manager_provider": "",
             "worker_continuation": None,
             "pending_worker_command": None,
             "next_autoresearch_action": None,
@@ -250,6 +253,22 @@ class HitlRuntimeState:
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             return self._copy(self._state)
+
+    def manager_provider(self) -> str:
+        """Return the workspace's selected manager backend, if configured."""
+        provider = str(self.snapshot().get("manager_provider", "")).strip().lower()
+        return provider if provider in {"claude", "codex"} else ""
+
+    def set_manager_provider(self, provider: str) -> str:
+        """Persist the backend selected for this workspace's manager."""
+        provider = str(provider or "").strip().lower()
+        if provider not in {"claude", "codex"}:
+            raise ValueError("Choose Claude or Codex for the HITL manager.")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            self._state["manager_provider"] = provider
+            self._save_unlocked()
+        return provider
 
     def worker_continuation(self) -> Optional[Dict[str, Any]]:
         value = self.snapshot().get("worker_continuation")
