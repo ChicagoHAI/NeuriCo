@@ -30,6 +30,10 @@ def hitl_launch_status_path(work_dir: Path) -> Path:
     return hitl_state_dir(work_dir) / "launch.json"
 
 
+def hitl_launch_requests_dir(workspace_root: Path) -> Path:
+    return Path(workspace_root) / ".neurico" / "hitl-launch-requests"
+
+
 def hitl_artifact_contract_path(work_dir: Path) -> Path:
     return hitl_state_dir(work_dir) / "artifact_contract.json"
 

@@ -6,7 +6,7 @@ from copy import deepcopy
 import json
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import yaml
 
@@ -295,7 +295,7 @@ class HitlWebWorkspaceRegistry:
         snapshot = HitlWorkspaceView(session.work_dir).snapshot()
         snapshot["manager_status"] = session.channel.presentation_status()
         live = snapshot.get("live") if isinstance(snapshot.get("live"), dict) else {}
-        current_provider = str(session.host.manager.provider or "").strip().lower()
+        current_provider = str(session.host.manager_provider() or "").strip().lower()
         locked_provider = str(live.get("provider") or "").strip().lower()
         snapshot["manager"] = {
             "provider": locked_provider if live.get("active") else current_provider,

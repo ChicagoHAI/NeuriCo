@@ -13,7 +13,6 @@
     runPanel: false, snapshotSig: "", scrollToBottom: false,
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
     conversationScroll: { top: 0, nearBottom: true, captured: false },
-    directTurn: null,
     managerStatusSeq: -1,
     runDraft: { iterations: 2, writePaper: true, paperStyle: "auto", github: false },
     portal: null, ideas: [], selectedIdeaId: initialIdeaId, catalogBusy: false,
@@ -744,19 +743,19 @@
     const messages = visibleConversation(state.snapshot?.conversation).map((record, index) => ({
       kind: "message", record, timestamp: String(record.created_at || ""), order: index,
     }));
-    const directTurn = state.directTurn;
-    const directRecorded = directTurn && messages.some(({ record }) => record.metadata?.client_turn_id === directTurn.clientTurnId);
-    if (directTurn && !directRecorded) {
+    const active = state.snapshot?.inbox?.active;
+    const activeRecorded = active && messages.some(({ record }) => String(record.record_id || record.id || "") === String(active.id || ""));
+    if (active && !activeRecorded) {
       messages.push({
         kind: "message",
         record: {
-          record_id: `pending:${directTurn.clientTurnId}`,
+          record_id: active.id,
           speaker: "human",
-          content: directTurn.text,
-          created_at: directTurn.createdAt,
-          metadata: { client_turn_id: directTurn.clientTurnId },
+          content: active.text,
+          created_at: active.created_at,
+          metadata: { client_turn_id: active.client_turn_id },
         },
-        timestamp: directTurn.createdAt,
+        timestamp: active.created_at,
         order: messages.length,
       });
     }
@@ -771,7 +770,7 @@
     });
   }
   function queueView() {
-    const queue = (state.snapshot?.inbox?.queue || []).filter((item) => item.client_turn_id !== state.directTurn?.clientTurnId);
+    const queue = state.snapshot?.inbox?.queue || [];
     if (!queue.length) return null;
     const list = q("div", { class: "queue" });
     queue.forEach((item) => {
@@ -938,17 +937,9 @@
     state.scrollToBottom = true;
     render();
     try {
-      const result = await post(workspaceApi("/input"), { text, input_kind: "conversation", provider: state.provider, client_turn_id: clientTurnId });
-      if (result.disposition === "direct") {
-        state.directTurn = {
-          clientTurnId,
-          text,
-          createdAt: result.created_at || new Date().toISOString(),
-        };
-      }
+      await post(workspaceApi("/input"), { text, input_kind: "conversation", provider: state.provider, client_turn_id: clientTurnId });
       await refresh();
     } catch (error) {
-      if (state.directTurn?.clientTurnId === clientTurnId) state.directTurn = null;
       state.composer = text;
       state.notice = error.message;
       render();
@@ -1090,18 +1081,19 @@
       if (result.error) {
         state.stale = result.error;
       } else {
-        const thinkingChanged = applyManagerStatus(result.data?.manager_status);
+        const activeInput = result.data?.inbox?.active;
+        const durableThinking = Boolean(activeInput && String(activeInput.status || "pending") !== "failed");
+        const thinkingChanged = applyManagerStatus({
+          ...(result.data?.manager_status || {}),
+          thinking: durableThinking,
+        });
         const managerProvider = String(result.data?.manager?.provider || "").toLowerCase();
         if (["claude", "codex"].includes(managerProvider) && (result.data?.manager?.provider_locked || !state.providerTouched)) {
           state.provider = managerProvider;
         }
-        const directTurnRecorded = state.directTurn && (result.data?.conversation || []).some(
-          (record) => record.metadata?.client_turn_id === state.directTurn.clientTurnId,
-        );
         state.snapshot = result.data;
         state.snapshotSig = result.signature;
         state.stale = "";
-        if (directTurnRecorded) state.directTurn = null;
         if (thinkingChanged) state.scrollToBottom = true;
       }
       if (changed) render({ preserveScroll: true });

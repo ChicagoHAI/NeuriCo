@@ -63,9 +63,7 @@ class HitlWorkspaceView:
 
     def snapshot(self) -> Dict[str, Any]:
         if not self.root.is_dir():
-            raise HitlWorkspaceViewError(
-                f"This workspace has no HITL state at {self.root}."
-            )
+            raise HitlWorkspaceViewError(f"This workspace has no HITL state at {self.root}.")
         ideas = self._ideas()
         nodes, attempts, frontier = self._frontier()
         whiteboard = self._whiteboard()
@@ -109,6 +107,7 @@ class HitlWorkspaceView:
             self._path_revision(hitl_runtime_state_path(self.work_dir)),
             self._path_revision(self.work_dir / ".neurico" / "pipeline_state.json"),
             self._path_revision(hitl_launch_status_path(self.work_dir)),
+            self._path_revision(self.root / "manager" / "inbox.json"),
             idea_revision,
             self._path_revision(self.root / "autoresearch_state.json"),
             json.dumps(owner, sort_keys=True) if owner is not None else "",
@@ -223,11 +222,9 @@ class HitlWorkspaceView:
 
     @classmethod
     def _retired_run_event(cls, event: Dict[str, Any]) -> bool:
-        return (
-            cls._workflow_token(event.get("stage")) == "research"
-            and cls._workflow_token(event.get("phase"))
-            in {"starting", "completed", "stopped"}
-        )
+        return cls._workflow_token(event.get("stage")) == "research" and cls._workflow_token(
+            event.get("phase")
+        ) in {"starting", "completed", "stopped"}
 
     @staticmethod
     def _stage_label(stage: str) -> str:
@@ -424,14 +421,25 @@ class HitlWorkspaceView:
             or continuation_status
         )
         if owner is None:
+            if str(launch_status.get("status", "")).strip() in {"starting", "running"}:
+                mode = str(launch_status.get("mode", "")).strip()
+                provider = str(launch_status.get("provider", "")).strip()
+                return projected(
+                    "starting",
+                    "Starting research",
+                    "The workspace runner is taking ownership.",
+                    next_step="Research will continue independently of this interface.",
+                    record=launch_status,
+                    display_stage="Starting",
+                    display_phase="",
+                )
             if str(launch_status.get("status", "")).strip() == "failed":
                 mode = str(launch_status.get("mode", "")).strip()
                 provider = str(launch_status.get("provider", "")).strip()
                 return projected(
                     "failed",
                     "Unable to start",
-                    str(launch_status.get("message", "")).strip()
-                    or "Research could not start.",
+                    str(launch_status.get("message", "")).strip() or "Research could not start.",
                     next_step="Review the issue, then try again.",
                     record=launch_status,
                     active=False,
@@ -564,7 +572,9 @@ class HitlWorkspaceView:
                 display_phase=action_phase,
             )
 
-        transition = frontier_transition if frontier_status not in {"", "completed"} else root_transition
+        transition = (
+            frontier_transition if frontier_status not in {"", "completed"} else root_transition
+        )
         transition_status = frontier_status if transition is frontier_transition else root_status
         if transition_status not in {"", "completed"}:
             transition_stage, transition_phase = durable_boundary_labels()
@@ -707,7 +717,9 @@ class HitlWorkspaceView:
             if activity == "reviewing":
                 phase_label = self._review_phase_label(phase)
             elif activity == "revising":
-                phase_label = "Revising" if phase == "review" else f"Revising {phase.replace('_', ' ')}"
+                phase_label = (
+                    "Revising" if phase == "review" else f"Revising {phase.replace('_', ' ')}"
+                )
             else:
                 phase_label = self._working_phase_label(phase)
             summary = f"{phase_label} started." if phase_label else "Research advanced."
@@ -745,7 +757,9 @@ class HitlWorkspaceView:
         else:
             title = "Proposal generated"
             summary = self._compact_notification_text(
-                idea.get("proposal") or idea.get("context") or "A new research proposal was generated."
+                idea.get("proposal")
+                or idea.get("context")
+                or "A new research proposal was generated."
             )
             tone = "proposal"
         return {
@@ -871,7 +885,9 @@ class HitlWorkspaceView:
                 raise HitlWorkspaceViewError(f"Duplicate HITL node record for {node_sha}")
             plan_path = path.with_suffix(".md")
             if not plan_path.is_file():
-                raise HitlWorkspaceViewError(f"Accepted HITL node is missing its saved plan: {node_sha}")
+                raise HitlWorkspaceViewError(
+                    f"Accepted HITL node is missing its saved plan: {node_sha}"
+                )
             try:
                 payload["plan"] = plan_path.read_text(encoding="utf-8")
             except (OSError, UnicodeError) as exc:
@@ -906,7 +922,9 @@ class HitlWorkspaceView:
                 payload["parent_node_sha"] = parent_sha
                 attempts.append(payload)
 
-        missing_active = [sha for sha in state["active_frontier_node_shas"] if sha not in nodes_by_sha]
+        missing_active = [
+            sha for sha in state["active_frontier_node_shas"] if sha not in nodes_by_sha
+        ]
         if missing_active:
             raise HitlWorkspaceViewError(
                 "Active frontier refers to missing node record(s): " + ", ".join(missing_active)
@@ -928,7 +946,9 @@ class HitlWorkspaceView:
             if not isinstance(tip.get("affects", []), list) or any(
                 not isinstance(value, str) for value in tip.get("affects", [])
             ):
-                raise HitlWorkspaceViewError("Every HITL whiteboard tip affects field must be a list of paths.")
+                raise HitlWorkspaceViewError(
+                    "Every HITL whiteboard tip affects field must be a list of paths."
+                )
         return {"tips": tips}
 
     def _research_state(self) -> Dict[str, Any]:
@@ -959,7 +979,11 @@ class HitlWorkspaceView:
     @staticmethod
     def _artifact_timestamp(path: Path) -> str:
         try:
-            return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            return (
+                datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
         except OSError as exc:
             raise HitlWorkspaceViewError(f"Could not read artifact timestamp: {path}") from exc
 
@@ -982,36 +1006,46 @@ class HitlWorkspaceView:
         ]
         for node in nodes:
             path = self.root / "nodes" / str(node["node_sha"]) / f"{node['node_sha']}.json"
-            activity.append({
-                "id": f"node:{node['node_sha']}",
-                "kind": "node",
-                "timestamp": self._artifact_timestamp(path),
-                "record": node,
-            })
+            activity.append(
+                {
+                    "id": f"node:{node['node_sha']}",
+                    "kind": "node",
+                    "timestamp": self._artifact_timestamp(path),
+                    "record": node,
+                }
+            )
         for attempt in attempts:
             if bool(attempt.get("accepted")):
                 continue
             parent = str(attempt["parent_node_sha"])
             candidate = str(attempt["node_sha"])
             path = self.root / "nodes" / parent / "attempts" / f"{candidate}.json"
-            activity.append({
-                "id": f"attempt:{candidate}",
-                "kind": "attempt",
-                "timestamp": self._artifact_timestamp(path),
-                "record": attempt,
-            })
+            activity.append(
+                {
+                    "id": f"attempt:{candidate}",
+                    "kind": "attempt",
+                    "timestamp": self._artifact_timestamp(path),
+                    "record": attempt,
+                }
+            )
         for tip in whiteboard["tips"]:
             timestamp = tip.get("written_at")
             if isinstance(timestamp, (int, float)):
-                timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                timestamp = (
+                    datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
             if not isinstance(timestamp, str) or not timestamp.strip():
                 timestamp = self._artifact_timestamp(hitl_whiteboard_path(self.work_dir))
-            activity.append({
-                "id": f"whiteboard:{tip['id']}",
-                "kind": "whiteboard",
-                "timestamp": timestamp,
-                "record": tip,
-            })
+            activity.append(
+                {
+                    "id": f"whiteboard:{tip['id']}",
+                    "kind": "whiteboard",
+                    "timestamp": timestamp,
+                    "record": tip,
+                }
+            )
         return sorted(activity, key=lambda entry: str(entry["timestamp"]))
 
     def _conversation(self, inbox: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -1072,6 +1106,12 @@ class HitlWorkspaceView:
         for entry in queue:
             if not str(entry.get("id", "")).strip() or not str(entry.get("text", "")).strip():
                 raise HitlWorkspaceViewError("Every queued NeuriCo message requires id and text.")
+        active_value = payload.get("active")
+        active = dict(active_value) if isinstance(active_value, dict) else None
+        if active is not None and (
+            not str(active.get("id", "")).strip() or not str(active.get("text", "")).strip()
+        ):
+            raise HitlWorkspaceViewError("The active NeuriCo message requires id and text.")
         pending = runtime.get("pending_worker_command")
         pending = pending if isinstance(pending, dict) else None
         record_id = str((pending or {}).get("human_request_record_id") or "").strip()
@@ -1085,7 +1125,9 @@ class HitlWorkspaceView:
                     if str(item.get("record_id", "")) == record_id
                 )
             except StopIteration as exc:
-                raise HitlWorkspaceViewError("The pending request is missing its conversation record.") from exc
+                raise HitlWorkspaceViewError(
+                    "The pending request is missing its conversation record."
+                ) from exc
             metadata = record.get("metadata")
             if (
                 not request_key
@@ -1108,4 +1150,4 @@ class HitlWorkspaceView:
                 "created_at": record.get("created_at", ""),
                 "conversation_record_id": record_id,
             }
-        return {"queue": queue, "pending_request": request}
+        return {"active": active, "queue": queue, "pending_request": request}

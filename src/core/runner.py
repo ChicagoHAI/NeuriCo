@@ -495,11 +495,9 @@ class ResearchRunner:
                 hitl_host = HitlManagerHost(
                     work_dir=work_dir,
                     config=load_manager_config(),
-                    interface=hitl,
+                    interface="headless",
                     project_root=self.project_root,
                     title=title,
-                    port=hitl_manager_port,
-                    open_browser=not hitl_manager_no_browser,
                 )
                 hitl_host.start()
                 owns_hitl_host = True

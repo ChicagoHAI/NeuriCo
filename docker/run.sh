@@ -2043,6 +2043,70 @@ hitl_direct_web_port_from_args() {
 # -----------------------------------------------------------------------------
 # Launch a standalone HITL interface inside the NeuriCo container.
 # -----------------------------------------------------------------------------
+hitl_launch_handoff_watcher() {
+    local workspace_dir="$1"
+    local gpu_flags="$2"
+    local user_flags="$3"
+    local credential_mounts="$4"
+    local requests_dir="$workspace_dir/.neurico/hitl-launch-requests"
+    mkdir -p "$requests_dir"
+    shopt -s nullglob
+
+    while true; do
+        local request_path
+        for request_path in "$requests_dir"/request.*.json; do
+            local request_name="${request_path##*/}"
+            if [[ ! "$request_name" =~ ^request\.(.+)\.([0-9a-f]{32})\.json$ ]]; then
+                continue
+            fi
+            local idea_id="${BASH_REMATCH[1]}"
+            local request_id="${BASH_REMATCH[2]}"
+            if [[ ! "$idea_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+                continue
+            fi
+            local claimed_path="${request_path}.claimed"
+            if ! mv "$request_path" "$claimed_path" 2>/dev/null; then
+                continue
+            fi
+
+            local runner_args=( run -d --rm --name "neurico-hitl-run-${request_id:0:12}" )
+            local runner_helpers=()
+            eval "runner_helpers=( $gpu_flags $user_flags $credential_mounts )"
+            runner_args+=(
+                "${runner_helpers[@]}"
+                --env-file "$PROJECT_ROOT/.env"
+                -e NEURICO_WORKSPACE=/workspaces
+                -v "$workspace_dir:/workspaces"
+                -v "$PROJECT_ROOT/ideas:/app/ideas"
+                -v "$PROJECT_ROOT/logs:/app/logs"
+                -v "$PROJECT_ROOT/config:/app/config:ro"
+                -v "$PROJECT_ROOT/templates:/app/templates:ro"
+            )
+
+            local mounts_file="$PROJECT_ROOT/ideas/mounts/${idea_id}.txt"
+            if [ -f "$mounts_file" ]; then
+                while IFS= read -r host_path; do
+                    [ -z "$host_path" ] && continue
+                    if [ -e "$host_path" ]; then
+                        runner_args+=( -v "$host_path:$host_path:ro" )
+                    fi
+                done < "$mounts_file"
+            fi
+
+            runner_args+=(
+                -w /app
+                "$IMAGE_NAME"
+                python /app/src/cli/hitl_run_worker.py
+                --request "/workspaces/.neurico/hitl-launch-requests/${request_name}.claimed"
+            )
+            if ! docker "${runner_args[@]}" >/dev/null; then
+                mv "$claimed_path" "$request_path" 2>/dev/null || true
+            fi
+        done
+        sleep 0.25
+    done
+}
+
 cmd_hitl_container() {
     local interface="$1"
     shift
@@ -2068,6 +2132,7 @@ cmd_hitl_container() {
         "${helper_args[@]}"
         --env-file "$PROJECT_ROOT/.env"
         -e NEURICO_WORKSPACE=/workspaces
+        -e NEURICO_HITL_DOCKER_HANDOFF=1
         -v "$workspace_dir:/workspaces"
         -v "$PROJECT_ROOT/ideas:/app/ideas"
         -v "$PROJECT_ROOT/logs:/app/logs"
@@ -2112,7 +2177,15 @@ cmd_hitl_container() {
 
     local script="/app/src/cli/hitl_${interface}.py"
     docker_args+=( -w /app "$IMAGE_NAME" python "$script" "$@" )
-    docker "${docker_args[@]}"
+    hitl_launch_handoff_watcher \
+        "$workspace_dir" "$gpu_flags" "$user_flags" "$credential_mounts" &
+    local handoff_watcher_pid=$!
+    local interface_status=0
+    docker "${docker_args[@]}" || interface_status=$?
+    sleep 0.3
+    kill "$handoff_watcher_pid" 2>/dev/null || true
+    wait "$handoff_watcher_pid" 2>/dev/null || true
+    return "$interface_status"
 }
 
 # -----------------------------------------------------------------------------

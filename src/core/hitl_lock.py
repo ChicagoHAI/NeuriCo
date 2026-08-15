@@ -21,7 +21,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on Windows only.
 HITL_RUN_LOCK = Path(".neurico") / "hitl" / "run.lock"
 # Keep the established path so a host started by an earlier build still conflicts
 # with a current host. The lease now covers every manager-consuming interface.
-HITL_MANAGER_CONSUMER_LOCK = Path(".neurico") / "hitl" / "manager" / "web.lock"
+# Keep the established web.lock path for renderer ownership so current builds
+# still reject an older renderer that owns the workspace.  Manager consumption
+# is a separate lease because an active run, rather than its renderer, owns it.
+HITL_RENDERER_LOCK = Path(".neurico") / "hitl" / "manager" / "web.lock"
+HITL_MANAGER_CONSUMER_LOCK = Path(".neurico") / "hitl" / "manager" / "consumer.lock"
 HITL_MANAGER_PROVIDERS = frozenset({"claude", "codex"})
 
 
@@ -75,6 +79,10 @@ def _run_lock_path(work_dir: Path) -> Path:
 
 def _manager_consumer_lock_path(work_dir: Path) -> Path:
     return Path(work_dir).resolve() / HITL_MANAGER_CONSUMER_LOCK
+
+
+def _renderer_lock_path(work_dir: Path) -> Path:
+    return Path(work_dir).resolve() / HITL_RENDERER_LOCK
 
 
 def _read_run_owner(handle: TextIO) -> dict[str, Any]:
@@ -170,6 +178,45 @@ def hitl_manager_consumer_lease(
     _require_fcntl()
     workspace = Path(work_dir).resolve()
     lock_path = _manager_consumer_lock_path(workspace)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+            raise HitlManagerConsumerActiveError(
+                workspace,
+                _read_run_owner(handle),
+            ) from exc
+
+        record = {
+            "pid": os.getpid(),
+            "started_at": utc_now(),
+            **dict(owner or {}),
+        }
+        handle.seek(0)
+        handle.truncate()
+        json.dump(record, handle, ensure_ascii=False, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        try:
+            yield record
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def hitl_renderer_lease(
+    work_dir: Path,
+    *,
+    owner: Mapping[str, Any] | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Allow one CLI or web server to render a workspace at a time."""
+    _require_fcntl()
+    workspace = Path(work_dir).resolve()
+    lock_path = _renderer_lock_path(workspace)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as handle:
         try:
