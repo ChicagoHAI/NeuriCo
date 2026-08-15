@@ -2043,6 +2043,86 @@ hitl_direct_web_port_from_args() {
 # -----------------------------------------------------------------------------
 # Launch a standalone HITL interface inside the NeuriCo container.
 # -----------------------------------------------------------------------------
+hitl_launch_status_for_request() {
+    local workspace_dir="$1"
+    local request_id="$2"
+    local matches=()
+    local candidate
+
+    while IFS= read -r -d '' candidate; do
+        if grep -Fq "\"request_id\": \"$request_id\"" "$candidate" 2>/dev/null; then
+            matches+=("$candidate")
+        fi
+    done < <(find "$workspace_dir" -type f -path '*/.neurico/hitl/launch.json' -print0 2>/dev/null)
+
+    if [ "${#matches[@]}" -eq 1 ]; then
+        printf '%s\n' "${matches[0]}"
+        return 0
+    fi
+    return 1
+}
+
+hitl_mark_launch_failed() {
+    local workspace_dir="$1"
+    local request_id="$2"
+    local reason="$3"
+    local message
+
+    case "$reason" in
+        idea_missing)
+            message="The selected idea is no longer available on the Docker host."
+            ;;
+        resource_manifest_invalid)
+            message="The selected idea has an invalid local-resource mount manifest."
+            ;;
+        resource_missing)
+            message="A declared local resource is unavailable on the Docker host. Check the terminal and idea definition, then try again."
+            ;;
+        docker_start_failed)
+            message="Docker could not start the research container. Check the terminal, then try again."
+            ;;
+        *)
+            message="The research container exited before the run could start. Check the terminal, then try again."
+            ;;
+    esac
+
+    local status_path
+    if ! status_path=$(hitl_launch_status_for_request "$workspace_dir" "$request_id"); then
+        echo -e "${YELLOW}[WARN]${NC} Could not locate launch status for request $request_id" >&2
+        return 1
+    fi
+
+    local failed_at
+    failed_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    local temporary_path="${status_path}.tmp.$$.${RANDOM}"
+    if ! printf '{\n  "status": "failed",\n  "request_id": "%s",\n  "failed_at": "%s",\n  "updated_at": "%s",\n  "message": "%s"\n}\n' \
+        "$request_id" "$failed_at" "$failed_at" "$message" > "$temporary_path"; then
+        return 1
+    fi
+    mv "$temporary_path" "$status_path"
+}
+
+hitl_reject_launch_request() {
+    local claimed_path="$1"
+    local workspace_dir="$2"
+    local request_id="$3"
+    local reason="$4"
+
+    hitl_mark_launch_failed "$workspace_dir" "$request_id" "$reason" || true
+    mv "$claimed_path" "${claimed_path}.failed" 2>/dev/null || true
+}
+
+hitl_idea_exists_on_host() {
+    local idea_id="$1"
+    local state
+    for state in submitted in_progress completed; do
+        if [ -f "$PROJECT_ROOT/ideas/$state/${idea_id}.yaml" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 hitl_launch_handoff_watcher() {
     local workspace_dir="$1"
     local gpu_flags="$2"
@@ -2069,6 +2149,13 @@ hitl_launch_handoff_watcher() {
                 continue
             fi
 
+            if ! hitl_idea_exists_on_host "$idea_id"; then
+                echo -e "${RED}[ERROR]${NC} HITL launch references an unavailable idea: $idea_id" >&2
+                hitl_reject_launch_request \
+                    "$claimed_path" "$workspace_dir" "$request_id" idea_missing
+                continue
+            fi
+
             local runner_args=( run -d --rm --name "neurico-hitl-run-${request_id:0:12}" )
             local runner_helpers=()
             eval "runner_helpers=( $gpu_flags $user_flags $credential_mounts )"
@@ -2084,13 +2171,34 @@ hitl_launch_handoff_watcher() {
             )
 
             local mounts_file="$PROJECT_ROOT/ideas/mounts/${idea_id}.txt"
-            if [ -f "$mounts_file" ]; then
+            local mount_error=""
+            if [ -e "$mounts_file" ] && { [ ! -f "$mounts_file" ] || [ -L "$mounts_file" ]; }; then
+                mount_error="manifest"
+            elif [ -f "$mounts_file" ]; then
                 while IFS= read -r host_path; do
                     [ -z "$host_path" ] && continue
-                    if [ -e "$host_path" ]; then
-                        runner_args+=( -v "$host_path:$host_path:ro" )
+                    if [[ "$host_path" != /* ]]; then
+                        echo -e "${RED}[ERROR]${NC} Local resource path is not absolute: $host_path" >&2
+                        mount_error="manifest"
+                        break
                     fi
+                    if [ ! -e "$host_path" ]; then
+                        echo -e "${RED}[ERROR]${NC} Declared local resource is unavailable: $host_path" >&2
+                        mount_error="missing"
+                        break
+                    fi
+                    runner_args+=( -v "$host_path:$host_path:ro" )
                 done < "$mounts_file"
+            fi
+
+            if [ "$mount_error" = "manifest" ]; then
+                hitl_reject_launch_request \
+                    "$claimed_path" "$workspace_dir" "$request_id" resource_manifest_invalid
+                continue
+            elif [ "$mount_error" = "missing" ]; then
+                hitl_reject_launch_request \
+                    "$claimed_path" "$workspace_dir" "$request_id" resource_missing
+                continue
             fi
 
             runner_args+=(
@@ -2099,8 +2207,26 @@ hitl_launch_handoff_watcher() {
                 python /app/src/cli/hitl_run_worker.py
                 --request "/workspaces/.neurico/hitl-launch-requests/${request_name}.claimed"
             )
-            if ! docker "${runner_args[@]}" >/dev/null; then
-                mv "$claimed_path" "$request_path" 2>/dev/null || true
+            local container_id
+            if ! container_id=$(docker "${runner_args[@]}"); then
+                echo -e "${RED}[ERROR]${NC} Docker could not start HITL run $request_id" >&2
+                hitl_reject_launch_request \
+                    "$claimed_path" "$workspace_dir" "$request_id" docker_start_failed
+                continue
+            fi
+
+            # `docker run -d` can succeed even when the container exits during
+            # entrypoint startup. Give the worker a moment to persist `running`;
+            # if the container has already disappeared and the request is still
+            # `starting`, surface the failure instead of leaving the portal stuck.
+            sleep 0.5
+            if ! docker inspect "$container_id" >/dev/null 2>&1; then
+                local status_path=""
+                status_path=$(hitl_launch_status_for_request "$workspace_dir" "$request_id") || true
+                if [ -n "$status_path" ] && grep -Fq '"status": "starting"' "$status_path"; then
+                    hitl_reject_launch_request \
+                        "$claimed_path" "$workspace_dir" "$request_id" run_container_exited
+                fi
             fi
         done
         sleep 0.25
@@ -2251,6 +2377,12 @@ cmd_help() {
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
+
+# Keep the helpers sourceable for focused launch-adapter verification without
+# dispatching a user command. Normal `./neurico` execution is unchanged.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
 
 # Parse command
 ACTION="${1:-help}"

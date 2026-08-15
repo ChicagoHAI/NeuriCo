@@ -6,6 +6,7 @@ import argparse
 from contextlib import redirect_stderr, redirect_stdout
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -18,6 +19,13 @@ from core.config_loader import ConfigLoader  # noqa: E402
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path  # noqa: E402
 from core.hitl_util import atomic_write_json, utc_now  # noqa: E402
 from core.runner import ResearchRunner  # noqa: E402
+from cli.hitl_launcher import workspace_for_idea  # noqa: E402
+
+
+_REQUEST_NAME = re.compile(
+    r"^request\.(?P<idea_id>[A-Za-z0-9][A-Za-z0-9._-]*)\."
+    r"(?P<request_id>[0-9a-f]{32})\.json(?:\.claimed)?$"
+)
 
 
 def _claim_request(path: Path) -> Path:
@@ -36,7 +44,15 @@ def _load_request(path: Path) -> Dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or value.get("version") != 1:
         raise ValueError("Unsupported HITL launch request.")
-    required = ("request_id", "idea_id", "work_dir", "provider", "mode", "interface")
+    required = (
+        "request_id",
+        "idea_id",
+        "work_dir",
+        "project_root",
+        "provider",
+        "mode",
+        "interface",
+    )
     if any(not str(value.get(key, "")).strip() for key in required):
         raise ValueError("HITL launch request is incomplete.")
     if value["provider"] not in {"claude", "codex"}:
@@ -45,6 +61,27 @@ def _load_request(path: Path) -> Dict[str, Any]:
         raise ValueError("HITL launch request has an unsupported mode.")
     if value["interface"] not in {"web", "cli"}:
         raise ValueError("HITL launch request has an unsupported source interface.")
+
+    identity = _REQUEST_NAME.fullmatch(path.name)
+    if identity is None:
+        raise ValueError("HITL launch request has an invalid filename.")
+    if value["idea_id"] != identity.group("idea_id"):
+        raise ValueError("HITL launch request idea does not match its filename.")
+    if value["request_id"] != identity.group("request_id"):
+        raise ValueError("HITL launch request ID does not match its filename.")
+
+    workspace_root = ConfigLoader().get_workspace_parent_dir().resolve()
+    work_dir = Path(str(value["work_dir"])).resolve()
+    if work_dir == workspace_root or not work_dir.is_relative_to(workspace_root):
+        raise ValueError("HITL launch workspace is outside the managed workspace root.")
+    expected_work_dir = workspace_for_idea(PROJECT_ROOT, str(value["idea_id"]))
+    if work_dir != expected_work_dir.resolve():
+        raise ValueError("HITL launch workspace does not match the selected idea.")
+
+    requested_project_root = Path(str(value.get("project_root", ""))).resolve()
+    if requested_project_root != PROJECT_ROOT.resolve():
+        raise ValueError("HITL launch request belongs to a different NeuriCo checkout.")
+    value["work_dir"] = str(work_dir)
     return value
 
 
