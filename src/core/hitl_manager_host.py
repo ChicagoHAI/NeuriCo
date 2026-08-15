@@ -33,7 +33,6 @@ from core.hitl_lock import (
     hitl_renderer_lease,
     resolve_hitl_manager_provider,
 )
-from core.hitl_runtime_state import HitlRuntimeState
 from core.hitl_manager_react import HitlManager
 
 _RESOLUTION_REPLY = "resolution_reply"
@@ -320,28 +319,11 @@ class HitlWebChannel(WebChannel):
         return True
 
     def _durable_resolution_request(self) -> Optional[Dict[str, Any]]:
-        if self.work_dir is None or self._conversation is None:
+        if self.work_dir is None:
             return None
-        pending = HitlRuntimeState(self.work_dir).pending_worker_command()
-        if not isinstance(pending, dict):
-            return None
-        request_key = str(pending.get("request_key", "")).strip()
-        record_id = str(pending.get("human_request_record_id", "")).strip()
-        if not request_key or not record_id:
-            return None
-        record = self._conversation.record(record_id)
-        metadata = record.get("metadata") if isinstance(record, dict) else None
-        if not isinstance(metadata, dict):
-            return None
-        return {
-            "request_key": request_key,
-            "message": str(record.get("content", "")),
-            "options": [
-                {"id": f"option_{index + 1}", "text": str(option)}
-                for index, option in enumerate(metadata.get("options") or [])
-                if str(option).strip()
-            ],
-        }
+        from core.hitl_workspace_view import HitlWorkspaceView
+
+        return HitlWorkspaceView(self.work_dir).pending_request()
 
     def last_polled_input_was_recorded(self) -> bool:
         return self._last_polled_input_recorded
@@ -436,6 +418,7 @@ class HitlTerminalChannel(UserChannel):
             "label": "Ready",
         }
         self._seen_interface_events: set[str] = set()
+        self._seen_conversation_records: set[str] = set()
         self._startup_rendered = False
         self._thinking_requested = threading.Event()
         self._thinking_stop = threading.Event()
@@ -548,6 +531,7 @@ class HitlTerminalChannel(UserChannel):
             self.send(f"Conversation history could not be loaded: {exc}", kind="system")
             return
         pending = snapshot.get("inbox", {}).get("pending_request")
+        pending_record_id = str((pending or {}).get("conversation_record_id", "")).strip()
         conversation = list(snapshot.get("conversation", []))
         for record in conversation:
             speaker = str(record.get("speaker", "manager")).strip().lower()
@@ -587,6 +571,11 @@ class HitlTerminalChannel(UserChannel):
                 self._render_interface_notification(notification)
                 continue
             record = entry["record"]
+            record_id = str(record.get("record_id") or record.get("id") or "").strip()
+            if record_id:
+                self._seen_conversation_records.add(record_id)
+            if record_id and record_id == pending_record_id:
+                continue
             speaker = str(record.get("speaker", "manager")).strip().lower()
             content = str(record.get("content", "")).strip()
             if content:
@@ -611,6 +600,42 @@ class HitlTerminalChannel(UserChannel):
                         "Use /run to resume before resolving this review.", tone="review"
                     )
                 )
+
+    def _present_new_conversation_records(
+        self,
+        conversation: List[Dict[str, Any]],
+        *,
+        pending_record_id: str = "",
+    ) -> None:
+        """Render newly archived human-visible turns exactly once."""
+        unseen: List[Dict[str, Any]] = []
+        with self._presentation_lock:
+            for record in conversation:
+                record_id = str(record.get("record_id") or record.get("id") or "").strip()
+                if not record_id or record_id in self._seen_conversation_records:
+                    continue
+                self._seen_conversation_records.add(record_id)
+                if record_id == pending_record_id:
+                    continue
+                unseen.append(record)
+        for record in unseen:
+            speaker = str(record.get("speaker", "manager")).strip().lower()
+            content = str(record.get("content", "")).strip()
+            if not content:
+                continue
+            if speaker == "human" and self._terminal_composer is not None:
+                self._terminal_composer.add_history(content)
+            self._write_block(
+                self._ui.conversation("human" if speaker == "human" else "manager", content),
+                blank_before=True,
+            )
+
+    def mark_conversation_record_presented(self, record_id: str) -> None:
+        value = str(record_id).strip()
+        if not value:
+            return
+        with self._presentation_lock:
+            self._seen_conversation_records.add(value)
 
     def _render_interface_notification(self, notification: Dict[str, Any]) -> None:
         kind = str(notification.get("kind", "")).strip()
@@ -651,9 +676,18 @@ class HitlTerminalChannel(UserChannel):
             ),
         )
         try:
-            pending_request = self._interface_view.snapshot()["inbox"].get("pending_request")
+            snapshot = self._interface_view.snapshot()
+            pending_request = snapshot["inbox"].get("pending_request")
         except Exception:
+            snapshot = {}
             pending_request = None
+        pending_record_id = str(
+            (pending_request or {}).get("conversation_record_id", "")
+        ).strip()
+        self._present_new_conversation_records(
+            list(snapshot.get("conversation") or []),
+            pending_record_id=pending_record_id,
+        )
         if isinstance(pending_request, dict):
             request_key = str(pending_request.get("request_key", ""))
             with self._state_lock:
@@ -805,6 +839,8 @@ class HitlTerminalChannel(UserChannel):
             provider=provider,
             client_turn_id=client_turn_id or f"H{uuid.uuid4().hex}",
         )
+        if self._interactive:
+            self.mark_conversation_record_presented(str(record.get("id", "")))
         return {
             "status": "accepted",
             "disposition": "queued" if int(record.get("queue_position", 0)) > 0 else "direct",
@@ -1134,6 +1170,22 @@ class HitlTerminalChannel(UserChannel):
             self._thinking_requested.clear()
             self._stop_thinking_indicator()
         if kind == "manager":
+            if self.work_dir is not None:
+                try:
+                    from core.hitl_workspace_view import HitlWorkspaceView
+
+                    snapshot = HitlWorkspaceView(self.work_dir).snapshot()
+                    self._present_new_conversation_records(
+                        list(snapshot.get("conversation") or []),
+                        pending_record_id=str(
+                            (snapshot.get("inbox", {}).get("pending_request") or {}).get(
+                                "conversation_record_id", ""
+                            )
+                        ).strip(),
+                    )
+                    return
+                except Exception:
+                    pass
             self._write_block(self._ui.conversation("manager", text), blank_before=True)
         elif kind == "system":
             tone = (
@@ -1508,15 +1560,19 @@ class HitlManagerHost:
         def durable_notice(text: str) -> None:
             conversation = getattr(manager, "conversation", None)
             append = getattr(conversation, "append", None)
+            record = None
             if callable(append):
                 try:
-                    append(
+                    record = append(
                         "manager",
                         text,
                         metadata={"visibility": "human", "kind": "manager_reply"},
                     )
                 except Exception:
                     pass
+            mark_presented = getattr(self.channel, "mark_conversation_record_presented", None)
+            if callable(mark_presented) and isinstance(record, dict):
+                mark_presented(str(record.get("id", "")))
             try:
                 self.channel.send(text, kind="system")
             except Exception:

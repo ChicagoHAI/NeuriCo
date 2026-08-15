@@ -96,6 +96,11 @@ class HitlWorkspaceView:
         runtime = self._runtime_state()
         return self._live_status(runtime)
 
+    def pending_request(self) -> Optional[Dict[str, Any]]:
+        """Return the currently actionable request from durable workspace state."""
+        request = self._inbox(self._runtime_state()).get("pending_request")
+        return dict(request) if isinstance(request, dict) else None
+
     def notifications(self) -> List[Dict[str, Any]]:
         """Return the shared, user-facing projection of durable interface events."""
         runtime = self._runtime_state()
@@ -1170,6 +1175,14 @@ class HitlWorkspaceView:
         pending = pending if isinstance(pending, dict) else None
         record_id = str((pending or {}).get("human_request_record_id") or "").strip()
         request = None
+        if record_id:
+            request_key = str(pending.get("request_key", "")).strip()
+            queued_reply = payload.get("resolution_reply")
+            if (
+                isinstance(queued_reply, dict)
+                and str(queued_reply.get("request_key", "")).strip() == request_key
+            ):
+                record_id = ""
         if record_id:
             request_key = str(pending.get("request_key", "")).strip()
             try:

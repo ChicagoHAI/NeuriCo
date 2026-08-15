@@ -201,7 +201,11 @@
       body: JSON.stringify(payload),
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Could not submit.");
+    if (!response.ok) {
+      const error = new Error(data.error || "Could not submit.");
+      error.status = String(data.status || "");
+      throw error;
+    }
     return data;
   }
 
@@ -989,7 +993,35 @@
       render();
     }
   }
-  async function submitRequest(request, feedback) { const operation = workspaceOperation("/input"); const transient = transientFor(operation.key); const draft = loadRequestDraft(request, operation.key); const selectedOption = transient.selectedOption || draft.selectedOption || ""; const text = String(feedback || draft.requestFeedback || "").trim(); if (!selectedOption && !text) { transient.notice = "Choose an option or add feedback before submitting."; render(); return; } try { await post(operation.path, { text, input_kind: "resolution_reply", request_key: request.request_key, option_id: selectedOption, provider: state.provider, client_turn_id: crypto.randomUUID() }); clearRequestDraft(request, operation.key); if (operationIsCurrent(operation)) await refresh(); } catch (error) { if (!operationIsCurrent(operation)) return; transient.notice = error.message; render(); } }
+  async function submitRequest(request, feedback) {
+    const operation = workspaceOperation("/input");
+    const transient = transientFor(operation.key);
+    const draft = loadRequestDraft(request, operation.key);
+    const selectedOption = transient.selectedOption || draft.selectedOption || "";
+    const text = String(feedback || draft.requestFeedback || "").trim();
+    if (!selectedOption && !text) {
+      transient.notice = "Choose an option or add feedback before submitting.";
+      render();
+      return;
+    }
+    try {
+      await post(operation.path, { text, input_kind: "resolution_reply", request_key: request.request_key, option_id: selectedOption, provider: state.provider, client_turn_id: crypto.randomUUID() });
+      clearRequestDraft(request, operation.key);
+      if (!operationIsCurrent(operation)) return;
+      transient.notice = "";
+      await refresh();
+    } catch (error) {
+      if (!operationIsCurrent(operation)) return;
+      if (["stale", "already_resolved"].includes(String(error.status || ""))) {
+        clearRequestDraft(request, operation.key);
+        transient.notice = "";
+        await refresh();
+        return;
+      }
+      transient.notice = error.message;
+      render();
+    }
+  }
   async function removeQueued(id) { const operation = workspaceOperation("/queue"); const transient = transientFor(operation.key); try { await post(operation.path, { action: "remove", id }); if (operationIsCurrent(operation)) await refresh(); } catch (error) { if (!operationIsCurrent(operation)) return; transient.notice = error.message; render(); } }
   async function editQueued(item) {
     const operation = workspaceOperation("/queue");
