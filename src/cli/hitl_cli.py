@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
-import time
+import threading
 from pathlib import Path
 
 
@@ -42,25 +42,32 @@ def main() -> int:
         project_root=PROJECT_ROOT,
         host=host,
         interface="cli",
-        on_status_change=host.channel.present_run_status,
     )
     host.channel.set_run_launcher(controller.launch, controller.snapshot)
 
-    stopping = False
-
     def stop(*_unused: object) -> None:
-        nonlocal stopping
-        stopping = True
+        host.channel.close()
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
-    host.channel.present_run_status(controller.snapshot())
-    host.channel.send(f"Workspace: {work_dir}", kind="system")
     host.start()
+    notifications_stopped = threading.Event()
+
+    def present_notifications() -> None:
+        while not notifications_stopped.wait(0.5):
+            host.channel.present_interface_notifications()
+
+    notification_thread = threading.Thread(
+        target=present_notifications,
+        daemon=True,
+        name="neurico-hitl-cli-notifications",
+    )
+    notification_thread.start()
     try:
-        while not stopping and not host.channel.is_closed():
-            time.sleep(0.25)
+        host.channel.run_foreground()
     finally:
+        host.channel.close()
+        notifications_stopped.set()
         host.stop()
     return 0
 

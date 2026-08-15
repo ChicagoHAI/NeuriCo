@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+import logging
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -12,8 +13,14 @@ import yaml
 from core.config_loader import ConfigLoader
 from core.hitl_frontier import HitlFrontierStore
 from core.hitl_lock import HitlWorkspaceRunActiveError, active_hitl_workspace_run
+from core.hitl_paths import hitl_launch_status_path
+from core.hitl_util import atomic_write_json, utc_now
+from core.hitl_workspace_view import HitlWorkspaceView
 from core.idea_manager import IdeaManager
 from core.runner import ResearchRunner
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def workspace_for_idea(project_root: Path, idea_id: str) -> Path:
@@ -60,7 +67,7 @@ class HitlRunController:
         on_status_change: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         if interface not in {"web", "cli"}:
-            raise ValueError("HITL run interface must be 'web' or 'cli'.")
+            raise ValueError("NeuriCo run interface must be 'web' or 'cli'.")
         self.idea_id = str(idea_id)
         self.work_dir = Path(work_dir)
         self.project_root = Path(project_root)
@@ -69,27 +76,41 @@ class HitlRunController:
         self.on_status_change = on_status_change
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
-        self._status: Dict[str, Any] = {"status": "idle"}
 
     def snapshot(self) -> Dict[str, Any]:
-        with self._lock:
-            local_status = dict(self._status)
-            local_running = self._thread is not None and self._thread.is_alive()
-        if local_running:
-            return {"status": "running", "source": self.interface}
-        external_owner = active_hitl_workspace_run(self.work_dir)
-        if external_owner is not None:
-            return {
-                "status": "running",
-                "source": "external",
-                "owner": external_owner,
-            }
-        return local_status
+        return HitlWorkspaceView(self.work_dir).live_status()
+
+    def _clear_launch_failure(self) -> None:
+        hitl_launch_status_path(self.work_dir).unlink(missing_ok=True)
+
+    def _record_launch_failure(
+        self,
+        error: Exception,
+        *,
+        provider: str,
+        mode: str,
+    ) -> None:
+        detail = str(error).strip() or error.__class__.__name__
+        failed_at = utc_now()
+        atomic_write_json(
+            hitl_launch_status_path(self.work_dir),
+            {
+                "status": "failed",
+                "failed_at": failed_at,
+                "updated_at": failed_at,
+                "mode": mode,
+                "provider": provider,
+                "message": f"Research could not start: {detail}",
+            },
+        )
 
     def launch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         provider = str(payload.get("provider", "")).strip().lower()
-        if provider not in {"claude", "codex", "gemini"}:
-            raise ValueError("Choose Claude, Codex, or Gemini as the worker.")
+        if provider not in {"claude", "codex"}:
+            raise ValueError(
+                "Choose Claude or Codex for HITL research so the workers and manager "
+                "can use the same backend."
+            )
         try:
             iterations = int(payload.get("iterations", 1))
         except (TypeError, ValueError) as exc:
@@ -102,11 +123,17 @@ class HitlRunController:
 
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
-                raise RuntimeError("An HITL AutoResearch run is already active for this workspace.")
+                raise RuntimeError("Research is already active for this workspace.")
             external_owner = active_hitl_workspace_run(self.work_dir)
             if external_owner is not None:
                 raise HitlWorkspaceRunActiveError(self.work_dir, external_owner)
+            manager = getattr(self.host, "manager", None)
+            set_manager_provider = getattr(manager, "set_provider", None)
+            if not callable(set_manager_provider):
+                raise RuntimeError("The HITL host cannot select a manager backend.")
+            set_manager_provider(provider)
             continuation = HitlFrontierStore(self.work_dir).exists()
+            mode = "continue" if continuation else "fresh"
             runner = ResearchRunner(
                 project_root=self.project_root,
                 use_github=bool(payload.get("github", False)),
@@ -131,41 +158,40 @@ class HitlRunController:
                         log_path.parent.mkdir(parents=True, exist_ok=True)
                         with log_path.open("a", encoding="utf-8") as output:
                             with redirect_stdout(output), redirect_stderr(output):
-                                result = execute()
+                                execute()
                     else:
-                        result = execute()
-                    next_status = "completed" if result.get("success") else "failed"
-                    error = ""
-                except HitlWorkspaceRunActiveError as exc:
-                    next_status = "idle"
-                    error = str(exc)
+                        execute()
                 except Exception as exc:
-                    next_status = "failed"
-                    error = str(exc)
-                with self._lock:
-                    self._status = {"status": next_status}
-                    if error:
-                        self._status["error"] = error
+                    LOGGER.exception(
+                        "HITL AutoResearch launch failed for workspace %s",
+                        self.work_dir,
+                    )
+                    try:
+                        self._record_launch_failure(
+                            exc,
+                            provider=provider,
+                            mode=mode,
+                        )
+                    except Exception:
+                        LOGGER.exception(
+                            "Unable to record HITL AutoResearch launch failure for workspace %s",
+                            self.work_dir,
+                        )
                 self._publish_status()
 
+            self._clear_launch_failure()
             self._thread = threading.Thread(
                 target=run,
                 name="hitl-autoresearch-launch",
                 daemon=True,
             )
-            self._status = {
-                "status": "running",
-                "mode": "continue" if continuation else "fresh",
-            }
             self._thread.start()
         self._publish_status()
         return {
             "status": "accepted",
-            "mode": "continue" if continuation else "fresh",
+            "mode": mode,
         }
 
     def _publish_status(self) -> None:
         if self.on_status_change is not None:
-            with self._lock:
-                status = dict(self._status)
-            self.on_status_change(status)
+            self.on_status_change(self.snapshot())

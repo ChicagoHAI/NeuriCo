@@ -26,6 +26,10 @@ def hitl_runtime_state_path(work_dir: Path) -> Path:
     return hitl_state_dir(work_dir) / "runtime.json"
 
 
+def hitl_launch_status_path(work_dir: Path) -> Path:
+    return hitl_state_dir(work_dir) / "launch.json"
+
+
 def hitl_artifact_contract_path(work_dir: Path) -> Path:
     return hitl_state_dir(work_dir) / "artifact_contract.json"
 

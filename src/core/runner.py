@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from functools import wraps
 import inspect
+import logging
 import subprocess
 import shlex
 import sys
@@ -49,6 +50,9 @@ from core.compute_backend import (
 )
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
+
+
+LOGGER = logging.getLogger(__name__)
 
 try:
     from core.github_manager import GitHubManager
@@ -262,6 +266,11 @@ class ResearchRunner:
         if len(selected_hitl_modes) > 1:
             raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
         hitl = hitl_autoresearch or hitl_continue_autoresearch
+        if hitl and provider not in {"claude", "codex"}:
+            raise ValueError(
+                "HITL AutoResearch requires Claude or Codex so its workers and "
+                "manager use the same backend."
+            )
         if continue_recover and not continue_autoresearch:
             raise ValueError(
                 "--continue-recover only applies with --continue-autoresearch."
@@ -494,6 +503,10 @@ class ResearchRunner:
                 )
                 hitl_host.start()
                 owns_hitl_host = True
+            set_manager_provider = getattr(hitl_host.manager, "set_provider", None)
+            if not callable(set_manager_provider):
+                raise RuntimeError("The HITL host cannot select a manager backend.")
+            set_manager_provider(provider)
 
         if continue_autoresearch:
             success = False
@@ -546,6 +559,7 @@ class ResearchRunner:
                         paper_style=paper_style,
                         paper_timeout=paper_timeout,
                         full_permissions=full_permissions,
+                        hitl_enabled=bool(hitl),
                     )
             except Exception as e:
                 print(f"\n❌ Continue AutoResearch error: {e}")
@@ -763,6 +777,7 @@ class ResearchRunner:
                         paper_style=paper_style,
                         paper_timeout=paper_timeout,
                         full_permissions=full_permissions,
+                        hitl_enabled=bool(hitl),
                     )
 
             except Exception as e:
@@ -1084,12 +1099,28 @@ https://github.com/ChicagoHAI/neurico
         paper_style: Optional[str],
         paper_timeout: int,
         full_permissions: bool,
+        hitl_enabled: bool = False,
     ) -> Dict[str, Any]:
         print()
         print("=" * 80)
         print("📝 STAGE: Paper Writing")
         print("=" * 80)
         print()
+
+        if hitl_enabled:
+            from core.hitl_runtime_state import HitlRuntimeState
+
+            try:
+                HitlRuntimeState(work_dir).record_interface_phase(
+                    stage="paper_writer",
+                    phase="drafting",
+                    activity="working",
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Unable to record the paper-writing interface phase.",
+                    exc_info=True,
+                )
 
         from agents.paper_writer import run_paper_writer
 

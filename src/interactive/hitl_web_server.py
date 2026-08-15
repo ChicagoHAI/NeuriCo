@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
-from core.hitl_lock import HitlWorkspaceRunActiveError
+from core.hitl_lock import HitlWorkspaceRunActiveError, resolve_hitl_manager_provider
 from core.hitl_manager_inbox import HitlWebInputError
 from core.hitl_workspace_view import HitlWorkspaceView, HitlWorkspaceViewError
 from interactive.channel import WebChannel
@@ -70,7 +70,7 @@ def _handler(
     workspace: Path,
     title: str,
     run_launcher: Callable[[dict[str, Any]], dict[str, Any]],
-    run_status: Callable[[], dict[str, Any]],
+    manager_provider: Callable[[], str],
     access_token: str,
     session_cookie_name: str,
 ):
@@ -188,7 +188,16 @@ def _handler(
             if path == "/api/snapshot":
                 try:
                     snapshot = HitlWorkspaceView(workspace).snapshot()
-                    snapshot["run"] = run_status()
+                    presentation_status = getattr(channel, "presentation_status", None)
+                    if callable(presentation_status):
+                        snapshot["manager_status"] = presentation_status()
+                    live = snapshot.get("live") if isinstance(snapshot.get("live"), dict) else {}
+                    current_provider = str(manager_provider() or "").strip().lower()
+                    locked_provider = str(live.get("provider") or "").strip().lower()
+                    snapshot["manager"] = {
+                        "provider": locked_provider if live.get("active") else current_provider,
+                        "provider_locked": bool(live.get("active")),
+                    }
                     self._json(snapshot)
                 except HitlWorkspaceViewError as exc:
                     self._json({"error": str(exc)}, 409)
@@ -259,7 +268,10 @@ def _handler(
                     input_kind=input_kind,
                     request_key=payload.get("request_key"),
                     option_id=payload.get("option_id"),
-                    provider=str(payload.get("provider", "")),
+                    provider=resolve_hitl_manager_provider(
+                        workspace,
+                        str(payload.get("provider", "")),
+                    ),
                     client_turn_id=str(payload.get("client_turn_id", "")),
                 )
             except HitlWebInputError as exc:
@@ -308,7 +320,7 @@ class HitlWebServer:
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._run_launcher: Callable[[dict[str, Any]], dict[str, Any]] = self._run_unavailable
-        self._run_status: Callable[[], dict[str, Any]] = lambda: {"status": "unavailable"}
+        self._manager_provider: Callable[[], str] = lambda: ""
 
     @staticmethod
     def _run_unavailable(_payload: dict[str, Any]) -> dict[str, Any]:
@@ -317,11 +329,11 @@ class HitlWebServer:
     def set_run_launcher(
         self,
         launcher: Callable[[dict[str, Any]], dict[str, Any]],
-        status: Optional[Callable[[], dict[str, Any]]] = None,
     ) -> None:
         self._run_launcher = launcher
-        if status is not None:
-            self._run_status = status
+
+    def set_manager_provider_getter(self, getter: Callable[[], str]) -> None:
+        self._manager_provider = getter
 
     @property
     def url(self) -> str:
@@ -336,7 +348,7 @@ class HitlWebServer:
             self.workspace,
             self.title,
             lambda payload: self._run_launcher(payload),
-            lambda: self._run_status(),
+            lambda: self._manager_provider(),
             self.access_token,
             self.session_cookie_name,
         )

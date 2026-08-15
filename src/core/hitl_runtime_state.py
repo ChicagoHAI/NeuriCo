@@ -8,6 +8,7 @@ manager process restart.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
@@ -29,6 +30,8 @@ UNRESOLVED_WORKER_COMMAND_STATUSES = frozenset(
         "scoring",
     }
 )
+MAX_INTERFACE_EVENTS = 500
+LOGGER = logging.getLogger(__name__)
 
 
 def worker_command_requires_resume(command: Any) -> bool:
@@ -88,7 +91,134 @@ class HitlRuntimeState:
             "frontier_decision_transition": None,
             "initial_root_publication_transition": None,
             "approved_plans": {},
+            "interface_events": [],
+            "interface_event_sequence": 0,
+            "interface_phase_key": "",
         }
+
+    def _append_interface_event_unlocked(self, kind: str, **values: Any) -> Dict[str, Any]:
+        sequence = int(self._state.get("interface_event_sequence", 0)) + 1
+        event = {
+            "id": f"N{sequence}",
+            "kind": str(kind),
+            "created_at": _now(),
+            **self._copy(values),
+        }
+        events = self._state.setdefault("interface_events", [])
+        if not isinstance(events, list):
+            events = []
+        events.append(event)
+        self._state["interface_events"] = events[-MAX_INTERFACE_EVENTS:]
+        self._state["interface_event_sequence"] = sequence
+        return event
+
+    def _record_phase_transition_unlocked(
+        self,
+        *,
+        stage: str,
+        phase: str,
+        activity: str,
+    ) -> Optional[Dict[str, Any]]:
+        previous_phase_key = str(self._state.get("interface_phase_key", ""))
+        try:
+            normalized = tuple(str(value or "").strip() for value in (stage, phase, activity))
+            if not any(normalized):
+                return None
+            phase_key = ":".join(normalized)
+            if previous_phase_key == phase_key:
+                return None
+            self._state["interface_phase_key"] = phase_key
+            return self._append_interface_event_unlocked(
+                "phase_transition",
+                stage=normalized[0],
+                phase=normalized[1],
+                activity=normalized[2],
+            )
+        except Exception:
+            self._state["interface_phase_key"] = previous_phase_key
+            LOGGER.warning(
+                "Unable to record observational HITL phase metadata.",
+                exc_info=True,
+            )
+            return None
+
+    def _record_worker_command_phase_unlocked(self, command: Dict[str, Any]) -> None:
+        review_kind = str(command.get("manager_review_kind", ""))
+        status = str(command.get("status", ""))
+        if review_kind == "initial_scoring":
+            stage, phase = "scoring", "initial_result_review"
+        elif review_kind == "frontier_scoring":
+            stage, phase = "candidate_decision", "accept_or_reject"
+        elif review_kind == "scoring_failure":
+            stage, phase = "scoring", "repair_review"
+        elif str(command.get("kind", "")).strip() == "proposal":
+            stage, phase = str(command.get("pipeline_stage", "")), "proposal"
+        elif status == "scoring_approval_pending":
+            stage, phase = "scoring", "preparing"
+        elif status == "scoring":
+            stage, phase = "scoring", "evaluating_results"
+        else:
+            stage = str(command.get("pipeline_stage", ""))
+            phase = str(command.get("hitl_stage", ""))
+        if review_kind or status == "pending":
+            activity = "reviewing"
+        elif status == "scoring_approval_pending":
+            activity = "preparing"
+        elif status == "scoring":
+            activity = "evaluating"
+        else:
+            activity = status or "reviewing"
+        self._record_phase_transition_unlocked(
+            stage=stage,
+            phase=phase,
+            activity=activity,
+        )
+
+    def record_interface_idea(self, idea_id: str) -> Optional[Dict[str, Any]]:
+        """Record a derived UI notice after an authoritative idea is appended."""
+        normalized = str(idea_id).strip()
+        if not normalized:
+            raise HitlRuntimeStateError("Interface idea event requires idea_id")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            events = self._state.get("interface_events", [])
+            if isinstance(events, list) and any(
+                isinstance(event, dict)
+                and event.get("kind") == "idea_created"
+                and str(event.get("idea_id", "")) == normalized
+                for event in events
+            ):
+                return None
+            event = self._append_interface_event_unlocked(
+                "idea_created",
+                idea_id=normalized,
+            )
+            self._save_unlocked()
+            return self._copy(event)
+
+    def interface_events(self) -> list[Dict[str, Any]]:
+        events = self.snapshot().get("interface_events", [])
+        if not isinstance(events, list):
+            return []
+        return [self._copy(event) for event in events if isinstance(event, dict)]
+
+    def record_interface_phase(
+        self,
+        *,
+        stage: str,
+        phase: str,
+        activity: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Record a user-facing phase transition without changing workflow state."""
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            event = self._record_phase_transition_unlocked(
+                stage=stage,
+                phase=phase,
+                activity=activity,
+            )
+            self._save_unlocked()
+            return self._copy(event) if event is not None else None
 
     def _locked(self) -> Iterator[None]:
         return exclusive_file_lock(self.lock_path)
@@ -108,6 +238,8 @@ class HitlRuntimeState:
             raise HitlRuntimeStateError("HITL runtime state must be a JSON object")
         merged = self._default()
         merged.update(payload)
+        # Ignore the retired interface-owned run shadow in existing workspaces.
+        merged.pop("run", None)
         return merged
 
     def _save_unlocked(self) -> None:
@@ -131,6 +263,11 @@ class HitlRuntimeState:
             value["status"] = "running"
             value["started_at"] = _now()
             self._state["worker_continuation"] = value
+            self._record_phase_transition_unlocked(
+                stage=str(value.get("pipeline_stage", "")),
+                phase=str(value.get("hitl_stage", "")),
+                activity="working",
+            )
             self._save_unlocked()
 
     def update_worker_continuation(self, **updates: Any) -> None:
@@ -141,6 +278,12 @@ class HitlRuntimeState:
                 return
             continuation.update(self._copy(updates))
             continuation["updated_at"] = _now()
+            status = str(continuation.get("status", ""))
+            self._record_phase_transition_unlocked(
+                stage=str(continuation.get("pipeline_stage", "")),
+                phase=str(continuation.get("hitl_stage", "")),
+                activity="revising" if status.startswith("replacement") else "working",
+            )
             self._save_unlocked()
 
     def mark_worker_replacement(self) -> None:
@@ -152,6 +295,11 @@ class HitlRuntimeState:
             continuation["replacement_count"] = int(continuation.get("replacement_count", 0)) + 1
             continuation["status"] = "replacement_running"
             continuation["updated_at"] = _now()
+            self._record_phase_transition_unlocked(
+                stage=str(continuation.get("pipeline_stage", "")),
+                phase=str(continuation.get("hitl_stage", "")),
+                activity="revising",
+            )
             self._save_unlocked()
 
     def clear_worker_continuation(self) -> None:
@@ -209,6 +357,7 @@ class HitlRuntimeState:
             record.setdefault("human_reply_record_ids", [])
             record["created_at"] = _now()
             self._state["pending_worker_command"] = record
+            self._record_worker_command_phase_unlocked(record)
             self._save_unlocked()
             return self._copy(record)
 
@@ -229,6 +378,7 @@ class HitlRuntimeState:
                 )
             command.update(self._copy(updates))
             command["updated_at"] = _now()
+            self._record_worker_command_phase_unlocked(command)
             self._save_unlocked()
             return self._copy(command)
 
@@ -246,6 +396,28 @@ class HitlRuntimeState:
             command["response"] = self._copy(response)
             command["resolved_at"] = _now()
             self._state["pending_worker_command"] = command
+            events = self._state.get("interface_events", [])
+            already_recorded = isinstance(events, list) and any(
+                isinstance(event, dict)
+                and event.get("kind") == "request_resolved"
+                and str(event.get("request_key", "")) == str(request_key)
+                for event in events
+            )
+            if not already_recorded:
+                try:
+                    self._append_interface_event_unlocked(
+                        "request_resolved",
+                        request_key=str(request_key),
+                        stage=str(command.get("pipeline_stage", "")),
+                        phase=str(command.get("hitl_stage", "")),
+                        outcome=str(response.get("status", "")).strip(),
+                        human_involved=bool(command.get("human_reply_record_ids")),
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "Unable to record observational HITL request metadata.",
+                        exc_info=True,
+                    )
             self._save_unlocked()
 
     def cancel_pending_worker_command(
@@ -309,6 +481,11 @@ class HitlRuntimeState:
             command["scoring_review"] = self._copy(review)
             command["updated_at"] = _now()
             self._state["pending_worker_command"] = command
+            self._record_phase_transition_unlocked(
+                stage="scoring",
+                phase="preparing",
+                activity="preparing",
+            )
             self._save_unlocked()
             return self._copy(command)
 
@@ -330,6 +507,11 @@ class HitlRuntimeState:
             command.pop("scoring_review", None)
             command["updated_at"] = _now()
             self._state["pending_worker_command"] = command
+            self._record_phase_transition_unlocked(
+                stage="scoring",
+                phase="evaluating_results",
+                activity="evaluating",
+            )
             self._save_unlocked()
 
     def clear_completed_worker_command(self, request_key: str) -> None:
@@ -389,6 +571,11 @@ class HitlRuntimeState:
             record["status"] = "pending"
             record["created_at"] = _now()
             self._state["next_autoresearch_action"] = record
+            self._record_phase_transition_unlocked(
+                stage="frontier",
+                phase="pruning" if kind == "prune_frontier" else "selecting_next",
+                activity="reviewing",
+            )
             self._save_unlocked()
             return self._copy(record)
 
@@ -427,6 +614,15 @@ class HitlRuntimeState:
             action["status"] = "decision_recorded"
             action["decision_recorded_at"] = _now()
             self._state["next_autoresearch_action"] = action
+            self._record_phase_transition_unlocked(
+                stage="frontier",
+                phase=(
+                    "saving_prune_decision"
+                    if normalized_kind == "prune_frontier"
+                    else "saving_selection"
+                ),
+                activity="saving",
+            )
             self._save_unlocked()
             return self._copy(action)
 
@@ -502,6 +698,11 @@ class HitlRuntimeState:
                 "created_at": _now(),
             }
             self._state["rejected_whiteboard_cleanup"] = record
+            self._record_phase_transition_unlocked(
+                stage="candidate_decision",
+                phase="applying_result",
+                activity="saving",
+            )
             self._save_unlocked()
             return self._copy(record)
 
@@ -542,6 +743,11 @@ class HitlRuntimeState:
             record["status"] = "prepared"
             record["created_at"] = _now()
             self._state["frontier_decision_transition"] = record
+            self._record_phase_transition_unlocked(
+                stage="candidate_decision",
+                phase="saving_result",
+                activity="saving",
+            )
             self._save_unlocked()
             return self._copy(record)
 
@@ -576,6 +782,11 @@ class HitlRuntimeState:
             record["status"] = "prepared"
             record["created_at"] = _now()
             self._state["initial_root_publication_transition"] = record
+            self._record_phase_transition_unlocked(
+                stage="frontier",
+                phase="creating_root",
+                activity="saving",
+            )
             self._save_unlocked()
             return self._copy(record)
 
