@@ -2,7 +2,7 @@
 name = "mabool-api"
 version = "0.1.0"
 requires-python = ">=3.12.8"
-readme = "../README.md"
+readme = "README.md"
 dependencies = [
     "ai2i-chain",
     "ai2i-common",
