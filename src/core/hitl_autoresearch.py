@@ -42,7 +42,11 @@ from core.hitl import (
     _load_hitl_template,
     validate_required_artifact_contract,
 )
-from core.hitl_frontier import HitlFrontierStore
+from core.hitl_frontier import (
+    HitlFrontierStore,
+    encode_hitl_history_root,
+    resolve_hitl_history_root,
+)
 from core.hitl_git import delete_git_ref
 from core.hitl_git_state import HitlGitStateStore
 from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
@@ -156,8 +160,13 @@ def _commit_initial_root_publication(
         status = "root_initialized"
 
     if status == "root_initialized":
+        history_root = resolve_hitl_history_root(
+            work_dir,
+            str(transition.get("history_root", "")),
+            require_existing=False,
+        )
         frontier.configure_autoresearch_run(
-            history_root=Path(str(transition.get("history_root", ""))),
+            history_root=history_root,
             lineage_source_sha=node_sha,
             last_iteration=0,
         )
@@ -167,7 +176,11 @@ def _commit_initial_root_publication(
         status = "run_configured"
 
     if status == "run_configured":
-        history_root = Path(str(transition.get("history_root", "")))
+        history_root = resolve_hitl_history_root(
+            work_dir,
+            str(transition.get("history_root", "")),
+            require_existing=False,
+        )
         frontier.mirror_nodes_to(history_root / "nodes")
         transition = runtime_state.advance_initial_root_publication_transition(
             status="mirrored",
@@ -316,7 +329,7 @@ def run_fresh_hitl_autoresearch_initial_node(
                 "results": results,
             },
             "reason_for_acceptance": _initial_frontier_acceptance_reason(work_dir),
-            "history_root": str(history_root.resolve()),
+            "history_root": encode_hitl_history_root(work_dir, history_root),
             "scoring_ref": str(scorer_result.get("scoring_ref", "")).strip(),
         }
     )
