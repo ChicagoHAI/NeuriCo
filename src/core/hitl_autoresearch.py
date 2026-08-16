@@ -80,6 +80,18 @@ class HitlTerminalRuntimeError(RuntimeError):
     """A runtime dependency failed in a way that must stop this HITL run."""
 
 
+def _raise_if_hitl_worker_stopped(result: Dict[str, Any]) -> None:
+    """Honor run cancellation before worker exit can request a replacement."""
+    from core.hitl_run_control import (
+        HitlRunStopRequested,
+        raise_if_hitl_run_stop_requested,
+    )
+
+    if result.get("stopped"):
+        raise HitlRunStopRequested("HITL run stop requested by the user.")
+    raise_if_hitl_run_stop_requested()
+
+
 @dataclass(frozen=True)
 class HitlRecoveryResult:
     """Summary of an interrupted HITL attempt recovery."""
@@ -1142,10 +1154,12 @@ class HitlAutoResearchController:
                     prompt_suffix=_load_hitl_template("worker_resume_pending_request.txt"),
                     env_extra=runtime.idea_tool_env(),
                 )
+                _raise_if_hitl_worker_stopped(proposal_result)
                 submission = runtime.proposal_submit_result_after_worker_exit(
                     proposal_result,
                     worker_name="Recovered AutoResearch proposal generator",
                 )
+                _raise_if_hitl_worker_stopped(proposal_result)
             finally:
                 runtime.clear_idea_tool_context()
             if submission.get("status") != "approved":
@@ -1793,11 +1807,14 @@ class HitlAutoResearchController:
                 attempt_history=attempt_history,
                 env_extra=runtime.idea_tool_env(),
             )
+            _raise_if_hitl_worker_stopped(proposal_result)
             submission = runtime.proposal_submit_result_after_worker_exit(
                 proposal_result,
                 worker_name="AutoResearch proposal generator",
             )
+            _raise_if_hitl_worker_stopped(proposal_result)
             while submission.get("replacement"):
+                _raise_if_hitl_worker_stopped(proposal_result)
                 proposal_result = self._call_proposal_generator(
                     parent_sha=parent_sha,
                     attempt_dir=attempt_dir,
@@ -1805,10 +1822,12 @@ class HitlAutoResearchController:
                     prompt_suffix=str(submission["prompt_block"]),
                     env_extra=runtime.idea_tool_env(),
                 )
+                _raise_if_hitl_worker_stopped(proposal_result)
                 submission = runtime.proposal_submit_result_after_worker_exit(
                     proposal_result,
                     worker_name="AutoResearch proposal generator",
                 )
+                _raise_if_hitl_worker_stopped(proposal_result)
         finally:
             runtime.clear_idea_tool_context()
         if submission.get("status") != "approved":
