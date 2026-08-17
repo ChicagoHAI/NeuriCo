@@ -529,6 +529,27 @@ class HitlWorkspaceView:
                     display_stage=paused_stage,
                     display_phase=f"{paused_phase} paused" if paused_phase else "Paused",
                 )
+            if launch_state == "completed":
+                completed_at = str(
+                    launch_status.get("completed_at")
+                    or launch_status.get("updated_at")
+                    or ""
+                ).strip()
+                return projected(
+                    "completed",
+                    "Complete",
+                    "Research is ready to inspect.",
+                    next_step=(
+                        "Continue research when ready."
+                        if HitlFrontierStore(self.work_dir).exists()
+                        else "Inspect the completed research artifacts."
+                    ),
+                    record=launch_status,
+                    active=False,
+                    display_stage="Complete",
+                    display_phase="",
+                    phase_started_at=completed_at,
+                )
             if bool(pipeline.get("completed")):
                 return projected(
                     "completed",

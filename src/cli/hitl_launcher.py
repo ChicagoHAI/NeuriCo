@@ -178,7 +178,7 @@ class HitlRunController:
                     log_path = self.work_dir / "logs" / "hitl_runtime.log"
                     log_path.parent.mkdir(parents=True, exist_ok=True)
                     with log_path.open("ab") as output:
-                        subprocess.Popen(
+                        process = subprocess.Popen(
                             [
                                 sys.executable,
                                 str(self.project_root / "src" / "cli" / "hitl_run_worker.py"),
@@ -192,6 +192,11 @@ class HitlRunController:
                             start_new_session=True,
                             close_fds=True,
                         )
+                        threading.Thread(
+                            target=process.wait,
+                            name=f"hitl-run-reaper-{request_id[:8]}",
+                            daemon=True,
+                        ).start()
             except Exception:
                 request_path.unlink(missing_ok=True)
                 if callable(cancel_handoff):

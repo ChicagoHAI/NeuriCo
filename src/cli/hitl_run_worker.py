@@ -158,15 +158,15 @@ def main() -> int:
 
         signal.signal(signal.SIGTERM, request_signal_stop)
         signal.signal(signal.SIGINT, request_signal_stop)
-        now = utc_now()
+        started_at = utc_now()
         atomic_write_json(
             hitl_launch_status_path(work_dir),
             {
                 "status": "running",
                 "pid": os.getpid(),
                 "request_id": request["request_id"],
-                "started_at": now,
-                "updated_at": now,
+                "started_at": started_at,
+                "updated_at": started_at,
                 "mode": request["mode"],
                 "provider": request["provider"],
             },
@@ -203,6 +203,8 @@ def main() -> int:
             {
                 "status": "completed",
                 "request_id": request["request_id"],
+                "started_at": started_at,
+                "completed_at": finished_at,
                 "updated_at": finished_at,
                 "mode": request["mode"],
                 "provider": request["provider"],
