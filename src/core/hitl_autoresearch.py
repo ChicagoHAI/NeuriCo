@@ -49,6 +49,7 @@ from core.hitl_frontier import (
 )
 from core.hitl_git import delete_git_ref
 from core.hitl_git_state import HitlGitStateStore
+from core.hitl_run_control import HitlRunStopRequested
 from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
 from core.hitl_scoring_workspace import (
     run_isolated_scorer,
@@ -82,10 +83,7 @@ class HitlTerminalRuntimeError(RuntimeError):
 
 def _raise_if_hitl_worker_stopped(result: Dict[str, Any]) -> None:
     """Honor run cancellation before worker exit can request a replacement."""
-    from core.hitl_run_control import (
-        HitlRunStopRequested,
-        raise_if_hitl_run_stop_requested,
-    )
+    from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
     if result.get("stopped"):
         raise HitlRunStopRequested("HITL run stop requested by the user.")
@@ -1632,6 +1630,8 @@ class HitlAutoResearchController:
                     comment_result.get("error")
                     or "AutoResearch HITL candidate experiment failed before scoring."
                 )
+        except HitlRunStopRequested:
+            raise
         except Exception as e:
             terminal_failure = isinstance(e, HitlTerminalRuntimeError)
             transition = HitlRuntimeState(self.work_dir).frontier_decision_transition()

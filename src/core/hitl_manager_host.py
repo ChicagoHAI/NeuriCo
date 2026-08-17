@@ -35,6 +35,7 @@ from core.hitl_lock import (
     select_hitl_manager_provider,
 )
 from core.hitl_manager_react import HitlManager
+from core.hitl_runtime_state import HitlResolutionReplyStaleError
 
 _RESOLUTION_REPLY = "resolution_reply"
 _CONVERSATION = "conversation"
@@ -202,7 +203,10 @@ class HitlWebChannel(WebChannel):
                 if self._inbox is None:
                     if self._resolution_reply_handler is None:
                         raise RuntimeError("The manager is not ready for a resolution reply.")
-                    self._resolution_reply_handler(response)
+                    self._resolution_reply_handler(
+                        response,
+                        request_key=expected_key,
+                    )
                 else:
                     self._inbox.submit_resolution_reply(expected_key, response)
             except HitlWebInputError:
@@ -311,7 +315,16 @@ class HitlWebChannel(WebChannel):
         record = self._inbox.resolution_reply()
         if record is None:
             return False
-        self._resolution_reply_handler(record["response"], reply_id=record["id"])
+        try:
+            self._resolution_reply_handler(
+                record["response"],
+                request_key=record["request_key"],
+                reply_id=record["id"],
+            )
+        except HitlResolutionReplyStaleError:
+            self._inbox.complete_resolution_reply(record["id"])
+            self._emit({"event": "resolution_cleared"})
+            return True
         self._inbox.complete_resolution_reply(record["id"])
         return True
 
@@ -893,7 +906,10 @@ class HitlTerminalChannel(UserChannel):
             if self._inbox is None:
                 if self._resolution_reply_handler is None:
                     raise RuntimeError("The manager is not ready for a resolution reply.")
-                self._resolution_reply_handler(response)
+                self._resolution_reply_handler(
+                    response,
+                    request_key=expected_key,
+                )
             else:
                 self._inbox.submit_resolution_reply(expected_key, response)
         except Exception as exc:
@@ -1272,7 +1288,16 @@ class HitlTerminalChannel(UserChannel):
         record = self._inbox.resolution_reply()
         if record is None:
             return False
-        self._resolution_reply_handler(record["response"], reply_id=record["id"])
+        try:
+            self._resolution_reply_handler(
+                record["response"],
+                request_key=record["request_key"],
+                reply_id=record["id"],
+            )
+        except HitlResolutionReplyStaleError:
+            self._inbox.complete_resolution_reply(record["id"])
+            self._input_ready.set()
+            return True
         self._inbox.complete_resolution_reply(record["id"])
         return True
 

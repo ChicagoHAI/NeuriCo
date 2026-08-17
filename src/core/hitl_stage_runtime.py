@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict
 
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
-from core.hitl_run_control import hitl_run_stop_requested
+from core.hitl_run_control import HitlRunStopRequested, hitl_run_stop_requested
 
 
 WorkerLauncher = Callable[..., Dict[str, Any]]
@@ -35,7 +35,7 @@ def run_worker_with_replacements(
         record_continuation=True,
     )
     if result.get("stopped") or hitl_run_stop_requested():
-        return result, result
+        raise HitlRunStopRequested("HITL run stop requested by the user.")
     finish = runtime.handle_worker_exit_after_finish(
         result,
         phase=phase,
@@ -50,7 +50,7 @@ def run_worker_with_replacements(
             record_continuation=False,
         )
         if result.get("stopped") or hitl_run_stop_requested():
-            return result, result
+            raise HitlRunStopRequested("HITL run stop requested by the user.")
         finish = runtime.handle_worker_exit_after_finish(
             result,
             phase=phase,

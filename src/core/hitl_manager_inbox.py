@@ -281,6 +281,21 @@ class HitlManagerInbox:
                 state["resolution_reply"] = None
                 self._write(state)
 
+    def discard_resolution_reply(self, request_key: str) -> str:
+        """Retire the saved reply for one request that is being rolled back."""
+        expected = str(request_key).strip()
+        if not expected:
+            return ""
+        with exclusive_file_lock(self.lock_path):
+            state = self._load()
+            value = state.get("resolution_reply")
+            if not isinstance(value, dict) or str(value.get("request_key", "")) != expected:
+                return ""
+            item_id = str(value.get("id", ""))
+            state["resolution_reply"] = None
+            self._write(state)
+            return item_id
+
     def update(self, item_id: str, text: str) -> Dict[str, str]:
         """Replace one queued message without changing its place in the queue."""
         item_id = str(item_id).strip()

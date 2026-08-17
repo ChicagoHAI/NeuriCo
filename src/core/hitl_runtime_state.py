@@ -58,6 +58,10 @@ class HitlRuntimeStateError(RuntimeError):
     """Raised when HITL runtime control state cannot make a safe transition."""
 
 
+class HitlResolutionReplyStaleError(HitlRuntimeStateError):
+    """A durable human reply no longer matches the active worker request."""
+
+
 def _now() -> str:
     return utc_now()
 
@@ -550,18 +554,23 @@ class HitlRuntimeState:
             human_request_record_id=record_id,
         )
 
-    def record_human_reply(self, record_id: str) -> Dict[str, Any]:
+    def record_human_reply(self, request_key: str, record_id: str) -> Dict[str, Any]:
+        request_key = str(request_key).strip()
         record_id = str(record_id).strip()
+        if not request_key:
+            raise HitlRuntimeStateError("Human resolution reply requires request_key")
         if not record_id:
             raise HitlRuntimeStateError("Human resolution reply requires a transcript record")
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             command = self._state.get("pending_worker_command")
-            if not isinstance(command, dict):
-                raise HitlRuntimeStateError("No pending HITL worker command needs a human reply")
+            if not isinstance(command, dict) or command.get("request_key") != request_key:
+                raise HitlResolutionReplyStaleError(
+                    "The human reply no longer matches the active HITL worker request."
+                )
             if not str(command.get("human_request_record_id", "")).strip():
-                raise HitlRuntimeStateError(
-                    "The pending HITL worker command has no open human question"
+                raise HitlResolutionReplyStaleError(
+                    "The matching HITL worker request no longer has an open human question."
                 )
             command.setdefault("human_reply_record_ids", []).append(record_id)
             command["human_request_record_id"] = None

@@ -48,6 +48,7 @@ from core.compute_backend import (
     normalize_compute_backend,
     without_runtime_compute_backend,
 )
+from core.hitl_run_control import HitlRunStopRequested
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -565,6 +566,8 @@ class ResearchRunner:
                         full_permissions=full_permissions,
                         hitl_enabled=bool(hitl),
                     )
+            except HitlRunStopRequested:
+                raise
             except Exception as e:
                 print(f"\n❌ Continue AutoResearch error: {e}")
                 success = False
@@ -784,6 +787,8 @@ class ResearchRunner:
                         hitl_enabled=bool(hitl),
                     )
 
+            except HitlRunStopRequested:
+                raise
             except Exception as e:
                 print(f"\n❌ Pipeline error: {e}")
                 success = False

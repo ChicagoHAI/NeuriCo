@@ -20,9 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_paths import hitl_manager_dir
 from core.hitl_runtime_state import (
     MANAGER_REVIEW_FINALIZERS,
+    HitlResolutionReplyStaleError,
     HitlRuntimeState,
     HitlRuntimeStateError,
 )
@@ -787,6 +789,7 @@ class HitlManager:
         if not request_key:
             return
         self.runtime_state.cancel_pending_worker_command(request_key, reason=reason)
+        HitlManagerInbox(self.work_dir).discard_resolution_reply(request_key)
         clear_request = getattr(self.channel, "clear_resolution_request", None)
         if callable(clear_request):
             clear_request()
@@ -1284,14 +1287,24 @@ class HitlManager:
             manager_review_kind="initial_scoring",
         )
 
-    def submit_resolution_reply(self, response: str, *, reply_id: str = "") -> None:
+    def submit_resolution_reply(
+        self,
+        response: str,
+        *,
+        request_key: str,
+        reply_id: str = "",
+    ) -> None:
         response = str(response).strip()
+        request_key = str(request_key).strip()
         if not response:
             raise HitlRuntimeStateError("A human resolution reply must not be empty.")
+        if not request_key:
+            raise HitlRuntimeStateError("A human resolution reply requires request_key.")
         command = self.runtime_state.pending_worker_command()
-        if not isinstance(command, dict):
-            raise HitlRuntimeStateError("No pending HITL worker command needs a human reply")
-        request_key = str(command["request_key"])
+        if not isinstance(command, dict) or str(command.get("request_key", "")) != request_key:
+            raise HitlResolutionReplyStaleError(
+                "The human reply no longer matches the active HITL worker request."
+            )
         stable_record_id = (
             f"human-reply:{request_key}:{str(reply_id).strip()}" if str(reply_id).strip() else ""
         )
@@ -1299,6 +1312,10 @@ class HitlManager:
             command.get("human_reply_record_ids") or []
         ):
             return
+        if not str(command.get("human_request_record_id", "")).strip():
+            raise HitlResolutionReplyStaleError(
+                "The matching HITL worker request no longer has an open human question."
+            )
         reply_record = self.conversation.append(
             "human",
             response,
@@ -1309,7 +1326,10 @@ class HitlManager:
                 "request_key": request_key,
             },
         )
-        pending = self.runtime_state.record_human_reply(str(reply_record["id"]))
+        pending = self.runtime_state.record_human_reply(
+            request_key,
+            str(reply_record["id"]),
+        )
         with self._resolution_lock:
             resolution = self._resolutions.get(request_key)
             if resolution and resolution.human_inputs is not None:
