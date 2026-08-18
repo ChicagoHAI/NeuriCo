@@ -230,6 +230,7 @@ def run_prebuilt_cli_agent(
 
     start_time = time.time()
     timed_out = False
+    stopped = False
     background_processes_terminated = False
     return_code: Optional[int] = None
 
@@ -296,13 +297,19 @@ def run_prebuilt_cli_agent(
             return_code = poll() if callable(poll) else process.wait(timeout=0)
             if return_code is not None:
                 break
+            from core.hitl_run_control import hitl_run_stop_requested
+
+            if hitl_run_stop_requested():
+                stopped = True
+                _terminate_process_group(process)
+                break
             if deadline is not None and time.time() >= deadline:
                 timed_out = True
                 _terminate_process_group(process)
                 break
             time.sleep(0.05)
 
-        if timed_out:
+        if timed_out or stopped:
             try:
                 return_code = process.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -318,7 +325,14 @@ def run_prebuilt_cli_agent(
         _flush_output()
 
     elapsed = time.time() - start_time
-    success = (return_code == 0) and not timed_out and not background_processes_terminated
+    if stopped and tracker is not None:
+        tracker.mark_stopped()
+    success = (
+        (return_code == 0)
+        and not timed_out
+        and not stopped
+        and not background_processes_terminated
+    )
     return {
         "success": success,
         "return_code": return_code,
@@ -326,6 +340,7 @@ def run_prebuilt_cli_agent(
         "log_file": str(log_file),
         "transcript_file": str(transcript_file),
         "timed_out": timed_out,
+        "stopped": stopped,
         "background_processes_terminated": background_processes_terminated,
     }
 

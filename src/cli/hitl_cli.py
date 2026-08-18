@@ -43,7 +43,7 @@ def main() -> int:
         host=host,
         interface="cli",
     )
-    host.channel.set_run_launcher(controller.launch, controller.snapshot)
+    host.channel.set_run_launcher(controller.launch, controller.snapshot, controller.stop)
 
     def stop(*_unused: object) -> None:
         host.channel.close()

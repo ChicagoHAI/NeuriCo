@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import sys
 import threading
+import time
 import webbrowser
 import os
 import uuid
@@ -24,11 +25,22 @@ from core.hitl_manager_inbox import (
     normalize_human_message,
 )
 from core.hitl_manager_context import HitlManagerTranscript
-from core.hitl_lock import hitl_manager_consumer_lease, resolve_hitl_manager_provider
+from core.hitl_paths import hitl_manager_dir
+from core.hitl_lock import (
+    active_hitl_workspace_run,
+    HitlManagerConsumerActiveError,
+    hitl_manager_consumer_lease,
+    hitl_renderer_lease,
+    resolve_hitl_manager_provider,
+    select_hitl_manager_provider,
+)
 from core.hitl_manager_react import HitlManager
+from core.hitl_runtime_state import HitlResolutionReplyStaleError
 
 _RESOLUTION_REPLY = "resolution_reply"
 _CONVERSATION = "conversation"
+_RUN_CONSUMER_HANDOFF_TIMEOUT_SECONDS = 5.0
+_MANAGER_CONSUMER_SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
 
 def _elapsed_phase_time(started_at: Any) -> str:
@@ -58,15 +70,16 @@ class HitlWebChannel(WebChannel):
 
     def __init__(self, work_dir: Optional[Path] = None) -> None:
         super().__init__()
+        self.work_dir = Path(work_dir) if work_dir is not None else None
         self._inbox = HitlManagerInbox(work_dir) if work_dir is not None else None
         self._memory_input: "queue.Queue[Any]" = queue.Queue()
         self._conversation: Optional[HitlManagerTranscript] = None
         self._last_polled_input_recorded = False
-        self._last_polled_provider = ""
         self._resolution_reply_handler: Optional[Any] = None
         self._pending_resolution_request: Optional[Dict[str, Any]] = None
         self._dispatch_lock = threading.Lock()
         self._turn_active = False
+        self._claimed_active_id = ""
         self._manager_status: Dict[str, Any] = {
             "event": "status",
             "label": "Manager idle",
@@ -164,37 +177,39 @@ class HitlWebChannel(WebChannel):
         input_kind: str = _CONVERSATION,
         request_key: Optional[str] = None,
         option_id: Optional[str] = None,
-        provider: str = "",
         client_turn_id: str = "",
     ) -> Dict[str, Any]:
         if self._closed.is_set():
             raise HitlWebInputError("invalid", "NeuriCo is no longer available.")
         if input_kind == _RESOLUTION_REPLY:
-            if self._pending_resolution_request is None:
+            request = self._pending_resolution_request or self._durable_resolution_request()
+            if request is None:
                 raise HitlWebInputError(
                     "already_resolved", "This request has already been resolved."
                 )
-            if self._resolution_reply_handler is None:
-                raise HitlWebInputError(
-                    "stale", "This request will be available when NeuriCo resumes."
-                )
-            expected_key = str(self._pending_resolution_request["request_key"])
+            expected_key = str(request["request_key"])
             if str(request_key or "") != expected_key:
-                raise HitlWebInputError(
-                    "stale", "This reply does not match the active request."
-                )
+                raise HitlWebInputError("stale", "This reply does not match the active request.")
             try:
                 selected = next(
                     (
                         choice
-                        for choice in self._pending_resolution_request["options"]
+                        for choice in request["options"]
                         if choice["id"] == str(option_id or "")
                     ),
                     None,
                 )
                 response = str(text).strip() or (str(selected["text"]) if selected else "")
                 response = normalize_human_message(response)
-                self._resolution_reply_handler(response)
+                if self._inbox is None:
+                    if self._resolution_reply_handler is None:
+                        raise RuntimeError("The manager is not ready for a resolution reply.")
+                    self._resolution_reply_handler(
+                        response,
+                        request_key=expected_key,
+                    )
+                else:
+                    self._inbox.submit_resolution_reply(expected_key, response)
             except HitlWebInputError:
                 raise
             except Exception as exc:
@@ -217,23 +232,16 @@ class HitlWebChannel(WebChannel):
         if self._inbox is None:
             with self._dispatch_lock:
                 disposition = (
-                    "queued"
-                    if self._turn_active or not self._memory_input.empty()
-                    else "direct"
+                    "queued" if self._turn_active or not self._memory_input.empty() else "direct"
                 )
                 self._memory_input.put(text)
             return {"status": "accepted", "disposition": disposition}
         with self._dispatch_lock:
             record = self._inbox.enqueue(
                 text,
-                provider=provider,
                 client_turn_id=client_turn_id,
             )
-            disposition = (
-                "queued"
-                if self._turn_active or int(record.get("queue_position", 0)) > 0
-                else "direct"
-            )
+            disposition = "queued" if int(record.get("queue_position", 0)) > 0 else "direct"
         if disposition == "queued":
             self._emit({"event": "workspace_changed", "section": "inbox"})
         return {
@@ -251,12 +259,11 @@ class HitlWebChannel(WebChannel):
                     self._turn_active = True
             except queue.Empty:
                 self._last_polled_input_recorded = False
-                self._last_polled_provider = ""
                 self._closed.wait(max(0.0, timeout))
                 return None
             self._last_polled_input_recorded = False
-            self._last_polled_provider = ""
             return str(value).strip()
+
         def publish(record: Dict[str, str]) -> None:
             if self._conversation is None:
                 raise RuntimeError("The NeuriCo conversation is not initialized.")
@@ -271,29 +278,67 @@ class HitlWebChannel(WebChannel):
             )
 
         with self._dispatch_lock:
-            value = self._inbox.consume(publish)
+            if self._claimed_active_id:
+                value = None
+            else:
+                value = self._inbox.claim(publish)
             if value is not None:
                 self._turn_active = True
+                self._claimed_active_id = str(value["id"])
         if value is None:
             self._last_polled_input_recorded = False
-            self._last_polled_provider = ""
             self._closed.wait(max(0.0, timeout))
             return None
         self._last_polled_input_recorded = True
-        self._last_polled_provider = str(value.get("provider", "")).strip().lower()
         self._emit({"event": "workspace_changed", "section": "conversation"})
         return str(value["text"]).strip()
 
-    def finish_active_turn(self) -> None:
+    def finish_active_turn(self, *, success: bool = True, error: str = "") -> None:
         """Mark the claimed conversation turn complete for future submissions."""
         with self._dispatch_lock:
-            self._turn_active = False
+            item_id = self._claimed_active_id
+            try:
+                if self._inbox is not None and item_id:
+                    if success:
+                        self._inbox.complete(item_id)
+                    else:
+                        self._inbox.fail(item_id, error)
+            finally:
+                # The claim belongs to this consumer session, not to the
+                # renderer. Never let a failed durable settlement wedge a
+                # channel that a later manager consumer will reuse.
+                self._claimed_active_id = ""
+                self._turn_active = False
+        self._emit({"event": "workspace_changed", "section": "inbox"})
+
+    def consume_resolution_reply(self) -> bool:
+        if self._inbox is None or self._resolution_reply_handler is None:
+            return False
+        record = self._inbox.resolution_reply()
+        if record is None:
+            return False
+        try:
+            self._resolution_reply_handler(
+                record["response"],
+                request_key=record["request_key"],
+                reply_id=record["id"],
+            )
+        except HitlResolutionReplyStaleError:
+            self._inbox.complete_resolution_reply(record["id"])
+            self._emit({"event": "resolution_cleared"})
+            return True
+        self._inbox.complete_resolution_reply(record["id"])
+        return True
+
+    def _durable_resolution_request(self) -> Optional[Dict[str, Any]]:
+        if self.work_dir is None:
+            return None
+        from core.hitl_workspace_view import HitlWorkspaceView
+
+        return HitlWorkspaceView(self.work_dir).pending_request()
 
     def last_polled_input_was_recorded(self) -> bool:
         return self._last_polled_input_recorded
-
-    def last_polled_provider(self) -> str:
-        return self._last_polled_provider
 
     def update_queued_input(self, item_id: str, text: str) -> Dict[str, str]:
         if self._inbox is None:
@@ -369,9 +414,10 @@ class HitlTerminalChannel(UserChannel):
         self._reader: Optional[threading.Thread] = None
         self._state_lock = threading.Lock()
         self._last_polled_input_recorded = False
-        self._last_polled_provider = ""
+        self._claimed_active_id = ""
         self._run_launcher: Optional[Any] = None
         self._run_status: Optional[Any] = None
+        self._run_stopper: Optional[Any] = None
         self._interface_view: Optional[Any] = None
         self._projection_lock = threading.Lock()
         self._cached_live_status: Dict[str, Any] = {
@@ -380,6 +426,7 @@ class HitlTerminalChannel(UserChannel):
             "label": "Ready",
         }
         self._seen_interface_events: set[str] = set()
+        self._seen_conversation_records: set[str] = set()
         self._startup_rendered = False
         self._thinking_requested = threading.Event()
         self._thinking_stop = threading.Event()
@@ -393,9 +440,10 @@ class HitlTerminalChannel(UserChannel):
     def bind_conversation(self, conversation: HitlManagerTranscript) -> None:
         self._conversation = conversation
 
-    def set_run_launcher(self, launcher: Any, status: Any) -> None:
+    def set_run_launcher(self, launcher: Any, status: Any, stopper: Any = None) -> None:
         self._run_launcher = launcher
         self._run_status = status
+        self._run_stopper = stopper
         live, error = self._read_run_status()
         if live is not None:
             self._cache_live_status(live)
@@ -491,6 +539,7 @@ class HitlTerminalChannel(UserChannel):
             self.send(f"Conversation history could not be loaded: {exc}", kind="system")
             return
         pending = snapshot.get("inbox", {}).get("pending_request")
+        pending_record_id = str((pending or {}).get("conversation_record_id", "")).strip()
         conversation = list(snapshot.get("conversation", []))
         for record in conversation:
             speaker = str(record.get("speaker", "manager")).strip().lower()
@@ -530,6 +579,11 @@ class HitlTerminalChannel(UserChannel):
                 self._render_interface_notification(notification)
                 continue
             record = entry["record"]
+            record_id = str(record.get("record_id") or record.get("id") or "").strip()
+            if record_id:
+                self._seen_conversation_records.add(record_id)
+            if record_id and record_id == pending_record_id:
+                continue
             speaker = str(record.get("speaker", "manager")).strip().lower()
             content = str(record.get("content", "")).strip()
             if content:
@@ -545,14 +599,51 @@ class HitlTerminalChannel(UserChannel):
             }
             with self._state_lock:
                 self._pending_resolution_request = request
-                self._resolution_ready = False
+                self._resolution_ready = bool((snapshot.get("live") or {}).get("active"))
                 self._displayed_request_key = request["request_key"]
-            self._render_resolution_request(request, actionable=False)
-            self._write_block(
-                self._ui.system(
-                    "Use /run to resume before resolving this review.", tone="review"
+            self._render_resolution_request(request, actionable=self._resolution_ready)
+            if not self._resolution_ready:
+                self._write_block(
+                    self._ui.system(
+                        "Use /run to resume before resolving this review.", tone="review"
+                    )
                 )
+
+    def _present_new_conversation_records(
+        self,
+        conversation: List[Dict[str, Any]],
+        *,
+        pending_record_id: str = "",
+    ) -> None:
+        """Render newly archived human-visible turns exactly once."""
+        unseen: List[Dict[str, Any]] = []
+        with self._presentation_lock:
+            for record in conversation:
+                record_id = str(record.get("record_id") or record.get("id") or "").strip()
+                if not record_id or record_id in self._seen_conversation_records:
+                    continue
+                self._seen_conversation_records.add(record_id)
+                if record_id == pending_record_id:
+                    continue
+                unseen.append(record)
+        for record in unseen:
+            speaker = str(record.get("speaker", "manager")).strip().lower()
+            content = str(record.get("content", "")).strip()
+            if not content:
+                continue
+            if speaker == "human" and self._terminal_composer is not None:
+                self._terminal_composer.add_history(content)
+            self._write_block(
+                self._ui.conversation("human" if speaker == "human" else "manager", content),
+                blank_before=True,
             )
+
+    def mark_conversation_record_presented(self, record_id: str) -> None:
+        value = str(record_id).strip()
+        if not value:
+            return
+        with self._presentation_lock:
+            self._seen_conversation_records.add(value)
 
     def _render_interface_notification(self, notification: Dict[str, Any]) -> None:
         kind = str(notification.get("kind", "")).strip()
@@ -581,6 +672,47 @@ class HitlTerminalChannel(UserChannel):
                 self._cache_live_status(self._unavailable_live_status(error))
             return
         self._cache_live_status(projection["live"])
+        try:
+            active_input = HitlManagerInbox(self.work_dir).snapshot().get("active")
+        except Exception:
+            active_input = None
+        self.status(
+            "NeuriCo is thinking…" if active_input else "Manager idle",
+            thinking=bool(
+                isinstance(active_input, dict)
+                and str(active_input.get("status", "pending")) != "failed"
+            ),
+        )
+        try:
+            snapshot = self._interface_view.snapshot()
+            pending_request = snapshot["inbox"].get("pending_request")
+        except Exception:
+            snapshot = {}
+            pending_request = None
+        pending_record_id = str(
+            (pending_request or {}).get("conversation_record_id", "")
+        ).strip()
+        self._present_new_conversation_records(
+            list(snapshot.get("conversation") or []),
+            pending_record_id=pending_record_id,
+        )
+        if isinstance(pending_request, dict):
+            request_key = str(pending_request.get("request_key", ""))
+            with self._state_lock:
+                unseen_request = bool(request_key and request_key != self._displayed_request_key)
+                self._pending_resolution_request = dict(pending_request)
+                self._resolution_ready = bool(projection["live"].get("active"))
+                if unseen_request:
+                    self._displayed_request_key = request_key
+            if unseen_request:
+                self._render_resolution_request(
+                    dict(pending_request), actionable=self._resolution_ready
+                )
+        else:
+            with self._state_lock:
+                self._pending_resolution_request = None
+                self._resolution_ready = False
+                self._displayed_request_key = ""
         notifications = projection["notifications"]
         for notification in notifications:
             event_id = str(notification.get("id", "")).strip()
@@ -629,7 +761,6 @@ class HitlTerminalChannel(UserChannel):
         input_kind: Optional[str] = None,
         request_key: Optional[str] = None,
         option_id: Optional[str] = None,
-        provider: str = "",
         client_turn_id: str = "",
     ) -> Dict[str, Any]:
         text = str(text).strip()
@@ -640,6 +771,36 @@ class HitlTerminalChannel(UserChannel):
             return {"status": "ignored"}
         if input_kind is None and text == "/run":
             return self._launch_run_interactively()
+        if input_kind is None and text == "/stop":
+            if not callable(self._run_stopper):
+                self._write_block(
+                    self._ui.system("Run stopping is unavailable in this client.", tone="error"),
+                    blank_before=True,
+                )
+                return {"status": "unavailable"}
+            try:
+                confirmed = self._read_yes_no(
+                    "Stop AutoResearch and restore the latest saved checkpoint? [y/N]: ",
+                    default=False,
+                )
+                if not confirmed:
+                    self._write_block(
+                        self._ui.system("Stop cancelled."),
+                        blank_before=True,
+                    )
+                    return {"status": "cancelled"}
+                result = self._run_stopper()
+            except Exception as exc:
+                self._write_block(
+                    self._ui.system(str(exc), tone="error"),
+                    blank_before=True,
+                )
+                return {"status": "invalid"}
+            self._write_block(
+                self._ui.system("Stop requested. NeuriCo is restoring saved progress.", tone="review"),
+                blank_before=True,
+            )
+            return dict(result)
         if input_kind is None and text == "/status":
             status, error = self._read_run_status()
             if status is None:
@@ -692,16 +853,15 @@ class HitlTerminalChannel(UserChannel):
             return {"status": "accepted"}
         record = self._inbox.enqueue(
             text,
-            provider=provider,
             client_turn_id=client_turn_id or f"H{uuid.uuid4().hex}",
         )
-        if self._conversation is None:
-            raise RuntimeError("The NeuriCo conversation is not initialized.")
-        transcript_record = self._conversation.append("human", record["text"])
+        if self._interactive:
+            self.mark_conversation_record_presented(str(record.get("id", "")))
         return {
             "status": "accepted",
-            "message_id": str(transcript_record["id"]),
+            "disposition": "queued" if int(record.get("queue_position", 0)) > 0 else "direct",
             "client_turn_id": record["client_turn_id"],
+            "created_at": record["created_at"],
         }
 
     def _submit_resolution(
@@ -713,7 +873,6 @@ class HitlTerminalChannel(UserChannel):
     ) -> Dict[str, Any]:
         with self._state_lock:
             request = dict(self._pending_resolution_request or {})
-            handler = self._resolution_reply_handler
             ready = self._resolution_ready
         if request and not ready:
             self.send(
@@ -721,7 +880,7 @@ class HitlTerminalChannel(UserChannel):
                 kind="system",
             )
             return {"status": "stale"}
-        if not request or handler is None:
+        if not request:
             self.send(
                 "No review request is awaiting a reply. Use ordinary text to talk to NeuriCo.",
                 kind="system",
@@ -746,7 +905,15 @@ class HitlTerminalChannel(UserChannel):
         response = str((selected or {}).get("text", "")).strip() or text
         try:
             response = normalize_human_message(response)
-            handler(response)
+            if self._inbox is None:
+                if self._resolution_reply_handler is None:
+                    raise RuntimeError("The manager is not ready for a resolution reply.")
+                self._resolution_reply_handler(
+                    response,
+                    request_key=expected_key,
+                )
+            else:
+                self._inbox.submit_resolution_reply(expected_key, response)
         except Exception as exc:
             self.send(
                 f"The resolution reply could not be recorded: {exc}. Please retry it.",
@@ -778,7 +945,9 @@ class HitlTerminalChannel(UserChannel):
                 self._ui.section("Start research"),
                 blank_before=True,
             )
-            provider = self._read_setting("Model [claude] (claude/codex/gemini): ", "claude").lower()
+            provider = self._read_setting(
+                "Model [claude] (claude/codex/gemini): ", "claude"
+            ).lower()
             iterations = self._read_setting("Iterations [2] (1-100): ", "2")
             write_paper = self._read_yes_no("Write paper? [Y/n]: ", default=True)
             paper_style = "auto"
@@ -809,20 +978,20 @@ class HitlTerminalChannel(UserChannel):
             try:
                 value = self._terminal_composer.readline(label)
             except EOFError as exc:
-                raise RuntimeError("Terminal input closed before the run was configured.") from exc
+                raise RuntimeError("Terminal input closed before the prompt was answered.") from exc
             except KeyboardInterrupt as exc:
-                raise RuntimeError("Run configuration was cancelled.") from exc
+                raise RuntimeError("Input was cancelled.") from exc
             return value.strip() or default
         self._write(label, end="")
         value = sys.stdin.readline()
         if value == "":
-            raise RuntimeError("Terminal input closed before the run was configured.")
+            raise RuntimeError("Terminal input closed before the prompt was answered.")
         return value.strip() or default
 
     def _read_yes_no(self, label: str, *, default: bool) -> bool:
         value = self._read_setting(label, "y" if default else "n").lower()
         if value not in {"y", "yes", "n", "no"}:
-            raise ValueError("Answer yes or no when configuring the run.")
+            raise ValueError("Answer yes or no.")
         return value in {"y", "yes"}
 
     def present_run_status(self, status: Dict[str, Any]) -> None:
@@ -859,9 +1028,7 @@ class HitlTerminalChannel(UserChannel):
 
     def _terminal_status_text(self) -> tuple[str, str]:
         status = self._live_snapshot()
-        label = terminal_safe_text(
-            status.get("label") or status.get("title") or "Ready"
-        ).strip()
+        label = terminal_safe_text(status.get("label") or status.get("title") or "Ready").strip()
         elapsed = _elapsed_phase_time(status.get("phase_started_at"))
         if elapsed and bool(status.get("active")):
             label = f"● {label}  {elapsed}"
@@ -942,10 +1109,7 @@ class HitlTerminalChannel(UserChannel):
         if not lines:
             return
         with self._presentation_lock:
-            resume_thinking = (
-                self._thinking_thread is not None
-                and self._thinking_thread.is_alive()
-            )
+            resume_thinking = self._thinking_thread is not None and self._thinking_thread.is_alive()
             if resume_thinking:
                 self._stop_thinking_indicator()
             try:
@@ -1025,11 +1189,29 @@ class HitlTerminalChannel(UserChannel):
             self._thinking_requested.clear()
             self._stop_thinking_indicator()
         if kind == "manager":
+            if self.work_dir is not None:
+                try:
+                    from core.hitl_workspace_view import HitlWorkspaceView
+
+                    snapshot = HitlWorkspaceView(self.work_dir).snapshot()
+                    self._present_new_conversation_records(
+                        list(snapshot.get("conversation") or []),
+                        pending_record_id=str(
+                            (snapshot.get("inbox", {}).get("pending_request") or {}).get(
+                                "conversation_record_id", ""
+                            )
+                        ).strip(),
+                    )
+                    return
+                except Exception:
+                    pass
             self._write_block(self._ui.conversation("manager", text), blank_before=True)
         elif kind == "system":
-            tone = "error" if any(
-                token in text.lower() for token in ("failed", "error", "could not")
-            ) else "neutral"
+            tone = (
+                "error"
+                if any(token in text.lower() for token in ("failed", "error", "could not"))
+                else "neutral"
+            )
             self._write_block(self._ui.system(text, tone=tone))
         else:
             self._write(terminal_safe_text(text))
@@ -1062,26 +1244,68 @@ class HitlTerminalChannel(UserChannel):
                 )
             except queue.Empty:
                 self._last_polled_input_recorded = False
-                self._last_polled_provider = ""
                 return None
             self._last_polled_input_recorded = False
-            self._last_polled_provider = ""
             return None if value is _SHUTDOWN else str(value)
-        value = self._inbox.pop()
+        if self._claimed_active_id:
+            self._closed.wait(max(0.0, timeout))
+            return None
+
+        def publish(record: Dict[str, str]) -> None:
+            if self._conversation is None:
+                raise RuntimeError("The NeuriCo conversation is not initialized.")
+            metadata = {"visibility": "human", "kind": "human_message"}
+            if record["client_turn_id"]:
+                metadata["client_turn_id"] = record["client_turn_id"]
+            self._conversation.append(
+                "human",
+                record["text"],
+                record_id=record["id"],
+                metadata=metadata,
+            )
+
+        value = self._inbox.claim(publish)
         if value is None:
             self._last_polled_input_recorded = False
-            self._last_polled_provider = ""
             self._closed.wait(max(0.0, timeout))
             return None
         self._last_polled_input_recorded = True
-        self._last_polled_provider = str(value.get("provider", "")).strip().lower()
+        self._claimed_active_id = str(value["id"])
         return str(value["text"]).strip()
+
+    def finish_active_turn(self, *, success: bool = True, error: str = "") -> None:
+        item_id = self._claimed_active_id
+        try:
+            if self._inbox is not None and item_id:
+                if success:
+                    self._inbox.complete(item_id)
+                else:
+                    self._inbox.fail(item_id, error)
+        finally:
+            self._claimed_active_id = ""
+            self._input_ready.set()
+
+    def consume_resolution_reply(self) -> bool:
+        if self._inbox is None or self._resolution_reply_handler is None:
+            return False
+        record = self._inbox.resolution_reply()
+        if record is None:
+            return False
+        try:
+            self._resolution_reply_handler(
+                record["response"],
+                request_key=record["request_key"],
+                reply_id=record["id"],
+            )
+        except HitlResolutionReplyStaleError:
+            self._inbox.complete_resolution_reply(record["id"])
+            self._input_ready.set()
+            return True
+        self._inbox.complete_resolution_reply(record["id"])
+        return True
 
     def last_polled_input_was_recorded(self) -> bool:
         return self._last_polled_input_recorded
-
-    def last_polled_provider(self) -> str:
-        return self._last_polled_provider
 
     def is_closed(self) -> bool:
         return self._closed.is_set()
@@ -1099,7 +1323,7 @@ class HitlTerminalChannel(UserChannel):
 
 
 class HitlManagerHost:
-    """Own one manager and one human interface for an entire HITL run."""
+    """Compose a renderer with the manager consumer currently available."""
 
     def __init__(
         self,
@@ -1111,14 +1335,24 @@ class HitlManagerHost:
         title: str,
         port: int = 7890,
         open_browser: bool = True,
+        serve_web: bool = True,
     ) -> None:
-        if interface not in {"web", "cli"}:
-            raise ValueError("NeuriCo interface must be 'web' or 'cli'.")
+        if interface not in {"web", "cli", "headless"}:
+            raise ValueError("NeuriCo interface must be 'web', 'cli', or 'headless'.")
         self.work_dir = Path(work_dir)
         self.interface = interface
+        self._config = config
         self._stop = threading.Event()
+        self._consumer_stop = threading.Event()
         self._conversation_thread: Optional[threading.Thread] = None
+        self._consumer_monitor_thread: Optional[threading.Thread] = None
         self._manager_consumer_lease: Optional[Any] = None
+        self._renderer_lease: Optional[Any] = None
+        self._consumer_lock = threading.RLock()
+        self._manager_stopped = False
+        self._handoff_pending = False
+        self._handoff_started_at = 0.0
+        self._saw_handoff_run = False
         self._started = False
         self.web_server: Optional[HitlWebServer] = None
         self._browser_url: Optional[str] = None
@@ -1132,26 +1366,75 @@ class HitlManagerHost:
                     "NeuriCo web interface must bind to loopback, or use 0.0.0.0 only with "
                     "NEURICO_HITL_WEB_CONTAINER_MODE=1 behind a loopback Docker publish."
                 )
-            configured_browser_url = os.environ.get("NEURICO_HITL_BROWSER_URL") or None
-            self._browser_url = configured_browser_url
-            self.web_server = HitlWebServer(
-                channel=self.channel,
-                workspace=self.work_dir,
-                project_root=project_root,
-                title=title,
-                port=port,
-                host=bind_host,
-            )
-            self._open_browser = open_browser
-        else:
+            if serve_web:
+                configured_browser_url = os.environ.get("NEURICO_HITL_BROWSER_URL") or None
+                self._browser_url = configured_browser_url
+                self.web_server = HitlWebServer(
+                    channel=self.channel,
+                    workspace=self.work_dir,
+                    project_root=project_root,
+                    title=title,
+                    port=port,
+                    host=bind_host,
+                )
+                self._open_browser = open_browser
+            else:
+                self._open_browser = False
+        elif interface == "cli":
             self.channel = HitlTerminalChannel(self.work_dir)
             self._open_browser = False
-        self.manager = HitlManager(config, work_dir=self.work_dir, channel=self.channel)
+        else:
+            self.channel = HitlWebChannel(self.work_dir)
+            self._open_browser = False
+        self.manager: Optional[HitlManager] = None
         if self.web_server is not None:
-            self.web_server.set_manager_provider_getter(lambda: self.manager.provider)
+            self.web_server.set_manager_provider_getter(self.manager_provider)
+            self.web_server.set_manager_provider_setter(self.select_manager_provider)
+
+    def _bind_passive_conversation(self) -> None:
         bind_conversation = getattr(self.channel, "bind_conversation", None)
         if callable(bind_conversation):
-            bind_conversation(self.manager.conversation)
+            bind_conversation(HitlManagerTranscript(hitl_manager_dir(self.work_dir)))
+
+    def _new_manager(self) -> HitlManager:
+        preferred_provider = resolve_hitl_manager_provider(
+            self.work_dir,
+            self._configured_manager_provider(),
+        )
+        config = dict(self._config)
+        manager_config = config.get("manager", {})
+        if not isinstance(manager_config, dict):
+            manager_config = {}
+        config["manager"] = {
+            **manager_config,
+            "hitl_manager_provider": preferred_provider,
+        }
+        manager = HitlManager(config, work_dir=self.work_dir, channel=self.channel)
+        bind_conversation = getattr(self.channel, "bind_conversation", None)
+        if callable(bind_conversation):
+            bind_conversation(manager.conversation)
+        self._manager_stopped = False
+        return manager
+
+    def _configured_manager_provider(self) -> str:
+        manager_config = self._config.get("manager", {})
+        if not isinstance(manager_config, dict):
+            manager_config = {}
+        return str(manager_config.get("hitl_manager_provider", "claude")).strip().lower()
+
+    def manager_provider(self) -> str:
+        return resolve_hitl_manager_provider(
+            self.work_dir,
+            self._configured_manager_provider(),
+        )
+
+    def select_manager_provider(self, provider: str) -> str:
+        selected = select_hitl_manager_provider(self.work_dir, provider)
+        HitlManagerInbox(self.work_dir).retry_failed()
+        emit = getattr(self.channel, "_emit", None)
+        if callable(emit):
+            emit({"event": "workspace_changed", "section": "manager"})
+        return selected
 
     @property
     def browser_url(self) -> Optional[str]:
@@ -1164,14 +1447,15 @@ class HitlManagerHost:
     def start(self) -> None:
         if self._started:
             return
-        lease: Optional[Any] = None
         try:
             owner: Dict[str, Any] = {"interface": self.interface}
             if self.web_server is not None:
                 owner["port"] = self._requested_port
-            lease = hitl_manager_consumer_lease(self.work_dir, owner=owner)
-            lease.__enter__()
-            self._manager_consumer_lease = lease
+            if self.interface != "headless":
+                renderer = hitl_renderer_lease(self.work_dir, owner=owner)
+                renderer.__enter__()
+                self._renderer_lease = renderer
+                self._bind_passive_conversation()
 
             if self.web_server is not None:
                 self.web_server.start()
@@ -1187,55 +1471,237 @@ class HitlManagerHost:
                 if self._open_browser and self._browser_url is None:
                     threading.Timer(0.8, lambda: webbrowser.open(browser_url)).start()
                 self.channel.send("NeuriCo is available.", kind="system")
-            else:
-                assert isinstance(self.channel, HitlTerminalChannel)
+            elif isinstance(self.channel, HitlTerminalChannel):
                 self.channel.start()
-            self._conversation_thread = threading.Thread(
-                target=self._run_conversation_loop,
-                daemon=True,
-                name="neurico-hitl-manager-conversation",
-            )
-            self._conversation_thread.start()
+            elif self.interface != "headless":
+                self.channel.send("NeuriCo is available.", kind="system")
+
+            if self.interface == "headless":
+                self._start_manager_consumer(strict=True)
+            elif active_hitl_workspace_run(self.work_dir) is None:
+                self._start_manager_consumer(strict=False)
             self._started = True
+            if self.interface != "headless":
+                self._consumer_monitor_thread = threading.Thread(
+                    target=self._monitor_manager_consumer,
+                    daemon=True,
+                    name="neurico-hitl-manager-owner-monitor",
+                )
+                self._consumer_monitor_thread.start()
         except Exception:
             if self.web_server is not None:
                 self.web_server.stop()
-            if self._manager_consumer_lease is not None:
-                self._manager_consumer_lease.__exit__(*sys.exc_info())
-                self._manager_consumer_lease = None
+            self._stop_manager_consumer()
+            if self._renderer_lease is not None:
+                self._renderer_lease.__exit__(*sys.exc_info())
+                self._renderer_lease = None
             raise
 
     def stop(self) -> None:
         self._stop.set()
+        # Process shutdown must not release manager ownership while its
+        # conversation thread can still mutate the workspace.
+        self._stop_manager_consumer(timeout_seconds=None)
         self.channel.close()
-        if self._conversation_thread is not None and self._conversation_thread.is_alive():
-            self._conversation_thread.join(timeout=1)
-        self.manager.stop()
         if self.web_server is not None:
             self.web_server.stop()
-        if self._manager_consumer_lease is not None:
-            self._manager_consumer_lease.__exit__(None, None, None)
-            self._manager_consumer_lease = None
+        if self._consumer_monitor_thread is not None and self._consumer_monitor_thread.is_alive():
+            self._consumer_monitor_thread.join(timeout=1)
+        if self._renderer_lease is not None:
+            self._renderer_lease.__exit__(None, None, None)
+            self._renderer_lease = None
         self._started = False
 
-    def _run_conversation_loop(self) -> None:
+    @property
+    def consumes_manager_input(self) -> bool:
+        return self._manager_consumer_lease is not None
+
+    def prepare_run_handoff(self) -> None:
+        """Release idle manager ownership before an independent run starts."""
+        if self.interface == "headless":
+            return
+        with self._consumer_lock:
+            self._handoff_pending = True
+            self._handoff_started_at = time.monotonic()
+            self._saw_handoff_run = False
+        if not self._stop_manager_consumer():
+            with self._consumer_lock:
+                self._handoff_pending = False
+                self._saw_handoff_run = False
+            raise RuntimeError(
+                "NeuriCo is still finishing the active manager turn. "
+                "Wait for it to finish before starting research."
+            )
+
+    def cancel_run_handoff(self) -> None:
+        with self._consumer_lock:
+            self._handoff_pending = False
+            self._saw_handoff_run = False
+        if not self._stop.is_set() and active_hitl_workspace_run(self.work_dir) is None:
+            self._start_manager_consumer(strict=False)
+
+    def _start_manager_consumer(self, *, strict: bool) -> bool:
+        with self._consumer_lock:
+            if self._stop.is_set() or self._manager_consumer_lease is not None:
+                return self._manager_consumer_lease is not None
+            owner = {"interface": "run" if self.interface == "headless" else self.interface}
+            lease = hitl_manager_consumer_lease(
+                self.work_dir,
+                owner=owner,
+                # Another passive renderer may still own the idle consumer when
+                # this run acquires run.lock. Its monitor releases that consumer
+                # as soon as it observes the run, so allow that bounded handoff.
+                timeout_seconds=(
+                    _RUN_CONSUMER_HANDOFF_TIMEOUT_SECONDS
+                    if self.interface == "headless"
+                    else 0.0
+                ),
+            )
+            try:
+                lease.__enter__()
+            except HitlManagerConsumerActiveError:
+                if strict:
+                    raise
+                return False
+            if self.manager is None or self._manager_stopped:
+                self.manager = self._new_manager()
+            HitlManagerInbox(self.work_dir).retry_failed()
+            consumer_stop = threading.Event()
+            self._consumer_stop = consumer_stop
+            self._manager_consumer_lease = lease
+            self._conversation_thread = threading.Thread(
+                target=self._run_conversation_loop,
+                args=(self.manager, consumer_stop),
+                daemon=True,
+                name="neurico-hitl-manager-conversation",
+            )
+            self._conversation_thread.start()
+            return True
+
+    def _stop_manager_consumer(
+        self,
+        *,
+        timeout_seconds: Optional[float] = _MANAGER_CONSUMER_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Stop one consumer and release its lease only after its thread exits."""
+        with self._consumer_lock:
+            lease = self._manager_consumer_lease
+            thread = self._conversation_thread
+            if lease is None:
+                return True
+            consumer_stop = self._consumer_stop
+            first_stop_request = not consumer_stop.is_set()
+            consumer_stop.set()
+            manager = self.manager
+            if manager is not None and first_stop_request:
+                manager.stop()
+            if (
+                thread is not None
+                and thread.is_alive()
+                and thread is not threading.current_thread()
+            ):
+                thread.join(timeout=timeout_seconds)
+            if thread is not None and thread.is_alive():
+                # Keep every session field and the file lease intact. A later
+                # monitor pass (or process shutdown) can finish the same
+                # teardown after the blocked backend call returns.
+                return False
+
+            # A normal conversation-loop exit settles this in its finally
+            # block. This defensive call also recovers a claim if the loop
+            # terminated before reaching that block.
+            finish_active_turn = getattr(self.channel, "finish_active_turn", None)
+            if callable(finish_active_turn):
+                try:
+                    finish_active_turn(
+                        success=False,
+                        error="Manager consumer stopped before completing the message.",
+                    )
+                except Exception:
+                    # The thread is gone and the local claim was cleared in
+                    # finish_active_turn(). A later consumer can retry the
+                    # still-durable record instead of losing ownership here.
+                    pass
+            self._manager_stopped = True
+            lease.__exit__(None, None, None)
+            self._manager_consumer_lease = None
+            self._conversation_thread = None
+            self.manager = None
+            set_resolution_handler = getattr(self.channel, "set_resolution_reply_handler", None)
+            if callable(set_resolution_handler):
+                set_resolution_handler(None)
+            self._bind_passive_conversation()
+            return True
+
+    def _monitor_manager_consumer(self) -> None:
+        while not self._stop.wait(0.25):
+            with self._consumer_lock:
+                consumer_thread_dead = bool(
+                    self._manager_consumer_lease is not None
+                    and (
+                        self._conversation_thread is None
+                        or not self._conversation_thread.is_alive()
+                    )
+                )
+                consumer_stopping = (
+                    self._manager_consumer_lease is not None
+                    and self._consumer_stop.is_set()
+                )
+            if consumer_thread_dead or consumer_stopping:
+                self._stop_manager_consumer(timeout_seconds=0.0)
+                if self.consumes_manager_input:
+                    continue
+            owner = active_hitl_workspace_run(self.work_dir)
+            with self._consumer_lock:
+                if self._handoff_pending:
+                    if owner is not None:
+                        self._saw_handoff_run = True
+                    elif self._saw_handoff_run or time.monotonic() - self._handoff_started_at > 30:
+                        self._handoff_pending = False
+                        self._saw_handoff_run = False
+                handoff_pending = self._handoff_pending
+            if owner is not None:
+                if self.consumes_manager_input:
+                    self._stop_manager_consumer()
+                continue
+            if not handoff_pending and not self.consumes_manager_input:
+                self._start_manager_consumer(strict=False)
+
+    def _run_conversation_loop(
+        self,
+        manager: Optional[HitlManager],
+        consumer_stop: threading.Event,
+    ) -> None:
+        if manager is None:
+            raise RuntimeError("The HITL manager consumer started without a manager.")
         active_poll_error: Optional[tuple[str, str]] = None
 
         def durable_notice(text: str) -> None:
-            conversation = getattr(self.manager, "conversation", None)
+            conversation = getattr(manager, "conversation", None)
             append = getattr(conversation, "append", None)
+            record = None
             if callable(append):
                 try:
-                    append("manager", text)
+                    record = append(
+                        "manager",
+                        text,
+                        metadata={"visibility": "human", "kind": "manager_reply"},
+                    )
                 except Exception:
                     pass
+            mark_presented = getattr(self.channel, "mark_conversation_record_presented", None)
+            if callable(mark_presented) and isinstance(record, dict):
+                mark_presented(str(record.get("id", "")))
             try:
                 self.channel.send(text, kind="system")
             except Exception:
                 pass
 
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not consumer_stop.is_set():
             try:
+                consume_resolution = getattr(self.channel, "consume_resolution_reply", None)
+                if callable(consume_resolution) and consume_resolution():
+                    continue
                 message = self.channel.poll_input(timeout=0.5)
                 active_poll_error = None
             except HitlManagerInboxMalformedRecordError as exc:
@@ -1246,7 +1712,7 @@ class HitlManagerHost:
                         "for inspection. Conversation processing will continue.",
                     )
                     active_poll_error = signature
-                self._stop.wait(0.5)
+                consumer_stop.wait(0.5)
                 continue
             except Exception as exc:
                 signature = (type(exc).__name__, str(exc))
@@ -1256,18 +1722,32 @@ class HitlManagerHost:
                         "The message remains queued and NeuriCo will retry.",
                     )
                     active_poll_error = signature
-                self._stop.wait(0.5)
+                consumer_stop.wait(0.5)
                 continue
             if not message:
                 continue
+            if consumer_stop.is_set():
+                finish_active_turn = getattr(self.channel, "finish_active_turn", None)
+                if callable(finish_active_turn):
+                    finish_active_turn(
+                        success=False,
+                        error="Manager ownership changed before the message was processed.",
+                    )
+                break
+            succeeded = False
+            failure = ""
             try:
                 self.channel.status("NeuriCo is thinking…", thinking=True)
                 recorded = getattr(self.channel, "last_polled_input_was_recorded", lambda: False)()
-                provider = getattr(self.channel, "last_polled_provider", lambda: "")()
-                set_provider = getattr(self.manager, "set_provider", None)
-                if callable(set_provider) and provider:
-                    set_provider(resolve_hitl_manager_provider(self.work_dir, str(provider)))
-                reply = self.manager.chat(message, input_recorded=bool(recorded))
+                set_provider = getattr(manager, "set_provider", None)
+                if callable(set_provider):
+                    set_provider(
+                        resolve_hitl_manager_provider(
+                            self.work_dir,
+                            self._configured_manager_provider(),
+                        )
+                    )
+                reply = manager.chat(message, input_recorded=bool(recorded))
                 if reply:
                     self.channel.send(reply, kind="manager")
                 else:
@@ -1275,12 +1755,23 @@ class HitlManagerHost:
                         "NeuriCo finished without a reply. Your message was recorded; "
                         "send another message or restart NeuriCo if this repeats.",
                     )
+                succeeded = True
             except Exception as exc:
+                failure = str(exc).strip() or exc.__class__.__name__
                 durable_notice(
                     f"NeuriCo could not complete the conversation: {exc}. You can retry your message.",
                 )
             finally:
                 finish_active_turn = getattr(self.channel, "finish_active_turn", None)
                 if callable(finish_active_turn):
-                    finish_active_turn()
-                self.channel.status("Manager idle", thinking=False)
+                    try:
+                        finish_active_turn(success=succeeded, error=failure)
+                    except Exception:
+                        # Local claim cleanup has already happened. End this
+                        # consumer session so the monitor can create a clean
+                        # manager around the still-durable input.
+                        consumer_stop.set()
+                try:
+                    self.channel.status("Manager idle", thinking=False)
+                except Exception:
+                    consumer_stop.set()

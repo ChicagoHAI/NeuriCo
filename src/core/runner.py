@@ -48,6 +48,7 @@ from core.compute_backend import (
     normalize_compute_backend,
     without_runtime_compute_backend,
 )
+from core.hitl_run_control import HitlRunStopRequested, raise_if_hitl_run_stop_requested
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -92,8 +93,13 @@ def _with_hitl_workspace_run_ownership(method):
                 "interface": str(hitl_interface),
                 "mode": mode,
                 "provider": str(arguments.arguments["provider"]),
+                "request_id": str(os.environ.get("NEURICO_HITL_REQUEST_ID", "")).strip(),
             },
         ):
+            # A renderer can request stop while the detached worker is still
+            # waiting to acquire this lease. Honor that request before the
+            # runner mutates any research state.
+            raise_if_hitl_run_stop_requested()
             return method(self, *args, **kwargs)
 
     return owned_run
@@ -488,6 +494,11 @@ class ResearchRunner:
         if hitl:
             if not multi_agent:
                 raise ValueError("HITL AutoResearch requires the multi-agent pipeline.")
+            from core.hitl_lock import select_hitl_manager_provider
+
+            # Recovery may restore an older runtime.json. Record the selected
+            # run backend after recovery and before the manager starts.
+            select_hitl_manager_provider(work_dir, provider)
             if hitl_host is None:
                 from core.hitl_manager_host import HitlManagerHost
                 from interactive.manager import load_config as load_manager_config
@@ -495,11 +506,9 @@ class ResearchRunner:
                 hitl_host = HitlManagerHost(
                     work_dir=work_dir,
                     config=load_manager_config(),
-                    interface=hitl,
+                    interface="headless",
                     project_root=self.project_root,
                     title=title,
-                    port=hitl_manager_port,
-                    open_browser=not hitl_manager_no_browser,
                 )
                 hitl_host.start()
                 owns_hitl_host = True
@@ -561,6 +570,8 @@ class ResearchRunner:
                         full_permissions=full_permissions,
                         hitl_enabled=bool(hitl),
                     )
+            except HitlRunStopRequested:
+                raise
             except Exception as e:
                 print(f"\n❌ Continue AutoResearch error: {e}")
                 success = False
@@ -780,6 +791,8 @@ class ResearchRunner:
                         hitl_enabled=bool(hitl),
                     )
 
+            except HitlRunStopRequested:
+                raise
             except Exception as e:
                 print(f"\n❌ Pipeline error: {e}")
                 success = False
@@ -1124,6 +1137,14 @@ https://github.com/ChicagoHAI/neurico
 
         from agents.paper_writer import run_paper_writer
 
+        paper_checkpoint_sha = ""
+        if hitl_enabled:
+            from core.autoresearch import CheckpointManager
+
+            paper_checkpoint_sha = CheckpointManager(work_dir).create_checkpoint(
+                "Before HITL paper writing"
+            ).sha
+
         domain = idea.get("idea", {}).get("domain", "general")
         paper_result = run_paper_writer(
             work_dir=work_dir,
@@ -1133,6 +1154,17 @@ https://github.com/ChicagoHAI/neurico
             full_permissions=full_permissions,
             domain=domain,
         )
+
+        if hitl_enabled and paper_result.get("stopped"):
+            from core.autoresearch import CheckpointManager
+            from core.hitl_run_control import HitlRunStopRequested
+
+            CheckpointManager(work_dir).restore_checkpoint(
+                paper_checkpoint_sha,
+                clean_untracked_public=True,
+                preserve_paper_outputs=False,
+            )
+            raise HitlRunStopRequested("HITL paper writing stopped by the user.")
 
         if paper_result.get("success"):
             print(f"\n✅ Paper generated: {paper_result['draft_dir']}/main.tex")

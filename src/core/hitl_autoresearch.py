@@ -42,9 +42,14 @@ from core.hitl import (
     _load_hitl_template,
     validate_required_artifact_contract,
 )
-from core.hitl_frontier import HitlFrontierStore
+from core.hitl_frontier import (
+    HitlFrontierStore,
+    encode_hitl_history_root,
+    resolve_hitl_history_root,
+)
 from core.hitl_git import delete_git_ref
 from core.hitl_git_state import HitlGitStateStore
+from core.hitl_run_control import HitlRunStopRequested
 from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
 from core.hitl_scoring_workspace import (
     run_isolated_scorer,
@@ -74,6 +79,15 @@ class HitlFrontierPublicationPendingError(RuntimeError):
 
 class HitlTerminalRuntimeError(RuntimeError):
     """A runtime dependency failed in a way that must stop this HITL run."""
+
+
+def _raise_if_hitl_worker_stopped(result: Dict[str, Any]) -> None:
+    """Honor run cancellation before worker exit can request a replacement."""
+    from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+    if result.get("stopped"):
+        raise HitlRunStopRequested("HITL run stop requested by the user.")
+    raise_if_hitl_run_stop_requested()
 
 
 @dataclass(frozen=True)
@@ -156,8 +170,13 @@ def _commit_initial_root_publication(
         status = "root_initialized"
 
     if status == "root_initialized":
+        history_root = resolve_hitl_history_root(
+            work_dir,
+            str(transition.get("history_root", "")),
+            require_existing=False,
+        )
         frontier.configure_autoresearch_run(
-            history_root=Path(str(transition.get("history_root", ""))),
+            history_root=history_root,
             lineage_source_sha=node_sha,
             last_iteration=0,
         )
@@ -167,7 +186,11 @@ def _commit_initial_root_publication(
         status = "run_configured"
 
     if status == "run_configured":
-        history_root = Path(str(transition.get("history_root", "")))
+        history_root = resolve_hitl_history_root(
+            work_dir,
+            str(transition.get("history_root", "")),
+            require_existing=False,
+        )
         frontier.mirror_nodes_to(history_root / "nodes")
         transition = runtime_state.advance_initial_root_publication_transition(
             status="mirrored",
@@ -316,7 +339,7 @@ def run_fresh_hitl_autoresearch_initial_node(
                 "results": results,
             },
             "reason_for_acceptance": _initial_frontier_acceptance_reason(work_dir),
-            "history_root": str(history_root.resolve()),
+            "history_root": encode_hitl_history_root(work_dir, history_root),
             "scoring_ref": str(scorer_result.get("scoring_ref", "")).strip(),
         }
     )
@@ -847,6 +870,9 @@ class HitlAutoResearchController:
         """
         if iterations < 0:
             raise ValueError("iterations must be non-negative")
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        raise_if_hitl_run_stop_requested()
 
         resumed_results: list[AutoResearchIterationResult] = []
         resumed_frontier_selection_required = False
@@ -907,6 +933,7 @@ class HitlAutoResearchController:
 
         first_iteration = len(resumed_results) + 1
         for iteration in range(first_iteration, iterations + 1):
+            raise_if_hitl_run_stop_requested()
             result = self._run_iteration_until_scored(iteration, current_best_sha)
             iteration_results.append(result)
             if bool(getattr(result, "terminal_failure", False)):
@@ -931,12 +958,15 @@ class HitlAutoResearchController:
         parent_sha: str,
     ) -> AutoResearchIterationResult:
         """Relaunch a rolled-back HITL iteration from its selected parent."""
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
         while True:
             result = self.run_iteration(iteration, parent_sha)
             if bool(getattr(result, "terminal_failure", False)) or self._is_normal_scored_iteration(
                 result
             ):
                 return result
+            raise_if_hitl_run_stop_requested()
             print(
                 "↻ HITL AutoResearch attempt rollback completed; "
                 "relaunching from the selected parent frontier node."
@@ -1122,10 +1152,12 @@ class HitlAutoResearchController:
                     prompt_suffix=_load_hitl_template("worker_resume_pending_request.txt"),
                     env_extra=runtime.idea_tool_env(),
                 )
+                _raise_if_hitl_worker_stopped(proposal_result)
                 submission = runtime.proposal_submit_result_after_worker_exit(
                     proposal_result,
                     worker_name="Recovered AutoResearch proposal generator",
                 )
+                _raise_if_hitl_worker_stopped(proposal_result)
             finally:
                 runtime.clear_idea_tool_context()
             if submission.get("status") != "approved":
@@ -1598,6 +1630,8 @@ class HitlAutoResearchController:
                     comment_result.get("error")
                     or "AutoResearch HITL candidate experiment failed before scoring."
                 )
+        except HitlRunStopRequested:
+            raise
         except Exception as e:
             terminal_failure = isinstance(e, HitlTerminalRuntimeError)
             transition = HitlRuntimeState(self.work_dir).frontier_decision_transition()
@@ -1773,11 +1807,14 @@ class HitlAutoResearchController:
                 attempt_history=attempt_history,
                 env_extra=runtime.idea_tool_env(),
             )
+            _raise_if_hitl_worker_stopped(proposal_result)
             submission = runtime.proposal_submit_result_after_worker_exit(
                 proposal_result,
                 worker_name="AutoResearch proposal generator",
             )
+            _raise_if_hitl_worker_stopped(proposal_result)
             while submission.get("replacement"):
+                _raise_if_hitl_worker_stopped(proposal_result)
                 proposal_result = self._call_proposal_generator(
                     parent_sha=parent_sha,
                     attempt_dir=attempt_dir,
@@ -1785,10 +1822,12 @@ class HitlAutoResearchController:
                     prompt_suffix=str(submission["prompt_block"]),
                     env_extra=runtime.idea_tool_env(),
                 )
+                _raise_if_hitl_worker_stopped(proposal_result)
                 submission = runtime.proposal_submit_result_after_worker_exit(
                     proposal_result,
                     worker_name="AutoResearch proposal generator",
                 )
+                _raise_if_hitl_worker_stopped(proposal_result)
         finally:
             runtime.clear_idea_tool_context()
         if submission.get("status") != "approved":

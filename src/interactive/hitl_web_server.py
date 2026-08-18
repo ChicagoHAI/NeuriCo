@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
-from core.hitl_lock import HitlWorkspaceRunActiveError, resolve_hitl_manager_provider
+from core.hitl_lock import HitlWorkspaceRunActiveError
 from core.hitl_manager_inbox import HitlWebInputError
 from core.hitl_workspace_view import HitlWorkspaceView, HitlWorkspaceViewError
 from interactive.channel import WebChannel
@@ -71,6 +71,7 @@ def _handler(
     title: str,
     run_launcher: Callable[[dict[str, Any]], dict[str, Any]],
     manager_provider: Callable[[], str],
+    manager_provider_setter: Callable[[str], str],
     access_token: str,
     session_cookie_name: str,
 ):
@@ -268,10 +269,6 @@ def _handler(
                     input_kind=input_kind,
                     request_key=payload.get("request_key"),
                     option_id=payload.get("option_id"),
-                    provider=resolve_hitl_manager_provider(
-                        workspace,
-                        str(payload.get("provider", "")),
-                    ),
                     client_turn_id=str(payload.get("client_turn_id", "")),
                 )
             except HitlWebInputError as exc:
@@ -285,6 +282,24 @@ def _handler(
                 self._json({"status": "invalid", "error": str(exc) or "Enter a message before sending it."}, 400)
                 return
             self._json(dict(result), 202)
+
+        def do_PATCH(self) -> None:
+            if not self._has_access() or not self._same_origin_post():
+                self._deny_access()
+                return
+            if urlsplit(self.path).path != "/api/manager":
+                self.send_error(404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 1_000_000:
+                    raise ValueError
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                selected = manager_provider_setter(str(payload.get("provider", "")))
+            except (ValueError, RuntimeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                self._json({"status": "invalid", "error": str(exc)}, 400)
+                return
+            self._json({"status": "accepted", "provider": selected}, 202)
 
     return Handler
 
@@ -321,10 +336,15 @@ class HitlWebServer:
         self._thread: Optional[threading.Thread] = None
         self._run_launcher: Callable[[dict[str, Any]], dict[str, Any]] = self._run_unavailable
         self._manager_provider: Callable[[], str] = lambda: ""
+        self._manager_provider_setter: Callable[[str], str] = self._provider_unavailable
 
     @staticmethod
     def _run_unavailable(_payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("AutoResearch launch is unavailable for this HITL workspace.")
+
+    @staticmethod
+    def _provider_unavailable(_provider: str) -> str:
+        raise RuntimeError("Manager backend selection is unavailable for this workspace.")
 
     def set_run_launcher(
         self,
@@ -334,6 +354,9 @@ class HitlWebServer:
 
     def set_manager_provider_getter(self, getter: Callable[[], str]) -> None:
         self._manager_provider = getter
+
+    def set_manager_provider_setter(self, setter: Callable[[str], str]) -> None:
+        self._manager_provider_setter = setter
 
     @property
     def url(self) -> str:
@@ -349,6 +372,7 @@ class HitlWebServer:
             self.title,
             lambda payload: self._run_launcher(payload),
             lambda: self._manager_provider(),
+            lambda provider: self._manager_provider_setter(provider),
             self.access_token,
             self.session_cookie_name,
         )

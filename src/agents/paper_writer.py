@@ -8,7 +8,6 @@ Style files are copied from templates/paper_styles/ to the workspace.
 
 from pathlib import Path
 from typing import Dict, Any
-import subprocess
 import shlex
 import os
 import sys
@@ -272,51 +271,39 @@ def run_paper_writer(
     log_file = logs_dir / f"paper_writer_{provider}.log"
 
     try:
-        with open(log_file, 'w', encoding='utf-8') as log_f:
-            process = subprocess.Popen(
-                shlex.split(cmd),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                text=True,
-                encoding='utf-8',
-                cwd=str(work_dir)
-            )
+        from core.agent_runner import run_prebuilt_cli_agent
 
-            process.stdin.write(prompt)
-            process.stdin.close()
-
-            for line in iter(process.stdout.readline, ''):
-                if line:
-                    print(line, end='')
-                    log_f.write(line)
-
-            return_code = process.wait(timeout=timeout)
-
-        success = return_code == 0
+        launch = run_prebuilt_cli_agent(
+            command_argv=shlex.split(cmd),
+            prompt=prompt,
+            work_dir=work_dir,
+            log_file=log_file,
+            transcript_file=logs_dir / f"paper_writer_{provider}_transcript.jsonl",
+            env=env,
+            timeout=timeout,
+        )
+        return_code = launch.get("return_code")
+        success = bool(launch.get("success"))
         if success:
             print(f"\n✅ Paper writer agent completed!")
             print(f"   Output directory: {draft_dir}")
+        elif launch.get("stopped"):
+            print("\n⏹️  Paper generation stopped by the user")
+        elif launch.get("timed_out"):
+            print(f"\n⏰ Paper generation timed out after {timeout}s")
         else:
             print(f"\n❌ Paper generation failed with code {return_code}")
 
-        return {
+        result = {
             'success': success,
             'draft_dir': str(draft_dir),
             'log_file': str(log_file),
-            'return_code': return_code
+            'return_code': return_code,
+            'stopped': bool(launch.get('stopped')),
         }
-
-    except subprocess.TimeoutExpired:
-        process.kill()
-        print(f"\n⏰ Paper generation timed out after {timeout}s")
-        return {
-            'success': False,
-            'draft_dir': str(draft_dir),
-            'log_file': str(log_file),
-            'error': 'timeout'
-        }
+        if launch.get("timed_out"):
+            result["error"] = "timeout"
+        return result
     except Exception as e:
         print(f"\n❌ Error running paper writer: {e}")
         return {

@@ -21,8 +21,10 @@ from core.hitl_manager_context import HitlManagerContext
 from core.hitl_paths import (
     hitl_idea_log_path,
     hitl_launch_status_path,
+    hitl_run_control_dir,
     hitl_runtime_state_path,
     hitl_state_dir,
+    hitl_stop_request_path,
 )
 from core.hitl_whiteboard import hitl_whiteboard_path
 from core.whiteboard import MAX_TIP_CONTENT_CHARS
@@ -63,9 +65,7 @@ class HitlWorkspaceView:
 
     def snapshot(self) -> Dict[str, Any]:
         if not self.root.is_dir():
-            raise HitlWorkspaceViewError(
-                f"This workspace has no HITL state at {self.root}."
-            )
+            raise HitlWorkspaceViewError(f"This workspace has no HITL state at {self.root}.")
         ideas = self._ideas()
         nodes, attempts, frontier = self._frontier()
         whiteboard = self._whiteboard()
@@ -96,6 +96,11 @@ class HitlWorkspaceView:
         runtime = self._runtime_state()
         return self._live_status(runtime)
 
+    def pending_request(self) -> Optional[Dict[str, Any]]:
+        """Return the currently actionable request from durable workspace state."""
+        request = self._inbox(self._runtime_state()).get("pending_request")
+        return dict(request) if isinstance(request, dict) else None
+
     def notifications(self) -> List[Dict[str, Any]]:
         """Return the shared, user-facing projection of durable interface events."""
         runtime = self._runtime_state()
@@ -109,6 +114,8 @@ class HitlWorkspaceView:
             self._path_revision(hitl_runtime_state_path(self.work_dir)),
             self._path_revision(self.work_dir / ".neurico" / "pipeline_state.json"),
             self._path_revision(hitl_launch_status_path(self.work_dir)),
+            self._path_revision(hitl_run_control_dir(self.work_dir)),
+            self._path_revision(self.root / "manager" / "inbox.json"),
             idea_revision,
             self._path_revision(self.root / "autoresearch_state.json"),
             json.dumps(owner, sort_keys=True) if owner is not None else "",
@@ -223,11 +230,9 @@ class HitlWorkspaceView:
 
     @classmethod
     def _retired_run_event(cls, event: Dict[str, Any]) -> bool:
-        return (
-            cls._workflow_token(event.get("stage")) == "research"
-            and cls._workflow_token(event.get("phase"))
-            in {"starting", "completed", "stopped"}
-        )
+        return cls._workflow_token(event.get("stage")) == "research" and cls._workflow_token(
+            event.get("phase")
+        ) in {"starting", "completed", "stopped"}
 
     @staticmethod
     def _stage_label(stage: str) -> str:
@@ -373,6 +378,29 @@ class HitlWorkspaceView:
         cleanup_pending = str(cleanup.get("status", "")).strip() == "pending"
         continuation_status = str(continuation.get("status", "")).strip()
         launch_status = self._launch_status()
+        launch_state = str(launch_status.get("status", "")).strip()
+        launch_request_id = str(launch_status.get("request_id", "")).strip()
+        launch_updated_at = self._parse_timestamp(
+            launch_status.get("updated_at") or launch_status.get("created_at")
+        )
+        launch_is_recent = bool(
+            launch_updated_at is not None
+            and (datetime.now(timezone.utc) - launch_updated_at).total_seconds() < 30
+        )
+        stop_requested = bool(
+            launch_request_id
+            and hitl_stop_request_path(self.work_dir, launch_request_id).is_file()
+        )
+
+        if launch_status:
+            mode = str(launch_status.get("mode", mode)).strip()
+            provider = str(launch_status.get("provider", provider)).strip()
+            if not started_at:
+                started_at = str(
+                    launch_status.get("started_at")
+                    or launch_status.get("created_at")
+                    or ""
+                ).strip()
 
         pending_kind = str(pending.get("kind", "")).strip()
         manager_review_kind = str(pending.get("manager_review_kind", "")).strip()
@@ -423,15 +451,54 @@ class HitlWorkspaceView:
             or cleanup_pending
             or continuation_status
         )
+        if owner is not None and stop_requested:
+            return projected(
+                "stopping",
+                "Stopping research",
+                "NeuriCo is restoring the latest saved progress.",
+                next_step="The run will stop after recovery finishes.",
+                record=launch_status,
+                display_stage="Stopping",
+                display_phase="Restoring progress",
+            )
         if owner is None:
-            if str(launch_status.get("status", "")).strip() == "failed":
-                mode = str(launch_status.get("mode", "")).strip()
-                provider = str(launch_status.get("provider", "")).strip()
+            if launch_state == "starting" and launch_is_recent:
+                return projected(
+                    "starting",
+                    "Starting research",
+                    "The workspace runner is taking ownership.",
+                    next_step="Research will continue independently of this interface.",
+                    record=launch_status,
+                    display_stage="Starting",
+                    display_phase="",
+                )
+            if launch_state in {"starting", "running"}:
+                return projected(
+                    "interrupted",
+                    "Research interrupted",
+                    "The saved run no longer has an active workspace owner.",
+                    next_step="Continue from the latest recoverable progress.",
+                    record=launch_status,
+                    active=False,
+                    display_stage="Interrupted",
+                    display_phase="",
+                )
+            if launch_state == "stopped":
+                return projected(
+                    "stopped",
+                    "Stopped",
+                    "The run stopped and recoverable progress was preserved.",
+                    next_step="Continue research when ready.",
+                    record=launch_status,
+                    active=False,
+                    display_stage="Stopped",
+                    display_phase="",
+                )
+            if launch_state == "failed":
                 return projected(
                     "failed",
                     "Unable to start",
-                    str(launch_status.get("message", "")).strip()
-                    or "Research could not start.",
+                    str(launch_status.get("message", "")).strip() or "Research could not start.",
                     next_step="Review the issue, then try again.",
                     record=launch_status,
                     active=False,
@@ -461,6 +528,27 @@ class HitlWorkspaceView:
                     active=False,
                     display_stage=paused_stage,
                     display_phase=f"{paused_phase} paused" if paused_phase else "Paused",
+                )
+            if launch_state == "completed":
+                completed_at = str(
+                    launch_status.get("completed_at")
+                    or launch_status.get("updated_at")
+                    or ""
+                ).strip()
+                return projected(
+                    "completed",
+                    "Complete",
+                    "Research is ready to inspect.",
+                    next_step=(
+                        "Continue research when ready."
+                        if HitlFrontierStore(self.work_dir).exists()
+                        else "Inspect the completed research artifacts."
+                    ),
+                    record=launch_status,
+                    active=False,
+                    display_stage="Complete",
+                    display_phase="",
+                    phase_started_at=completed_at,
                 )
             if bool(pipeline.get("completed")):
                 return projected(
@@ -564,7 +652,9 @@ class HitlWorkspaceView:
                 display_phase=action_phase,
             )
 
-        transition = frontier_transition if frontier_status not in {"", "completed"} else root_transition
+        transition = (
+            frontier_transition if frontier_status not in {"", "completed"} else root_transition
+        )
         transition_status = frontier_status if transition is frontier_transition else root_status
         if transition_status not in {"", "completed"}:
             transition_stage, transition_phase = durable_boundary_labels()
@@ -707,7 +797,9 @@ class HitlWorkspaceView:
             if activity == "reviewing":
                 phase_label = self._review_phase_label(phase)
             elif activity == "revising":
-                phase_label = "Revising" if phase == "review" else f"Revising {phase.replace('_', ' ')}"
+                phase_label = (
+                    "Revising" if phase == "review" else f"Revising {phase.replace('_', ' ')}"
+                )
             else:
                 phase_label = self._working_phase_label(phase)
             summary = f"{phase_label} started." if phase_label else "Research advanced."
@@ -745,7 +837,9 @@ class HitlWorkspaceView:
         else:
             title = "Proposal generated"
             summary = self._compact_notification_text(
-                idea.get("proposal") or idea.get("context") or "A new research proposal was generated."
+                idea.get("proposal")
+                or idea.get("context")
+                or "A new research proposal was generated."
             )
             tone = "proposal"
         return {
@@ -871,7 +965,9 @@ class HitlWorkspaceView:
                 raise HitlWorkspaceViewError(f"Duplicate HITL node record for {node_sha}")
             plan_path = path.with_suffix(".md")
             if not plan_path.is_file():
-                raise HitlWorkspaceViewError(f"Accepted HITL node is missing its saved plan: {node_sha}")
+                raise HitlWorkspaceViewError(
+                    f"Accepted HITL node is missing its saved plan: {node_sha}"
+                )
             try:
                 payload["plan"] = plan_path.read_text(encoding="utf-8")
             except (OSError, UnicodeError) as exc:
@@ -906,7 +1002,9 @@ class HitlWorkspaceView:
                 payload["parent_node_sha"] = parent_sha
                 attempts.append(payload)
 
-        missing_active = [sha for sha in state["active_frontier_node_shas"] if sha not in nodes_by_sha]
+        missing_active = [
+            sha for sha in state["active_frontier_node_shas"] if sha not in nodes_by_sha
+        ]
         if missing_active:
             raise HitlWorkspaceViewError(
                 "Active frontier refers to missing node record(s): " + ", ".join(missing_active)
@@ -928,7 +1026,9 @@ class HitlWorkspaceView:
             if not isinstance(tip.get("affects", []), list) or any(
                 not isinstance(value, str) for value in tip.get("affects", [])
             ):
-                raise HitlWorkspaceViewError("Every HITL whiteboard tip affects field must be a list of paths.")
+                raise HitlWorkspaceViewError(
+                    "Every HITL whiteboard tip affects field must be a list of paths."
+                )
         return {"tips": tips}
 
     def _research_state(self) -> Dict[str, Any]:
@@ -959,7 +1059,11 @@ class HitlWorkspaceView:
     @staticmethod
     def _artifact_timestamp(path: Path) -> str:
         try:
-            return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            return (
+                datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
         except OSError as exc:
             raise HitlWorkspaceViewError(f"Could not read artifact timestamp: {path}") from exc
 
@@ -982,36 +1086,46 @@ class HitlWorkspaceView:
         ]
         for node in nodes:
             path = self.root / "nodes" / str(node["node_sha"]) / f"{node['node_sha']}.json"
-            activity.append({
-                "id": f"node:{node['node_sha']}",
-                "kind": "node",
-                "timestamp": self._artifact_timestamp(path),
-                "record": node,
-            })
+            activity.append(
+                {
+                    "id": f"node:{node['node_sha']}",
+                    "kind": "node",
+                    "timestamp": self._artifact_timestamp(path),
+                    "record": node,
+                }
+            )
         for attempt in attempts:
             if bool(attempt.get("accepted")):
                 continue
             parent = str(attempt["parent_node_sha"])
             candidate = str(attempt["node_sha"])
             path = self.root / "nodes" / parent / "attempts" / f"{candidate}.json"
-            activity.append({
-                "id": f"attempt:{candidate}",
-                "kind": "attempt",
-                "timestamp": self._artifact_timestamp(path),
-                "record": attempt,
-            })
+            activity.append(
+                {
+                    "id": f"attempt:{candidate}",
+                    "kind": "attempt",
+                    "timestamp": self._artifact_timestamp(path),
+                    "record": attempt,
+                }
+            )
         for tip in whiteboard["tips"]:
             timestamp = tip.get("written_at")
             if isinstance(timestamp, (int, float)):
-                timestamp = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                timestamp = (
+                    datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
             if not isinstance(timestamp, str) or not timestamp.strip():
                 timestamp = self._artifact_timestamp(hitl_whiteboard_path(self.work_dir))
-            activity.append({
-                "id": f"whiteboard:{tip['id']}",
-                "kind": "whiteboard",
-                "timestamp": timestamp,
-                "record": tip,
-            })
+            activity.append(
+                {
+                    "id": f"whiteboard:{tip['id']}",
+                    "kind": "whiteboard",
+                    "timestamp": timestamp,
+                    "record": tip,
+                }
+            )
         return sorted(activity, key=lambda entry: str(entry["timestamp"]))
 
     def _conversation(self, inbox: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -1029,9 +1143,25 @@ class HitlWorkspaceView:
         del inbox
         conversation: List[Dict[str, str]] = []
         for record in records:
+            content = str(record.get("content") or "").strip()
             metadata = record.get("metadata")
             if not isinstance(metadata, dict) or metadata.get("visibility") != "human":
-                continue
+                # Older manager hosts persisted these user-facing notices before
+                # tagging them for the workspace renderer.  Recover only the
+                # exact NeuriCo notice family; ordinary untagged manager context
+                # remains private.
+                legacy_notice = str(record.get("speaker") or "") == "manager" and any(
+                    content.startswith(prefix)
+                    for prefix in (
+                        "NeuriCo skipped a malformed queued message",
+                        "NeuriCo could not read the next queued message",
+                        "NeuriCo finished without a reply",
+                        "NeuriCo could not complete the conversation",
+                    )
+                )
+                if not legacy_notice:
+                    continue
+                metadata = {"visibility": "human", "kind": "manager_reply"}
             if metadata.get("kind") not in {
                 "human_message",
                 "human_reply",
@@ -1039,11 +1169,11 @@ class HitlWorkspaceView:
                 "manager_reply",
             }:
                 continue
-            content = str(record.get("content") or "").strip()
             if not content or content.lower() == "null":
                 continue
             normalized = dict(record)
             normalized["content"] = content
+            normalized["metadata"] = metadata
             conversation.append(normalized)
         return conversation
 
@@ -1056,10 +1186,24 @@ class HitlWorkspaceView:
         for entry in queue:
             if not str(entry.get("id", "")).strip() or not str(entry.get("text", "")).strip():
                 raise HitlWorkspaceViewError("Every queued NeuriCo message requires id and text.")
+        active_value = payload.get("active")
+        active = dict(active_value) if isinstance(active_value, dict) else None
+        if active is not None and (
+            not str(active.get("id", "")).strip() or not str(active.get("text", "")).strip()
+        ):
+            raise HitlWorkspaceViewError("The active NeuriCo message requires id and text.")
         pending = runtime.get("pending_worker_command")
         pending = pending if isinstance(pending, dict) else None
         record_id = str((pending or {}).get("human_request_record_id") or "").strip()
         request = None
+        if record_id:
+            request_key = str(pending.get("request_key", "")).strip()
+            queued_reply = payload.get("resolution_reply")
+            if (
+                isinstance(queued_reply, dict)
+                and str(queued_reply.get("request_key", "")).strip() == request_key
+            ):
+                record_id = ""
         if record_id:
             request_key = str(pending.get("request_key", "")).strip()
             try:
@@ -1069,7 +1213,9 @@ class HitlWorkspaceView:
                     if str(item.get("record_id", "")) == record_id
                 )
             except StopIteration as exc:
-                raise HitlWorkspaceViewError("The pending request is missing its conversation record.") from exc
+                raise HitlWorkspaceViewError(
+                    "The pending request is missing its conversation record."
+                ) from exc
             metadata = record.get("metadata")
             if (
                 not request_key
@@ -1092,4 +1238,4 @@ class HitlWorkspaceView:
                 "created_at": record.get("created_at", ""),
                 "conversation_record_id": record_id,
             }
-        return {"queue": queue, "pending_request": request}
+        return {"active": active, "queue": queue, "pending_request": request}

@@ -23,6 +23,48 @@ class HitlFrontierError(RuntimeError):
     """Raised when persisted HITL frontier state is invalid or cannot change."""
 
 
+def encode_hitl_history_root(work_dir: Path, history_root: Path) -> str:
+    """Persist workspace-owned history portably and external history absolutely."""
+    workspace = Path(work_dir).resolve()
+    resolved = Path(history_root).resolve()
+    try:
+        return resolved.relative_to(workspace).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def resolve_hitl_history_root(
+    work_dir: Path,
+    persisted_root: str,
+    *,
+    require_existing: bool = True,
+) -> Path:
+    """Resolve one persisted HITL history root in the current workspace namespace."""
+    raw = str(persisted_root).strip()
+    if not raw:
+        raise HitlFrontierError("HITL frontier is missing its AutoResearch history root")
+
+    workspace = Path(work_dir).resolve()
+    stored = Path(raw)
+    if stored.is_absolute():
+        resolved = stored.resolve()
+    else:
+        resolved = (workspace / stored).resolve()
+        try:
+            resolved.relative_to(workspace)
+        except ValueError as exc:
+            raise HitlFrontierError(
+                "HITL AutoResearch history root escapes the current workspace"
+            ) from exc
+
+    if require_existing and not resolved.is_dir():
+        location = "external" if stored.is_absolute() else "workspace"
+        raise HitlFrontierError(
+            f"HITL AutoResearch {location} history root is unavailable: {resolved}"
+        )
+    return resolved
+
+
 @dataclass(frozen=True)
 class HitlFrontierPaths:
     work_dir: Path
@@ -123,7 +165,10 @@ class HitlFrontierStore:
         if last_iteration < 0:
             raise HitlFrontierError("HITL AutoResearch last_iteration cannot be negative")
         payload = self._read_json(self.paths.state)
-        payload["history_root"] = str(Path(history_root).resolve())
+        payload["history_root"] = encode_hitl_history_root(
+            self.paths.work_dir,
+            history_root,
+        )
         payload["lineage_source_sha"] = lineage
         payload["last_iteration"] = int(last_iteration)
         self._write_json(self.paths.state, payload)
@@ -137,7 +182,9 @@ class HitlFrontierStore:
         if not history_root or not isinstance(last_iteration, int) or last_iteration < 0:
             raise HitlFrontierError("HITL frontier is missing AutoResearch continuation metadata")
         return {
-            "history_root": history_root,
+            "history_root": str(
+                resolve_hitl_history_root(self.paths.work_dir, history_root)
+            ),
             "lineage_source_sha": lineage,
             "last_iteration": last_iteration,
         }

@@ -58,6 +58,10 @@ class HitlRuntimeStateError(RuntimeError):
     """Raised when HITL runtime control state cannot make a safe transition."""
 
 
+class HitlResolutionReplyStaleError(HitlRuntimeStateError):
+    """A durable human reply no longer matches the active worker request."""
+
+
 def _now() -> str:
     return utc_now()
 
@@ -78,12 +82,15 @@ class HitlRuntimeState:
         self.lock_path = self.hitl_dir / "runtime.lock"
         self.hitl_dir.mkdir(parents=True, exist_ok=True)
         with self._locked():
-            self._state = self._load_unlocked() or self._default()
-            self._save_unlocked()
+            loaded = self._load_unlocked()
+            self._state = loaded or self._default()
+            if loaded is None:
+                self._save_unlocked()
 
     @staticmethod
     def _default() -> Dict[str, Any]:
         return {
+            "manager_provider": "",
             "worker_continuation": None,
             "pending_worker_command": None,
             "next_autoresearch_action": None,
@@ -250,6 +257,22 @@ class HitlRuntimeState:
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             return self._copy(self._state)
+
+    def manager_provider(self) -> str:
+        """Return the workspace's selected manager backend, if configured."""
+        provider = str(self.snapshot().get("manager_provider", "")).strip().lower()
+        return provider if provider in {"claude", "codex"} else ""
+
+    def set_manager_provider(self, provider: str) -> str:
+        """Persist the backend selected for this workspace's manager."""
+        provider = str(provider or "").strip().lower()
+        if provider not in {"claude", "codex"}:
+            raise ValueError("Choose Claude or Codex for the HITL manager.")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            self._state["manager_provider"] = provider
+            self._save_unlocked()
+        return provider
 
     def worker_continuation(self) -> Optional[Dict[str, Any]]:
         value = self.snapshot().get("worker_continuation")
@@ -531,18 +554,23 @@ class HitlRuntimeState:
             human_request_record_id=record_id,
         )
 
-    def record_human_reply(self, record_id: str) -> Dict[str, Any]:
+    def record_human_reply(self, request_key: str, record_id: str) -> Dict[str, Any]:
+        request_key = str(request_key).strip()
         record_id = str(record_id).strip()
+        if not request_key:
+            raise HitlRuntimeStateError("Human resolution reply requires request_key")
         if not record_id:
             raise HitlRuntimeStateError("Human resolution reply requires a transcript record")
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             command = self._state.get("pending_worker_command")
-            if not isinstance(command, dict):
-                raise HitlRuntimeStateError("No pending HITL worker command needs a human reply")
+            if not isinstance(command, dict) or command.get("request_key") != request_key:
+                raise HitlResolutionReplyStaleError(
+                    "The human reply no longer matches the active HITL worker request."
+                )
             if not str(command.get("human_request_record_id", "")).strip():
-                raise HitlRuntimeStateError(
-                    "The pending HITL worker command has no open human question"
+                raise HitlResolutionReplyStaleError(
+                    "The matching HITL worker request no longer has an open human question."
                 )
             command.setdefault("human_reply_record_ids", []).append(record_id)
             command["human_request_record_id"] = None

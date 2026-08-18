@@ -33,8 +33,9 @@ class HitlGitStateError(RuntimeError):
 
 # The whole HITL state directory rolls back with a failed attempt so a newly
 # created private state file cannot leak into the recovered run. Capture and
-# restore explicitly exclude live locks, SQLite sidecars, temporary files, and
-# generated worker command wrappers; those are process artifacts, not state.
+# restore explicitly exclude live locks, SQLite sidecars, temporary files,
+# generated worker command wrappers, and launch-scoped control requests; those
+# belong to the running process rather than the rollback boundary.
 DURABLE_HITL_STATE_PATHS = (
     HITL_RELATIVE_ROOT.as_posix(),
     ".neurico/research_state.json",
@@ -264,7 +265,7 @@ class HitlGitStateStore:
             return False
         name = suffix[-1]
         return (
-            suffix[0] == "bin"
+            suffix[0] in {"bin", "control"}
             or name.endswith(".lock")
             or name.endswith(".tmp")
             or name in {"history.sqlite-wal", "history.sqlite-shm", "manager_mcp.json"}

@@ -20,9 +20,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_paths import hitl_manager_dir
 from core.hitl_runtime_state import (
     MANAGER_REVIEW_FINALIZERS,
+    HitlResolutionReplyStaleError,
     HitlRuntimeState,
     HitlRuntimeStateError,
 )
@@ -140,7 +142,9 @@ class HitlManagerToolExecutor:
         from core.hitl_frontier import HitlFrontierStore
 
         return json.dumps(
-            HitlFrontierStore(self.manager.work_dir).state(allow_unselected=True), ensure_ascii=False, indent=2
+            HitlFrontierStore(self.manager.work_dir).state(allow_unselected=True),
+            ensure_ascii=False,
+            indent=2,
         )
 
     def _view_node(self, args: Dict[str, Any]) -> str:
@@ -267,7 +271,9 @@ class HitlManager:
             raise ValueError("HITL manager requires a workspace")
         self.config = config
         self.work_dir = Path(work_dir)
-        manager_config = config.get("manager", {}) if isinstance(config.get("manager", {}), dict) else {}
+        manager_config = (
+            config.get("manager", {}) if isinstance(config.get("manager", {}), dict) else {}
+        )
         self._manager_config = manager_config
         self._backend_state_lock = threading.Lock()
         # Keep provider replacement separate from transcript/tool state. MCP
@@ -387,6 +393,7 @@ class HitlManager:
             "finalize_frontier_decision",
         }
     )
+
     def _available_tool_names(self) -> set[str]:
         """Return the runtime-authorized tool surface for the next ReAct turn.
 
@@ -502,8 +509,7 @@ class HitlManager:
         scoring_handoff = self._scoring_handoff_instruction(tools)
         if scoring_handoff:
             return (
-                native_retry
-                + "The worker request remains unresolved. "
+                native_retry + "The worker request remains unresolved. "
                 f"{scoring_handoff} Direct assistant text cannot advance it."
             )
         completion_name = self._runtime_completion_tool_name(tools)
@@ -515,8 +521,7 @@ class HitlManager:
                 f"`{completion_name}`. Direct assistant text cannot complete it."
             )
         return (
-            native_retry
-            + "The worker request remains unresolved. Follow the exact "
+            native_retry + "The worker request remains unresolved. Follow the exact "
             "runtime-authorized MCP tool surface in the system instruction; direct "
             "assistant text cannot complete it."
         )
@@ -538,11 +543,7 @@ class HitlManager:
             for artifact in pending.get("related_artifacts", [])
             if isinstance(artifact, dict)
         }
-        return {
-            path
-            for path in SEALED_PATHS
-            if path.startswith("scoring/") and path in declared
-        }
+        return {path for path in SEALED_PATHS if path.startswith("scoring/") and path in declared}
 
     @classmethod
     def _mcp_allowed_tool_name(cls, tool_name: str) -> str:
@@ -638,7 +639,10 @@ class HitlManager:
         tool_name = str(name).strip()
         known_tools = {str(tool["name"]) for tool in self.tool_definitions}
         if not tool_name or tool_name not in known_tools:
-            return "Error: unknown HITL manager MCP tool. Inspect the available tools and retry.", True
+            return (
+                "Error: unknown HITL manager MCP tool. Inspect the available tools and retry.",
+                True,
+            )
         if not isinstance(arguments, dict):
             return "Error: MCP tool arguments must be an object. Correct the call and retry.", True
         call_id = f"mcp_{secrets.token_hex(12)}"
@@ -785,6 +789,7 @@ class HitlManager:
         if not request_key:
             return
         self.runtime_state.cancel_pending_worker_command(request_key, reason=reason)
+        HitlManagerInbox(self.work_dir).discard_resolution_reply(request_key)
         clear_request = getattr(self.channel, "clear_resolution_request", None)
         if callable(clear_request):
             clear_request()
@@ -804,7 +809,9 @@ class HitlManager:
         )
         self.start()
         self._turns.put(turn)
-        turn.done.wait()
+        from core.hitl_run_control import wait_for_event_or_hitl_stop
+
+        wait_for_event_or_hitl_stop(turn.done)
         if turn.error is not None:
             raise turn.error
         return turn.reply
@@ -861,7 +868,11 @@ class HitlManager:
         legacy_question = pending.get("human_question")
         if not request_record_id and isinstance(legacy_question, dict):
             message = str(legacy_question.get("message", "")).strip()
-            options = [str(option) for option in legacy_question.get("options") or [] if str(option).strip()]
+            options = [
+                str(option)
+                for option in legacy_question.get("options") or []
+                if str(option).strip()
+            ]
             if not message:
                 raise HitlRuntimeStateError("Runtime human request is missing its message")
             request_record_id = f"human-request:{request_key}"
@@ -893,7 +904,9 @@ class HitlManager:
         else:
             self.notify_runtime(prompt, request_key=request_key)
         resolution = self._resolutions[request_key]
-        resolution.completed.wait()
+        from core.hitl_run_control import wait_for_event_or_hitl_stop
+
+        wait_for_event_or_hitl_stop(resolution.completed)
         completed = self.runtime_state.pending_worker_command()
         if isinstance(completed, dict) and completed.get("request_key") == request_key:
             if completed.get("status") == "cancelled":
@@ -910,6 +923,9 @@ class HitlManager:
     def wait_for_worker_request(self, request_key: str) -> Dict[str, Any]:
         """Wait for an already-attached worker request to receive its response."""
         while True:
+            from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+            raise_if_hitl_run_stop_requested()
             pending = self.runtime_state.pending_worker_command()
             if not isinstance(pending, dict) or pending.get("request_key") != request_key:
                 raise HitlRuntimeStateError(
@@ -1271,24 +1287,49 @@ class HitlManager:
             manager_review_kind="initial_scoring",
         )
 
-    def submit_resolution_reply(self, response: str) -> None:
+    def submit_resolution_reply(
+        self,
+        response: str,
+        *,
+        request_key: str,
+        reply_id: str = "",
+    ) -> None:
         response = str(response).strip()
+        request_key = str(request_key).strip()
         if not response:
             raise HitlRuntimeStateError("A human resolution reply must not be empty.")
+        if not request_key:
+            raise HitlRuntimeStateError("A human resolution reply requires request_key.")
         command = self.runtime_state.pending_worker_command()
-        if not isinstance(command, dict):
-            raise HitlRuntimeStateError("No pending HITL worker command needs a human reply")
-        request_key = str(command["request_key"])
+        if not isinstance(command, dict) or str(command.get("request_key", "")) != request_key:
+            raise HitlResolutionReplyStaleError(
+                "The human reply no longer matches the active HITL worker request."
+            )
+        stable_record_id = (
+            f"human-reply:{request_key}:{str(reply_id).strip()}" if str(reply_id).strip() else ""
+        )
+        if stable_record_id and stable_record_id in list(
+            command.get("human_reply_record_ids") or []
+        ):
+            return
+        if not str(command.get("human_request_record_id", "")).strip():
+            raise HitlResolutionReplyStaleError(
+                "The matching HITL worker request no longer has an open human question."
+            )
         reply_record = self.conversation.append(
             "human",
             response,
+            record_id=stable_record_id,
             metadata={
                 "visibility": "human",
                 "kind": "human_reply",
                 "request_key": request_key,
             },
         )
-        pending = self.runtime_state.record_human_reply(str(reply_record["id"]))
+        pending = self.runtime_state.record_human_reply(
+            request_key,
+            str(reply_record["id"]),
+        )
         with self._resolution_lock:
             resolution = self._resolutions.get(request_key)
             if resolution and resolution.human_inputs is not None:
@@ -1369,7 +1410,9 @@ class HitlManager:
             manager_review_kind=manager_review_kind,
         )
         self.notify_runtime(prompt, request_key=request_key)
-        resolution.completed.wait()
+        from core.hitl_run_control import wait_for_event_or_hitl_stop
+
+        wait_for_event_or_hitl_stop(resolution.completed)
         completed = self.runtime_state.pending_worker_command()
         if isinstance(completed, dict) and completed.get("request_key") == request_key:
             if completed.get("status") == "cancelled":
@@ -1431,7 +1474,10 @@ class HitlManager:
             metadata = record.get("metadata") if isinstance(record, dict) else None
             if not isinstance(record, dict) or not isinstance(metadata, dict):
                 continue
-            if metadata.get("kind") != "human_reply" or str(metadata.get("request_key", "")) != request_key:
+            if (
+                metadata.get("kind") != "human_reply"
+                or str(metadata.get("request_key", "")) != request_key
+            ):
                 continue
             response = str(record.get("content", "")).strip()
             if response:
@@ -1525,10 +1571,14 @@ class HitlManager:
 
     def prune_frontier(self, node_sha: str, reason: str) -> str:
         if not reason:
-            return "Error: prune_frontier requires a non-empty strategic rationale. Retry with reason."
+            return (
+                "Error: prune_frontier requires a non-empty strategic rationale. Retry with reason."
+            )
         action = self.runtime_state.snapshot().get("next_autoresearch_action")
         if not isinstance(action, dict) or action.get("kind") != "prune_frontier":
-            return "Error: prune_frontier is available only at the runtime frontier-pruning boundary."
+            return (
+                "Error: prune_frontier is available only at the runtime frontier-pruning boundary."
+            )
         handler = getattr(self, "_frontier_pruner", None)
         if not callable(handler):
             return "Error: runtime has not attached frontier pruning for this boundary."
@@ -1604,6 +1654,9 @@ class HitlManager:
         self.notify_runtime(prompt, runtime_action_kind="select_frontier")
         # The controller is the sole executor of the recorded manager choice.
         while True:
+            from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+            raise_if_hitl_run_stop_requested()
             current = self.runtime_state.snapshot().get("next_autoresearch_action")
             if (
                 isinstance(current, dict)
@@ -1627,7 +1680,10 @@ class HitlManager:
                 and current.get("status") == "cancelled"
             ):
                 raise RuntimeError(
-                    str(current.get("cancellation_reason") or "HITL frontier selection was cancelled.")
+                    str(
+                        current.get("cancellation_reason")
+                        or "HITL frontier selection was cancelled."
+                    )
                 )
             threading.Event().wait(0.1)
 
@@ -1647,6 +1703,9 @@ class HitlManager:
         self.notify_runtime(prompt, runtime_action_kind="prune_frontier")
         # The controller is the sole executor of the recorded manager choice.
         while True:
+            from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+            raise_if_hitl_run_stop_requested()
             current = self.runtime_state.snapshot().get("next_autoresearch_action")
             if (
                 isinstance(current, dict)
@@ -1670,7 +1729,9 @@ class HitlManager:
                 and current.get("status") == "cancelled"
             ):
                 raise RuntimeError(
-                    str(current.get("cancellation_reason") or "HITL frontier pruning was cancelled.")
+                    str(
+                        current.get("cancellation_reason") or "HITL frontier pruning was cancelled."
+                    )
                 )
             threading.Event().wait(0.1)
 
@@ -1890,7 +1951,9 @@ class HitlManager:
         if "provider budget" in detail:
             failure = detail
         else:
-            failure = "The HITL manager backend remained unavailable after its bounded retry budget."
+            failure = (
+                "The HITL manager backend remained unavailable after its bounded retry budget."
+            )
             if detail:
                 failure = f"{failure} Detail: {detail}"
         if (
@@ -1917,7 +1980,9 @@ class HitlManager:
 
         action_kind = turn.runtime_action_kind.strip()
         if action_kind:
-            boundary = "frontier selection" if action_kind == "select_frontier" else "frontier pruning"
+            boundary = (
+                "frontier selection" if action_kind == "select_frontier" else "frontier pruning"
+            )
             reason = f"{failure} The {boundary} boundary was not completed; restart HITL AutoResearch to retry it."
             self.runtime_state.cancel_next_autoresearch_action(action_kind, reason=reason)
             self.channel.send(reason, kind="system")
@@ -2048,7 +2113,9 @@ class HitlManager:
             raise RuntimeError("Manager returned an empty conversation summary")
         return text
 
-    def _send(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None) -> Any:
+    def _send(
+        self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None
+    ) -> Any:
         with self._backend_lifecycle_lock:
             last: Optional[Exception] = None
             for attempt in range(self.max_backend_retries):
@@ -2065,7 +2132,9 @@ class HitlManager:
                             ) from exc
             raise RuntimeError("Manager backend was unavailable") from last
 
-    def _send_once(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None) -> Any:
+    def _send_once(
+        self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None
+    ) -> Any:
         """Run one manager provider turn without a wall-clock deadline."""
         result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
 
@@ -2074,20 +2143,22 @@ class HitlManager:
             active_backend = backend or self.backend
             parameters = inspect.signature(active_backend.send).parameters
             supports_adapter_contract = (
-                (
-                    "timeout_seconds" in parameters
-                    and "disable_native_tools" in parameters
-                )
+                "timeout_seconds" in parameters and "disable_native_tools" in parameters
+            ) or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+            )
+        except (TypeError, ValueError):
+            supports_adapter_contract = False
+        use_cli_mcp = (
+            bool(tools)
+            and self._uses_cli_mcp_bridge()
+            and (
+                "mcp_config_path" in parameters
                 or any(
                     parameter.kind is inspect.Parameter.VAR_KEYWORD
                     for parameter in parameters.values()
                 )
             )
-        except (TypeError, ValueError):
-            supports_adapter_contract = False
-        use_cli_mcp = bool(tools) and self._uses_cli_mcp_bridge() and (
-            "mcp_config_path" in parameters
-            or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
         )
         if use_cli_mcp:
             self._ensure_cli_mcp_bridge()
@@ -2099,12 +2170,9 @@ class HitlManager:
                         "timeout_seconds": None,
                         "disable_native_tools": True,
                     }
-                    if (
-                        "use_dedicated_system_prompt" in parameters
-                        or any(
-                            parameter.kind is inspect.Parameter.VAR_KEYWORD
-                            for parameter in parameters.values()
-                        )
+                    if "use_dedicated_system_prompt" in parameters or any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters.values()
                     ):
                         kwargs["use_dedicated_system_prompt"] = True
                     provider_tools: List[Dict[str, Any]] = tools
