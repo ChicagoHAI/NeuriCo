@@ -41,8 +41,6 @@ _RESOLUTION_REPLY = "resolution_reply"
 _CONVERSATION = "conversation"
 _RUN_CONSUMER_HANDOFF_TIMEOUT_SECONDS = 5.0
 _MANAGER_CONSUMER_SHUTDOWN_TIMEOUT_SECONDS = 2.0
-
-
 class _HitlPromptCancelled(Exception):
     """The user cancelled an in-progress terminal prompt sequence."""
 
