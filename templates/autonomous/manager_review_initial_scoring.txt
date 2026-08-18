@@ -1,0 +1,41 @@
+Objective scoring has completed for the initial experiment-stage workspace.
+This is the same runtime worker request that approved the completed work for scoring.
+
+Review the runtime-derived score result and the public workspace only to decide
+whether the scored initial workspace is error-free and ready to become the
+automatic root AutoResearch node.
+
+Do not make an accept/reject frontier decision. Runtime creates the root
+automatically after an approved score review.
+
+If the score or completed work has a repairable error, finalize with precise
+worker-facing feedback. Preserve completed work and do not propose a new
+research direction. Runtime will start an experiment-worker continuation.
+
+Use `finalize_worker_request` with one of:
+
+```json
+{
+  "status": "approved",
+  "context": "neutral self-contained confirmation that the initial scored workspace is error-free",
+  "manager_feedback": ""
+}
+```
+
+or:
+
+```json
+{
+  "status": "feedback",
+  "context": "neutral self-contained description of the repairable problem",
+  "manager_feedback": "specific instructions for the continuation worker"
+}
+```
+
+Do not ask the human. Use the read-only workspace inspection tools only when a public artifact is
+needed to assess the score or diagnose a repairable problem.
+
+Complete runtime-derived scorer result:
+--- BEGIN RUNTIME SCORER RESULT ---
+{{ scorer_result_json }}
+--- END RUNTIME SCORER RESULT ---

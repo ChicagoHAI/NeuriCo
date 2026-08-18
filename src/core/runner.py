@@ -205,6 +205,7 @@ class ResearchRunner:
         autoresearch_history_dir: Optional[Path] = None,
         continue_autoresearch: bool = False,
         continue_recover: bool = False,
+        legacy_autoresearch: bool = False,
         bootstrap_autoresearch_baseline: bool = False,
         proposer_timeout: int = 900,
         compute_backend: str = "local",
@@ -289,7 +290,40 @@ class ResearchRunner:
                     "--autoresearch or --continue-autoresearch."
                 )
             continue_autoresearch = True
-        if hitl:
+        # AutoResearch runs on the manager-driven pipeline. Without an explicit
+        # human interface (web/cli) it runs autonomously: the same runtime,
+        # manager, and frontier as HITL, but the manager resolves every decision
+        # itself. --legacy-autoresearch opts back into the flat comparator path.
+        autonomous = bool(
+            (autoresearch or continue_autoresearch)
+            and not hitl
+            and multi_agent
+            and not legacy_autoresearch
+        )
+        if autonomous and provider not in {"claude", "codex"}:
+            raise ValueError(
+                "Autonomous-manager AutoResearch requires Claude or Codex so its "
+                "workers and manager use the same backend. Use --legacy-autoresearch "
+                "for the provider-agnostic flat AutoResearch path."
+            )
+        # Bootstrap-baseline is a mechanical scoring pipeline (no manager, no
+        # provider constraint). Without a human interface it seeds the autonomous
+        # frontier root; --legacy-autoresearch keeps the flat baseline instead.
+        autonomous_bootstrap = bool(
+            bootstrap_autoresearch_baseline
+            and not hitl
+            and multi_agent
+            and not legacy_autoresearch
+        )
+        # The manager-driven code paths (host, recovery, HITL entry functions)
+        # serve both the human interfaces and the autonomous manager. Bootstrap
+        # is intentionally excluded: it needs no manager and no host.
+        manager_driven = bool(hitl) or autonomous
+        if autonomous:
+            print("   AutoResearch: autonomous manager (no human in the loop)")
+        elif autonomous_bootstrap:
+            print("   AutoResearch: autonomous bootstrap baseline")
+        elif hitl:
             print(f"   HITL: enabled ({hitl})")
         autoresearch_modes = [
             name
@@ -477,45 +511,71 @@ class ResearchRunner:
         stage_local_resources(work_dir, idea)
 
         recovered_hitl_attempt = None
-        if hitl and continue_autoresearch:
-            # Recovery can restore the private HITL manager database. Do it before
+        if manager_driven and continue_autoresearch:
+            # Recovery can restore the private manager database. Do it before
             # the host starts accepting conversation messages against that state.
-            from core.hitl_autoresearch import recover_interrupted_hitl_autoresearch_attempt
+            if autonomous:
+                from core.autonomous.autoresearch import (
+                    recover_interrupted_autonomous_autoresearch_attempt
+                    as recover_interrupted_hitl_autoresearch_attempt,
+                )
+            else:
+                from core.hitl_autoresearch import (
+                    recover_interrupted_hitl_autoresearch_attempt,
+                )
 
             recovered_hitl_attempt = recover_interrupted_hitl_autoresearch_attempt(work_dir)
 
         owns_hitl_host = False
-        if hitl:
+        if manager_driven:
             if not multi_agent:
-                raise ValueError("HITL AutoResearch requires the multi-agent pipeline.")
+                raise ValueError("Manager-driven AutoResearch requires the multi-agent pipeline.")
             if hitl_host is None:
-                from core.hitl_manager_host import HitlManagerHost
                 from interactive.manager import load_config as load_manager_config
 
-                hitl_host = HitlManagerHost(
-                    work_dir=work_dir,
-                    config=load_manager_config(),
-                    interface=hitl,
-                    project_root=self.project_root,
-                    title=title,
-                    port=hitl_manager_port,
-                    open_browser=not hitl_manager_no_browser,
-                )
+                if autonomous:
+                    from core.autonomous.host import AutonomousManagerHost
+
+                    hitl_host = AutonomousManagerHost(
+                        work_dir=work_dir,
+                        config=load_manager_config(),
+                        project_root=self.project_root,
+                        title=title,
+                    )
+                else:
+                    from core.hitl_manager_host import HitlManagerHost
+
+                    hitl_host = HitlManagerHost(
+                        work_dir=work_dir,
+                        config=load_manager_config(),
+                        interface=hitl,
+                        project_root=self.project_root,
+                        title=title,
+                        port=hitl_manager_port,
+                        open_browser=not hitl_manager_no_browser,
+                    )
                 hitl_host.start()
                 owns_hitl_host = True
             set_manager_provider = getattr(hitl_host.manager, "set_provider", None)
             if not callable(set_manager_provider):
-                raise RuntimeError("The HITL host cannot select a manager backend.")
+                raise RuntimeError("The manager host cannot select a manager backend.")
             set_manager_provider(provider)
 
         if continue_autoresearch:
             success = False
             pipeline_result: Dict[str, Any] = {}
             try:
-                if hitl:
-                    from core.hitl_autoresearch import continue_hitl_autoresearch
+                if manager_driven:
+                    if autonomous:
+                        from core.autonomous.autoresearch import (
+                            continue_autonomous_autoresearch as _continue_manager_driven,
+                        )
+                    else:
+                        from core.hitl_autoresearch import (
+                            continue_hitl_autoresearch as _continue_manager_driven,
+                        )
 
-                    pipeline_result = continue_hitl_autoresearch(
+                    pipeline_result = _continue_manager_driven(
                         idea=idea,
                         idea_id=idea_id,
                         work_dir=work_dir,
@@ -580,9 +640,7 @@ class ResearchRunner:
             success = False
             baseline_result: Dict[str, Any] = {}
             try:
-                from core.autoresearch import construct_bootstrap_initial_node
-
-                baseline_result = construct_bootstrap_initial_node(
+                bootstrap_args = dict(
                     idea=idea,
                     idea_id=idea_id,
                     work_dir=work_dir,
@@ -598,6 +656,22 @@ class ResearchRunner:
                         compute_backend=compute_backend,
                     ),
                 )
+                if autonomous_bootstrap:
+                    from core.autonomous.autoresearch import (
+                        construct_bootstrap_autonomous_baseline,
+                    )
+
+                    node_result = construct_bootstrap_autonomous_baseline(**bootstrap_args)
+                    baseline_result = {
+                        "success": node_result.success,
+                        "mode": node_result.mode,
+                        "current_best_sha": node_result.current_best_sha,
+                        "reason": node_result.reason,
+                    }
+                else:
+                    from core.autoresearch import construct_bootstrap_initial_node
+
+                    baseline_result = construct_bootstrap_initial_node(**bootstrap_args)
                 success = baseline_result.get("success", False)
             except Exception as e:
                 print(f"\n❌ Bootstrap AutoResearch baseline error: {e}")
@@ -669,11 +743,22 @@ class ResearchRunner:
 
             try:
                 if autoresearch:
-                    if hitl:
-                        from core.hitl_autoresearch import (
-                            continue_hitl_autoresearch,
-                            run_fresh_hitl_autoresearch_initial_node,
-                        )
+                    if manager_driven:
+                        # The autonomous engine and the human HITL engine each
+                        # build their own initial root node and iteration loop
+                        # from their own package; both use the shared multi-agent
+                        # pipeline orchestrator underneath.
+                        if autonomous:
+                            from core.autonomous.autoresearch import (
+                                continue_autonomous_autoresearch as _continue_manager_driven,
+                                run_fresh_autonomous_autoresearch_initial_node
+                                as run_fresh_hitl_autoresearch_initial_node,
+                            )
+                        else:
+                            from core.hitl_autoresearch import (
+                                continue_hitl_autoresearch as _continue_manager_driven,
+                                run_fresh_hitl_autoresearch_initial_node,
+                            )
                     else:
                         from core.autoresearch import (
                             construct_fresh_initial_node,
@@ -702,7 +787,7 @@ class ResearchRunner:
                         "manifest_trimmer_timeout": manifest_trimmer_timeout,
                         "autoresearch_history_dir": autoresearch_history_dir,
                     }
-                    if hitl:
+                    if manager_driven:
                         initial_result = run_fresh_hitl_autoresearch_initial_node(
                             **initial_args,
                             manager=hitl_host.manager,
@@ -737,8 +822,8 @@ class ResearchRunner:
                             "proposer_timeout": proposer_timeout,
                             "comment_timeout": timeout,
                         }
-                        if hitl:
-                            autoresearch_result = continue_hitl_autoresearch(
+                        if manager_driven:
+                            autoresearch_result = _continue_manager_driven(
                                 **continuation_args,
                                 manager=hitl_host.manager,
                                 channel=hitl_host.channel,
@@ -1471,6 +1556,13 @@ def main():
              "best checkpoint and continue, instead of refusing.",
     )
     parser.add_argument(
+        "--legacy-autoresearch",
+        action="store_true",
+        help="Run --autoresearch / --continue-autoresearch on the legacy flat "
+             "comparator path instead of the autonomous manager. Escape hatch while "
+             "the autonomous manager path matures.",
+    )
+    parser.add_argument(
         "--autoresearch-iterations",
         type=int,
         default=1,
@@ -1609,6 +1701,7 @@ def main():
             autoresearch_history_dir=args.autoresearch_history_dir,
             continue_autoresearch=args.continue_autoresearch,
             continue_recover=args.continue_recover,
+            legacy_autoresearch=args.legacy_autoresearch,
             bootstrap_autoresearch_baseline=args.bootstrap_autoresearch_baseline,
             proposer_timeout=args.proposer_timeout,
             compute_backend=args.compute_backend,

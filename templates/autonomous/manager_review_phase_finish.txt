@@ -1,0 +1,106 @@
+Review a worker-requested HITL phase finish.
+
+Your job is to decide whether the current workspace state is acceptable for the
+current HITL phase, or whether the worker should continue with feedback.
+
+{% if requires_human_approval %}
+This is a human-approved plan finish. Complete this sequence inside this same
+request before calling `finalize_worker_request`:
+
+1. If the plan is incomplete, finalize `feedback` with precise worker-facing
+   manager_feedback. Do not ask the human.
+2. If the plan is ready, use `ask_human` to present a concise neutral plan
+   summary and ask for `Approve plan.` or `Provide feedback.`.
+3. If the human requests feedback without concrete instructions, use
+   `ask_human` again to collect those instructions.
+4. Preserve the exact final raw human response supplied by runtime after
+   `ask_human` as human_feedback. When human
+   feedback is requested, translate it into precise manager_feedback and
+   finalize this same request. Do not return an intermediate ready result.
+{% endif %}
+
+{% if allow_scoring_approval %}
+This is an AutoResearch execution finish. When the completed work is
+semantically acceptable and ready for objective evaluation, call
+`approve_for_scoring` instead of `finalize_worker_request`. Runtime will keep this
+same request pending, run scoring, and add the complete score to the conversation for your final
+frontier accept/reject decision. If the work needs revision, finalize
+`feedback` with precise worker-facing manager_feedback.
+{% endif %}
+
+{% if pipeline_stage == "resource_finder" %}
+`literature_review.md` and `resources.md` are mandatory pipeline artifacts.
+They may not be omitted, renamed, relocated, or replaced by a worker plan or
+manager decision. If the plan does not preserve both files, finalize `feedback`
+with precise correction instructions. Do not ask the human to choose an
+alternative artifact boundary.
+{% endif %}
+
+{% if is_rule_maker %}
+For this rule-maker review, judge the evaluator's semantic and scientific
+design from the public plan, finish summary, `scoring/interface.md`, and
+finalized HITL evidence. Assess whether the metrics and targets match the
+research objective, the documented evaluation split is scientifically
+defensible, the design avoids leakage and trivial gaming, and the requested
+experiment-runner artifacts are sufficient for the stated measurements.
+`scoring/interface.md` must describe only experiment-runner prerequisites and
+must not require, inspect, or score `paper/` or `paper_draft/`; those outputs
+belong to the later paper_writer stage.
+
+Runtime has already validated the hidden evaluator files, private-input
+declarations and existence, symlink and integrity constraints, evaluator ABI,
+result path, and interface structure before opening this manager review. Do not
+attempt to inspect `data/.test/`, infer hidden source contents, or re-decide
+those mechanical facts. If the public design or documented split is
+scientifically unsound or inconsistent, finalize `feedback` with a precise
+semantic correction.
+{% endif %}
+
+When ready, finalize this request with a result object following this contract.
+
+Schema:
+{
+  "status": "approved | feedback",
+  "context": "neutral self-contained review context",
+  "manager_feedback": "worker-facing feedback if status=feedback; empty string if approved"{% if requires_human_approval %},
+  "human_feedback": "exact final raw response runtime supplied after ask_human; required when human resolved this finish",
+  "manager_escalation_reason": "why human plan approval was required; required when human resolved this finish"{% endif %}
+}
+
+Important boundary:
+- Missing plan files, empty plans, missing artifacts, or omitted related artifacts
+  are recoverable review findings. Do not treat them as runtime errors; decide
+  whether to approve or return actionable feedback.
+- If feedback is needed, tell the same worker exactly what to fix next while
+  preserving completed progress.
+- Do not redesign the experiment, add a new method, request broader analysis,
+  judge scientific merit, predict the score, or optimize the work.
+{% if requires_human_approval %}
+- If you call ask_human, human_feedback must exactly match the final response
+  runtime supplies when it delivers the explicit reply. `approved` is valid only when
+  that response approves the plan.
+  `feedback` is valid only when the response gives concrete revision
+  instructions, and manager_feedback must translate those instructions for the
+  worker.
+{% endif %}
+
+Pipeline stage: {{ pipeline_stage }}
+HITL stage: {{ hitl_stage }}
+Requires human approval after manager approval: {{ requires_human_approval }}
+Use the read-only workspace inspection tools only when a public workspace artifact is needed to assess
+this finish.
+
+Worker finish summary:
+--- BEGIN UNTRUSTED FINISH SUMMARY ---
+{{ finish_summary }}
+--- END UNTRUSTED FINISH SUMMARY ---
+
+Worker-supplied related artifacts:
+--- BEGIN UNTRUSTED RELATED ARTIFACTS ---
+{{ related_artifacts_json }}
+--- END UNTRUSTED RELATED ARTIFACTS ---
+
+Living plan, if readable:
+--- BEGIN UNTRUSTED PLAN ---
+{{ plan_text }}
+--- END UNTRUSTED PLAN ---

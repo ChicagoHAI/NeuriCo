@@ -1,0 +1,6 @@
+Runtime restarted after the earlier worker session ended unexpectedly.
+
+Do not change the workspace yet. Run `autonomous-resume-worker-request` and wait for
+runtime's result. Follow the returned instruction exactly. If runtime returns
+feedback, apply it in this same session. If runtime returns approval, follow
+its stop or next-phase instruction.

@@ -256,18 +256,108 @@ class ResearchPipelineOrchestrator:
         self.hitl_channel = hitl_channel
         self.hitl_manager_config = hitl_manager_config or {}
         self.hitl_autoresearch = hitl_autoresearch
+        self._stage_modules: Optional[Any] = None
+
+    @property
+    def _sm(self) -> Any:
+        """Manager-driven stage machinery, resolved by manager type.
+
+        The state/stage/git/scoring helpers all derive their on-disk namespace
+        from their own module. An autonomous run must use the autonomous package
+        (``.neurico/autonomous/``); a human HITL run uses the hitl_* modules
+        (``.neurico/hitl/``) exactly as before. Standard (non-manager) runs never
+        reach these call sites.
+        """
+        if self._stage_modules is None:
+            from types import SimpleNamespace
+
+            # Each branch imports the same roles under canonical aliases so the
+            # namespace and its call sites are identical for both modes. The
+            # autonomous package dropped the "Hitl" class-name prefix.
+            if getattr(self.hitl_manager, "autonomous", False):
+                from core.autonomous.git import delete_git_ref
+                from core.autonomous.git_state import (
+                    GitSnapshot as _GitSnapshot,
+                    GitStateStore as _GitStateStore,
+                )
+                from core.autonomous.runtime import (
+                    persist_hitl_required_artifact_contract as _persist_contract,
+                    validate_required_artifact_contract as _validate_contract,
+                    verify_required_artifacts as _verify_artifacts,
+                )
+                from core.autonomous.runtime_state import RuntimeState as _RuntimeState
+                from core.autonomous.scoring_workspace import (
+                    run_isolated_scorer,
+                    scoring_source_workspace_fingerprint,
+                )
+                from core.autonomous.stage_runtime import (
+                    StageRollback as _StageRollback,
+                    run_plan_centered_hitl_stage,
+                    run_worker_with_replacements,
+                )
+                from core.autonomous.workspace_guard import (
+                    WorkspaceWriteGuard as _WorkspaceWriteGuard,
+                )
+            else:
+                from core.hitl import (
+                    persist_hitl_required_artifact_contract as _persist_contract,
+                    validate_required_artifact_contract as _validate_contract,
+                    verify_required_artifacts as _verify_artifacts,
+                )
+                from core.hitl_git import delete_git_ref
+                from core.hitl_git_state import (
+                    HitlGitSnapshot as _GitSnapshot,
+                    HitlGitStateStore as _GitStateStore,
+                )
+                from core.hitl_runtime_state import HitlRuntimeState as _RuntimeState
+                from core.hitl_scoring_workspace import (
+                    run_isolated_scorer,
+                    scoring_source_workspace_fingerprint,
+                )
+                from core.hitl_stage_runtime import (
+                    HitlStageRollback as _StageRollback,
+                    run_plan_centered_hitl_stage,
+                    run_worker_with_replacements,
+                )
+                from core.hitl_workspace_guard import (
+                    HitlWorkspaceWriteGuard as _WorkspaceWriteGuard,
+                )
+            self._stage_modules = SimpleNamespace(
+                HitlRuntimeState=_RuntimeState,
+                HitlStageRollback=_StageRollback,
+                run_plan_centered_hitl_stage=run_plan_centered_hitl_stage,
+                run_worker_with_replacements=run_worker_with_replacements,
+                HitlGitStateStore=_GitStateStore,
+                HitlGitSnapshot=_GitSnapshot,
+                delete_git_ref=delete_git_ref,
+                HitlWorkspaceWriteGuard=_WorkspaceWriteGuard,
+                run_isolated_scorer=run_isolated_scorer,
+                scoring_source_workspace_fingerprint=scoring_source_workspace_fingerprint,
+                persist_hitl_required_artifact_contract=_persist_contract,
+                validate_required_artifact_contract=_validate_contract,
+                verify_required_artifacts=_verify_artifacts,
+            )
+        return self._stage_modules
 
     def _create_hitl_runtime(self, pipeline_stage: str) -> HitlRuntime:
         whiteboard_mode: Dict[str, bool] = {}
         if self.hitl_autoresearch:
             whiteboard_mode["use_hitl_autoresearch_whiteboard"] = True
+        # An autonomous manager needs the autonomous runtime so no worker phase
+        # requires human approval and proposal admission is recorded as a
+        # manager decision. HITL managers keep the base runtime unchanged.
+        runtime_cls = HitlRuntime
+        if getattr(self.hitl_manager, "autonomous", False):
+            from core.autonomous.runtime import Runtime as AutonomousRuntime
+
+            runtime_cls = AutonomousRuntime
         if self.hitl_manager is None:
-            return HitlRuntime(
+            return runtime_cls(
                 self.work_dir,
                 pipeline_stage,
                 **whiteboard_mode,
             )
-        return HitlRuntime(
+        return runtime_cls(
             self.work_dir,
             pipeline_stage,
             manager=self.hitl_manager,
@@ -573,7 +663,7 @@ class ResearchPipelineOrchestrator:
         checkpoint = CheckpointManager(self.work_dir).create_checkpoint(
             "HITL pre-experiment recovery checkpoint"
         )
-        hitl_snapshot = HitlGitStateStore(self.work_dir).create_rollback_snapshot()
+        hitl_snapshot = self._sm.HitlGitStateStore(self.work_dir).create_rollback_snapshot()
         payload = {
             "kind": "pre_experiment_checkpoint",
             "checkpoint_sha": checkpoint.sha,
@@ -590,7 +680,7 @@ class ResearchPipelineOrchestrator:
             return
         snapshot_ref = str(recovery.get("hitl_snapshot_ref", "")).strip()
         if snapshot_ref:
-            HitlGitStateStore(self.work_dir).discard(snapshot_ref)
+            self._sm.HitlGitStateStore(self.work_dir).discard(snapshot_ref)
 
     def _recover_experiment_runner_from_runtime_checkpoint(self) -> None:
         recovery = self.state.get_runtime_recovery("experiment_runner")
@@ -622,10 +712,10 @@ class ResearchPipelineOrchestrator:
             )
         if not snapshot_ref.startswith("refs/neurico/hitl-rollback/"):
             raise RuntimeError("Invalid HITL private-state recovery snapshot reference.")
-        state_store = HitlGitStateStore(self.work_dir)
+        state_store = self._sm.HitlGitStateStore(self.work_dir)
         try:
             state_store.restore(
-                HitlGitSnapshot(
+                self._sm.HitlGitSnapshot(
                     ref=snapshot_ref,
                     commit_sha=snapshot_commit,
                     paths=state_store.rollback_paths(),
@@ -647,7 +737,7 @@ class ResearchPipelineOrchestrator:
 
     def _retire_initial_scoring_refs_before_rollback(self) -> None:
         """Retire refs named by live initial-scoring state before restoring it."""
-        pending = HitlRuntimeState(self.work_dir).pending_worker_command()
+        pending = self._sm.HitlRuntimeState(self.work_dir).pending_worker_command()
         if not isinstance(pending, dict):
             return
         isolated = pending.get("isolated_scoring")
@@ -663,7 +753,7 @@ class ResearchPipelineOrchestrator:
         if request_key:
             refs.add(f"refs/neurico/hitl/scoring/{request_key}")
         for scoring_ref in refs:
-            delete_git_ref(self.work_dir, scoring_ref, strict=True)
+            self._sm.delete_git_ref(self.work_dir, scoring_ref, strict=True)
 
     # Provider → top-level skills directory inside the workspace. runner.py
     # copies templates/skills/* to every provider's directory so skills work
@@ -814,7 +904,7 @@ class ResearchPipelineOrchestrator:
         }
         # Keep ordinary-stage HITL failure semantics consistent: a failed
         # resource run must not leave public artifacts or private idea state.
-        rollback = HitlStageRollback.capture(
+        rollback = self._sm.HitlStageRollback.capture(
             self.work_dir,
             "HITL resource finder starting state",
         )
@@ -831,7 +921,7 @@ class ResearchPipelineOrchestrator:
             issues: List[str] = []
             for artifact in required:
                 try:
-                    verify_required_artifacts(self.work_dir, [artifact])
+                    self._sm.verify_required_artifacts(self.work_dir, [artifact])
                 except HitlValidationError:
                     issues.append(
                         f"Required resource artifact is missing or empty: {artifact.path}"
@@ -898,7 +988,7 @@ class ResearchPipelineOrchestrator:
             )
 
         try:
-            return run_plan_centered_hitl_stage(
+            return self._sm.run_plan_centered_hitl_stage(
                 runtime=runtime,
                 actor="resource_finder",
                 worker_name="resource_finder",
@@ -1232,14 +1322,14 @@ class ResearchPipelineOrchestrator:
         # plan/execution/review invocation, including non-scoring runs.
         from core.autoresearch import CheckpointManager
 
-        rollback = HitlStageRollback.capture(
+        rollback = self._sm.HitlStageRollback.capture(
             self.work_dir,
             "HITL experiment runner starting state",
         )
         scored_checkpoint_sha: Optional[str] = None
 
         artifact_validator = (
-            (lambda: validate_required_artifact_contract(self.work_dir))
+            (lambda: self._sm.validate_required_artifact_contract(self.work_dir))
             if scoring_enabled
             else None
         )
@@ -1308,7 +1398,7 @@ class ResearchPipelineOrchestrator:
             """Run scoring while the finishing worker remains held in its command."""
             nonlocal scored_checkpoint_sha
             scoring_review_idea_id = str(approval.get("scoring_review_idea_id", "")).strip()
-            runtime_state = HitlRuntimeState(self.work_dir)
+            runtime_state = self._sm.HitlRuntimeState(self.work_dir)
             pending = runtime_state.pending_worker_command() or {}
             request_key = str(pending.get("request_key", "")).strip()
             if not request_key:
@@ -1318,7 +1408,7 @@ class ResearchPipelineOrchestrator:
                 """Ensure a repair scores revised work rather than a cached failure."""
                 scoring_ref = str(result.get("scoring_ref", "")).strip()
                 if scoring_ref:
-                    delete_git_ref(self.work_dir, scoring_ref, strict=False)
+                    self._sm.delete_git_ref(self.work_dir, scoring_ref, strict=False)
                 runtime_state.update_pending_worker_command(
                     request_key,
                     isolated_scoring=None,
@@ -1332,7 +1422,7 @@ class ResearchPipelineOrchestrator:
                     raise RuntimeError("Persisted isolated initial scoring handoff is incomplete.")
             else:
                 checkpoints = CheckpointManager(self.work_dir)
-                reviewed_fingerprint = scoring_source_workspace_fingerprint(
+                reviewed_fingerprint = self._sm.scoring_source_workspace_fingerprint(
                     pending,
                     cached_score,
                 )
@@ -1340,7 +1430,7 @@ class ResearchPipelineOrchestrator:
                     raise RuntimeError(
                         "HITL initial scoring is missing its reviewed workspace fingerprint."
                     )
-                current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
+                current_fingerprint = self._sm.HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
                 if current_fingerprint != reviewed_fingerprint:
                     raise RuntimeError(
                         "The public workspace changed after the worker submitted its reviewed finish "
@@ -1358,7 +1448,7 @@ class ResearchPipelineOrchestrator:
                     stale_results = self.work_dir / "scoring" / "results.json"
                     stale_results.unlink(missing_ok=True)
                     source_workspace_fingerprint = (
-                        HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
+                        self._sm.HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
                     )
                     source_sha = checkpoints.create_checkpoint(
                         "HITL initial experiment before isolated scoring"
@@ -1373,7 +1463,7 @@ class ResearchPipelineOrchestrator:
                     )
                 try:
                     self.state.start_stage(SCORER_STAGE)
-                    scorer_result = run_isolated_scorer(
+                    scorer_result = self._sm.run_isolated_scorer(
                         work_dir=self.work_dir,
                         source_sha=source_sha,
                         sealed_dir=sealed_dir,
@@ -1447,7 +1537,7 @@ class ResearchPipelineOrchestrator:
                     scoring_handler=score_in_background if scoring_enabled else None,
                     worker_prompt_contexts=worker_prompt_contexts,
                 )
-                result, finish = run_worker_with_replacements(
+                result, finish = self._sm.run_worker_with_replacements(
                     runtime=runtime,
                     launch_worker=launch_worker,
                     worker_name="experiment_runner",
@@ -1471,7 +1561,7 @@ class ResearchPipelineOrchestrator:
                 scoring_handler=score_in_background if scoring_enabled else None,
                 worker_prompt_contexts=worker_prompt_contexts,
             )
-            result, finish = run_worker_with_replacements(
+            result, finish = self._sm.run_worker_with_replacements(
                 runtime=runtime,
                 launch_worker=launch_worker,
                 worker_name="experiment_runner",
@@ -1621,6 +1711,44 @@ class ResearchPipelineOrchestrator:
                   "after one retry -- failing the rule maker stage.")
         return retry
 
+    def _verify_autonomous_eval_contract(
+        self,
+        idea: Dict[str, Any],
+        rule_maker_result: Dict[str, Any],
+        provider: str,
+        full_permissions: bool,
+    ) -> Dict[str, Any]:
+        """Verify a manager-approved autonomous scoring contract against the
+        user's declared evaluation contract.
+
+        The manager-driven rule-maker is worker-driven, so there is no in-place
+        rule_maker re-run to retry with; the verifier acts as a hard gate. A
+        rejected contract fails the rule-maker stage (runtime then restores the
+        prior state), keeping an invalid harness from reaching the experiment
+        runner. No-op unless the idea declares a contract.
+        """
+        if not has_user_eval_contract(idea):
+            return {**rule_maker_result, "success": True}
+
+        print()
+        print("─" * 80)
+        print("STAGE: EVAL VERIFIER  (autonomous, user evaluation contract declared)")
+        print("─" * 80)
+        print()
+
+        verdict = run_eval_verifier(
+            idea=idea,
+            work_dir=self.work_dir,
+            provider=provider,
+            templates_dir=self.templates_dir,
+            full_permissions=full_permissions,
+        )
+        passed = bool(verdict["success"] and verdict["passed"])
+        if not passed:
+            print("⚠️  The approved scoring contract violates the user's declared "
+                  "evaluation contract -- failing the rule maker stage.")
+        return {**rule_maker_result, "verification": verdict, "success": passed}
+
     def _run_rule_maker_hitl(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
     ) -> Dict[str, Any]:
@@ -1642,7 +1770,7 @@ class ResearchPipelineOrchestrator:
             )
             for phase in ("plan", "execution", "review")
         }
-        rollback = HitlStageRollback.capture(
+        rollback = self._sm.HitlStageRollback.capture(
             self.work_dir,
             "HITL rule maker starting state",
         )
@@ -1652,7 +1780,7 @@ class ResearchPipelineOrchestrator:
             if not validation.get("valid"):
                 return validation
             try:
-                persist_hitl_required_artifact_contract(self.work_dir)
+                self._sm.persist_hitl_required_artifact_contract(self.work_dir)
             except Exception as exc:
                 return {"valid": False, "issues": [str(exc)]}
             return validation
@@ -1680,10 +1808,27 @@ class ResearchPipelineOrchestrator:
             result: Dict[str, Any],
             finish: Dict[str, Any],
         ) -> Dict[str, Any]:
-            self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
+            # An autonomous manager approves the scoring contract itself, so
+            # verify it against the user's declared evaluation contract before
+            # sealing (the non-HITL rule-maker already does this; human HITL is
+            # left unchanged). No-op unless the idea declares a contract.
+            verified = result
+            if getattr(runtime.manager, "autonomous", False):
+                verified = self._verify_autonomous_eval_contract(
+                    idea=idea,
+                    rule_maker_result=result,
+                    provider=provider,
+                    full_permissions=full_permissions,
+                )
+                if not verified["success"]:
+                    self.state.complete_stage(
+                        RULE_MAKER_STAGE, False, verified.get("outputs")
+                    )
+                    return finalize_failed(verified)
+            self.state.complete_stage(RULE_MAKER_STAGE, True, verified.get("outputs"))
             discard_completed_rollback_snapshot()
             return {
-                **result,
+                **verified,
                 "success": True,
                 "hitl": True,
                 "phase": "complete",
@@ -1717,7 +1862,7 @@ class ResearchPipelineOrchestrator:
             )
 
         try:
-            return run_plan_centered_hitl_stage(
+            return self._sm.run_plan_centered_hitl_stage(
                 runtime=runtime,
                 actor=RULE_MAKER_STAGE,
                 worker_name=RULE_MAKER_STAGE,

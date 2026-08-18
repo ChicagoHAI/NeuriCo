@@ -1,0 +1,30 @@
+Objective scoring could not produce a valid result for a completed AutoResearch
+candidate. This is the same runtime worker request that approved the candidate for scoring.
+
+Inspect the runtime-derived scoring result and the current workspace. Finalize
+this request with precise worker-facing feedback that tells an experiment worker
+what must be corrected before it can request review and scoring again. Preserve
+completed work and do not propose a new research direction.
+
+Use `finalize_worker_request` with:
+
+{
+  "status": "feedback",
+  "context": "neutral self-contained context for the scoring failure",
+  "manager_feedback": "specific instructions for the continuation worker"
+}
+
+Do not ask the human. Do not approve the candidate. Runtime will deliver your
+feedback to a continuation worker in the current workspace state.
+Use the read-only workspace inspection tools only when a public workspace artifact is needed to
+diagnose the scoring failure.
+
+Complete runtime-derived scorer result:
+--- BEGIN RUNTIME SCORER RESULT ---
+{{ scorer_result_json }}
+--- END RUNTIME SCORER RESULT ---
+
+Runtime score validation:
+--- BEGIN RUNTIME SCORE VALIDATION ---
+{{ score_validation_json }}
+--- END RUNTIME SCORE VALIDATION ---

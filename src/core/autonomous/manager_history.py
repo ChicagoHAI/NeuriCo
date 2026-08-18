@@ -1,0 +1,218 @@
+"""Long-term transcript archive and recall index for the HITL manager."""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+import json
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Dict, Iterator, List
+
+from core.autonomous.lock import exclusive_file_lock
+
+
+def _estimate_tokens(text: str) -> int:
+    return max(1, (len(text) + 3) // 4)
+
+
+class ManagerHistory:
+    """Store complete raw conversation records and provide deliberate FTS recall.
+
+    This class is intentionally never used to build normal manager prompt context.
+    """
+
+    def __init__(self, manager_dir: Path):
+        self.manager_dir = Path(manager_dir)
+        self.manager_dir.mkdir(parents=True, exist_ok=True)
+        self.path = self.manager_dir / "history.sqlite"
+        self.lock_path = self.manager_dir / "conversation.lock"
+        self._initialize()
+
+    def _lock(self) -> Iterator[None]:
+        return exclusive_file_lock(self.lock_path)
+
+    @classmethod
+    @contextmanager
+    def snapshot_lock(cls, manager_dir: Path) -> Iterator[None]:
+        manager_dir = Path(manager_dir)
+        lock_path = manager_dir / "conversation.lock"
+        with exclusive_file_lock(lock_path):
+            database_path = manager_dir / "history.sqlite"
+            if database_path.exists():
+                with sqlite3.connect(database_path, timeout=30) as connection:
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            yield
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _initialize(self) -> None:
+        with self._lock():
+            with self._connect() as connection:
+                connection.executescript("""
+                    PRAGMA journal_mode=WAL;
+                    CREATE TABLE IF NOT EXISTS conversation_records (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        record_id TEXT NOT NULL UNIQUE,
+                        record_type TEXT NOT NULL,
+                        speaker TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        metadata_json TEXT NOT NULL DEFAULT '{}'
+                    );
+                    CREATE TABLE IF NOT EXISTS conversation_chunks (
+                        chunk_id INTEGER PRIMARY KEY,
+                        start_sequence INTEGER NOT NULL,
+                        end_sequence INTEGER NOT NULL,
+                        content TEXT NOT NULL
+                    );
+                    """)
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(conversation_records)")}
+                if "metadata_json" not in columns:
+                    connection.execute(
+                        "ALTER TABLE conversation_records ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+                    )
+                try:
+                    connection.execute(
+                        "CREATE VIRTUAL TABLE IF NOT EXISTS conversation_chunks_fts USING fts5(content)"
+                    )
+                except sqlite3.OperationalError as exc:
+                    raise RuntimeError("SQLite FTS5 is required for HITL manager recall.") from exc
+
+    def append(self, record: Dict[str, object]) -> str:
+        """Archive one raw conversation/tool record without affecting active context."""
+        record_type = str(record.get("type", ""))
+        if record_type in {"summary", "function_call_output_placeholder"}:
+            return str(record.get("id", ""))
+        record_id = str(record["id"])
+        speaker = str(record.get("speaker", record.get("role", "runtime")))
+        if record_type == "message":
+            content = str(record["content"])
+        elif record_type == "function_call":
+            content = f"Tool call {record.get('name', '')}: {record.get('arguments', {})}"
+            speaker = "manager"
+        elif record_type == "function_call_output":
+            output = record.get("output", {})
+            content = str(output.get("content", "")) if isinstance(output, dict) else str(output)
+            speaker = "runtime"
+        else:
+            raise ValueError(f"Unsupported manager archive record type: {record_type}")
+        created_at = str(record["timestamp"])
+        metadata_json = json.dumps(record.get("metadata", {}), ensure_ascii=True, separators=(",", ":"))
+        with self._lock():
+            with self._connect() as connection:
+                inserted = connection.execute(
+                    "INSERT OR IGNORE INTO conversation_records "
+                    "(record_id, record_type, speaker, content, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?)",
+                    (record_id, record_type, speaker, content, created_at, metadata_json),
+                )
+                if inserted.rowcount == 0:
+                    return record_id
+                row = connection.execute(
+                    "SELECT sequence FROM conversation_records WHERE record_id = ?", (record_id,)
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("HITL manager archive did not retain a conversation record.")
+                self._append_chunk(connection, int(row["sequence"]), speaker, content)
+        return record_id
+
+    @staticmethod
+    def _append_chunk(
+        connection: sqlite3.Connection, sequence: int, speaker: str, content: str
+    ) -> None:
+        rendered = f"{speaker.capitalize()}: {content}"
+        last = connection.execute(
+            "SELECT chunk_id, content FROM conversation_chunks ORDER BY chunk_id DESC LIMIT 1"
+        ).fetchone()
+        if last is not None:
+            combined = str(last["content"]) + "\n\n" + rendered
+            if _estimate_tokens(combined) <= 1600:
+                chunk_id = int(last["chunk_id"])
+                connection.execute(
+                    "UPDATE conversation_chunks SET end_sequence = ?, content = ? WHERE chunk_id = ?",
+                    (sequence, combined, chunk_id),
+                )
+                connection.execute(
+                    "DELETE FROM conversation_chunks_fts WHERE rowid = ?", (chunk_id,)
+                )
+                connection.execute(
+                    "INSERT INTO conversation_chunks_fts (rowid, content) VALUES (?, ?)",
+                    (chunk_id, combined),
+                )
+                return
+        chunk_id = int(
+            connection.execute(
+                "SELECT COALESCE(MAX(chunk_id), 0) + 1 FROM conversation_chunks"
+            ).fetchone()[0]
+        )
+        connection.execute(
+            "INSERT INTO conversation_chunks (chunk_id, start_sequence, end_sequence, content) VALUES (?, ?, ?, ?)",
+            (chunk_id, sequence, sequence, rendered),
+        )
+        connection.execute(
+            "INSERT INTO conversation_chunks_fts (rowid, content) VALUES (?, ?)",
+            (chunk_id, rendered),
+        )
+
+    def recall(self, query: str, *, limit: int = 4) -> str:
+        terms = re.findall(r"[A-Za-z0-9_]{2,}", str(query).lower())
+        if not terms:
+            return "Error: provide concrete words from the earlier discussion to recall."
+        with self._lock():
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT c.content FROM conversation_chunks_fts AS f
+                    JOIN conversation_chunks AS c ON c.chunk_id = f.rowid
+                    WHERE conversation_chunks_fts MATCH ?
+                    ORDER BY bm25(conversation_chunks_fts), c.start_sequence LIMIT ?
+                    """,
+                    (" OR ".join(terms), min(max(int(limit), 1), 8)),
+                ).fetchall()
+        if not rows:
+            return "No earlier conversation matched that query."
+        return "Earlier relevant conversation:\n\n" + "\n\n---\n\n".join(
+            str(row["content"]) for row in rows
+        )
+
+    @classmethod
+    def read_messages(cls, manager_dir: Path) -> List[Dict[str, str]]:
+        """Read the durable transcript without creating or migrating any state."""
+        manager_dir = Path(manager_dir)
+        path = manager_dir / "history.sqlite"
+        if not path.exists():
+            return []
+        with exclusive_file_lock(manager_dir / "conversation.lock"):
+            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+            try:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    "SELECT record_id, speaker, content, created_at, metadata_json FROM conversation_records "
+                    "WHERE record_type = 'message' ORDER BY sequence"
+                ).fetchall()
+            finally:
+                connection.close()
+        return [cls._message_row(row) for row in rows]
+
+    def messages(self) -> List[Dict[str, str]]:
+        with self._lock():
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT record_id, speaker, content, created_at, metadata_json FROM conversation_records "
+                    "WHERE record_type = 'message' ORDER BY sequence"
+                ).fetchall()
+        return [self._message_row(row) for row in rows]
+
+    @staticmethod
+    def _message_row(row: sqlite3.Row) -> Dict[str, object]:
+        record = dict(row)
+        raw_metadata = record.pop("metadata_json", "{}")
+        try:
+            metadata = json.loads(str(raw_metadata))
+        except json.JSONDecodeError:
+            metadata = {}
+        record["metadata"] = metadata if isinstance(metadata, dict) else {}
+        return record

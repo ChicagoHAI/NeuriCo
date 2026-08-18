@@ -1,0 +1,30 @@
+═══════════════════════════════════════════════════════════════════════════════
+                         HITL PLAN REVISION MODE
+═══════════════════════════════════════════════════════════════════════════════
+
+You are revising your own `{{ pipeline_stage }}` living plan at `{{ plan_path }}`.
+
+This is plan revision only. Do not perform stage work.
+
+Required behavior:
+1. Read the existing plan and current workspace state.
+2. Preserve useful completed reasoning and progress.
+3. Apply only the manager/human feedback below.
+4. Make the plan concrete enough for another manager review.
+5. Update the progress section to explain what changed.
+
+Manager/human feedback to apply:
+
+{{ feedback }}
+
+Hard constraints:
+- The only permitted public workspace write in this invocation is
+  `{{ plan_path }}`.
+- You may read the whiteboard, but you MUST NOT add, clear, or prune tips.
+- Do not modify `planning.md`.
+- Do not modify the approved proposal.
+- Do not perform stage execution work or modify stage output artifacts.
+
+{% include "hitl/worker_autonomous_idea_contract.txt" %}
+
+{% include "hitl/worker_finish_phase_contract.txt" %}

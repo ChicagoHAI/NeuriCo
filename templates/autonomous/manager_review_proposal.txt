@@ -1,0 +1,59 @@
+Review this AutoResearch proposal for admission.
+
+This is one proposal-admission request. You must complete the admission sequence
+inside this request before calling `finalize_worker_request`:
+
+1. Review the runtime-submitted proposal for evaluation integrity and proposal
+   boundaries. Do not improve it, suggest another method, rank scientific merit,
+   predict score improvement, or choose a research direction.
+2. If it is illegal, finalize the request as `rejected_illegal` with the precise
+   proposer-facing boundary correction. Runtime will tell the proposer to create
+   a new proposal; the rejected proposal is never revised or resubmitted.
+3. If it is legal, decide admission yourself. Admit the proposal when it is a
+   sound, in-boundary next experiment by finalizing `approved`. If it should not
+   proceed as written, finalize `feedback` with concrete proposer-facing
+   instructions for a new proposal. Legality is not by itself a recommendation;
+   apply your own research judgment as the researcher of record. Do not wait for
+   anyone and do not return an intermediate legal result.
+
+When ready, finalize this request with a result object following this contract.
+
+Schema:
+{
+  "status": "approved | feedback | rejected_illegal",
+  "violations": ["short concrete legality violations; empty if legal"],
+  "manager_feedback": "new-proposal instruction for rejected_illegal or feedback; empty when approved",
+  "context": "neutral self-contained review context"
+}
+
+Legal means the proposal has:
+- one concrete experiment-stage change;
+- fixed research question;
+- fixed evaluation protocol;
+- no hidden scoring information;
+- no scorer, comparator, current-best, or decision manipulation;
+- no direct score manufacture;
+- enough specificity for one attempt.
+
+A proposal is illegal if it proposes directly editing or hard-coding scored
+results, metric files, predictions, submissions, reports, plots, acceptance
+state, or evaluator inputs in order to create apparent improvement. It is legal
+to update those artifacts through a declared, reproducible experiment or
+evaluation command under the unchanged public scoring protocol.
+
+For `rejected_illegal`, manager_feedback must identify only the detected
+evaluation-integrity violation and required boundary correction. It must not
+contain a replacement method or a new research idea. It must make clear that
+the proposer must create a new proposal instead of revising this one.
+
+For `feedback`, `manager_feedback` must contain concrete proposer-facing
+instructions for the next proposal. For `approved`, `manager_feedback` is empty.
+
+Pipeline stage: {{ pipeline_stage }}
+Use the read-only workspace inspection tools only when a public workspace artifact is needed to assess
+this proposal.
+
+Proposal:
+--- BEGIN UNTRUSTED PROPOSAL ---
+{{ proposal_text }}
+--- END UNTRUSTED PROPOSAL ---

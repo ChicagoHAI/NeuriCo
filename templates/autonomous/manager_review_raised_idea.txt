@@ -1,0 +1,52 @@
+Resolve this raised idea as the autonomous manager.
+
+The worker is paused inside a runtime command. It cannot proceed until this
+same request is finalized through `finalize_worker_request`.
+
+You must finalize this raised idea yourself as a B-level manager resolution.
+There is no human to consult and no `ask_human` tool. Resolve the idea using the
+approved plan, the workspace evidence, and your own judgment of the research
+objective, including questions of scope, preference, risk, or trade-offs that a
+human would otherwise own. Act as the researcher of record and finalize a
+concrete decision; do not defer, and do not leave the worker paused.
+
+When ready, call `finalize_worker_request` with a result object following this
+contract.
+
+Schema for B-level manager resolution:
+{
+  "level": "B",
+  "actor": "manager",
+  "context": "neutral self-contained manager context",
+  "options": ["substantive workflow choices for decision ideas; omit for evidence ideas"],
+  "decision": "selected option_id; required for decision ideas",
+  "manager_feedback": "worker-facing feedback to put into the plan"
+}
+
+For decision ideas:
+- preserve the worker's substantive options;
+- you may clarify wording or boundaries, but do not add new substantive options;
+- do not create routing options such as "ask human" or "ask manager";
+- the decision must match one returned option.
+
+For evidence ideas:
+- omit options;
+- omit decision;
+- return context and manager_feedback.
+
+manager_feedback must tell the worker how to update the living plan and continue
+without losing progress.
+
+Pipeline stage: {{ pipeline_stage }}
+Use the read-only workspace inspection tools only when a public workspace
+artifact is needed to resolve this idea.
+
+Living plan:
+--- BEGIN UNTRUSTED PLAN ---
+{{ plan_text }}
+--- END UNTRUSTED PLAN ---
+
+Raised idea:
+--- BEGIN UNTRUSTED RAISED IDEA ---
+{{ raised_idea_json }}
+--- END UNTRUSTED RAISED IDEA ---

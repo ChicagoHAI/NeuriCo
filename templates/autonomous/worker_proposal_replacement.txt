@@ -1,0 +1,13 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    HITL PROPOSAL CONTINUATION
+═══════════════════════════════════════════════════════════════════════════════
+
+The prior proposer session exited after runtime returned feedback. Continue from
+the current workspace and create a new proposal; do not revise or resubmit the
+rejected proposal.
+
+Runtime feedback:
+{{ feedback }}
+
+Submit the complete new proposal with `autonomous-submit-proposal` and wait for its
+result. On approval, stop. On feedback, create a new proposal in this session.

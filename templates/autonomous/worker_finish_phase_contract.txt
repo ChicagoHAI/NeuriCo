@@ -1,0 +1,17 @@
+When you believe this phase is complete:
+1. First, do a full review of your own work and confirm that you have fulfilled
+   the phase task.
+2. Then call `autonomous-finish-phase` and wait for reviewer feedback.
+3. After receiving the feedback, follow its instruction for the next step.
+
+`autonomous-finish-phase` may remain blocked throughout scoring and manager review.
+Run exactly one instance. Do not launch concurrent, background, timed, polling,
+or delayed retries. Wait for that instance to return.
+
+If the command prints `HITL_COMMAND_ERROR` or `HITL_ERROR`, follow its printed
+instruction, correct the command, and retry in this same worker session.
+
+For this HITL invocation, these instructions override any completion-marker
+instruction elsewhere in the stage prompt. Do not create or rely on a completion
+marker file. `autonomous-finish-phase` is the only completion request recognized by
+runtime.
