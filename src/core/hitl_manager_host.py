@@ -946,9 +946,8 @@ class HitlTerminalChannel(UserChannel):
             provider = self._read_setting(
                 "Model [claude] (claude/codex/gemini): ", "claude"
             ).lower()
-            hitl_mode = self._read_setting(
-                "HITL mode [full] (full/auto): ", "full"
-            ).lower()
+            auto = self._read_yes_no("Auto [Y] (Y/n): ", default=True)
+            hitl_mode = "auto" if auto else "full"
             iterations = self._read_setting("Iterations [2] (1-100): ", "2")
             write_paper = self._read_yes_no("Write paper? [Y/n]: ", default=True)
             paper_style = "auto"
@@ -970,9 +969,10 @@ class HitlTerminalChannel(UserChannel):
         except (ValueError, RuntimeError) as exc:
             self._write_block(self._ui.system(str(exc), tone="error"), blank_before=True)
             return {"status": "invalid"}
+        mode_label = "Auto" if hitl_mode == "auto" else "HITL"
         self._write_block(
             self._ui.system(
-                f"Started {result['mode']} research in {hitl_mode} HITL mode.",
+                f"Started {result['mode']} research in {mode_label} mode.",
                 tone="success",
             ),
         )

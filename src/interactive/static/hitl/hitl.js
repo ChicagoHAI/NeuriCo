@@ -14,7 +14,7 @@
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
     conversationScroll: { top: 0, nearBottom: true, captured: false },
     managerStatusSeq: -1,
-    runDraft: { hitlMode: "full", iterations: 2, writePaper: true, paperStyle: "auto", github: false },
+    runDraft: { hitlMode: "auto", iterations: 2, writePaper: true, paperStyle: "auto", github: false },
     portal: null, ideas: [], selectedIdeaId: initialIdeaId, catalogBusy: false,
     creatingIdea: false, ideaSchema: null, ideaDraft: {}, ideaSubmitError: "",
     renamingIdeaId: "", draggedIdeaId: "",
@@ -655,7 +655,7 @@
       q("div", { class: "brand" }, [q("span", { class: "workspace-mark", text: "▱" }), q("span", { class: "workspace-title", text: workspace }), q("span", { class: "page-label", text: state.route === "conversation" ? "Conversation" : "Research" })]),
       q("div", { class: "topbar-spacer" }),
       workspaceStatus(),
-      runIsActive ? q("span", { class: "status-mode", title: "Active HITL research mode", text: live.hitl_mode === "auto" ? "Auto HITL" : "Full HITL" }) : null,
+      runIsActive ? q("span", { class: "status-mode", title: "Active research mode", text: live.hitl_mode === "auto" ? "Auto" : "HITL" }) : null,
       q("span", { class: `connection ${state.stale ? "warning" : ""}`, text: state.stale ? "Workspace data unavailable" : "Connected" }),
       state.route === "conversation" ? runControl : null,
       icon(state.route === "conversation" ? "▦" : "←", state.route === "conversation" ? "Research views" : "Back to conversation", () => navigate(state.route === "conversation" ? "research" : "conversation"), "toolbar-action"),
@@ -845,13 +845,13 @@
     const mode = state.snapshot?.autoresearch?.mode === "continue" ? "continue" : "fresh";
     const title = mode === "continue" ? "Continue AutoResearch" : "Fresh AutoResearch";
     const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
-    const hitlMode = q("select", { id: "run-hitl-mode", "data-focus-key": "run-hitl-mode" }); [["full", "Full HITL"], ["auto", "Auto HITL"]].forEach(([value, label]) => hitlMode.append(q("option", { value, text: label }))); hitlMode.value = state.runDraft.hitlMode; hitlMode.onchange = () => { state.runDraft.hitlMode = hitlMode.value; };
+    const hitlMode = q("select", { id: "run-hitl-mode", "data-focus-key": "run-hitl-mode" }); [["full", "No"], ["auto", "Yes"]].forEach(([value, label]) => hitlMode.append(q("option", { value, text: label }))); hitlMode.value = state.runDraft.hitlMode; hitlMode.onchange = () => { state.runDraft.hitlMode = hitlMode.value; };
     const iterations = q("input", { id: "run-iterations", type: "number", min: "1", max: "100", value: state.runDraft.iterations, "data-focus-key": "run-iterations" }); iterations.oninput = () => { state.runDraft.iterations = iterations.value; };
     const paper = q("input", { id: "run-paper", type: "checkbox", "data-focus-key": "run-paper" }); paper.checked = state.runDraft.writePaper; paper.onchange = () => { state.runDraft.writePaper = paper.checked; };
     const github = q("input", { id: "run-github", type: "checkbox", "data-focus-key": "run-github" }); github.checked = state.runDraft.github; github.onchange = () => { state.runDraft.github = github.checked; };
     const style = q("select", { id: "run-style", "data-focus-key": "run-style" }); [["auto", "Automatic"], ["neurips", "NeurIPS"], ["icml", "ICML"], ["acl", "ACL"]].forEach(([value, label]) => style.append(q("option", { value, text: label }))); style.value = state.runDraft.paperStyle; style.onchange = () => { state.runDraft.paperStyle = style.value; };
     const row = (label, control) => q("label", { class: "run-row" }, [q("span", { text: label }), control]);
-    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close AutoResearch setup", () => { state.runPanel = false; render(); })]), row("Model", provider), row("HITL mode", hitlMode), row("Iterations", iterations), q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", `Start ${title}`, () => launchRun({ provider: provider.value, hitl_mode: hitlMode.value, iterations: Number(iterations.value), write_paper: paper.checked, paper_style: style.value, github: github.checked }), "run-start")])]);
+    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close AutoResearch setup", () => { state.runPanel = false; render(); })]), row("Model", provider), row("Auto", hitlMode), row("Iterations", iterations), q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", `Start ${title}`, () => launchRun({ provider: provider.value, hitl_mode: hitlMode.value, iterations: Number(iterations.value), write_paper: paper.checked, paper_style: style.value, github: github.checked }), "run-start")])]);
   }
   function conversation() {
     const shell = q("main", { class: "conversation-shell" }); const thread = q("div", { class: "thread" }); const request = state.snapshot?.inbox?.pending_request; const requestId = String(request?.conversation_record_id || "");
