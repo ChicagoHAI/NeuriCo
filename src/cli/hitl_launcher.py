@@ -93,10 +93,15 @@ class HitlRunController:
                 "Choose Claude or Codex for HITL research so the workers and manager "
                 "can use the same backend."
             )
+        raw_iterations = payload.get("iterations", 1)
         try:
-            iterations = int(payload.get("iterations", 1))
-        except (TypeError, ValueError) as exc:
+            iterations = int(raw_iterations)
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("Iterations must be a whole number.") from exc
+        if isinstance(raw_iterations, bool) or (
+            isinstance(raw_iterations, float) and not raw_iterations.is_integer()
+        ):
+            raise ValueError("Iterations must be a whole number.")
         if not 1 <= iterations <= 100:
             raise ValueError("Iterations must be between 1 and 100.")
         style = str(payload.get("paper_style", "auto")).strip().lower()
