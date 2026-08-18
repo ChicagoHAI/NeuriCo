@@ -400,6 +400,14 @@ class HitlRuntimeState:
                 "scoring",
             }:
                 command["hitl_mode"] = selected.value
+                if command.get("kind") == "phase_finish":
+                    # Human plan approval is derived from the policy of the
+                    # run that resumes this unresolved command.  Keeping the
+                    # prior run's value would make the validator and manager
+                    # tool surface disagree after an Auto -> Full switch.
+                    command["requires_human_approval"] = bool(
+                        selected is HitlMode.FULL and command.get("hitl_stage") == "plan"
+                    )
                 command["updated_at"] = _now()
                 if selected is HitlMode.AUTO:
                     request_key = str(command.get("request_key", "")).strip()

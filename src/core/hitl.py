@@ -909,7 +909,6 @@ class HitlRuntime:
             hitl_stage="plan",
             allow_raised_ideas=False,
             hitl_mode=self.hitl_mode.value,
-            human_resolution_allowed=requires_human_approval,
         )
 
     def execution_prompt_block(self, mode: str = "execute", feedback: str = "") -> str:
@@ -923,7 +922,6 @@ class HitlRuntime:
             allow_raised_ideas=True,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
-            human_resolution_allowed=self.hitl_mode is HitlMode.FULL,
         )
 
     def review_prompt_block(self, feedback: str = "") -> str:
@@ -936,7 +934,6 @@ class HitlRuntime:
             allow_raised_ideas=True,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
-            human_resolution_allowed=self.hitl_mode is HitlMode.FULL,
         )
 
     def plan_revision_prompt_block(self, feedback: str) -> str:
@@ -949,7 +946,6 @@ class HitlRuntime:
             allow_raised_ideas=False,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
-            human_resolution_allowed=self.hitl_mode is HitlMode.FULL,
         )
 
     def compose_worker_prompt(self, *, hitl_stage: str, phase_prompt: str) -> str:
@@ -986,7 +982,6 @@ class HitlRuntime:
             hitl_stage=hitl_stage,
             allow_raised_ideas=hitl_stage in {"execution", "review"},
             hitl_mode=self.hitl_mode.value,
-            human_resolution_allowed=self.hitl_mode is HitlMode.FULL,
         )
 
     @property
@@ -3453,20 +3448,17 @@ class HitlRuntime:
         """Record Auto HITL's manager-owned scientific admission decision."""
 
         status = str(review.get("status", "")).strip()
-        if status not in {"approved", "feedback"}:
-            raise HitlValidationError("Auto HITL proposal admission must approve or give feedback.")
-        approved = status == "approved"
-        manager_feedback = ""
-        if not approved:
-            manager_feedback = _require_text(
-                review.get("manager_feedback"),
-                "manager_feedback",
-                "Auto HITL proposal admission",
+        if status == "approved":
+            approved = True
+            manager_feedback = ""
+        elif status == "feedback":
+            approved = False
+            manager_feedback = str(review["manager_feedback"]).strip()
+        else:
+            raise RuntimeError(
+                "Validated Auto HITL proposal admission reached finalization with an "
+                f"unexpected status: {status or '<empty>'}."
             )
-            if _is_feedback_placeholder(manager_feedback):
-                raise HitlValidationError(
-                    "Auto HITL proposal feedback must contain concrete next-proposal instructions."
-                )
         record = {
             "pipeline_stage": self.pipeline_stage,
             "hitl_stage": "proposal",

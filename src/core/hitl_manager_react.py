@@ -1059,7 +1059,6 @@ class HitlManager:
             plan_text=plan_text,
             raised_idea_json=json.dumps(raised_idea, indent=2, ensure_ascii=False),
             hitl_mode=selected_mode.value,
-            human_resolution_allowed=selected_mode is HitlMode.FULL,
         )
         return self.request_worker_resolution(
             command={
@@ -1174,7 +1173,6 @@ class HitlManager:
             allow_scoring_approval=allow_scoring_approval,
             is_rule_maker=(pipeline_stage == "rule_maker"),
             hitl_mode=selected_mode.value,
-            human_resolution_allowed=requires_human_approval,
         )
         return self.request_worker_resolution(
             command={
@@ -1217,11 +1215,27 @@ class HitlManager:
                     "Proposal review status must be approved, feedback, or rejected_illegal."
                 )
             self._require_text(data.get("context"), "context", "Proposal admission")
+            violations = data.get("violations", [])
+            if not isinstance(violations, list):
+                raise ValueError("violations must be an array.")
+            concrete_violations = [
+                str(violation).strip() for violation in violations if str(violation).strip()
+            ]
             if status == "rejected_illegal":
-                self._require_text(
+                if not concrete_violations:
+                    raise ValueError(
+                        "An illegal proposal review requires at least one concrete violation."
+                    )
+                feedback = self._require_text(
                     data.get("manager_feedback"), "manager_feedback", "Illegal proposal review"
                 )
+                if _is_feedback_placeholder(feedback):
+                    raise ValueError("Illegal proposal feedback must be concrete.")
+                data["violations"] = concrete_violations
             elif selected_mode is HitlMode.AUTO:
+                if concrete_violations:
+                    raise ValueError("A legal Auto HITL proposal review cannot include violations.")
+                data["violations"] = []
                 if human_inputs:
                     raise ValueError("Auto HITL proposal admission cannot call ask_human.")
                 data.pop("human_feedback", None)
@@ -1233,8 +1247,11 @@ class HitlManager:
                     if _is_feedback_placeholder(feedback):
                         raise ValueError("Auto HITL proposal feedback must be concrete.")
                 else:
-                    data["manager_feedback"] = str(data.get("manager_feedback", ""))
+                    data["manager_feedback"] = ""
             else:
+                if concrete_violations:
+                    raise ValueError("A legal HITL proposal review cannot include violations.")
+                data["violations"] = []
                 feedback = self._require_text(
                     data.get("human_feedback"), "human_feedback", "Proposal admission"
                 )
@@ -1261,8 +1278,6 @@ class HitlManager:
                     self._require_text(
                         data.get("manager_feedback"), "manager_feedback", "Proposal feedback"
                     )
-            if not isinstance(data.get("violations", []), list):
-                raise ValueError("violations must be an array.")
             return data
 
         request = {
@@ -1275,7 +1290,6 @@ class HitlManager:
             pipeline_stage=pipeline_stage,
             proposal_text=proposal_text,
             hitl_mode=selected_mode.value,
-            human_resolution_allowed=selected_mode is HitlMode.FULL,
         )
         return self.request_worker_resolution(
             command={

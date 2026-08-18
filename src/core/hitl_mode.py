@@ -39,6 +39,6 @@ def human_resolution_allowed(
 
     if normalize_hitl_mode(hitl_mode) is HitlMode.AUTO:
         return False
-    if command_kind in {"proposal", "raised_idea", "review_proposal", "review_raised_idea"}:
+    if command_kind in {"proposal", "raised_idea"}:
         return True
-    return command_kind in {"phase_finish", "review_phase_finish"} and requires_human_approval
+    return command_kind == "phase_finish" and requires_human_approval

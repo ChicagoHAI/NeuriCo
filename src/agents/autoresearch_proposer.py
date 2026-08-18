@@ -164,7 +164,6 @@ def generate_autoresearch_proposal_prompt(
         hitl_stage="proposal",
         allow_raised_ideas=False,
         hitl_mode=hitl_mode,
-        human_resolution_allowed=hitl_mode != "auto",
         public_context=context,
         whiteboard_active_tips_md=whiteboard_active_tips_md,
         compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
