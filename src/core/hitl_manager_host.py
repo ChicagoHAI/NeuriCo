@@ -40,6 +40,7 @@ from core.hitl_runtime_state import HitlResolutionReplyStaleError
 _RESOLUTION_REPLY = "resolution_reply"
 _CONVERSATION = "conversation"
 _RUN_CONSUMER_HANDOFF_TIMEOUT_SECONDS = 5.0
+_MANAGER_CONSUMER_SHUTDOWN_TIMEOUT_SECONDS = 2.0
 
 
 def _elapsed_phase_time(started_at: Any) -> str:
@@ -296,16 +297,17 @@ class HitlWebChannel(WebChannel):
         """Mark the claimed conversation turn complete for future submissions."""
         with self._dispatch_lock:
             item_id = self._claimed_active_id
-            if self._inbox is not None and item_id:
-                if success:
-                    self._inbox.complete(item_id)
-                    self._claimed_active_id = ""
-                    self._turn_active = False
-                else:
-                    self._inbox.fail(item_id, error)
-                    self._claimed_active_id = ""
-                    self._turn_active = False
-            else:
+            try:
+                if self._inbox is not None and item_id:
+                    if success:
+                        self._inbox.complete(item_id)
+                    else:
+                        self._inbox.fail(item_id, error)
+            finally:
+                # The claim belongs to this consumer session, not to the
+                # renderer. Never let a failed durable settlement wedge a
+                # channel that a later manager consumer will reuse.
+                self._claimed_active_id = ""
                 self._turn_active = False
         self._emit({"event": "workspace_changed", "section": "inbox"})
 
@@ -1273,14 +1275,15 @@ class HitlTerminalChannel(UserChannel):
 
     def finish_active_turn(self, *, success: bool = True, error: str = "") -> None:
         item_id = self._claimed_active_id
-        if self._inbox is not None and item_id:
-            if success:
-                self._inbox.complete(item_id)
-                self._claimed_active_id = ""
-            else:
-                self._inbox.fail(item_id, error)
-                self._claimed_active_id = ""
-        self._input_ready.set()
+        try:
+            if self._inbox is not None and item_id:
+                if success:
+                    self._inbox.complete(item_id)
+                else:
+                    self._inbox.fail(item_id, error)
+        finally:
+            self._claimed_active_id = ""
+            self._input_ready.set()
 
     def consume_resolution_reply(self) -> bool:
         if self._inbox is None or self._resolution_reply_handler is None:
@@ -1496,7 +1499,9 @@ class HitlManagerHost:
 
     def stop(self) -> None:
         self._stop.set()
-        self._stop_manager_consumer()
+        # Process shutdown must not release manager ownership while its
+        # conversation thread can still mutate the workspace.
+        self._stop_manager_consumer(timeout_seconds=None)
         self.channel.close()
         if self.web_server is not None:
             self.web_server.stop()
@@ -1519,7 +1524,14 @@ class HitlManagerHost:
             self._handoff_pending = True
             self._handoff_started_at = time.monotonic()
             self._saw_handoff_run = False
-        self._stop_manager_consumer()
+        if not self._stop_manager_consumer():
+            with self._consumer_lock:
+                self._handoff_pending = False
+                self._saw_handoff_run = False
+            raise RuntimeError(
+                "NeuriCo is still finishing the active manager turn. "
+                "Wait for it to finish before starting research."
+            )
 
     def cancel_run_handoff(self) -> None:
         with self._consumer_lock:
@@ -1554,33 +1566,63 @@ class HitlManagerHost:
             if self.manager is None or self._manager_stopped:
                 self.manager = self._new_manager()
             HitlManagerInbox(self.work_dir).retry_failed()
-            self._consumer_stop = threading.Event()
+            consumer_stop = threading.Event()
+            self._consumer_stop = consumer_stop
             self._manager_consumer_lease = lease
             self._conversation_thread = threading.Thread(
                 target=self._run_conversation_loop,
+                args=(self.manager, consumer_stop),
                 daemon=True,
                 name="neurico-hitl-manager-conversation",
             )
             self._conversation_thread.start()
             return True
 
-    def _stop_manager_consumer(self) -> None:
+    def _stop_manager_consumer(
+        self,
+        *,
+        timeout_seconds: Optional[float] = _MANAGER_CONSUMER_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Stop one consumer and release its lease only after its thread exits."""
         with self._consumer_lock:
             lease = self._manager_consumer_lease
             thread = self._conversation_thread
             if lease is None:
-                return
-            self._consumer_stop.set()
+                return True
+            consumer_stop = self._consumer_stop
+            first_stop_request = not consumer_stop.is_set()
+            consumer_stop.set()
             manager = self.manager
-            if manager is not None:
+            if manager is not None and first_stop_request:
                 manager.stop()
-            self._manager_stopped = True
             if (
                 thread is not None
                 and thread.is_alive()
                 and thread is not threading.current_thread()
             ):
-                thread.join(timeout=2)
+                thread.join(timeout=timeout_seconds)
+            if thread is not None and thread.is_alive():
+                # Keep every session field and the file lease intact. A later
+                # monitor pass (or process shutdown) can finish the same
+                # teardown after the blocked backend call returns.
+                return False
+
+            # A normal conversation-loop exit settles this in its finally
+            # block. This defensive call also recovers a claim if the loop
+            # terminated before reaching that block.
+            finish_active_turn = getattr(self.channel, "finish_active_turn", None)
+            if callable(finish_active_turn):
+                try:
+                    finish_active_turn(
+                        success=False,
+                        error="Manager consumer stopped before completing the message.",
+                    )
+                except Exception:
+                    # The thread is gone and the local claim was cleared in
+                    # finish_active_turn(). A later consumer can retry the
+                    # still-durable record instead of losing ownership here.
+                    pass
+            self._manager_stopped = True
             lease.__exit__(None, None, None)
             self._manager_consumer_lease = None
             self._conversation_thread = None
@@ -1589,9 +1631,26 @@ class HitlManagerHost:
             if callable(set_resolution_handler):
                 set_resolution_handler(None)
             self._bind_passive_conversation()
+            return True
 
     def _monitor_manager_consumer(self) -> None:
         while not self._stop.wait(0.25):
+            with self._consumer_lock:
+                consumer_thread_dead = bool(
+                    self._manager_consumer_lease is not None
+                    and (
+                        self._conversation_thread is None
+                        or not self._conversation_thread.is_alive()
+                    )
+                )
+                consumer_stopping = (
+                    self._manager_consumer_lease is not None
+                    and self._consumer_stop.is_set()
+                )
+            if consumer_thread_dead or consumer_stopping:
+                self._stop_manager_consumer(timeout_seconds=0.0)
+                if self.consumes_manager_input:
+                    continue
             owner = active_hitl_workspace_run(self.work_dir)
             with self._consumer_lock:
                 if self._handoff_pending:
@@ -1608,8 +1667,11 @@ class HitlManagerHost:
             if not handoff_pending and not self.consumes_manager_input:
                 self._start_manager_consumer(strict=False)
 
-    def _run_conversation_loop(self) -> None:
-        manager = self.manager
+    def _run_conversation_loop(
+        self,
+        manager: Optional[HitlManager],
+        consumer_stop: threading.Event,
+    ) -> None:
         if manager is None:
             raise RuntimeError("The HITL manager consumer started without a manager.")
         active_poll_error: Optional[tuple[str, str]] = None
@@ -1635,7 +1697,7 @@ class HitlManagerHost:
             except Exception:
                 pass
 
-        while not self._stop.is_set() and not self._consumer_stop.is_set():
+        while not self._stop.is_set() and not consumer_stop.is_set():
             try:
                 consume_resolution = getattr(self.channel, "consume_resolution_reply", None)
                 if callable(consume_resolution) and consume_resolution():
@@ -1650,7 +1712,7 @@ class HitlManagerHost:
                         "for inspection. Conversation processing will continue.",
                     )
                     active_poll_error = signature
-                self._consumer_stop.wait(0.5)
+                consumer_stop.wait(0.5)
                 continue
             except Exception as exc:
                 signature = (type(exc).__name__, str(exc))
@@ -1660,10 +1722,18 @@ class HitlManagerHost:
                         "The message remains queued and NeuriCo will retry.",
                     )
                     active_poll_error = signature
-                self._consumer_stop.wait(0.5)
+                consumer_stop.wait(0.5)
                 continue
             if not message:
                 continue
+            if consumer_stop.is_set():
+                finish_active_turn = getattr(self.channel, "finish_active_turn", None)
+                if callable(finish_active_turn):
+                    finish_active_turn(
+                        success=False,
+                        error="Manager ownership changed before the message was processed.",
+                    )
+                break
             succeeded = False
             failure = ""
             try:
@@ -1694,5 +1764,14 @@ class HitlManagerHost:
             finally:
                 finish_active_turn = getattr(self.channel, "finish_active_turn", None)
                 if callable(finish_active_turn):
-                    finish_active_turn(success=succeeded, error=failure)
-                self.channel.status("Manager idle", thinking=False)
+                    try:
+                        finish_active_turn(success=succeeded, error=failure)
+                    except Exception:
+                        # Local claim cleanup has already happened. End this
+                        # consumer session so the monitor can create a clean
+                        # manager around the still-durable input.
+                        consumer_stop.set()
+                try:
+                    self.channel.status("Manager idle", thinking=False)
+                except Exception:
+                    consumer_stop.set()

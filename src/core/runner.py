@@ -48,7 +48,7 @@ from core.compute_backend import (
     normalize_compute_backend,
     without_runtime_compute_backend,
 )
-from core.hitl_run_control import HitlRunStopRequested
+from core.hitl_run_control import HitlRunStopRequested, raise_if_hitl_run_stop_requested
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -96,6 +96,10 @@ def _with_hitl_workspace_run_ownership(method):
                 "request_id": str(os.environ.get("NEURICO_HITL_REQUEST_ID", "")).strip(),
             },
         ):
+            # A renderer can request stop while the detached worker is still
+            # waiting to acquire this lease. Honor that request before the
+            # runner mutates any research state.
+            raise_if_hitl_run_stop_requested()
             return method(self, *args, **kwargs)
 
     return owned_run

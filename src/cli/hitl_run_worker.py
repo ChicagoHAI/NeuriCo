@@ -159,22 +159,24 @@ def main() -> int:
         signal.signal(signal.SIGTERM, request_signal_stop)
         signal.signal(signal.SIGINT, request_signal_stop)
         started_at = utc_now()
-        atomic_write_json(
-            hitl_launch_status_path(work_dir),
-            {
-                "status": "running",
-                "pid": os.getpid(),
-                "request_id": request["request_id"],
-                "started_at": started_at,
-                "updated_at": started_at,
-                "mode": request["mode"],
-                "provider": request["provider"],
-            },
-        )
         continuation = request["mode"] == "continue"
         log_path = work_dir / "logs" / "hitl_runtime.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with activate_hitl_run_stop_control(control):
+            if control.requested():
+                raise HitlRunStopRequested("HITL run stopped before startup completed.")
+            atomic_write_json(
+                hitl_launch_status_path(work_dir),
+                {
+                    "status": "running",
+                    "pid": os.getpid(),
+                    "request_id": request["request_id"],
+                    "started_at": started_at,
+                    "updated_at": started_at,
+                    "mode": request["mode"],
+                    "provider": request["provider"],
+                },
+            )
             with log_path.open("a", encoding="utf-8") as output:
                 with redirect_stdout(output), redirect_stderr(output):
                     result = ResearchRunner(
