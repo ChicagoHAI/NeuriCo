@@ -946,6 +946,9 @@ class HitlTerminalChannel(UserChannel):
             provider = self._read_setting(
                 "Model [claude] (claude/codex/gemini): ", "claude"
             ).lower()
+            hitl_mode = self._read_setting(
+                "HITL mode [full] (full/auto): ", "full"
+            ).lower()
             iterations = self._read_setting("Iterations [2] (1-100): ", "2")
             write_paper = self._read_yes_no("Write paper? [Y/n]: ", default=True)
             paper_style = "auto"
@@ -957,6 +960,7 @@ class HitlTerminalChannel(UserChannel):
             result = self._run_launcher(
                 {
                     "provider": provider,
+                    "hitl_mode": hitl_mode,
                     "iterations": iterations,
                     "write_paper": write_paper,
                     "paper_style": paper_style,
@@ -967,7 +971,10 @@ class HitlTerminalChannel(UserChannel):
             self._write_block(self._ui.system(str(exc), tone="error"), blank_before=True)
             return {"status": "invalid"}
         self._write_block(
-            self._ui.system(f"Started {result['mode']} research.", tone="success"),
+            self._ui.system(
+                f"Started {result['mode']} research in {hitl_mode} HITL mode.",
+                tone="success",
+            ),
         )
         return dict(result)
 

@@ -22,6 +22,7 @@ from core.hitl_lock import (
     select_hitl_manager_provider,
 )
 from core.hitl_manager_inbox import HitlManagerInbox
+from core.hitl_mode import normalize_hitl_mode
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path
 from core.hitl_run_control import request_hitl_run_stop
 from core.hitl_util import atomic_write_json, utc_now
@@ -101,6 +102,7 @@ class HitlRunController:
         style = str(payload.get("paper_style", "auto")).strip().lower()
         if style not in {"auto", "neurips", "icml", "acl"}:
             raise ValueError("Choose a supported paper style.")
+        hitl_mode = normalize_hitl_mode(payload.get("hitl_mode")).value
 
         with self._lock:
             external_owner = active_hitl_workspace_run(self.work_dir)
@@ -140,7 +142,7 @@ class HitlRunController:
             mode = "continue" if continuation else "fresh"
             request_id = uuid.uuid4().hex
             request = {
-                "version": 1,
+                "version": 2,
                 "request_id": request_id,
                 "idea_id": self.idea_id,
                 "work_dir": str(self.work_dir.resolve()),
@@ -151,6 +153,7 @@ class HitlRunController:
                 "paper_style": None if style == "auto" else style,
                 "github": bool(payload.get("github", False)),
                 "mode": mode,
+                "hitl_mode": hitl_mode,
                 "interface": self.interface,
                 "created_at": utc_now(),
             }
@@ -171,6 +174,7 @@ class HitlRunController:
                         "created_at": request["created_at"],
                         "updated_at": request["created_at"],
                         "mode": mode,
+                        "hitl_mode": hitl_mode,
                         "provider": provider,
                     },
                 )

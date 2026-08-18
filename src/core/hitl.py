@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
 
 from core.hitl_lock import exclusive_file_lock
+from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_paths import (
     hitl_artifact_contract_path,
     hitl_idea_log_path,
@@ -837,12 +838,14 @@ class HitlRuntime:
         manager: Optional[Any] = None,
         config: Optional[Dict[str, Any]] = None,
         use_hitl_autoresearch_whiteboard: bool = False,
+        hitl_mode: HitlMode | str = HitlMode.FULL,
     ):
         if pipeline_stage not in PIPELINE_STAGES:
             raise ValueError(f"Unsupported HITL pipeline stage: {pipeline_stage}")
         self.work_dir = Path(work_dir)
         self.pipeline_stage = pipeline_stage
         self.use_hitl_autoresearch_whiteboard = use_hitl_autoresearch_whiteboard
+        self.hitl_mode = normalize_hitl_mode(hitl_mode)
         self.paths = HitlPaths(self.work_dir, pipeline_stage)
         self.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
         self.paths.hitl_dir.mkdir(parents=True, exist_ok=True)
@@ -890,8 +893,12 @@ class HitlRuntime:
         self,
         approved_proposal: str = "",
         *,
-        requires_human_approval: bool = True,
+        requires_human_approval: Optional[bool] = None,
     ) -> str:
+        if requires_human_approval is None:
+            requires_human_approval = self.requires_human_plan_approval
+        elif requires_human_approval and not self.requires_human_plan_approval:
+            requires_human_approval = False
         rel_plan = self.paths.plan_path.relative_to(self.work_dir)
         return _load_hitl_template(
             "worker_plan.txt",
@@ -901,6 +908,8 @@ class HitlRuntime:
             requires_human_approval=requires_human_approval,
             hitl_stage="plan",
             allow_raised_ideas=False,
+            hitl_mode=self.hitl_mode.value,
+            human_resolution_allowed=requires_human_approval,
         )
 
     def execution_prompt_block(self, mode: str = "execute", feedback: str = "") -> str:
@@ -913,6 +922,8 @@ class HitlRuntime:
             hitl_stage="execution",
             allow_raised_ideas=True,
             feedback=feedback,
+            hitl_mode=self.hitl_mode.value,
+            human_resolution_allowed=self.hitl_mode is HitlMode.FULL,
         )
 
     def review_prompt_block(self, feedback: str = "") -> str:
@@ -924,6 +935,8 @@ class HitlRuntime:
             hitl_stage="review",
             allow_raised_ideas=True,
             feedback=feedback,
+            hitl_mode=self.hitl_mode.value,
+            human_resolution_allowed=self.hitl_mode is HitlMode.FULL,
         )
 
     def plan_revision_prompt_block(self, feedback: str) -> str:
@@ -935,6 +948,8 @@ class HitlRuntime:
             hitl_stage="plan",
             allow_raised_ideas=False,
             feedback=feedback,
+            hitl_mode=self.hitl_mode.value,
+            human_resolution_allowed=self.hitl_mode is HitlMode.FULL,
         )
 
     def compose_worker_prompt(self, *, hitl_stage: str, phase_prompt: str) -> str:
@@ -970,6 +985,24 @@ class HitlRuntime:
             pipeline_stage=self.pipeline_stage,
             hitl_stage=hitl_stage,
             allow_raised_ideas=hitl_stage in {"execution", "review"},
+            hitl_mode=self.hitl_mode.value,
+            human_resolution_allowed=self.hitl_mode is HitlMode.FULL,
+        )
+
+    @property
+    def requires_human_plan_approval(self) -> bool:
+        return self.hitl_mode is HitlMode.FULL
+
+    def plan_has_required_approval(self) -> bool:
+        if not self.paths.plan_path.exists():
+            return False
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        levels = ("A",) if self.requires_human_plan_approval else ("A", "B")
+        return HitlRuntimeState(self.work_dir).has_plan_approval(
+            pipeline_stage=self.pipeline_stage,
+            plan_fingerprint=self._current_plan_fingerprint(),
+            approval_levels=levels,
         )
 
     def plan_has_human_approval(self) -> bool:
@@ -1060,6 +1093,7 @@ class HitlRuntime:
             raised_idea=raised_idea,
             plan_text=self._read_optional(self.paths.plan_path),
             on_finalize=persist_resolution,
+            hitl_mode=self.hitl_mode,
         )
         try:
             return finalized["record"]
@@ -1097,6 +1131,12 @@ class HitlRuntime:
                     "HITL worker prompt contexts must define plan, execution, and review; "
                     f"missing: {', '.join(missing_contexts)}."
                 )
+        if requires_human_approval is None:
+            requires_human_approval = (
+                hitl_stage == "plan" and self.requires_human_plan_approval
+            )
+        elif requires_human_approval and not self.requires_human_plan_approval:
+            requires_human_approval = False
         self.stop_idea_tool_server()
         self.paths.hitl_dir.mkdir(parents=True, exist_ok=True)
         self.paths.tool_bin_dir.mkdir(parents=True, exist_ok=True)
@@ -1120,6 +1160,7 @@ class HitlRuntime:
             "level": "C",
             "provenance": provenance or {},
             "requires_human_approval": requires_human_approval,
+            "hitl_mode": self.hitl_mode.value,
             "allow_scoring_approval": allow_scoring_approval,
             "proposal_submission_validator": proposal_submission_validator,
             "proposal_review_path": str(Path(proposal_review_path).resolve())
@@ -1297,6 +1338,7 @@ class HitlRuntime:
                 "hitl_stage": str(self._tool_context.get("hitl_stage", self.current_hitl_stage)),
                 "actor": str(self._tool_context.get("actor", self.pipeline_stage)),
                 "provenance": dict(self._tool_context.get("provenance") or {}),
+                "hitl_mode": self.hitl_mode.value,
                 "prompt_block": prompt,
                 "replacement_count": 0,
                 "status": "running",
@@ -1420,6 +1462,7 @@ class HitlRuntime:
         env["NEURICO_HITL_TOKEN"] = self._tool_token
         env["NEURICO_PROJECT_ROOT"] = str(Path(__file__).resolve().parents[2])
         env["NEURICO_PYTHON"] = sys.executable
+        env["NEURICO_HITL_MODE"] = self.hitl_mode.value
         env["PATH"] = f"{self.paths.tool_bin_dir}{os.pathsep}{env.get('PATH', '')}"
         if self.use_hitl_autoresearch_whiteboard:
             from core.hitl_whiteboard import hitl_whiteboard_env
@@ -1530,6 +1573,12 @@ class HitlRuntime:
                         "proposal_idea_id": proposal_record["idea_id"],
                         "manager_idea_id": manager_record["idea_id"],
                     }
+                elif self.hitl_mode is HitlMode.AUTO:
+                    finalized["result"] = self._finalize_proposal_manager_admission(
+                        proposal_record=proposal_record,
+                        manager_record=manager_record,
+                        review=review,
+                    )
                 else:
                     finalized["result"] = self._finalize_proposal_human_admission(
                         proposal_record=proposal_record,
@@ -1556,6 +1605,7 @@ class HitlRuntime:
                         "proposal": proposal_record["proposal"],
                     },
                 },
+                hitl_mode=self.hitl_mode,
             )
             try:
                 result = finalized["result"]
@@ -1613,9 +1663,14 @@ class HitlRuntime:
             "attempt_id": proposal_record.get("attempt_id", ""),
             "manager_legality_decision_idea_id": manager_record["idea_id"],
             "admission_status": admission.get("status", ""),
-            "human_admission_decision_idea_id": admission.get("human_idea_id", ""),
             "manager_feedback": admission.get("feedback", ""),
         }
+        if admission.get("human_idea_id"):
+            payload["human_admission_decision_idea_id"] = admission["human_idea_id"]
+        if admission.get("manager_admission_idea_id"):
+            payload["manager_admission_decision_idea_id"] = admission[
+                "manager_admission_idea_id"
+            ]
         atomic_write_json(
             path,
             payload,
@@ -1721,7 +1776,32 @@ class HitlRuntime:
                 record.get("level") == "B"
                 and record.get("actor") == "manager"
                 and decision_needed
-                == "Is this AutoResearch proposal legal to show to the human for approval?"
+                == "Should this AutoResearch proposal be admitted to experiment execution?"
+            ):
+                if record.get("decision") == "O1":
+                    return {
+                        "status": "approved",
+                        "instruction": "The proposal is already admitted. Stop proposal generation now.",
+                        "proposal_idea_id": proposal_id,
+                        "proposal": proposal_record.get("proposal", ""),
+                    }
+                return {
+                    "status": "feedback",
+                    "feedback": str(record.get("manager_feedback", "")).strip(),
+                    "instruction": (
+                        "This proposal was already rejected. Create a new proposal using "
+                        "the returned feedback, then submit that new proposal in this same session."
+                    ),
+                    "proposal_idea_id": proposal_id,
+                }
+            if (
+                record.get("level") == "B"
+                and record.get("actor") == "manager"
+                and decision_needed
+                in {
+                    "Is this AutoResearch proposal legal to show to the human for approval?",
+                    "Is this AutoResearch proposal legal for admission review?",
+                }
                 and record.get("decision") == "O2"
             ):
                 return {
@@ -2903,6 +2983,7 @@ class HitlRuntime:
                 scoring_handoff_context=dict(self._tool_context.get("provenance") or {}),
                 on_finalize=persist_phase_review,
                 on_scoring_approval=persist_scoring_approval,
+                hitl_mode=self.hitl_mode,
             )
             if (
                 self._phase_finish_request_key == request_key
@@ -2944,13 +3025,17 @@ class HitlRuntime:
             instruction = "Reviewer approved this stage. Stop this worker session now."
             prompt_block = ""
             if hitl_stage == "plan":
-                if bool(self._tool_context.get("requires_human_approval")):
-                    from core.hitl_runtime_state import HitlRuntimeState
+                from core.hitl_runtime_state import HitlRuntimeState
 
-                    HitlRuntimeState(self.work_dir).mark_plan_approved(
-                        pipeline_stage=self.pipeline_stage,
-                        plan_fingerprint=plan_fingerprint,
-                    )
+                HitlRuntimeState(self.work_dir).mark_plan_approved(
+                    pipeline_stage=self.pipeline_stage,
+                    plan_fingerprint=plan_fingerprint,
+                    approval_level=(
+                        "A"
+                        if bool(self._tool_context.get("requires_human_approval"))
+                        else "B"
+                    ),
+                )
                 next_phase = "execution"
                 final = False
                 instruction = (
@@ -3345,7 +3430,11 @@ class HitlRuntime:
                 review.get("context", "Manager reviewed AutoResearch proposal legality.")
             ).strip(),
             "related_artifacts": [],
-            "decision_needed": "Is this AutoResearch proposal legal to show to the human for approval?",
+            "decision_needed": (
+                "Is this AutoResearch proposal legal for admission review?"
+                if self.hitl_mode is HitlMode.AUTO
+                else "Is this AutoResearch proposal legal to show to the human for approval?"
+            ),
             "options": options,
             "decision": "O1" if legal else "O2",
             "manager_feedback": "" if legal else str(review["manager_feedback"]).strip(),
@@ -3353,6 +3442,73 @@ class HitlRuntime:
         }
         _apply_runtime_provenance(record, self._tool_context.get("provenance"))
         return self.log.append(record, idempotent=True)
+
+    def _finalize_proposal_manager_admission(
+        self,
+        *,
+        proposal_record: Dict[str, Any],
+        manager_record: Dict[str, Any],
+        review: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Record Auto HITL's manager-owned scientific admission decision."""
+
+        status = str(review.get("status", "")).strip()
+        if status not in {"approved", "feedback"}:
+            raise HitlValidationError("Auto HITL proposal admission must approve or give feedback.")
+        approved = status == "approved"
+        manager_feedback = ""
+        if not approved:
+            manager_feedback = _require_text(
+                review.get("manager_feedback"),
+                "manager_feedback",
+                "Auto HITL proposal admission",
+            )
+            if _is_feedback_placeholder(manager_feedback):
+                raise HitlValidationError(
+                    "Auto HITL proposal feedback must contain concrete next-proposal instructions."
+                )
+        record = {
+            "pipeline_stage": self.pipeline_stage,
+            "hitl_stage": "proposal",
+            "idea_type": "decision",
+            "idea_category": "method_choice",
+            "level": "B",
+            "actor": "manager",
+            "premises": [proposal_record["idea_id"], manager_record["idea_id"]],
+            "context": str(
+                review.get("context", "Manager reviewed AutoResearch proposal admission.")
+            ).strip(),
+            "related_artifacts": [],
+            "decision_needed": (
+                "Should this AutoResearch proposal be admitted to experiment execution?"
+            ),
+            "options": _normalize_options(["Approve proposal.", "Request a new proposal."]),
+            "decision": "O1" if approved else "O2",
+            "manager_feedback": manager_feedback,
+            "raised": False,
+        }
+        _apply_runtime_provenance(record, self._tool_context.get("provenance"))
+        admission_record = self.log.append(record, idempotent=True)
+        if approved:
+            return {
+                "status": "approved",
+                "instruction": "The proposal is admitted. Stop proposal generation now.",
+                "proposal_idea_id": proposal_record["idea_id"],
+                "manager_idea_id": manager_record["idea_id"],
+                "manager_admission_idea_id": admission_record["idea_id"],
+                "proposal": proposal_record["proposal"],
+            }
+        return {
+            "status": "feedback",
+            "feedback": manager_feedback,
+            "instruction": (
+                "This proposal is rejected. Create a new proposal using this feedback, "
+                "then submit the new proposal with `hitl-submit-proposal` in this same session."
+            ),
+            "proposal_idea_id": proposal_record["idea_id"],
+            "manager_idea_id": manager_record["idea_id"],
+            "manager_admission_idea_id": admission_record["idea_id"],
+        }
 
     def _finalize_proposal_human_admission(
         self,

@@ -331,24 +331,85 @@ class HitlRuntimeState:
             self._state["worker_continuation"] = None
             self._save_unlocked()
 
-    def mark_plan_approved(self, *, pipeline_stage: str, plan_fingerprint: str) -> None:
+    def mark_plan_approved(
+        self,
+        *,
+        pipeline_stage: str,
+        plan_fingerprint: str,
+        approval_level: str = "A",
+    ) -> None:
         if not pipeline_stage or not plan_fingerprint:
             raise HitlRuntimeStateError(
                 "Plan approval requires pipeline stage and plan fingerprint"
             )
+        if approval_level not in {"A", "B"}:
+            raise HitlRuntimeStateError("Plan approval level must be A or B")
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             approvals = self._state.setdefault("approved_plans", {})
             approvals[str(pipeline_stage)] = {
                 "plan_fingerprint": str(plan_fingerprint),
+                "approval_level": approval_level,
                 "approved_at": _now(),
             }
             self._save_unlocked()
 
-    def has_plan_approval(self, *, pipeline_stage: str, plan_fingerprint: str) -> bool:
+    def has_plan_approval(
+        self,
+        *,
+        pipeline_stage: str,
+        plan_fingerprint: str,
+        approval_levels: tuple[str, ...] = ("A",),
+    ) -> bool:
         approvals = self.snapshot().get("approved_plans", {})
         record = approvals.get(str(pipeline_stage)) if isinstance(approvals, dict) else None
-        return isinstance(record, dict) and record.get("plan_fingerprint") == str(plan_fingerprint)
+        if not isinstance(record, dict):
+            return False
+        level = str(record.get("approval_level") or "A")
+        return (
+            record.get("plan_fingerprint") == str(plan_fingerprint)
+            and level in approval_levels
+        )
+
+    def adopt_hitl_mode(self, hitl_mode: str) -> Dict[str, Any]:
+        """Apply one run's policy to restartable, unresolved HITL state.
+
+        Resolved commands and audit records are historical facts and are never
+        rewritten. Switching to Auto closes any outstanding human-resolution
+        pointer while preserving the request key and worker continuation.
+        """
+
+        from core.hitl_mode import HitlMode, normalize_hitl_mode
+
+        selected = normalize_hitl_mode(hitl_mode)
+        result: Dict[str, Any] = {
+            "hitl_mode": selected.value,
+            "discard_resolution_reply_for": "",
+        }
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            continuation = self._state.get("worker_continuation")
+            if isinstance(continuation, dict):
+                continuation["hitl_mode"] = selected.value
+                continuation["updated_at"] = _now()
+
+            command = self._state.get("pending_worker_command")
+            if isinstance(command, dict) and command.get("status") in {
+                "pending",
+                "scoring_approval_pending",
+                "scoring",
+            }:
+                command["hitl_mode"] = selected.value
+                command["updated_at"] = _now()
+                if selected is HitlMode.AUTO:
+                    request_key = str(command.get("request_key", "")).strip()
+                    # Return this on every adoption so a restart can complete
+                    # inbox cleanup after a crash between the two durable files.
+                    result["discard_resolution_reply_for"] = request_key
+                    command["human_request_record_id"] = None
+                    command["human_reply_record_ids"] = []
+            self._save_unlocked()
+        return result
 
     def pending_worker_command(self) -> Optional[Dict[str, Any]]:
         value = self.snapshot().get("pending_worker_command")

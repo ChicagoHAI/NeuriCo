@@ -27,3 +27,6 @@
 @media(max-width:900px){.connection.warning{display:inline}}
 
 .portal-workspace-error{align-content:center;justify-items:center;gap:8px;padding:32px;text-align:center}.portal-workspace-error strong{color:var(--text);font-size:18px}.portal-workspace-error p{max-width:720px;margin:0;color:#c6d0cc;line-height:1.5}.portal-workspace-error span{color:var(--muted)}
+
+.status-mode{padding:3px 7px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px;white-space:nowrap}
+@media(max-width:740px){.status-mode{display:none}}

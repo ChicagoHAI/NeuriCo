@@ -49,6 +49,8 @@ from core.hitl_frontier import (
 )
 from core.hitl_git import delete_git_ref
 from core.hitl_git_state import HitlGitStateStore
+from core.hitl_manager_inbox import HitlManagerInbox
+from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_run_control import HitlRunStopRequested
 from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
 from core.hitl_scoring_workspace import (
@@ -71,6 +73,17 @@ from core.scoring_seal import (
 
 HitlCommentModeHook = Callable[..., Dict[str, Any]]
 MAX_ACTIVE_HITL_FRONTIER_NODES = 10
+
+
+def _adopt_run_hitl_mode(work_dir: Path, hitl_mode: HitlMode | str) -> HitlMode:
+    """Adopt a run policy without rewriting completed decisions."""
+
+    selected = normalize_hitl_mode(hitl_mode)
+    adoption = HitlRuntimeState(work_dir).adopt_hitl_mode(selected.value)
+    request_key = str(adoption.get("discard_resolution_reply_for", "")).strip()
+    if request_key:
+        HitlManagerInbox(work_dir).discard_resolution_reply(request_key)
+    return selected
 
 
 class HitlFrontierPublicationPendingError(RuntimeError):
@@ -251,11 +264,13 @@ def run_fresh_hitl_autoresearch_initial_node(
     manager: Optional[Any] = None,
     channel: Optional[Any] = None,
     manager_config: Optional[Dict[str, Any]] = None,
+    hitl_mode: HitlMode | str = HitlMode.FULL,
 ) -> InitialAutoResearchNodeResult:
     """Run the initial scored experiment through the HITL pipeline."""
     from core.pipeline_orchestrator import ResearchPipelineOrchestrator
 
     work_dir = Path(work_dir)
+    selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
     existing_publication = (
         HitlRuntimeState(work_dir).initial_root_publication_transition()
     )
@@ -281,6 +296,7 @@ def run_fresh_hitl_autoresearch_initial_node(
         hitl_channel=channel,
         hitl_manager_config=manager_config,
         hitl_autoresearch=True,
+        hitl_mode=selected_hitl_mode,
     ).run_pipeline(
         idea=idea,
         provider=provider,
@@ -714,6 +730,7 @@ def continue_hitl_autoresearch(
     channel: Optional[Any] = None,
     manager_config: Optional[Dict[str, Any]] = None,
     recovered_attempt: Optional[HitlRecoveryResult] = None,
+    hitl_mode: HitlMode | str = HitlMode.FULL,
 ) -> Dict[str, Any]:
     """Continue only from the runtime-selected HITL frontier node."""
     print()
@@ -727,6 +744,7 @@ def continue_hitl_autoresearch(
 
     runtime_state = HitlRuntimeState(work_dir)
     recovery = recovered_attempt or recover_interrupted_hitl_attempt_if_needed(work_dir)
+    selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
     pending_worker_request = bool(
         recovery and recovery.recovery_classification == "pending_worker_request"
     )
@@ -809,6 +827,7 @@ def continue_hitl_autoresearch(
         pending_hitl_recovery=recovery
         if pending_worker_request or pending_frontier_transition
         else None,
+        hitl_mode=selected_hitl_mode,
     )
     payload = autoresearch_result_payload(result)
     payload["initial_sha"] = lineage_source_sha
@@ -847,6 +866,7 @@ class HitlAutoResearchController:
         hitl_runtime: Optional[HitlRuntime] = None,
         hitl_comment_mode: Optional[HitlCommentModeHook] = None,
         pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
+        hitl_mode: HitlMode | str = HitlMode.FULL,
     ):
         self.idea = idea
         self.idea_id = idea_id
@@ -859,6 +879,7 @@ class HitlAutoResearchController:
         self.hitl_comment_mode = hitl_comment_mode
         self.hitl_frontier = HitlFrontierStore(self.work_dir)
         self.pending_hitl_recovery = pending_hitl_recovery
+        self.hitl_mode = normalize_hitl_mode(hitl_mode)
 
     def run(self, iterations: int) -> AutoResearchRunResult:
         """
@@ -2205,6 +2226,7 @@ class HitlAutoResearchController:
                 self.work_dir,
                 "experiment_runner",
                 use_hitl_autoresearch_whiteboard=True,
+                hitl_mode=self.hitl_mode,
             )
         return self.hitl_runtime
 
@@ -2360,6 +2382,7 @@ def run_hitl_autoresearch_loop(
     hitl_channel: Optional[Any] = None,
     hitl_manager_config: Optional[Dict[str, Any]] = None,
     pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
+    hitl_mode: HitlMode | str = HitlMode.FULL,
 ) -> AutoResearchRunResult:
     """
     Run AutoResearch with NeuriCo's real proposer, comment handler, and scorer.
@@ -2460,9 +2483,11 @@ def run_hitl_autoresearch_loop(
                 channel=hitl_channel,
                 config=hitl_manager_config,
                 use_hitl_autoresearch_whiteboard=True,
+                hitl_mode=hitl_mode,
             )
         ),
         hitl_comment_mode=hitl_comment_mode,
         pending_hitl_recovery=pending_hitl_recovery,
+        hitl_mode=hitl_mode,
     )
     return controller.run(iterations=iterations)

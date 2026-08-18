@@ -95,8 +95,8 @@ Rule-maker reminders:
   thresholds, split/aggregation rules, required runner artifacts, or an
   anti-gaming check within the approved plan;
 - raise rather than decide autonomously when a choice would redefine scientific
-  success, invalidate the research claim, or depend on the human's intended
-  tradeoff between competing evaluation goals.
+  success, invalidate the research claim, or depend on {% if hitl_mode == "auto" %}a manager-level
+  tradeoff{% else %}the human's intended tradeoff{% endif %} between competing evaluation goals.
 {% endif %}
 
 Evidence categories:
@@ -175,11 +175,11 @@ formatting/editing detail, or temporary scratch step, do not log it.
 
 Do not log routine reading, formatting, ordinary commands, minor edits, or
 micro-steps. Do not log the same idea again unless new evidence materially
-changes it. Do not log manager/human feedback, approval, or the act of following
+changes it. Do not log manager{% if hitl_mode != "auto" %}/human{% endif %} feedback, approval, or the act of following
 that feedback as a new C-level idea.
 
 {% if allow_raised_ideas %}
-For issues that need manager or human input, use `hitl-raise-idea` and wait for
+For issues that need manager{% if hitl_mode != "auto" %} or human{% endif %} input, use `hitl-raise-idea` and wait for
 the returned feedback.
 
 Raised evidence idea:
@@ -189,7 +189,7 @@ hitl-raise-idea evidence \
   --category "dataset_property" \
   --context "what situation produced this evidence" \
   --evidence "the evidence idea" \
-  --reason-for-escalation "why manager or human input is required"
+  --reason-for-escalation "why manager{% if hitl_mode != "auto" %} or human{% endif %} input is required"
 ```
 
 Raised decision idea:
@@ -201,11 +201,11 @@ hitl-raise-idea decision \
   --decision-needed "the question being decided" \
   --option "one substantive option" \
   --option "another substantive option" \
-  --reason-for-escalation "why manager or human input is required"
+  --reason-for-escalation "why manager{% if hitl_mode != "auto" %} or human{% endif %} input is required"
 ```
 
 For raised decision ideas, include every substantive option that should be
-available for manager/human resolution using repeated `--option`. The command
+available for manager{% if hitl_mode != "auto" %}/human{% endif %} resolution using repeated `--option`. The command
 blocks until runtime resolves the idea, then prints `HITL_RESOLVED` and
 worker-facing feedback. Read that feedback, update the living plan, and continue
 in the same session.

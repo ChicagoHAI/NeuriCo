@@ -321,6 +321,12 @@ class HitlWorkspaceView:
         started_at = str((owner or {}).get("started_at") or "").strip()
         provider = str((owner or {}).get("provider") or "").strip()
         mode = str((owner or {}).get("mode") or "").strip()
+        hitl_mode = str(
+            (owner or {}).get("hitl_mode")
+            or active_pending.get("hitl_mode")
+            or continuation.get("hitl_mode")
+            or "full"
+        ).strip().lower()
         latest_phase_event = self._latest_phase_event(runtime, started_at)
         latest_phase_started_at = str(latest_phase_event.get("created_at", "")).strip()
         paper_phase = bool(
@@ -355,6 +361,7 @@ class HitlWorkspaceView:
                 "phase_label": visible_phase,
                 "label": label,
                 "mode": mode,
+                "hitl_mode": hitl_mode if hitl_mode in {"full", "auto"} else "full",
                 "provider": provider,
                 "started_at": started_at,
                 "phase_started_at": (
@@ -394,6 +401,7 @@ class HitlWorkspaceView:
 
         if launch_status:
             mode = str(launch_status.get("mode", mode)).strip()
+            hitl_mode = str(launch_status.get("hitl_mode", hitl_mode)).strip().lower()
             provider = str(launch_status.get("provider", provider)).strip()
             if not started_at:
                 started_at = str(

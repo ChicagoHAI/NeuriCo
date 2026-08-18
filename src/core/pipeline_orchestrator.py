@@ -71,6 +71,7 @@ from core.hitl import (
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
 from core.hitl_git import delete_git_ref
 from core.hitl_run_control import HitlRunStopRequested
+from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_stage_runtime import (
     HitlStageRollback,
     run_plan_centered_hitl_stage,
@@ -238,6 +239,7 @@ class ResearchPipelineOrchestrator:
         hitl_channel: Optional[Any] = None,
         hitl_manager_config: Optional[Dict[str, Any]] = None,
         hitl_autoresearch: bool = False,
+        hitl_mode: HitlMode | str = HitlMode.FULL,
     ):
         """
         Initialize pipeline orchestrator.
@@ -257,6 +259,7 @@ class ResearchPipelineOrchestrator:
         self.hitl_channel = hitl_channel
         self.hitl_manager_config = hitl_manager_config or {}
         self.hitl_autoresearch = hitl_autoresearch
+        self.hitl_mode = normalize_hitl_mode(hitl_mode)
 
     def _create_hitl_runtime(self, pipeline_stage: str) -> HitlRuntime:
         whiteboard_mode: Dict[str, bool] = {}
@@ -266,6 +269,7 @@ class ResearchPipelineOrchestrator:
             return HitlRuntime(
                 self.work_dir,
                 pipeline_stage,
+                hitl_mode=self.hitl_mode,
                 **whiteboard_mode,
             )
         return HitlRuntime(
@@ -274,6 +278,7 @@ class ResearchPipelineOrchestrator:
             manager=self.hitl_manager,
             channel=self.hitl_channel,
             config=self.hitl_manager_config,
+            hitl_mode=self.hitl_mode,
             **whiteboard_mode,
         )
 
@@ -1446,13 +1451,13 @@ class ResearchPipelineOrchestrator:
             )
 
         try:
-            plan_approved = runtime.plan_has_human_approval()
+            plan_approved = runtime.plan_has_required_approval()
 
             if not plan_approved:
                 runtime.prepare_idea_tool_context(
                     hitl_stage="plan",
                     actor="experiment_runner",
-                    requires_human_approval=True,
+                    requires_human_approval=runtime.requires_human_plan_approval,
                     allow_scoring_approval=scoring_enabled,
                     phase_finish_validator=artifact_validator,
                     scoring_handler=score_in_background if scoring_enabled else None,

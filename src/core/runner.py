@@ -49,6 +49,7 @@ from core.compute_backend import (
     without_runtime_compute_backend,
 )
 from core.hitl_run_control import HitlRunStopRequested
+from core.hitl_mode import HitlMode, normalize_hitl_mode
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -86,12 +87,14 @@ def _with_hitl_workspace_run_ownership(method):
             force_fresh=bool(arguments.arguments["force_fresh"]),
         )
         mode = "continue" if arguments.arguments["hitl_continue_autoresearch"] else "fresh"
+        hitl_mode = normalize_hitl_mode(arguments.arguments["hitl_mode"])
         with hitl_workspace_run_lease(
             work_dir,
             owner={
                 "idea_id": idea_id,
                 "interface": str(hitl_interface),
                 "mode": mode,
+                "hitl_mode": hitl_mode.value,
                 "provider": str(arguments.arguments["provider"]),
                 "request_id": str(os.environ.get("NEURICO_HITL_REQUEST_ID", "")).strip(),
             },
@@ -215,6 +218,7 @@ class ResearchRunner:
         hitl_manager_port: int = 7890,
         hitl_manager_no_browser: bool = False,
         hitl_host: Optional[Any] = None,
+        hitl_mode: str = "full",
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -268,6 +272,14 @@ class ResearchRunner:
         if len(selected_hitl_modes) > 1:
             raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
         hitl = hitl_autoresearch or hitl_continue_autoresearch
+        selected_hitl_mode = normalize_hitl_mode(hitl_mode)
+        if selected_hitl_mode is HitlMode.AUTO and not hitl:
+            raise ValueError("--auto is valid only with a HITL AutoResearch entry mode.")
+        if selected_hitl_mode is HitlMode.AUTO and pause_after_resources:
+            raise ValueError(
+                "--pause-after-resources is not supported in Auto HITL because it is a "
+                "direct human checkpoint."
+            )
         if hitl and provider not in {"claude", "codex"}:
             raise ValueError(
                 "HITL AutoResearch requires Claude or Codex so its workers and "
@@ -293,6 +305,7 @@ class ResearchRunner:
             continue_autoresearch = True
         if hitl:
             print(f"   HITL: enabled ({hitl})")
+            print(f"   HITL mode: {selected_hitl_mode.value}")
         autoresearch_modes = [
             name
             for name, enabled in (
@@ -491,10 +504,20 @@ class ResearchRunner:
             if not multi_agent:
                 raise ValueError("HITL AutoResearch requires the multi-agent pipeline.")
             from core.hitl_lock import select_hitl_manager_provider
+            from core.hitl_manager_inbox import HitlManagerInbox
+            from core.hitl_runtime_state import HitlRuntimeState
 
             # Recovery may restore an older runtime.json. Record the selected
             # run backend after recovery and before the manager starts.
             select_hitl_manager_provider(work_dir, provider)
+            adoption = HitlRuntimeState(work_dir).adopt_hitl_mode(
+                selected_hitl_mode.value
+            )
+            stale_reply_key = str(
+                adoption.get("discard_resolution_reply_for", "")
+            ).strip()
+            if stale_reply_key:
+                HitlManagerInbox(work_dir).discard_resolution_reply(stale_reply_key)
             if hitl_host is None:
                 from core.hitl_manager_host import HitlManagerHost
                 from interactive.manager import load_config as load_manager_config
@@ -536,6 +559,7 @@ class ResearchRunner:
                         channel=hitl_host.channel,
                         manager_config=hitl_host.manager.config,
                         recovered_attempt=recovered_hitl_attempt,
+                        hitl_mode=selected_hitl_mode,
                     )
                 else:
                     from core.autoresearch import continue_from_current_best
@@ -654,6 +678,7 @@ class ResearchRunner:
                 hitl_manager=hitl_host.manager if hitl_host else None,
                 hitl_channel=hitl_host.channel if hitl_host else None,
                 hitl_manager_config=hitl_host.manager.config if hitl_host else None,
+                hitl_mode=selected_hitl_mode,
             )
             success = False
 
@@ -715,6 +740,7 @@ class ResearchRunner:
                             manager=hitl_host.manager,
                             channel=hitl_host.channel,
                             manager_config=hitl_host.manager.config,
+                            hitl_mode=selected_hitl_mode,
                         )
                     else:
                         initial_result = construct_fresh_initial_node(**initial_args)
@@ -750,6 +776,7 @@ class ResearchRunner:
                                 manager=hitl_host.manager,
                                 channel=hitl_host.channel,
                                 manager_config=hitl_host.manager.config,
+                                hitl_mode=selected_hitl_mode,
                             )
                         else:
                             autoresearch_result = continue_from_current_best(**continuation_args)
@@ -1553,6 +1580,11 @@ def main():
         help="Continue an existing HITL AutoResearch workspace from its selected frontier node.",
     )
     parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Use manager-resolved Auto HITL for the selected HITL AutoResearch run.",
+    )
+    parser.add_argument(
         "--hitl-manager-port",
         type=int,
         default=7890,
@@ -1644,6 +1676,7 @@ def main():
             hitl_continue_autoresearch=args.hitl_continue_autoresearch,
             hitl_manager_port=args.hitl_manager_port,
             hitl_manager_no_browser=args.hitl_manager_no_browser,
+            hitl_mode="auto" if args.auto else "full",
         )
 
         print()

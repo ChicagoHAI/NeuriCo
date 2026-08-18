@@ -56,7 +56,7 @@ Idea protocol:
 - Evidence idea: important information discovered during the stage.
 - Decision idea: a choice/action under a specific context.
 - C-level autonomous ideas may be recorded without blocking.
-- Raised ideas must pause through `hitl-raise-idea` until manager/human feedback
+- Raised ideas must pause through `hitl-raise-idea` until manager{% if hitl_mode != "auto" %}/human{% endif %} feedback
   is returned.
 {% include "hitl/worker_escalation_policy.txt" %}
 
