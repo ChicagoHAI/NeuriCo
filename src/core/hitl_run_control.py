@@ -146,16 +146,19 @@ def request_hitl_run_stop(work_dir: Path, *, requested_by: str) -> Dict[str, Any
         raise RuntimeError("The HITL launch record must be an object.")
     status = str(launch.get("status", "")).strip()
     request_id = str(launch.get("request_id", "")).strip()
-    if status == "stopped":
-        return {"status": "already_stopped", "request_id": request_id}
-    owner = active_hitl_workspace_run(workspace)
-    if owner is None:
-        raise RuntimeError("No HITL AutoResearch run currently owns this workspace.")
     if not request_id:
         raise RuntimeError("The active HITL run has no launch request ID.")
-    owner_request_id = str(owner.get("request_id", "")).strip()
-    if owner_request_id and owner_request_id != request_id:
-        raise RuntimeError("The workspace owner does not match its saved launch request.")
+    if status == "stopped":
+        return {"status": "already_stopped", "request_id": request_id}
+    if status not in {"starting", "running"}:
+        raise RuntimeError("No HITL AutoResearch run is currently active for this workspace.")
+    owner = active_hitl_workspace_run(workspace)
+    if owner is None and status != "starting":
+        raise RuntimeError("No HITL AutoResearch run currently owns this workspace.")
+    if owner is not None:
+        owner_request_id = str(owner.get("request_id", "")).strip()
+        if owner_request_id and owner_request_id != request_id:
+            raise RuntimeError("The workspace owner does not match its saved launch request.")
     control = HitlRunStopControl(workspace, request_id)
     record = control.request(requested_by=requested_by)
     return {
