@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from core.hitl_manager_inbox import HitlManagerInbox
+from core.hitl_lock import active_hitl_workspace_run
+from core.hitl_mode import HitlMode, human_resolution_allowed, normalize_hitl_mode
 from core.hitl_paths import hitl_manager_dir
 from core.hitl_runtime_state import (
     MANAGER_REVIEW_FINALIZERS,
@@ -394,6 +396,23 @@ class HitlManager:
         }
     )
 
+    def _current_hitl_mode(self) -> HitlMode:
+        pending = self.runtime_state.pending_worker_command()
+        if isinstance(pending, dict) and str(pending.get("hitl_mode", "")).strip():
+            return normalize_hitl_mode(pending["hitl_mode"])
+        owner = active_hitl_workspace_run(self.work_dir)
+        if isinstance(owner, dict) and str(owner.get("hitl_mode", "")).strip():
+            return normalize_hitl_mode(owner["hitl_mode"])
+        return HitlMode.FULL
+
+    @staticmethod
+    def _human_resolution_allowed_for(pending: Dict[str, Any]) -> bool:
+        return human_resolution_allowed(
+            pending.get("hitl_mode"),
+            command_kind=str(pending.get("kind", "")),
+            requires_human_approval=bool(pending.get("requires_human_approval")),
+        )
+
     def _available_tool_names(self) -> set[str]:
         """Return the runtime-authorized tool surface for the next ReAct turn.
 
@@ -425,7 +444,8 @@ class HitlManager:
             names.add(manager_finalizer)
             return names
 
-        names.add("ask_human")
+        if self._human_resolution_allowed_for(pending):
+            names.add("ask_human")
         names.add("finalize_worker_request")
         request_key = str(pending.get("request_key", "")).strip()
         with self._resolution_lock:
@@ -514,11 +534,16 @@ class HitlManager:
             )
         completion_name = self._runtime_completion_tool_name(tools)
         if completion_name:
+            human_instruction = (
+                " Continue reviewing or consult the human as permitted, then call "
+                if any(str(tool.get("name", "")) == "ask_human" for tool in tools)
+                else " Continue reviewing, then call "
+            )
             return (
                 native_retry
-                + "The worker request remains unresolved. Continue reviewing or consult "
-                "the human as permitted, then call "
-                f"`{completion_name}`. Direct assistant text cannot complete it."
+                + "The worker request remains unresolved."
+                + human_instruction
+                + f"`{completion_name}`. Direct assistant text cannot complete it."
             )
         return (
             native_retry + "The worker request remains unresolved. Follow the exact "
@@ -704,9 +729,14 @@ class HitlManager:
                     f"Error: {tool_name} is unavailable for the current worker request. "
                     f"{scoring_handoff}"
                 )
+            human_hint = (
+                ", or ask_human if human intent is required"
+                if self._human_resolution_allowed_for(pending)
+                else ""
+            )
             return (
                 f"Error: {tool_name} is unavailable for the current worker request. "
-                "Use finalize_worker_request, or ask_human if human intent is required."
+                f"Use finalize_worker_request{human_hint}."
             )
         return (
             f"Error: {tool_name} is unavailable because runtime has not opened that action. "
@@ -967,16 +997,20 @@ class HitlManager:
         raised_idea: Dict[str, Any],
         plan_text: str,
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        hitl_mode: HitlMode | str = HitlMode.FULL,
     ) -> Dict[str, Any]:
-        from core.hitl import _load_hitl_template, _validate_substantive_options
+        from core.hitl import _load_hitl_template, _normalize_options, _validate_substantive_options
 
         human_inputs: List[Dict[str, Any]] = []
+        selected_mode = normalize_hitl_mode(hitl_mode)
 
         def validate(data: Dict[str, Any]) -> Dict[str, Any]:
             level = str(data.get("level", "")).strip()
             actor = str(data.get("actor", "")).strip()
             if (level, actor) not in {("B", "manager"), ("A", "human")}:
                 raise ValueError("Resolution must use B/manager or A/human.")
+            if selected_mode is HitlMode.AUTO and (level, actor) != ("B", "manager"):
+                raise ValueError("Auto HITL raised ideas must be resolved by the manager at B level.")
             self._require_text(data.get("context"), "context", "Raised-idea resolution")
             self._require_text(
                 data.get("manager_feedback"), "manager_feedback", "Raised-idea resolution"
@@ -1004,6 +1038,16 @@ class HitlManager:
                     data.get("options", raised_idea.get("options")),
                     error_prefix="Decision resolution",
                 )
+                if selected_mode is HitlMode.AUTO:
+                    expected_options = _normalize_options(raised_idea.get("options"))
+                    submitted_options = _normalize_options(
+                        data.get("options", raised_idea.get("options"))
+                    )
+                    if submitted_options != expected_options:
+                        raise ValueError(
+                            "Auto HITL must select from the worker's existing decision options."
+                        )
+                    data["options"] = raised_idea.get("options", [])
             else:
                 data.pop("options", None)
                 data.pop("decision", None)
@@ -1014,6 +1058,7 @@ class HitlManager:
             pipeline_stage=pipeline_stage,
             plan_text=plan_text,
             raised_idea_json=json.dumps(raised_idea, indent=2, ensure_ascii=False),
+            hitl_mode=selected_mode.value,
         )
         return self.request_worker_resolution(
             command={
@@ -1022,6 +1067,7 @@ class HitlManager:
                 "pipeline_stage": pipeline_stage,
                 "hitl_stage": raised_idea.get("hitl_stage", "execution"),
                 "raised_idea": raised_idea,
+                "hitl_mode": selected_mode.value,
             },
             prompt=prompt,
             validate=validate,
@@ -1044,6 +1090,7 @@ class HitlManager:
         scoring_handoff_context: Optional[Dict[str, Any]] = None,
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         on_scoring_approval: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        hitl_mode: HitlMode | str = HitlMode.FULL,
     ) -> Dict[str, Any]:
         from core.hitl import (
             _is_feedback_placeholder,
@@ -1053,6 +1100,10 @@ class HitlManager:
         )
 
         human_inputs: List[Dict[str, Any]] = []
+        selected_mode = normalize_hitl_mode(hitl_mode)
+        requires_human_approval = (
+            requires_human_approval and selected_mode is HitlMode.FULL
+        )
 
         def validate(data: Dict[str, Any]) -> Dict[str, Any]:
             status = str(data.get("status", "")).strip()
@@ -1121,11 +1172,14 @@ class HitlManager:
             requires_human_approval=requires_human_approval,
             allow_scoring_approval=allow_scoring_approval,
             is_rule_maker=(pipeline_stage == "rule_maker"),
+            hitl_mode=selected_mode.value,
         )
         return self.request_worker_resolution(
             command={
                 "request_key": self._request_key("phase_finish", request),
                 "kind": "phase_finish",
+                "hitl_mode": selected_mode.value,
+                "requires_human_approval": requires_human_approval,
                 **request,
             },
             prompt=prompt,
@@ -1142,6 +1196,7 @@ class HitlManager:
         proposal_text: str,
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         request_context: Optional[Dict[str, Any]] = None,
+        hitl_mode: HitlMode | str = HitlMode.FULL,
     ) -> Dict[str, Any]:
         from core.hitl import (
             _is_feedback_placeholder,
@@ -1151,6 +1206,7 @@ class HitlManager:
         )
 
         human_inputs: List[Dict[str, Any]] = []
+        selected_mode = normalize_hitl_mode(hitl_mode)
 
         def validate(data: Dict[str, Any]) -> Dict[str, Any]:
             status = str(data.get("status", "")).strip()
@@ -1159,11 +1215,43 @@ class HitlManager:
                     "Proposal review status must be approved, feedback, or rejected_illegal."
                 )
             self._require_text(data.get("context"), "context", "Proposal admission")
+            violations = data.get("violations", [])
+            if not isinstance(violations, list):
+                raise ValueError("violations must be an array.")
+            concrete_violations = [
+                str(violation).strip() for violation in violations if str(violation).strip()
+            ]
             if status == "rejected_illegal":
-                self._require_text(
+                if not concrete_violations:
+                    raise ValueError(
+                        "An illegal proposal review requires at least one concrete violation."
+                    )
+                feedback = self._require_text(
                     data.get("manager_feedback"), "manager_feedback", "Illegal proposal review"
                 )
+                if _is_feedback_placeholder(feedback):
+                    raise ValueError("Illegal proposal feedback must be concrete.")
+                data["violations"] = concrete_violations
+            elif selected_mode is HitlMode.AUTO:
+                if concrete_violations:
+                    raise ValueError("A legal Auto HITL proposal review cannot include violations.")
+                data["violations"] = []
+                if human_inputs:
+                    raise ValueError("Auto HITL proposal admission cannot call ask_human.")
+                data.pop("human_feedback", None)
+                data.pop("manager_escalation_reason", None)
+                if status == "feedback":
+                    feedback = self._require_text(
+                        data.get("manager_feedback"), "manager_feedback", "Proposal feedback"
+                    )
+                    if _is_feedback_placeholder(feedback):
+                        raise ValueError("Auto HITL proposal feedback must be concrete.")
+                else:
+                    data["manager_feedback"] = ""
             else:
+                if concrete_violations:
+                    raise ValueError("A legal HITL proposal review cannot include violations.")
+                data["violations"] = []
                 feedback = self._require_text(
                     data.get("human_feedback"), "human_feedback", "Proposal admission"
                 )
@@ -1190,8 +1278,6 @@ class HitlManager:
                     self._require_text(
                         data.get("manager_feedback"), "manager_feedback", "Proposal feedback"
                     )
-            if not isinstance(data.get("violations", []), list):
-                raise ValueError("violations must be an array.")
             return data
 
         request = {
@@ -1203,11 +1289,13 @@ class HitlManager:
             "manager_review_proposal.txt",
             pipeline_stage=pipeline_stage,
             proposal_text=proposal_text,
+            hitl_mode=selected_mode.value,
         )
         return self.request_worker_resolution(
             command={
                 "request_key": self._request_key("proposal", request),
                 "kind": "proposal",
+                "hitl_mode": selected_mode.value,
                 **request,
             },
             prompt=prompt,
@@ -1430,6 +1518,8 @@ class HitlManager:
         pending = self.runtime_state.pending_worker_command()
         if not isinstance(pending, dict) or pending.get("status") != "pending":
             return "Error: ask_human is available only while runtime has a pending worker command."
+        if not self._human_resolution_allowed_for(pending):
+            return "Error: ask_human is not permitted for this HITL runtime boundary."
         request_key = str(pending["request_key"])
         request_record_id = f"human-request:{request_key}"
         self.conversation.append(
@@ -2063,7 +2153,10 @@ class HitlManager:
         return [
             {
                 "role": "system",
-                "content": _load_hitl_template("interactive_manager_system.txt"),
+                "content": _load_hitl_template(
+                    "interactive_manager_system.txt",
+                    hitl_mode=self._current_hitl_mode().value,
+                ),
             },
             {
                 "role": "system",

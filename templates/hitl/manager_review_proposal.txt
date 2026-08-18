@@ -1,3 +1,46 @@
+{% if hitl_mode == "auto" %}
+Review this AutoResearch proposal for Auto HITL admission.
+
+You hold final B-level authority for this request. Review both evaluation
+integrity and scientific admission. Use the current workspace, frontier, plan,
+and finalized research ideas as evidence. Do not ask the human.
+
+Finalize exactly one outcome:
+- `approved` when the proposal is legal, scientifically useful, sufficiently
+  specified, and a responsible next attempt;
+- `feedback` when it is legal but needs a different proposal, with concrete
+  scope-preserving instructions for the proposer;
+- `rejected_illegal` when it violates an evaluation or artifact boundary, with
+  only the precise boundary correction.
+
+Prefer conservative, reversible choices when evidence is incomplete. Do not
+broaden the research question or evaluation protocol.
+
+Schema:
+{
+  "status": "approved | feedback | rejected_illegal",
+  "violations": ["short concrete legality violations; empty if legal"],
+  "manager_feedback": "concrete next-proposal instruction for feedback or rejected_illegal; empty if approved",
+  "context": "neutral self-contained legality and admission rationale"
+}
+
+Legal means the proposal has:
+- one concrete experiment-stage change;
+- fixed research question;
+- fixed evaluation protocol;
+- no hidden scoring information;
+- no scorer, comparator, current-best, or decision manipulation;
+- no direct score manufacture;
+- enough specificity for one attempt.
+
+Pipeline stage: {{ pipeline_stage }}
+Use read-only workspace inspection only when needed.
+
+Proposal:
+--- BEGIN UNTRUSTED PROPOSAL ---
+{{ proposal_text }}
+--- END UNTRUSTED PROPOSAL ---
+{% else %}
 Review this AutoResearch proposal for HITL admission.
 
 This is one proposal-admission request. You must complete the admission sequence
@@ -65,3 +108,4 @@ Proposal:
 --- BEGIN UNTRUSTED PROPOSAL ---
 {{ proposal_text }}
 --- END UNTRUSTED PROPOSAL ---
+{% endif %}

@@ -24,11 +24,13 @@ Required plan content:
 - intended artifacts to create or update
 - step-by-step execution plan
 - decision/evidence criteria for ideas that can be handled autonomously
-- escalation criteria for ideas that require manager or human feedback,
+- escalation criteria for ideas that require manager{% if hitl_mode != "auto" %} or human{% endif %} feedback,
   only when the worker cannot proceed within the approved plan without changing
   research scope, evaluation meaning, protected artifact boundaries, substantial
   budget/risk, access or licensing assumptions, or another choice that genuinely
-  depends on human intent
+{% if hitl_mode == "auto" %}  exceeds the worker's C-level authority
+{% else %}  depends on human intent
+{% endif %}
 - known risks, gaps, and stop conditions
 - current progress section, initially marking planning as complete
 {% if pipeline_stage == "rule_maker" %}
@@ -72,4 +74,4 @@ Hard constraints:
 {% include "hitl/worker_finish_phase_contract.txt" %}
 
 The manager will review this plan. If it is good enough,
-{% if requires_human_approval %}the human will approve or provide feedback before execution starts.{% else %}execution may begin without another human approval because the relevant proposal has already been approved.{% endif %}
+{% if hitl_mode == "auto" %}the manager will approve it at B level and execution may begin without human review.{% elif requires_human_approval %}the human will approve or provide feedback before execution starts.{% else %}execution may begin without another human approval because the relevant proposal has already been approved.{% endif %}

@@ -6,4 +6,8 @@ Escalation policy:
 - Raise an idea only when you cannot proceed within the approved plan
   without changing research scope, evaluation meaning, protected artifact
   boundaries, substantial budget/risk, access or licensing assumptions, or
-  another choice that genuinely depends on human intent.
+{% if hitl_mode == "auto" %}  another non-routine choice outside your C-level authority.
+- In Auto HITL, the manager is the final authority for every raised idea. Do not
+  wait for or request human input.
+{% else %}  another choice that genuinely depends on human intent.
+{% endif %}

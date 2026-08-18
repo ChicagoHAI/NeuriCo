@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from core.config_loader import ConfigLoader  # noqa: E402
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path  # noqa: E402
+from core.hitl_mode import normalize_hitl_mode  # noqa: E402
 from core.hitl_run_control import (  # noqa: E402
     HitlRunStopControl,
     HitlRunStopRequested,
@@ -48,7 +49,7 @@ def _claim_request(path: Path) -> Path:
 
 def _load_request(path: Path) -> Dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("version") != 1:
+    if not isinstance(value, dict) or value.get("version") not in {1, 2}:
         raise ValueError("Unsupported HITL launch request.")
     required = (
         "request_id",
@@ -67,6 +68,9 @@ def _load_request(path: Path) -> Dict[str, Any]:
         raise ValueError("HITL launch request has an unsupported mode.")
     if value["interface"] not in {"web", "cli"}:
         raise ValueError("HITL launch request has an unsupported source interface.")
+    if value["version"] == 2 and not str(value.get("hitl_mode", "")).strip():
+        raise ValueError("HITL launch request is missing its HITL mode.")
+    value["hitl_mode"] = normalize_hitl_mode(value.get("hitl_mode")).value
 
     identity = _REQUEST_NAME.fullmatch(path.name)
     if identity is None:
@@ -109,6 +113,7 @@ def _finalize_stopped_run(
             "updated_at": stopped_at,
             "stopped_at": stopped_at,
             "mode": request.get("mode", ""),
+            "hitl_mode": request.get("hitl_mode", "full"),
             "provider": request.get("provider", ""),
             "reason": "user_requested",
         }
@@ -128,6 +133,7 @@ def _finalize_stopped_run(
                 "failed_at": failed_at,
                 "updated_at": failed_at,
                 "mode": request.get("mode", ""),
+                "hitl_mode": request.get("hitl_mode", "full"),
                 "provider": request.get("provider", ""),
                 "recovery_required": True,
                 "message": f"Run stopped, but rollback could not finish: {recovery_error}",
@@ -147,6 +153,8 @@ def main() -> int:
     try:
         request = _load_request(claimed)
         work_dir = Path(str(request["work_dir"])).resolve()
+        hitl_mode = normalize_hitl_mode(request.get("hitl_mode")).value
+        request["hitl_mode"] = hitl_mode
         project_root = PROJECT_ROOT.resolve()
         request_id = str(request["request_id"])
         control = HitlRunStopControl(work_dir, request_id)
@@ -174,6 +182,7 @@ def main() -> int:
                     "started_at": started_at,
                     "updated_at": started_at,
                     "mode": request["mode"],
+                    "hitl_mode": hitl_mode,
                     "provider": request["provider"],
                 },
             )
@@ -192,6 +201,7 @@ def main() -> int:
                         hitl_continue_autoresearch=(
                             str(request["interface"]) if continuation else None
                         ),
+                        hitl_mode=hitl_mode,
                     )
         if control.requested() and not bool(result.get("success", False)):
             return _finalize_stopped_run(
@@ -209,6 +219,7 @@ def main() -> int:
                 "completed_at": finished_at,
                 "updated_at": finished_at,
                 "mode": request["mode"],
+                "hitl_mode": hitl_mode,
                 "provider": request["provider"],
                 "success": bool(result.get("success", False)),
             },
@@ -233,6 +244,7 @@ def main() -> int:
                     "failed_at": failed_at,
                     "updated_at": failed_at,
                     "mode": request.get("mode", ""),
+                    "hitl_mode": request.get("hitl_mode", "full"),
                     "provider": request.get("provider", ""),
                     "message": f"Research could not start: {str(exc).strip() or exc.__class__.__name__}",
                 },

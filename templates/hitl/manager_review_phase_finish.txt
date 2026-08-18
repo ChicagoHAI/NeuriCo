@@ -2,6 +2,12 @@ Review a worker-requested HITL phase finish.
 
 Your job is to decide whether the current workspace state is acceptable for the
 current HITL phase, or whether the worker should continue with feedback.
+{% if hitl_mode == "auto" and hitl_stage == "plan" %}
+
+This is an Auto HITL plan finish. You hold final B-level plan authority. Approve
+when the plan is complete, safe, and executable within the research scope, or
+return precise revision feedback. Do not ask the human.
+{% endif %}
 
 {% if requires_human_approval %}
 This is a human-approved plan finish. Complete this sequence inside this same

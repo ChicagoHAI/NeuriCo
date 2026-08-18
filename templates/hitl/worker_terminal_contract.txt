@@ -10,7 +10,7 @@ Before requesting finish review, COMPLETE should hold:
 
 {% include "hitl/worker_finish_phase_contract.txt" %}
 
-If manager/human input is needed before completion, call `hitl-raise-idea` and
+If manager{% if hitl_mode != "auto" %}/human{% endif %} input is needed before completion, call `hitl-raise-idea` and
 wait for the returned feedback instead of requesting finish review. If a HITL
 command prints `HITL_COMMAND_ERROR` or `HITL_ERROR`, follow its printed
 instruction and retry it in this same worker session. If it prints

@@ -73,11 +73,18 @@ def run_plan_centered_hitl_stage(
     on_failed: StageFailureHandler,
 ) -> Dict[str, Any]:
     """Run the shared plan/execution state machine for ordinary HITL stages."""
-    if not runtime.plan_has_human_approval():
+    plan_approved = getattr(
+        runtime,
+        "plan_has_required_approval",
+        runtime.plan_has_human_approval,
+    )()
+    if not plan_approved:
         runtime.prepare_idea_tool_context(
             hitl_stage="plan",
             actor=actor,
-            requires_human_approval=True,
+            requires_human_approval=getattr(
+                runtime, "requires_human_plan_approval", True
+            ),
             phase_finish_validator=phase_finish_validator,
             worker_prompt_contexts=worker_prompt_contexts,
         )

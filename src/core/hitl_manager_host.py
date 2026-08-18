@@ -41,6 +41,8 @@ _RESOLUTION_REPLY = "resolution_reply"
 _CONVERSATION = "conversation"
 _RUN_CONSUMER_HANDOFF_TIMEOUT_SECONDS = 5.0
 _MANAGER_CONSUMER_SHUTDOWN_TIMEOUT_SECONDS = 2.0
+class _HitlPromptCancelled(Exception):
+    """The user cancelled an in-progress terminal prompt sequence."""
 
 
 def _elapsed_phase_time(started_at: Any) -> str:
@@ -945,54 +947,156 @@ class HitlTerminalChannel(UserChannel):
                 self._ui.section("Start research"),
                 blank_before=True,
             )
-            provider = self._read_setting(
-                "Model [claude] (claude/codex/gemini): ", "claude"
-            ).lower()
-            iterations = self._read_setting("Iterations [2] (1-100): ", "2")
-            write_paper = self._read_yes_no("Write paper? [Y/n]: ", default=True)
+            self._write_block(
+                self._ui.system("Type /cancel at any prompt to cancel setup.")
+            )
+            provider = self._read_choice(
+                "Model [claude] (claude/codex): ",
+                "claude",
+                {"claude", "codex"},
+                "Choose claude or codex.",
+                cancellable=True,
+            )
+            auto = self._read_yes_no(
+                "Auto [Y] (Y/n): ", default=True, cancellable=True
+            )
+            hitl_mode = "auto" if auto else "full"
+            iterations = self._read_integer(
+                "Iterations [2] (1-100): ",
+                2,
+                minimum=1,
+                maximum=100,
+                cancellable=True,
+            )
+            write_paper = self._read_yes_no(
+                "Write paper? [Y/n]: ", default=True, cancellable=True
+            )
             paper_style = "auto"
             if write_paper:
-                paper_style = self._read_setting(
-                    "Paper style [auto] (auto/neurips/icml/acl): ", "auto"
-                ).lower()
-            github = self._read_yes_no("Publish to GitHub? [y/N]: ", default=False)
+                paper_style = self._read_choice(
+                    "Paper style [auto] (auto/neurips/icml/acl): ",
+                    "auto",
+                    {"auto", "neurips", "icml", "acl"},
+                    "Choose auto, neurips, icml, or acl.",
+                    cancellable=True,
+                )
+            github = self._read_yes_no(
+                "Publish to GitHub? [y/N]: ", default=False, cancellable=True
+            )
             result = self._run_launcher(
                 {
                     "provider": provider,
+                    "hitl_mode": hitl_mode,
                     "iterations": iterations,
                     "write_paper": write_paper,
                     "paper_style": paper_style,
                     "github": github,
                 }
             )
+        except _HitlPromptCancelled:
+            self._write_block(
+                self._ui.system("Research setup cancelled."), blank_before=True
+            )
+            return {"status": "cancelled"}
         except (ValueError, RuntimeError) as exc:
             self._write_block(self._ui.system(str(exc), tone="error"), blank_before=True)
             return {"status": "invalid"}
+        mode_label = "Auto" if hitl_mode == "auto" else "HITL"
         self._write_block(
-            self._ui.system(f"Started {result['mode']} research.", tone="success"),
+            self._ui.system(
+                f"Started {result['mode']} research in {mode_label} mode.",
+                tone="success",
+            ),
         )
         return dict(result)
 
-    def _read_setting(self, label: str, default: str) -> str:
+    def _read_setting(
+        self,
+        label: str,
+        default: str,
+        *,
+        cancellable: bool = False,
+    ) -> str:
         if self._terminal_composer is not None:
             try:
                 value = self._terminal_composer.readline(label)
             except EOFError as exc:
                 raise RuntimeError("Terminal input closed before the prompt was answered.") from exc
             except KeyboardInterrupt as exc:
+                if cancellable:
+                    raise _HitlPromptCancelled from exc
                 raise RuntimeError("Input was cancelled.") from exc
-            return value.strip() or default
-        self._write(label, end="")
-        value = sys.stdin.readline()
-        if value == "":
-            raise RuntimeError("Terminal input closed before the prompt was answered.")
-        return value.strip() or default
+        else:
+            self._write(label, end="")
+            value = sys.stdin.readline()
+            if value == "":
+                raise RuntimeError("Terminal input closed before the prompt was answered.")
+        value = value.strip()
+        if cancellable and value.lower() == "/cancel":
+            raise _HitlPromptCancelled
+        return value or default
 
-    def _read_yes_no(self, label: str, *, default: bool) -> bool:
-        value = self._read_setting(label, "y" if default else "n").lower()
-        if value not in {"y", "yes", "n", "no"}:
-            raise ValueError("Answer yes or no.")
-        return value in {"y", "yes"}
+    def _read_choice(
+        self,
+        label: str,
+        default: str,
+        choices: set[str],
+        error: str,
+        *,
+        cancellable: bool = False,
+    ) -> str:
+        while True:
+            value = self._read_setting(
+                label, default, cancellable=cancellable
+            ).lower()
+            if value in choices:
+                return value
+            self._write_block(self._ui.system(error, tone="error"))
+
+    def _read_integer(
+        self,
+        label: str,
+        default: int,
+        *,
+        minimum: int,
+        maximum: int,
+        cancellable: bool = False,
+    ) -> int:
+        while True:
+            value = self._read_setting(
+                label, str(default), cancellable=cancellable
+            )
+            try:
+                parsed = int(value)
+            except ValueError:
+                parsed = minimum - 1
+            if minimum <= parsed <= maximum:
+                return parsed
+            self._write_block(
+                self._ui.system(
+                    f"Enter a whole number from {minimum} to {maximum}.",
+                    tone="error",
+                )
+            )
+
+    def _read_yes_no(
+        self,
+        label: str,
+        *,
+        default: bool,
+        cancellable: bool = False,
+    ) -> bool:
+        while True:
+            value = self._read_setting(
+                label,
+                "y" if default else "n",
+                cancellable=cancellable,
+            ).lower()
+            if value in {"y", "yes", "n", "no"}:
+                return value in {"y", "yes"}
+            self._write_block(
+                self._ui.system("Answer Y or N.", tone="error")
+            )
 
     def present_run_status(self, status: Dict[str, Any]) -> None:
         self._cache_live_status(status)

@@ -1,3 +1,37 @@
+{% if hitl_mode == "auto" %}
+Resolve this NeuriCo Auto HITL raised idea as manager.
+
+The worker is paused inside a runtime command. You hold final B-level authority
+for this request, and `ask_human` is unavailable. Resolve from the approved plan,
+workspace evidence, frontier, and finalized research ideas. Prefer a
+conservative, reversible, scope-preserving choice when evidence is incomplete.
+
+Finalize as B/manager with:
+{
+  "level": "B",
+  "actor": "manager",
+  "context": "neutral self-contained manager context",
+  "options": ["the worker's substantive options; omit for evidence ideas"],
+  "decision": "one selected option_id; required for decision ideas",
+  "manager_feedback": "concrete worker-facing instruction"
+}
+
+For decision ideas, preserve the worker's substantive options and select one of
+them. Do not add `CUSTOM`, routing options, or a new research direction. For
+evidence ideas, omit options and decision. Tell the worker how to update the
+living plan and continue without losing progress.
+
+Pipeline stage: {{ pipeline_stage }}
+Living plan:
+--- BEGIN UNTRUSTED PLAN ---
+{{ plan_text }}
+--- END UNTRUSTED PLAN ---
+
+Raised idea:
+--- BEGIN UNTRUSTED RAISED IDEA ---
+{{ raised_idea_json }}
+--- END UNTRUSTED RAISED IDEA ---
+{% else %}
 Resolve this NeuriCo HITL raised idea as manager.
 
 The worker is paused inside a runtime command. It cannot proceed until this
@@ -78,3 +112,4 @@ Raised idea:
 --- BEGIN UNTRUSTED RAISED IDEA ---
 {{ raised_idea_json }}
 --- END UNTRUSTED RAISED IDEA ---
+{% endif %}

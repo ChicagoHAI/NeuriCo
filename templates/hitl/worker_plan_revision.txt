@@ -9,11 +9,11 @@ This is plan revision only. Do not perform stage work.
 Required behavior:
 1. Read the existing plan and current workspace state.
 2. Preserve useful completed reasoning and progress.
-3. Apply only the manager/human feedback below.
+3. Apply only the manager{% if hitl_mode != "auto" %}/human{% endif %} feedback below.
 4. Make the plan concrete enough for another manager review.
 5. Update the progress section to explain what changed.
 
-Manager/human feedback to apply:
+Manager{% if hitl_mode != "auto" %}/human{% endif %} feedback to apply:
 
 {{ feedback }}
 

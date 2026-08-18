@@ -26,7 +26,7 @@ Revalidate the approved rule-maker deliverables after the revision:
 sealing only after final approval.
 {% endif %}
 
-If another idea requires manager/human feedback, update `{{ plan_path }}`, call
+If another idea requires manager{% if hitl_mode != "auto" %}/human{% endif %} feedback, update `{{ plan_path }}`, call
 `hitl-raise-idea`, wait for returned feedback, apply only that feedback, and
 continue in this same session.
 

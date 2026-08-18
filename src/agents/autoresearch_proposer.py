@@ -106,6 +106,7 @@ def generate_autoresearch_proposal_prompt(
     hitl_idea_reporting: bool = False,
     hitl_submission: bool = False,
     hitl_autoresearch_whiteboard: bool = False,
+    hitl_mode: str = "full",
 ) -> str:
     """
     Generate the AutoResearch proposer prompt from a curated public context.
@@ -162,6 +163,7 @@ def generate_autoresearch_proposal_prompt(
         pipeline_stage="experiment_runner",
         hitl_stage="proposal",
         allow_raised_ideas=False,
+        hitl_mode=hitl_mode,
         public_context=context,
         whiteboard_active_tips_md=whiteboard_active_tips_md,
         compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
@@ -273,6 +275,7 @@ def run_autoresearch_proposer(
         hitl_autoresearch_whiteboard=bool(
             env_extra and env_extra.get("NEURICO_HITL_AUTORESEARCH_WHITEBOARD") == "1"
         ),
+        hitl_mode=str((env_extra or {}).get("NEURICO_HITL_MODE", "full")),
     )
     prompt = append_prompt_block(prompt, prompt_suffix)
 
