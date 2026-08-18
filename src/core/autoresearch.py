@@ -75,6 +75,15 @@ PAPER_OUTPUT_PATTERNS = (
     "logs/paper_writer_prompt.txt",
     "logs/paper_writer_*.log",
 )
+# Transient dsi-slurm compute state: the remote-workspace contract file and any
+# pulled-back cluster artifacts. Both are normally cleared or archived before a
+# checkpoint; excluding them keeps a stale contract or transient artifacts out
+# of any checkpoint even if that cleanup did not run. Harmless when the compute
+# backend is not dsi-slurm (the paths simply never exist).
+DSI_SLURM_TRANSIENT_PATTERNS = (
+    ".neurico/dsi_slurm_remote_workspace.json",
+    "dsi-slurm-artifacts/",
+)
 
 CHECKPOINT_EXCLUDE_PATTERNS = (
     HIDDEN_SCORING_PATTERNS
@@ -84,6 +93,7 @@ CHECKPOINT_EXCLUDE_PATTERNS = (
     + AGENT_LOCAL_PATTERNS
     + PRIVATE_RUNTIME_PATTERNS
     + PAPER_OUTPUT_PATTERNS
+    + DSI_SLURM_TRANSIENT_PATTERNS
 )
 
 COMPARISON_EPS = 1e-6

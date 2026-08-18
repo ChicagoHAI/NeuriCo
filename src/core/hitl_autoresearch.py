@@ -370,6 +370,130 @@ def run_fresh_hitl_autoresearch_initial_node(
     )
 
 
+def construct_bootstrap_hitl_baseline(
+    *,
+    idea: Dict[str, Any],
+    idea_id: str,
+    work_dir: Path,
+    templates_dir: Path,
+    provider: str,
+    full_permissions: bool,
+    rule_maker_timeout: int,
+    scorer_timeout: int,
+    manifest_trimmer_timeout: int,
+    autoresearch_history_dir: Optional[Path],
+    hitl_mode: HitlMode | str = HitlMode.AUTO,
+    prepare_workspace: Optional[Callable[[Path], None]] = None,
+) -> InitialAutoResearchNodeResult:
+    """Seed the AutoResearch frontier root from an existing unscored workspace.
+
+    Runs the shared, mechanical bootstrap scoring pipeline (workspace manifest +
+    trimmer + bootstrap rule-maker + scorer) against a workspace a Standard run
+    already produced, then publishes the scored result as the frontier root. No
+    manager decision is needed for the baseline itself; the manager drives later
+    ``--continue-autoresearch`` iterations under the selected mode. On failure
+    the original workspace is restored.
+    """
+    from core.pipeline_orchestrator import ResearchPipelineOrchestrator
+
+    print()
+    print("=" * 80)
+    print("🔁 BOOTSTRAP HITL AUTORESEARCH BASELINE")
+    print("=" * 80)
+    print()
+
+    work_dir = Path(work_dir)
+    selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
+
+    # Idempotent: an initialized frontier already has a scored root.
+    if HitlFrontierStore(work_dir).exists():
+        return InitialAutoResearchNodeResult(
+            success=True,
+            mode="bootstrap_initial_node",
+            work_dir=str(work_dir),
+            reason="AutoResearch frontier already initialized.",
+        )
+
+    # Resume an interrupted root publication if one is pending.
+    existing_publication = HitlRuntimeState(work_dir).initial_root_publication_transition()
+    if isinstance(existing_publication, dict):
+        pipeline_result = _initial_publication_pipeline_result(work_dir, existing_publication)
+        completed = _commit_initial_root_publication(work_dir, existing_publication)
+        return _initial_node_result_from_publication(work_dir, completed, pipeline_result)
+
+    checkpoints = CheckpointManager(work_dir)
+    source = checkpoints.create_checkpoint(
+        "HITL bootstrap: original unscored workspace"
+    )
+    if prepare_workspace is not None:
+        prepare_workspace(work_dir)
+
+    try:
+        pipeline_result = ResearchPipelineOrchestrator(
+            work_dir=work_dir,
+            templates_dir=templates_dir,
+        ).run_pipeline(
+            idea=idea,
+            provider=provider,
+            full_permissions=full_permissions,
+            scoring_enabled=True,
+            bootstrap_mode=True,
+            rule_maker_timeout=rule_maker_timeout,
+            scorer_timeout=scorer_timeout,
+            manifest_trimmer_timeout=manifest_trimmer_timeout,
+        )
+    except Exception:
+        checkpoints.restore_checkpoint(
+            source.sha, clean_untracked_public=True, remove_hidden_scoring=True
+        )
+        raise
+
+    stages = pipeline_result.get("stages", {})
+    scorer_result = stages.get("scorer", {}) if isinstance(stages, dict) else {}
+    results = scorer_result.get("results") if isinstance(scorer_result, dict) else None
+    if not pipeline_result.get("success", False) or not isinstance(results, dict):
+        checkpoints.restore_checkpoint(
+            source.sha, clean_untracked_public=True, remove_hidden_scoring=True
+        )
+        return InitialAutoResearchNodeResult(
+            success=False,
+            mode="bootstrap_initial_node",
+            work_dir=str(work_dir),
+            reason="Bootstrap scoring pipeline failed.",
+            pipeline_result=pipeline_result,
+        )
+
+    # A bootstrapped workspace has no living plan; use the experiment plan if one
+    # exists, otherwise a neutral placeholder for the root node.
+    plan_path = work_dir / "plans" / "experiment_runner_plan.md"
+    plan_text = (
+        plan_path.read_text(encoding="utf-8")
+        if plan_path.is_file()
+        else (
+            "Bootstrapped baseline from an existing scored workspace. No living "
+            "plan was recorded for the original experiment; later proposals may "
+            "establish one."
+        )
+    )
+    history_root, _ = resolve_autoresearch_history_root(work_dir, autoresearch_history_dir)
+    publication = HitlRuntimeState(work_dir).begin_initial_root_publication_transition(
+        {
+            "plan_text": plan_text,
+            "objective_score": {
+                "scorer_result": scorer_result if isinstance(scorer_result, dict) else {},
+                "results": results,
+            },
+            "reason_for_acceptance": (
+                "Bootstrapped AutoResearch baseline from an existing scored workspace."
+            ),
+            "history_root": encode_hitl_history_root(work_dir, history_root),
+            "scoring_ref": str(scorer_result.get("scoring_ref", "")).strip(),
+        }
+    )
+    completed = _commit_initial_root_publication(work_dir, publication)
+    return _initial_node_result_from_publication(work_dir, completed, pipeline_result)
+
+
 def _initial_frontier_acceptance_reason(work_dir: Path) -> str:
     """Use the manager's finalized initial-score decision as root rationale."""
     for record in reversed(HitlIdeaLog(work_dir).records()):
@@ -2433,32 +2557,51 @@ def run_hitl_autoresearch_loop(
             raise RuntimeError(
                 "HITL comment-handler logs require a runtime-owned attempt directory."
             )
-        launch = build_comment_handler_launch(
-            idea=comment_idea,
-            work_dir=comment_work_dir,
-            provider=provider,
-            templates_dir=templates_dir,
-            full_permissions=full_permissions,
-            dsi_remote_info=None,
-            prompt_override=prompt_override,
-            prompt_override_only=True,
-            logs_dir=Path(logs_dir),
-            log_prefix=log_prefix,
-            env_extra=env_extra,
+        from core.dsi_slurm_artifacts import (
+            DSI_SLURM_ARTIFACTS_DIR,
+            move_dsi_slurm_artifacts,
         )
-        result = run_prebuilt_cli_agent(
-            command_argv=launch["command_argv"],
-            prompt=launch["prompt"],
-            work_dir=launch["work_dir"],
-            log_file=launch["log_file"],
-            transcript_file=launch["transcript_file"],
-            env=launch["env"],
-            timeout=comment_timeout,
-        )
-        if result.get("timed_out"):
-            result["error"] = (
-                f"AutoResearch HITL comment handler timed out after {comment_timeout}s"
+        from core.dsi_slurm_remote import dsi_slurm_remote_workspace
+
+        # Provision a dsi-cluster remote workspace for this experiment attempt.
+        # No-op unless --compute-backend is exactly dsi-slurm, so local and modal
+        # runs behave exactly as before (dsi_remote_info stays None).
+        with dsi_slurm_remote_workspace(idea, comment_work_dir) as dsi_remote_info:
+            if dsi_remote_info is not None:
+                print(f"DSI remote workspace: {dsi_remote_info['remote_root']}")
+            launch = build_comment_handler_launch(
+                idea=comment_idea,
+                work_dir=comment_work_dir,
+                provider=provider,
+                templates_dir=templates_dir,
+                full_permissions=full_permissions,
+                dsi_remote_info=dsi_remote_info,
+                prompt_override=prompt_override,
+                prompt_override_only=True,
+                logs_dir=Path(logs_dir),
+                log_prefix=log_prefix,
+                env_extra=env_extra,
             )
+            result = run_prebuilt_cli_agent(
+                command_argv=launch["command_argv"],
+                prompt=launch["prompt"],
+                work_dir=launch["work_dir"],
+                log_file=launch["log_file"],
+                transcript_file=launch["transcript_file"],
+                env=launch["env"],
+                timeout=comment_timeout,
+            )
+            if result.get("timed_out"):
+                result["error"] = (
+                    f"AutoResearch HITL comment handler timed out after {comment_timeout}s"
+                )
+            # Archive transient cluster artifacts into the runtime-owned attempt
+            # directory before the workspace is checkpointed. No-op when none exist.
+            if dsi_remote_info is not None:
+                move_dsi_slurm_artifacts(
+                    comment_work_dir,
+                    Path(logs_dir) / DSI_SLURM_ARTIFACTS_DIR,
+                )
         return result
 
     def scorer(score_work_dir: Path) -> Dict[str, Any]:

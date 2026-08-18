@@ -1639,6 +1639,45 @@ class ResearchPipelineOrchestrator:
                   "after one retry -- failing the rule maker stage.")
         return retry
 
+    def _verify_hitl_eval_contract(
+        self,
+        idea: Dict[str, Any],
+        rule_maker_result: Dict[str, Any],
+        provider: str,
+        full_permissions: bool,
+    ) -> Dict[str, Any]:
+        """Verify a manager-approved HITL scoring contract against the user's
+        declared evaluation contract.
+
+        The HITL rule-maker is worker/manager-driven, so there is no in-place
+        rule_maker re-run to retry with; the verifier acts as a hard gate. A
+        rejected contract fails the rule-maker stage (runtime then restores the
+        prior state), which keeps an invalid harness from reaching the
+        experiment runner. No-op unless the idea declares a contract. Applies to
+        both Full and Auto HITL.
+        """
+        if not has_user_eval_contract(idea):
+            return {**rule_maker_result, "success": True}
+
+        print()
+        print("─" * 80)
+        print("STAGE: EVAL VERIFIER  (HITL, user evaluation contract declared)")
+        print("─" * 80)
+        print()
+
+        verdict = run_eval_verifier(
+            idea=idea,
+            work_dir=self.work_dir,
+            provider=provider,
+            templates_dir=self.templates_dir,
+            full_permissions=full_permissions,
+        )
+        passed = bool(verdict["success"] and verdict["passed"])
+        if not passed:
+            print("⚠️  The approved scoring contract violates the user's declared "
+                  "evaluation contract -- failing the HITL rule maker stage.")
+        return {**rule_maker_result, "verification": verdict, "success": passed}
+
     def _run_rule_maker_hitl(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
     ) -> Dict[str, Any]:
@@ -1698,10 +1737,22 @@ class ResearchPipelineOrchestrator:
             result: Dict[str, Any],
             finish: Dict[str, Any],
         ) -> Dict[str, Any]:
-            self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
+            # Verify the manager-approved scoring contract against the user's
+            # declared evaluation contract before sealing, mirroring the non-HITL
+            # rule-maker. No-op unless the idea declares a contract.
+            verified = self._verify_hitl_eval_contract(
+                idea=idea,
+                rule_maker_result=result,
+                provider=provider,
+                full_permissions=full_permissions,
+            )
+            if not verified["success"]:
+                self.state.complete_stage(RULE_MAKER_STAGE, False, verified.get("outputs"))
+                return finalize_failed(verified)
+            self.state.complete_stage(RULE_MAKER_STAGE, True, verified.get("outputs"))
             discard_completed_rollback_snapshot()
             return {
-                **result,
+                **verified,
                 "success": True,
                 "hitl": True,
                 "phase": "complete",
