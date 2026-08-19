@@ -405,7 +405,21 @@ def construct_bootstrap_hitl_baseline(
     work_dir = Path(work_dir)
     selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
 
-    # Idempotent: an initialized frontier already has a scored root.
+    # Resume an interrupted (or already-finished) root publication before
+    # treating an existing frontier as complete. The frontier file is written
+    # midway through publication, at root initialization, so its presence alone
+    # does not mean the continuation metadata (history root, lineage source,
+    # last iteration), history mirroring, and cleanup have been written.
+    # Committing the pending transition is replay-safe and idempotent: it
+    # finishes a partial publication, or returns an already-completed one
+    # unchanged.
+    existing_publication = HitlRuntimeState(work_dir).initial_root_publication_transition()
+    if isinstance(existing_publication, dict):
+        pipeline_result = _initial_publication_pipeline_result(work_dir, existing_publication)
+        completed = _commit_initial_root_publication(work_dir, existing_publication)
+        return _initial_node_result_from_publication(work_dir, completed, pipeline_result)
+
+    # Idempotent: a frontier with no pending publication is already initialized.
     if HitlFrontierStore(work_dir).exists():
         return InitialAutoResearchNodeResult(
             success=True,
@@ -414,21 +428,18 @@ def construct_bootstrap_hitl_baseline(
             reason="AutoResearch frontier already initialized.",
         )
 
-    # Resume an interrupted root publication if one is pending.
-    existing_publication = HitlRuntimeState(work_dir).initial_root_publication_transition()
-    if isinstance(existing_publication, dict):
-        pipeline_result = _initial_publication_pipeline_result(work_dir, existing_publication)
-        completed = _commit_initial_root_publication(work_dir, existing_publication)
-        return _initial_node_result_from_publication(work_dir, completed, pipeline_result)
-
     checkpoints = CheckpointManager(work_dir)
     source = checkpoints.create_checkpoint(
         "HITL bootstrap: original unscored workspace"
     )
-    if prepare_workspace is not None:
-        prepare_workspace(work_dir)
 
     try:
+        # Preparation mutates provider skill directories and .gitignore, so it
+        # runs inside the restore boundary: a failure partway through rolls the
+        # workspace back to the checkpoint instead of leaving it partially
+        # prepared.
+        if prepare_workspace is not None:
+            prepare_workspace(work_dir)
         pipeline_result = ResearchPipelineOrchestrator(
             work_dir=work_dir,
             templates_dir=templates_dir,

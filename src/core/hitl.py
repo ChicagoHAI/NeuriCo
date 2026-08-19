@@ -2818,7 +2818,7 @@ class HitlRuntime:
                     )
                     next_stage = "plan" if hitl_stage == "plan" else "review"
                     feedback = (
-                        "Runtime validation found work outside the allowed HITL boundary. "
+                        "Runtime validation rejected this phase before manager review. "
                         "Correct only these issues, preserve completed permitted work, then call "
                         "hitl-finish-phase again:\n"
                         + (issue_text or "- Recheck the active HITL workspace boundary.")

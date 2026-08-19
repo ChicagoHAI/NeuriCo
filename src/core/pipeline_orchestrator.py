@@ -1639,25 +1639,32 @@ class ResearchPipelineOrchestrator:
                   "after one retry -- failing the rule maker stage.")
         return retry
 
-    def _verify_hitl_eval_contract(
+    def _evaluate_hitl_eval_contract(
         self,
         idea: Dict[str, Any],
-        rule_maker_result: Dict[str, Any],
         provider: str,
         full_permissions: bool,
     ) -> Dict[str, Any]:
-        """Verify a manager-approved HITL scoring contract against the user's
-        declared evaluation contract.
+        """Verify the HITL scoring contract against the user's declared
+        evaluation contract, before manager review.
 
-        The HITL rule-maker is worker/manager-driven, so there is no in-place
-        rule_maker re-run to retry with; the verifier acts as a hard gate. A
-        rejected contract fails the rule-maker stage (runtime then restores the
-        prior state), which keeps an invalid harness from reaching the
-        experiment runner. No-op unless the idea declares a contract. Applies to
-        both Full and Auto HITL.
+        Runs inside the rule-maker phase-finish validation flow so a rejected
+        contract becomes an informed worker revision (the completed work is
+        preserved and the concrete violations are returned to the worker),
+        mirroring how the flat rule-maker re-runs once with the findings
+        appended. Only a contract that passes verification reaches the manager.
+
+        Returns a structured outcome:
+          - {"status": "skipped"}        no declared contract, nothing to check
+          - {"status": "passed"}         contract satisfies the declaration
+          - {"status": "rejected", ...}  genuine contract violations to revise
+          - {"status": "verifier_error", ...}  the verifier could not complete
+            (crash or timeout); an infrastructure failure, distinct from a
+            contract rejection so the worker is not told to rewrite a contract
+            that was never actually judged. Applies to both Full and Auto HITL.
         """
         if not has_user_eval_contract(idea):
-            return {**rule_maker_result, "success": True}
+            return {"status": "skipped"}
 
         print()
         print("─" * 80)
@@ -1672,11 +1679,56 @@ class ResearchPipelineOrchestrator:
             templates_dir=self.templates_dir,
             full_permissions=full_permissions,
         )
-        passed = bool(verdict["success"] and verdict["passed"])
-        if not passed:
-            print("⚠️  The approved scoring contract violates the user's declared "
-                  "evaluation contract -- failing the HITL rule maker stage.")
-        return {**rule_maker_result, "verification": verdict, "success": passed}
+        if not verdict.get("success"):
+            print("⚠️  The evaluation-contract verifier could not complete -- "
+                  "returning it as an infrastructure issue, not a rejection.")
+            return {"status": "verifier_error", "verdict": verdict}
+        if verdict.get("passed"):
+            return {"status": "passed", "verdict": verdict}
+        print("⚠️  The scoring contract violates the user's declared evaluation "
+              "contract -- returning the violations to the worker for revision.")
+        return {"status": "rejected", "verdict": verdict}
+
+    @staticmethod
+    def _hitl_eval_contract_issues(outcome: Dict[str, Any]) -> Dict[str, Any]:
+        """Translate a rejected/errored eval-contract outcome into a
+        phase-finish validation result the worker can act on."""
+        verdict = outcome.get("verdict", {})
+        if outcome["status"] == "verifier_error":
+            detail = ""
+            violations = verdict.get("violations") or []
+            if violations:
+                first = violations[0]
+                detail = first.get("detail", "") if isinstance(first, dict) else str(first)
+            return {
+                "valid": False,
+                "eval_verifier_incomplete": True,
+                "issues": [
+                    "The evaluation-contract verifier could not complete"
+                    + (f" ({detail})" if detail else "")
+                    + ". This is a verifier or infrastructure failure, not a "
+                    "rejection of your scoring contract -- do not rewrite the "
+                    "contract to satisfy it. Re-run hitl-finish-phase to retry "
+                    "verification."
+                ],
+            }
+        issues = []
+        for violation in verdict.get("violations") or []:
+            if isinstance(violation, dict):
+                check = violation.get("check", "eval-contract")
+                text = f"[{check}] {violation.get('detail', '')}".strip()
+                evidence = violation.get("evidence", "")
+                if evidence:
+                    text += f" (evidence: {evidence})"
+                issues.append(text)
+            else:
+                issues.append(f"[eval-contract] {violation}")
+        if not issues:
+            issues = [
+                "[eval-contract] The scoring contract violates the user's "
+                "declared evaluation contract."
+            ]
+        return {"valid": False, "eval_contract_rejected": True, "issues": issues}
 
     def _run_rule_maker_hitl(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
@@ -1712,6 +1764,22 @@ class ResearchPipelineOrchestrator:
                 persist_hitl_required_artifact_contract(self.work_dir)
             except Exception as exc:
                 return {"valid": False, "issues": [str(exc)]}
+            # Verify the scoring contract against the user's declared
+            # evaluation contract before it can reach the manager. This runs on
+            # every phase finish whose artifacts validate, not only the review
+            # phase: the manager can approve a finish at any non-plan phase, so
+            # gating to review could let an unverified contract through. A
+            # rejection returns the violations for an informed revision
+            # (completed work preserved); a verifier that cannot complete is
+            # surfaced as an infrastructure issue rather than a contract
+            # rejection. No-op unless the idea declares a contract.
+            outcome = self._evaluate_hitl_eval_contract(
+                idea=idea,
+                provider=provider,
+                full_permissions=full_permissions,
+            )
+            if outcome["status"] in ("rejected", "verifier_error"):
+                return self._hitl_eval_contract_issues(outcome)
             return validation
 
         def restore_failed_hitl_state() -> None:
@@ -1737,22 +1805,13 @@ class ResearchPipelineOrchestrator:
             result: Dict[str, Any],
             finish: Dict[str, Any],
         ) -> Dict[str, Any]:
-            # Verify the manager-approved scoring contract against the user's
-            # declared evaluation contract before sealing, mirroring the non-HITL
-            # rule-maker. No-op unless the idea declares a contract.
-            verified = self._verify_hitl_eval_contract(
-                idea=idea,
-                rule_maker_result=result,
-                provider=provider,
-                full_permissions=full_permissions,
-            )
-            if not verified["success"]:
-                self.state.complete_stage(RULE_MAKER_STAGE, False, verified.get("outputs"))
-                return finalize_failed(verified)
-            self.state.complete_stage(RULE_MAKER_STAGE, True, verified.get("outputs"))
+            # The scoring contract was already verified against the user's
+            # declared evaluation contract in the phase-finish validator, before
+            # this manager approval, so only a verified contract reaches here.
+            self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
             discard_completed_rollback_snapshot()
             return {
-                **verified,
+                **result,
                 "success": True,
                 "hitl": True,
                 "phase": "complete",
