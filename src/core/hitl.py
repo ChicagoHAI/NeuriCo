@@ -862,6 +862,10 @@ class HitlRuntime:
         self._tool_url: str = ""
         self._tool_token: str = ""
         self._tool_context: Dict[str, Any] = {}
+        # User-declared evaluation contract, surfaced to the manager as review
+        # criteria for the rule-maker scoring finish. Set per stage by the
+        # orchestrator; None when the idea declares no contract.
+        self._scoring_review_contract: Optional[Dict[str, Any]] = None
         self._phase_finish_result: Optional[Dict[str, Any]] = None
         self._phase_finish_request_key: str = ""
         self._phase_finish_response: Optional[Dict[str, Any]] = None
@@ -2338,6 +2342,17 @@ class HitlRuntime:
             },
         )
 
+    def set_scoring_review_contract(
+        self, contract: Optional[Dict[str, Any]]
+    ) -> None:
+        """Provide the user-declared evaluation contract for manager review.
+
+        Surfaced in the rule-maker phase-finish review so the manager can
+        confirm the scoring design honors the user's declared requirements. A
+        falsy contract clears it.
+        """
+        self._scoring_review_contract = contract or None
+
     def finish_tool_phase(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self._worker_request_lock.acquire(blocking=False):
             raise HitlActiveWorkerRequestError(self._pending_worker_command())
@@ -2818,7 +2833,7 @@ class HitlRuntime:
                     )
                     next_stage = "plan" if hitl_stage == "plan" else "review"
                     feedback = (
-                        "Runtime validation rejected this phase before manager review. "
+                        "Runtime validation found work outside the allowed HITL boundary. "
                         "Correct only these issues, preserve completed permitted work, then call "
                         "hitl-finish-phase again:\n"
                         + (issue_text or "- Recheck the active HITL workspace boundary.")
@@ -2976,6 +2991,7 @@ class HitlRuntime:
                 allow_scoring_approval=bool(self._tool_context.get("allow_scoring_approval"))
                 and hitl_stage in {"execution", "review"},
                 scoring_handoff_context=dict(self._tool_context.get("provenance") or {}),
+                declared_eval_contract=self._scoring_review_contract,
                 on_finalize=persist_phase_review,
                 on_scoring_approval=persist_scoring_approval,
                 hitl_mode=self.hitl_mode,

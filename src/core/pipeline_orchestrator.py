@@ -30,6 +30,7 @@ import time
 
 from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
 from agents.eval_verifier import (
+    extract_eval_contract,
     format_violations_for_retry,
     has_user_eval_contract,
     run_eval_verifier,
@@ -1639,97 +1640,6 @@ class ResearchPipelineOrchestrator:
                   "after one retry -- failing the rule maker stage.")
         return retry
 
-    def _evaluate_hitl_eval_contract(
-        self,
-        idea: Dict[str, Any],
-        provider: str,
-        full_permissions: bool,
-    ) -> Dict[str, Any]:
-        """Verify the HITL scoring contract against the user's declared
-        evaluation contract, before manager review.
-
-        Runs inside the rule-maker phase-finish validation flow so a rejected
-        contract becomes an informed worker revision (the completed work is
-        preserved and the concrete violations are returned to the worker),
-        mirroring how the flat rule-maker re-runs once with the findings
-        appended. Only a contract that passes verification reaches the manager.
-
-        Returns a structured outcome:
-          - {"status": "skipped"}        no declared contract, nothing to check
-          - {"status": "passed"}         contract satisfies the declaration
-          - {"status": "rejected", ...}  genuine contract violations to revise
-          - {"status": "verifier_error", ...}  the verifier could not complete
-            (crash or timeout); an infrastructure failure, distinct from a
-            contract rejection so the worker is not told to rewrite a contract
-            that was never actually judged. Applies to both Full and Auto HITL.
-        """
-        if not has_user_eval_contract(idea):
-            return {"status": "skipped"}
-
-        print()
-        print("─" * 80)
-        print("STAGE: EVAL VERIFIER  (HITL, user evaluation contract declared)")
-        print("─" * 80)
-        print()
-
-        verdict = run_eval_verifier(
-            idea=idea,
-            work_dir=self.work_dir,
-            provider=provider,
-            templates_dir=self.templates_dir,
-            full_permissions=full_permissions,
-        )
-        if not verdict.get("success"):
-            print("⚠️  The evaluation-contract verifier could not complete -- "
-                  "returning it as an infrastructure issue, not a rejection.")
-            return {"status": "verifier_error", "verdict": verdict}
-        if verdict.get("passed"):
-            return {"status": "passed", "verdict": verdict}
-        print("⚠️  The scoring contract violates the user's declared evaluation "
-              "contract -- returning the violations to the worker for revision.")
-        return {"status": "rejected", "verdict": verdict}
-
-    @staticmethod
-    def _hitl_eval_contract_issues(outcome: Dict[str, Any]) -> Dict[str, Any]:
-        """Translate a rejected/errored eval-contract outcome into a
-        phase-finish validation result the worker can act on."""
-        verdict = outcome.get("verdict", {})
-        if outcome["status"] == "verifier_error":
-            detail = ""
-            violations = verdict.get("violations") or []
-            if violations:
-                first = violations[0]
-                detail = first.get("detail", "") if isinstance(first, dict) else str(first)
-            return {
-                "valid": False,
-                "eval_verifier_incomplete": True,
-                "issues": [
-                    "The evaluation-contract verifier could not complete"
-                    + (f" ({detail})" if detail else "")
-                    + ". This is a verifier or infrastructure failure, not a "
-                    "rejection of your scoring contract -- do not rewrite the "
-                    "contract to satisfy it. Re-run hitl-finish-phase to retry "
-                    "verification."
-                ],
-            }
-        issues = []
-        for violation in verdict.get("violations") or []:
-            if isinstance(violation, dict):
-                check = violation.get("check", "eval-contract")
-                text = f"[{check}] {violation.get('detail', '')}".strip()
-                evidence = violation.get("evidence", "")
-                if evidence:
-                    text += f" (evidence: {evidence})"
-                issues.append(text)
-            else:
-                issues.append(f"[eval-contract] {violation}")
-        if not issues:
-            issues = [
-                "[eval-contract] The scoring contract violates the user's "
-                "declared evaluation contract."
-            ]
-        return {"valid": False, "eval_contract_rejected": True, "issues": issues}
-
     def _run_rule_maker_hitl(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
     ) -> Dict[str, Any]:
@@ -1742,6 +1652,13 @@ class ResearchPipelineOrchestrator:
 
         self.state.start_stage(RULE_MAKER_STAGE)
         runtime = self._create_hitl_runtime(RULE_MAKER_STAGE)
+        # Hand the manager the user's declared evaluation contract as review
+        # criteria. Conformance to the declared contract is a semantic judgment,
+        # so it belongs to the manager (who has authority and recovery), not to
+        # a second model agent in the mechanical validation layer. No-op unless
+        # the idea declares a contract.
+        if has_user_eval_contract(idea):
+            runtime.set_scoring_review_contract(extract_eval_contract(idea))
         worker_prompt_contexts = {
             phase: generate_rule_maker_prompt(
                 idea,
@@ -1764,22 +1681,6 @@ class ResearchPipelineOrchestrator:
                 persist_hitl_required_artifact_contract(self.work_dir)
             except Exception as exc:
                 return {"valid": False, "issues": [str(exc)]}
-            # Verify the scoring contract against the user's declared
-            # evaluation contract before it can reach the manager. This runs on
-            # every phase finish whose artifacts validate, not only the review
-            # phase: the manager can approve a finish at any non-plan phase, so
-            # gating to review could let an unverified contract through. A
-            # rejection returns the violations for an informed revision
-            # (completed work preserved); a verifier that cannot complete is
-            # surfaced as an infrastructure issue rather than a contract
-            # rejection. No-op unless the idea declares a contract.
-            outcome = self._evaluate_hitl_eval_contract(
-                idea=idea,
-                provider=provider,
-                full_permissions=full_permissions,
-            )
-            if outcome["status"] in ("rejected", "verifier_error"):
-                return self._hitl_eval_contract_issues(outcome)
             return validation
 
         def restore_failed_hitl_state() -> None:

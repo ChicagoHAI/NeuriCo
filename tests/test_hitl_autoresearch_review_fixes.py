@@ -1,12 +1,11 @@
 """Focused tests for the PR #168 review fixes.
 
-Covers the three paths raised in review:
-  1. eval-contract verification runs in the rule-maker phase-finish validation
-     flow (before manager review): a rejection becomes an informed worker
-     revision, and a verifier that cannot complete is reported distinctly from
-     a contract rejection.
+Covers:
+  1. the manager, not a second model agent, owns eval-contract conformance:
+     the runtime carries the user's declared contract and the rule-maker
+     phase-finish review surfaces it to the manager as review criteria;
   2. the bootstrap baseline resumes an interrupted root publication instead of
-     reporting a mid-publication frontier as complete.
+     reporting a mid-publication frontier as complete;
   3. a workspace-preparation failure restores the original workspace checkpoint.
 
 Run: python -m pytest tests/test_hitl_autoresearch_review_fixes.py
@@ -20,75 +19,92 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import core.hitl_autoresearch as har  # noqa: E402
+from core.hitl import HitlRuntime, _load_hitl_template  # noqa: E402
 from core.hitl_autoresearch import (  # noqa: E402
     InitialAutoResearchNodeResult,
     construct_bootstrap_hitl_baseline,
 )
-from core.pipeline_orchestrator import ResearchPipelineOrchestrator  # noqa: E402
+from agents.eval_verifier import extract_eval_contract, has_user_eval_contract  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
-# 1. eval-contract verification in the validation flow
+# 1. manager owns eval-contract conformance (no second verifier agent)
 # --------------------------------------------------------------------------- #
 
-def _orchestrator(tmp_path):
-    orch = ResearchPipelineOrchestrator.__new__(ResearchPipelineOrchestrator)
-    orch.work_dir = tmp_path
-    orch.templates_dir = tmp_path / "templates"
-    return orch
+def test_runtime_scoring_review_contract_set_and_clear():
+    runtime = HitlRuntime.__new__(HitlRuntime)
+    runtime._scoring_review_contract = None
+    runtime.set_scoring_review_contract({"evaluation": {"metric": "F1"}})
+    assert runtime._scoring_review_contract == {"evaluation": {"metric": "F1"}}
+    # A falsy contract clears it, so non-declaring ideas surface nothing.
+    runtime.set_scoring_review_contract({})
+    assert runtime._scoring_review_contract is None
+    runtime.set_scoring_review_contract(None)
+    assert runtime._scoring_review_contract is None
 
 
-def test_eval_outcome_skipped_without_contract(tmp_path, monkeypatch):
-    po = __import__("core.pipeline_orchestrator", fromlist=["x"])
-    monkeypatch.setattr(po, "has_user_eval_contract", lambda idea: False)
-    outcome = _orchestrator(tmp_path)._evaluate_hitl_eval_contract(
-        idea={}, provider="claude", full_permissions=True)
-    assert outcome["status"] == "skipped"
+def test_declared_contract_detection_matches_extractor():
+    # The manager's has_declared_eval_contract mirrors extract_eval_contract:
+    # an idea that declares evaluation is detected, a bare idea is not.
+    declaring = {"idea": {"evaluation": {"metrics": [{"name": "acc", "target": ">= 0.9"}]}}}
+    bare = {"idea": {"title": "no evaluation section"}}
+
+    assert has_user_eval_contract(declaring) is True
+    contract = extract_eval_contract(declaring)
+    assert bool(contract.get("evaluation") or contract.get("mandated_functions"))
+
+    assert has_user_eval_contract(bare) is False
+    empty = extract_eval_contract(bare)
+    assert not (empty.get("evaluation") or empty.get("mandated_functions"))
 
 
-def test_eval_outcome_passed(tmp_path, monkeypatch):
-    po = __import__("core.pipeline_orchestrator", fromlist=["x"])
-    monkeypatch.setattr(po, "has_user_eval_contract", lambda idea: True)
-    monkeypatch.setattr(po, "run_eval_verifier",
-                        lambda **kw: {"success": True, "passed": True, "violations": []})
-    outcome = _orchestrator(tmp_path)._evaluate_hitl_eval_contract(
-        idea={"evaluation": {}}, provider="claude", full_permissions=True)
-    assert outcome["status"] == "passed"
+def _render_review(**overrides):
+    kwargs = dict(
+        pipeline_stage="rule_maker",
+        hitl_stage="review",
+        plan_text="plan",
+        finish_summary="summary",
+        related_artifacts_json="[]",
+        requires_human_approval=False,
+        allow_scoring_approval=False,
+        is_rule_maker=True,
+        has_declared_eval_contract=True,
+        declared_eval_contract_json='{"evaluation": {"primary_metric": "F1"}}',
+        hitl_mode="auto",
+    )
+    kwargs.update(overrides)
+    return _load_hitl_template("manager_review_phase_finish.txt", **kwargs)
 
 
-def test_eval_outcome_rejected_returns_violations(tmp_path, monkeypatch):
-    po = __import__("core.pipeline_orchestrator", fromlist=["x"])
-    monkeypatch.setattr(po, "has_user_eval_contract", lambda idea: True)
-    monkeypatch.setattr(po, "run_eval_verifier", lambda **kw: {
-        "success": True, "passed": False,
-        "violations": [{"check": "metric", "detail": "uses accuracy not F1"}]})
-    outcome = _orchestrator(tmp_path)._evaluate_hitl_eval_contract(
-        idea={"evaluation": {}}, provider="claude", full_permissions=True)
-    assert outcome["status"] == "rejected"
-
-    result = ResearchPipelineOrchestrator._hitl_eval_contract_issues(outcome)
-    assert result["valid"] is False
-    assert result["eval_contract_rejected"] is True
-    assert any("metric" in issue and "F1" in issue for issue in result["issues"])
+def test_review_template_surfaces_declared_contract_for_rule_maker():
+    rendered = _render_review()
+    assert "USER-DECLARED EVALUATION CONTRACT" in rendered
+    assert '"primary_metric": "F1"' in rendered
+    assert "conformance check" in rendered
+    # It must be framed as conformance, distinct from judging merit.
+    assert "not a judgment of scientific merit" in rendered
 
 
-def test_eval_outcome_verifier_error_is_distinct(tmp_path, monkeypatch):
-    po = __import__("core.pipeline_orchestrator", fromlist=["x"])
-    monkeypatch.setattr(po, "has_user_eval_contract", lambda idea: True)
-    monkeypatch.setattr(po, "run_eval_verifier", lambda **kw: {
-        "success": False, "passed": False,
-        "violations": [{"detail": "verifier agent timed out"}]})
-    outcome = _orchestrator(tmp_path)._evaluate_hitl_eval_contract(
-        idea={"evaluation": {}}, provider="claude", full_permissions=True)
-    assert outcome["status"] == "verifier_error"
+def test_review_template_hides_contract_block_when_none_declared():
+    rendered = _render_review(has_declared_eval_contract=False)
+    assert "USER-DECLARED EVALUATION CONTRACT" not in rendered
+    # The ordinary rule-maker design-review guidance still renders.
+    assert "rule-maker review" in rendered
 
-    result = ResearchPipelineOrchestrator._hitl_eval_contract_issues(outcome)
-    assert result["valid"] is False
-    # A verifier crash must not be reported as a contract rejection.
-    assert "eval_contract_rejected" not in result
-    assert result["eval_verifier_incomplete"] is True
-    joined = " ".join(result["issues"]).lower()
-    assert "infrastructure" in joined and "do not rewrite" in joined
+
+def test_review_template_contract_block_is_scoped_to_rule_maker():
+    # A non-rule-maker finish never shows the contract block even if a contract
+    # was (defensively) passed, because the block is nested in is_rule_maker.
+    rendered = _render_review(
+        pipeline_stage="experiment_runner", is_rule_maker=False)
+    assert "USER-DECLARED EVALUATION CONTRACT" not in rendered
+
+
+def test_review_template_contract_block_skipped_at_plan_finish():
+    # At the plan finish the scoring design does not exist yet, so the
+    # conformance block must not render even for a rule-maker with a contract.
+    rendered = _render_review(hitl_stage="plan")
+    assert "USER-DECLARED EVALUATION CONTRACT" not in rendered
 
 
 # --------------------------------------------------------------------------- #
@@ -114,70 +130,12 @@ class _FakeFrontier:
         return self._exists
 
 
-def test_bootstrap_resumes_pending_publication_when_frontier_exists(
-        tmp_path, monkeypatch):
-    pending = {"status": "root_initialized", "objective_score": {}}
-    monkeypatch.setattr(har, "_adopt_run_hitl_mode",
-                        lambda work_dir, hitl_mode: har.HitlMode.AUTO)
-    # Frontier file already present (written mid-publication) AND a transition
-    # is still pending -- the fix must resume rather than early-return.
-    monkeypatch.setattr(har, "HitlRuntimeState",
-                        lambda wd: _FakeRuntimeState(wd, pending=pending))
-    monkeypatch.setattr(har, "HitlFrontierStore",
-                        lambda wd: _FakeFrontier(wd, exists=True))
-    committed = {}
-    monkeypatch.setattr(har, "_initial_publication_pipeline_result",
-                        lambda wd, t: {"success": True})
-    monkeypatch.setattr(har, "_commit_initial_root_publication",
-                        lambda wd, t: committed.setdefault("called", True) or t)
-    sentinel = InitialAutoResearchNodeResult(
-        success=True, mode="bootstrap_initial_node",
-        work_dir=str(tmp_path), reason="resumed")
-    monkeypatch.setattr(har, "_initial_node_result_from_publication",
-                        lambda wd, t, pr: sentinel)
-
-    result = construct_bootstrap_hitl_baseline(
-        idea={}, idea_id="i1", work_dir=tmp_path, templates_dir=tmp_path,
-        provider="claude", full_permissions=True, rule_maker_timeout=1,
-        scorer_timeout=1, manifest_trimmer_timeout=1,
-        autoresearch_history_dir=None)
-
-    assert committed.get("called") is True
-    assert result is sentinel
-    assert result.reason != "AutoResearch frontier already initialized."
-
-
-def test_bootstrap_reports_complete_only_without_pending_publication(
-        tmp_path, monkeypatch):
-    monkeypatch.setattr(har, "_adopt_run_hitl_mode",
-                        lambda work_dir, hitl_mode: har.HitlMode.AUTO)
-    monkeypatch.setattr(har, "HitlRuntimeState",
-                        lambda wd: _FakeRuntimeState(wd, pending=None))
-    monkeypatch.setattr(har, "HitlFrontierStore",
-                        lambda wd: _FakeFrontier(wd, exists=True))
-    monkeypatch.setattr(har, "_commit_initial_root_publication",
-                        lambda wd, t: pytest.fail("must not commit"))
-
-    result = construct_bootstrap_hitl_baseline(
-        idea={}, idea_id="i1", work_dir=tmp_path, templates_dir=tmp_path,
-        provider="claude", full_permissions=True, rule_maker_timeout=1,
-        scorer_timeout=1, manifest_trimmer_timeout=1,
-        autoresearch_history_dir=None)
-
-    assert result.success is True
-    assert result.reason == "AutoResearch frontier already initialized."
-
-
-# --------------------------------------------------------------------------- #
-# 3. workspace-preparation failure restores the checkpoint
-# --------------------------------------------------------------------------- #
-
 class _FakeCheckpoint:
     sha = "deadbeef"
 
 
 class _FakeCheckpointManager:
-    restored = []
+    restored: list = []
 
     def __init__(self, work_dir):
         pass
@@ -188,105 +146,6 @@ class _FakeCheckpointManager:
     def restore_checkpoint(self, sha, **kwargs):
         _FakeCheckpointManager.restored.append((sha, kwargs))
 
-
-def test_bootstrap_restores_when_preparation_fails(tmp_path, monkeypatch):
-    _FakeCheckpointManager.restored.clear()
-    monkeypatch.setattr(har, "_adopt_run_hitl_mode",
-                        lambda work_dir, hitl_mode: har.HitlMode.AUTO)
-    monkeypatch.setattr(har, "HitlRuntimeState",
-                        lambda wd: _FakeRuntimeState(wd, pending=None))
-    monkeypatch.setattr(har, "HitlFrontierStore",
-                        lambda wd: _FakeFrontier(wd, exists=False))
-    monkeypatch.setattr(har, "CheckpointManager", _FakeCheckpointManager)
-
-    def failing_prepare(work_dir):
-        raise RuntimeError("gitignore write failed")
-
-    with pytest.raises(RuntimeError, match="gitignore write failed"):
-        construct_bootstrap_hitl_baseline(
-            idea={}, idea_id="i1", work_dir=tmp_path, templates_dir=tmp_path,
-            provider="claude", full_permissions=True, rule_maker_timeout=1,
-            scorer_timeout=1, manifest_trimmer_timeout=1,
-            autoresearch_history_dir=None, prepare_workspace=failing_prepare)
-
-    assert _FakeCheckpointManager.restored, "workspace was not restored"
-    sha, kwargs = _FakeCheckpointManager.restored[-1]
-    assert sha == "deadbeef"
-    assert kwargs.get("clean_untracked_public") is True
-    assert kwargs.get("remove_hidden_scoring") is True
-
-
-# --------------------------------------------------------------------------- #
-# 1b. eval-contract issue translation edge cases (worker-facing feedback)
-# --------------------------------------------------------------------------- #
-
-def _issues(status, violations):
-    return ResearchPipelineOrchestrator._hitl_eval_contract_issues(
-        {"status": status, "verdict": {"violations": violations}})
-
-
-def test_eval_issues_rejection_empty_violations_uses_fallback():
-    result = _issues("rejected", [])
-    assert result["valid"] is False
-    assert result["eval_contract_rejected"] is True
-    assert len(result["issues"]) == 1
-    assert "declared evaluation contract" in result["issues"][0]
-
-
-def test_eval_issues_rejection_multiple_with_evidence_preserves_order():
-    result = _issues("rejected", [
-        {"check": "metric", "detail": "accuracy not F1", "evidence": "eval.py:12"},
-        {"check": "split", "detail": "train reused as test"},
-    ])
-    assert len(result["issues"]) == 2
-    assert result["issues"][0].startswith("[metric]")
-    assert "evidence: eval.py:12" in result["issues"][0]
-    assert result["issues"][1] == "[split] train reused as test"
-
-
-def test_eval_issues_rejection_string_violation():
-    result = _issues("rejected", ["freeform note"])
-    assert result["issues"] == ["[eval-contract] freeform note"]
-
-
-def test_eval_issues_rejection_missing_check_defaults_label():
-    result = _issues("rejected", [{"detail": "no check field"}])
-    assert result["issues"] == ["[eval-contract] no check field"]
-
-
-def test_eval_issues_verifier_error_has_no_parenthetical_without_detail():
-    result = _issues("verifier_error", [])
-    assert result["eval_verifier_incomplete"] is True
-    assert "eval_contract_rejected" not in result
-    text = result["issues"][0].lower()
-    assert "could not complete." in text
-    assert "do not rewrite" in text
-    assert "infrastructure" in text
-
-
-def test_eval_issues_verifier_error_includes_detail():
-    result = _issues("verifier_error", [{"detail": "timeout after 600s"}])
-    assert "(timeout after 600s)" in result["issues"][0]
-
-
-def test_eval_issues_are_finish_handler_shaped():
-    # The phase-finish handler joins issues into "- {issue}" feedback, so every
-    # issue must be a non-empty string and the result must carry `valid=False`.
-    for status, violations in (
-        ("rejected", [{"detail": "x"}]),
-        ("rejected", []),
-        ("verifier_error", []),
-        ("verifier_error", [{"detail": "y"}]),
-    ):
-        result = _issues(status, violations)
-        assert result["valid"] is False
-        assert isinstance(result["issues"], list) and result["issues"]
-        assert all(isinstance(i, str) and i.strip() for i in result["issues"])
-
-
-# --------------------------------------------------------------------------- #
-# 2b. bootstrap: pipeline outcomes and restore boundary
-# --------------------------------------------------------------------------- #
 
 class _FakeOrchestrator:
     built: list = []
@@ -320,6 +179,66 @@ def _run_bootstrap(tmp_path, **overrides):
     return construct_bootstrap_hitl_baseline(**kwargs)
 
 
+def test_bootstrap_resumes_pending_publication_when_frontier_exists(
+        tmp_path, monkeypatch):
+    pending = {"status": "root_initialized", "objective_score": {}}
+    committed = {}
+    _patch_bootstrap_env(monkeypatch, pending=pending, exists=True)
+    monkeypatch.setattr(har, "_initial_publication_pipeline_result",
+                        lambda wd, t: {"success": True})
+    monkeypatch.setattr(har, "_commit_initial_root_publication",
+                        lambda wd, t: committed.setdefault("called", True) or t)
+    sentinel = InitialAutoResearchNodeResult(
+        success=True, mode="bootstrap_initial_node",
+        work_dir=str(tmp_path), reason="resumed")
+    monkeypatch.setattr(har, "_initial_node_result_from_publication",
+                        lambda wd, t, pr: sentinel)
+
+    result = _run_bootstrap(tmp_path)
+
+    assert committed.get("called") is True
+    assert result is sentinel
+    assert result.reason != "AutoResearch frontier already initialized."
+
+
+def test_bootstrap_reports_complete_only_without_pending_publication(
+        tmp_path, monkeypatch):
+    _patch_bootstrap_env(monkeypatch, pending=None, exists=True)
+    monkeypatch.setattr(har, "_commit_initial_root_publication",
+                        lambda wd, t: pytest.fail("must not commit"))
+
+    result = _run_bootstrap(tmp_path)
+
+    assert result.success is True
+    assert result.reason == "AutoResearch frontier already initialized."
+
+
+def test_bootstrap_resumes_pending_even_without_frontier_file(tmp_path, monkeypatch):
+    # Interrupted before the frontier file was written: transition pending,
+    # frontier absent. The resume must still finish the publication.
+    pending = {"status": "checkpoint_created", "objective_score": {}}
+    committed = {}
+    _patch_bootstrap_env(monkeypatch, pending=pending, exists=False)
+    monkeypatch.setattr(har, "_initial_publication_pipeline_result",
+                        lambda wd, t: {"success": True})
+    monkeypatch.setattr(har, "_commit_initial_root_publication",
+                        lambda wd, t: committed.setdefault("called", True) or t)
+    sentinel = InitialAutoResearchNodeResult(
+        success=True, mode="bootstrap_initial_node",
+        work_dir=str(tmp_path), reason="resumed")
+    monkeypatch.setattr(har, "_initial_node_result_from_publication",
+                        lambda wd, t, pr: sentinel)
+
+    result = _run_bootstrap(tmp_path)
+
+    assert committed.get("called") is True
+    assert result is sentinel
+
+
+# --------------------------------------------------------------------------- #
+# 3. bootstrap restore boundary
+# --------------------------------------------------------------------------- #
+
 def test_bootstrap_restores_when_pipeline_scoring_fails(tmp_path, monkeypatch):
     _FakeCheckpointManager.restored.clear()
     _FakeOrchestrator.built.clear()
@@ -350,6 +269,10 @@ def test_bootstrap_preparation_failure_never_builds_pipeline(tmp_path, monkeypat
 
     assert not _FakeOrchestrator.built, "pipeline must not run after prep failure"
     assert _FakeCheckpointManager.restored, "prep failure must restore"
+    sha, kwargs = _FakeCheckpointManager.restored[-1]
+    assert sha == "deadbeef"
+    assert kwargs.get("clean_untracked_public") is True
+    assert kwargs.get("remove_hidden_scoring") is True
 
 
 def test_bootstrap_success_runs_prepare_inside_try_and_publishes(tmp_path, monkeypatch):
@@ -392,31 +315,4 @@ def test_bootstrap_success_runs_prepare_inside_try_and_publishes(tmp_path, monke
     assert not _FakeCheckpointManager.restored, "success must not restore"
     assert published, "a scored root must be published"
     assert published[0]["history_root"] == "encoded-root"
-    assert result is sentinel
-
-
-def test_bootstrap_resumes_pending_even_without_frontier_file(tmp_path, monkeypatch):
-    # Interrupted before the frontier file was written: transition pending,
-    # frontier absent. The resume must still finish the publication.
-    pending = {"status": "checkpoint_created", "objective_score": {}}
-    committed = {}
-    monkeypatch.setattr(har, "_adopt_run_hitl_mode",
-                        lambda work_dir, hitl_mode: har.HitlMode.AUTO)
-    monkeypatch.setattr(har, "HitlRuntimeState",
-                        lambda wd: _FakeRuntimeState(wd, pending=pending))
-    monkeypatch.setattr(har, "HitlFrontierStore",
-                        lambda wd: _FakeFrontier(wd, exists=False))
-    monkeypatch.setattr(har, "_initial_publication_pipeline_result",
-                        lambda wd, t: {"success": True})
-    monkeypatch.setattr(har, "_commit_initial_root_publication",
-                        lambda wd, t: committed.setdefault("called", True) or t)
-    sentinel = InitialAutoResearchNodeResult(
-        success=True, mode="bootstrap_initial_node",
-        work_dir=str(tmp_path), reason="resumed")
-    monkeypatch.setattr(har, "_initial_node_result_from_publication",
-                        lambda wd, t, pr: sentinel)
-
-    result = _run_bootstrap(tmp_path)
-
-    assert committed.get("called") is True
     assert result is sentinel
