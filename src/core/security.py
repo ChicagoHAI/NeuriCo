@@ -72,6 +72,8 @@ API_KEY_PATTERNS = [
 
     # Google/Gemini API keys
     (r'AIza[A-Za-z0-9_-]{35,}', '[REDACTED_GOOGLE_KEY]'),
+    (r'ya29\.[A-Za-z0-9_-]{20,}', '[REDACTED_GOOGLE_OAUTH_ACCESS]'),
+    (r'1//0[A-Za-z0-9_-]{20,}', '[REDACTED_GOOGLE_OAUTH_REFRESH]'),
 
     # AWS keys
     (r'AKIA[A-Z0-9]{16}', '[REDACTED_AWS_ACCESS_KEY]'),
