@@ -15,7 +15,12 @@ import subprocess
 import shlex
 from datetime import datetime
 
-from core.security import sanitize_logs_directory
+from core.security import (
+    SanitizationError,
+    contains_sensitive_data,
+    sanitize_file,
+    sanitize_logs_directory,
+)
 
 try:
     from github import Github, GithubException, Auth
@@ -289,6 +294,11 @@ class GitHubManager:
             # Add all files
             repo.git.add(A=True)
 
+            sanitized_files = self._sanitize_staged_files(repo, repo_path)
+            if sanitized_files:
+                print(f"   ✓ Sanitized {len(sanitized_files)} staged file(s)")
+            self._verify_staged_files_sanitized(repo)
+
             # Unstage files exceeding GitHub's 100MB file size limit
             large_files = self._unstage_large_files(repo, repo_path)
             if large_files:
@@ -325,6 +335,57 @@ class GitHubManager:
 
         except GitCommandError as e:
             raise RuntimeError(f"Failed to commit and push: {e}")
+        except SanitizationError as e:
+            raise RuntimeError(f"Refusing to commit unsafe staged content: {e}") from e
+
+    def _staged_paths(self, repo: 'Repo') -> list:
+        """Return staged paths, excluding deleted entries."""
+        staged_output = repo.git.diff('--cached', '--name-only', '--diff-filter=ACMR')
+        if not staged_output.strip():
+            return []
+        return [path for path in staged_output.splitlines() if path.strip()]
+
+    def _sanitize_staged_files(self, repo: 'Repo', repo_path: Path) -> list:
+        """
+        Sanitize staged text files and re-stage files modified by the sanitizer.
+
+        This is the GitHub commit boundary: if a staged file cannot be safely
+        read or rewritten, fail closed instead of committing possibly unsafe
+        content.
+        """
+        sanitized_files = []
+
+        for relative_path in self._staged_paths(repo):
+            full_path = Path(repo_path) / relative_path
+
+            if sanitize_file(full_path, strict=True):
+                repo.git.add('--', relative_path)
+                sanitized_files.append(relative_path)
+
+        return sanitized_files
+
+    def _verify_staged_files_sanitized(self, repo: 'Repo') -> None:
+        """Fail if any recognized secret remains in staged textual content."""
+        for relative_path in self._staged_paths(repo):
+            try:
+                result = subprocess.run(
+                    ["git", "show", f":{relative_path}"],
+                    cwd=repo.working_tree_dir,
+                    capture_output=True,
+                    check=True,
+                )
+                staged_content = result.stdout.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            except (GitCommandError, subprocess.CalledProcessError) as e:
+                raise SanitizationError(
+                    f"Could not inspect staged content for {relative_path}: {e}"
+                ) from e
+
+            if contains_sensitive_data(staged_content):
+                raise SanitizationError(
+                    f"Recognized credential remains staged in {relative_path}"
+                )
 
     def _unstage_large_files(self, repo: 'Repo', repo_path: Path) -> list:
         """
