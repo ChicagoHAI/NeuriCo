@@ -1635,6 +1635,7 @@ def main():
             ("--hitl-autoresearch", bool(args.hitl_autoresearch)),
             ("--hitl-continue-autoresearch", bool(args.hitl_continue_autoresearch)),
             ("--bootstrap-autoresearch-baseline", args.bootstrap_autoresearch_baseline),
+            ("--hitl-bootstrap-autoresearch-baseline", args.hitl_bootstrap_autoresearch_baseline),
         )
         if enabled
     ]

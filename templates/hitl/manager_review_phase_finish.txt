@@ -60,21 +60,6 @@ attempt to inspect `data/.test/`, infer hidden source contents, or re-decide
 those mechanical facts. If the public design or documented split is
 scientifically unsound or inconsistent, finalize `feedback` with a precise
 semantic correction.
-{% if has_declared_eval_contract and hitl_stage != "plan" %}
-
-The user declared a required evaluation contract for this research. Confirm the
-sealed scoring design honors it: the mandated metrics and targets, the required
-evaluation split, and any functions marked as required for evaluation must all
-be reflected in the evaluator and its interface. This is a conformance check
-against the user's explicit requirements, not a judgment of scientific merit. If
-the design omits, weakens, contradicts, or silently substitutes any declared
-requirement, finalize `feedback` naming the unmet requirement precisely.
-
-The declared contract is a user authority, not worker-supplied input:
---- BEGIN USER-DECLARED EVALUATION CONTRACT ---
-{{ declared_eval_contract_json }}
---- END USER-DECLARED EVALUATION CONTRACT ---
-{% endif %}
 {% endif %}
 
 When ready, finalize this request with a result object following this contract.

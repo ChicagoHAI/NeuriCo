@@ -1,12 +1,11 @@
-"""Focused tests for the PR #168 review fixes.
+"""Focused tests for the PR #168 bootstrap-baseline review fixes.
 
 Covers:
-  1. the manager, not a second model agent, owns eval-contract conformance:
-     the runtime carries the user's declared contract and the rule-maker
-     phase-finish review surfaces it to the manager as review criteria;
-  2. the bootstrap baseline resumes an interrupted root publication instead of
+  1. the bootstrap baseline resumes an interrupted root publication instead of
      reporting a mid-publication frontier as complete;
-  3. a workspace-preparation failure restores the original workspace checkpoint.
+  2. the original checkpoint stays the recovery boundary until the publication
+     transition is durably recorded: preparation, scoring, and the transition
+     handoff all restore on failure, while the replay-forward commit does not.
 
 Run: python -m pytest tests/test_hitl_autoresearch_review_fixes.py
 """
@@ -19,96 +18,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import core.hitl_autoresearch as har  # noqa: E402
-from core.hitl import HitlRuntime, _load_hitl_template  # noqa: E402
 from core.hitl_autoresearch import (  # noqa: E402
     InitialAutoResearchNodeResult,
     construct_bootstrap_hitl_baseline,
 )
-from agents.eval_verifier import extract_eval_contract, has_user_eval_contract  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
-# 1. manager owns eval-contract conformance (no second verifier agent)
-# --------------------------------------------------------------------------- #
-
-def test_runtime_scoring_review_contract_set_and_clear():
-    runtime = HitlRuntime.__new__(HitlRuntime)
-    runtime._scoring_review_contract = None
-    runtime.set_scoring_review_contract({"evaluation": {"metric": "F1"}})
-    assert runtime._scoring_review_contract == {"evaluation": {"metric": "F1"}}
-    # A falsy contract clears it, so non-declaring ideas surface nothing.
-    runtime.set_scoring_review_contract({})
-    assert runtime._scoring_review_contract is None
-    runtime.set_scoring_review_contract(None)
-    assert runtime._scoring_review_contract is None
-
-
-def test_declared_contract_detection_matches_extractor():
-    # The manager's has_declared_eval_contract mirrors extract_eval_contract:
-    # an idea that declares evaluation is detected, a bare idea is not.
-    declaring = {"idea": {"evaluation": {"metrics": [{"name": "acc", "target": ">= 0.9"}]}}}
-    bare = {"idea": {"title": "no evaluation section"}}
-
-    assert has_user_eval_contract(declaring) is True
-    contract = extract_eval_contract(declaring)
-    assert bool(contract.get("evaluation") or contract.get("mandated_functions"))
-
-    assert has_user_eval_contract(bare) is False
-    empty = extract_eval_contract(bare)
-    assert not (empty.get("evaluation") or empty.get("mandated_functions"))
-
-
-def _render_review(**overrides):
-    kwargs = dict(
-        pipeline_stage="rule_maker",
-        hitl_stage="review",
-        plan_text="plan",
-        finish_summary="summary",
-        related_artifacts_json="[]",
-        requires_human_approval=False,
-        allow_scoring_approval=False,
-        is_rule_maker=True,
-        has_declared_eval_contract=True,
-        declared_eval_contract_json='{"evaluation": {"primary_metric": "F1"}}',
-        hitl_mode="auto",
-    )
-    kwargs.update(overrides)
-    return _load_hitl_template("manager_review_phase_finish.txt", **kwargs)
-
-
-def test_review_template_surfaces_declared_contract_for_rule_maker():
-    rendered = _render_review()
-    assert "USER-DECLARED EVALUATION CONTRACT" in rendered
-    assert '"primary_metric": "F1"' in rendered
-    assert "conformance check" in rendered
-    # It must be framed as conformance, distinct from judging merit.
-    assert "not a judgment of scientific merit" in rendered
-
-
-def test_review_template_hides_contract_block_when_none_declared():
-    rendered = _render_review(has_declared_eval_contract=False)
-    assert "USER-DECLARED EVALUATION CONTRACT" not in rendered
-    # The ordinary rule-maker design-review guidance still renders.
-    assert "rule-maker review" in rendered
-
-
-def test_review_template_contract_block_is_scoped_to_rule_maker():
-    # A non-rule-maker finish never shows the contract block even if a contract
-    # was (defensively) passed, because the block is nested in is_rule_maker.
-    rendered = _render_review(
-        pipeline_stage="experiment_runner", is_rule_maker=False)
-    assert "USER-DECLARED EVALUATION CONTRACT" not in rendered
-
-
-def test_review_template_contract_block_skipped_at_plan_finish():
-    # At the plan finish the scoring design does not exist yet, so the
-    # conformance block must not render even for a rule-maker with a contract.
-    rendered = _render_review(hitl_stage="plan")
-    assert "USER-DECLARED EVALUATION CONTRACT" not in rendered
-
-
-# --------------------------------------------------------------------------- #
-# 2. interrupted root publication is resumed, not reported complete
+# Fakes
 # --------------------------------------------------------------------------- #
 
 class _FakeRuntimeState:
@@ -179,6 +96,10 @@ def _run_bootstrap(tmp_path, **overrides):
     return construct_bootstrap_hitl_baseline(**kwargs)
 
 
+# --------------------------------------------------------------------------- #
+# 1. interrupted root publication is resumed, not reported complete
+# --------------------------------------------------------------------------- #
+
 def test_bootstrap_resumes_pending_publication_when_frontier_exists(
         tmp_path, monkeypatch):
     pending = {"status": "root_initialized", "objective_score": {}}
@@ -236,7 +157,7 @@ def test_bootstrap_resumes_pending_even_without_frontier_file(tmp_path, monkeypa
 
 
 # --------------------------------------------------------------------------- #
-# 3. bootstrap restore boundary
+# 2. recovery boundary holds until the transition is durably recorded
 # --------------------------------------------------------------------------- #
 
 def test_bootstrap_restores_when_pipeline_scoring_fails(tmp_path, monkeypatch):
@@ -275,24 +196,15 @@ def test_bootstrap_preparation_failure_never_builds_pipeline(tmp_path, monkeypat
     assert kwargs.get("remove_hidden_scoring") is True
 
 
-def test_bootstrap_success_runs_prepare_inside_try_and_publishes(tmp_path, monkeypatch):
-    _FakeCheckpointManager.restored.clear()
+def _patch_success_env(monkeypatch, tmp_path, runtime_state_factory):
     _FakeOrchestrator.built.clear()
     _FakeOrchestrator.result = {
         "success": True,
         "stages": {"scorer": {"results": {"score": 1.0}, "scoring_ref": "ref/1"}},
     }
-    published = []
-
-    class _PublishingRuntimeState(_FakeRuntimeState):
-        def begin_initial_root_publication_transition(self, payload):
-            published.append(payload)
-            return {"status": "prepared", **payload}
-
     monkeypatch.setattr(har, "_adopt_run_hitl_mode",
                         lambda work_dir, hitl_mode: har.HitlMode.AUTO)
-    monkeypatch.setattr(har, "HitlRuntimeState",
-                        lambda wd: _PublishingRuntimeState(wd, pending=None))
+    monkeypatch.setattr(har, "HitlRuntimeState", runtime_state_factory)
     monkeypatch.setattr(har, "HitlFrontierStore",
                         lambda wd: _FakeFrontier(wd, exists=False))
     monkeypatch.setattr(har, "CheckpointManager", _FakeCheckpointManager)
@@ -301,6 +213,44 @@ def test_bootstrap_success_runs_prepare_inside_try_and_publishes(tmp_path, monke
     monkeypatch.setattr(har, "resolve_autoresearch_history_root",
                         lambda wd, d: (tmp_path / "hist", None))
     monkeypatch.setattr(har, "encode_hitl_history_root", lambda wd, r: "encoded-root")
+
+
+def test_bootstrap_restores_when_begin_transition_fails(tmp_path, monkeypatch):
+    # The transition handoff is inside the recovery boundary: if it raises after
+    # the workspace is scored, the original checkpoint is restored and the
+    # replay-forward commit is never reached.
+    _FakeCheckpointManager.restored.clear()
+    committed = {}
+
+    class _FailingBeginState(_FakeRuntimeState):
+        def begin_initial_root_publication_transition(self, payload):
+            raise RuntimeError("state write failed")
+
+    _patch_success_env(
+        monkeypatch, tmp_path,
+        lambda wd: _FailingBeginState(wd, pending=None))
+    monkeypatch.setattr(har, "_commit_initial_root_publication",
+                        lambda wd, t: committed.setdefault("called", True) or t)
+
+    with pytest.raises(RuntimeError, match="state write failed"):
+        _run_bootstrap(tmp_path)
+
+    assert _FakeCheckpointManager.restored, "transition failure must restore"
+    assert not committed, "commit must not run when the transition failed"
+
+
+def test_bootstrap_success_publishes_and_never_restores(tmp_path, monkeypatch):
+    _FakeCheckpointManager.restored.clear()
+    published = []
+
+    class _PublishingState(_FakeRuntimeState):
+        def begin_initial_root_publication_transition(self, payload):
+            published.append(payload)
+            return {"status": "prepared", **payload}
+
+    _patch_success_env(
+        monkeypatch, tmp_path,
+        lambda wd: _PublishingState(wd, pending=None))
     monkeypatch.setattr(har, "_commit_initial_root_publication", lambda wd, t: t)
     sentinel = InitialAutoResearchNodeResult(
         success=True, mode="bootstrap_initial_node",
@@ -313,6 +263,5 @@ def test_bootstrap_success_runs_prepare_inside_try_and_publishes(tmp_path, monke
 
     assert prepared == [tmp_path], "preparation must run on success"
     assert not _FakeCheckpointManager.restored, "success must not restore"
-    assert published, "a scored root must be published"
-    assert published[0]["history_root"] == "encoded-root"
+    assert published and published[0]["history_root"] == "encoded-root"
     assert result is sentinel

@@ -30,7 +30,6 @@ import time
 
 from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
 from agents.eval_verifier import (
-    extract_eval_contract,
     format_violations_for_retry,
     has_user_eval_contract,
     run_eval_verifier,
@@ -1652,13 +1651,6 @@ class ResearchPipelineOrchestrator:
 
         self.state.start_stage(RULE_MAKER_STAGE)
         runtime = self._create_hitl_runtime(RULE_MAKER_STAGE)
-        # Hand the manager the user's declared evaluation contract as review
-        # criteria. Conformance to the declared contract is a semantic judgment,
-        # so it belongs to the manager (who has authority and recovery), not to
-        # a second model agent in the mechanical validation layer. No-op unless
-        # the idea declares a contract.
-        if has_user_eval_contract(idea):
-            runtime.set_scoring_review_contract(extract_eval_contract(idea))
         worker_prompt_contexts = {
             phase: generate_rule_maker_prompt(
                 idea,
@@ -1706,9 +1698,6 @@ class ResearchPipelineOrchestrator:
             result: Dict[str, Any],
             finish: Dict[str, Any],
         ) -> Dict[str, Any]:
-            # The scoring contract was already verified against the user's
-            # declared evaluation contract in the phase-finish validator, before
-            # this manager approval, so only a verified contract reaches here.
             self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
             discard_completed_rollback_snapshot()
             return {

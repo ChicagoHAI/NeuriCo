@@ -433,11 +433,18 @@ def construct_bootstrap_hitl_baseline(
         "HITL bootstrap: original unscored workspace"
     )
 
+    def restore_source() -> None:
+        checkpoints.restore_checkpoint(
+            source.sha, clean_untracked_public=True, remove_hidden_scoring=True
+        )
+
+    # The original checkpoint stays the recovery boundary until the publication
+    # transition is durably recorded. Everything that mutates or scores the
+    # workspace, and the transition record itself, runs inside this boundary so
+    # a failure anywhere restores the original workspace rather than stranding a
+    # scored-but-unpublished one that a later run could adopt as its start.
     try:
-        # Preparation mutates provider skill directories and .gitignore, so it
-        # runs inside the restore boundary: a failure partway through rolls the
-        # workspace back to the checkpoint instead of leaving it partially
-        # prepared.
+        # Preparation mutates provider skill directories and .gitignore.
         if prepare_workspace is not None:
             prepare_workspace(work_dir)
         pipeline_result = ResearchPipelineOrchestrator(
@@ -453,54 +460,57 @@ def construct_bootstrap_hitl_baseline(
             scorer_timeout=scorer_timeout,
             manifest_trimmer_timeout=manifest_trimmer_timeout,
         )
-    except Exception:
-        checkpoints.restore_checkpoint(
-            source.sha, clean_untracked_public=True, remove_hidden_scoring=True
+
+        stages = pipeline_result.get("stages", {})
+        scorer_result = stages.get("scorer", {}) if isinstance(stages, dict) else {}
+        results = scorer_result.get("results") if isinstance(scorer_result, dict) else None
+        if not pipeline_result.get("success", False) or not isinstance(results, dict):
+            restore_source()
+            return InitialAutoResearchNodeResult(
+                success=False,
+                mode="bootstrap_initial_node",
+                work_dir=str(work_dir),
+                reason="Bootstrap scoring pipeline failed.",
+                pipeline_result=pipeline_result,
+            )
+
+        # A bootstrapped workspace has no living plan; use the experiment plan
+        # if one exists, otherwise a neutral placeholder for the root node.
+        plan_path = work_dir / "plans" / "experiment_runner_plan.md"
+        plan_text = (
+            plan_path.read_text(encoding="utf-8")
+            if plan_path.is_file()
+            else (
+                "Bootstrapped baseline from an existing scored workspace. No living "
+                "plan was recorded for the original experiment; later proposals may "
+                "establish one."
+            )
         )
+        history_root, _ = resolve_autoresearch_history_root(
+            work_dir, autoresearch_history_dir
+        )
+        publication = HitlRuntimeState(work_dir).begin_initial_root_publication_transition(
+            {
+                "plan_text": plan_text,
+                "objective_score": {
+                    "scorer_result": scorer_result if isinstance(scorer_result, dict) else {},
+                    "results": results,
+                },
+                "reason_for_acceptance": (
+                    "Bootstrapped AutoResearch baseline from an existing scored workspace."
+                ),
+                "history_root": encode_hitl_history_root(work_dir, history_root),
+                "scoring_ref": str(scorer_result.get("scoring_ref", "")).strip(),
+            }
+        )
+    except Exception:
+        restore_source()
         raise
 
-    stages = pipeline_result.get("stages", {})
-    scorer_result = stages.get("scorer", {}) if isinstance(stages, dict) else {}
-    results = scorer_result.get("results") if isinstance(scorer_result, dict) else None
-    if not pipeline_result.get("success", False) or not isinstance(results, dict):
-        checkpoints.restore_checkpoint(
-            source.sha, clean_untracked_public=True, remove_hidden_scoring=True
-        )
-        return InitialAutoResearchNodeResult(
-            success=False,
-            mode="bootstrap_initial_node",
-            work_dir=str(work_dir),
-            reason="Bootstrap scoring pipeline failed.",
-            pipeline_result=pipeline_result,
-        )
-
-    # A bootstrapped workspace has no living plan; use the experiment plan if one
-    # exists, otherwise a neutral placeholder for the root node.
-    plan_path = work_dir / "plans" / "experiment_runner_plan.md"
-    plan_text = (
-        plan_path.read_text(encoding="utf-8")
-        if plan_path.is_file()
-        else (
-            "Bootstrapped baseline from an existing scored workspace. No living "
-            "plan was recorded for the original experiment; later proposals may "
-            "establish one."
-        )
-    )
-    history_root, _ = resolve_autoresearch_history_root(work_dir, autoresearch_history_dir)
-    publication = HitlRuntimeState(work_dir).begin_initial_root_publication_transition(
-        {
-            "plan_text": plan_text,
-            "objective_score": {
-                "scorer_result": scorer_result if isinstance(scorer_result, dict) else {},
-                "results": results,
-            },
-            "reason_for_acceptance": (
-                "Bootstrapped AutoResearch baseline from an existing scored workspace."
-            ),
-            "history_root": encode_hitl_history_root(work_dir, history_root),
-            "scoring_ref": str(scorer_result.get("scoring_ref", "")).strip(),
-        }
-    )
+    # The transition is durably recorded: publication is now replay-forward and
+    # idempotent. It must not roll back past the recorded transition; an
+    # interrupted commit is resumed by the pending-publication path on a later
+    # run instead.
     completed = _commit_initial_root_publication(work_dir, publication)
     return _initial_node_result_from_publication(work_dir, completed, pipeline_result)
 

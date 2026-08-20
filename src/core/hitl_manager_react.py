@@ -1088,7 +1088,6 @@ class HitlManager:
         workspace_fingerprint: str = "",
         allow_scoring_approval: bool = False,
         scoring_handoff_context: Optional[Dict[str, Any]] = None,
-        declared_eval_contract: Optional[Dict[str, Any]] = None,
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         on_scoring_approval: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
@@ -1163,11 +1162,6 @@ class HitlManager:
             "related_artifacts": related_artifacts,
             "provenance": dict(scoring_handoff_context or {}),
         }
-        declared_contract = declared_eval_contract or {}
-        has_declared_eval_contract = bool(
-            declared_contract.get("evaluation")
-            or declared_contract.get("mandated_functions")
-        )
         prompt = _load_hitl_template(
             "manager_review_phase_finish.txt",
             pipeline_stage=pipeline_stage,
@@ -1178,10 +1172,6 @@ class HitlManager:
             requires_human_approval=requires_human_approval,
             allow_scoring_approval=allow_scoring_approval,
             is_rule_maker=(pipeline_stage == "rule_maker"),
-            has_declared_eval_contract=has_declared_eval_contract,
-            declared_eval_contract_json=json.dumps(
-                declared_contract, indent=2, ensure_ascii=False
-            ),
             hitl_mode=selected_mode.value,
         )
         return self.request_worker_resolution(
