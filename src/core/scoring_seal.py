@@ -23,6 +23,13 @@ SEALED_PATHS: list[str] = [
     # contract; quotes eval.py internals as evidence, so it must be hidden
     # from the runner alongside them. Absent files are skipped by the seal.
     "scoring/verification.json",
+    # Trusted continuation baseline of protected-path hashes (continue-research).
+    # It is the reference the generated eval.py compares against to enforce
+    # protected_path invariants, so it MUST NOT stay writable while the
+    # optimizing agent runs -- otherwise an iteration could rewrite a protected
+    # file and its recorded hash together and pass. Sealed like eval.py: hidden
+    # from the workspace during Stage 2, copied into the isolated scorer tree.
+    "scoring/protected_baseline.json",
     "data/.test/",
 ]
 SEALED_REQUIRED_PATHS = ("scoring/eval.py", "scoring/targets.json")

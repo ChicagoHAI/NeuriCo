@@ -18,6 +18,7 @@ import subprocess
 import shlex
 import sys
 import os
+import json
 import yaml
 
 # Force UTF-8 stdout/stderr on Windows where the default is cp1252.
@@ -215,6 +216,7 @@ class ResearchRunner:
         continue_autoresearch: bool = False,
         continue_recover: bool = False,
         bootstrap_autoresearch_baseline: bool = False,
+        prepare_only: bool = False,
         proposer_timeout: int = 900,
         compute_backend: str = "local",
         hitl_autoresearch: Optional[str] = None,
@@ -332,8 +334,17 @@ class ResearchRunner:
             print("   Bootstrap AutoResearch baseline: enabled")
         print("=" * 80)
 
-        # Load idea
+        # Load idea. The continuation research container does NOT mount the host
+        # ideas/ directory (its submitted YAML retains the source repo URL, which
+        # the optimizing agent must not see), so fall back to the redacted
+        # contract the prepare stage wrote into the workspace. That copy has
+        # source_repo stripped but keeps the goal + invariants Stage 2 needs.
         idea = self.idea_manager.get_idea(idea_id)
+        if idea is None:
+            import yaml as _yaml
+            workspace_idea = (self.runs_dir / idea_id / ".neurico" / "idea.yaml")
+            if workspace_idea.exists():
+                idea = _yaml.safe_load(workspace_idea.read_text(encoding="utf-8"))
         if idea is None:
             raise ValueError(f"Idea not found: {idea_id}")
         attach_runtime_compute_backend(idea, compute_backend)
@@ -349,6 +360,51 @@ class ResearchRunner:
 
         # Update status
         self.idea_manager.update_status(idea_id, "in_progress")
+
+        # continue-research: an idea carrying a continuation contract is run as
+        # two consecutive stages under this one command. Stage 1 (trusted, no
+        # optimizing agent) prepares a scored standard NeuriCo workspace; Stage
+        # 2 is a plain continuation on it. Detected here, before the forward
+        # workspace setup, because Stage 1's adoption needs an empty work_dir.
+        # source_repo marks a fresh continuation; on the research-stage re-entry
+        # the redacted workspace idea has no source_repo, so the prepared marker
+        # (written by Stage 1) is the signal that this is a continuation to
+        # resume into Stage 2.
+        from core.continuation_prepare import PREPARED_MARKER as _PREP_MARKER
+        _cont = idea_spec.get("continuation")
+        _prepared = (self.runs_dir / idea_id / _PREP_MARKER).exists()
+        if isinstance(_cont, dict) and (_cont.get("source_repo") or _prepared):
+            return self._run_continuation(
+                idea=idea,
+                idea_id=idea_id,
+                title=title,
+                provider=provider,
+                full_permissions=full_permissions,
+                rule_maker_timeout=rule_maker_timeout,
+                scorer_timeout=scorer_timeout,
+                manifest_trimmer_timeout=manifest_trimmer_timeout,
+                autoresearch_iterations=autoresearch_iterations,
+                autoresearch_history_dir=autoresearch_history_dir,
+                proposer_timeout=proposer_timeout,
+                comment_timeout=timeout,
+                compute_backend=compute_backend,
+                private=private,
+                no_hash=no_hash,
+                write_paper=write_paper,
+                paper_style=paper_style,
+                paper_timeout=paper_timeout,
+                prepare_only=prepare_only,
+                force_fresh=force_fresh,
+            )
+
+        # --prepare-only is meaningful only for a continuation idea (it splits
+        # Stage 1 into the Docker prepare container). For a forward idea it is
+        # a no-op, so a misrouted prepare container never runs the full forward
+        # pipeline with materials mounted.
+        if prepare_only:
+            print("ℹ️  --prepare-only has no effect on a non-continuation idea; "
+                  "nothing to prepare.")
+            return {"idea_id": idea_id, "success": True, "prepared": False}
 
         # Setup working directory (GitHub repo or local runs/)
         github_url = None
@@ -1131,6 +1187,239 @@ https://github.com/ChicagoHAI/neurico
 
         return {"work_dir": work_dir, "github_url": github_url, "success": result["success"]}
 
+    @staticmethod
+    def _continuation_materials_readable(idea: Dict[str, Any]) -> list:
+        """Declared continuation source materials that are still readable on
+        this filesystem: the local source repo and any absolute (host) sealed
+        dataset source. In-repo sealed sources are moved into data/.test during
+        Stage 1 (their originals deleted), and data/.test itself is the accepted
+        residual every NeuriCo run carries, so neither is reported here."""
+        from core.repo_adoption import is_remote_repo
+        from core.local_resources import sealed_dataset_entries
+
+        inner = idea.get("idea", idea) if isinstance(idea, dict) else {}
+        exposed = []
+        source_repo = str((inner.get("continuation") or {}).get("source_repo") or "").strip()
+        if source_repo and not is_remote_repo(source_repo):
+            p = Path(source_repo).expanduser()
+            if p.exists():
+                exposed.append(str(p))
+        for entry in sealed_dataset_entries(idea):
+            raw = str(entry.get("source_path") or entry.get("path") or "").strip()
+            if not raw or raw.replace("\\", "/").startswith("data/.test/"):
+                continue
+            p = Path(raw).expanduser()
+            if p.is_absolute() and p.exists():
+                exposed.append(str(p))
+        return exposed
+
+    def _run_continuation(
+        self,
+        *,
+        idea: Dict[str, Any],
+        idea_id: str,
+        title: str,
+        provider: str,
+        full_permissions: bool,
+        rule_maker_timeout: int,
+        scorer_timeout: int,
+        manifest_trimmer_timeout: int,
+        autoresearch_iterations: int,
+        autoresearch_history_dir: Optional[Path],
+        proposer_timeout: int,
+        comment_timeout: int,
+        compute_backend: str,
+        private: bool,
+        no_hash: bool,
+        write_paper: bool,
+        paper_style: Optional[str],
+        paper_timeout: int,
+        prepare_only: bool,
+        force_fresh: bool = False,
+    ) -> Dict[str, Any]:
+        """continue-research dispatch: Stage 1 (prepare) then Stage 2 (plain
+        continuation).
+
+        Stage 1 is trusted setup with NO optimizing agent: adopt the source
+        repo, stage held-out materials into gitignored data/.test, and generate
+        + score the baseline via main's bootstrap path, producing a standard
+        scored NeuriCo workspace. Stage 2 is an ordinary
+        ``continue_from_current_best`` run on that workspace -- it sees no
+        source materials, does no protocol regeneration, and does no
+        re-baseline, so the whole class of agent-tampering/leak bugs the
+        single-stage design hit cannot occur here.
+
+        With ``prepare_only`` the command stops after Stage 1 (used by the
+        Docker prepare container, which mounts the source materials; the
+        separate research container then runs Stage 2 without them).
+        """
+        from core.continuation_prepare import prepare_continuation_workspace
+        from core.autoresearch import (
+            continue_from_current_best,
+            read_autoresearch_state,
+            autoresearch_state_current_best_sha,
+        )
+        from core.repo_adoption import ADOPTION_RECORD
+        from core.continuation_prepare import PREPARED_MARKER
+
+        work_dir = (self.runs_dir / idea_id).resolve()
+        github_manager = self.github_manager if self.use_github else None
+        github_url = None
+
+        # --force-fresh: discard any prepared or in-progress continuation
+        # workspace so Stage 1 re-adopts from scratch. Without this, an existing
+        # adoption record plus a recorded current_best makes already_prepared
+        # true below and Stage 1 is skipped, silently continuing from stale
+        # repo/held-out/evaluator/baseline state against the user's explicit
+        # request. Move rather than delete, mirroring the forward path's
+        # treatment of a superseded workspace.
+        if force_fresh and work_dir.exists():
+            import shutil
+            stale = work_dir.with_name(f"{work_dir.name}.superseded")
+            n = 1
+            while stale.exists():
+                n += 1
+                stale = work_dir.with_name(f"{work_dir.name}.superseded-{n}")
+            shutil.move(str(work_dir), str(stale))
+            print(f"🧹 --force-fresh: previous continuation workspace moved to "
+                  f"{stale}")
+
+        # Skip Stage 1 only when Stage 1 FULLY completed: adoption record, a
+        # recorded current_best, AND the prepared marker. The marker is written
+        # last, after invariant verification passes, so it is the authoritative
+        # "prepare finished cleanly" signal. Keying only on adoption +
+        # current_best would treat a workspace whose invariant verification
+        # FAILED (after current_best was already recorded) as prepared, skip
+        # verification on retry, and continue with the rejected evaluator. The
+        # marker closes that: a failed prepare leaves no marker, so the next run
+        # re-runs Stage 1 and re-verifies. Enables the clean two-container Docker
+        # flow the same way (the prepare container writes the marker; the
+        # research container sees it and runs only Stage 2).
+        already_prepared = (
+            (work_dir / ADOPTION_RECORD).exists()
+            and (work_dir / PREPARED_MARKER).exists()
+            and autoresearch_state_current_best_sha(
+                read_autoresearch_state(work_dir)) is not None
+        )
+
+        prepared: Dict[str, Any] = {"work_dir": str(work_dir), "prepared": True,
+                                    "reused_existing": True}
+        if already_prepared:
+            print("=" * 80)
+            print("CONTINUE-RESEARCH STAGE 1: workspace already prepared; skipping")
+            print("=" * 80)
+            # Surface the backup repo URL created by Stage 1 (the prepare
+            # container / earlier native run) so Stage 2's finalize still pushes
+            # to it. Without this a resumed / research-container Stage 2 loses it.
+            try:
+                record = json.loads(
+                    (work_dir / ADOPTION_RECORD).read_text(encoding="utf-8"))
+                github_url = record.get("github_url")
+            except (OSError, json.JSONDecodeError):
+                github_url = None
+        else:
+            # ---- Stage 1: prepare a scored standard NeuriCo workspace ----
+            print("=" * 80)
+            print("CONTINUE-RESEARCH STAGE 1: prepare (trusted setup, no optimizing agent)")
+            print("=" * 80)
+            prepared = prepare_continuation_workspace(
+                idea=idea,
+                idea_id=idea_id,
+                work_dir=work_dir,
+                templates_dir=self.project_root / "templates",
+                provider=provider,
+                full_permissions=full_permissions,
+                github_manager=github_manager,
+                private=private,
+                no_hash=no_hash,
+                rule_maker_timeout=rule_maker_timeout,
+                scorer_timeout=scorer_timeout,
+                manifest_trimmer_timeout=manifest_trimmer_timeout,
+                autoresearch_history_dir=autoresearch_history_dir,
+                prepare_workspace=lambda wd: self._copy_workspace_resources(
+                    wd, compute_backend=compute_backend),
+            )
+            github_url = (prepared.get("adoption") or {}).get("github_url")
+
+        if prepare_only:
+            print("\n📦 Continuation workspace prepared; exiting before Stage 2 "
+                  "(--prepare-only).")
+            return {
+                "work_dir": str(work_dir),
+                "github_url": github_url,
+                "success": True,
+                "prepared": True,
+                "continuation_prepare": prepared,
+            }
+
+        # Isolation backstop (defense-in-depth): Stage 2 runs the OPTIMIZING
+        # agent. In Docker it must run in the research container, which does NOT
+        # mount the source repo or the external held-out materials. The
+        # two-container split is chosen by a run.sh grep heuristic; a
+        # misdetected continuation could be routed to a single container with
+        # materials mounted and reach here. If we are in a container and the
+        # source materials are still readable, refuse rather than let the agent
+        # see them. Native runs (no container) are unaffected -- there is no
+        # container boundary to enforce, matching every other native run.
+        in_container = Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+        if in_container:
+            exposed = self._continuation_materials_readable(idea)
+            if exposed:
+                raise RuntimeError(
+                    "Refusing to run continue-research Stage 2 (the optimizing "
+                    "agent) while source materials are still readable in this "
+                    "container: " + ", ".join(exposed) + ". The research "
+                    "container must run without the source repo / held-out "
+                    "materials mounted. This usually means the continuation was "
+                    "misrouted into a single-container run; re-run so Stage 1 "
+                    "(prepare, --prepare-only) and Stage 2 use separate "
+                    "containers.")
+
+        # ---- Stage 2: plain continuation on the prepared workspace ----
+        print("=" * 80)
+        print("CONTINUE-RESEARCH STAGE 2: continue (plain NeuriCo autoresearch)")
+        print("=" * 80)
+        success = False
+        pipeline_result: Dict[str, Any] = {}
+        try:
+            pipeline_result = continue_from_current_best(
+                idea=idea,
+                idea_id=idea_id,
+                work_dir=work_dir,
+                templates_dir=self.project_root / "templates",
+                provider=provider,
+                full_permissions=full_permissions,
+                scorer_timeout=scorer_timeout,
+                iterations=autoresearch_iterations,
+                autoresearch_history_dir=autoresearch_history_dir,
+                proposer_timeout=proposer_timeout,
+                comment_timeout=comment_timeout,
+            )
+            success = pipeline_result.get("success", False)
+            if write_paper and success:
+                self._run_paper_writer_stage(
+                    idea=idea,
+                    work_dir=work_dir,
+                    provider=provider,
+                    paper_style=paper_style,
+                    paper_timeout=paper_timeout,
+                    full_permissions=full_permissions,
+                )
+        except Exception as e:
+            print(f"\n❌ Continue-research Stage 2 error: {e}")
+            success = False
+        finally:
+            self._finalize_research(idea_id, work_dir, github_url, title,
+                                    provider, success)
+
+        return {
+            "work_dir": str(work_dir),
+            "github_url": github_url,
+            "success": success,
+            "continuation_prepare": prepared,
+            "autoresearch": pipeline_result.get("autoresearch"),
+        }
+
     def _run_paper_writer_stage(
         self,
         idea: Dict[str, Any],
@@ -1561,6 +1850,14 @@ def main():
         "Does not run AutoResearch iterations.",
     )
     parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="continue-research only: run Stage 1 (prepare a scored workspace "
+        "from the source repo + materials) and stop before Stage 2. Used by "
+        "the Docker prepare container so the source materials are never "
+        "mounted into the research container that runs Stage 2.",
+    )
+    parser.add_argument(
         "--proposer-timeout",
         type=int,
         default=900,
@@ -1674,6 +1971,7 @@ def main():
             continue_autoresearch=args.continue_autoresearch,
             continue_recover=args.continue_recover,
             bootstrap_autoresearch_baseline=args.bootstrap_autoresearch_baseline,
+            prepare_only=args.prepare_only,
             proposer_timeout=args.proposer_timeout,
             compute_backend=args.compute_backend,
             hitl_autoresearch=args.hitl_autoresearch,

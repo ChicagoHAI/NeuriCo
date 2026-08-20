@@ -720,6 +720,108 @@ cmd_submit_local() {
 }
 
 # -----------------------------------------------------------------------------
+# continue-research: convert <repo> <intention.md> into a continuation idea.
+# Mirrors submit-local's container mount setup. The conversion validates a
+# LOCAL repo path (it must exist and is resolved to absolute), so the repo is
+# mounted read-only at its identical host path; a remote URL needs no mount.
+# Actually running the idea is a separate `./neurico run <idea>` (which applies
+# the two-container prepare/research split), so --run is not handled here.
+# -----------------------------------------------------------------------------
+cmd_continue_research() {
+    if [ -z "$1" ] || [ -z "$2" ]; then
+        echo -e "${RED}Usage: $0 continue-research <repo> <intention.md> [--submit] [--provider claude|codex|gemini]${NC}"
+        exit 1
+    fi
+
+    ensure_directories
+    check_env_file
+    warn_if_outdated
+
+    local repo="$1"
+    local intention_file="$2"
+    shift 2
+
+    local passthrough=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --run)
+                echo -e "${YELLOW}Note: --run is not handled by the container wrapper.${NC}"
+                echo -e "      Convert (optionally with --submit), then run separately:"
+                echo -e "        ./neurico run <idea_id>"
+                ;;
+            *) passthrough+=("$1") ;;
+        esac
+        shift
+    done
+
+    if [ ! -f "$intention_file" ]; then
+        echo -e "${RED}Error: intention file not found: $intention_file${NC}"
+        exit 1
+    fi
+    local intention_abs intention_dir intention_name
+    intention_abs=$(cd "$(dirname "$intention_file")" && pwd)/$(basename "$intention_file")
+    intention_dir=$(dirname "$intention_abs")
+    intention_name=$(basename "$intention_abs")
+
+    local gpu_flags=$(get_gpu_flags)
+    local user_flags=$(get_user_flags)
+    local credential_mounts=$(get_cli_credential_mounts)
+    local workspace_dir=$(get_workspace_dir)
+    local tty_flag=$(get_tty_flag)
+
+    local docker_args=( run $tty_flag --rm )
+    local helper_args=()
+    eval "helper_args=( $gpu_flags $user_flags $credential_mounts )"
+    docker_args+=(
+        "${helper_args[@]}"
+        --env-file "$PROJECT_ROOT/.env"
+        -e NEURICO_WORKSPACE=/workspaces
+        -v "$workspace_dir:/workspaces"
+        -v "$PROJECT_ROOT/ideas:/app/ideas"
+        -v "$PROJECT_ROOT/logs:/app/logs"
+        -v "$PROJECT_ROOT/config:/app/config:ro"
+        -v "$PROJECT_ROOT/templates:/app/templates:ro"
+        -v "$intention_dir:/input:ro"
+    )
+
+    # A LOCAL repo must be readable in-container at its identical host path, so
+    # continue_research.py's exists()/resolve() succeeds and the source_repo it
+    # records matches the path `./neurico run` will later mount. A remote URL
+    # (http/https/git@) is cloned at adoption time and needs no mount.
+    case "$repo" in
+        http://*|https://*|git@*) ;;
+        *)
+            if [ ! -e "$repo" ]; then
+                echo -e "${RED}Error: repository path not found: $repo${NC}"
+                exit 1
+            fi
+            local repo_abs
+            repo_abs=$(cd "$repo" 2>/dev/null && pwd || echo "")
+            if [ -z "$repo_abs" ]; then
+                echo -e "${RED}Error: repository path is not a directory: $repo${NC}"
+                exit 1
+            fi
+            docker_args+=( -v "$repo_abs:$repo_abs:ro" )
+            repo="$repo_abs"
+            ;;
+    esac
+
+    # Host cwd at its identical path, so any relative paths in the intention
+    # resolve and canonicalize the same way they would natively.
+    if [ "$PWD" != "/" ] && [ "$PWD" != "$PROJECT_ROOT" ]; then
+        docker_args+=( -v "$PWD:$PWD:ro" )
+    fi
+    docker_args+=( -e NEURICO_HOST_CWD="$PWD" -e NEURICO_IN_DOCKER=1 )
+
+    docker_args+=( -w /app "$IMAGE_NAME"
+                   python /app/src/cli/continue_research.py "$repo" "/input/$intention_name"
+                   "${passthrough[@]}" )
+
+    echo -e "${BLUE}Converting continuation intention...${NC}"
+    docker "${docker_args[@]}"
+}
+
+# -----------------------------------------------------------------------------
 # Submit a research idea
 # -----------------------------------------------------------------------------
 cmd_submit() {
@@ -920,12 +1022,87 @@ cmd_run() {
     )
 
     # Ideas that declare host-local resources (local_resources paths, local
-    # papers) get a sidecar written at submit time: ideas/mounts/<idea_id>.txt,
-    # one absolute host path per line. Mount each existing path read-only at
-    # its identical in-container location so staging works unmodified inside
-    # Docker.
+    # papers, a continuation source repo) get a sidecar written at submit
+    # time: ideas/mounts/<idea_id>.txt, one absolute host path per line.
     local idea_id="$1"
     local mounts_file="$PROJECT_ROOT/ideas/mounts/${idea_id}.txt"
+
+    # continue-research runs as two stages under one command. Stage 1 (prepare)
+    # needs the source repo + host materials mounted; Stage 2 (research, where
+    # the optimizing agent runs) must NOT see them. We enforce that with two
+    # containers: a PREPARE container that mounts the materials and runs
+    # `--prepare-only` (Stage 1), then a RESEARCH container that mounts only
+    # the workspace and runs Stage 2. runner.py detects the continuation
+    # contract and skips Stage 1 in the research container (the workspace is
+    # already prepared), so the materials are needed only in the prepare
+    # container. --prepare-only is a no-op on a forward idea, so a
+    # false-positive detection cannot run a forward pipeline with materials
+    # mounted (see run_research).
+    local is_continuation=false
+    if _idea_is_continuation "$idea_id"; then
+        is_continuation=true
+    fi
+
+    if [ "$is_continuation" = true ]; then
+        echo -e "${BLUE}continue-research: Stage 1 (prepare) in a materials-mounted container${NC}"
+        local prep_args=( "${docker_args[@]}" )
+        if [ -f "$mounts_file" ]; then
+            while IFS= read -r host_path; do
+                [ -z "$host_path" ] && continue
+                if [ -e "$host_path" ]; then
+                    prep_args+=( -v "$host_path:$host_path:ro" )
+                    echo -e "${BLUE}Mounting material (prepare only):${NC} $host_path"
+                else
+                    echo -e "${YELLOW}[SKIP]${NC} declared path not found: $host_path"
+                fi
+            done < "$mounts_file"
+        fi
+        prep_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "$@" --prepare-only )
+        docker "${prep_args[@]}" || { echo -e "${RED}Prepare stage failed${NC}"; exit 1; }
+
+        echo -e "${BLUE}continue-research: Stage 2 (research) with NO source materials mounted${NC}"
+        # --force-fresh belongs to the prepare stage only: it already moved any
+        # stale workspace aside and Stage 1 re-adopted. Passing it to the
+        # research container would move the freshly prepared workspace aside too,
+        # and Stage 2 cannot re-prepare (the source is deliberately not mounted
+        # here). Strip it from the research invocation.
+        local research_args=()
+        for a in "$@"; do
+            [ "$a" = "--force-fresh" ] && continue
+            research_args+=( "$a" )
+        done
+        # Drop the host ideas/ mount from the research container: the submitted
+        # YAML there retains the source repo URL, which the optimizing agent
+        # must not be able to read. Stage 2 loads the redacted contract from the
+        # workspace's .neurico/idea.yaml instead.
+        local research_docker_args=() _i=0 _arr=( "${docker_args[@]}" )
+        while [ $_i -lt ${#_arr[@]} ]; do
+            if [ "${_arr[$_i]}" = "-v" ] && [[ "${_arr[$((_i+1))]}" == *":/app/ideas" ]]; then
+                _i=$((_i+2)); continue
+            fi
+            research_docker_args+=( "${_arr[$_i]}" ); _i=$((_i+1))
+        done
+        research_docker_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "${research_args[@]}" )
+        docker "${research_docker_args[@]}"
+        local _rc=$?
+        # Stage 2 ran with the ideas/ mount dropped, so the runner's in-container
+        # "completed" status update no-oped and the idea would stay in_progress
+        # forever. Finalize it here on success, in a throwaway container that
+        # mounts ONLY ideas/ (never the workspace or source), so the idea is
+        # archived to ideas/completed while the source URL stays unreadable to
+        # the optimizing agent. A failed run is deliberately left in_progress for
+        # inspection/resume, matching runner.py's own policy.
+        if [ "$_rc" -eq 0 ]; then
+            docker run --rm -e PYTHONPATH=/app/src:/app \
+                -v "$PROJECT_ROOT/ideas:/app/ideas" -w /app "$IMAGE_NAME" \
+                python -c "from pathlib import Path; from core.idea_manager import IdeaManager; IdeaManager(Path('/app/ideas')).update_status('${idea_id}', 'completed')" \
+                || echo -e "${YELLOW}Note: could not finalize idea status; left in_progress${NC}"
+        fi
+        return "$_rc"
+    fi
+
+    # Forward run: single container, mount declared resources read-only at
+    # their identical in-container location so staging works unmodified.
     if [ -f "$mounts_file" ]; then
         while IFS= read -r host_path; do
             [ -z "$host_path" ] && continue
@@ -943,6 +1120,22 @@ cmd_run() {
 
     docker_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "$@" )
     docker "${docker_args[@]}"
+}
+
+# Whether an idea declares a continuation contract (source_repo). Detection is
+# a mount-boundary optimization only; runner.py's contract check is
+# authoritative, and --prepare-only is a no-op on a forward idea, so a
+# false positive here is harmless. Matches a `source_repo:` line inside the
+# idea YAML for this id, wherever IdeaManager stored it under ideas/.
+_idea_is_continuation() {
+    local idea_id="$1"
+    local f
+    while IFS= read -r f; do
+        if grep -qE '^\s*source_repo\s*:' "$f" 2>/dev/null; then
+            return 0
+        fi
+    done < <(grep -rl -- "$idea_id" "$PROJECT_ROOT/ideas" --include='*.yaml' 2>/dev/null)
+    return 1
 }
 
 # -----------------------------------------------------------------------------
@@ -2371,6 +2564,7 @@ cmd_help() {
     echo "  shell                     Start an interactive shell"
     echo "  fetch <url> [--submit]    Fetch idea from IdeaHub"
     echo "  submit-local <idea.md> [--submit]  Convert a local idea file (markdown/text)"
+    echo "  continue-research <repo> <intention.md> [--submit]  Adopt-and-optimize an existing repo"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
     echo "  hitl-web [id]             Open the containerized HITL idea portal"
@@ -2441,6 +2635,9 @@ case "$ACTION" in
         ;;
     submit-local)
         cmd_submit_local "$@"
+        ;;
+    continue-research)
+        cmd_continue_research "$@"
         ;;
     submit)
         cmd_submit "$@"

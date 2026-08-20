@@ -50,8 +50,19 @@ VERDICT_CHECKS = {
     'routing': lambda contract: bool(contract['mandated_functions']),
     'transcription': lambda contract: bool(contract['evaluation'].get('metrics')),
     'format': lambda contract: bool(contract['evaluation'].get('results_format')),
+    # continue-research: the verifier must independently confirm the generated
+    # eval.py actually ENFORCES each declared invariant (reads the protected
+    # baseline and recomputes hashes; runs each check command), not just that a
+    # passing baseline reported them. Applicable whenever the continuation
+    # contract declares protected_path or check invariants.
+    'invariants': lambda contract: bool(contract['invariants']),
 }
 VERDICT_CHECK_VALUES = ('pass', 'fail', 'not_applicable')
+# Checks that need only be reported when the contract makes them applicable.
+# The original three are always required (reported not_applicable when they do
+# not apply); invariants is continuation-only, so a non-continuation verdict is
+# not obliged to mention it.
+OPTIONAL_UNLESS_APPLICABLE = {'invariants'}
 
 
 def has_user_eval_contract(idea: Dict[str, Any]) -> bool:
@@ -83,9 +94,22 @@ def extract_eval_contract(idea: Dict[str, Any]) -> Dict[str, Any]:
         func for func in (resources.get('functions') or [])
         if isinstance(func, dict) and func.get('required_for_evaluation')
     ]
+    # Continuation invariants the generated eval.py must enforce, normalized to
+    # {protected_paths: [...], checks: [...]} for the prompt and the predicate.
+    from core.local_resources import (
+        protected_path_prefixes,
+        continuation_check_commands,
+    )
+    invariants = {
+        'protected_paths': protected_path_prefixes(idea),
+        'checks': continuation_check_commands(idea),
+    }
+    if not (invariants['protected_paths'] or invariants['checks']):
+        invariants = {}
     return {
         'evaluation': evaluation,
         'mandated_functions': mandated,
+        'invariants': invariants,
     }
 
 
@@ -408,7 +432,12 @@ def interpret_verdict(
                        f"expected one of {list(VERDICT_CHECK_VALUES)}")
             elif value == 'fail':
                 failed.append(name)
-        missing = [name for name in VERDICT_CHECKS if name not in checks]
+        missing = [
+            name for name in VERDICT_CHECKS
+            if name not in checks
+            and (name not in OPTIONAL_UNLESS_APPLICABLE
+                 or VERDICT_CHECKS[name](contract))
+        ]
         if missing:
             reject(f"verification.json 'checks' must report every mandated check "
                    f"(use 'not_applicable' when a check does not apply); missing: {missing}")

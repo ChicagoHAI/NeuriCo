@@ -73,6 +73,39 @@ interface.md and eval.py must together produce results in the user's
 declared shape. Missing fields the user asked for are a FAIL; extra fields
 are acceptable.
 
+CHECK 4: INVARIANTS (only when the contract lists `invariants`)
+─────────────────────────────────────────────────────────────────────────────
+
+continue-research declares continuation invariants the generated eval.py MUST
+enforce as scoring guardrails. Read eval.py and confirm it actually ENFORCES
+each one -- do not trust that a property NAME merely appears. A harness that
+hardcodes the property to 1.0, or computes it from something other than the
+real filesystem/command, is a FAIL.
+
+✓ For every path in the contract's `invariants.protected_paths`: eval.py MUST
+  read the trusted baseline `scoring/protected_baseline.json` (keys `baseline_ref`
+  and `paths`) and emit a `protected_paths_unchanged` property that is 1.0 only
+  when every protected path is byte-identical to `baseline_ref`, 0.0 otherwise.
+  It MUST establish this by reading the IMMUTABLE baseline objects
+  (`git ls-tree -r <baseline_ref>` + `git cat-file blob <sha>`) and comparing them
+  to the REAL filesystem with plain Python (open().read(), os.readlink, os.lstat
+  for the exec bit, os.walk for additions). It MUST NOT decide "unchanged" via
+  `git diff`, `git ls-files`, `git status`, `git checkout`, or the index -- those
+  read git's agent-controllable working-tree view and are exploitable
+  (assume-unchanged / skip-worktree, clean filters, core.fileMode, gitignore). If
+  eval.py uses ANY of those to determine the property, hard-codes it, or ignores
+  `baseline_ref`, FAIL with the quoted line. Confirm the 0.0 path is reachable (a
+  content/mode mismatch, an added or deleted path, or a missing baseline object
+  yields 0.0).
+
+✓ For every command in the contract's `invariants.checks`: eval.py MUST run
+  THAT command verbatim via subprocess from the workspace root and map exit 0
+  to a passing guardrail property, nonzero to failing. A check that is faked,
+  altered, or never executed is a FAIL.
+
+Confirm the FAILURE behavior is reachable (the comparison/exit-code path can
+return 0.0), not just that the baseline case returns 1.0.
+
 ═══════════════════════════════════════════════════════════════════════════════
                           VERDICT: {verdict_file}
 ═══════════════════════════════════════════════════════════════════════════════
@@ -85,11 +118,12 @@ INCLUDING the field order):
   "checks": {
     "routing": "pass" | "fail" | "not_applicable",
     "transcription": "pass" | "fail" | "not_applicable",
-    "format": "pass" | "fail" | "not_applicable"
+    "format": "pass" | "fail" | "not_applicable",
+    "invariants": "pass" | "fail" | "not_applicable"
   },
   "violations": [
     {
-      "check": "routing" | "transcription" | "format",
+      "check": "routing" | "transcription" | "format" | "invariants",
       "detail": "<one sentence: what is wrong>",
       "evidence": "<short verbatim quote from the offending file, with path>"
     }
