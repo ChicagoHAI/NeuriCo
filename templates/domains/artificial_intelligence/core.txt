@@ -151,7 +151,7 @@ client = openai.OpenAI(
 
 # Rate limiting and retry logic
 @retry(wait=wait_exponential(min=1, max=60), stop=stop_after_attempt(5))
-def call_api_with_retry(prompt, model="openai/gpt-4.1"):
+def call_api_with_retry(prompt, model):
     """Robust API calling with exponential backoff."""
     # Implementation here
     pass
@@ -319,39 +319,45 @@ Create error taxonomy specific to your task:
 - RAM: 8-16GB typical; more if loading large models
 - Storage: Download datasets and models as needed for research
 
-**Model Selection (2025)**
+**Model Selection (live-catalog policy)**
 
 IMPORTANT: Use state-of-the-art models for credible research results.
 CRITICAL: For LLM research, use REAL models (APIs or downloads) and run them with experiments, do not simulate fake models!
 
-**Recommended Models (as of 2025):**
+**Selection procedure:**
 
-Access all of these through OpenRouter by DEFAULT (key in OPENROUTER_KEY,
-base_url https://openrouter.ai/api/v1). You can search the full catalog at
-https://openrouter.ai/models.
+1. Immediately before choosing models, query `https://openrouter.ai/api/v1/models`
+   (or the provider's official model catalog for direct API use). Confirm the exact
+   ID, availability, supported parameters, context limit, and current price.
+2. Match the model tier to the scientific role: use frontier models when capability
+   is the object of study, balanced models for general experiments, and efficient
+   models for high-volume screening. Do not silently substitute tiers.
+3. Record the provider, exact model ID, access date, parameters, and routing method
+   in the experiment artifacts. Pin the exact model used when reproducibility matters.
 
-- **GPT-4.1 or GPT-5** (OpenAI, August 2025) - Best for everyday reasoning, coding, reliability
-  - OpenRouter IDs: `openai/gpt-4.1`, `openai/gpt-5`, `openai/gpt-5-codex` (for coding tasks)
-  - Pricing: ~$1.25/M input tokens, ~$10/M output tokens
-  - Context: Standard context window
+**Current reference points (verified August 2026; re-check before use):**
 
-- **Claude Sonnet 4.5** (Anthropic, September 2025) - Best for coding, agents, polished writing
-  - OpenRouter ID: `anthropic/claude-sonnet-4.5`
-  - Context: 1,000,000 tokens
-  - Excels at: Complex B2B workflows, multi-file reasoning, autonomous agents
+- **OpenAI GPT-5.6 family**
+  - `openai/gpt-5.6-sol`: frontier capability
+  - `openai/gpt-5.6-terra`: balanced capability and cost
+  - `openai/gpt-5.6-luna`: efficient, high-volume workloads
+- **Anthropic Claude**
+  - `anthropic/claude-fable-5`: highest generally available capability
+  - `anthropic/claude-sonnet-5`: balanced intelligence and speed
+- **Google Gemini**
+  - `google/gemini-3.1-pro-preview`: frontier reasoning preview; confirm preview
+    availability and use a stable model instead when the protocol requires stability
 
-- **Gemini 2.5 Pro** (Google, June 2025) - Best for long context, visual reasoning
-  - OpenRouter ID: `google/gemini-2.5-pro`
-  - Context: 1,000,000 tokens
-  - Features: Computer Use for browser control, excellent multimodal
+This list is a fallback reference, not a permanent allowlist. The live catalog and
+official provider documentation are authoritative.
 
 **When to use older/smaller models:**
 - Historical baselines: Compare new methods against prior SOTA
 - Ablation studies: Test how model size affects phenomenon
 - Resource constraints: Explicitly justified (e.g., on-device deployment)
 
-**AVOID using models older than 2024** unless explicitly justified as baseline comparison.
-Do NOT use: FLAN-T5, GPT-3.5, Claude 2.x, Gemini 1.0 as primary evaluation models.
+Do not use a legacy or deprecated model as the primary model in a contemporary
+evaluation unless the research question explicitly requires it.
 
 **When to Download Models vs. Use APIs**
 
