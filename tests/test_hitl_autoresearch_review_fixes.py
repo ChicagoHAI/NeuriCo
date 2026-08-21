@@ -502,3 +502,104 @@ def test_prepublication_boundary_requires_source_and_backup(tmp_path):
     with pytest.raises(HitlRuntimeStateError):
         state.begin_bootstrap_prepublication_boundary(
             {"source_sha": "sha", "agent_local_backup": ""})
+
+
+# --------------------------------------------------------------------------- #
+# 7. rollback/retirement edge cases (backup lifetime, path trust, dual records)
+# --------------------------------------------------------------------------- #
+
+def _seed_canonical_backup(tmp_path):
+    backup = tmp_path / ".neurico" / "hitl" / "bootstrap_agent_local_backup"
+    (backup / ".codex").mkdir(parents=True)
+    (backup / ".codex" / "orig.txt").write_text("ORIGINAL")
+    return backup
+
+
+def test_failed_rollback_keeps_boundary_and_backup(tmp_path, monkeypatch):
+    # If the provider-local restore fails, the boundary record and its backup
+    # must both survive so the next run can retry, not be deleted underneath a
+    # still-pending boundary.
+    backup = _seed_canonical_backup(tmp_path)
+    prepub = {"source_sha": "deadbeef", "agent_local_backup": str(backup),
+              "agent_local_existed": [".codex"], "status": "prepared"}
+    state = _patch_bootstrap_env(monkeypatch, pending=None, exists=True, prepub=prepub)
+
+    def boom(*a, **k):
+        raise OSError("restore failed")
+
+    monkeypatch.setattr(har, "_restore_bootstrap_agent_local", boom)
+
+    # The raw OSError is wrapped in a HitlRuntimeStateError, matching how the
+    # experiment-runner recovery surfaces a failed private-state restore.
+    with pytest.raises(har.HitlRuntimeStateError, match="provider-local recovery"):
+        _run_bootstrap(tmp_path)
+
+    assert state.cleared_boundary is False, "a failed rollback must keep the record"
+    assert backup.is_dir(), "a failed rollback must keep the backup for retry"
+
+
+def test_rollback_rejects_record_with_noncanonical_backup_path(tmp_path, monkeypatch):
+    # The stored backup path is validated against the canonical in-workspace
+    # location. A record pointing elsewhere is treated as corrupt and fails
+    # loudly, so a damaged record can never redirect a restore-from or delete to
+    # another directory. Mirrors the ref-prefix validation in the
+    # experiment-runner recovery.
+    _seed_canonical_backup(tmp_path)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (decoy / "keep.txt").write_text("DO NOT DELETE")
+
+    prepub = {"source_sha": "deadbeef", "agent_local_backup": str(decoy),
+              "agent_local_existed": [".codex"], "status": "prepared"}
+    _patch_bootstrap_env(monkeypatch, pending=None, exists=True, prepub=prepub)
+
+    with pytest.raises(har.HitlRuntimeStateError, match="unexpected snapshot location"):
+        _run_bootstrap(tmp_path)
+
+    # The decoy the corrupt record pointed at is never touched.
+    assert (decoy / "keep.txt").read_text() == "DO NOT DELETE"
+
+
+def test_rollback_uses_canonical_backup_when_path_matches(tmp_path, monkeypatch):
+    # A healthy record stores the canonical location; recovery restores from it.
+    backup = _seed_canonical_backup(tmp_path)
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "injected.txt").write_text("PARTIAL")
+
+    prepub = {"source_sha": "deadbeef", "agent_local_backup": str(backup),
+              "agent_local_existed": [".codex"], "status": "prepared"}
+    _patch_bootstrap_env(monkeypatch, pending=None, exists=True, prepub=prepub)
+
+    _run_bootstrap(tmp_path)
+
+    assert (tmp_path / ".codex" / "orig.txt").read_text() == "ORIGINAL"
+    assert not (tmp_path / ".codex" / "injected.txt").exists()
+
+
+def test_publication_resume_retires_stale_boundary(tmp_path, monkeypatch):
+    # A crash between recording the publication and retiring the boundary leaves
+    # both records active. The publication-resume path must retire the obsolete
+    # boundary and its backup, not leave a record saying the published root
+    # should be rolled back.
+    backup = _seed_canonical_backup(tmp_path)
+    committed = {}
+    pending_pub = {"status": "root_initialized", "objective_score": {}}
+    prepub = {"source_sha": "deadbeef", "agent_local_backup": str(backup),
+              "agent_local_existed": [".codex"], "status": "prepared"}
+    state = _patch_bootstrap_env(
+        monkeypatch, pending=pending_pub, exists=True, prepub=prepub)
+    monkeypatch.setattr(har, "_initial_publication_pipeline_result",
+                        lambda wd, t: {"success": True})
+    monkeypatch.setattr(har, "_commit_initial_root_publication",
+                        lambda wd, t: committed.setdefault("called", True) or t)
+    monkeypatch.setattr(har, "_initial_node_result_from_publication",
+                        lambda wd, t, pr: InitialAutoResearchNodeResult(
+                            success=True, mode="bootstrap_initial_node",
+                            work_dir=str(tmp_path), reason="resumed"))
+
+    result = _run_bootstrap(tmp_path)
+
+    assert committed.get("called") is True, "publication must be resumed"
+    assert state.cleared_boundary is True, "the stale boundary must be retired"
+    assert not backup.exists(), "the stale boundary's backup must be deleted"
+    assert result.success is True
