@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import core.hitl_autoresearch as har  # noqa: E402
 from core.hitl_autoresearch import (  # noqa: E402
     InitialAutoResearchNodeResult,
+    _restore_bootstrap_agent_local,
+    _snapshot_bootstrap_agent_local,
     construct_bootstrap_hitl_baseline,
 )
 
@@ -194,6 +196,67 @@ def test_bootstrap_preparation_failure_never_builds_pipeline(tmp_path, monkeypat
     assert sha == "deadbeef"
     assert kwargs.get("clean_untracked_public") is True
     assert kwargs.get("remove_hidden_scoring") is True
+
+
+# --------------------------------------------------------------------------- #
+# 4. provider-local skill dirs are restored on failure (git-excluded state)
+# --------------------------------------------------------------------------- #
+
+def test_snapshot_restore_agent_local_roundtrip(tmp_path):
+    skills = tmp_path / ".codex" / "skills"
+    skills.mkdir(parents=True)
+    (skills / "orig.txt").write_text("ORIGINAL")
+    backup = tmp_path / "backup"
+    backup.mkdir()
+
+    existed = _snapshot_bootstrap_agent_local(tmp_path, backup)
+    assert ".codex" in existed
+
+    # Simulate a partial _copy_workspace_resources: replace + add files.
+    (skills / "orig.txt").unlink()
+    (skills / "injected.txt").write_text("PARTIAL")
+
+    _restore_bootstrap_agent_local(tmp_path, backup, existed)
+    assert (skills / "orig.txt").read_text() == "ORIGINAL"
+    assert not (skills / "injected.txt").exists()
+
+
+def test_restore_removes_agent_local_dir_absent_before(tmp_path):
+    backup = tmp_path / "backup"
+    backup.mkdir()
+    # .gemini did not exist at snapshot time.
+    existed = _snapshot_bootstrap_agent_local(tmp_path, backup)
+    assert ".gemini" not in existed
+
+    # Preparation creates it; restore must remove it to reach the prior state.
+    (tmp_path / ".gemini" / "skills").mkdir(parents=True)
+    (tmp_path / ".gemini" / "skills" / "new.txt").write_text("NEW")
+
+    _restore_bootstrap_agent_local(tmp_path, backup, existed)
+    assert not (tmp_path / ".gemini").exists()
+
+
+def test_bootstrap_restores_provider_skills_on_prep_failure(tmp_path, monkeypatch):
+    # Reproduces the reported gap: a file under .codex/skills/ surviving the
+    # rollback because git checkpoints exclude provider-local dirs. The public
+    # checkpoint restore is faked; the provider-skill restore is the real one.
+    skills = tmp_path / ".codex" / "skills"
+    skills.mkdir(parents=True)
+    (skills / "orig.txt").write_text("ORIGINAL")
+    _patch_bootstrap_env(monkeypatch, pending=None, exists=False)
+
+    def failing_prepare(work_dir):
+        (skills / "orig.txt").unlink()
+        (skills / "injected.txt").write_text("PARTIAL")
+        raise RuntimeError("prep failed mid-copy")
+
+    with pytest.raises(RuntimeError, match="prep failed mid-copy"):
+        _run_bootstrap(tmp_path, prepare_workspace=failing_prepare)
+
+    assert (skills / "orig.txt").read_text() == "ORIGINAL", \
+        "provider skills must be restored on rollback"
+    assert not (skills / "injected.txt").exists(), \
+        "partial provider-skill writes must not survive rollback"
 
 
 def _patch_success_env(monkeypatch, tmp_path, runtime_state_factory):
