@@ -603,3 +603,50 @@ def test_publication_resume_retires_stale_boundary(tmp_path, monkeypatch):
     assert state.cleared_boundary is True, "the stale boundary must be retired"
     assert not backup.exists(), "the stale boundary's backup must be deleted"
     assert result.success is True
+
+
+# --------------------------------------------------------------------------- #
+# 8. a missing provider-local snapshot is an incomplete recovery, not a success
+# --------------------------------------------------------------------------- #
+
+def test_rollback_with_missing_snapshot_but_provider_state_keeps_boundary(
+        tmp_path, monkeypatch):
+    # The record says provider dirs must be restored (.codex existed) but the
+    # durable snapshot is gone. This is incomplete recovery: raise and keep the
+    # boundary, do not clear it over partial state. Mirrors the missing
+    # private-snapshot handling in the experiment-runner recovery.
+    # No canonical backup is seeded, so the snapshot is absent.
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "injected.txt").write_text("PARTIAL")
+    prepub = {"source_sha": "deadbeef",
+              "agent_local_backup": str(
+                  tmp_path / ".neurico" / "hitl" / "bootstrap_agent_local_backup"),
+              "agent_local_existed": [".codex"], "status": "prepared"}
+    state = _patch_bootstrap_env(monkeypatch, pending=None, exists=True, prepub=prepub)
+
+    with pytest.raises(har.HitlRuntimeStateError, match="missing its provider-local"):
+        _run_bootstrap(tmp_path)
+
+    assert state.cleared_boundary is False, \
+        "an incomplete rollback must keep the recovery boundary"
+
+
+def test_rollback_with_missing_snapshot_and_no_prior_provider_state_succeeds(
+        tmp_path, monkeypatch):
+    # The original workspace had no provider dirs (empty `agent_local_existed`),
+    # so restoration is only a removal and needs no snapshot. Preparation created
+    # .codex; rollback removes it and retires the boundary cleanly.
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "created.txt").write_text("CREATED")
+    prepub = {"source_sha": "deadbeef",
+              "agent_local_backup": str(
+                  tmp_path / ".neurico" / "hitl" / "bootstrap_agent_local_backup"),
+              "agent_local_existed": [], "status": "prepared"}
+    state = _patch_bootstrap_env(monkeypatch, pending=None, exists=True, prepub=prepub)
+
+    result = _run_bootstrap(tmp_path)
+
+    assert not (tmp_path / ".codex").exists(), \
+        "provider dir created by preparation must be removed on rollback"
+    assert state.cleared_boundary is True
+    assert result.success is True

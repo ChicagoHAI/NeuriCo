@@ -479,15 +479,25 @@ def _rollback_bootstrap_prepublication_boundary(
     CheckpointManager(work_dir).restore_checkpoint(
         source_sha, clean_untracked_public=True, remove_hidden_scoring=True
     )
-    if backup_root.is_dir():
-        try:
-            _restore_bootstrap_agent_local(work_dir, backup_root, existed)
-        except OSError as exc:
-            # Keep the record and backup so the next run retries, rather than
-            # clearing recovery with partial provider-local state in place.
-            raise HitlRuntimeStateError(
-                "Could not restore the bootstrap provider-local recovery boundary."
-            ) from exc
+    # A missing snapshot is an incomplete recovery, not a successful one, when
+    # the record says provider-local state must be restored. Mirroring the
+    # missing-private-snapshot handling in the experiment-runner recovery, raise
+    # and keep the boundary rather than clearing it over partial state. (An empty
+    # `existed` means the original workspace had no provider-local dirs, so
+    # restoring is only a removal and needs no snapshot.)
+    if existed and not backup_root.is_dir():
+        raise HitlRuntimeStateError(
+            "Bootstrap pre-publication boundary is missing its provider-local "
+            "snapshot; treating recovery as incomplete and keeping the boundary."
+        )
+    try:
+        _restore_bootstrap_agent_local(work_dir, backup_root, existed)
+    except OSError as exc:
+        # Keep the record and backup so the next run retries, rather than
+        # clearing recovery with partial provider-local state in place.
+        raise HitlRuntimeStateError(
+            "Could not restore the bootstrap provider-local recovery boundary."
+        ) from exc
     _retire_prepublication_boundary(work_dir, runtime_state)
 
 
