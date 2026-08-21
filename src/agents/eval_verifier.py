@@ -511,16 +511,57 @@ _MANAGER_CONCERN_DESCRIPTIONS = {
 _MANAGER_GENERIC_CONCERN = "a declared evaluation requirement may not be met"
 
 
-def build_manager_conformance_report(verdict: Dict[str, Any]) -> str:
+def _declared_requirements_for_check(check: str, contract: Dict[str, Any]) -> List[str]:
+    """User-declared requirement labels relevant to a failed check.
+
+    Drawn only from the user's own declarations (idea.evaluation and mandated
+    functions), which are not sealed, so naming them to the manager leaks
+    nothing about the evaluator implementation. Only user-declared names and
+    targets are echoed, never anything read from the sealed evaluator.
+    """
+    contract = contract or {}
+    evaluation = contract.get("evaluation")
+    evaluation = evaluation if isinstance(evaluation, dict) else {}
+    metrics = [
+        metric for metric in (evaluation.get("metrics") or [])
+        if isinstance(metric, dict) and str(metric.get("name", "")).strip()
+    ]
+    labels: List[str] = []
+    if check in ("transcription", "routing"):
+        for metric in metrics:
+            label = f"metric {str(metric['name'])!r}"
+            target = metric.get("target")
+            if target not in (None, ""):
+                label += f" (target {str(target)!r})"
+            labels.append(label)
+    if check == "routing":
+        for function in contract.get("mandated_functions") or []:
+            if isinstance(function, dict):
+                name = function.get("entrypoint") or function.get("path")
+                if str(name or "").strip():
+                    labels.append(f"required function {str(name)!r}")
+    if check == "format":
+        results_format = evaluation.get("results_format")
+        if results_format:
+            labels.append(f"results format {str(results_format)!r}")
+    return labels
+
+
+def build_manager_conformance_report(
+    verdict: Dict[str, Any],
+    declared_contract: Optional[Dict[str, Any]] = None,
+) -> str:
     """Render a verifier verdict as a leak-proof, manager-facing report.
 
     - verifier could not complete -> UNAVAILABLE (not a signal about the design)
     - contract satisfied          -> PASS
-    - contract not satisfied      -> CONCERNS with canned per-check categories
+    - contract not satisfied      -> CONCERNS with canned per-check categories,
+      naming the user's own declared requirements in that category verbatim
 
-    Contains no code, file contents, `detail`/`evidence` strings, or any value
-    derived from the sealed evaluator. Every byte comes from a fixed status
-    string or a canned description keyed by a recognized check name.
+    Contains no code, file contents, `detail`/`evidence` strings, verdict
+    `summary`, or any value derived from the sealed evaluator. Every byte comes
+    from a fixed status string, a canned description keyed by a recognized check
+    name, or the user's own declared requirements (which are not sealed).
     """
     verdict = verdict or {}
     if not verdict.get("success"):
@@ -535,26 +576,31 @@ def build_manager_conformance_report(verdict: Dict[str, Any]) -> str:
             "satisfy the user's declared evaluation contract (mandated metrics, "
             "targets, evaluation split, and required functions)."
         )
-    # CONCERNS: emit only canned category descriptions, deduplicated. An
-    # unrecognized check name is mapped to the generic description and never
-    # echoed, so nothing agent- or file-derived reaches the manager.
-    descriptions: List[str] = []
+    # CONCERNS: for each failed check emit its canned category plus the user's
+    # own declared requirements in that category, so the manager sees exactly
+    # which of the user's requirements may be unmet without any sealed content.
+    # An unrecognized check maps to the generic category and its raw name is
+    # never echoed.
+    lines_out: List[str] = []
     for violation in verdict.get("violations") or []:
-        check = violation.get("check") if isinstance(violation, dict) else None
-        described = _MANAGER_CONCERN_DESCRIPTIONS.get(str(check), _MANAGER_GENERIC_CONCERN)
-        if described not in descriptions:
-            descriptions.append(described)
-    if not descriptions:
-        descriptions.append(_MANAGER_GENERIC_CONCERN)
-    lines = [
+        check = str(violation.get("check")) if isinstance(violation, dict) else ""
+        category = _MANAGER_CONCERN_DESCRIPTIONS.get(check, _MANAGER_GENERIC_CONCERN)
+        requirements = _declared_requirements_for_check(check, declared_contract)
+        line = f"- {category}"
+        if requirements:
+            line += " -- user's declared requirement(s): " + "; ".join(requirements)
+        if line not in lines_out:
+            lines_out.append(line)
+    if not lines_out:
+        lines_out.append(f"- {_MANAGER_GENERIC_CONCERN}")
+    header = [
         "Automated conformance check: CONCERNS. The scoring design may not satisfy "
         "the user's declared evaluation contract:"
     ]
-    lines.extend(f"- {described}" for described in descriptions)
-    lines.append(
-        "This is advisory and carries no detail from the sealed evaluator. If a "
-        "concern looks real, return feedback asking the rule maker to recheck that "
-        "requirement against its own scoring/ files; otherwise decide from your "
-        "own review."
-    )
-    return "\n".join(lines)
+    trailer = [
+        "The named requirements are the user's own declarations, not the sealed "
+        "evaluator's contents. If a concern looks real, return feedback asking the "
+        "rule maker to recheck the named requirement against its own scoring/ "
+        "files; otherwise decide from your own review."
+    ]
+    return "\n".join(header + lines_out + trailer)

@@ -32,6 +32,7 @@ import time
 from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
 from agents.eval_verifier import (
     build_manager_conformance_report,
+    extract_eval_contract,
     format_violations_for_retry,
     has_user_eval_contract,
     run_eval_verifier,
@@ -1692,7 +1693,9 @@ class ResearchPipelineOrchestrator:
             verdict = {"success": False, "passed": False, "violations": []}
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
-        return build_manager_conformance_report(verdict)
+        # The declared contract is the user's own input (not sealed), so the
+        # report may name the specific unmet requirements verbatim.
+        return build_manager_conformance_report(verdict, extract_eval_contract(idea))
 
     def _run_rule_maker_hitl(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool

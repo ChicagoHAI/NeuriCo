@@ -56,6 +56,42 @@ def test_report_concerns_deduplicates_categories():
     assert report.count("may not compute the mandated measurements") == 1
 
 
+def test_report_concerns_names_user_declared_requirements_verbatim():
+    contract = {
+        "evaluation": {"metrics": [{"name": "macro_f1", "target": ">= 0.85"}]},
+        "mandated_functions": [{"entrypoint": "evaluate_protocol"}],
+    }
+    report = build_manager_conformance_report(
+        {"success": True, "passed": False, "violations": [{"check": "routing"}]},
+        contract,
+    )
+    # The user's own declared requirement is named, verbatim.
+    assert "'macro_f1'" in report and "'>= 0.85'" in report
+    assert "'evaluate_protocol'" in report
+    assert "user's declared requirement" in report
+
+
+def test_report_concerns_names_requirements_but_still_drops_sealed_detail():
+    # Even with the declared contract surfaced, nothing from the sealed evaluator
+    # (detail/evidence/summary) reaches the manager.
+    contract = {"evaluation": {"metrics": [{"name": "accuracy", "target": ">= 0.8"}]}}
+    report = build_manager_conformance_report(
+        {
+            "success": True, "passed": False,
+            "summary": "targets.json actually stores 0.55 from the hidden key",
+            "violations": [{
+                "check": "transcription",
+                "detail": "hidden target is 0.55",
+                "evidence": "TARGET=0.55  # SEALED",
+            }],
+        },
+        contract,
+    )
+    assert "'accuracy'" in report and "'>= 0.8'" in report  # declared, safe
+    for sealed in ("0.55", "SEALED", "hidden", "TARGET="):
+        assert sealed not in report
+
+
 # --------------------------------------------------------------------------- #
 # leak-proofing: no sealed content, agent detail/evidence, or raw check names
 # --------------------------------------------------------------------------- #
