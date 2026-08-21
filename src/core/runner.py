@@ -215,6 +215,7 @@ class ResearchRunner:
         continue_autoresearch: bool = False,
         continue_recover: bool = False,
         bootstrap_autoresearch_baseline: bool = False,
+        hitl_bootstrap_autoresearch_baseline: bool = False,
         proposer_timeout: int = 900,
         compute_backend: str = "local",
         hitl_autoresearch: Optional[str] = None,
@@ -316,6 +317,7 @@ class ResearchRunner:
                 ("--autoresearch", autoresearch),
                 ("--continue-autoresearch", continue_autoresearch),
                 ("--bootstrap-autoresearch-baseline", bootstrap_autoresearch_baseline),
+                ("--hitl-bootstrap-autoresearch-baseline", hitl_bootstrap_autoresearch_baseline),
             )
             if enabled
         ]
@@ -611,13 +613,11 @@ class ResearchRunner:
                 "autoresearch": pipeline_result.get("autoresearch"),
             }
 
-        if bootstrap_autoresearch_baseline:
+        if bootstrap_autoresearch_baseline or hitl_bootstrap_autoresearch_baseline:
             success = False
             baseline_result: Dict[str, Any] = {}
             try:
-                from core.autoresearch import construct_bootstrap_initial_node
-
-                baseline_result = construct_bootstrap_initial_node(
+                bootstrap_args = dict(
                     idea=idea,
                     idea_id=idea_id,
                     work_dir=work_dir,
@@ -633,6 +633,23 @@ class ResearchRunner:
                         compute_backend=compute_backend,
                     ),
                 )
+                if hitl_bootstrap_autoresearch_baseline:
+                    # Seed a manager-driven AutoResearch frontier root; continue
+                    # it later with the HITL web/CLI interfaces or
+                    # --hitl-continue-autoresearch under the selected mode.
+                    from core.hitl_autoresearch import construct_bootstrap_hitl_baseline
+
+                    node_result = construct_bootstrap_hitl_baseline(**bootstrap_args)
+                    baseline_result = {
+                        "success": node_result.success,
+                        "mode": node_result.mode,
+                        "current_best_sha": node_result.current_best_sha,
+                        "reason": node_result.reason,
+                    }
+                else:
+                    from core.autoresearch import construct_bootstrap_initial_node
+
+                    baseline_result = construct_bootstrap_initial_node(**bootstrap_args)
                 success = baseline_result.get("success", False)
             except Exception as e:
                 print(f"\n❌ Bootstrap AutoResearch baseline error: {e}")
@@ -1561,6 +1578,15 @@ def main():
         "Does not run AutoResearch iterations.",
     )
     parser.add_argument(
+        "--hitl-bootstrap-autoresearch-baseline",
+        action="store_true",
+        help="Like --bootstrap-autoresearch-baseline, but publishes the scored "
+        "baseline as the manager-driven AutoResearch frontier root instead of "
+        "the flat continuation state. Continue it with the HITL web/CLI "
+        "interfaces or --hitl-continue-autoresearch (Auto or Full mode). "
+        "Does not run AutoResearch iterations.",
+    )
+    parser.add_argument(
         "--proposer-timeout",
         type=int,
         default=900,
@@ -1609,6 +1635,7 @@ def main():
             ("--hitl-autoresearch", bool(args.hitl_autoresearch)),
             ("--hitl-continue-autoresearch", bool(args.hitl_continue_autoresearch)),
             ("--bootstrap-autoresearch-baseline", args.bootstrap_autoresearch_baseline),
+            ("--hitl-bootstrap-autoresearch-baseline", args.hitl_bootstrap_autoresearch_baseline),
         )
         if enabled
     ]
@@ -1674,6 +1701,7 @@ def main():
             continue_autoresearch=args.continue_autoresearch,
             continue_recover=args.continue_recover,
             bootstrap_autoresearch_baseline=args.bootstrap_autoresearch_baseline,
+            hitl_bootstrap_autoresearch_baseline=args.hitl_bootstrap_autoresearch_baseline,
             proposer_timeout=args.proposer_timeout,
             compute_backend=args.compute_backend,
             hitl_autoresearch=args.hitl_autoresearch,

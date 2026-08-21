@@ -96,6 +96,7 @@ class HitlRuntimeState:
             "next_autoresearch_action": None,
             "rejected_whiteboard_cleanup": None,
             "frontier_decision_transition": None,
+            "bootstrap_prepublication_boundary": None,
             "initial_root_publication_transition": None,
             "approved_plans": {},
             "interface_events": [],
@@ -851,6 +852,52 @@ class HitlRuntimeState:
     def frontier_decision_transition(self) -> Optional[Dict[str, Any]]:
         value = self.snapshot().get("frontier_decision_transition")
         return value if isinstance(value, dict) and value else None
+
+    def begin_bootstrap_prepublication_boundary(
+        self,
+        boundary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Persist the pre-publication bootstrap recovery boundary.
+
+        Recorded before a bootstrap mutates the workspace (preparation and
+        scoring), so an interrupted run killed before the publication transition
+        exists is rolled back on a later invocation instead of being adopted as
+        a new baseline. Carries the source checkpoint and the durable
+        provider-local snapshot location, the two things a rollback needs.
+        Idempotent: an existing boundary is returned unchanged.
+        """
+        source_sha = str(boundary.get("source_sha", "")).strip()
+        backup_dir = str(boundary.get("agent_local_backup", "")).strip()
+        if not source_sha or not backup_dir:
+            raise HitlRuntimeStateError(
+                "Bootstrap pre-publication boundary requires a source checkpoint "
+                "and a durable provider-local snapshot location"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            existing = self._state.get("bootstrap_prepublication_boundary")
+            if isinstance(existing, dict) and existing:
+                return self._copy(existing)
+            record = self._copy(boundary)
+            record["status"] = "prepared"
+            record["created_at"] = _now()
+            self._state["bootstrap_prepublication_boundary"] = record
+            self._save_unlocked()
+            return self._copy(record)
+
+    def bootstrap_prepublication_boundary(self) -> Optional[Dict[str, Any]]:
+        value = self.snapshot().get("bootstrap_prepublication_boundary")
+        return value if isinstance(value, dict) and value else None
+
+    def clear_bootstrap_prepublication_boundary(self) -> None:
+        """Retire the pre-publication boundary once it is no longer the recovery
+        point: after a successful rollback, or after the publication transition
+        has been durably established and owns recovery from here on."""
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            if self._state.get("bootstrap_prepublication_boundary"):
+                self._state["bootstrap_prepublication_boundary"] = None
+                self._save_unlocked()
 
     def begin_initial_root_publication_transition(
         self,

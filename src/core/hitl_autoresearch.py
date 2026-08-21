@@ -16,6 +16,7 @@ import re
 import shutil
 
 from core.autoresearch import (
+    AGENT_LOCAL_PATTERNS,
     AttemptHistoryManager,
     AutoResearchIterationResult,
     AutoResearchRunResult,
@@ -50,9 +51,14 @@ from core.hitl_frontier import (
 from core.hitl_git import delete_git_ref
 from core.hitl_git_state import HitlGitStateStore
 from core.hitl_manager_inbox import HitlManagerInbox
+from core.hitl_paths import hitl_state_dir
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_run_control import HitlRunStopRequested
-from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
+from core.hitl_runtime_state import (
+    HitlRuntimeState,
+    HitlRuntimeStateError,
+    worker_command_requires_resume,
+)
 from core.hitl_scoring_workspace import (
     run_isolated_scorer,
     scoring_source_workspace_fingerprint,
@@ -368,6 +374,332 @@ def run_fresh_hitl_autoresearch_initial_node(
         completed_publication,
         pipeline_result,
     )
+
+
+# Provider-local directories that workspace preparation rewrites. Git
+# checkpoints exclude them (AGENT_LOCAL_PATTERNS), so a git restore cannot undo a
+# partial copy; the bootstrap snapshots and restores them alongside the public
+# checkpoint.
+_BOOTSTRAP_AGENT_LOCAL_DIRS = tuple(pattern.rstrip("/") for pattern in AGENT_LOCAL_PATTERNS)
+
+
+def _snapshot_bootstrap_agent_local(work_dir: Path, backup_root: Path) -> List[str]:
+    """Copy the provider-local dirs preparation mutates into a backup.
+
+    Returns the names that existed, so restore can recreate exactly the prior
+    state (a dir absent before preparation is removed on restore).
+    """
+    existed: List[str] = []
+    for name in _BOOTSTRAP_AGENT_LOCAL_DIRS:
+        source = Path(work_dir) / name
+        if source.exists():
+            shutil.copytree(source, Path(backup_root) / name, symlinks=True)
+            existed.append(name)
+    return existed
+
+
+def _restore_bootstrap_agent_local(
+    work_dir: Path, backup_root: Path, existed: List[str]
+) -> None:
+    """Restore the provider-local dirs from the pre-preparation snapshot.
+
+    Removal failures are not suppressed: a provider dir that cannot be replaced
+    must surface as an incomplete rollback rather than leave partial state
+    behind while returning successfully.
+    """
+    for name in _BOOTSTRAP_AGENT_LOCAL_DIRS:
+        target = Path(work_dir) / name
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+        if name in existed:
+            shutil.copytree(Path(backup_root) / name, target, symlinks=True)
+
+
+def _bootstrap_agent_local_backup_dir(work_dir: Path) -> Path:
+    """The one canonical location of the provider-local bootstrap snapshot.
+
+    Derived from the workspace, never read from the runtime record, so a damaged
+    or tampered record can never redirect a restore-from or delete to some other
+    directory. The record stores this same path only for auditing.
+    """
+    return hitl_state_dir(work_dir) / "bootstrap_agent_local_backup"
+
+
+def _retire_prepublication_boundary(
+    work_dir: Path, runtime_state: "HitlRuntimeState"
+) -> None:
+    """Clear the boundary record and delete its backup as one retirement.
+
+    The backup is deleted only here, tied to clearing the record, so a backup is
+    never removed while its boundary is still pending.
+    """
+    runtime_state.clear_bootstrap_prepublication_boundary()
+    shutil.rmtree(_bootstrap_agent_local_backup_dir(work_dir), ignore_errors=True)
+
+
+def _rollback_bootstrap_prepublication_boundary(
+    work_dir: Path,
+    runtime_state: "HitlRuntimeState",
+    boundary: Dict[str, Any],
+) -> None:
+    """Roll back an interrupted pre-publication bootstrap on a later invocation.
+
+    Restores the public workspace to the recorded source checkpoint and the
+    provider-local dirs from the durable snapshot, then retires the boundary so
+    the workspace is the original again and a fresh attempt can proceed. Runs
+    before any new checkpoint is created, so a killed bootstrap is never adopted
+    as a new baseline.
+
+    Mirrors ``_recover_experiment_runner_from_runtime_checkpoint``: the durable
+    record's fields are validated and a corrupt record fails loudly rather than
+    acting on it; the public workspace is restored first, then the private
+    provider-local state; a failed restore leaves the boundary and its backup
+    intact and propagates, so recovery is retried rather than lost; only a clean
+    restore retires the record and discards its snapshot.
+    """
+    source_sha = str(boundary.get("source_sha", "")).strip()
+    if not source_sha:
+        raise HitlRuntimeStateError(
+            "Bootstrap pre-publication boundary is missing its source checkpoint."
+        )
+    backup_root = _bootstrap_agent_local_backup_dir(work_dir)
+    # The snapshot location is derived from the workspace and never taken from
+    # the record as a filesystem target. A record whose stored location does not
+    # match the canonical one is treated as corrupt, so a damaged record can
+    # never redirect a restore-from or delete to another directory.
+    recorded_backup = str(boundary.get("agent_local_backup", "")).strip()
+    if recorded_backup and Path(recorded_backup) != backup_root:
+        raise HitlRuntimeStateError(
+            "Bootstrap pre-publication boundary references an unexpected snapshot "
+            "location; refusing to act on a corrupt recovery record."
+        )
+    existed = list(boundary.get("agent_local_existed") or [])
+    CheckpointManager(work_dir).restore_checkpoint(
+        source_sha, clean_untracked_public=True, remove_hidden_scoring=True
+    )
+    # A missing snapshot is an incomplete recovery, not a successful one, when
+    # the record says provider-local state must be restored. Mirroring the
+    # missing-private-snapshot handling in the experiment-runner recovery, raise
+    # and keep the boundary rather than clearing it over partial state. (An empty
+    # `existed` means the original workspace had no provider-local dirs, so
+    # restoring is only a removal and needs no snapshot.)
+    if existed and not backup_root.is_dir():
+        raise HitlRuntimeStateError(
+            "Bootstrap pre-publication boundary is missing its provider-local "
+            "snapshot; treating recovery as incomplete and keeping the boundary."
+        )
+    try:
+        _restore_bootstrap_agent_local(work_dir, backup_root, existed)
+    except OSError as exc:
+        # Keep the record and backup so the next run retries, rather than
+        # clearing recovery with partial provider-local state in place.
+        raise HitlRuntimeStateError(
+            "Could not restore the bootstrap provider-local recovery boundary."
+        ) from exc
+    _retire_prepublication_boundary(work_dir, runtime_state)
+
+
+def construct_bootstrap_hitl_baseline(
+    *,
+    idea: Dict[str, Any],
+    idea_id: str,
+    work_dir: Path,
+    templates_dir: Path,
+    provider: str,
+    full_permissions: bool,
+    rule_maker_timeout: int,
+    scorer_timeout: int,
+    manifest_trimmer_timeout: int,
+    autoresearch_history_dir: Optional[Path],
+    hitl_mode: HitlMode | str = HitlMode.AUTO,
+    prepare_workspace: Optional[Callable[[Path], None]] = None,
+) -> InitialAutoResearchNodeResult:
+    """Seed the AutoResearch frontier root from an existing unscored workspace.
+
+    Runs the shared, mechanical bootstrap scoring pipeline (workspace manifest +
+    trimmer + bootstrap rule-maker + scorer) against a workspace a Standard run
+    already produced, then publishes the scored result as the frontier root. No
+    manager decision is needed for the baseline itself; the manager drives later
+    ``--continue-autoresearch`` iterations under the selected mode. On failure
+    the original workspace is restored.
+    """
+    from core.pipeline_orchestrator import ResearchPipelineOrchestrator
+
+    print()
+    print("=" * 80)
+    print("🔁 BOOTSTRAP HITL AUTORESEARCH BASELINE")
+    print("=" * 80)
+    print()
+
+    work_dir = Path(work_dir)
+    selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
+    runtime_state = HitlRuntimeState(work_dir)
+
+    # Resume an interrupted (or already-finished) root publication before
+    # treating an existing frontier as complete. The frontier file is written
+    # midway through publication, at root initialization, so its presence alone
+    # does not mean the continuation metadata (history root, lineage source,
+    # last iteration), history mirroring, and cleanup have been written.
+    # Committing the pending transition is replay-safe and idempotent: it
+    # finishes a partial publication, or returns an already-completed one
+    # unchanged.
+    existing_publication = runtime_state.initial_root_publication_transition()
+    if isinstance(existing_publication, dict):
+        pipeline_result = _initial_publication_pipeline_result(work_dir, existing_publication)
+        completed = _commit_initial_root_publication(work_dir, existing_publication)
+        # A publication transition exists, so the pre-publication window is over.
+        # If a crash between recording the publication and retiring the boundary
+        # left both records active, the boundary is now obsolete: publication
+        # owns recovery, so retire the stale boundary and its backup here rather
+        # than leave a record that says the published root should be rolled back.
+        _retire_prepublication_boundary(work_dir, runtime_state)
+        return _initial_node_result_from_publication(work_dir, completed, pipeline_result)
+
+    # Roll back an interrupted pre-publication bootstrap before doing anything
+    # else. If a previous run was killed during preparation or scoring, no
+    # publication transition exists yet, and without this the workspace is
+    # partially prepared or scored. Restoring the recorded source checkpoint and
+    # provider-local snapshot returns it to the original state so a fresh attempt
+    # starts clean and the partial workspace is never adopted as a new baseline.
+    pending_boundary = runtime_state.bootstrap_prepublication_boundary()
+    if isinstance(pending_boundary, dict):
+        print("↩️  Rolling back an interrupted pre-publication bootstrap before retrying.")
+        _rollback_bootstrap_prepublication_boundary(work_dir, runtime_state, pending_boundary)
+
+    # Idempotent: a frontier with no pending publication is already initialized.
+    if HitlFrontierStore(work_dir).exists():
+        return InitialAutoResearchNodeResult(
+            success=True,
+            mode="bootstrap_initial_node",
+            work_dir=str(work_dir),
+            reason="AutoResearch frontier already initialized.",
+        )
+
+    checkpoints = CheckpointManager(work_dir)
+    source = checkpoints.create_checkpoint(
+        "HITL bootstrap: original unscored workspace"
+    )
+
+    # Capture the provider-local dirs preparation rewrites before it runs. Git
+    # checkpoints exclude them, so restoring the checkpoint alone would leave a
+    # partial _copy_workspace_resources behind. The snapshot lives under the
+    # runtime-owned HITL state dir, which git rollback preserves, so it survives
+    # both restore_checkpoint and process death and is available to a later run.
+    agent_local_backup = _bootstrap_agent_local_backup_dir(work_dir)
+    if agent_local_backup.exists():
+        shutil.rmtree(agent_local_backup, ignore_errors=True)
+    agent_local_backup.mkdir(parents=True, exist_ok=True)
+    agent_local_existed = _snapshot_bootstrap_agent_local(work_dir, agent_local_backup)
+
+    # Record the pre-publication recovery boundary durably, before preparation
+    # mutates anything. From here until the publication transition exists, a
+    # later invocation resumes and rolls this back rather than adopting the
+    # partial workspace.
+    runtime_state.begin_bootstrap_prepublication_boundary(
+        {
+            "source_sha": source.sha,
+            "agent_local_backup": str(agent_local_backup),
+            "agent_local_existed": agent_local_existed,
+        }
+    )
+
+    def restore_source() -> None:
+        checkpoints.restore_checkpoint(
+            source.sha, clean_untracked_public=True, remove_hidden_scoring=True
+        )
+        # The public checkpoint does not cover the excluded provider-local dirs,
+        # so restore them from the pre-preparation snapshot to reach the complete
+        # original state.
+        _restore_bootstrap_agent_local(work_dir, agent_local_backup, agent_local_existed)
+
+    def fail_and_restore() -> None:
+        # restore_source() may raise (an incomplete provider-local restore);
+        # then the boundary and backup are kept for the next run to retry,
+        # because retirement only runs after a clean restore.
+        restore_source()
+        _retire_prepublication_boundary(work_dir, runtime_state)
+
+    # The original checkpoint stays the recovery boundary until the publication
+    # transition is durably recorded. Everything that mutates or scores the
+    # workspace, and the transition record itself, runs inside this boundary so a
+    # failure anywhere restores the original workspace rather than stranding a
+    # scored-but-unpublished one that a later run could adopt as its start.
+    try:
+        # Preparation mutates provider skill directories and .gitignore.
+        if prepare_workspace is not None:
+            prepare_workspace(work_dir)
+        pipeline_result = ResearchPipelineOrchestrator(
+            work_dir=work_dir,
+            templates_dir=templates_dir,
+        ).run_pipeline(
+            idea=idea,
+            provider=provider,
+            full_permissions=full_permissions,
+            scoring_enabled=True,
+            bootstrap_mode=True,
+            rule_maker_timeout=rule_maker_timeout,
+            scorer_timeout=scorer_timeout,
+            manifest_trimmer_timeout=manifest_trimmer_timeout,
+        )
+
+        stages = pipeline_result.get("stages", {})
+        scorer_result = stages.get("scorer", {}) if isinstance(stages, dict) else {}
+        results = scorer_result.get("results") if isinstance(scorer_result, dict) else None
+        if not pipeline_result.get("success", False) or not isinstance(results, dict):
+            fail_and_restore()
+            return InitialAutoResearchNodeResult(
+                success=False,
+                mode="bootstrap_initial_node",
+                work_dir=str(work_dir),
+                reason="Bootstrap scoring pipeline failed.",
+                pipeline_result=pipeline_result,
+            )
+
+        # A bootstrapped workspace has no living plan; use the experiment plan
+        # if one exists, otherwise a neutral placeholder for the root.
+        plan_path = work_dir / "plans" / "experiment_runner_plan.md"
+        plan_text = (
+            plan_path.read_text(encoding="utf-8")
+            if plan_path.is_file()
+            else (
+                "Bootstrapped baseline from an existing scored workspace. No living "
+                "plan was recorded for the original experiment; later proposals may "
+                "establish one."
+            )
+        )
+        history_root, _ = resolve_autoresearch_history_root(
+            work_dir, autoresearch_history_dir
+        )
+        publication = runtime_state.begin_initial_root_publication_transition(
+            {
+                "plan_text": plan_text,
+                "objective_score": {
+                    "scorer_result": scorer_result if isinstance(scorer_result, dict) else {},
+                    "results": results,
+                },
+                "reason_for_acceptance": (
+                    "Bootstrapped AutoResearch baseline from an existing scored workspace."
+                ),
+                "history_root": encode_hitl_history_root(work_dir, history_root),
+                "scoring_ref": str(scorer_result.get("scoring_ref", "")).strip(),
+            }
+        )
+    except Exception:
+        fail_and_restore()
+        raise
+
+    # The publication transition is durably recorded and owns recovery from here:
+    # it is replay-forward and idempotent, resumed by the pending-publication path
+    # on any later run. Retire the pre-publication boundary and its backup
+    # together now so the two recovery records never both claim the run. The
+    # backup is deleted only alongside clearing the record, never in an
+    # unconditional cleanup, so a backup is never removed while its boundary is
+    # still pending.
+    _retire_prepublication_boundary(work_dir, runtime_state)
+    completed = _commit_initial_root_publication(work_dir, publication)
+    return _initial_node_result_from_publication(work_dir, completed, pipeline_result)
 
 
 def _initial_frontier_acceptance_reason(work_dir: Path) -> str:
@@ -2433,32 +2765,51 @@ def run_hitl_autoresearch_loop(
             raise RuntimeError(
                 "HITL comment-handler logs require a runtime-owned attempt directory."
             )
-        launch = build_comment_handler_launch(
-            idea=comment_idea,
-            work_dir=comment_work_dir,
-            provider=provider,
-            templates_dir=templates_dir,
-            full_permissions=full_permissions,
-            dsi_remote_info=None,
-            prompt_override=prompt_override,
-            prompt_override_only=True,
-            logs_dir=Path(logs_dir),
-            log_prefix=log_prefix,
-            env_extra=env_extra,
+        from core.dsi_slurm_artifacts import (
+            DSI_SLURM_ARTIFACTS_DIR,
+            move_dsi_slurm_artifacts,
         )
-        result = run_prebuilt_cli_agent(
-            command_argv=launch["command_argv"],
-            prompt=launch["prompt"],
-            work_dir=launch["work_dir"],
-            log_file=launch["log_file"],
-            transcript_file=launch["transcript_file"],
-            env=launch["env"],
-            timeout=comment_timeout,
-        )
-        if result.get("timed_out"):
-            result["error"] = (
-                f"AutoResearch HITL comment handler timed out after {comment_timeout}s"
+        from core.dsi_slurm_remote import dsi_slurm_remote_workspace
+
+        # Provision a dsi-cluster remote workspace for this experiment attempt.
+        # No-op unless --compute-backend is exactly dsi-slurm, so local and modal
+        # runs behave exactly as before (dsi_remote_info stays None).
+        with dsi_slurm_remote_workspace(idea, comment_work_dir) as dsi_remote_info:
+            if dsi_remote_info is not None:
+                print(f"DSI remote workspace: {dsi_remote_info['remote_root']}")
+            launch = build_comment_handler_launch(
+                idea=comment_idea,
+                work_dir=comment_work_dir,
+                provider=provider,
+                templates_dir=templates_dir,
+                full_permissions=full_permissions,
+                dsi_remote_info=dsi_remote_info,
+                prompt_override=prompt_override,
+                prompt_override_only=True,
+                logs_dir=Path(logs_dir),
+                log_prefix=log_prefix,
+                env_extra=env_extra,
             )
+            result = run_prebuilt_cli_agent(
+                command_argv=launch["command_argv"],
+                prompt=launch["prompt"],
+                work_dir=launch["work_dir"],
+                log_file=launch["log_file"],
+                transcript_file=launch["transcript_file"],
+                env=launch["env"],
+                timeout=comment_timeout,
+            )
+            if result.get("timed_out"):
+                result["error"] = (
+                    f"AutoResearch HITL comment handler timed out after {comment_timeout}s"
+                )
+            # Archive transient cluster artifacts into the runtime-owned attempt
+            # directory before the workspace is checkpointed. No-op when none exist.
+            if dsi_remote_info is not None:
+                move_dsi_slurm_artifacts(
+                    comment_work_dir,
+                    Path(logs_dir) / DSI_SLURM_ARTIFACTS_DIR,
+                )
         return result
 
     def scorer(score_work_dir: Path) -> Dict[str, Any]:
