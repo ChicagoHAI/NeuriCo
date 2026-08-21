@@ -485,3 +485,76 @@ def format_violations_for_retry(violations) -> str:
         "so every finding below is resolved:\n\n"
         f"{listing}\n"
     )
+
+
+# --- Manager-facing conformance report ------------------------------------- #
+#
+# The HITL manager must not read the sealed evaluator files (scoring/eval.py,
+# targets.json). The verifier can, so it produces a conformance report the
+# manager reads as advisory evidence when it reviews the rule maker.
+#
+# The report is leak-proof BY CONSTRUCTION: it is assembled only from a fixed
+# status (PASS / CONCERNS / UNAVAILABLE) and canned, code-owned descriptions
+# keyed by the verifier's recognized check names. It never echoes the verdict's
+# `detail` or `evidence` strings, an unrecognized check name, or any other value
+# derived from the sealed files, so no sealed content can reach the manager
+# through it. The verifier learns "which named check failed"; it does not relay
+# what the evaluator contains.
+
+_MANAGER_CONCERN_DESCRIPTIONS = {
+    "transcription": "the scoring targets may not carry the metrics or targets "
+                     "the user declared",
+    "routing": "the evaluator may not compute the mandated measurements or use a "
+               "required function",
+    "format": "the declared results format may not be honored",
+}
+_MANAGER_GENERIC_CONCERN = "a declared evaluation requirement may not be met"
+
+
+def build_manager_conformance_report(verdict: Dict[str, Any]) -> str:
+    """Render a verifier verdict as a leak-proof, manager-facing report.
+
+    - verifier could not complete -> UNAVAILABLE (not a signal about the design)
+    - contract satisfied          -> PASS
+    - contract not satisfied      -> CONCERNS with canned per-check categories
+
+    Contains no code, file contents, `detail`/`evidence` strings, or any value
+    derived from the sealed evaluator. Every byte comes from a fixed status
+    string or a canned description keyed by a recognized check name.
+    """
+    verdict = verdict or {}
+    if not verdict.get("success"):
+        return (
+            "Automated conformance check: UNAVAILABLE. The verifier could not "
+            "complete, so this is not a signal about the scoring design. Decide "
+            "from your own review of the public design."
+        )
+    if verdict.get("passed"):
+        return (
+            "Automated conformance check: PASS. The scoring design is reported to "
+            "satisfy the user's declared evaluation contract (mandated metrics, "
+            "targets, evaluation split, and required functions)."
+        )
+    # CONCERNS: emit only canned category descriptions, deduplicated. An
+    # unrecognized check name is mapped to the generic description and never
+    # echoed, so nothing agent- or file-derived reaches the manager.
+    descriptions: List[str] = []
+    for violation in verdict.get("violations") or []:
+        check = violation.get("check") if isinstance(violation, dict) else None
+        described = _MANAGER_CONCERN_DESCRIPTIONS.get(str(check), _MANAGER_GENERIC_CONCERN)
+        if described not in descriptions:
+            descriptions.append(described)
+    if not descriptions:
+        descriptions.append(_MANAGER_GENERIC_CONCERN)
+    lines = [
+        "Automated conformance check: CONCERNS. The scoring design may not satisfy "
+        "the user's declared evaluation contract:"
+    ]
+    lines.extend(f"- {described}" for described in descriptions)
+    lines.append(
+        "This is advisory and carries no detail from the sealed evaluator. If a "
+        "concern looks real, return feedback asking the rule maker to recheck that "
+        "requirement against its own scoring/ files; otherwise decide from your "
+        "own review."
+    )
+    return "\n".join(lines)

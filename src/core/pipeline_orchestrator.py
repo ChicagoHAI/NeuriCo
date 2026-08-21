@@ -26,15 +26,18 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
 from agents.eval_verifier import (
+    build_manager_conformance_report,
     format_violations_for_retry,
     has_user_eval_contract,
     run_eval_verifier,
 )
 from agents.rule_maker import (
+    RULE_MAKER_OUTPUT_FILES,
     generate_rule_maker_prompt,
     run_rule_maker,
     validate_hitl_rule_maker_outputs,
@@ -1639,6 +1642,58 @@ class ResearchPipelineOrchestrator:
                   "after one retry -- failing the rule maker stage.")
         return retry
 
+    def _scoring_conformance_report(
+        self,
+        idea: Dict[str, Any],
+        provider: str,
+        full_permissions: bool,
+    ) -> str:
+        """Run the verifier in an isolated sandbox and return a manager report.
+
+        Evidence for the manager's rule-maker review, never a gate. A verifier
+        crash becomes an ``UNAVAILABLE`` report (the verifier's own failure), so
+        it can never block or mislead the rule maker.
+
+        The verifier is the only actor allowed to read the sealed evaluator, so
+        it runs under least privilege: a throwaway sandbox holding only the rule
+        maker's own output files (eval.py, targets.json, interface.md,
+        rule_maker_log.md), copied as regular files. Symlinks and any other
+        workspace content are never copied, so a symlink that pointed at
+        ``data/.test/`` cannot be followed out of the sandbox. The declared
+        contract reaches the verifier through the prompt, not the filesystem, so
+        it needs nothing else. Its transcript, logs, and verification.json are
+        written inside the sandbox and discarded; only the in-memory verdict
+        leaves it, and the report built from that verdict carries no sealed
+        content.
+        """
+        scoring_src = self.work_dir / "scoring"
+        if not scoring_src.is_dir():
+            return build_manager_conformance_report({"success": False})
+
+        sandbox = Path(tempfile.mkdtemp(prefix="neurico-conformance-"))
+        try:
+            sandbox_scoring = sandbox / "scoring"
+            sandbox_scoring.mkdir(parents=True)
+            for name in RULE_MAKER_OUTPUT_FILES.values():
+                candidate = scoring_src / name
+                # Regular files only: skip symlinks so none can point back into
+                # the real workspace (e.g. at the private evaluator inputs).
+                if candidate.is_file() and not candidate.is_symlink():
+                    shutil.copy2(candidate, sandbox_scoring / name)
+            verdict = run_eval_verifier(
+                idea=idea,
+                work_dir=sandbox,
+                provider=provider,
+                templates_dir=self.templates_dir,
+                full_permissions=full_permissions,
+            )
+        except Exception as exc:
+            print(f"⚠️  Conformance verifier could not run: {exc}")
+            verdict = {"success": False, "passed": False, "violations": []}
+        finally:
+            shutil.rmtree(sandbox, ignore_errors=True)
+        return build_manager_conformance_report(verdict)
+
     def _run_rule_maker_hitl(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
     ) -> Dict[str, Any]:
@@ -1651,6 +1706,14 @@ class ResearchPipelineOrchestrator:
 
         self.state.start_stage(RULE_MAKER_STAGE)
         runtime = self._create_hitl_runtime(RULE_MAKER_STAGE)
+        # Give the manager a sanitized conformance report as advisory evidence:
+        # the verifier reads the sealed evaluator (which the manager may not) and
+        # reports conclusions only. The manager still owns the accept/rerun call.
+        # No-op unless the idea declares an evaluation contract.
+        if has_user_eval_contract(idea):
+            runtime.set_scoring_conformance_reporter(
+                lambda: self._scoring_conformance_report(idea, provider, full_permissions)
+            )
         worker_prompt_contexts = {
             phase: generate_rule_maker_prompt(
                 idea,

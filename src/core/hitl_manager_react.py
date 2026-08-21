@@ -1088,6 +1088,7 @@ class HitlManager:
         workspace_fingerprint: str = "",
         allow_scoring_approval: bool = False,
         scoring_handoff_context: Optional[Dict[str, Any]] = None,
+        verifier_report: str = "",
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         on_scoring_approval: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
@@ -1172,6 +1173,8 @@ class HitlManager:
             requires_human_approval=requires_human_approval,
             allow_scoring_approval=allow_scoring_approval,
             is_rule_maker=(pipeline_stage == "rule_maker"),
+            has_verifier_report=bool(str(verifier_report).strip()),
+            verifier_report=str(verifier_report),
             hitl_mode=selected_mode.value,
         )
         return self.request_worker_resolution(
