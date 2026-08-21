@@ -14,7 +14,6 @@ import inspect
 import json
 import re
 import shutil
-import tempfile
 
 from core.autoresearch import (
     AGENT_LOCAL_PATTERNS,
@@ -52,6 +51,7 @@ from core.hitl_frontier import (
 from core.hitl_git import delete_git_ref
 from core.hitl_git_state import HitlGitStateStore
 from core.hitl_manager_inbox import HitlManagerInbox
+from core.hitl_paths import hitl_state_dir
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_run_control import HitlRunStopRequested
 from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
@@ -397,13 +397,46 @@ def _snapshot_bootstrap_agent_local(work_dir: Path, backup_root: Path) -> List[s
 def _restore_bootstrap_agent_local(
     work_dir: Path, backup_root: Path, existed: List[str]
 ) -> None:
-    """Restore the provider-local dirs from the pre-preparation snapshot."""
+    """Restore the provider-local dirs from the pre-preparation snapshot.
+
+    Removal failures are not suppressed: a provider dir that cannot be replaced
+    must surface as an incomplete rollback rather than leave partial state
+    behind while returning successfully.
+    """
     for name in _BOOTSTRAP_AGENT_LOCAL_DIRS:
         target = Path(work_dir) / name
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
         if name in existed:
             shutil.copytree(Path(backup_root) / name, target, symlinks=True)
+
+
+def _rollback_bootstrap_prepublication_boundary(
+    work_dir: Path,
+    runtime_state: "HitlRuntimeState",
+    boundary: Dict[str, Any],
+) -> None:
+    """Roll back an interrupted pre-publication bootstrap on a later invocation.
+
+    Restores the public workspace to the recorded source checkpoint and the
+    provider-local dirs from the durable snapshot, then retires the boundary so
+    the workspace is the original again and a fresh attempt can proceed. Runs
+    before any new checkpoint is created, so a killed bootstrap is never adopted
+    as a new baseline.
+    """
+    source_sha = str(boundary.get("source_sha", "")).strip()
+    backup_root = Path(str(boundary.get("agent_local_backup", "")))
+    existed = list(boundary.get("agent_local_existed") or [])
+    if source_sha:
+        CheckpointManager(work_dir).restore_checkpoint(
+            source_sha, clean_untracked_public=True, remove_hidden_scoring=True
+        )
+    if backup_root.is_dir():
+        _restore_bootstrap_agent_local(work_dir, backup_root, existed)
+        shutil.rmtree(backup_root, ignore_errors=True)
+    runtime_state.clear_bootstrap_prepublication_boundary()
 
 
 def construct_bootstrap_hitl_baseline(
@@ -440,6 +473,7 @@ def construct_bootstrap_hitl_baseline(
 
     work_dir = Path(work_dir)
     selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
+    runtime_state = HitlRuntimeState(work_dir)
 
     # Resume an interrupted (or already-finished) root publication before
     # treating an existing frontier as complete. The frontier file is written
@@ -449,11 +483,22 @@ def construct_bootstrap_hitl_baseline(
     # Committing the pending transition is replay-safe and idempotent: it
     # finishes a partial publication, or returns an already-completed one
     # unchanged.
-    existing_publication = HitlRuntimeState(work_dir).initial_root_publication_transition()
+    existing_publication = runtime_state.initial_root_publication_transition()
     if isinstance(existing_publication, dict):
         pipeline_result = _initial_publication_pipeline_result(work_dir, existing_publication)
         completed = _commit_initial_root_publication(work_dir, existing_publication)
         return _initial_node_result_from_publication(work_dir, completed, pipeline_result)
+
+    # Roll back an interrupted pre-publication bootstrap before doing anything
+    # else. If a previous run was killed during preparation or scoring, no
+    # publication transition exists yet, and without this the workspace is
+    # partially prepared or scored. Restoring the recorded source checkpoint and
+    # provider-local snapshot returns it to the original state so a fresh attempt
+    # starts clean and the partial workspace is never adopted as a new baseline.
+    pending_boundary = runtime_state.bootstrap_prepublication_boundary()
+    if isinstance(pending_boundary, dict):
+        print("↩️  Rolling back an interrupted pre-publication bootstrap before retrying.")
+        _rollback_bootstrap_prepublication_boundary(work_dir, runtime_state, pending_boundary)
 
     # Idempotent: a frontier with no pending publication is already initialized.
     if HitlFrontierStore(work_dir).exists():
@@ -471,9 +516,26 @@ def construct_bootstrap_hitl_baseline(
 
     # Capture the provider-local dirs preparation rewrites before it runs. Git
     # checkpoints exclude them, so restoring the checkpoint alone would leave a
-    # partial _copy_workspace_resources behind.
-    agent_local_backup = Path(tempfile.mkdtemp(prefix="neurico-bootstrap-agentlocal-"))
+    # partial _copy_workspace_resources behind. The snapshot lives under the
+    # runtime-owned HITL state dir, which git rollback preserves, so it survives
+    # both restore_checkpoint and process death and is available to a later run.
+    agent_local_backup = hitl_state_dir(work_dir) / "bootstrap_agent_local_backup"
+    if agent_local_backup.exists():
+        shutil.rmtree(agent_local_backup, ignore_errors=True)
+    agent_local_backup.mkdir(parents=True, exist_ok=True)
     agent_local_existed = _snapshot_bootstrap_agent_local(work_dir, agent_local_backup)
+
+    # Record the pre-publication recovery boundary durably, before preparation
+    # mutates anything. From here until the publication transition exists, a
+    # later invocation resumes and rolls this back rather than adopting the
+    # partial workspace.
+    runtime_state.begin_bootstrap_prepublication_boundary(
+        {
+            "source_sha": source.sha,
+            "agent_local_backup": str(agent_local_backup),
+            "agent_local_existed": agent_local_existed,
+        }
+    )
 
     def restore_source() -> None:
         checkpoints.restore_checkpoint(
@@ -483,6 +545,10 @@ def construct_bootstrap_hitl_baseline(
         # so restore them from the pre-preparation snapshot to reach the complete
         # original state.
         _restore_bootstrap_agent_local(work_dir, agent_local_backup, agent_local_existed)
+
+    def fail_and_restore() -> None:
+        restore_source()
+        runtime_state.clear_bootstrap_prepublication_boundary()
 
     try:
         # The original checkpoint stays the recovery boundary until the
@@ -513,7 +579,7 @@ def construct_bootstrap_hitl_baseline(
             scorer_result = stages.get("scorer", {}) if isinstance(stages, dict) else {}
             results = scorer_result.get("results") if isinstance(scorer_result, dict) else None
             if not pipeline_result.get("success", False) or not isinstance(results, dict):
-                restore_source()
+                fail_and_restore()
                 return InitialAutoResearchNodeResult(
                     success=False,
                     mode="bootstrap_initial_node",
@@ -537,7 +603,7 @@ def construct_bootstrap_hitl_baseline(
             history_root, _ = resolve_autoresearch_history_root(
                 work_dir, autoresearch_history_dir
             )
-            publication = HitlRuntimeState(work_dir).begin_initial_root_publication_transition(
+            publication = runtime_state.begin_initial_root_publication_transition(
                 {
                     "plan_text": plan_text,
                     "objective_score": {
@@ -552,16 +618,19 @@ def construct_bootstrap_hitl_baseline(
                 }
             )
         except Exception:
-            restore_source()
+            fail_and_restore()
             raise
 
-        # The transition is durably recorded: publication is now replay-forward
-        # and idempotent. It must not roll back past the recorded transition; an
-        # interrupted commit is resumed by the pending-publication path on a
-        # later run instead.
+        # The publication transition is durably recorded and owns recovery from
+        # here: it is replay-forward and idempotent, resumed by the
+        # pending-publication path on any later run. Retire the pre-publication
+        # boundary now so the two recovery records never both claim the run.
+        runtime_state.clear_bootstrap_prepublication_boundary()
         completed = _commit_initial_root_publication(work_dir, publication)
         return _initial_node_result_from_publication(work_dir, completed, pipeline_result)
     finally:
+        # The durable snapshot is only needed while the boundary is pending; both
+        # the success and rollback paths have retired it by now.
         shutil.rmtree(agent_local_backup, ignore_errors=True)
 
 
