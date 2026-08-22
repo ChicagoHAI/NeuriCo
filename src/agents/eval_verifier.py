@@ -217,11 +217,25 @@ def run_eval_verifier(
     # scoring/. Snapshot the reviewed files (None = absent, so a file the
     # agent CREATES is also caught) so any modification can be detected,
     # restored, and turned into a failing verdict.
-    reviewed_files = {}
+    # Snapshot every file the verifier is allowed to read so a read-only review
+    # can be enforced after it runs. Keyed by workspace-relative path so both the
+    # reviewed scoring files and the staged mandated functions under code/local/
+    # (which the routing check inspects) are covered. None marks a file absent at
+    # snapshot time, so a file the agent creates is caught too.
+    work_dir_resolved = work_dir.resolve()
+    reviewed_files: Dict[str, Optional[bytes]] = {}
+
+    def _snapshot_reviewed(path: Path) -> None:
+        rel = str(path.resolve().relative_to(work_dir_resolved))
+        reviewed_files[rel] = path.read_bytes() if path.is_file() else None
+
     for reviewed_name in ('eval.py', 'targets.json', 'rule_maker_log.md'):
-        reviewed_path = scoring_dir / reviewed_name
-        reviewed_files[reviewed_name] = (
-            reviewed_path.read_bytes() if reviewed_path.exists() else None)
+        _snapshot_reviewed(scoring_dir / reviewed_name)
+    code_local = work_dir / 'code' / 'local'
+    if code_local.is_dir() and not code_local.is_symlink():
+        for staged in sorted(code_local.rglob('*')):
+            if staged.is_file() and not staged.is_symlink():
+                _snapshot_reviewed(staged)
 
     start_time = time.time()
 
@@ -270,28 +284,29 @@ def run_eval_verifier(
     else:
         print(f"⚠️  Agent exited with return code: {return_code}")
 
-    # Enforce read-only review: restore any reviewed file the agent touched
-    # and fail the verification outright — a verifier that edits the
-    # contract it reviews cannot be trusted to have judged it.
+    # Enforce read-only review: restore any reviewed or staged file the agent
+    # touched and fail the verification outright — a verifier that edits what it
+    # reviews cannot be trusted to have judged it.
     tampered = []
-    for reviewed_name, original_bytes in reviewed_files.items():
-        reviewed_path = scoring_dir / reviewed_name
-        current = reviewed_path.read_bytes() if reviewed_path.exists() else None
+    for rel_path, original_bytes in reviewed_files.items():
+        reviewed_path = work_dir / rel_path
+        current = reviewed_path.read_bytes() if reviewed_path.is_file() else None
         if current != original_bytes:
             if original_bytes is None:
                 reviewed_path.unlink(missing_ok=True)  # agent created it
             else:
+                reviewed_path.parent.mkdir(parents=True, exist_ok=True)
                 reviewed_path.write_bytes(original_bytes)
-            tampered.append(reviewed_name)
+            tampered.append(rel_path)
     if tampered:
-        print(f"⚠️  Verifier modified reviewed scoring files "
+        print(f"⚠️  Verifier modified reviewed files "
               f"({', '.join(tampered)}); originals restored, verification failed.")
         return {
             'success': True,
             'passed': False,
             'violations': [
                 {'check': 'read_only',
-                 'detail': f"verifier modified reviewed scoring files: "
+                 'detail': f"verifier modified reviewed files: "
                            f"{', '.join(tampered)} (restored)"}
             ],
             'log_file': str(log_file),
@@ -564,11 +579,18 @@ def build_manager_conformance_report(
     name, or the user's own declared requirements (which are not sealed).
     """
     verdict = verdict or {}
-    if not verdict.get("success"):
+    tampered = any(
+        isinstance(v, dict) and str(v.get("check")) == "read_only"
+        for v in verdict.get("violations") or []
+    )
+    if not verdict.get("success") or tampered:
+        # A verifier that could not complete, or that edited what it reviewed
+        # (its judgment can no longer be trusted), is reported as UNAVAILABLE
+        # rather than as a signal about the scoring design.
         return (
             "Automated conformance check: UNAVAILABLE. The verifier could not "
-            "complete, so this is not a signal about the scoring design. Decide "
-            "from your own review of the public design."
+            "complete a clean read-only review, so this is not a signal about "
+            "the scoring design. Decide from your own review of the public design."
         )
     if verdict.get("passed"):
         return (

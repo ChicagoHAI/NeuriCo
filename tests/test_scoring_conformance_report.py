@@ -279,6 +279,57 @@ def test_no_scoring_dir_returns_unavailable_without_running(tmp_path, monkeypatc
 
 
 # --------------------------------------------------------------------------- #
+# read-only guarantee: the verifier may produce only its verdict, edit nothing
+# else. Borrows run_eval_verifier's existing snapshot-and-restore guard,
+# extended to the staged mandated functions.
+# --------------------------------------------------------------------------- #
+
+def test_verifier_readonly_guard_restores_tampered_staged_function(
+        tmp_path, monkeypatch):
+    import agents.eval_verifier as ev
+
+    (tmp_path / "scoring").mkdir()
+    (tmp_path / "scoring" / "eval.py").write_text("def score(): ...")
+    (tmp_path / "scoring" / "targets.json").write_text("{}")
+    (tmp_path / "scoring" / "interface.md").write_text("interface")
+    fn = tmp_path / "code" / "local"
+    fn.mkdir(parents=True)
+    (fn / "metric.py").write_text("ORIGINAL")
+
+    def fake_launch(**kwargs):
+        # A misbehaving verifier edits a staged mandated function it was only
+        # supposed to read, and writes a passing verdict.
+        (fn / "metric.py").write_text("TAMPERED")
+        (tmp_path / "scoring" / "verification.json").write_text(
+            '{"checks": {}, "violations": [], "pass": true}')
+        return {"timed_out": False, "return_code": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(ev, "run_prebuilt_cli_agent", fake_launch)
+    templates_dir = Path(__file__).resolve().parents[1] / "templates"
+    verdict = ev.run_eval_verifier(
+        idea={"idea": {}}, work_dir=tmp_path, provider="claude",
+        templates_dir=templates_dir, full_permissions=True)
+
+    assert (fn / "metric.py").read_text() == "ORIGINAL", \
+        "a tampered staged function must be restored"
+    assert verdict["passed"] is False
+    assert any(v.get("check") == "read_only" for v in verdict["violations"]), \
+        "editing a reviewed file must fail the verdict as read_only"
+
+
+def test_report_readonly_violation_is_unavailable():
+    # A verifier that tampered cannot be trusted to have judged, so its report is
+    # UNAVAILABLE rather than a CONCERNS signal about the scoring design.
+    report = build_manager_conformance_report({
+        "success": True, "passed": False,
+        "violations": [{"check": "read_only", "detail": "verifier edited eval.py"}],
+    })
+    assert "UNAVAILABLE" in report
+    assert "CONCERNS" not in report
+    assert "eval.py" not in report
+
+
+# --------------------------------------------------------------------------- #
 # runtime gating
 # --------------------------------------------------------------------------- #
 
