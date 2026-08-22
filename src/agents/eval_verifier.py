@@ -216,26 +216,16 @@ def run_eval_verifier(
     # edit it — but the agent process necessarily has filesystem access to
     # scoring/. Snapshot the reviewed files (None = absent, so a file the
     # agent CREATES is also caught) so any modification can be detected,
-    # restored, and turned into a failing verdict.
-    # Snapshot every file the verifier is allowed to read so a read-only review
-    # can be enforced after it runs. Keyed by workspace-relative path so both the
-    # reviewed scoring files and the staged mandated functions under code/local/
-    # (which the routing check inspects) are covered. None marks a file absent at
-    # snapshot time, so a file the agent creates is caught too.
-    work_dir_resolved = work_dir.resolve()
-    reviewed_files: Dict[str, Optional[bytes]] = {}
-
-    def _snapshot_reviewed(path: Path) -> None:
-        rel = str(path.resolve().relative_to(work_dir_resolved))
-        reviewed_files[rel] = path.read_bytes() if path.is_file() else None
-
+    # restored, and turned into a failing verdict. HITL callers additionally
+    # guard the whole reviewed workspace with HitlWorkspaceWriteGuard; this
+    # narrow guard is the flat-mode safeguard over the sealed inputs.
+    reviewed_files = {}
     for reviewed_name in ('eval.py', 'targets.json', 'rule_maker_log.md'):
-        _snapshot_reviewed(scoring_dir / reviewed_name)
-    code_local = work_dir / 'code' / 'local'
-    if code_local.is_dir() and not code_local.is_symlink():
-        for staged in sorted(code_local.rglob('*')):
-            if staged.is_file() and not staged.is_symlink():
-                _snapshot_reviewed(staged)
+        reviewed_path = scoring_dir / reviewed_name
+        reviewed_files[reviewed_name] = (
+            reviewed_path.read_bytes()
+            if reviewed_path.is_file() and not reviewed_path.is_symlink()
+            else None)
 
     start_time = time.time()
 
@@ -284,29 +274,33 @@ def run_eval_verifier(
     else:
         print(f"⚠️  Agent exited with return code: {return_code}")
 
-    # Enforce read-only review: restore any reviewed or staged file the agent
-    # touched and fail the verification outright — a verifier that edits what it
+    # Enforce read-only review: restore any reviewed file the agent touched and
+    # fail the verification outright — a verifier that edits the contract it
     # reviews cannot be trusted to have judged it.
     tampered = []
-    for rel_path, original_bytes in reviewed_files.items():
-        reviewed_path = work_dir / rel_path
+    for reviewed_name, original_bytes in reviewed_files.items():
+        reviewed_path = scoring_dir / reviewed_name
+        # A verifier that replaced a reviewed file with a symlink must not have
+        # the restore write through it into another path; drop the link first so
+        # write_bytes recreates a regular file in place.
+        if reviewed_path.is_symlink():
+            reviewed_path.unlink(missing_ok=True)
         current = reviewed_path.read_bytes() if reviewed_path.is_file() else None
         if current != original_bytes:
             if original_bytes is None:
                 reviewed_path.unlink(missing_ok=True)  # agent created it
             else:
-                reviewed_path.parent.mkdir(parents=True, exist_ok=True)
                 reviewed_path.write_bytes(original_bytes)
-            tampered.append(rel_path)
+            tampered.append(reviewed_name)
     if tampered:
-        print(f"⚠️  Verifier modified reviewed files "
+        print(f"⚠️  Verifier modified reviewed scoring files "
               f"({', '.join(tampered)}); originals restored, verification failed.")
         return {
             'success': True,
             'passed': False,
             'violations': [
                 {'check': 'read_only',
-                 'detail': f"verifier modified reviewed files: "
+                 'detail': f"verifier modified reviewed scoring files: "
                            f"{', '.join(tampered)} (restored)"}
             ],
             'log_file': str(log_file),

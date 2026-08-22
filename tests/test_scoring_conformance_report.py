@@ -280,26 +280,63 @@ def test_no_scoring_dir_returns_unavailable_without_running(tmp_path, monkeypatc
 
 # --------------------------------------------------------------------------- #
 # read-only guarantee: the verifier may produce only its verdict, edit nothing
-# else. Borrows run_eval_verifier's existing snapshot-and-restore guard,
-# extended to the staged mandated functions.
+# else. Write safety over the real workspace uses HitlWorkspaceWriteGuard (the
+# shared mechanism); run_eval_verifier's own narrow guard covers the sealed
+# scoring files in flat mode.
 # --------------------------------------------------------------------------- #
 
-def test_verifier_readonly_guard_restores_tampered_staged_function(
+def test_conformance_report_flags_workspace_mutation_as_unavailable(
         tmp_path, monkeypatch):
-    import agents.eval_verifier as ev
-
+    # The real protection: HitlWorkspaceWriteGuard fingerprints the reviewed
+    # workspace around the verifier. A verifier that writes into the real
+    # workspace is detected and reported UNAVAILABLE, using the shared guard
+    # rather than a parallel per-file mechanism.
     (tmp_path / "scoring").mkdir()
     (tmp_path / "scoring" / "eval.py").write_text("def score(): ...")
     (tmp_path / "scoring" / "targets.json").write_text("{}")
-    (tmp_path / "scoring" / "interface.md").write_text("interface")
-    fn = tmp_path / "code" / "local"
-    fn.mkdir(parents=True)
-    (fn / "metric.py").write_text("ORIGINAL")
+
+    def fake_verifier(**kwargs):
+        # Adversarial: write into the REAL workspace (not the sandbox).
+        (tmp_path / "scoring" / "eval.py").write_text("MUTATED")
+        return {"success": True, "passed": True}
+
+    monkeypatch.setattr(po, "run_eval_verifier", fake_verifier)
+    report = _orchestrator(tmp_path)._scoring_conformance_report(
+        idea={}, provider="claude", full_permissions=True)
+
+    assert "UNAVAILABLE" in report
+    assert "CONCERNS" not in report and "PASS" not in report
+
+
+def test_conformance_report_clean_run_does_not_flag_workspace(tmp_path, monkeypatch):
+    # A verifier that leaves the real workspace unchanged (writes only to its
+    # sandbox) passes the guard and the PASS verdict stands.
+    (tmp_path / "scoring").mkdir()
+    (tmp_path / "scoring" / "eval.py").write_text("def score(): ...")
+    (tmp_path / "scoring" / "targets.json").write_text("{}")
+
+    monkeypatch.setattr(po, "run_eval_verifier",
+                        lambda **kw: {"success": True, "passed": True})
+    report = _orchestrator(tmp_path)._scoring_conformance_report(
+        idea={}, provider="claude", full_permissions=True)
+
+    assert "PASS" in report
+
+
+def test_verifier_readonly_guard_does_not_write_through_symlink(tmp_path, monkeypatch):
+    # If the verifier replaces a reviewed scoring file with a symlink, the guard's
+    # restore must not write through it into the link target.
+    import agents.eval_verifier as ev
+
+    (tmp_path / "scoring").mkdir()
+    (tmp_path / "scoring" / "eval.py").write_text("ORIGINAL")
+    (tmp_path / "scoring" / "targets.json").write_text("{}")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("DO NOT TOUCH")
 
     def fake_launch(**kwargs):
-        # A misbehaving verifier edits a staged mandated function it was only
-        # supposed to read, and writes a passing verdict.
-        (fn / "metric.py").write_text("TAMPERED")
+        (tmp_path / "scoring" / "eval.py").unlink()
+        (tmp_path / "scoring" / "eval.py").symlink_to(outside)
         (tmp_path / "scoring" / "verification.json").write_text(
             '{"checks": {}, "violations": [], "pass": true}')
         return {"timed_out": False, "return_code": 0, "stdout": "", "stderr": ""}
@@ -310,11 +347,11 @@ def test_verifier_readonly_guard_restores_tampered_staged_function(
         idea={"idea": {}}, work_dir=tmp_path, provider="claude",
         templates_dir=templates_dir, full_permissions=True)
 
-    assert (fn / "metric.py").read_text() == "ORIGINAL", \
-        "a tampered staged function must be restored"
+    assert outside.read_text() == "DO NOT TOUCH", "restore must not write through the symlink"
+    assert (tmp_path / "scoring" / "eval.py").read_text() == "ORIGINAL"
+    assert not (tmp_path / "scoring" / "eval.py").is_symlink()
     assert verdict["passed"] is False
-    assert any(v.get("check") == "read_only" for v in verdict["violations"]), \
-        "editing a reviewed file must fail the verdict as read_only"
+    assert any(v.get("check") == "read_only" for v in verdict["violations"])
 
 
 def test_report_readonly_violation_is_unavailable():

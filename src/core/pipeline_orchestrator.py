@@ -1658,21 +1658,28 @@ class ResearchPipelineOrchestrator:
         The sandbox is a focus mechanism, not a security boundary. Like every
         other HITL worker the verifier runs with the run's permissions (see the
         docs: full-permission workers are not an OS sandbox), so it could in
-        principle read elsewhere on disk. The sandbox scopes what it is *given*
+        principle write elsewhere on disk. The sandbox scopes what it is *given*
         to the files it needs to judge, the rule maker's own outputs under
-        ``scoring/`` and the staged mandated functions under ``code/local/``, so
-        it does not have to dig for them, and its transcript, logs, and
-        verification.json are written inside the sandbox and discarded. Isolation
-        of the result is provided instead by the report being leak-proof by
-        construction and by the verifier being advisory only: it cannot change or
-        seal anything, so its filesystem access cannot affect scoring, and only
-        the in-memory verdict leaves the sandbox. Symlinks are never copied in,
-        so the sandbox never itself materializes a pointer to ``data/.test/``.
+        ``scoring/`` and the staged mandated functions under ``code/local/``, and
+        its transcript, logs, and verification.json are written inside the
+        sandbox and discarded.
+
+        Write safety over the *real* workspace uses the same mechanism as the
+        rest of HITL rather than a parallel one: ``HitlWorkspaceWriteGuard``
+        fingerprints the public workspace before the verifier runs and after,
+        detecting any change including symlinks and unexpected files. If the
+        verifier mutated the reviewed workspace, its judgment is untrusted and
+        the report is UNAVAILABLE. Isolation of the result is otherwise provided
+        by the report being leak-proof by construction and by the verifier being
+        advisory only.
         """
         scoring_src = self.work_dir / "scoring"
         if not scoring_src.is_dir():
             return build_manager_conformance_report({"success": False})
 
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        write_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
         sandbox = Path(tempfile.mkdtemp(prefix="neurico-conformance-"))
         try:
             sandbox_scoring = sandbox / "scoring"
@@ -1699,6 +1706,20 @@ class ResearchPipelineOrchestrator:
             verdict = {"success": False, "passed": False, "violations": []}
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
+
+        # A verifier that changed the real reviewed workspace cannot be trusted
+        # to have judged it (and would leave the manager approving a workspace
+        # different from the one runtime validated). Detect it with the shared
+        # workspace guard and report UNAVAILABLE.
+        boundary = write_guard.require_unchanged()
+        if not boundary.get("valid"):
+            issues = "; ".join(str(i) for i in boundary.get("issues") or [])
+            print(f"⚠️  Conformance verifier modified the reviewed workspace: {issues}")
+            verdict = {
+                "success": True,
+                "passed": False,
+                "violations": [{"check": "read_only", "detail": issues}],
+            }
         # The declared contract is the user's own input (not sealed), so the
         # report may name the specific unmet requirements verbatim.
         return build_manager_conformance_report(verdict, extract_eval_contract(idea))
