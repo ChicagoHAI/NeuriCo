@@ -1649,23 +1649,25 @@ class ResearchPipelineOrchestrator:
         provider: str,
         full_permissions: bool,
     ) -> str:
-        """Run the verifier in an isolated sandbox and return a manager report.
+        """Run the verifier in a scoped sandbox and return a manager report.
 
         Evidence for the manager's rule-maker review, never a gate. A verifier
         crash becomes an ``UNAVAILABLE`` report (the verifier's own failure), so
         it can never block or mislead the rule maker.
 
-        The verifier is the only actor allowed to read the sealed evaluator, so
-        it runs under least privilege: a throwaway sandbox holding only the rule
-        maker's own output files (eval.py, targets.json, interface.md,
-        rule_maker_log.md), copied as regular files. Symlinks and any other
-        workspace content are never copied, so a symlink that pointed at
-        ``data/.test/`` cannot be followed out of the sandbox. The declared
-        contract reaches the verifier through the prompt, not the filesystem, so
-        it needs nothing else. Its transcript, logs, and verification.json are
-        written inside the sandbox and discarded; only the in-memory verdict
-        leaves it, and the report built from that verdict carries no sealed
-        content.
+        The sandbox is a focus mechanism, not a security boundary. Like every
+        other HITL worker the verifier runs with the run's permissions (see the
+        docs: full-permission workers are not an OS sandbox), so it could in
+        principle read elsewhere on disk. The sandbox scopes what it is *given*
+        to the files it needs to judge, the rule maker's own outputs under
+        ``scoring/`` and the staged mandated functions under ``code/local/``, so
+        it does not have to dig for them, and its transcript, logs, and
+        verification.json are written inside the sandbox and discarded. Isolation
+        of the result is provided instead by the report being leak-proof by
+        construction and by the verifier being advisory only: it cannot change or
+        seal anything, so its filesystem access cannot affect scoring, and only
+        the in-memory verdict leaves the sandbox. Symlinks are never copied in,
+        so the sandbox never itself materializes a pointer to ``data/.test/``.
         """
         scoring_src = self.work_dir / "scoring"
         if not scoring_src.is_dir():
@@ -1677,10 +1679,14 @@ class ResearchPipelineOrchestrator:
             sandbox_scoring.mkdir(parents=True)
             for name in RULE_MAKER_OUTPUT_FILES.values():
                 candidate = scoring_src / name
-                # Regular files only: skip symlinks so none can point back into
-                # the real workspace (e.g. at the private evaluator inputs).
+                # Regular files only: skip symlinks so the sandbox never itself
+                # holds a pointer back into the real workspace.
                 if candidate.is_file() and not candidate.is_symlink():
                     shutil.copy2(candidate, sandbox_scoring / name)
+            # The routing check needs the staged mandated functions the contract
+            # requires eval.py to call. These are the user's own staged code, not
+            # the sealed test data, so include them so routing has its evidence.
+            self._stage_mandated_functions(sandbox)
             verdict = run_eval_verifier(
                 idea=idea,
                 work_dir=sandbox,
@@ -1696,6 +1702,26 @@ class ResearchPipelineOrchestrator:
         # The declared contract is the user's own input (not sealed), so the
         # report may name the specific unmet requirements verbatim.
         return build_manager_conformance_report(verdict, extract_eval_contract(idea))
+
+    def _stage_mandated_functions(self, sandbox: Path) -> None:
+        """Copy the staged mandated-function tree (code/local/) into the sandbox.
+
+        Regular files only, symlinks skipped, so the copy can never follow a link
+        out to the sealed test data. No-op when the workspace has no code/local/.
+        """
+        source = self.work_dir / "code" / "local"
+        if not source.is_dir() or source.is_symlink():
+            return
+
+        def _ignore_symlinks(directory: str, names: List[str]) -> set:
+            base = Path(directory)
+            return {name for name in names if (base / name).is_symlink()}
+
+        shutil.copytree(
+            source,
+            sandbox / "code" / "local",
+            ignore=_ignore_symlinks,
+        )
 
     def _run_rule_maker_hitl(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool

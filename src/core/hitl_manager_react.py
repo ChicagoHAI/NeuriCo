@@ -1184,6 +1184,11 @@ class HitlManager:
                 "hitl_mode": selected_mode.value,
                 "requires_human_approval": requires_human_approval,
                 **request,
+                # Persist the verifier report as part of the durable request so a
+                # restart replays the same evidence instead of rerunning the model
+                # verifier. It is added after `request`, so it never enters the
+                # request-key identity (which must stay deterministic).
+                "verifier_report": str(verifier_report),
             },
             prompt=prompt,
             validate=validate,

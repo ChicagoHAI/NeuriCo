@@ -573,8 +573,9 @@ def build_manager_conformance_report(
     if verdict.get("passed"):
         return (
             "Automated conformance check: PASS. The scoring design is reported to "
-            "satisfy the user's declared evaluation contract (mandated metrics, "
-            "targets, evaluation split, and required functions)."
+            "honor the user's declared metrics and targets, required functions, "
+            "and results format. This does not cover the scientific validity of "
+            "the evaluation split, which remains your review."
         )
     # CONCERNS: for each failed check emit its canned category plus the user's
     # own declared requirements in that category, so the manager sees exactly

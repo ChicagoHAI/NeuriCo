@@ -2371,6 +2371,24 @@ class HitlRuntime:
                 "Decide from your own review of the public design."
             )
 
+    def _durable_conformance_report(self, request_key: str, hitl_stage: str) -> str:
+        """Return the conformance report for this phase-finish request, once.
+
+        The report is part of the durable phase-finish request. A resumed request
+        replays the report persisted on its pending command instead of rerunning
+        the model verifier, so recovery continues from the same evidence and does
+        not repeat an expensive verifier call. It is generated only the first
+        time this request is raised, then persisted by ``review_phase_finish``.
+        """
+        pending = self._pending_worker_command()
+        if (
+            isinstance(pending, dict)
+            and str(pending.get("request_key", "")) == request_key
+            and "verifier_report" in pending
+        ):
+            return str(pending.get("verifier_report") or "")
+        return self._scoring_conformance_report_for_review(hitl_stage)
+
     def finish_tool_phase(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self._worker_request_lock.acquire(blocking=False):
             raise HitlActiveWorkerRequestError(self._pending_worker_command())
@@ -3009,7 +3027,7 @@ class HitlRuntime:
                 allow_scoring_approval=bool(self._tool_context.get("allow_scoring_approval"))
                 and hitl_stage in {"execution", "review"},
                 scoring_handoff_context=dict(self._tool_context.get("provenance") or {}),
-                verifier_report=self._scoring_conformance_report_for_review(hitl_stage),
+                verifier_report=self._durable_conformance_report(request_key, hitl_stage),
                 on_finalize=persist_phase_review,
                 on_scoring_approval=persist_scoring_approval,
                 hitl_mode=self.hitl_mode,

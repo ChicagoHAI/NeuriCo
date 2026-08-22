@@ -1,13 +1,17 @@
 """Tests for the HITL scoring-conformance report.
 
-The verifier is the only actor allowed to read the sealed evaluator. For the
-manager's rule-maker review it runs in an isolated sandbox (only the rule
-maker's output files, no symlinks) and produces a report that is leak-proof by
-construction: assembled from a fixed status plus canned, code-owned category
-descriptions, never from sealed file contents or agent free-text.
+For the manager's rule-maker review the verifier runs in a scoped sandbox. The
+sandbox is a focus mechanism, not a security boundary: it holds only the files
+the verifier needs to judge (the rule maker's outputs under scoring/ and the
+staged mandated functions under code/local/), copied as regular files with
+symlinks skipped, and its writes are discarded. Isolation of the *result* comes
+instead from the report being leak-proof by construction (a fixed status plus
+canned, code-owned category descriptions and the user's own declared
+requirements, never sealed file contents or agent free-text) and from the
+verifier being advisory only.
 
-These tests cover the report outcomes, the leak-proofing, the sandbox
-isolation, the runtime gating, and the template wiring.
+These tests cover the report outcomes, the leak-proofing, the sandbox scoping,
+the durable-report replay, the runtime gating, and the template wiring.
 
 Run: python -m pytest tests/test_scoring_conformance_report.py
 """
@@ -30,6 +34,10 @@ from core.pipeline_orchestrator import ResearchPipelineOrchestrator  # noqa: E40
 def test_report_pass():
     report = build_manager_conformance_report({"success": True, "passed": True})
     assert report.startswith("Automated conformance check: PASS")
+    # The verifier does not check the evaluation split; the PASS must not claim
+    # it does, and must defer the split to the manager's own review.
+    assert "evaluation split" in report and "remains your review" in report
+    assert "targets" in report and "required functions" in report and "results format" in report
 
 
 def test_report_unavailable_when_verifier_failed():
@@ -149,7 +157,11 @@ def _seed_workspace(tmp_path):
     (secret / "answers.json").write_text("SECRET ANSWERS")
 
 
-def test_verifier_runs_in_sandbox_isolated_from_workspace(tmp_path, monkeypatch):
+def test_verifier_runs_in_scoped_sandbox_not_the_workspace(tmp_path, monkeypatch):
+    # The sandbox is a focus mechanism: it is given the rule-maker outputs and
+    # nothing else the verifier does not need. The sealed test data is simply not
+    # provided in the sandbox (not claimed unreachable on the real filesystem),
+    # and the verifier's writes land in the sandbox and are discarded.
     _seed_workspace(tmp_path)
     seen = {}
 
@@ -157,7 +169,7 @@ def test_verifier_runs_in_sandbox_isolated_from_workspace(tmp_path, monkeypatch)
         wd = Path(kwargs["work_dir"])
         seen["work_dir"] = wd
         seen["has_eval"] = (wd / "scoring" / "eval.py").exists()
-        seen["has_secret"] = (wd / "data" / ".test" / "answers.json").exists()
+        seen["secret_in_sandbox"] = (wd / "data" / ".test" / "answers.json").exists()
         (wd / "scoring" / "verification.json").write_text("{}")  # writes in sandbox
         return {"success": True, "passed": True}
 
@@ -167,12 +179,57 @@ def test_verifier_runs_in_sandbox_isolated_from_workspace(tmp_path, monkeypatch)
 
     assert seen["work_dir"] != tmp_path, "verifier must run in a sandbox, not the workspace"
     assert seen["has_eval"] is True, "the rule maker output must be copied in"
-    assert seen["has_secret"] is False, "the sealed test data must not be reachable"
+    assert seen["secret_in_sandbox"] is False, "the sealed test data is not provided in the sandbox"
     # nothing written into the real workspace, and the sandbox is gone
     assert not (tmp_path / "scoring" / "verification.json").exists()
     assert not seen["work_dir"].exists(), "sandbox must be cleaned up"
-    # the real secret is untouched
+    # the verifier is advisory, so the real workspace and its secret are untouched
     assert (tmp_path / "data" / ".test" / "answers.json").read_text() == "SECRET ANSWERS"
+
+
+def test_sandbox_stages_mandated_functions_for_routing(tmp_path, monkeypatch):
+    # The routing check needs the staged mandated functions under code/local/, so
+    # they are copied into the sandbox alongside scoring/.
+    _seed_workspace(tmp_path)
+    fn = tmp_path / "code" / "local" / "metrics"
+    fn.mkdir(parents=True)
+    (fn / "score.py").write_text("def evaluate_protocol(): ...")
+    seen = {}
+
+    def fake_verifier(**kwargs):
+        wd = Path(kwargs["work_dir"])
+        seen["has_fn"] = (wd / "code" / "local" / "metrics" / "score.py").exists()
+        return {"success": True, "passed": True}
+
+    monkeypatch.setattr(po, "run_eval_verifier", fake_verifier)
+    _orchestrator(tmp_path)._scoring_conformance_report(
+        idea={}, provider="claude", full_permissions=True)
+
+    assert seen["has_fn"] is True, "staged mandated functions must reach the sandbox"
+
+
+def test_sandbox_skips_symlinks_in_code_local(tmp_path, monkeypatch):
+    # A symlink inside code/local/ pointing at the sealed data must not be copied,
+    # so the sandbox never itself materializes a pointer to the secret.
+    _seed_workspace(tmp_path)
+    (tmp_path / "code" / "local").mkdir(parents=True)
+    (tmp_path / "code" / "local" / "real.py").write_text("ok")
+    (tmp_path / "code" / "local" / "leak").symlink_to(
+        tmp_path / "data" / ".test" / "answers.json")
+    seen = {}
+
+    def fake_verifier(**kwargs):
+        wd = Path(kwargs["work_dir"])
+        seen["has_real"] = (wd / "code" / "local" / "real.py").exists()
+        seen["has_link"] = (wd / "code" / "local" / "leak").exists()
+        return {"success": True, "passed": True}
+
+    monkeypatch.setattr(po, "run_eval_verifier", fake_verifier)
+    _orchestrator(tmp_path)._scoring_conformance_report(
+        idea={}, provider="claude", full_permissions=True)
+
+    assert seen["has_real"] is True
+    assert seen["has_link"] is False, "a symlink in code/local/ must not be copied"
 
 
 def test_sandbox_skips_symlinks_in_scoring(tmp_path, monkeypatch):
@@ -264,6 +321,45 @@ def test_runtime_no_reporter_returns_empty():
     runtime = HitlRuntime.__new__(HitlRuntime)
     runtime._scoring_conformance_reporter = None
     assert runtime._scoring_conformance_report_for_review("review") == ""
+
+
+# --------------------------------------------------------------------------- #
+# durable report: a resumed request replays the persisted report, no rerun
+# --------------------------------------------------------------------------- #
+
+def _runtime_with_pending(reporter, pending):
+    runtime = HitlRuntime.__new__(HitlRuntime)
+    runtime._scoring_conformance_reporter = None
+    runtime.set_scoring_conformance_reporter(reporter)
+    runtime._pending_worker_command = lambda: pending
+    return runtime
+
+
+def test_durable_report_generates_when_no_pending_command():
+    calls = []
+    runtime = _runtime_with_pending(
+        lambda: calls.append(1) or "FRESH report", pending=None)
+    assert runtime._durable_conformance_report("rk1", "review") == "FRESH report"
+    assert calls == [1], "first raise must generate the report"
+
+
+def test_durable_report_replays_persisted_without_rerunning():
+    calls = []
+    pending = {"request_key": "rk1", "verifier_report": "PERSISTED report"}
+    runtime = _runtime_with_pending(
+        lambda: calls.append(1) or "FRESH report", pending=pending)
+    # The resumed request replays the persisted report and never calls the model.
+    assert runtime._durable_conformance_report("rk1", "review") == "PERSISTED report"
+    assert calls == [], "a resumed request must not rerun the verifier"
+
+
+def test_durable_report_regenerates_for_a_different_request_key():
+    calls = []
+    pending = {"request_key": "OTHER", "verifier_report": "STALE report"}
+    runtime = _runtime_with_pending(
+        lambda: calls.append(1) or "FRESH report", pending=pending)
+    assert runtime._durable_conformance_report("rk1", "review") == "FRESH report"
+    assert calls == [1], "a mismatched pending command must not be replayed"
 
 
 # --------------------------------------------------------------------------- #
