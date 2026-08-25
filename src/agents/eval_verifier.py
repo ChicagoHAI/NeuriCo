@@ -145,6 +145,7 @@ def run_eval_verifier(
     templates_dir: Optional[Path] = None,
     timeout: int = 600,  # 10 min; this is a read-and-judge task
     full_permissions: bool = True,
+    write_restricted: bool = False,
 ) -> Dict[str, Any]:
     """
     Launch the eval_verifier CLI agent.
@@ -200,7 +201,14 @@ def run_eval_verifier(
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
 
-    cmd = build_agent_command(provider, full_permissions=full_permissions)
+    # When write-restricted, confine the agent to reads plus the single verdict
+    # file so it cannot change any workspace or runtime state but its own report.
+    write_only_path = f"./scoring/{VERDICT_FILE_NAME}" if write_restricted else None
+    cmd = build_agent_command(
+        provider,
+        full_permissions=full_permissions,
+        write_only_path=write_only_path,
+    )
 
     print(f"▶️  Launching {provider} CLI agent...")
     print(f"   Command: {cmd}")

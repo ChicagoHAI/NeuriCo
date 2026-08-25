@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from typing import Mapping, Optional
 
 
@@ -11,6 +12,13 @@ CLI_COMMANDS = {
     "codex": "codex exec",
     "gemini": "gemini",
 }
+
+# Providers whose CLI can confine an agent so it cannot modify state outside its
+# working sandbox, enforced by the CLI itself (not by monitoring). Used for the
+# advisory scoring verifier, which must not be able to change the reviewed
+# workspace or runtime state. Claude confines Write to the single verdict file
+# (app-level allow rule); Codex uses its OS-level workspace-write sandbox.
+WRITE_RESTRICTED_PROVIDERS = frozenset({"claude", "codex"})
 
 TRANSCRIPT_FLAGS = {
     "claude": "--verbose --output-format stream-json",
@@ -32,14 +40,43 @@ def build_agent_command(
     use_scribe: bool = False,
     transcript_flags: Optional[Mapping[str, str]] = None,
     gemini_skip_trust: bool = True,
+    write_only_path: Optional[str] = None,
 ) -> str:
-    """Build a provider command while leaving launch/completion policy to callers."""
+    """Build a provider command while leaving launch/completion policy to callers.
+
+    ``write_only_path`` confines the agent to reads plus a single writable file
+    (the given cwd-relative path), enforced by the CLI. When set it overrides
+    ``full_permissions`` and is only supported for providers in
+    ``WRITE_RESTRICTED_PROVIDERS``.
+    """
     if provider not in CLI_COMMANDS:
         raise ValueError(
             f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}"
         )
     command = f"scribe {provider}" if use_scribe else CLI_COMMANDS[provider]
-    if full_permissions:
+    if write_only_path is not None:
+        if provider not in WRITE_RESTRICTED_PROVIDERS:
+            raise ValueError(
+                f"Write-restricted agent profile is not supported for provider {provider!r}."
+            )
+        if provider == "claude":
+            # dontAsk auto-denies anything unlisted without prompting (safe
+            # headless), the tool set omits Bash so no shell escape exists, and
+            # Write/Edit are scoped to the one verdict file. Confirmed enforced
+            # and non-blocking.
+            scoped = f"Write({write_only_path}) Edit({write_only_path})"
+            command += (
+                " --permission-mode dontAsk"
+                " --tools " + shlex.quote("Read,Grep,Glob,Write,Edit")
+                + " --allowedTools " + shlex.quote(f"Read Grep Glob {scoped}")
+            )
+        elif provider == "codex":
+            # OS-level sandbox: writes are confined to the working directory (the
+            # throwaway sandbox) and system temp, so the reviewed workspace and
+            # runtime state, which live outside both, cannot be modified.
+            # skip-git-repo-check because the sandbox is not a git repo.
+            command += " --sandbox workspace-write --skip-git-repo-check"
+    elif full_permissions:
         if provider == "codex":
             command += " --yolo"
         elif provider == "claude":

@@ -19,6 +19,8 @@ Run: python -m pytest tests/test_scoring_conformance_report.py
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import core.pipeline_orchestrator as po  # noqa: E402
@@ -279,48 +281,90 @@ def test_no_scoring_dir_returns_unavailable_without_running(tmp_path, monkeypatc
 
 
 # --------------------------------------------------------------------------- #
-# read-only guarantee: the verifier may produce only its verdict, edit nothing
-# else. Write safety over the real workspace uses HitlWorkspaceWriteGuard (the
-# shared mechanism); run_eval_verifier's own narrow guard covers the sealed
-# scoring files in flat mode.
+# write safety by capability: the verifier CLI is confined to reads plus its one
+# verdict file, so it cannot change any workspace or runtime state but its report
 # --------------------------------------------------------------------------- #
 
-def test_conformance_report_flags_workspace_mutation_as_unavailable(
-        tmp_path, monkeypatch):
-    # The real protection: HitlWorkspaceWriteGuard fingerprints the reviewed
-    # workspace around the verifier. A verifier that writes into the real
-    # workspace is detected and reported UNAVAILABLE, using the shared guard
-    # rather than a parallel per-file mechanism.
+def test_build_command_write_restricted_claude_confines_writes():
+    from core.agent_cli import build_agent_command
+    cmd = build_agent_command(
+        "claude", full_permissions=True,
+        write_only_path="./scoring/verification.json")
+    # No bypass, deny-unlisted mode, Bash absent, Write/Edit scoped to one file.
+    assert "--dangerously-skip-permissions" not in cmd
+    assert "--permission-mode dontAsk" in cmd
+    assert "Bash" not in cmd
+    assert "Write(./scoring/verification.json)" in cmd
+    assert "Edit(./scoring/verification.json)" in cmd
+
+
+def test_build_command_write_restricted_codex_uses_workspace_sandbox():
+    from core.agent_cli import build_agent_command
+    cmd = build_agent_command(
+        "codex", full_permissions=True,
+        write_only_path="./scoring/verification.json")
+    assert "--yolo" not in cmd  # not danger-full-access
+    assert "--sandbox workspace-write" in cmd
+    assert "--skip-git-repo-check" in cmd
+
+
+def test_build_command_write_restricted_rejects_unsupported_provider():
+    from core.agent_cli import build_agent_command
+    with pytest.raises(ValueError, match="not supported"):
+        build_agent_command("gemini", full_permissions=True,
+                            write_only_path="./scoring/verification.json")
+
+
+def test_conformance_report_runs_write_restricted(tmp_path, monkeypatch):
     (tmp_path / "scoring").mkdir()
     (tmp_path / "scoring" / "eval.py").write_text("def score(): ...")
     (tmp_path / "scoring" / "targets.json").write_text("{}")
+    seen = {}
 
     def fake_verifier(**kwargs):
-        # Adversarial: write into the REAL workspace (not the sandbox).
-        (tmp_path / "scoring" / "eval.py").write_text("MUTATED")
+        seen["write_restricted"] = kwargs.get("write_restricted")
         return {"success": True, "passed": True}
 
     monkeypatch.setattr(po, "run_eval_verifier", fake_verifier)
     report = _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="claude", full_permissions=True)
+        idea={}, provider="claude", full_permissions=False)
 
-    assert "UNAVAILABLE" in report
-    assert "CONCERNS" not in report and "PASS" not in report
+    assert seen["write_restricted"] is True, "the verifier must run write-restricted"
+    assert "PASS" in report
 
 
-def test_conformance_report_clean_run_does_not_flag_workspace(tmp_path, monkeypatch):
-    # A verifier that leaves the real workspace unchanged (writes only to its
-    # sandbox) passes the guard and the PASS verdict stands.
+def test_confinement_tripwire_reports_unavailable_on_workspace_change(
+        tmp_path, monkeypatch):
+    # Defense in depth: if the CLI confinement ever regressed and the verifier
+    # changed the real workspace, the HitlWorkspaceWriteGuard tripwire catches it
+    # and the report is UNAVAILABLE, never trusted.
     (tmp_path / "scoring").mkdir()
     (tmp_path / "scoring" / "eval.py").write_text("def score(): ...")
     (tmp_path / "scoring" / "targets.json").write_text("{}")
 
-    monkeypatch.setattr(po, "run_eval_verifier",
-                        lambda **kw: {"success": True, "passed": True})
-    report = _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="claude", full_permissions=True)
+    def escaped_verifier(**kwargs):
+        # Simulate a confinement regression: write into the REAL workspace.
+        (tmp_path / "scoring" / "eval.py").write_text("MUTATED")
+        return {"success": True, "passed": True}
 
-    assert "PASS" in report
+    monkeypatch.setattr(po, "run_eval_verifier", escaped_verifier)
+    report = _orchestrator(tmp_path)._scoring_conformance_report(
+        idea={}, provider="claude", full_permissions=False)
+
+    assert "UNAVAILABLE" in report
+    assert "PASS" not in report
+
+
+def test_conformance_report_skipped_for_unrestrictable_provider(tmp_path, monkeypatch):
+    # No advisory report rather than an unconfined verifier process: a provider
+    # that cannot be confined to one writable file yields no report.
+    (tmp_path / "scoring").mkdir()
+    (tmp_path / "scoring" / "eval.py").write_text("def score(): ...")
+    monkeypatch.setattr(po, "run_eval_verifier",
+                        lambda **kw: (_ for _ in ()).throw(AssertionError("must not run")))
+    report = _orchestrator(tmp_path)._scoring_conformance_report(
+        idea={}, provider="gemini", full_permissions=False)
+    assert report == ""
 
 
 def test_verifier_readonly_guard_does_not_write_through_symlink(tmp_path, monkeypatch):

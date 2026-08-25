@@ -1649,37 +1649,53 @@ class ResearchPipelineOrchestrator:
         provider: str,
         full_permissions: bool,
     ) -> str:
-        """Run the verifier in a scoped sandbox and return a manager report.
+        """Run the verifier under a write-restricted profile and return a report.
 
         Evidence for the manager's rule-maker review, never a gate. A verifier
         crash becomes an ``UNAVAILABLE`` report (the verifier's own failure), so
         it can never block or mislead the rule maker.
 
-        The sandbox is a focus mechanism, not a security boundary. Like every
-        other HITL worker the verifier runs with the run's permissions (see the
-        docs: full-permission workers are not an OS sandbox), so it could in
-        principle write elsewhere on disk. The sandbox scopes what it is *given*
-        to the files it needs to judge, the rule maker's own outputs under
-        ``scoring/`` and the staged mandated functions under ``code/local/``, and
-        its transcript, logs, and verification.json are written inside the
-        sandbox and discarded.
+        Write safety is enforced by capability, not by monitoring: the verifier
+        runs with the provider CLI confined so it cannot write outside its
+        throwaway sandbox (Claude limits Write to the one verdict file; Codex
+        uses its OS-level workspace-write sandbox). It therefore cannot change
+        the reviewed workspace or any runtime state (``.neurico``, ``.git``,
+        ``.venv``), which all live outside the sandbox, so the review boundary
+        the manager approves is exactly the one runtime validated. Because the
+        restriction is enforced by the provider CLI, the report is produced only
+        for providers that support it (``WRITE_RESTRICTED_PROVIDERS``); otherwise
+        no advisory report is offered rather than running an unconfined agent.
 
-        Write safety over the *real* workspace uses the same mechanism as the
-        rest of HITL rather than a parallel one: ``HitlWorkspaceWriteGuard``
-        fingerprints the public workspace before the verifier runs and after,
-        detecting any change including symlinks and unexpected files. If the
-        verifier mutated the reviewed workspace, its judgment is untrusted and
-        the report is UNAVAILABLE. Isolation of the result is otherwise provided
-        by the report being leak-proof by construction and by the verifier being
-        advisory only.
+        The sandbox remains a focus mechanism: it gives the verifier only the
+        files it judges (the rule maker's outputs under ``scoring/`` and the
+        staged mandated functions under ``code/local/``), and its verdict, logs,
+        and transcript are written inside the sandbox and discarded. Isolation of
+        the result is otherwise provided by the report being leak-proof by
+        construction and by the verifier being advisory only.
+
+        As defense in depth behind that restriction, and not as the protection
+        itself, the reviewed workspace is fingerprinted with
+        ``HitlWorkspaceWriteGuard`` around the run. Under correct operation the
+        confined verifier cannot change it, so this never fires; if it ever does,
+        the CLI confinement has regressed, which is treated as a broken invariant:
+        the change is logged loudly and the report is UNAVAILABLE so a run that
+        escaped confinement is never trusted.
         """
+        from core.agent_cli import WRITE_RESTRICTED_PROVIDERS
+
+        if provider not in WRITE_RESTRICTED_PROVIDERS:
+            # No advisory report rather than an unconfined verifier process.
+            print(f"ℹ️  Conformance verifier skipped: provider {provider!r} cannot "
+                  "be confined against writing outside its sandbox.")
+            return ""
+
         scoring_src = self.work_dir / "scoring"
         if not scoring_src.is_dir():
             return build_manager_conformance_report({"success": False})
 
         from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
-        write_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
+        confinement_tripwire = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
         sandbox = Path(tempfile.mkdtemp(prefix="neurico-conformance-"))
         try:
             sandbox_scoring = sandbox / "scoring"
@@ -1699,7 +1715,7 @@ class ResearchPipelineOrchestrator:
                 work_dir=sandbox,
                 provider=provider,
                 templates_dir=self.templates_dir,
-                full_permissions=full_permissions,
+                write_restricted=True,
             )
         except Exception as exc:
             print(f"⚠️  Conformance verifier could not run: {exc}")
@@ -1707,19 +1723,20 @@ class ResearchPipelineOrchestrator:
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
 
-        # A verifier that changed the real reviewed workspace cannot be trusted
-        # to have judged it (and would leave the manager approving a workspace
-        # different from the one runtime validated). Detect it with the shared
-        # workspace guard and report UNAVAILABLE.
-        boundary = write_guard.require_unchanged()
+        # Invariant check: the confined verifier must not have changed the real
+        # workspace. If it did, the CLI confinement regressed; refuse to trust the
+        # run and report UNAVAILABLE.
+        boundary = confinement_tripwire.require_unchanged()
         if not boundary.get("valid"):
             issues = "; ".join(str(i) for i in boundary.get("issues") or [])
-            print(f"⚠️  Conformance verifier modified the reviewed workspace: {issues}")
+            print("🚨 Conformance verifier CONFINEMENT REGRESSION: the restricted "
+                  f"verifier changed the reviewed workspace: {issues}")
             verdict = {
                 "success": True,
                 "passed": False,
                 "violations": [{"check": "read_only", "detail": issues}],
             }
+
         # The declared contract is the user's own input (not sealed), so the
         # report may name the specific unmet requirements verbatim.
         return build_manager_conformance_report(verdict, extract_eval_contract(idea))
