@@ -1,25 +1,19 @@
 """Tests for the HITL scoring-conformance report.
 
-For the manager's rule-maker review the verifier runs in a scoped sandbox. The
-sandbox is a focus mechanism, not a security boundary: it holds only the files
-the verifier needs to judge (the rule maker's outputs under scoring/ and the
-staged mandated functions under code/local/), copied as regular files with
-symlinks skipped, and its writes are discarded. Isolation of the *result* comes
-instead from the report being leak-proof by construction (a fixed status plus
-canned, code-owned category descriptions and the user's own declared
-requirements, never sealed file contents or agent free-text) and from the
-verifier being advisory only.
+For the manager's rule-maker review, trusted runtime code sends a bounded
+allowlist of scorer contents to a tool-less model API. No coding-agent process
+is launched, and the advisory call persists no prompt, response, verdict, or
+audit file in the workspace. The manager receives only a leak-proof canned
+report.
 
-These tests cover the report outcomes, the leak-proofing, the sandbox scoping,
-the durable-report replay, the runtime gating, and the template wiring.
+These tests cover report outcomes, leak-proofing, non-persistence, unavailable
+API behavior, durable replay, runtime gating, and template wiring.
 
 Run: python -m pytest tests/test_scoring_conformance_report.py
 """
 
 import sys
 from pathlib import Path
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -44,7 +38,8 @@ def test_report_pass():
 
 def test_report_unavailable_when_verifier_failed():
     report = build_manager_conformance_report({"success": False, "passed": False})
-    assert "UNAVAILABLE" in report
+    assert "API NOT AVAILABLE" in report
+    assert "does not block" in report
     assert "CONCERNS" not in report and "PASS" not in report
 
 
@@ -140,7 +135,7 @@ def test_report_nondict_and_missing_check_use_generic():
 
 
 # --------------------------------------------------------------------------- #
-# sandbox isolation: the verifier sees only scoring/ output, never the workspace
+# tool-less API wiring: runtime selects evidence; advisory call writes nothing
 # --------------------------------------------------------------------------- #
 
 def _orchestrator(tmp_path):
@@ -154,260 +149,61 @@ def _seed_workspace(tmp_path):
     (tmp_path / "scoring").mkdir()
     (tmp_path / "scoring" / "eval.py").write_text("def score(): ...")
     (tmp_path / "scoring" / "targets.json").write_text("{}")
+    (tmp_path / "scoring" / "interface.md").write_text("results.json")
+    (tmp_path / "scoring" / "rule_maker_log.md").write_text("rationale")
     secret = tmp_path / "data" / ".test"
     secret.mkdir(parents=True)
     (secret / "answers.json").write_text("SECRET ANSWERS")
 
 
-def test_verifier_runs_in_scoped_sandbox_not_the_workspace(tmp_path, monkeypatch):
-    # The sandbox is a focus mechanism: it is given the rule-maker outputs and
-    # nothing else the verifier does not need. The sealed test data is simply not
-    # provided in the sandbox (not claimed unreachable on the real filesystem),
-    # and the verifier's writes land in the sandbox and are discarded.
+def test_conformance_report_uses_non_persisting_api_call(tmp_path, monkeypatch):
     _seed_workspace(tmp_path)
     seen = {}
 
     def fake_verifier(**kwargs):
-        wd = Path(kwargs["work_dir"])
-        seen["work_dir"] = wd
-        seen["has_eval"] = (wd / "scoring" / "eval.py").exists()
-        seen["secret_in_sandbox"] = (wd / "data" / ".test" / "answers.json").exists()
-        (wd / "scoring" / "verification.json").write_text("{}")  # writes in sandbox
+        seen.update(kwargs)
         return {"success": True, "passed": True}
 
     monkeypatch.setattr(po, "run_eval_verifier", fake_verifier)
-    _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="claude", full_permissions=True)
+    report = _orchestrator(tmp_path)._scoring_conformance_report(idea={})
 
-    assert seen["work_dir"] != tmp_path, "verifier must run in a sandbox, not the workspace"
-    assert seen["has_eval"] is True, "the rule maker output must be copied in"
-    assert seen["secret_in_sandbox"] is False, "the sealed test data is not provided in the sandbox"
-    # nothing written into the real workspace, and the sandbox is gone
+    assert seen["work_dir"] == tmp_path
+    assert seen["persist_verdict"] is False
+    assert seen["persist_audit"] is False
+    assert "provider" not in seen and "full_permissions" not in seen
+    assert "PASS" in report
     assert not (tmp_path / "scoring" / "verification.json").exists()
-    assert not seen["work_dir"].exists(), "sandbox must be cleaned up"
-    # the verifier is advisory, so the real workspace and its secret are untouched
+    assert not (tmp_path / "logs").exists()
     assert (tmp_path / "data" / ".test" / "answers.json").read_text() == "SECRET ANSWERS"
 
 
-def test_sandbox_stages_mandated_functions_for_routing(tmp_path, monkeypatch):
-    # The routing check needs the staged mandated functions under code/local/, so
-    # they are copied into the sandbox alongside scoring/.
+def test_api_unavailable_is_advisory_and_manager_moves_on(tmp_path, monkeypatch):
     _seed_workspace(tmp_path)
-    fn = tmp_path / "code" / "local" / "metrics"
-    fn.mkdir(parents=True)
-    (fn / "score.py").write_text("def evaluate_protocol(): ...")
-    seen = {}
-
-    def fake_verifier(**kwargs):
-        wd = Path(kwargs["work_dir"])
-        seen["has_fn"] = (wd / "code" / "local" / "metrics" / "score.py").exists()
-        return {"success": True, "passed": True}
-
-    monkeypatch.setattr(po, "run_eval_verifier", fake_verifier)
-    _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="claude", full_permissions=True)
-
-    assert seen["has_fn"] is True, "staged mandated functions must reach the sandbox"
-
-
-def test_sandbox_skips_symlinks_in_code_local(tmp_path, monkeypatch):
-    # A symlink inside code/local/ pointing at the sealed data must not be copied,
-    # so the sandbox never itself materializes a pointer to the secret.
-    _seed_workspace(tmp_path)
-    (tmp_path / "code" / "local").mkdir(parents=True)
-    (tmp_path / "code" / "local" / "real.py").write_text("ok")
-    (tmp_path / "code" / "local" / "leak").symlink_to(
-        tmp_path / "data" / ".test" / "answers.json")
-    seen = {}
-
-    def fake_verifier(**kwargs):
-        wd = Path(kwargs["work_dir"])
-        seen["has_real"] = (wd / "code" / "local" / "real.py").exists()
-        seen["has_link"] = (wd / "code" / "local" / "leak").exists()
-        return {"success": True, "passed": True}
-
-    monkeypatch.setattr(po, "run_eval_verifier", fake_verifier)
-    _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="claude", full_permissions=True)
-
-    assert seen["has_real"] is True
-    assert seen["has_link"] is False, "a symlink in code/local/ must not be copied"
-
-
-def test_sandbox_skips_symlinks_in_scoring(tmp_path, monkeypatch):
-    _seed_workspace(tmp_path)
-    # A symlink inside scoring/ that points at the sealed inputs must not be
-    # copied, or the agent could follow it out of the sandbox.
-    link = tmp_path / "scoring" / "targets.json"
-    link.unlink()
-    link.symlink_to(tmp_path / "data" / ".test" / "answers.json")
-    seen = {}
-
-    def fake_verifier(**kwargs):
-        wd = Path(kwargs["work_dir"])
-        seen["link_present"] = (wd / "scoring" / "targets.json").exists()
-        return {"success": True, "passed": True}
-
-    monkeypatch.setattr(po, "run_eval_verifier", fake_verifier)
-    _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="claude", full_permissions=True)
-
-    assert seen["link_present"] is False, "a symlink must not be copied into the sandbox"
-
-
-def test_sandbox_cleaned_up_even_when_verifier_raises(tmp_path, monkeypatch):
-    _seed_workspace(tmp_path)
-    seen = {}
-
-    def boom(**kwargs):
-        seen["work_dir"] = Path(kwargs["work_dir"])
-        raise RuntimeError("verifier died")
-
-    monkeypatch.setattr(po, "run_eval_verifier", boom)
-    report = _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="claude", full_permissions=True)
-
-    assert "UNAVAILABLE" in report
-    assert not seen["work_dir"].exists(), "sandbox must be cleaned up on failure"
+    monkeypatch.setattr(
+        po, "run_eval_verifier",
+        lambda **kwargs: {"success": False, "passed": False, "violations": []})
+    report = _orchestrator(tmp_path)._scoring_conformance_report(idea={})
+    assert "API NOT AVAILABLE" in report
+    assert "does not block" in report
+    assert "CONCERNS" not in report
     assert not (tmp_path / "scoring" / "verification.json").exists()
 
 
-def test_no_scoring_dir_returns_unavailable_without_running(tmp_path, monkeypatch):
-    monkeypatch.setattr(po, "run_eval_verifier",
-                        lambda **kw: (_ for _ in ()).throw(AssertionError("must not run")))
-    report = _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="claude", full_permissions=True)
-    assert "UNAVAILABLE" in report
-
-
-# --------------------------------------------------------------------------- #
-# write safety by capability: the verifier CLI is confined to reads plus its one
-# verdict file, so it cannot change any workspace or runtime state but its report
-# --------------------------------------------------------------------------- #
-
-def test_build_command_write_restricted_claude_confines_writes():
-    from core.agent_cli import build_agent_command
-    cmd = build_agent_command(
-        "claude", full_permissions=True,
-        write_only_path="./scoring/verification.json")
-    # No bypass, deny-unlisted mode, Bash absent, Write/Edit scoped to one file.
-    assert "--dangerously-skip-permissions" not in cmd
-    assert "--permission-mode dontAsk" in cmd
-    assert "Bash" not in cmd
-    assert "Write(./scoring/verification.json)" in cmd
-    assert "Edit(./scoring/verification.json)" in cmd
-
-
-def test_build_command_write_restricted_codex_uses_workspace_sandbox():
-    from core.agent_cli import build_agent_command
-    cmd = build_agent_command(
-        "codex", full_permissions=True,
-        write_only_path="./scoring/verification.json")
-    assert "--yolo" not in cmd  # not danger-full-access
-    assert "--sandbox workspace-write" in cmd
-    assert "--skip-git-repo-check" in cmd
-
-
-def test_build_command_write_restricted_rejects_unsupported_provider():
-    from core.agent_cli import build_agent_command
-    with pytest.raises(ValueError, match="not supported"):
-        build_agent_command("gemini", full_permissions=True,
-                            write_only_path="./scoring/verification.json")
-
-
-def test_conformance_report_runs_write_restricted(tmp_path, monkeypatch):
-    (tmp_path / "scoring").mkdir()
-    (tmp_path / "scoring" / "eval.py").write_text("def score(): ...")
-    (tmp_path / "scoring" / "targets.json").write_text("{}")
-    seen = {}
-
-    def fake_verifier(**kwargs):
-        seen["write_restricted"] = kwargs.get("write_restricted")
-        return {"success": True, "passed": True}
-
-    monkeypatch.setattr(po, "run_eval_verifier", fake_verifier)
-    report = _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="claude", full_permissions=False)
-
-    assert seen["write_restricted"] is True, "the verifier must run write-restricted"
-    assert "PASS" in report
-
-
-def test_confinement_tripwire_reports_unavailable_on_workspace_change(
-        tmp_path, monkeypatch):
-    # Defense in depth: if the CLI confinement ever regressed and the verifier
-    # changed the real workspace, the HitlWorkspaceWriteGuard tripwire catches it
-    # and the report is UNAVAILABLE, never trusted.
-    (tmp_path / "scoring").mkdir()
-    (tmp_path / "scoring" / "eval.py").write_text("def score(): ...")
-    (tmp_path / "scoring" / "targets.json").write_text("{}")
-
-    def escaped_verifier(**kwargs):
-        # Simulate a confinement regression: write into the REAL workspace.
-        (tmp_path / "scoring" / "eval.py").write_text("MUTATED")
-        return {"success": True, "passed": True}
-
-    monkeypatch.setattr(po, "run_eval_verifier", escaped_verifier)
-    report = _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="claude", full_permissions=False)
-
-    assert "UNAVAILABLE" in report
-    assert "PASS" not in report
-
-
-def test_conformance_report_skipped_for_unrestrictable_provider(tmp_path, monkeypatch):
-    # No advisory report rather than an unconfined verifier process: a provider
-    # that cannot be confined to one writable file yields no report.
-    (tmp_path / "scoring").mkdir()
-    (tmp_path / "scoring" / "eval.py").write_text("def score(): ...")
-    monkeypatch.setattr(po, "run_eval_verifier",
-                        lambda **kw: (_ for _ in ()).throw(AssertionError("must not run")))
-    report = _orchestrator(tmp_path)._scoring_conformance_report(
-        idea={}, provider="gemini", full_permissions=False)
-    assert report == ""
-
-
-def test_verifier_readonly_guard_does_not_write_through_symlink(tmp_path, monkeypatch):
-    # If the verifier replaces a reviewed scoring file with a symlink, the guard's
-    # restore must not write through it into the link target.
-    import agents.eval_verifier as ev
-
-    (tmp_path / "scoring").mkdir()
-    (tmp_path / "scoring" / "eval.py").write_text("ORIGINAL")
-    (tmp_path / "scoring" / "targets.json").write_text("{}")
-    outside = tmp_path / "outside.txt"
-    outside.write_text("DO NOT TOUCH")
-
-    def fake_launch(**kwargs):
-        (tmp_path / "scoring" / "eval.py").unlink()
-        (tmp_path / "scoring" / "eval.py").symlink_to(outside)
-        (tmp_path / "scoring" / "verification.json").write_text(
-            '{"checks": {}, "violations": [], "pass": true}')
-        return {"timed_out": False, "return_code": 0, "stdout": "", "stderr": ""}
-
-    monkeypatch.setattr(ev, "run_prebuilt_cli_agent", fake_launch)
-    templates_dir = Path(__file__).resolve().parents[1] / "templates"
-    verdict = ev.run_eval_verifier(
-        idea={"idea": {}}, work_dir=tmp_path, provider="claude",
-        templates_dir=templates_dir, full_permissions=True)
-
-    assert outside.read_text() == "DO NOT TOUCH", "restore must not write through the symlink"
-    assert (tmp_path / "scoring" / "eval.py").read_text() == "ORIGINAL"
-    assert not (tmp_path / "scoring" / "eval.py").is_symlink()
-    assert verdict["passed"] is False
-    assert any(v.get("check") == "read_only" for v in verdict["violations"])
-
-
-def test_report_readonly_violation_is_unavailable():
-    # A verifier that tampered cannot be trusted to have judged, so its report is
-    # UNAVAILABLE rather than a CONCERNS signal about the scoring design.
-    report = build_manager_conformance_report({
-        "success": True, "passed": False,
-        "violations": [{"check": "read_only", "detail": "verifier edited eval.py"}],
-    })
-    assert "UNAVAILABLE" in report
+def test_verifier_exception_is_advisory(tmp_path, monkeypatch):
+    _seed_workspace(tmp_path)
+    monkeypatch.setattr(
+        po, "run_eval_verifier",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("verifier died")))
+    report = _orchestrator(tmp_path)._scoring_conformance_report(idea={})
+    assert "API NOT AVAILABLE" in report
     assert "CONCERNS" not in report
-    assert "eval.py" not in report
+
+
+def test_no_scoring_dir_returns_api_not_available_without_running(tmp_path, monkeypatch):
+    monkeypatch.setattr(po, "run_eval_verifier",
+                        lambda **kw: (_ for _ in ()).throw(AssertionError("must not run")))
+    report = _orchestrator(tmp_path)._scoring_conformance_report(idea={})
+    assert "API NOT AVAILABLE" in report
 
 
 # --------------------------------------------------------------------------- #

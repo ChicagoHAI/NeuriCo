@@ -26,7 +26,6 @@ import json
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
@@ -38,7 +37,6 @@ from agents.eval_verifier import (
     run_eval_verifier,
 )
 from agents.rule_maker import (
-    RULE_MAKER_OUTPUT_FILES,
     generate_rule_maker_prompt,
     run_rule_maker,
     validate_hitl_rule_maker_outputs,
@@ -1607,12 +1605,19 @@ class ResearchPipelineOrchestrator:
         verdict = run_eval_verifier(
             idea=idea,
             work_dir=self.work_dir,
-            provider=provider,
             templates_dir=self.templates_dir,
-            full_permissions=full_permissions,
         )
         if verdict["success"] and verdict["passed"]:
             rule_maker_result["verification"] = verdict
+            return rule_maker_result
+        if not verdict["success"]:
+            # An unavailable/malformed verifier API is not evidence that the
+            # rule maker's design is wrong. Fail closed without wasting the one
+            # semantic repair attempt on an infrastructure failure.
+            rule_maker_result["verification"] = verdict
+            rule_maker_result["success"] = False
+            print("⚠️  Eval verifier API was unavailable; failing the rule maker "
+                  "stage without a repair retry.")
             return rule_maker_result
 
         print()
@@ -1625,15 +1630,15 @@ class ResearchPipelineOrchestrator:
             templates_dir=self.templates_dir,
             timeout=timeout,
             full_permissions=full_permissions,
-            prompt_suffix=format_violations_for_retry(verdict.get("violations")),
+            prompt_suffix=format_violations_for_retry(
+                verdict.get("violations"), extract_eval_contract(idea)
+            ),
         )
         if retry["success"]:
             verdict = run_eval_verifier(
                 idea=idea,
                 work_dir=self.work_dir,
-                provider=provider,
                 templates_dir=self.templates_dir,
-                full_permissions=full_permissions,
             )
             retry["verification"] = verdict
             retry["success"] = verdict["success"] and verdict["passed"]
@@ -1646,120 +1651,44 @@ class ResearchPipelineOrchestrator:
     def _scoring_conformance_report(
         self,
         idea: Dict[str, Any],
-        provider: str,
-        full_permissions: bool,
     ) -> str:
-        """Run the verifier under a write-restricted profile and return a report.
+        """Run a tool-less API verifier and return an advisory manager report.
 
         Evidence for the manager's rule-maker review, never a gate. A verifier
-        crash becomes an ``UNAVAILABLE`` report (the verifier's own failure), so
-        it can never block or mislead the rule maker.
+        or evidence-assembly failure becomes ``API NOT AVAILABLE`` and cannot
+        block the rule maker.
 
-        Write safety is enforced by capability, not by monitoring: the verifier
-        runs with the provider CLI confined so it cannot write outside its
-        throwaway sandbox (Claude limits Write to the one verdict file; Codex
-        uses its OS-level workspace-write sandbox). It therefore cannot change
-        the reviewed workspace or any runtime state (``.neurico``, ``.git``,
-        ``.venv``), which all live outside the sandbox, so the review boundary
-        the manager approves is exactly the one runtime validated. Because the
-        restriction is enforced by the provider CLI, the report is produced only
-        for providers that support it (``WRITE_RESTRICTED_PROVIDERS``); otherwise
-        no advisory report is offered rather than running an unconfined agent.
-
-        The sandbox remains a focus mechanism: it gives the verifier only the
-        files it judges (the rule maker's outputs under ``scoring/`` and the
-        staged mandated functions under ``code/local/``), and its verdict, logs,
-        and transcript are written inside the sandbox and discarded. Isolation of
-        the result is otherwise provided by the report being leak-proof by
-        construction and by the verifier being advisory only.
-
-        As defense in depth behind that restriction, and not as the protection
-        itself, the reviewed workspace is fingerprinted with
-        ``HitlWorkspaceWriteGuard`` around the run. Under correct operation the
-        confined verifier cannot change it, so this never fires; if it ever does,
-        the CLI confinement has regressed, which is treated as a broken invariant:
-        the change is logged loudly and the report is UNAVAILABLE so a run that
-        escaped confinement is never trusted.
+        The runtime reads a fixed allowlist of scorer files plus only the staged
+        functions named by the user's evaluation contract, applies byte limits,
+        and sends their contents to an OpenAI-compatible API without tools. The
+        remote model receives no filesystem paths it can open, no shell, no MCP,
+        and no write callback. For HITL this call persists neither the raw prompt,
+        raw response, audit log, nor ``verification.json`` in the workspace; the
+        already-durable canned manager report is the only handoff.
         """
-        from core.agent_cli import WRITE_RESTRICTED_PROVIDERS
-
-        if provider not in WRITE_RESTRICTED_PROVIDERS:
-            # No advisory report rather than an unconfined verifier process.
-            print(f"ℹ️  Conformance verifier skipped: provider {provider!r} cannot "
-                  "be confined against writing outside its sandbox.")
-            return ""
-
-        scoring_src = self.work_dir / "scoring"
-        if not scoring_src.is_dir():
-            return build_manager_conformance_report({"success": False})
-
-        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
-
-        confinement_tripwire = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
-        sandbox = Path(tempfile.mkdtemp(prefix="neurico-conformance-"))
         try:
-            sandbox_scoring = sandbox / "scoring"
-            sandbox_scoring.mkdir(parents=True)
-            for name in RULE_MAKER_OUTPUT_FILES.values():
-                candidate = scoring_src / name
-                # Regular files only: skip symlinks so the sandbox never itself
-                # holds a pointer back into the real workspace.
-                if candidate.is_file() and not candidate.is_symlink():
-                    shutil.copy2(candidate, sandbox_scoring / name)
-            # The routing check needs the staged mandated functions the contract
-            # requires eval.py to call. These are the user's own staged code, not
-            # the sealed test data, so include them so routing has its evidence.
-            self._stage_mandated_functions(sandbox)
+            scoring_src = self.work_dir / "scoring"
+            if not scoring_src.is_dir():
+                return build_manager_conformance_report({"success": False})
             verdict = run_eval_verifier(
                 idea=idea,
-                work_dir=sandbox,
-                provider=provider,
+                work_dir=self.work_dir,
                 templates_dir=self.templates_dir,
-                write_restricted=True,
+                persist_verdict=False,
+                persist_audit=False,
+            )
+            # The declared contract is the user's own input (not sealed), so
+            # the report may name the specific unmet requirements verbatim.
+            return build_manager_conformance_report(
+                verdict, extract_eval_contract(idea)
             )
         except Exception as exc:
-            print(f"⚠️  Conformance verifier could not run: {exc}")
-            verdict = {"success": False, "passed": False, "violations": []}
-        finally:
-            shutil.rmtree(sandbox, ignore_errors=True)
-
-        # Invariant check: the confined verifier must not have changed the real
-        # workspace. If it did, the CLI confinement regressed; refuse to trust the
-        # run and report UNAVAILABLE.
-        boundary = confinement_tripwire.require_unchanged()
-        if not boundary.get("valid"):
-            issues = "; ".join(str(i) for i in boundary.get("issues") or [])
-            print("🚨 Conformance verifier CONFINEMENT REGRESSION: the restricted "
-                  f"verifier changed the reviewed workspace: {issues}")
-            verdict = {
-                "success": True,
-                "passed": False,
-                "violations": [{"check": "read_only", "detail": issues}],
-            }
-
-        # The declared contract is the user's own input (not sealed), so the
-        # report may name the specific unmet requirements verbatim.
-        return build_manager_conformance_report(verdict, extract_eval_contract(idea))
-
-    def _stage_mandated_functions(self, sandbox: Path) -> None:
-        """Copy the staged mandated-function tree (code/local/) into the sandbox.
-
-        Regular files only, symlinks skipped, so the copy can never follow a link
-        out to the sealed test data. No-op when the workspace has no code/local/.
-        """
-        source = self.work_dir / "code" / "local"
-        if not source.is_dir() or source.is_symlink():
-            return
-
-        def _ignore_symlinks(directory: str, names: List[str]) -> set:
-            base = Path(directory)
-            return {name for name in names if (base / name).is_symlink()}
-
-        shutil.copytree(
-            source,
-            sandbox / "code" / "local",
-            ignore=_ignore_symlinks,
-        )
+            # Keep arbitrary provider/runtime exception prose out of manager
+            # and console channels. Every failure at this advisory boundary
+            # collapses to the one runtime-owned unavailable status.
+            print("\u26a0\ufe0f  Conformance verifier could not run "
+                  f"({type(exc).__name__}).")
+            return build_manager_conformance_report({"success": False})
 
     def _run_rule_maker_hitl(
         self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
@@ -1779,7 +1708,7 @@ class ResearchPipelineOrchestrator:
         # No-op unless the idea declares an evaluation contract.
         if has_user_eval_contract(idea):
             runtime.set_scoring_conformance_reporter(
-                lambda: self._scoring_conformance_report(idea, provider, full_permissions)
+                lambda: self._scoring_conformance_report(idea)
             )
         worker_prompt_contexts = {
             phase: generate_rule_maker_prompt(
