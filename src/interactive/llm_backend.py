@@ -9,11 +9,14 @@ in config/manager.yaml or .env.
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 import json
+import math
 import os
 from pathlib import Path
+import queue
 import signal
 import subprocess
 import threading
+import time
 
 
 @dataclass
@@ -30,6 +33,10 @@ class LLMResponse:
     text: str
     tool_calls: List[ToolCall] = field(default_factory=list)
     raw: Any = None
+
+
+class McpInitializationError(RuntimeError):
+    """A required MCP server did not become ready before provider inference."""
 
 
 class LLMBackend:
@@ -74,6 +81,7 @@ class LLMBackend:
         disable_native_tools: bool = False,
         mcp_config_path: Optional[str] = None,
         allowed_mcp_tools: Optional[List[str]] = None,
+        mcp_startup_timeout_seconds: Optional[float] = None,
         use_dedicated_system_prompt: bool = False,
     ) -> LLMResponse:
         """
@@ -99,6 +107,7 @@ class LLMBackend:
                 disable_native_tools=disable_native_tools,
                 mcp_config_path=mcp_config_path,
                 allowed_mcp_tools=allowed_mcp_tools,
+                mcp_startup_timeout_seconds=mcp_startup_timeout_seconds,
                 use_dedicated_system_prompt=use_dedicated_system_prompt,
             )
         elif self.backend in {"codex", "codex_cli"}:
@@ -108,6 +117,7 @@ class LLMBackend:
                 timeout_seconds=timeout_seconds,
                 mcp_config_path=mcp_config_path,
                 allowed_mcp_tools=allowed_mcp_tools,
+                mcp_startup_timeout_seconds=mcp_startup_timeout_seconds,
             )
         elif self.backend == "anthropic_api":
             return self._send_anthropic_api(messages, tools, timeout_seconds=timeout_seconds)
@@ -124,6 +134,7 @@ class LLMBackend:
         timeout_seconds: Optional[float] = None,
         mcp_config_path: Optional[str] = None,
         allowed_mcp_tools: Optional[List[str]] = None,
+        mcp_startup_timeout_seconds: Optional[float] = None,
     ) -> LLMResponse:
         """Send a manager turn through `codex exec`."""
         prompt = self._messages_to_prompt(messages, None if mcp_config_path else tools)
@@ -144,6 +155,7 @@ class LLMBackend:
             cmd[2:2] = self._codex_mcp_config_args(
                 mcp_config_path,
                 allowed_mcp_tools=allowed_mcp_tools,
+                startup_timeout_seconds=mcp_startup_timeout_seconds,
             )
         process = subprocess.Popen(
             cmd,
@@ -168,6 +180,16 @@ class LLMBackend:
             self._clear_active_process(process)
         if process.returncode != 0:
             error_msg = stderr.strip() if stderr else f"codex exec exited with code {process.returncode}"
+            if mcp_config_path and self._codex_required_mcp_startup_failed(
+                stdout=stdout,
+                stderr=stderr,
+                server_names=self._mcp_server_names(mcp_config_path),
+            ):
+                server_names = self._mcp_server_names(mcp_config_path)
+                raise McpInitializationError(
+                    "Codex could not initialize required manager MCP server(s): "
+                    + ", ".join(server_names)
+                )
             raise RuntimeError(f"Codex CLI backend error: {error_msg}")
         return self._parse_codex_cli_response(stdout)
 
@@ -177,12 +199,50 @@ class LLMBackend:
             return "true" if value else "false"
         return json.dumps(value, ensure_ascii=False)
 
+    @staticmethod
+    def _validated_mcp_startup_timeout(value: float) -> float:
+        timeout = float(value)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("MCP startup timeout must be a positive finite number")
+        return timeout
+
+    @staticmethod
+    def _mcp_server_names(mcp_config_path: str) -> List[str]:
+        payload = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
+        servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
+        if not isinstance(servers, dict) or not servers:
+            raise ValueError("MCP configuration must define at least one server")
+        return [str(name) for name in servers]
+
+    @staticmethod
+    def _codex_required_mcp_startup_failed(
+        *,
+        stdout: str,
+        stderr: str,
+        server_names: List[str],
+    ) -> bool:
+        """Recognize Codex's explicit required-server startup failures."""
+        output = f"{stdout}\n{stderr}".lower()
+        if not any(str(name).lower() in output for name in server_names):
+            return False
+        markers = (
+            "required mcp server",
+            "mcp startup failed",
+            "mcp client startup timed out",
+            "mcp startup interrupted",
+            "mcp startup incomplete",
+            "handshaking with mcp server failed",
+            "mcp client for",
+        )
+        return any(marker in output for marker in markers)
+
     @classmethod
     def _codex_mcp_config_args(
         cls,
         mcp_config_path: str,
         *,
         allowed_mcp_tools: Optional[List[str]] = None,
+        startup_timeout_seconds: Optional[float] = None,
     ) -> List[str]:
         payload = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
         servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
@@ -224,6 +284,9 @@ class LLMBackend:
                     f"{prefix}.enabled_tools={cls._codex_config_value(enabled_tools)}",
                 ])
             args.extend(["-c", f"{prefix}.required=true"])
+            if startup_timeout_seconds is not None:
+                timeout = cls._validated_mcp_startup_timeout(startup_timeout_seconds)
+                args.extend(["-c", f"{prefix}.startup_timeout_sec={timeout:g}"])
         return args
 
     def _send_cli(
@@ -235,6 +298,7 @@ class LLMBackend:
         disable_native_tools: bool = False,
         mcp_config_path: Optional[str] = None,
         allowed_mcp_tools: Optional[List[str]] = None,
+        mcp_startup_timeout_seconds: Optional[float] = None,
         use_dedicated_system_prompt: bool = False,
     ) -> LLMResponse:
         """
@@ -268,6 +332,8 @@ class LLMBackend:
                 "--append-system-prompt" if mcp_config_path else "--system-prompt"
             )
             cmd.extend([system_prompt_flag, system_prompt])
+        names: List[str] = []
+        process_env: Optional[Dict[str, str]] = None
         if mcp_config_path:
             names = list(
                 dict.fromkeys(
@@ -280,6 +346,15 @@ class LLMBackend:
             cmd.extend(["--mcp-config", str(mcp_config_path), "--strict-mcp-config"])
             cmd.extend(["--tools", "ToolSearch", "--allowedTools", ",".join(allowed)])
             cmd.append("--dangerously-skip-permissions")
+            if mcp_startup_timeout_seconds is not None:
+                startup_timeout = self._validated_mcp_startup_timeout(
+                    mcp_startup_timeout_seconds
+                )
+                startup_timeout_ms = max(1, int(startup_timeout * 1000))
+                process_env = os.environ.copy()
+                process_env["MCP_CONNECTION_NONBLOCKING"] = "0"
+                process_env["MCP_CONNECT_TIMEOUT_MS"] = str(startup_timeout_ms)
+                process_env["MCP_TIMEOUT"] = str(startup_timeout_ms)
         elif disable_native_tools:
             # HITL manager tools are parsed and executed by the runtime. Do
             # not let the CLI agent gain a second, unmanaged tool surface.
@@ -294,21 +369,32 @@ class LLMBackend:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=process_env,
             # Only HITL manager calls request cancellation semantics. Keep
             # ordinary interactive-manager launch behavior unchanged.
-            start_new_session=(disable_native_tools and os.name == "posix"),
+            start_new_session=((disable_native_tools or bool(mcp_config_path)) and os.name == "posix"),
         )
         self._set_active_process(process)
 
         try:
-            try:
-                stdout, stderr = process.communicate(input=prompt, timeout=timeout_seconds)
-            except subprocess.TimeoutExpired as exc:
-                self._terminate_process_group(process)
-                raise TimeoutError(
-                    "CLI backend timed out after "
-                    f"{timeout_seconds:g} seconds"
-                ) from exc
+            if mcp_config_path and mcp_startup_timeout_seconds is not None:
+                stdout, stderr = self._communicate_with_claude_mcp_gate(
+                    process,
+                    prompt,
+                    provider_timeout_seconds=timeout_seconds,
+                    mcp_startup_timeout_seconds=mcp_startup_timeout_seconds,
+                    server_names=self._mcp_server_names(mcp_config_path),
+                    expected_tools=names,
+                )
+            else:
+                try:
+                    stdout, stderr = process.communicate(input=prompt, timeout=timeout_seconds)
+                except subprocess.TimeoutExpired as exc:
+                    self._terminate_process_group(process)
+                    raise TimeoutError(
+                        "CLI backend timed out after "
+                        f"{timeout_seconds:g} seconds"
+                    ) from exc
         finally:
             self._clear_active_process(process)
 
@@ -327,6 +413,204 @@ class LLMBackend:
             # ReAct loop must not replay them as legacy XML tool calls.
             response.tool_calls = []
         return response
+
+    def _communicate_with_claude_mcp_gate(
+        self,
+        process: subprocess.Popen[str],
+        prompt: str,
+        *,
+        provider_timeout_seconds: Optional[float],
+        mcp_startup_timeout_seconds: float,
+        server_names: List[str],
+        expected_tools: List[str],
+    ) -> tuple[str, str]:
+        """Hold a Claude provider turn until its required MCP tools are ready."""
+        started = time.monotonic()
+        stdout_lines: List[str] = []
+        stderr_lines: List[str] = []
+        stdout_events: "queue.Queue[Any]" = queue.Queue()
+        stdout_done = object()
+        readiness_observed = threading.Event()
+
+        def read_stdout() -> None:
+            stream = process.stdout
+            if stream is not None:
+                for line in stream:
+                    stdout_lines.append(line)
+                    if not readiness_observed.is_set():
+                        stdout_events.put(line)
+            if not readiness_observed.is_set():
+                stdout_events.put(stdout_done)
+
+        def read_stderr() -> None:
+            stream = process.stderr
+            if stream is not None:
+                stderr_lines.extend(stream.readlines())
+
+        def write_stdin() -> None:
+            stream = process.stdin
+            if stream is None:
+                return
+            try:
+                stream.write(prompt)
+                stream.flush()
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stdin_thread = threading.Thread(target=write_stdin, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        stdin_thread.start()
+
+        startup_timeout = self._validated_mcp_startup_timeout(
+            mcp_startup_timeout_seconds
+        )
+        startup_grace = max(1.0, min(5.0, startup_timeout * 0.2))
+        startup_deadline = started + startup_timeout + startup_grace
+
+        try:
+            while True:
+                remaining = startup_deadline - time.monotonic()
+                if remaining <= 0:
+                    self._terminate_process_group(process)
+                    raise McpInitializationError(
+                        "Claude did not report manager MCP readiness within "
+                        f"{startup_timeout:g} seconds."
+                    )
+                try:
+                    item = stdout_events.get(timeout=remaining)
+                except queue.Empty as exc:
+                    self._terminate_process_group(process)
+                    raise McpInitializationError(
+                        "Claude did not report manager MCP readiness within "
+                        f"{startup_timeout:g} seconds."
+                    ) from exc
+                if item is stdout_done:
+                    process.wait()
+                    stderr_thread.join(timeout=1)
+                    stdout = "".join(stdout_lines)
+                    stderr = "".join(stderr_lines)
+                    if process.returncode != 0:
+                        detail = self._claude_cli_error_message(
+                            stdout=stdout,
+                            stderr=stderr,
+                            returncode=process.returncode,
+                        )
+                        raise RuntimeError(f"CLI backend error: {detail}")
+                    raise McpInitializationError(
+                        "Claude exited before reporting manager MCP readiness."
+                    )
+                try:
+                    event = json.loads(str(item))
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") != "system" or event.get("subtype") != "init":
+                    continue
+                readiness_error = self._claude_mcp_readiness_error(
+                    event,
+                    server_names=server_names,
+                    expected_tools=expected_tools,
+                )
+                if readiness_error:
+                    self._terminate_process_group(process)
+                    raise McpInitializationError(readiness_error)
+                readiness_observed.set()
+                break
+
+            if provider_timeout_seconds is None:
+                process.wait()
+            else:
+                provider_timeout = float(provider_timeout_seconds)
+                remaining = provider_timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    self._terminate_process_group(process)
+                    raise TimeoutError(
+                        f"CLI backend timed out after {provider_timeout:g} seconds"
+                    )
+                try:
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired as exc:
+                    self._terminate_process_group(process)
+                    raise TimeoutError(
+                        f"CLI backend timed out after {provider_timeout:g} seconds"
+                    ) from exc
+        finally:
+            if process.poll() is None:
+                self._terminate_process_group(process)
+            stdin_thread.join(timeout=1)
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
+
+        return "".join(stdout_lines), "".join(stderr_lines)
+
+    @staticmethod
+    def _claude_mcp_readiness_error(
+        event: Dict[str, Any],
+        *,
+        server_names: List[str],
+        expected_tools: List[str],
+    ) -> str:
+        """Return a safe startup error when Claude's init surface is incomplete."""
+        expected_servers = {str(name) for name in server_names}
+        raw_errors = event.get("mcp_server_errors") or []
+        for raw_error in raw_errors if isinstance(raw_errors, list) else []:
+            if not isinstance(raw_error, dict):
+                continue
+            name = str(raw_error.get("name", ""))
+            if name in expected_servers:
+                category = str(raw_error.get("type", "invalid_config")).strip()
+                return f"Claude skipped required MCP server {name!r} ({category})."
+
+        raw_servers = event.get("mcp_servers") or []
+        servers: Dict[str, str] = {}
+        if isinstance(raw_servers, list):
+            for raw_server in raw_servers:
+                if isinstance(raw_server, dict):
+                    name = str(raw_server.get("name", ""))
+                    if name:
+                        servers[name] = str(raw_server.get("status", "")).lower()
+        elif isinstance(raw_servers, dict):
+            for name, raw_server in raw_servers.items():
+                status = (
+                    raw_server.get("status", "")
+                    if isinstance(raw_server, dict)
+                    else raw_server
+                )
+                servers[str(name)] = str(status).lower()
+
+        missing_servers = sorted(expected_servers - set(servers))
+        if missing_servers:
+            return "Claude did not load required MCP server(s): " + ", ".join(missing_servers)
+        unavailable = sorted(
+            f"{name}={servers[name] or 'unknown'}"
+            for name in expected_servers
+            if servers.get(name) != "connected"
+        )
+        if unavailable:
+            return "Claude reported required MCP server(s) unavailable: " + ", ".join(
+                unavailable
+            )
+
+        raw_tools = event.get("tools") or []
+        visible_tools = {
+            str(tool.get("name", "")) if isinstance(tool, dict) else str(tool)
+            for tool in raw_tools
+        } if isinstance(raw_tools, list) else set()
+        missing_tools = sorted(set(expected_tools) - visible_tools)
+        if missing_tools:
+            return "Claude did not expose required manager MCP tool(s): " + ", ".join(
+                missing_tools
+            )
+        return ""
 
     @staticmethod
     def _claude_cli_error_message(*, stdout: str, stderr: str, returncode: int) -> str:

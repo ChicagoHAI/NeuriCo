@@ -11,6 +11,8 @@ import json
 import hashlib
 import http.server
 import inspect
+import logging
+import math
 import os
 import queue
 import secrets
@@ -31,6 +33,9 @@ from core.hitl_runtime_state import (
     HitlRuntimeStateError,
 )
 from core.hitl_workspace_inspection import HitlWorkspaceInspector
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class _StaleManagerTurn(RuntimeError):
@@ -303,6 +308,22 @@ class HitlManager:
             0.1,
             float(config.get("manager", {}).get("hitl_manager_retry_delay_seconds", 1.0)),
         )
+        self.mcp_startup_timeout_seconds = float(
+            manager_config.get("hitl_manager_mcp_startup_timeout_seconds", 30.0)
+        )
+        self.mcp_startup_timeout_increment_seconds = float(
+            manager_config.get("hitl_manager_mcp_startup_timeout_increment_seconds", 15.0)
+        )
+        if (
+            not math.isfinite(self.mcp_startup_timeout_seconds)
+            or self.mcp_startup_timeout_seconds <= 0
+        ):
+            raise ValueError("HITL manager MCP startup timeout must be positive and finite")
+        if (
+            not math.isfinite(self.mcp_startup_timeout_increment_seconds)
+            or self.mcp_startup_timeout_increment_seconds <= 0
+        ):
+            raise ValueError("HITL manager MCP startup increment must be positive and finite")
         self._turns: "queue.Queue[_Turn]" = queue.Queue()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -637,6 +658,7 @@ class HitlManager:
                 self._CLI_MCP_SERVER_NAME: {
                     "command": sys.executable,
                     "args": [str(adapter)],
+                    "alwaysLoad": True,
                     "env": {
                         "NEURICO_HITL_MANAGER_URL": self._mcp_url,
                         "NEURICO_HITL_MANAGER_TOKEN": token,
@@ -2217,16 +2239,48 @@ class HitlManager:
     def _send(
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None
     ) -> Any:
+        from interactive.llm_backend import McpInitializationError
+
         with self._backend_lifecycle_lock:
             last: Optional[Exception] = None
-            for attempt in range(self.max_backend_retries):
+            provider_attempt = 0
+            mcp_attempt = 0
+            while provider_attempt < self.max_backend_retries:
+                mcp_timeout = (
+                    self.mcp_startup_timeout_seconds
+                    + mcp_attempt * self.mcp_startup_timeout_increment_seconds
+                )
                 try:
-                    return self._send_once(messages, tools, backend=backend)
+                    return self._send_once(
+                        messages,
+                        tools,
+                        backend=backend,
+                        mcp_startup_timeout_seconds=mcp_timeout,
+                    )
+                except McpInitializationError as exc:
+                    mcp_attempt += 1
+                    LOGGER.warning(
+                        "HITL manager MCP startup attempt %d failed for provider %s "
+                        "after a %.1fs window: %s",
+                        mcp_attempt,
+                        self.provider,
+                        mcp_timeout,
+                        exc,
+                    )
+                    if self._stop.is_set():
+                        raise RuntimeError(
+                            "HITL manager stopped during MCP initialization."
+                        ) from exc
+                    if self._stop.wait(self.backend_retry_delay_seconds):
+                        raise RuntimeError(
+                            "HITL manager stopped during MCP initialization."
+                        ) from exc
                 except Exception as exc:
                     last = exc
+                    provider_attempt += 1
                     if self._stop.is_set():
                         raise RuntimeError("HITL manager stopped during its provider turn.") from exc
-                    if attempt + 1 < self.max_backend_retries:
+                    if provider_attempt < self.max_backend_retries:
                         if self._stop.wait(self.backend_retry_delay_seconds):
                             raise RuntimeError(
                                 "HITL manager stopped during its provider turn."
@@ -2234,7 +2288,12 @@ class HitlManager:
             raise RuntimeError("Manager backend was unavailable") from last
 
     def _send_once(
-        self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        backend: Any = None,
+        mcp_startup_timeout_seconds: Optional[float] = None,
     ) -> Any:
         """Run one manager provider turn without a wall-clock deadline."""
         result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
@@ -2282,6 +2341,13 @@ class HitlManager:
                         kwargs["allowed_mcp_tools"] = [
                             self._mcp_allowed_tool_name(str(tool["name"])) for tool in tools
                         ]
+                        if "mcp_startup_timeout_seconds" in parameters or any(
+                            parameter.kind is inspect.Parameter.VAR_KEYWORD
+                            for parameter in parameters.values()
+                        ):
+                            kwargs["mcp_startup_timeout_seconds"] = (
+                                mcp_startup_timeout_seconds
+                            )
                         provider_tools = []
                     response = active_backend.send(messages, provider_tools, **kwargs)
                 else:
