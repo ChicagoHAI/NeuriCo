@@ -53,7 +53,12 @@ from core.hitl_scoring_workspace import (
     scoring_source_workspace_fingerprint,
 )
 from core.hitl_runtime_state import HitlRuntimeState
-from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
+from core.scoring_seal import (
+    sealed_dir_for,
+    seal_scoring_files,
+    unseal_scoring_files,
+    verify_sealed_scoring_manifest,
+)
 from core.workspace_manifest import build_manifest, curate_manifest
 from core.phase_state import (
     check_working_directory,
@@ -521,6 +526,8 @@ class ResearchPipelineOrchestrator:
                     )
                 self._recover_experiment_runner_from_runtime_checkpoint()
                 experiment_recovery_armed = False
+                self._restore_rule_maker_inputs_for_initial_scoring_repair(sealed_dir)
+                sealed_dir = None
                 results["stages"][RULE_MAKER_STAGE] = self._run_hitl_stage_until_complete(
                     stage_name=RULE_MAKER_STAGE,
                     run_stage=lambda: self._run_rule_maker_hitl(
@@ -1919,6 +1926,39 @@ class ResearchPipelineOrchestrator:
         always called in a finally block.
         """
         unseal_scoring_files(self.work_dir, sealed_dir)
+
+    def _restore_rule_maker_inputs_for_initial_scoring_repair(
+        self,
+        sealed_dir: Optional[Path],
+    ) -> None:
+        """Restore the approved evaluator before reopening rule-maker review."""
+        if sealed_dir is None:
+            raise RuntimeError(
+                "Initial rule-maker repair cannot start without a sealed evaluator."
+            )
+
+        verify_sealed_scoring_manifest(sealed_dir)
+        self._unseal_runner_inputs(sealed_dir)
+
+        if sealed_dir.exists():
+            raise RuntimeError(
+                "Initial rule-maker repair did not fully restore the sealed evaluator payload."
+            )
+
+        required = (
+            "scoring/eval.py",
+            "scoring/targets.json",
+            "scoring/interface.md",
+            "scoring/rule_maker_log.md",
+        )
+        missing = [
+            relative for relative in required if not (self.work_dir / relative).is_file()
+        ]
+        if missing:
+            raise RuntimeError(
+                "Initial rule-maker repair could not restore required evaluator artifacts: "
+                + ", ".join(missing)
+            )
 
     # === Bootstrap mode ====================================================
     # When bootstrap_mode=True, the workspace was produced by an earlier
