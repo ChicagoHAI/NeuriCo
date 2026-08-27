@@ -15,3 +15,7 @@ For this HITL invocation, these instructions override any completion-marker
 instruction elsewhere in the stage prompt. Do not create or rely on a completion
 marker file. `hitl-finish-phase` is the only completion request recognized by
 runtime.
+
+If the current approach cannot be executed, choose another valid approach and
+continue. Never stop or exit the phase or give up. You must continue working
+until `hitl-finish-phase` is accepted.

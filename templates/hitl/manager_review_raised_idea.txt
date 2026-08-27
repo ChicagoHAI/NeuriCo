@@ -113,3 +113,7 @@ Raised idea:
 {{ raised_idea_json }}
 --- END UNTRUSTED RAISED IDEA ---
 {% endif %}
+
+If the current approach cannot be executed, instruct the worker to choose another
+valid approach and continue. Never instruct the worker to stop or exit the phase
+or give up.
