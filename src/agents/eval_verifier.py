@@ -41,19 +41,30 @@ from core.hitl_util import atomic_write_json
 
 VERDICT_FILE_NAME = "verification.json"
 EVIDENCE_SCHEMA_VERSION = 1
-SCORING_EVIDENCE_FILES = (
+REQUIRED_SCORING_EVIDENCE_FILES = (
     "scoring/eval.py",
     "scoring/targets.json",
     "scoring/interface.md",
+)
+OPTIONAL_SCORING_EVIDENCE_FILES = (
     "scoring/rule_maker_log.md",
+)
+SCORING_EVIDENCE_FILES = (
+    *REQUIRED_SCORING_EVIDENCE_FILES,
+    *OPTIONAL_SCORING_EVIDENCE_FILES,
 )
 MAX_EVIDENCE_FILE_BYTES = 256 * 1024
 MAX_EVIDENCE_TOTAL_BYTES = 1024 * 1024
 MAX_EVIDENCE_BUNDLE_BYTES = 2 * 1024 * 1024
 DEFAULT_OPENAI_MODEL = "gpt-4.1"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4.1"
-VERIFIER_OPENROUTER_KEY_ENV = "NEURICO_EVAL_VERIFIER_OPENROUTER_KEY"
-VERIFIER_OPENAI_KEY_ENV = "NEURICO_EVAL_VERIFIER_OPENAI_API_KEY"
+FAILURE_KIND_API_UNAVAILABLE = "api_unavailable"
+FAILURE_KIND_EVIDENCE_INVALID = "evidence_invalid"
+FAILURE_KIND_VERDICT_INVALID = "verdict_invalid"
+
+
+class VerifierResponseInvalidError(ValueError):
+    """The provider replied, but its response did not contain usable content."""
 
 
 # The verdict contract, stated once: every check the eval_verifier template
@@ -100,14 +111,48 @@ def extract_eval_contract(idea: Dict[str, Any]) -> Dict[str, Any]:
     # function. In particular, never send source_path (an absolute host path)
     # or local integrity metadata to the external verifier API.
     mandated = []
+    staged_names: set[str] = set()
     for func in resources.get('functions') or []:
-        if not isinstance(func, dict) or not func.get('required_for_evaluation'):
+        if not isinstance(func, dict):
             continue
-        mandated.append({
+        normalized_path = ''
+        raw_path = str(func.get('path') or '').replace('\\', '/')
+        if raw_path:
+            # The external verifier needs the staged logical path, never the
+            # original host address. Mirror local-resource staging's basename
+            # and collision protocol for older/resumed contracts whose paths
+            # have not yet been rewritten to code/local/. Every declared
+            # function reserves its destination because staging does the same,
+            # even though only mandated functions enter the verifier contract.
+            logical = PurePosixPath(raw_path)
+            already_staged = (
+                len(logical.parts) == 3
+                and logical.parts[:2] == ('code', 'local')
+            )
+            if already_staged:
+                name = logical.name
+            else:
+                name = raw_path.rstrip('/').rsplit('/', 1)[-1]
+            if name:
+                candidate = name
+                if candidate in staged_names and not already_staged:
+                    stem, dot, ext = name.partition('.')
+                    counter = 2
+                    while candidate in staged_names:
+                        candidate = f"{stem}_{counter}{dot}{ext}"
+                        counter += 1
+                staged_names.add(candidate)
+                normalized_path = f"code/local/{candidate}"
+        if not func.get('required_for_evaluation'):
+            continue
+        normalized = {
             key: func[key]
-            for key in ('path', 'entrypoint', 'usage', 'required_for_evaluation')
+            for key in ('entrypoint', 'usage', 'required_for_evaluation')
             if key in func
-        })
+        }
+        if normalized_path:
+            normalized['path'] = normalized_path
+        mandated.append(normalized)
     return {
         'evaluation': evaluation,
         'mandated_functions': mandated,
@@ -175,16 +220,11 @@ def _mandated_function_paths(contract: Dict[str, Any]) -> List[str]:
         raw = str(function.get('path') or '').replace('\\', '/')
         if not raw:
             raise ValueError("mandated evaluation function is missing its path")
-        if raw.startswith('code/local/'):
-            relative = raw
-        else:
-            # Normal staging rewrites the trusted in-memory contract to
-            # code/local/<basename>. Retain this fallback for older/resumed
-            # contracts that still carry the original source address.
-            name = raw.rstrip('/').rsplit('/', 1)[-1]
-            if not name or name in ('.', '..'):
-                raise ValueError(f"mandated evaluation function has invalid path: {raw!r}")
-            relative = f"code/local/{name}"
+        if not raw.startswith('code/local/'):
+            raise ValueError(
+                "mandated evaluation function was not normalized to its staged path"
+            )
+        relative = raw
         if relative not in paths:
             paths.append(relative)
     return paths
@@ -196,9 +236,16 @@ def build_eval_verifier_evidence(
 ) -> Dict[str, Any]:
     """Build the complete, bounded set of data the remote verifier may see."""
     contract = extract_eval_contract(idea)
+    artifact_paths = list(REQUIRED_SCORING_EVIDENCE_FILES)
+    artifact_paths.extend(
+        relative
+        for relative in OPTIONAL_SCORING_EVIDENCE_FILES
+        if (Path(work_dir) / relative).exists()
+    )
+    artifact_paths.extend(_mandated_function_paths(contract))
     artifacts = [
         _read_evidence_file(work_dir, relative)
-        for relative in (*SCORING_EVIDENCE_FILES, *_mandated_function_paths(contract))
+        for relative in artifact_paths
     ]
     total_bytes = sum(int(artifact['size_bytes']) for artifact in artifacts)
     if total_bytes > MAX_EVIDENCE_TOTAL_BYTES:
@@ -269,18 +316,15 @@ def generate_eval_verifier_prompt(
 
 def _verifier_api_client(timeout: int):
     """Create the repository-standard OpenAI-compatible API client."""
-    # These credentials are intentionally verifier-specific. General-purpose
-    # OPENROUTER_KEY / OPENAI_API_KEY values are copied into experiment-agent
-    # environments elsewhere in NeuriCo and therefore do not establish a
-    # credential boundary around verifier request records.
-    openrouter_key = os.getenv(VERIFIER_OPENROUTER_KEY_ENV)
-    openai_key = os.getenv(VERIFIER_OPENAI_KEY_ENV)
+    # Match the repository's other OpenAI-compatible API callers: prefer
+    # OpenRouter, including its conventional alias, then use direct OpenAI.
+    openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
+    openai_key = os.getenv('OPENAI_API_KEY')
     api_key = openrouter_key or openai_key
     if not api_key:
         raise RuntimeError(
-            f"eval verifier requires {VERIFIER_OPENROUTER_KEY_ENV} or "
-            f"{VERIFIER_OPENAI_KEY_ENV}; shared agent credentials and CLI "
-            "fallback are intentionally disabled"
+            "eval verifier requires OPENROUTER_KEY, OPENROUTER_API_KEY, or "
+            "OPENAI_API_KEY; CLI fallback is intentionally disabled"
         )
     try:
         from openai import OpenAI
@@ -320,12 +364,19 @@ def _call_verifier_api(messages: List[Dict[str, str]], timeout: int):
     else:
         # Direct OpenAI Chat Completions has no application-state retention
         # when store=false. Provider abuse-monitoring policy remains an account
-        # concern, but the dedicated key is never exposed to NeuriCo agents.
+        # concern. This uses the repository's configured shared API access.
         request['store'] = False
     response = client.chat.completions.create(**request)
-    content = response.choices[0].message.content
+    try:
+        content = response.choices[0].message.content
+    except (AttributeError, IndexError, KeyError, TypeError) as exc:
+        raise VerifierResponseInvalidError(
+            "eval verifier API response did not contain message content"
+        ) from exc
     if not isinstance(content, str) or not content.strip():
-        raise ValueError("eval verifier API returned an empty response")
+        raise VerifierResponseInvalidError(
+            "eval verifier API returned an empty response"
+        )
     return content, backend, model
 
 
@@ -387,23 +438,20 @@ def run_eval_verifier(
     backend = None
     model = None
     evidence = None
-    try:
-        messages, evidence = generate_eval_verifier_messages(
-            idea, work_dir, templates_dir
-        )
-        content, backend, model = _call_verifier_api(messages, timeout)
-        verdict = _parse_api_verdict(content)
-    except Exception as exc:
+
+    def failure_result(kind: str, exception_type: str) -> Dict[str, Any]:
         elapsed = time.time() - start_time
-        # Exception strings from a remote API or SDK are not trusted audit
-        # content: they can contain response bodies and, depending on the
-        # client, fragments of the submitted request. Preserve only a stable
-        # runtime-owned category and the local exception type.
-        exception_type = type(exc).__name__
-        detail = "verifier API request or evidence validation failed"
+        if kind == FAILURE_KIND_EVIDENCE_INVALID:
+            detail = "verifier evidence could not be safely assembled"
+        elif kind == FAILURE_KIND_VERDICT_INVALID:
+            detail = "verifier API returned a malformed review"
+        else:
+            detail = "verifier API request did not return a usable review"
+        check = "evidence" if kind == FAILURE_KIND_EVIDENCE_INVALID else "verdict"
         metadata = {
             'attempt': attempt,
             'success': False,
+            'failure_kind': kind,
             'backend': backend,
             'model': model,
             'input_sha256': evidence.get('input_sha256') if evidence else None,
@@ -413,11 +461,18 @@ def run_eval_verifier(
         }
         if persist_audit:
             atomic_write_json(log_file, metadata, ensure_ascii=False, indent=2)
-        print(f"⚠️  Eval verifier API could not complete ({exception_type}).")
+        if kind == FAILURE_KIND_EVIDENCE_INVALID:
+            label = "evidence validation"
+        elif kind == FAILURE_KIND_VERDICT_INVALID:
+            label = "verdict validation"
+        else:
+            label = "API"
+        print(f"⚠️  Eval verifier {label} could not complete ({exception_type}).")
         return {
             'success': False,
+            'failure_kind': kind,
             'passed': False,
-            'violations': [{'check': 'verdict', 'detail': detail}],
+            'violations': [{'check': check}],
             'log_file': str(log_file) if persist_audit else None,
             'transcript_file': None,
             'elapsed_time': elapsed,
@@ -426,16 +481,53 @@ def run_eval_verifier(
             'model': model,
         }
 
+    try:
+        messages, evidence = generate_eval_verifier_messages(
+            idea, work_dir, templates_dir
+        )
+    except Exception as exc:
+        return failure_result(FAILURE_KIND_EVIDENCE_INVALID, type(exc).__name__)
+
+    try:
+        content, backend, model = _call_verifier_api(messages, timeout)
+    except VerifierResponseInvalidError as exc:
+        return failure_result(FAILURE_KIND_VERDICT_INVALID, type(exc).__name__)
+    except Exception as exc:
+        # Exception strings from a remote API or SDK are not trusted audit
+        # content: they can contain response bodies and, depending on the
+        # client, fragments of the submitted request. Preserve only a stable
+        # runtime-owned category and the local exception type.
+        return failure_result(FAILURE_KIND_API_UNAVAILABLE, type(exc).__name__)
+
+    try:
+        verdict = _parse_api_verdict(content)
+    except Exception as exc:
+        # The provider completed the request. A malformed model response is a
+        # failed review, not provider unavailability, because treating it as
+        # nonblocking would let untrusted scorer text suppress verification.
+        return failure_result(FAILURE_KIND_VERDICT_INVALID, type(exc).__name__)
+
     passed, verdict_violations = interpret_verdict(verdict, extract_eval_contract(idea))
-    violations = verdict_violations
+    # Raw verifier prose ends here. Only fixed runtime-owned categories may be
+    # returned, persisted, logged, or relayed to another agent.
+    categories: List[str] = []
+    for violation in verdict_violations:
+        raw_check = str(violation.get('check', '')) if isinstance(violation, dict) else ''
+        check = raw_check if raw_check in VERDICT_CHECKS else 'verdict'
+        if check not in categories:
+            categories.append(check)
+    violations = [{'check': check} for check in categories]
     if persist_verdict:
         scoring_dir.mkdir(parents=True, exist_ok=True)
-        persisted_verdict = dict(verdict)
-        persisted_verdict['_neurico'] = {
-            'evidence_schema_version': EVIDENCE_SCHEMA_VERSION,
-            'input_sha256': evidence['input_sha256'],
-            'backend': backend,
-            'model': model,
+        persisted_verdict = {
+            'pass': passed,
+            'failed_checks': categories,
+            '_neurico': {
+                'evidence_schema_version': EVIDENCE_SCHEMA_VERSION,
+                'input_sha256': evidence['input_sha256'],
+                'backend': backend,
+                'model': model,
+            },
         }
         atomic_write_json(
             verdict_path, persisted_verdict, ensure_ascii=False, indent=2
@@ -496,17 +588,18 @@ def interpret_verdict(
 
     - `pass` must be a JSON boolean; bool() coercion would accept any non-empty
       string — including "false" — as passing.
-    - `violations` must always be present as an array of mappings each
-      carrying a concrete detail; a missing key, null, or any other shape is
+    - `summary` must be a non-empty string, and `violations` must always be
+      present as an array of mappings each carrying concrete string detail and
+      evidence; a missing key, null, or any other shape is
       a failed verdict, never an exception, so a malformed verifier response
       still reaches the normal retry path.
     - `checks` must report every mandated check (routing, transcription,
       format) with pass/fail/not_applicable; a check that does not apply must
       say `not_applicable` explicitly rather than be omitted, so a verifier
       cannot silently skip part of the contract.
-    - A check the contract makes applicable (per VERDICT_CHECKS) must not be
-      reported `not_applicable`: the verifier only runs because the contract
-      declares that component, so waving it off is a silent skip.
+    - Applicability must agree in both directions: applicable checks cannot be
+      reported `not_applicable`, and inapplicable checks must use exactly that
+      value rather than claiming to have reviewed absent requirements.
     - `pass` must be consistent with the evidence in BOTH directions: true
       requires no failing check AND an empty violations list (a reported
       defect contradicts a pass), while false requires at least one recorded
@@ -531,7 +624,9 @@ def interpret_verdict(
         bad_value = declared_violations
         declared_violations = []
 
-    violations = list(declared_violations)
+    # Return only categories reconciled with the checks map. Raw model prose
+    # is retained only after its category is mechanically tied to a failure.
+    violations: List[Dict[str, Any]] = []
 
     def reject(detail: str) -> None:
         nonlocal passed
@@ -545,11 +640,15 @@ def interpret_verdict(
     if not isinstance(raw_pass, bool):
         reject(f"verification.json 'pass' must be a JSON boolean, got {raw_pass!r}")
 
+    summary = verdict.get('summary')
+    if not isinstance(summary, str) or not summary.strip():
+        reject("verification.json 'summary' must be a non-empty string")
+
     checks = verdict.get('checks')
+    failed: List[str] = []
     if not isinstance(checks, dict) or not checks:
         reject(f"verification.json must include a non-empty 'checks' mapping, got {checks!r}")
     else:
-        failed = []
         for name, value in checks.items():
             if name not in VERDICT_CHECKS:
                 reject(f"unknown check {name!r}; expected one of {list(VERDICT_CHECKS)}")
@@ -572,6 +671,15 @@ def interpret_verdict(
         if waved_off:
             reject(f"checks {waved_off} are applicable under the submitted "
                    f"contract but were reported 'not_applicable'")
+        falsely_applicable = [
+            name for name, applicable in VERDICT_CHECKS.items()
+            if not applicable(contract) and checks.get(name) != 'not_applicable'
+        ]
+        if falsely_applicable:
+            reject(
+                f"checks {falsely_applicable} are inapplicable under the submitted "
+                "contract and must be reported 'not_applicable'"
+            )
         # `pass` is true only when every applicable check passes.
         if raw_pass is True and failed:
             reject(f"'pass' is true but these checks failed: {failed}")
@@ -585,10 +693,53 @@ def interpret_verdict(
         reject(f"'pass' is true but {len(declared_violations)} violation(s) "
                f"were reported; a reported defect contradicts a pass")
 
-    # Each declared violation must be a mapping carrying a concrete detail.
+    # Each declared violation must be well formed and identify a check that
+    # the checks map actually marks failed. Discard mismatched categories so
+    # they cannot make the manager see a different concern from the failure.
     for entry in declared_violations:
-        if not isinstance(entry, dict) or not str(entry.get('detail', '')).strip():
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get('detail'), str)
+            or not entry['detail'].strip()
+            or not isinstance(entry.get('evidence'), str)
+            or not entry['evidence'].strip()
+        ):
             reject(f"malformed violation entry: {entry!r}")
+            continue
+        check = str(entry.get('check', '')).strip()
+        if check not in VERDICT_CHECKS:
+            reject("violation entry must name a recognized check")
+            continue
+        if not isinstance(checks, dict) or checks.get(check) != 'fail':
+            reject(
+                f"violation category {check!r} does not match a check marked 'fail'"
+            )
+            continue
+        if not VERDICT_CHECKS[check](contract):
+            # The model may claim that an absent requirement failed. Preserve
+            # the malformed-verdict signal above, but do not let that invented
+            # category become a concrete manager concern.
+            reject(
+                f"violation category {check!r} names an inapplicable check"
+            )
+            continue
+        violations.append(entry)
+
+    # Surface every failed check under its correct runtime-owned category,
+    # even when the model omitted or mislabeled its corresponding violation.
+    reported_failed = {
+        str(entry.get('check')) for entry in violations
+        if isinstance(entry, dict)
+    }
+    for name in failed:
+        if name not in VERDICT_CHECKS or not VERDICT_CHECKS[name](contract):
+            continue
+        if name not in reported_failed:
+            passed = False
+            violations.append({
+                'check': name,
+                'detail': f"check {name!r} failed but had no matching violation",
+            })
 
     return passed, violations
 
@@ -629,6 +780,12 @@ def format_violations_for_retry(
             line = f"- [{check}] {description}."
             if requirements:
                 line += " Re-check: " + "; ".join(requirements) + "."
+        elif check == 'evidence':
+            line = (
+                "- [evidence] Runtime could not safely assemble the scoring "
+                "artifacts. Recreate them as regular UTF-8 files within the "
+                "documented size limits."
+            )
         else:
             line = f"- {_MANAGER_GENERIC_CONCERN}."
         if line not in lines:
@@ -713,7 +870,8 @@ def build_manager_conformance_report(
 ) -> str:
     """Render a verifier verdict as a leak-proof, manager-facing report.
 
-    - verifier could not complete -> API NOT AVAILABLE (manager continues normally)
+    - provider/API unavailable    -> API NOT AVAILABLE (manager continues normally)
+    - evidence/verdict invalid    -> CONCERNS
     - contract satisfied          -> PASS
     - contract not satisfied      -> CONCERNS with canned per-check categories,
       naming the user's own declared requirements in that category verbatim
@@ -728,6 +886,20 @@ def build_manager_conformance_report(
         isinstance(v, dict) and str(v.get("check")) == "read_only"
         for v in verdict.get("violations") or []
     )
+    if verdict.get('failure_kind') == FAILURE_KIND_EVIDENCE_INVALID:
+        return (
+            "Automated conformance check: CONCERNS. The rule maker's scoring "
+            "evidence could not be safely assembled within the required file, "
+            "path, encoding, and size constraints. Ask the rule maker to correct "
+            "its scoring artifacts before approving this checkpoint."
+        )
+    if verdict.get('failure_kind') == FAILURE_KIND_VERDICT_INVALID:
+        return (
+            "Automated conformance check: CONCERNS. The verifier API returned "
+            "a malformed review, so the scoring design was not successfully "
+            "verified. Do not treat this as API unavailability when deciding "
+            "whether to approve this checkpoint."
+        )
     if not verdict.get("success") or tampered:
         # A verifier that could not complete (or a legacy tamper signal) is not
         # evidence against the design. Tell the manager to continue normally.

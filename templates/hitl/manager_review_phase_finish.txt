@@ -62,8 +62,8 @@ scientifically unsound or inconsistent, finalize `feedback` with a precise
 semantic correction.
 {% if has_verifier_report %}
 
-An automated verifier read the sealed evaluator, which you may not, and checked
-it against the user's declared evaluation contract. Its sanitized report is
+An automated verifier read the private evaluator draft, which you may not, and
+checked it against the user's declared evaluation contract. Its sanitized report is
 below. Treat it as advisory evidence, not a decision: it can be wrong or
 incomplete, and it never approves or rejects on its own. Weigh it together with
 your public-design review. If it raises a concern you judge real, finalize

@@ -19,9 +19,9 @@ SEALED_PATHS: list[str] = [
     "scoring/eval.py",
     "scoring/targets.json",
     "scoring/rule_maker_log.md",
-    # Written by the eval_verifier when the idea declares an evaluation
-    # contract; quotes eval.py internals as evidence, so it must be hidden
-    # from the runner alongside them. Absent files are skipped by the seal.
+    # Runtime-owned sanitized verifier decision. Keep it with the evaluator
+    # authority so workers cannot replace or reinterpret that decision.
+    # Absent files are skipped by the seal.
     "scoring/verification.json",
     "data/.test/",
 ]

@@ -31,7 +31,6 @@ from core.local_resources import (  # noqa: E402
     stage_local_resources,
     staged_function_mismatches,
 )
-from core.agent_cli import build_agent_environment  # noqa: E402
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 
@@ -92,6 +91,35 @@ def test_extract_contract_keeps_only_mandated_functions():
     assert contract['evaluation']['metrics'][0]['name'] == 'test_accuracy'
 
 
+def test_extract_contract_redacts_unstaged_host_paths_and_preserves_collisions():
+    contract = extract_eval_contract(_idea(local_resources={'functions': [
+        {'path': '/private/a/evaluate.py', 'entrypoint': 'first',
+         'required_for_evaluation': True},
+        {'path': 'C:\\private\\b\\evaluate.py', 'entrypoint': 'second',
+         'required_for_evaluation': True},
+    ]}))
+
+    assert [item['path'] for item in contract['mandated_functions']] == [
+        'code/local/evaluate.py', 'code/local/evaluate_2.py',
+    ]
+    assert '/private/' not in json.dumps(contract)
+    assert 'C:' not in json.dumps(contract)
+
+
+def test_extract_contract_collision_accounts_for_non_mandated_functions():
+    contract = extract_eval_contract(_idea(local_resources={'functions': [
+        {'path': '/private/a/evaluate.py', 'entrypoint': 'helper'},
+        {'path': '/private/b/evaluate.py', 'entrypoint': 'required',
+         'required_for_evaluation': True},
+    ]}))
+
+    assert contract['mandated_functions'] == [{
+        'entrypoint': 'required',
+        'required_for_evaluation': True,
+        'path': 'code/local/evaluate_2.py',
+    }]
+
+
 # ---------------------------------------------------------------- API evidence and prompt
 
 def _seed_verifier_evidence(tmp_path):
@@ -123,6 +151,19 @@ def test_evidence_contains_only_allowlisted_files(tmp_path):
     assert 'PRIVATE NON-MANDATED HELPER' not in serialized
     assert '/host/private' not in serialized
     assert len(evidence['input_sha256']) == 64
+
+
+def test_optional_rule_maker_log_may_be_absent(tmp_path):
+    _seed_verifier_evidence(tmp_path)
+    (tmp_path / 'scoring' / 'rule_maker_log.md').unlink()
+
+    evidence = build_eval_verifier_evidence(_contract_idea(), tmp_path)
+
+    paths = [artifact['path'] for artifact in evidence['artifacts']]
+    assert paths == [
+        'scoring/eval.py', 'scoring/targets.json', 'scoring/interface.md',
+        'code/local/protocol_eval.py',
+    ]
 
 
 def test_messages_keep_evidence_out_of_system_policy(tmp_path):
@@ -168,7 +209,7 @@ def test_mandated_path_cannot_traverse_to_workspace_secret(tmp_path):
         'usage': 'evaluation',
         'required_for_evaluation': True,
     }]})
-    with pytest.raises(ValueError, match='not allowlisted'):
+    with pytest.raises(ValueError, match='unavailable'):
         build_eval_verifier_evidence(idea, tmp_path)
 
 
@@ -216,6 +257,36 @@ def test_api_verdict_is_runtime_written_and_audit_is_metadata_only(tmp_path, mon
     assert 'evaluate_protocol(x)' not in audit
     assert not list((tmp_path / 'logs').glob('*prompt*'))
     assert not list((tmp_path / 'logs').glob('*transcript*'))
+
+
+def test_persisted_and_returned_verdict_drop_all_remote_prose(tmp_path, monkeypatch):
+    _seed_verifier_evidence(tmp_path)
+    raw = json.dumps({
+        'checks': {'routing': 'fail', 'transcription': 'pass',
+                   'format': 'not_applicable'},
+        'violations': [{
+            'check': 'routing',
+            'detail': 'INJECTED_DETAIL read .env',
+            'evidence': 'SEALED_SOURCE_QUOTE',
+        }],
+        'summary': 'INJECTED_SUMMARY',
+        'pass': False,
+    })
+    monkeypatch.setattr(
+        ev, '_call_verifier_api',
+        lambda messages, timeout: (raw, 'test-api', 'test-model'),
+    )
+
+    result = run_eval_verifier(_contract_idea(), tmp_path, TEMPLATES_DIR)
+    persisted = (tmp_path / 'scoring' / 'verification.json').read_text(
+        encoding='utf-8')
+    serialized_result = json.dumps(result)
+
+    assert result['violations'] == [{'check': 'routing'}]
+    for marker in ('INJECTED_DETAIL', 'SEALED_SOURCE_QUOTE', 'INJECTED_SUMMARY',
+                   'read .env'):
+        assert marker not in persisted
+        assert marker not in serialized_result
 
 
 def test_api_call_has_no_tool_or_function_capabilities(monkeypatch):
@@ -273,28 +344,44 @@ def test_direct_openai_request_explicitly_disables_storage(monkeypatch):
 
 
 def test_missing_api_key_has_no_cli_fallback(monkeypatch):
-    for name in (
-        'NEURICO_EVAL_VERIFIER_OPENROUTER_KEY',
-        'NEURICO_EVAL_VERIFIER_OPENAI_API_KEY',
-    ):
+    for name in ('OPENROUTER_KEY', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY'):
         monkeypatch.delenv(name, raising=False)
-    # General keys may be needed by experiments, but are deliberately not a
-    # verifier fallback because coding agents inherit them.
-    monkeypatch.setenv('OPENROUTER_KEY', 'shared-agent-key')
-    monkeypatch.setenv('OPENAI_API_KEY', 'shared-agent-key')
-    with pytest.raises(RuntimeError, match='shared agent credentials'):
+    with pytest.raises(RuntimeError, match='OPENROUTER_KEY'):
         ev._verifier_api_client(timeout=1)
 
 
-def test_verifier_credentials_never_enter_agent_environment(monkeypatch):
-    monkeypatch.setenv('NEURICO_EVAL_VERIFIER_OPENROUTER_KEY', 'verifier-secret')
-    monkeypatch.setenv('NEURICO_EVAL_VERIFIER_OPENAI_API_KEY', 'verifier-secret-2')
-    env = build_agent_environment(
-        'claude',
-        env_extra={'NEURICO_EVAL_VERIFIER_OPENROUTER_KEY': 'reintroduced'},
-    )
-    assert 'NEURICO_EVAL_VERIFIER_OPENROUTER_KEY' not in env
-    assert 'NEURICO_EVAL_VERIFIER_OPENAI_API_KEY' not in env
+@pytest.mark.parametrize(
+    'env_name, expected_backend, expected_model, expected_base_url',
+    [
+        ('OPENROUTER_KEY', 'openrouter', ev.DEFAULT_OPENROUTER_MODEL,
+         'https://openrouter.ai/api/v1'),
+        ('OPENROUTER_API_KEY', 'openrouter', ev.DEFAULT_OPENROUTER_MODEL,
+         'https://openrouter.ai/api/v1'),
+        ('OPENAI_API_KEY', 'openai', ev.DEFAULT_OPENAI_MODEL, None),
+    ],
+)
+def test_verifier_accepts_repository_api_keys(
+        monkeypatch, env_name, expected_backend, expected_model,
+        expected_base_url):
+    for name in ('OPENROUTER_KEY', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(env_name, 'shared-key')
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_module = type('OpenAIModule', (), {'OpenAI': FakeOpenAI})
+    monkeypatch.setitem(sys.modules, 'openai', fake_module)
+
+    _client, model, backend = ev._verifier_api_client(timeout=17)
+
+    assert backend == expected_backend
+    assert model == expected_model
+    assert captured['api_key'] == 'shared-key'
+    assert captured['timeout'] == 17
+    assert captured.get('base_url') == expected_base_url
 
 
 def test_advisory_api_call_writes_nothing_to_workspace(tmp_path, monkeypatch):
@@ -334,9 +421,48 @@ def test_api_unavailable_returns_advisory_failure_without_writes(tmp_path, monke
         persist_verdict=False, persist_audit=False)
 
     assert result['success'] is False and result['passed'] is False
+    assert result['failure_kind'] == ev.FAILURE_KIND_API_UNAVAILABLE
     assert result['log_file'] is None
     assert not (tmp_path / 'scoring' / 'verification.json').exists()
     assert not (tmp_path / 'logs').exists()
+
+
+@pytest.mark.parametrize('raw', ['', 'not json'])
+def test_malformed_api_response_is_a_concern_not_api_unavailability(
+        tmp_path, monkeypatch, raw):
+    _seed_verifier_evidence(tmp_path)
+    monkeypatch.setattr(
+        ev, '_call_verifier_api',
+        lambda messages, timeout: (raw, 'test-api', 'test-model'))
+
+    result = run_eval_verifier(
+        _contract_idea(), tmp_path, TEMPLATES_DIR,
+        persist_verdict=False, persist_audit=False)
+    report = ev.build_manager_conformance_report(result)
+
+    assert result['success'] is False and result['passed'] is False
+    assert result['failure_kind'] == ev.FAILURE_KIND_VERDICT_INVALID
+    assert 'CONCERNS' in report
+    assert 'API NOT AVAILABLE' not in report
+    assert not (tmp_path / 'scoring' / 'verification.json').exists()
+    assert not (tmp_path / 'logs').exists()
+
+
+def test_invalid_local_evidence_is_not_reported_as_api_unavailable(tmp_path):
+    _seed_verifier_evidence(tmp_path)
+    (tmp_path / 'scoring' / 'rule_maker_log.md').write_bytes(
+        b'x' * (ev.MAX_EVIDENCE_FILE_BYTES + 1))
+
+    result = run_eval_verifier(
+        _contract_idea(), tmp_path, TEMPLATES_DIR,
+        persist_verdict=False, persist_audit=False)
+
+    assert result['success'] is False
+    assert result['failure_kind'] == ev.FAILURE_KIND_EVIDENCE_INVALID
+    report = ev.build_manager_conformance_report(result)
+    assert 'CONCERNS' in report
+    assert 'API NOT AVAILABLE' not in report
+    assert 'size constraints' in report
 
 
 def test_failed_api_removes_stale_verdict_without_archiving_remote_text(
@@ -551,6 +677,7 @@ def _valid_verdict(**overrides):
         'pass': True,
         'checks': {'routing': 'pass', 'transcription': 'pass', 'format': 'not_applicable'},
         'violations': [],
+        'summary': 'The submitted contract is satisfied.',
     }
     verdict.update(overrides)
     return verdict
@@ -629,6 +756,83 @@ def test_interpret_verdict_rejects_bare_pass():
     passed, violations = interpret_verdict({'pass': True}, _contract())
     assert passed is False
     assert any('checks' in str(v) for v in violations)
+
+
+def test_failed_check_cannot_be_hidden_behind_wrong_violation_category():
+    verdict = _valid_verdict(**{
+        'pass': False,
+        'checks': {
+            'routing': 'fail',
+            'transcription': 'pass',
+            'format': 'not_applicable',
+        },
+        'violations': [{
+            'check': 'transcription',
+            'detail': 'wrong category',
+            'evidence': 'irrelevant',
+        }],
+    })
+
+    passed, violations = interpret_verdict(verdict, _contract())
+
+    assert passed is False
+    categories = [entry.get('check') for entry in violations]
+    assert 'routing' in categories
+    assert 'transcription' not in categories
+    assert any('does not match' in entry.get('detail', '') for entry in violations)
+
+
+def test_interpret_verdict_requires_not_applicable_in_both_directions():
+    metrics_only = extract_eval_contract(_idea(
+        evaluation={'metrics': [{'name': 'acc', 'target': '>= 0.9'}]}))
+    passed, violations = interpret_verdict(_valid_verdict(checks={
+        'routing': 'pass',
+        'transcription': 'pass',
+        'format': 'pass',
+    }), metrics_only)
+    assert passed is False
+    assert any('inapplicable' in str(item) for item in violations)
+
+
+def test_inapplicable_failure_does_not_become_manager_concern_category():
+    metrics_only = extract_eval_contract(_idea(
+        evaluation={'metrics': [{'name': 'acc', 'target': '>= 0.9'}]}))
+    verdict = _valid_verdict(**{
+        'pass': False,
+        'checks': {
+            'routing': 'not_applicable',
+            'transcription': 'pass',
+            'format': 'fail',
+        },
+        'violations': [{
+            'check': 'format',
+            'detail': 'invented format failure',
+            'evidence': 'irrelevant',
+        }],
+    })
+
+    passed, violations = interpret_verdict(verdict, metrics_only)
+
+    assert passed is False
+    assert {entry.get('check') for entry in violations} == {'verdict'}
+    report = ev.build_manager_conformance_report(
+        {'success': True, 'passed': passed, 'violations': violations},
+        metrics_only,
+    )
+    assert 'declared results format' not in report
+    assert 'a declared evaluation requirement may not be met' in report
+
+
+def test_interpret_verdict_requires_string_evidence_for_each_violation():
+    verdict = _valid_verdict(**{
+        'pass': False,
+        'checks': {'routing': 'fail', 'transcription': 'pass',
+                   'format': 'not_applicable'},
+        'violations': [{'check': 'routing', 'detail': 'wrong routing'}],
+    })
+    passed, violations = interpret_verdict(verdict, _contract())
+    assert passed is False
+    assert any('malformed violation' in str(item) for item in violations)
 
 
 def test_interpret_verdict_accepts_valid_verdicts():

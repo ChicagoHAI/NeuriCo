@@ -371,22 +371,24 @@ meaning of the result.
 When the idea declares metrics, a results format, or a required evaluation
 function, manager review of the rule-maker checkpoint receives an automated
 conformance report. Trusted runtime code reads only `scoring/eval.py`,
-`scoring/targets.json`, `scoring/interface.md`, `scoring/rule_maker_log.md`, and
-the specifically declared staged function files. It rejects symlinks, path
+`scoring/targets.json`, `scoring/interface.md`, optional
+`scoring/rule_maker_log.md` when present, and the specifically declared staged
+function files. It rejects symlinks, path
 traversal, non-UTF-8 input, and evidence above the per-file or total byte caps,
 then submits that bundle and the user's declared evaluation contract to the
 configured OpenRouter or OpenAI API.
 
-Verifier access uses a dedicated API credential that runtime removes from every
-coding-agent environment. OpenRouter calls additionally require a zero-data-
-retention endpoint and deny provider data collection on each request. If those
+Verifier access uses the configured OpenRouter or OpenAI API credential.
+OpenRouter calls additionally require a zero-data-retention endpoint and deny
+provider data collection on each request. If those
 constraints cannot be met, the call fails as `API NOT AVAILABLE` rather than
 routing the scorer source through a less restrictive endpoint.
 
 This verifier is a tool-less model request, not a coding-agent process. The
 request declares no shell, filesystem, network, MCP, function, or write tools.
-The remote response is strictly parsed by runtime. HITL writes no prompt, raw
-response, verifier verdict, or verifier audit file into the workspace; the
+The remote response is strictly parsed by runtime and reduced immediately to
+fixed check categories. HITL writes no prompt, raw response, verifier verdict,
+or verifier audit file into the workspace; the
 durable manager handoff contains only `PASS`, `CONCERNS`, or
 `API NOT AVAILABLE`, fixed runtime-owned descriptions, and names from the
 user's own declarations. Model-generated detail is not passed to the manager
@@ -399,12 +401,15 @@ allowlisted scorer and required-function source is disclosed to the configured
 external API provider. Operators should configure a provider whose data policy
 is acceptable for that source.
 
-The report is advisory in HITL mode. If the API key is absent, the provider is
-unreachable, evidence cannot be assembled, or the response is unusable, the
-manager sees `API NOT AVAILABLE` and continues the normal public-design review.
-That status is never represented as a pass. This explicit fail-open behavior
-preserves manager progress during an outage but provides no automated
-conformance assurance for that checkpoint.
+The report is advisory in HITL mode. If the API key is absent or the provider is
+unreachable, the manager sees `API NOT AVAILABLE` and continues the normal
+public-design review. That status is never represented as a pass. A provider
+response that arrives but cannot be validated produces `CONCERNS`, since it did
+not establish conformance. Local evidence failures are also different: missing,
+unsafe, non-UTF-8, or oversized rule-maker artifacts produce a fixed `CONCERNS`
+report so a worker cannot manufacture an apparent provider outage. Final rule-
+maker approval also rechecks the public workspace fingerprint captured for the
+review, preventing changed artifacts from being sealed under a stale report.
 
 ## Durable State and Recovery
 

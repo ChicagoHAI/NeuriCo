@@ -24,14 +24,6 @@ PROVIDER_WORKSPACE_ROOTS = {
     "gemini": ".gemini",
 }
 
-# Verifier-only credentials protect access to any provider-side request record.
-# They belong to the trusted orchestrator and must never enter a coding-agent
-# process, even when a caller supplies them through env_extra.
-VERIFIER_ONLY_ENV_VARS = {
-    "NEURICO_EVAL_VERIFIER_OPENROUTER_KEY",
-    "NEURICO_EVAL_VERIFIER_OPENAI_API_KEY",
-}
-
 
 def build_agent_command(
     provider: str,
@@ -72,8 +64,6 @@ def build_agent_environment(
     env["PYTHONUNBUFFERED"] = "1"
     if env_extra:
         env.update({str(key): str(value) for key, value in env_extra.items()})
-    for name in VERIFIER_ONLY_ENV_VARS:
-        env.pop(name, None)
     if provider == "gemini":
         env["GEMINI_CLI_IDE_DISABLE"] = "1"
     return env

@@ -15,6 +15,8 @@ Run: python -m pytest tests/test_scoring_conformance_report.py
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import core.pipeline_orchestrator as po  # noqa: E402
@@ -41,6 +43,30 @@ def test_report_unavailable_when_verifier_failed():
     assert "API NOT AVAILABLE" in report
     assert "does not block" in report
     assert "CONCERNS" not in report and "PASS" not in report
+
+
+def test_invalid_evidence_is_a_concern_not_api_unavailability():
+    report = build_manager_conformance_report({
+        "success": False,
+        "failure_kind": "evidence_invalid",
+        "passed": False,
+        "violations": [{"check": "evidence"}],
+    })
+    assert "CONCERNS" in report
+    assert "API NOT AVAILABLE" not in report
+    assert "size constraints" in report
+
+
+def test_invalid_verifier_response_is_a_concern_not_api_unavailability():
+    report = build_manager_conformance_report({
+        "success": False,
+        "failure_kind": "verdict_invalid",
+        "passed": False,
+        "violations": [{"check": "verdict"}],
+    })
+    assert "CONCERNS" in report
+    assert "API NOT AVAILABLE" not in report
+    assert "malformed review" in report
 
 
 def test_report_concerns_uses_canned_category_descriptions():
@@ -199,11 +225,60 @@ def test_verifier_exception_is_advisory(tmp_path, monkeypatch):
     assert "CONCERNS" not in report
 
 
-def test_no_scoring_dir_returns_api_not_available_without_running(tmp_path, monkeypatch):
+def test_no_scoring_dir_returns_evidence_concern_without_running(tmp_path, monkeypatch):
     monkeypatch.setattr(po, "run_eval_verifier",
                         lambda **kw: (_ for _ in ()).throw(AssertionError("must not run")))
     report = _orchestrator(tmp_path)._scoring_conformance_report(idea={})
-    assert "API NOT AVAILABLE" in report
+    assert "CONCERNS" in report
+    assert "API NOT AVAILABLE" not in report
+
+
+def test_non_hitl_evidence_failure_uses_rule_maker_repair_retry(tmp_path, monkeypatch):
+    orch = _orchestrator(tmp_path)
+    idea = {"idea": {"evaluation": {"metrics": [{"name": "accuracy"}]}}}
+    verifier_results = iter([
+        {
+            "success": False,
+            "passed": False,
+            "failure_kind": po.FAILURE_KIND_EVIDENCE_INVALID,
+            "violations": [{"check": "evidence"}],
+        },
+        {"success": True, "passed": True, "violations": []},
+    ])
+    repairs = []
+
+    monkeypatch.setattr(po, "run_eval_verifier", lambda **kwargs: next(verifier_results))
+
+    def fake_rule_maker(**kwargs):
+        repairs.append(kwargs)
+        return {"success": True, "outputs": {}}
+
+    monkeypatch.setattr(po, "run_rule_maker", fake_rule_maker)
+
+    result = orch._verify_eval_contract(
+        idea=idea,
+        rule_maker_result={"success": True},
+        provider="claude",
+        timeout=10,
+        full_permissions=False,
+    )
+
+    assert result["success"] is True
+    assert result["verification"]["passed"] is True
+    assert len(repairs) == 1
+    assert "safely assemble the scoring artifacts" in repairs[0]["prompt_suffix"]
+
+
+def test_reviewed_workspace_fingerprint_rejects_post_review_changes(tmp_path):
+    _seed_workspace(tmp_path)
+    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+    reviewed = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path)
+    po._require_reviewed_workspace_unchanged(tmp_path, reviewed)
+
+    (tmp_path / "scoring" / "eval.py").write_text("changed after review")
+    with pytest.raises(RuntimeError, match="changed after its reviewed snapshot"):
+        po._require_reviewed_workspace_unchanged(tmp_path, reviewed)
 
 
 # --------------------------------------------------------------------------- #

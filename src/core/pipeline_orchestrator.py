@@ -30,6 +30,7 @@ import time
 
 from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
 from agents.eval_verifier import (
+    FAILURE_KIND_EVIDENCE_INVALID,
     build_manager_conformance_report,
     extract_eval_contract,
     format_violations_for_retry,
@@ -220,6 +221,22 @@ BOOTSTRAP_SEALED_PATHS: List[str] = [
     "REPORT.md",
     "planning.md",
 ]
+
+
+def _require_reviewed_workspace_unchanged(
+    work_dir: Path,
+    reviewed_fingerprint: str,
+) -> None:
+    """Refuse a HITL handoff when public artifacts changed after review began."""
+    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+    expected = str(reviewed_fingerprint or "").strip()
+    current = HitlWorkspaceWriteGuard.public_fingerprint(work_dir)
+    if not expected or current != expected:
+        raise RuntimeError(
+            "HITL rule-maker workspace changed after its reviewed snapshot; "
+            "refusing to seal or approve stale conformance evidence."
+        )
 
 
 class ResearchPipelineOrchestrator:
@@ -1610,19 +1627,26 @@ class ResearchPipelineOrchestrator:
         if verdict["success"] and verdict["passed"]:
             rule_maker_result["verification"] = verdict
             return rule_maker_result
-        if not verdict["success"]:
-            # An unavailable/malformed verifier API is not evidence that the
-            # rule maker's design is wrong. Fail closed without wasting the one
-            # semantic repair attempt on an infrastructure failure.
+        if (
+            not verdict["success"]
+            and verdict.get("failure_kind") != FAILURE_KIND_EVIDENCE_INVALID
+        ):
+            # Provider failures and malformed remote verdicts are not defects
+            # the rule maker can repair. Fail closed without wasting its one
+            # artifact-repair attempt on an external failure.
             rule_maker_result["verification"] = verdict
             rule_maker_result["success"] = False
-            print("⚠️  Eval verifier API was unavailable; failing the rule maker "
-                  "stage without a repair retry.")
+            print("⚠️  Eval verifier could not produce a usable review; failing "
+                  "the rule maker stage without a repair retry.")
             return rule_maker_result
 
         print()
-        print("↻ Verifier rejected the scoring contract -- re-running rule maker "
-              "once with the findings appended.")
+        if verdict.get("failure_kind") == FAILURE_KIND_EVIDENCE_INVALID:
+            print("↻ Verifier could not safely assemble the scoring artifacts -- "
+                  "re-running rule maker once to repair them.")
+        else:
+            print("↻ Verifier rejected the scoring contract -- re-running rule maker "
+                  "once with the findings appended.")
         retry = run_rule_maker(
             idea=idea,
             work_dir=self.work_dir,
@@ -1644,8 +1668,13 @@ class ResearchPipelineOrchestrator:
             retry["success"] = verdict["success"] and verdict["passed"]
 
         if not retry["success"]:
-            print("⚠️  Scoring contract still violates the user's declarations "
-                  "after one retry -- failing the rule maker stage.")
+            retry_failure = (retry.get("verification") or {}).get("failure_kind")
+            if retry_failure == FAILURE_KIND_EVIDENCE_INVALID:
+                print("⚠️  Scoring artifacts still cannot be safely assembled after "
+                      "one retry -- failing the rule maker stage.")
+            else:
+                print("⚠️  Scoring contract was not verified after one retry -- "
+                      "failing the rule maker stage.")
         return retry
 
     def _scoring_conformance_report(
@@ -1654,9 +1683,10 @@ class ResearchPipelineOrchestrator:
     ) -> str:
         """Run a tool-less API verifier and return an advisory manager report.
 
-        Evidence for the manager's rule-maker review, never a gate. A verifier
-        or evidence-assembly failure becomes ``API NOT AVAILABLE`` and cannot
-        block the rule maker.
+        Evidence for the manager's rule-maker review, never a gate. Provider
+        unavailability becomes ``API NOT AVAILABLE``. Invalid local evidence
+        becomes a fixed ``CONCERNS`` report so the worker cannot disguise an
+        artifact failure as an external outage.
 
         The runtime reads a fixed allowlist of scorer files plus only the staged
         functions named by the user's evaluation contract, applies byte limits,
@@ -1669,7 +1699,10 @@ class ResearchPipelineOrchestrator:
         try:
             scoring_src = self.work_dir / "scoring"
             if not scoring_src.is_dir():
-                return build_manager_conformance_report({"success": False})
+                return build_manager_conformance_report({
+                    "success": False,
+                    "failure_kind": FAILURE_KIND_EVIDENCE_INVALID,
+                })
             verdict = run_eval_verifier(
                 idea=idea,
                 work_dir=self.work_dir,
@@ -1703,7 +1736,7 @@ class ResearchPipelineOrchestrator:
         self.state.start_stage(RULE_MAKER_STAGE)
         runtime = self._create_hitl_runtime(RULE_MAKER_STAGE)
         # Give the manager a sanitized conformance report as advisory evidence:
-        # the verifier reads the sealed evaluator (which the manager may not) and
+        # the verifier reads the private evaluator draft (which the manager may not) and
         # reports conclusions only. The manager still owns the accept/rerun call.
         # No-op unless the idea declares an evaluation contract.
         if has_user_eval_contract(idea):
@@ -1757,6 +1790,17 @@ class ResearchPipelineOrchestrator:
             result: Dict[str, Any],
             finish: Dict[str, Any],
         ) -> Dict[str, Any]:
+            # The manager reviewed a fingerprinted workspace while the worker
+            # was blocked in hitl-finish-phase. Recheck after the provider
+            # process has exited so the evaluator we hand to sealing is exactly
+            # the public snapshot that was validated and reviewed. This also
+            # catches accidental background writers during a long API/manager
+            # turn instead of approving stale conformance evidence.
+            approved = runtime.phase_finish_result() or {}
+            _require_reviewed_workspace_unchanged(
+                self.work_dir,
+                str(approved.get("workspace_fingerprint", "")),
+            )
             self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
             discard_completed_rollback_snapshot()
             return {
