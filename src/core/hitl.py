@@ -2216,6 +2216,7 @@ class HitlRuntime:
         approved: bool,
         context: str,
         manager_feedback: str,
+        repair_target: str = "",
     ) -> Dict[str, Any]:
         """Record the manager's final initial-score readiness decision."""
         premise = _require_text(
@@ -2224,12 +2225,23 @@ class HitlRuntime:
             "Initial AutoResearch scoring decision",
         )
         feedback = str(manager_feedback).strip()
-        if not approved:
+        target = str(repair_target).strip()
+        if approved and target:
+            raise HitlValidationError(
+                "Approved initial scoring decisions cannot select a repair target."
+            )
+        if approved:
+            feedback = ""
+        else:
             feedback = _require_text(
                 feedback,
                 "manager_feedback",
                 "Initial AutoResearch scoring repair decision",
             )
+            if target not in {"experiment_runner", "rule_maker"}:
+                raise HitlValidationError(
+                    "Initial scoring feedback must target experiment_runner or rule_maker."
+                )
         record = {
             "pipeline_stage": "experiment_runner",
             "hitl_stage": "review",
@@ -2252,10 +2264,12 @@ class HitlRuntime:
             "decision_needed": "Is the scored initial experiment ready to become the AutoResearch root node?",
             "options": [
                 "Accept the error-free scored initial experiment as the root node.",
-                "Return repair feedback and score the initial experiment again.",
+                "Return targeted repair feedback either to the experiment runner or, after "
+                "restoring the pre-experiment boundary, to rule-maker execution review.",
             ],
             "decision": "O1" if approved else "O2",
             "manager_feedback": feedback,
+            "repair_target": target,
             "raised": not approved,
         }
         return self.log.append(record, idempotent=True)
@@ -2334,6 +2348,67 @@ class HitlRuntime:
                 ),
                 "prompt_block": prompt_block,
                 "final": False,
+                "record": dict(record),
+            },
+        )
+
+    def initial_rule_maker_repair_response(
+        self,
+        *,
+        context: str,
+        manager_feedback: str,
+        record: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """End the experiment request so runtime can reopen rule-maker review."""
+        feedback = _require_text(
+            manager_feedback,
+            "manager_feedback",
+            "Initial rule-maker scoring repair response",
+        )
+        pending = self._pending_worker_command()
+        if not str((pending or {}).get("request_key", "")).strip():
+            raise HitlValidationError(
+                "Initial rule-maker repair has no pending phase-finish request to resume."
+            )
+        request_key = self._phase_finish_request_key_for(
+            hitl_stage=str((pending or {}).get("hitl_stage", "")).strip(),
+            plan_fingerprint=str((pending or {}).get("plan_fingerprint", "")).strip(),
+            workspace_fingerprint=str(
+                (pending or {}).get("workspace_fingerprint", "")
+            ).strip(),
+            summary=str((pending or {}).get("finish_summary", "")).strip(),
+            related_artifacts=_as_related_artifacts(
+                (pending or {}).get("related_artifacts")
+            ),
+        )
+        normalized_context = _require_text(
+            context,
+            "context",
+            "Initial rule-maker scoring repair response",
+        )
+        self._phase_finish_result = {
+            "called": True,
+            "status": "feedback",
+            "hitl_stage": str((pending or {}).get("hitl_stage", "")).strip(),
+            "manager_feedback": feedback,
+            "context": normalized_context,
+            "record": dict(record),
+            "final": True,
+            "rule_maker_repair_requested": True,
+        }
+        return self._remember_phase_finish_response(
+            request_key,
+            {
+                "status": "feedback",
+                "feedback": feedback,
+                "context": normalized_context,
+                "instruction": (
+                    "This experiment-worker invocation is complete. Runtime will restore "
+                    "the pre-experiment boundary and reopen rule-maker execution review. "
+                    "Do not retry hitl-finish-phase."
+                ),
+                "final": True,
+                "rule_maker_repair_requested": True,
                 "record": dict(record),
             },
         )

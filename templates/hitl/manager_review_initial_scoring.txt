@@ -9,8 +9,18 @@ Do not make an accept/reject frontier decision. Runtime creates the root
 automatically after an approved score review.
 
 If the score or completed work has a repairable error, finalize with precise
-worker-facing feedback. Preserve completed work and do not propose a new
-research direction. Runtime will start an experiment-worker continuation.
+worker-facing feedback and select the worker that owns the defect. Preserve
+completed work and do not propose a new research direction.
+
+Use `repair_target="experiment_runner"` when the experiment implementation or
+its public artifacts are wrong. Runtime will start an experiment-worker
+continuation.
+
+Use `repair_target="rule_maker"` only when runtime score evidence shows that
+the sealed evaluator or scoring contract implementation is defective. Runtime
+will restore the pre-experiment boundary and reopen rule-maker execution review;
+it will not rerun rule-maker planning or resource finding. A merely low score is
+not evidence that the evaluator is defective.
 
 Use `finalize_worker_request` with one of:
 
@@ -18,7 +28,8 @@ Use `finalize_worker_request` with one of:
 {
   "status": "approved",
   "context": "neutral self-contained confirmation that the initial scored workspace is error-free",
-  "manager_feedback": ""
+  "manager_feedback": "",
+  "repair_target": ""
 }
 ```
 
@@ -28,7 +39,8 @@ or:
 {
   "status": "feedback",
   "context": "neutral self-contained description of the repairable problem",
-  "manager_feedback": "specific instructions for the continuation worker"
+  "manager_feedback": "specific revision instructions",
+  "repair_target": "experiment_runner"
 }
 ```
 

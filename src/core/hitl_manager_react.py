@@ -1357,11 +1357,19 @@ class HitlManager:
                     data.get("context"), "context", "Initial score review"
                 ),
                 "manager_feedback": str(data.get("manager_feedback", "")).strip(),
+                "repair_target": str(data.get("repair_target", "")).strip(),
             }
             if status == "feedback":
                 result["manager_feedback"] = self._require_text(
                     result["manager_feedback"], "manager_feedback", "Initial score repair"
                 )
+                if result["repair_target"] not in {"experiment_runner", "rule_maker"}:
+                    raise ValueError(
+                        "Initial score repair_target must be experiment_runner or rule_maker."
+                    )
+            else:
+                result["manager_feedback"] = ""
+                result["repair_target"] = ""
             return result
 
         return self.resume_worker_request(
