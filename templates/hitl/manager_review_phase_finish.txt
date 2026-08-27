@@ -2,6 +2,18 @@ Review a worker-requested HITL phase finish.
 
 Your job is to decide whether the current workspace state is acceptable for the
 current HITL phase, or whether the worker should continue with feedback.
+{% if hitl_stage == "plan" %}
+
+Treat the proposed plan as unverified. Before approving it, independently trace
+its essential steps from the current phase state to completion using the
+authoritative artifacts and evidence available to you. Confirm that every
+required action is supported by an explicitly available tool, interface,
+permission, or handoff; that it produces the result required by the next step;
+and that the critical path is not circular or internally contradictory. Do not
+assume a capability exists merely because the plan mentions it. If an essential
+capability or handoff cannot be verified from the available evidence, return
+precise revision feedback instead of approving the plan.
+{% endif %}
 {% if hitl_mode == "auto" and hitl_stage == "plan" %}
 
 This is an Auto HITL plan finish. You hold final B-level plan authority. Approve
