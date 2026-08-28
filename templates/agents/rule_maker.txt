@@ -215,12 +215,17 @@ WHAT TO INCLUDE:
   types, return types).
 ✓ Any invariants (no side effects, no I/O during the measured call,
   deterministic given inputs).
+✓ How the runner-produced artifact is imported or called, including only its
+  path, entry point, arguments, and return value.
 ✓ A one-line "what is measured" pointer for context.
 
 WHAT TO EXCLUDE:
 ✗ Numeric targets. (Those are in scoring/targets.json — hidden.)
 ✗ The baseline's location or expected output values.
 ✗ Test inputs or their distribution.
+✗ Evaluator invocation, evaluator-owned paths, result handling, sealing, or
+  runtime orchestration. `Invocation` describes only how the runner-produced
+  artifact is called.
 ✗ Anything that would let a runner over-fit the measurement.
 
 FORMAT TEMPLATE (mirror this structure exactly):
@@ -257,7 +262,8 @@ def <function_name>(<args>) -> <return_type>:
 
 ## Invocation
 
-<one paragraph: how the scorer will load + call this artifact>
+<one paragraph describing only how the runner-produced artifact is imported or
+called. Do not describe how the evaluator itself is launched.>
 
 ## What is measured (context only — do not tune)
 
