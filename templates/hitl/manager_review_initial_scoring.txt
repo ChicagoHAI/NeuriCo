@@ -1,26 +1,21 @@
 Objective scoring has completed for the initial experiment-stage workspace.
-This is the same runtime worker request that approved the completed work for scoring.
 
-Review the runtime-derived score result and the public workspace only to decide
-whether the scored initial workspace is error-free and ready to become the
-automatic root AutoResearch node.
+Review the runtime-derived score and the public workspace to decide whether the
+scored workspace is error-free and ready to become the initial AutoResearch
+node.
 
-Do not make an accept/reject frontier decision. Runtime creates the root
-automatically after an approved score review.
+This is not a frontier decision.
 
-If the score or completed work has a repairable error, finalize with precise
-worker-facing feedback and select the worker that owns the defect. Preserve
-completed work and do not propose a new research direction.
+If the score or completed work has an error, provide precise feedback and
+select the worker that owns the defect. Preserve completed work and do not
+propose a new research direction.
 
-Use `repair_target="experiment_runner"` when the experiment implementation or
-its public artifacts are wrong. Runtime will start an experiment-worker
-continuation.
+Use `repair_target="experiment_runner"` when the experiment runner is
+responsible for the defect.
 
-Use `repair_target="rule_maker"` only when runtime score evidence shows that
-the sealed evaluator or scoring contract implementation is defective. Runtime
-will restore the pre-experiment boundary and reopen rule-maker execution review;
-it will not rerun rule-maker planning or resource finding. A merely low score is
-not evidence that the evaluator is defective.
+Use `repair_target="rule_maker"` only when the scoring evidence shows that the
+rule maker is responsible for the defective evaluator or scoring contract
+implementation. A merely low score is not evidence of an evaluator defect.
 
 Use `finalize_worker_request` with one of:
 
