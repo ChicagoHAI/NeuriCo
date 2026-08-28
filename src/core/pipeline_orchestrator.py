@@ -1229,6 +1229,7 @@ class ResearchPipelineOrchestrator:
                 idea,
                 root_dir=self.work_dir,
                 scoring_enabled=scoring_enabled,
+                include_implicit_time_limit=False,
             )
             return generate_instructions(
                 prompt=ordinary_prompt,
