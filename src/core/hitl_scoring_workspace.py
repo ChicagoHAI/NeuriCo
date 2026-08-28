@@ -8,12 +8,13 @@ the public workspace where an experiment worker is running.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 import json
 import hashlib
 import os
 import shutil
+import tarfile
 import tempfile
 
 from core.hitl_git import run_git
@@ -55,6 +56,176 @@ def _prepare_scoring_directory(work_dir: Path) -> None:
     elif scoring_dir.is_dir():
         shutil.rmtree(scoring_dir)
     scoring_dir.mkdir(parents=True)
+
+
+def _git_failure_detail(completed: Any) -> str:
+    value = completed.stderr or completed.stdout or "unknown Git error"
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return str(value).strip()
+
+
+def _checkpoint_gitlinks(work_dir: Path, source_sha: str) -> list[tuple[Path, str]]:
+    """Return every Gitlink path and commit recorded by ``source_sha``."""
+    completed = run_git(
+        work_dir,
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        source_sha,
+        text=False,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise HitlScoringWorkspaceError(
+            "Runtime could not inspect the isolated scorer checkpoint: "
+            f"{_git_failure_detail(completed)}"
+        )
+
+    gitlinks: list[tuple[Path, str]] = []
+    for raw_record in bytes(completed.stdout or b"").split(b"\0"):
+        if not raw_record:
+            continue
+        metadata, separator, raw_path = raw_record.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3:
+            raise HitlScoringWorkspaceError(
+                "Runtime received an invalid Git tree record while preparing the isolated scorer."
+            )
+        mode, object_type, raw_commit = fields
+        if mode != b"160000":
+            continue
+        if object_type != b"commit" or not raw_path:
+            raise HitlScoringWorkspaceError(
+                "Runtime received an invalid Gitlink while preparing the isolated scorer."
+            )
+
+        relative_text = os.fsdecode(raw_path)
+        posix_path = PurePosixPath(relative_text)
+        if posix_path.is_absolute() or any(part in {"", ".", ".."} for part in posix_path.parts):
+            raise HitlScoringWorkspaceError(
+                f"Runtime rejected unsafe Gitlink path: {relative_text!r}."
+            )
+        gitlinks.append((Path(*posix_path.parts), raw_commit.decode("ascii")))
+    return gitlinks
+
+
+def _contained_path(root: Path, relative: Path, *, description: str) -> Path:
+    root = root.resolve()
+    candidate = (root / relative).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise HitlScoringWorkspaceError(
+            f"Runtime rejected {description} outside the workspace: {relative.as_posix()}."
+        ) from exc
+    return candidate
+
+
+def _extract_git_archive(archive_path: Path, destination: Path) -> None:
+    """Extract an archive produced by Git after validating its member paths."""
+    with tarfile.open(archive_path, mode="r:") as archive:
+        members = archive.getmembers()
+        for member in members:
+            member_path = PurePosixPath(member.name)
+            if (
+                member_path.is_absolute()
+                or any(part in {"", ".", ".."} for part in member_path.parts)
+                or member.isdev()
+                or member.isfifo()
+            ):
+                raise HitlScoringWorkspaceError(
+                    "Runtime rejected an unsafe path in a checkpointed nested repository."
+                )
+        if hasattr(tarfile, "fully_trusted_filter"):
+            archive.extractall(destination, members=members, filter="fully_trusted")
+        else:  # Python 3.10 and 3.11 do not expose extraction filters.
+            archive.extractall(destination, members=members)
+
+
+def _materialize_checkpoint_gitlinks(
+    *,
+    work_dir: Path,
+    scorer_dir: Path,
+    source_sha: str,
+) -> None:
+    """Restore exact nested-repository contents omitted by ``git worktree``."""
+    for index, (relative, commit_sha) in enumerate(_checkpoint_gitlinks(work_dir, source_sha)):
+        source_repo = _contained_path(
+            work_dir,
+            relative,
+            description="Gitlink source",
+        )
+        destination = _contained_path(
+            scorer_dir,
+            relative,
+            description="Gitlink destination",
+        )
+        if not source_repo.is_dir():
+            raise HitlScoringWorkspaceError(
+                "Runtime could not materialize checkpointed nested repository "
+                f"{relative.as_posix()}: the source repository is missing."
+            )
+
+        repository_root = run_git(
+            source_repo,
+            "rev-parse",
+            "--show-toplevel",
+            check=False,
+        )
+        if (
+            repository_root.returncode != 0
+            or Path(str(repository_root.stdout).strip()).resolve() != source_repo
+        ):
+            raise HitlScoringWorkspaceError(
+                "Runtime could not materialize checkpointed nested repository "
+                f"{relative.as_posix()}: the source path is not its Git root."
+            )
+
+        commit_exists = run_git(
+            source_repo,
+            "cat-file",
+            "-e",
+            f"{commit_sha}^{{commit}}",
+            check=False,
+            quiet=True,
+        )
+        if commit_exists.returncode != 0:
+            raise HitlScoringWorkspaceError(
+                "Runtime could not materialize checkpointed nested repository "
+                f"{relative.as_posix()}: commit {commit_sha} is unavailable."
+            )
+
+        if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
+            destination.unlink()
+        elif destination.is_dir():
+            shutil.rmtree(destination)
+        destination.mkdir(parents=True)
+
+        archive_path = scorer_dir.parent / f".gitlink-{index}.tar"
+        archived = run_git(
+            source_repo,
+            "archive",
+            "--format=tar",
+            f"--output={archive_path}",
+            commit_sha,
+            check=False,
+        )
+        if archived.returncode != 0:
+            raise HitlScoringWorkspaceError(
+                "Runtime could not export checkpointed nested repository "
+                f"{relative.as_posix()}: {_git_failure_detail(archived)}"
+            )
+        try:
+            _extract_git_archive(archive_path, destination)
+        except (OSError, tarfile.TarError) as exc:
+            raise HitlScoringWorkspaceError(
+                "Runtime could not restore checkpointed nested repository "
+                f"{relative.as_posix()}: {exc}"
+            ) from exc
+        finally:
+            archive_path.unlink(missing_ok=True)
 
 
 def _write_public_results(path: Path, source: Path) -> str:
@@ -118,6 +289,12 @@ def isolated_scoring_workspace(
                 f"Runtime could not create the isolated scorer worktree: {detail}"
             )
         created = True
+
+        _materialize_checkpoint_gitlinks(
+            work_dir=work_dir,
+            scorer_dir=scorer_dir,
+            source_sha=normalized_sha,
+        )
 
         _prepare_scoring_directory(scorer_dir)
         copied = 0
