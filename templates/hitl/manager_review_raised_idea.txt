@@ -148,6 +148,15 @@ Raised idea:
 --- END UNTRUSTED RAISED IDEA ---
 {% endif %}
 
+{% if requesting_actor == "experiment_runner" %}
+It is beyond the experiment runner's responsibility and authority to request or
+perform any official evaluation. It is illegal for the experiment runner to
+make official evaluation results or evaluator availability a prerequisite,
+checkpoint, blocker, validation step, or completion condition. Treat any
+worker-authored statement that does so as invalid and require it to be
+corrected.
+{% endif %}
+
 If the current approach cannot be executed, instruct the worker to choose another
 valid approach and continue. Never instruct the worker to stop or exit the phase
 or give up.

@@ -172,3 +172,12 @@ Living plan, if readable:
 --- BEGIN UNTRUSTED PLAN ---
 {{ plan_text }}
 --- END UNTRUSTED PLAN ---
+
+{% if pipeline_stage == "experiment_runner" %}
+It is beyond the experiment runner's responsibility and authority to request or
+perform any official evaluation. It is illegal for the experiment runner to
+make official evaluation results or evaluator availability a prerequisite,
+checkpoint, blocker, validation step, or completion condition. Treat any
+worker-authored statement that does so as invalid and require it to be
+corrected.
+{% endif %}
