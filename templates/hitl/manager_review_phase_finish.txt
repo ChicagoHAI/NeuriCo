@@ -65,12 +65,17 @@ trivial gaming, and the requested experiment outputs are sufficient for the
 evaluation.
 
 {% if hitl_stage == "plan" %}
-The planned `scoring/interface.md` must require only the experiment outputs
-needed by the evaluator. The evaluation must not depend on `paper/` or
+The planned `scoring/interface.md` must describe only runner-owned artifacts,
+their public entry points, and their required behavior. It must not expose
+evaluator invocation, evaluator-owned paths, result handling, sealing, or
+runtime orchestration. The evaluation must not depend on `paper/` or
 `paper_draft/`.
 {% else %}
-`scoring/interface.md` must require only the experiment outputs needed by the
-evaluator. The evaluation must not depend on `paper/` or `paper_draft/`.
+Before approving completion, read `scoring/interface.md` and confirm that it
+describes only runner-owned artifacts, their public entry points, and their
+required behavior. It must not expose evaluator invocation, evaluator-owned
+paths, result handling, sealing, or runtime orchestration. The evaluation must
+not depend on `paper/` or `paper_draft/`.
 {% endif %}
 {% if hitl_stage == "plan" %}
 
