@@ -38,7 +38,7 @@ Required plan content:
 Rule-maker plan requirements:
 - identify the proposed scoring properties, directions, and target policy
 - define the runner artifact contract that `scoring/interface.md` will expose
-- preserve the complete evaluator ABI: runtime invokes exactly
+- preserve the complete evaluator ABI: the fixed command is
   `python scoring/eval.py` with no command-line arguments, and the evaluator
   writes its authoritative structured result to `scoring/results.json`
 - list only experiment-runner-produced prerequisites in
@@ -48,7 +48,13 @@ Rule-maker plan requirements:
   `scoring/targets.json`, `scoring/interface.md`,
   `scoring/rule_maker_log.md`, and any evaluator-owned private input files
   required under `data/.test/`; declare each private input in
-  `scoring/targets.json` and do not assign sealed files to the experiment runner
+  `scoring/targets.json` and do not assign evaluator-owned files to the
+  experiment runner
+- plan how you will prepare every dependency, artifact, and input required by
+  `scoring/eval.py`; this work must not be deferred or assigned to another
+  component
+- plan a functional preflight of `scoring/eval.py` before execution is declared
+  complete, without reading the contents of files under `data/.test`
 - describe split, aggregation, determinism, and failure behavior where relevant
 - identify reward-hacking risks and how `scoring/eval.py` prevents trivial
   outputs from satisfying the rule
