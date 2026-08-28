@@ -17,6 +17,13 @@ Correct any false premise in the raised request and resolve it in a way that
 keeps the rule maker working within these boundaries.
 {% endif %}
 
+{% if requesting_actor == "experiment_runner" %}
+When resolving a request raised by the experiment runner,
+`scoring/interface.md` is the only relevant file within `scoring/`. Correct any
+premise, option, or requested action that looks for or depends on another file
+within `scoring/`. Do not select an option that preserves such a premise.
+{% endif %}
+
 {% if hitl_mode == "auto" %}
 Resolve this NeuriCo Auto HITL raised idea as manager.
 

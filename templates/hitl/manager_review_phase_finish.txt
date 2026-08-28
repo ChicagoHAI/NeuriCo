@@ -49,6 +49,12 @@ with precise correction instructions. Do not ask the human to choose an
 alternative artifact boundary.
 {% endif %}
 
+{% if pipeline_stage == "experiment_runner" %}
+When reviewing the experiment runner, `scoring/interface.md` is the only
+relevant file within `scoring/`. Correct any plan, completion request, or raised
+concern that looks for or depends on another file within `scoring/`.
+{% endif %}
+
 {% if is_rule_maker %}
 {% if hitl_stage == "plan" %}
 Review whether the proposed evaluation design is scientifically sound and
