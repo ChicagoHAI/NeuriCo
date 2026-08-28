@@ -2892,12 +2892,26 @@ class HitlRuntime:
                         f"- {str(issue)}" for issue in issues if str(issue).strip()
                     )
                     next_stage = "plan" if hitl_stage == "plan" else "review"
-                    feedback = (
+                    provided_feedback = str(validation.get("worker_feedback", "")).strip()
+                    feedback = provided_feedback or (
                         "Runtime validation found work outside the allowed HITL boundary. "
                         "Correct only these issues, preserve completed permitted work, then call "
                         "hitl-finish-phase again:\n"
                         + (issue_text or "- Recheck the active HITL workspace boundary.")
                     )
+                    feedback_context = str(
+                        validation.get(
+                            "worker_feedback_context",
+                            "Runtime validation rejected the phase boundary before manager review.",
+                        )
+                    ).strip()
+                    feedback_instruction = str(
+                        validation.get(
+                            "worker_instruction",
+                            "Correct the listed runtime validation issues in this same worker "
+                            "session, then call hitl-finish-phase again.",
+                        )
+                    ).strip()
                     self._tool_context["hitl_stage"] = next_stage
                     self.current_hitl_stage = next_stage
                     self._phase_finish_result = {
@@ -2909,7 +2923,7 @@ class HitlRuntime:
                         "summary": summary,
                         "related_artifacts": related_artifacts,
                         "manager_feedback": feedback,
-                        "context": "Runtime validation rejected the phase boundary before manager review.",
+                        "context": feedback_context,
                         "next_phase": next_stage,
                         "final": False,
                     }
@@ -2927,10 +2941,7 @@ class HitlRuntime:
                             "status": "feedback",
                             "feedback": feedback,
                             "next_phase": next_stage,
-                            "instruction": (
-                                "Correct the listed runtime validation issues in this same worker "
-                                "session, then call hitl-finish-phase again."
-                            ),
+                            "instruction": feedback_instruction,
                             "prompt_block": prompt_block,
                         },
                     )
