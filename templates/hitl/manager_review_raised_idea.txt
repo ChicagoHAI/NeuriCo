@@ -2,9 +2,10 @@
 This request was raised by the rule maker. Apply these boundaries when resolving
 it:
 
-- The rule maker is responsible for preparing every dependency, artifact, and
-  input required by `scoring/eval.py`. It is forbidden to defer or assign that
-  work to another component.
+- To ensure objectivity and security, the rule maker is solely responsible for
+  preparing the complete, functional evaluator and everything it requires or
+  depends on. Nothing required by the evaluator will be supplied by the runtime,
+  another component, or any external source.
 - The rule maker may create, generate, write, or replace required files under
   `data/.test`. It is illegal for the rule maker to read the contents of files
   under `data/.test`.
@@ -13,8 +14,9 @@ it:
 - These boundaries are fixed workflow requirements, not options that the
   manager or human may relax.
 
-Correct any false premise in the raised request and resolve it in a way that
-keeps the rule maker working within these boundaries.
+Correct any premise that assumes something required by the evaluator will be
+supplied externally. Resolve the request in a way that keeps the complete
+evaluator under the rule maker's responsibility.
 
 When resolving a request raised by the rule maker, preserve the requirement that
 the evaluator depend only on file contents present in the scoring workspace.

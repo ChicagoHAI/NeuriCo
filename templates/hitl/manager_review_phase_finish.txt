@@ -70,6 +70,11 @@ evaluation split is scientifically defensible, the design avoids leakage and
 trivial gaming, and the requested experiment outputs are sufficient for the
 evaluation.
 
+To ensure objectivity and security, the rule maker is solely responsible for
+preparing the complete, functional evaluator and everything it requires or
+depends on. Nothing required by the evaluator will be supplied by the runtime,
+another component, or any external source.
+
 The evaluator must depend only on file contents present in the scoring
 workspace. Repository metadata, including nested `.git` data, is not guaranteed.
 
@@ -90,9 +95,8 @@ not depend on `paper/` or `paper_draft/`.
 
 Before approving the plan, confirm that it:
 
-- keeps every dependency, artifact, and input required by `scoring/eval.py`
-  under the rule maker's responsibility;
-- does not defer or assign that work to another component;
+- has the rule maker prepare the complete, functional evaluator and everything
+  it requires or depends on;
 - correctly distinguishes preparing files under `data/.test` from the
   prohibited act of reading their contents; and
 - includes a functional `scoring/eval.py` preflight in a clean copy containing
@@ -108,9 +112,8 @@ violating these boundaries. You need to review its work. Before approving
 completion, you must confirm from the finish summary and finalized evidence
 that:
 
-- the rule maker prepared every dependency, artifact, and input required by
-  `scoring/eval.py`;
-- none of that work was deferred or assigned to another component; and
+- the rule maker prepared the complete, functional evaluator and everything it
+  requires or depends on; and
 - the functional `scoring/eval.py` preflight completed without errors or
   failures and without relying on repository metadata or other state outside
   the scoring workspace's file contents.
