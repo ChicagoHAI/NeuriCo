@@ -46,7 +46,7 @@ def _resolve_python_executable(work_dir: Path) -> str:
 
 def run_scorer(
     work_dir: Path,
-    timeout: int = 600,
+    timeout: Optional[int] = 600,
     python_executable: Optional[str] = None,
     *,
     idea: Dict[str, Any],

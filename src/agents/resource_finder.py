@@ -69,7 +69,7 @@ def run_resource_finder(
     work_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: int = 2700,  # 45 minutes default
+    timeout: Optional[int] = 2700,  # 45 minutes default
     full_permissions: bool = True,
     completion_marker_name: str = ".resource_finder_complete",
     completion_mode: str = "marker",
@@ -124,7 +124,8 @@ def run_resource_finder(
     print("🔍 Starting Resource Finder Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
-    print(f"   Timeout: {timeout}s ({timeout//60} minutes)")
+    timeout_label = "disabled" if timeout is None else f"{timeout}s ({timeout // 60} minutes)"
+    print(f"   Timeout: {timeout_label}")
     print("=" * 80)
 
     # Generate prompt

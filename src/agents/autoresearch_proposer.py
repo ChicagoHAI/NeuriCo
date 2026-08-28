@@ -227,7 +227,7 @@ def run_autoresearch_proposer(
     attempt_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: int = 900,
+    timeout: Optional[int] = 900,
     full_permissions: bool = True,
     attempt_history: Optional[list[Dict[str, Any]]] = None,
     prompt_suffix: str = "",
@@ -259,7 +259,8 @@ def run_autoresearch_proposer(
     print(f"   Work dir: {work_dir}")
     print(f"   Parent node: {parent_sha}")
     print(f"   Attempt dir: {attempt_dir}")
-    print(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
+    timeout_label = "disabled" if timeout is None else f"{timeout}s ({timeout // 60} minutes)"
+    print(f"   Timeout: {timeout_label}")
     print("=" * 80)
 
     prompt = generate_autoresearch_proposal_prompt(

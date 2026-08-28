@@ -319,13 +319,13 @@ class ResearchPipelineOrchestrator:
         provider: str = "claude",
         pause_after_resources: bool = False,
         skip_resource_finder: bool = False,
-        resource_finder_timeout: int = 2700,  # 45 min
-        experiment_runner_timeout: int = 10800,  # 3 hours
+        resource_finder_timeout: Optional[int] = 2700,  # 45 min
+        experiment_runner_timeout: Optional[int] = 10800,  # 3 hours
         full_permissions: bool = True,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
-        rule_maker_timeout: int = 1800,  # 30 min
-        scorer_timeout: int = 600,  # 10 min
+        rule_maker_timeout: Optional[int] = 1800,  # 30 min
+        scorer_timeout: Optional[int] = 600,  # 10 min
         bootstrap_mode: bool = False,
         manifest_trimmer_timeout: int = 300,  # 5 min
         hitl_enabled: bool = False,
@@ -845,7 +845,7 @@ class ResearchPipelineOrchestrator:
             raise
 
     def _run_resource_finder_hitl(
-        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
+        self, idea: Dict[str, Any], provider: str, timeout: Optional[int], full_permissions: bool
     ) -> Dict[str, Any]:
         """Run resource_finder through the plan-centered HITL workflow."""
         print()
@@ -1025,7 +1025,7 @@ class ResearchPipelineOrchestrator:
         self,
         idea: Dict[str, Any],
         provider: str,
-        timeout: int,
+        timeout: Optional[int],
         full_permissions: bool,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
@@ -1258,11 +1258,11 @@ class ResearchPipelineOrchestrator:
         self,
         idea: Dict[str, Any],
         provider: str,
-        timeout: int,
+        timeout: Optional[int],
         full_permissions: bool,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
-        scorer_timeout: int = 600,
+        scorer_timeout: Optional[int] = 600,
         sealed_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Run experiment_runner through the plan-centered HITL workflow."""
@@ -1708,7 +1708,7 @@ class ResearchPipelineOrchestrator:
         self,
         idea: Dict[str, Any],
         provider: str,
-        timeout: int,
+        timeout: Optional[int],
         full_permissions: bool,
         initial_scoring_repair_feedback: str = "",
     ) -> Dict[str, Any]:
@@ -1865,7 +1865,7 @@ class ResearchPipelineOrchestrator:
         finally:
             runtime.clear_idea_tool_context()
 
-    def _run_scorer(self, timeout: int,
+    def _run_scorer(self, timeout: Optional[int],
                     idea: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Run the scorer stage (scoring mode only). Executes scoring/eval.py

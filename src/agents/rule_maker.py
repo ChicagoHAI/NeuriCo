@@ -455,7 +455,7 @@ def run_rule_maker(
     work_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: int = 1800,  # 30 min
+    timeout: Optional[int] = 1800,  # 30 min
     full_permissions: bool = True,
     prompt_suffix: str = "",
     completion_mode: str = "outputs",
@@ -493,7 +493,8 @@ def run_rule_maker(
     print("📐 Starting Rule Maker Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
-    print(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
+    timeout_label = "disabled" if timeout is None else f"{timeout}s ({timeout // 60} minutes)"
+    print(f"   Timeout: {timeout_label}")
     print("=" * 80)
 
     # Per-attempt artifact names: the orchestrator re-runs the rule maker
