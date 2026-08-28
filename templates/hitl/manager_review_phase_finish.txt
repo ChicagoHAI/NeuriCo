@@ -70,6 +70,9 @@ evaluation split is scientifically defensible, the design avoids leakage and
 trivial gaming, and the requested experiment outputs are sufficient for the
 evaluation.
 
+The evaluator must depend only on file contents present in the scoring
+workspace. Repository metadata, including nested `.git` data, is not guaranteed.
+
 {% if hitl_stage == "plan" %}
 The planned `scoring/interface.md` must describe only runner-owned artifacts,
 their public entry points, and their required behavior. It must not expose
@@ -92,7 +95,8 @@ Before approving the plan, confirm that it:
 - does not defer or assign that work to another component;
 - correctly distinguishes preparing files under `data/.test` from the
   prohibited act of reading their contents; and
-- includes a functional `scoring/eval.py` preflight before stage completion.
+- includes a functional `scoring/eval.py` preflight in a clean copy containing
+  the same files but no repository metadata before stage completion.
 
 If any requirement is missing or contradicted, return precise revision
 feedback.
@@ -108,7 +112,8 @@ that:
   `scoring/eval.py`;
 - none of that work was deferred or assigned to another component; and
 - the functional `scoring/eval.py` preflight completed without errors or
-  failures.
+  failures and without relying on repository metadata or other state outside
+  the scoring workspace's file contents.
 
 If any point is absent, contradictory, or unsupported, return precise correction
 instructions.

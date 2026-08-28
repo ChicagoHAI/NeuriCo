@@ -15,6 +15,12 @@ it:
 
 Correct any false premise in the raised request and resolve it in a way that
 keeps the rule maker working within these boundaries.
+
+When resolving a request raised by the rule maker, preserve the requirement that
+the evaluator depend only on file contents present in the scoring workspace.
+Correct any premise, option, or requested action that relies on repository
+metadata or other state outside those file contents. Do not select an option
+that preserves such a dependency.
 {% endif %}
 
 {% if requesting_actor == "experiment_runner" %}

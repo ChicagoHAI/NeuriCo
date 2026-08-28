@@ -26,6 +26,10 @@ The approved evaluation design may use a baseline implementation under
 evaluator-owned outputs remain under `scoring/`.
 
 Rule-maker execution requirements:
+- the evaluator must depend only on file contents present in the scoring
+  workspace; repository metadata, including nested `.git` data, is not
+  guaranteed; run the required preflight in a clean copy containing the same
+  files but no repository metadata
 - create or update only the approved evaluation contract: `scoring/eval.py`,
   `scoring/targets.json`, `scoring/interface.md`, `scoring/rule_maker_log.md`,
   and any required evaluator-owned private input files under `data/.test/`

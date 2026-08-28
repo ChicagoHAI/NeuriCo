@@ -36,6 +36,9 @@ Required plan content:
 {% if pipeline_stage == "rule_maker" %}
 
 Rule-maker plan requirements:
+- the evaluator must depend only on file contents present in the scoring
+  workspace; repository metadata, including nested `.git` data, is not
+  guaranteed
 - identify the proposed scoring properties, directions, and target policy
 - define the runner artifact contract that `scoring/interface.md` will expose
 - preserve the complete evaluator ABI: the fixed command is
@@ -53,7 +56,8 @@ Rule-maker plan requirements:
 - plan how you will prepare every dependency, artifact, and input required by
   `scoring/eval.py`; this work must not be deferred or assigned to another
   component
-- plan a functional preflight of `scoring/eval.py` before execution is declared
+- plan a functional preflight of `scoring/eval.py` in a clean copy containing
+  the same files but no repository metadata before execution is declared
   complete, without reading the contents of files under `data/.test`
 - describe split, aggregation, determinism, and failure behavior where relevant
 - identify reward-hacking risks and how `scoring/eval.py` prevents trivial

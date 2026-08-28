@@ -30,6 +30,11 @@ assign this work to another component.
 
 It is illegal for you to read the contents of files under `data/.test`.
 
+The evaluator must depend only on file contents present in the scoring
+workspace. Repository metadata, including nested `.git` data, is not guaranteed.
+Run the required preflight in a clean copy containing the same files but no
+repository metadata.
+
 Before declaring the phase complete, you must run a preflight test to ensure
 that `scoring/eval.py` works as expected with no error or failure.
 {% endif %}
