@@ -64,6 +64,21 @@ experiment-runner artifacts are sufficient for the stated measurements.
 `scoring/interface.md` must describe only experiment-runner prerequisites and
 must not require, inspect, or score `paper/` or `paper_draft/`; those outputs
 belong to the later paper_writer stage.
+{% if hitl_stage == "plan" %}
+
+Before approving the plan, confirm that it:
+
+- keeps every dependency, artifact, and input required by `scoring/eval.py`
+  under the rule maker's responsibility;
+- does not defer or assign that work to another component;
+- correctly distinguishes preparing files under `data/.test` from the
+  prohibited act of reading their contents; and
+- includes a functional `scoring/eval.py` preflight before stage completion.
+
+If any requirement is missing or contradicted, return precise revision
+feedback.
+{% endif %}
+{% if hitl_stage in ["execution", "review"] %}
 
 Runtime has already validated the hidden evaluator files, private-input
 declarations and existence, symlink and integrity constraints, evaluator ABI,
@@ -72,6 +87,21 @@ attempt to inspect `data/.test/`, infer hidden source contents, or re-decide
 those mechanical facts. If the public design or documented split is
 scientifically unsound or inconsistent, finalize `feedback` with a precise
 semantic correction.
+
+The rule maker has claimed to have fulfilled its responsibilities without
+violating these boundaries. You need to review its work. Before approving
+completion, you must confirm from the finish summary and finalized evidence
+that:
+
+- the rule maker prepared every dependency, artifact, and input required by
+  `scoring/eval.py`;
+- none of that work was deferred or assigned to another component; and
+- the functional `scoring/eval.py` preflight completed without errors or
+  failures.
+
+If any point is absent, contradictory, or unsupported, return precise correction
+instructions.
+{% endif %}
 {% endif %}
 
 When ready, finalize this request with a result object following this contract.

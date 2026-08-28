@@ -1078,6 +1078,7 @@ class HitlManager:
         prompt = _load_hitl_template(
             "manager_review_raised_idea.txt",
             pipeline_stage=pipeline_stage,
+            requesting_actor=str(raised_idea.get("actor", "")).strip(),
             plan_text=plan_text,
             raised_idea_json=json.dumps(raised_idea, indent=2, ensure_ascii=False),
             hitl_mode=selected_mode.value,

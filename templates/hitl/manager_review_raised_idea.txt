@@ -1,3 +1,22 @@
+{% if requesting_actor == "rule_maker" %}
+This request was raised by the rule maker. Apply these boundaries when resolving
+it:
+
+- The rule maker is responsible for preparing every dependency, artifact, and
+  input required by `scoring/eval.py`. It is forbidden to defer or assign that
+  work to another component.
+- The rule maker may create, generate, write, or replace required files under
+  `data/.test`. It is illegal for the rule maker to read the contents of files
+  under `data/.test`.
+- Running `scoring/eval.py` as a functional preflight is permitted and required;
+  it is not the same as reading private input contents.
+- These boundaries are fixed workflow requirements, not options that the
+  manager or human may relax.
+
+Correct any false premise in the raised request and resolve it in a way that
+keeps the rule maker working within these boundaries.
+{% endif %}
+
 {% if hitl_mode == "auto" %}
 Resolve this NeuriCo Auto HITL raised idea as manager.
 
