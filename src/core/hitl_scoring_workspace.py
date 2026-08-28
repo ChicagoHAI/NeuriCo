@@ -269,7 +269,12 @@ def isolated_scoring_workspace(
             f"Runtime rejected the sealed evaluator payload: {exc}"
         ) from exc
 
-    temporary_parent = Path(tempfile.mkdtemp(prefix="neurico-hitl-scorer-"))
+    temporary_parent = Path(
+        tempfile.mkdtemp(
+            prefix=".neurico-hitl-scorer-",
+            dir=work_dir.parent,
+        )
+    )
     os.chmod(temporary_parent, 0o700)
     scorer_dir = temporary_parent / "workspace"
     created = False
