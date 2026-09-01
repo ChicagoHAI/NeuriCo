@@ -19,9 +19,9 @@ implementation. A merely low score is not evidence of an evaluator defect.
 
 When selecting `repair_target="rule_maker"`, describe in `manager_feedback` the
 concrete conditions that produced the evaluator failure and require the rule
-maker to add matching preflight regression tests that reproduce those
-conditions and verify the correction. Ensure that `manager_feedback` is
-self-contained.
+maker to reproduce those conditions during the functional `scoring/eval.py`
+preflight, verify the correction, and record the evidence in
+`scoring/rule_maker_log.md`. Ensure that `manager_feedback` is self-contained.
 
 Use `finalize_worker_request` with one of:
 

@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import core.hitl_autoresearch as har  # noqa: E402
 import agents.rule_maker as rule_maker  # noqa: E402
+from core.hitl import render_hitl_template  # noqa: E402
 from core.hitl_autoresearch import (  # noqa: E402
     InitialAutoResearchNodeResult,
     _restore_bootstrap_agent_local,
@@ -775,3 +776,14 @@ def test_hitl_rule_maker_validation_includes_gitlink_issues(tmp_path, monkeypatc
     assert validation["valid"] is False
     assert validation["issues"] == ["nested repository is dirty"]
     assert "Nested repository is dirty" in validation["worker_feedback"]
+
+
+def test_initial_scoring_repair_requires_preflight_evidence_not_test_artifact():
+    prompt = render_hitl_template(
+        "manager_review_initial_scoring.txt",
+        scorer_result_json="{}",
+    )
+
+    assert "reproduce those conditions during the functional `scoring/eval.py`" in prompt
+    assert "record the evidence in\n`scoring/rule_maker_log.md`" in prompt
+    assert "add matching preflight regression tests" not in prompt
