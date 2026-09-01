@@ -1020,6 +1020,7 @@ class HitlManager:
         plan_text: str,
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
+        request_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         from core.hitl import _load_hitl_template, _normalize_options, _validate_substantive_options
 
@@ -1075,6 +1076,13 @@ class HitlManager:
                 data.pop("decision", None)
             return data
 
+        provenance = dict(request_context or {})
+        assigned_candidate_sha = str(provenance.get("parent_node_id", "")).strip()
+        autoresearch_attempt = bool(
+            assigned_candidate_sha
+            and str(provenance.get("attempt_id", "")).strip()
+            and str(provenance.get("proposal_idea_id", "")).strip()
+        )
         prompt = _load_hitl_template(
             "manager_review_raised_idea.txt",
             pipeline_stage=pipeline_stage,
@@ -1082,6 +1090,8 @@ class HitlManager:
             plan_text=plan_text,
             raised_idea_json=json.dumps(raised_idea, indent=2, ensure_ascii=False),
             hitl_mode=selected_mode.value,
+            autoresearch_attempt=autoresearch_attempt,
+            assigned_candidate_sha=assigned_candidate_sha,
         )
         return self.request_worker_resolution(
             command={
@@ -1185,6 +1195,13 @@ class HitlManager:
             "related_artifacts": related_artifacts,
             "provenance": dict(scoring_handoff_context or {}),
         }
+        provenance = dict(scoring_handoff_context or {})
+        assigned_candidate_sha = str(provenance.get("parent_node_id", "")).strip()
+        autoresearch_attempt = bool(
+            assigned_candidate_sha
+            and str(provenance.get("attempt_id", "")).strip()
+            and str(provenance.get("proposal_idea_id", "")).strip()
+        )
         prompt = _load_hitl_template(
             "manager_review_phase_finish.txt",
             pipeline_stage=pipeline_stage,
@@ -1196,6 +1213,8 @@ class HitlManager:
             allow_scoring_approval=allow_scoring_approval,
             is_rule_maker=(pipeline_stage == "rule_maker"),
             hitl_mode=selected_mode.value,
+            autoresearch_attempt=autoresearch_attempt,
+            assigned_candidate_sha=assigned_candidate_sha,
         )
         return self.request_worker_resolution(
             command={

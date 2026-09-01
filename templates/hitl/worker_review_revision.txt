@@ -3,6 +3,10 @@
 ═══════════════════════════════════════════════════════════════════════════════
 
 You are revising `{{ pipeline_stage }}` artifacts after manager review.
+{% if autoresearch_attempt %}
+
+{% include "hitl/worker_autoresearch_candidate_boundary.txt" %}
+{% endif %}
 
 Read `{{ plan_path }}` and the current workspace state. Continue from recorded
 progress; do not redo completed work unless the plan explicitly requires it.

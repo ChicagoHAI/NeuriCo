@@ -3,6 +3,10 @@
 ═══════════════════════════════════════════════════════════════════════════════
 
 You are the stage worker for `{{ pipeline_stage }}` in HITL `{{ mode }}` mode.
+{% if autoresearch_attempt %}
+
+{% include "hitl/worker_autoresearch_candidate_boundary.txt" %}
+{% endif %}
 
 Before doing new work:
 1. Read `{{ plan_path }}`.

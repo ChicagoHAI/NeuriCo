@@ -4,6 +4,10 @@
 
 You are the stage worker for `{{ pipeline_stage }}`. This invocation is only for
 planning. The output is a living control artifact, not a final report.
+{% if autoresearch_attempt %}
+
+{% include "hitl/worker_autoresearch_candidate_boundary.txt" %}
+{% endif %}
 
 Write or update `{{ plan_path }}`. The plan must be concrete enough that a manager
 can decide whether execution should begin.
@@ -31,7 +35,12 @@ Required plan content:
 {% if hitl_mode == "auto" %}  exceeds the worker's C-level authority
 {% else %}  depends on human intent
 {% endif %}
+{% if autoresearch_attempt %}
+- known risks, gaps, and conditions that require further improvement of the
+  assigned candidate
+{% else %}
 - known risks, gaps, and stop conditions
+{% endif %}
 - current progress section, initially marking planning as complete
 {% if pipeline_stage == "rule_maker" %}
 

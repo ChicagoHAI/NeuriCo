@@ -1,3 +1,7 @@
+{% if autoresearch_attempt %}
+{% include "hitl/manager_autoresearch_candidate_boundary.txt" %}
+
+{% endif %}
 {% if requesting_actor == "rule_maker" %}
 This request was raised by the rule maker. Apply these boundaries when resolving
 it:

@@ -889,6 +889,21 @@ class HitlRuntime:
 
         return HitlManager(config, work_dir=work_dir, channel=channel)
 
+    def _autoresearch_candidate_prompt_context(self) -> Dict[str, Any]:
+        provenance = self._tool_context.get("provenance")
+        if not isinstance(provenance, dict):
+            provenance = {}
+        assigned_candidate_sha = str(provenance.get("parent_node_id", "")).strip()
+        autoresearch_attempt = bool(
+            assigned_candidate_sha
+            and str(provenance.get("attempt_id", "")).strip()
+            and str(provenance.get("proposal_idea_id", "")).strip()
+        )
+        return {
+            "autoresearch_attempt": autoresearch_attempt,
+            "assigned_candidate_sha": assigned_candidate_sha,
+        }
+
     def plan_prompt_block(
         self,
         approved_proposal: str = "",
@@ -909,6 +924,7 @@ class HitlRuntime:
             hitl_stage="plan",
             allow_raised_ideas=False,
             hitl_mode=self.hitl_mode.value,
+            **self._autoresearch_candidate_prompt_context(),
         )
 
     def execution_prompt_block(self, mode: str = "execute", feedback: str = "") -> str:
@@ -922,6 +938,7 @@ class HitlRuntime:
             allow_raised_ideas=True,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
+            **self._autoresearch_candidate_prompt_context(),
         )
 
     def review_prompt_block(self, feedback: str = "") -> str:
@@ -934,6 +951,7 @@ class HitlRuntime:
             allow_raised_ideas=True,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
+            **self._autoresearch_candidate_prompt_context(),
         )
 
     def plan_revision_prompt_block(self, feedback: str) -> str:
@@ -946,6 +964,7 @@ class HitlRuntime:
             allow_raised_ideas=False,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
+            **self._autoresearch_candidate_prompt_context(),
         )
 
     def compose_worker_prompt(self, *, hitl_stage: str, phase_prompt: str) -> str:
@@ -1089,6 +1108,7 @@ class HitlRuntime:
             plan_text=self._read_optional(self.paths.plan_path),
             on_finalize=persist_resolution,
             hitl_mode=self.hitl_mode,
+            request_context=dict(provenance or {}),
         )
         try:
             return finalized["record"]

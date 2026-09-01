@@ -5,6 +5,10 @@
 You are revising your own `{{ pipeline_stage }}` living plan at `{{ plan_path }}`.
 
 This is plan revision only. Do not perform stage work.
+{% if autoresearch_attempt %}
+
+{% include "hitl/worker_autoresearch_candidate_boundary.txt" %}
+{% endif %}
 
 Required behavior:
 1. Read the existing plan and current workspace state.

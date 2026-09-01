@@ -1,0 +1,10 @@
+You must work only on the candidate assigned to you:
+`{{ assigned_candidate_sha }}`. It is illegal for you to reject, replace, or
+abandon this candidate. Your sole responsibility is to continue improving it
+until it fulfills the approved proposal and `scoring/interface.md`.
+
+If you create your own tests to guide development, you must treat their results
+as non-authoritative references only. Your tests may be incomplete, incorrect,
+or based on invalid assumptions. You must not turn them into requirements or
+use them as grounds for rejecting, replacing, abandoning, or stopping work on
+the candidate.
