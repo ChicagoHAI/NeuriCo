@@ -39,6 +39,10 @@ class McpInitializationError(RuntimeError):
     """A required MCP server did not become ready before provider inference."""
 
 
+class McpReadinessTimeout(McpInitializationError):
+    """Required MCP readiness was not observed within the current startup window."""
+
+
 class LLMBackend:
     """
     Unified LLM interface. Calls the configured backend and returns
@@ -186,6 +190,15 @@ class LLMBackend:
                 server_names=self._mcp_server_names(mcp_config_path),
             ):
                 server_names = self._mcp_server_names(mcp_config_path)
+                if self._codex_required_mcp_startup_timed_out(
+                    stdout=stdout,
+                    stderr=stderr,
+                    server_names=server_names,
+                ):
+                    raise McpReadinessTimeout(
+                        "Codex did not report manager MCP readiness within the "
+                        "current startup window."
+                    )
                 raise McpInitializationError(
                     "Codex could not initialize required manager MCP server(s): "
                     + ", ".join(server_names)
@@ -235,6 +248,20 @@ class LLMBackend:
             "mcp client for",
         )
         return any(marker in output for marker in markers)
+
+    @staticmethod
+    def _codex_required_mcp_startup_timed_out(
+        *,
+        stdout: str,
+        stderr: str,
+        server_names: List[str],
+    ) -> bool:
+        """Recognize Codex exhausting only its current MCP startup window."""
+        output = f"{stdout}\n{stderr}".lower()
+        return (
+            any(str(name).lower() in output for name in server_names)
+            and "mcp client startup timed out" in output
+        )
 
     @classmethod
     def _codex_mcp_config_args(
@@ -480,7 +507,7 @@ class LLMBackend:
                 remaining = startup_deadline - time.monotonic()
                 if remaining <= 0:
                     self._terminate_process_group(process)
-                    raise McpInitializationError(
+                    raise McpReadinessTimeout(
                         "Claude did not report manager MCP readiness within "
                         f"{startup_timeout:g} seconds."
                     )
@@ -488,7 +515,7 @@ class LLMBackend:
                     item = stdout_events.get(timeout=remaining)
                 except queue.Empty as exc:
                     self._terminate_process_group(process)
-                    raise McpInitializationError(
+                    raise McpReadinessTimeout(
                         "Claude did not report manager MCP readiness within "
                         f"{startup_timeout:g} seconds."
                     ) from exc

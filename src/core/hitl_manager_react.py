@@ -2274,7 +2274,7 @@ class HitlManager:
     def _send(
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None
     ) -> Any:
-        from interactive.llm_backend import McpInitializationError
+        from interactive.llm_backend import McpReadinessTimeout
 
         with self._backend_lifecycle_lock:
             last: Optional[Exception] = None
@@ -2292,7 +2292,7 @@ class HitlManager:
                         backend=backend,
                         mcp_startup_timeout_seconds=mcp_timeout,
                     )
-                except McpInitializationError as exc:
+                except McpReadinessTimeout as exc:
                     mcp_attempt += 1
                     LOGGER.warning(
                         "HITL manager MCP startup attempt %d failed for provider %s "
