@@ -105,7 +105,13 @@ def _finalize_stopped_run(
     try:
         from core.hitl_autoresearch import recover_interrupted_hitl_autoresearch_attempt
 
+        stop_record = control.record()
         recovery = recover_interrupted_hitl_autoresearch_attempt(work_dir)
+        stop_reason = (
+            "provider_unavailable"
+            if str(stop_record.get("requested_by", "")).strip() == "provider_unavailable"
+            else "user_requested"
+        )
         stopped_at = utc_now()
         status: Dict[str, Any] = {
             "status": "stopped",
@@ -115,7 +121,7 @@ def _finalize_stopped_run(
             "mode": request.get("mode", ""),
             "hitl_mode": request.get("hitl_mode", "full"),
             "provider": request.get("provider", ""),
-            "reason": "user_requested",
+            "reason": stop_reason,
         }
         if recovery is not None:
             status["resume_from"] = recovery.recovery_classification

@@ -207,6 +207,19 @@ def next_attempt_number(logs_dir: Path, name_for_attempt) -> int:
     return attempt
 
 
+def _request_provider_unavailable_stop(provider: Optional[str]) -> bool:
+    """Stop an active HITL run after its provider process becomes unavailable."""
+    if not str(provider or "").strip():
+        return False
+    from core.hitl_run_control import active_hitl_run_stop_control
+
+    control = active_hitl_run_stop_control()
+    if control is None:
+        return False
+    control.request(requested_by="provider_unavailable")
+    return True
+
+
 def run_prebuilt_cli_agent(
     *,
     command_argv: list[str],
@@ -217,6 +230,7 @@ def run_prebuilt_cli_agent(
     env: Dict[str, str],
     timeout: Optional[int] = None,
     tracker: Optional[RunTracker] = None,
+    provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute a caller-constructed CLI command with streaming capture.
@@ -238,21 +252,30 @@ def run_prebuilt_cli_agent(
         open(log_file, "w", encoding="utf-8") as log_f,
         open(transcript_file, "w", encoding="utf-8") as transcript_f,
     ):
-        process = subprocess.Popen(
-            command_argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
-            cwd=str(work_dir),
-            # Every external worker owns an isolated process group.  A clean
-            # provider exit is not a valid terminal result if it leaves a
-            # background child modifying the workspace.
-            start_new_session=os.name == "posix",
-        )
+        try:
+            process = subprocess.Popen(
+                command_argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                bufsize=1,
+                cwd=str(work_dir),
+                # Every external worker owns an isolated process group.  A clean
+                # provider exit is not a valid terminal result if it leaves a
+                # background child modifying the workspace.
+                start_new_session=os.name == "posix",
+            )
+        except OSError as exc:
+            if _request_provider_unavailable_stop(provider):
+                from core.hitl_run_control import HitlRunStopRequested
+
+                raise HitlRunStopRequested(
+                    "HITL run stopped because its provider was unavailable."
+                ) from exc
+            raise
         process_group_id = getattr(process, "pid", None) if os.name == "posix" else None
         if tracker is not None:
             tracker.mark_running(process.pid)
@@ -325,6 +348,19 @@ def run_prebuilt_cli_agent(
         _flush_output()
 
     elapsed = time.time() - start_time
+    provider_unavailable = bool(
+        str(provider or "").strip()
+        and return_code not in {None, 0}
+        and not timed_out
+        and not stopped
+        and not background_processes_terminated
+    )
+    if provider_unavailable and _request_provider_unavailable_stop(provider):
+        from core.hitl_run_control import HitlRunStopRequested
+
+        raise HitlRunStopRequested(
+            "HITL run stopped because its provider was unavailable."
+        )
     if stopped and tracker is not None:
         tracker.mark_stopped()
     success = (

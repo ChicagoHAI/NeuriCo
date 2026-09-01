@@ -236,6 +236,7 @@ def run_eval_verifier(
         transcript_file=transcript_file,
         env=env,
         timeout=timeout,
+        provider=provider,
     )
 
     if launch["timed_out"]:

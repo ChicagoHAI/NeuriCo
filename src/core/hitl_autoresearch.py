@@ -2798,6 +2798,7 @@ def run_hitl_autoresearch_loop(
                 transcript_file=launch["transcript_file"],
                 env=launch["env"],
                 timeout=comment_timeout,
+                provider=provider,
             )
             if result.get("timed_out"):
                 result["error"] = (

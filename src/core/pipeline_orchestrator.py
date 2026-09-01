@@ -1152,6 +1152,7 @@ class ResearchPipelineOrchestrator:
                 transcript_file=transcript_file,
                 env=env,
                 timeout=timeout,
+                provider=provider,
             )
             return_code = run_result["return_code"]
 

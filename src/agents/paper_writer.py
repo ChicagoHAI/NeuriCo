@@ -281,6 +281,7 @@ def run_paper_writer(
             transcript_file=logs_dir / f"paper_writer_{provider}_transcript.jsonl",
             env=env,
             timeout=timeout,
+            provider=provider,
         )
         return_code = launch.get("return_code")
         success = bool(launch.get("success"))

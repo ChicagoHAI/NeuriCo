@@ -551,6 +551,7 @@ def run_rule_maker(
             transcript_file=transcript_file,
             env=env,
             timeout=timeout,
+            provider=provider,
         )
         return_code = launch["return_code"]
         if launch["timed_out"]:

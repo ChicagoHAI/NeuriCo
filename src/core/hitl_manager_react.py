@@ -42,6 +42,10 @@ class _StaleManagerTurn(RuntimeError):
     """Internal signal that rollback invalidated an in-flight manager turn."""
 
 
+class _ManagerProviderUnavailable(RuntimeError):
+    """The manager provider remained unavailable after its retry budget."""
+
+
 @dataclass
 class _Turn:
     speaker: str
@@ -2084,7 +2088,7 @@ class HitlManager:
         )
 
     def _cancel_backend_failed_runtime_request(self, turn: _Turn, exc: BaseException) -> None:
-        """Release the runtime action whose manager provider retries exhausted."""
+        """Stop the run when its manager provider retries are exhausted."""
         request_key = turn.request_key.strip()
         pending = self.runtime_state.pending_worker_command()
         detail = str(exc).strip()
@@ -2096,6 +2100,17 @@ class HitlManager:
             )
             if detail:
                 failure = f"{failure} Detail: {detail}"
+        if isinstance(exc, _ManagerProviderUnavailable):
+            from core.hitl_run_control import active_hitl_run_stop_control
+
+            control = active_hitl_run_stop_control()
+            if control is not None:
+                control.request(requested_by="provider_unavailable")
+                self.channel.send(
+                    f"{failure} NeuriCo is stopping this run and restoring saved progress.",
+                    kind="system",
+                )
+                return
         if (
             request_key
             and isinstance(pending, dict)
@@ -2305,7 +2320,7 @@ class HitlManager:
                             raise RuntimeError(
                                 "HITL manager stopped during its provider turn."
                             ) from exc
-            raise RuntimeError("Manager backend was unavailable") from last
+            raise _ManagerProviderUnavailable("Manager backend was unavailable") from last
 
     def _send_once(
         self,
