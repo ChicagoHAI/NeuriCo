@@ -205,6 +205,7 @@ class PipelineState:
 # Stage names tracked in PipelineState when scoring_enabled=True
 RULE_MAKER_STAGE = "rule_maker"
 SCORER_STAGE = "scorer"
+INITIAL_SCORING_REPAIR_KIND = "initial_scoring_repair"
 
 # Stage names tracked in PipelineState when bootstrap_mode=True
 BOOTSTRAP_MANIFEST_STAGE = "bootstrap_manifest"
@@ -446,8 +447,15 @@ class ResearchPipelineOrchestrator:
             # STAGE 2.5 (scoring mode only): Rule Maker
             # Writes scoring/interface.md, scoring/eval.py, scoring/targets.json,
             # scoring/rule_maker_log.md before the runner sees the workspace.
+            pending_repair: Optional[Dict[str, Any]] = None
             if scoring_enabled:
                 if hitl_enabled:
+                    pending_repair = self._initial_rule_maker_repair_recovery()
+                    repair_feedback = (
+                        self._prepare_initial_rule_maker_repair()
+                        if pending_repair is not None
+                        else ""
+                    )
                     results["stages"][RULE_MAKER_STAGE] = self._run_hitl_stage_until_complete(
                         stage_name=RULE_MAKER_STAGE,
                         run_stage=lambda: self._run_rule_maker_hitl(
@@ -455,6 +463,7 @@ class ResearchPipelineOrchestrator:
                             provider=provider,
                             timeout=rule_maker_timeout,
                             full_permissions=full_permissions,
+                            initial_scoring_repair_feedback=repair_feedback,
                         ),
                     )
                 else:
@@ -468,6 +477,8 @@ class ResearchPipelineOrchestrator:
                     print()
                     print("⚠️  Rule maker stage failed -- aborting.")
                     return results
+                if hitl_enabled and pending_repair is not None:
+                    self.state.clear_runtime_recovery(RULE_MAKER_STAGE)
 
             # STAGE 3: Experiment Runner
             # In scoring mode, seal eval.py / targets.json / rule_maker_log.md
@@ -524,9 +535,9 @@ class ResearchPipelineOrchestrator:
                     raise RuntimeError(
                         "Initial rule-maker repair returned without manager feedback."
                     )
-                self._recover_experiment_runner_from_runtime_checkpoint()
+                self._begin_initial_rule_maker_repair(repair_feedback)
+                repair_feedback = self._prepare_initial_rule_maker_repair()
                 experiment_recovery_armed = False
-                self._restore_rule_maker_inputs_for_initial_scoring_repair(sealed_dir)
                 sealed_dir = None
                 results["stages"][RULE_MAKER_STAGE] = self._run_hitl_stage_until_complete(
                     stage_name=RULE_MAKER_STAGE,
@@ -542,6 +553,7 @@ class ResearchPipelineOrchestrator:
                     print()
                     print("⚠️  Rule maker repair failed -- aborting.")
                     return results
+                self.state.clear_runtime_recovery(RULE_MAKER_STAGE)
 
             # STAGE 4 (scoring mode only): Scorer
             # Executes scoring/eval.py and captures results.json.
@@ -635,6 +647,90 @@ class ResearchPipelineOrchestrator:
         }
         self.state.set_runtime_recovery("experiment_runner", payload)
         return dict(payload)
+
+    def _initial_rule_maker_repair_recovery(self) -> Optional[Dict[str, Any]]:
+        """Return one validated durable initial-scoring repair handoff."""
+        recovery = self.state.get_runtime_recovery(RULE_MAKER_STAGE)
+        if recovery is None:
+            return None
+        if str(recovery.get("kind", "")).strip() != INITIAL_SCORING_REPAIR_KIND:
+            raise RuntimeError("Unsupported rule_maker runtime recovery record.")
+        status = str(recovery.get("status", "")).strip()
+        if status not in {"requested", "ready"}:
+            raise RuntimeError(
+                "Initial rule-maker repair recovery has an invalid status."
+            )
+        if not str(recovery.get("manager_feedback", "")).strip():
+            raise RuntimeError(
+                "Initial rule-maker repair recovery is missing manager feedback."
+            )
+        return dict(recovery)
+
+    def _begin_initial_rule_maker_repair(self, manager_feedback: str) -> Dict[str, Any]:
+        """Persist the repair decision before restoring the experiment boundary."""
+        feedback = str(manager_feedback).strip()
+        if not feedback:
+            raise RuntimeError("Initial rule-maker repair requires manager feedback.")
+        existing = self._initial_rule_maker_repair_recovery()
+        if existing is not None:
+            if str(existing.get("manager_feedback", "")).strip() != feedback:
+                raise RuntimeError(
+                    "A different initial rule-maker repair is already pending."
+                )
+            return existing
+        record = {
+            "kind": INITIAL_SCORING_REPAIR_KIND,
+            "status": "requested",
+            "manager_feedback": feedback,
+            "requested_at": utc_now(),
+        }
+        self.state.set_runtime_recovery(RULE_MAKER_STAGE, record)
+        return dict(record)
+
+    def _prepare_initial_rule_maker_repair(self) -> str:
+        """Replay the pre-experiment handoff and make rule-maker repair ready."""
+        record = self._initial_rule_maker_repair_recovery()
+        if record is None:
+            raise RuntimeError("No initial rule-maker repair is pending.")
+        feedback = str(record["manager_feedback"]).strip()
+        if record["status"] == "ready":
+            return feedback
+
+        # The manager selected rule-maker repair while the initial experiment
+        # recovery boundary still owned the workspace. Complete that established
+        # rollback first; the separate rule-maker recovery record survives it.
+        self._recover_experiment_runner_from_runtime_checkpoint()
+
+        canonical_sealed_dir = sealed_dir_for(self.work_dir)
+        if canonical_sealed_dir.exists():
+            self._restore_rule_maker_inputs_for_initial_scoring_repair(
+                canonical_sealed_dir
+            )
+        else:
+            required = (
+                "scoring/eval.py",
+                "scoring/targets.json",
+                "scoring/interface.md",
+                "scoring/rule_maker_log.md",
+            )
+            missing = [
+                relative
+                for relative in required
+                if not (self.work_dir / relative).is_file()
+            ]
+            if missing:
+                raise RuntimeError(
+                    "Initial rule-maker repair has neither a sealed evaluator nor "
+                    "complete restored evaluator artifacts: " + ", ".join(missing)
+                )
+
+        ready = {
+            **record,
+            "status": "ready",
+            "prepared_at": utc_now(),
+        }
+        self.state.set_runtime_recovery(RULE_MAKER_STAGE, ready)
+        return feedback
 
     def _discard_experiment_runner_hitl_recovery_state(self) -> None:
         recovery = self.state.get_runtime_recovery("experiment_runner")
@@ -1844,6 +1940,12 @@ class ResearchPipelineOrchestrator:
             )
 
         except HitlRunStopRequested:
+            try:
+                restore_failed_hitl_state()
+            except Exception as restore_error:
+                raise RuntimeError(
+                    "HITL rule maker stopped, but its stage rollback could not complete."
+                ) from restore_error
             raise
         except Exception as exc:
             print(f"❌ HITL rule maker stage failed: {exc}")
