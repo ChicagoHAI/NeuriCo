@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent_runner import next_attempt_number, run_prebuilt_cli_agent
 from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
+from core.hitl_scoring_workspace import validate_checkpoint_gitlinks
 from core.scorer import RESULTS_FILE_NAME
 
 # Files the rule_maker is responsible for producing (relative to scoring/)
@@ -733,6 +734,7 @@ def validate_hitl_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
             else _validate_declared_sealed_inputs(Path(work_dir), targets)
         )
     issues.extend(target_issues)
+    issues.extend(validate_checkpoint_gitlinks(Path(work_dir)))
     if target_issues:
         found.pop("targets", None)
     result: Dict[str, Any] = {

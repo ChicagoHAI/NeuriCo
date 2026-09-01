@@ -123,6 +123,86 @@ def _contained_path(root: Path, relative: Path, *, description: str) -> Path:
     return candidate
 
 
+def validate_checkpoint_gitlinks(
+    work_dir: Path,
+    source_sha: str = "HEAD",
+) -> list[str]:
+    """Return issues for nested repositories that differ from their Gitlinks."""
+    root = Path(work_dir).resolve()
+    try:
+        gitlinks = _checkpoint_gitlinks(root, source_sha)
+    except HitlScoringWorkspaceError as exc:
+        return [str(exc)]
+
+    issues: list[str] = []
+    for relative, commit_sha in gitlinks:
+        try:
+            source_repo = _contained_path(
+                root,
+                relative,
+                description="Gitlink source",
+            )
+        except HitlScoringWorkspaceError as exc:
+            issues.append(str(exc))
+            continue
+        relative_text = relative.as_posix()
+        if not source_repo.is_dir():
+            issues.append(
+                "Checkpointed nested repository "
+                f"`{relative_text}` is missing from the workspace."
+            )
+            continue
+
+        repository_root = run_git(
+            source_repo,
+            "rev-parse",
+            "--show-toplevel",
+            check=False,
+        )
+        if (
+            repository_root.returncode != 0
+            or Path(str(repository_root.stdout).strip()).resolve() != source_repo
+        ):
+            issues.append(
+                "Checkpointed nested repository "
+                f"`{relative_text}` is not available at its recorded Git root."
+            )
+            continue
+
+        head = run_git(source_repo, "rev-parse", "HEAD", check=False)
+        if head.returncode != 0:
+            issues.append(
+                "Could not inspect HEAD for checkpointed nested repository "
+                f"`{relative_text}`: {_git_failure_detail(head)}"
+            )
+        elif str(head.stdout).strip() != commit_sha:
+            issues.append(
+                "Checkpointed nested repository "
+                f"`{relative_text}` is at a different commit than the workspace Gitlink."
+            )
+
+        status = run_git(
+            source_repo,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            text=False,
+            check=False,
+        )
+        if status.returncode != 0:
+            issues.append(
+                "Could not inspect working-tree status for checkpointed nested repository "
+                f"`{relative_text}`: {_git_failure_detail(status)}"
+            )
+        elif bytes(status.stdout or b""):
+            issues.append(
+                "Checkpointed nested repository "
+                f"`{relative_text}` contains staged, modified, or untracked files."
+            )
+    return issues
+
+
 def _extract_git_archive(archive_path: Path, destination: Path) -> None:
     """Extract an archive produced by Git after validating its member paths."""
     with tarfile.open(archive_path, mode="r:") as archive:
