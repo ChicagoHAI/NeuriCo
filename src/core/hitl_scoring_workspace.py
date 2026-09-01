@@ -218,10 +218,7 @@ def _extract_git_archive(archive_path: Path, destination: Path) -> None:
                 raise HitlScoringWorkspaceError(
                     "Runtime rejected an unsafe path in a checkpointed nested repository."
                 )
-        if hasattr(tarfile, "fully_trusted_filter"):
-            archive.extractall(destination, members=members, filter="fully_trusted")
-        else:  # Python 3.10 and 3.11 do not expose extraction filters.
-            archive.extractall(destination, members=members)
+        archive.extractall(destination, members=members, filter="data")
 
 
 def _materialize_checkpoint_gitlinks(

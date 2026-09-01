@@ -27,7 +27,11 @@ from core.hitl_autoresearch import (  # noqa: E402
     construct_bootstrap_hitl_baseline,
 )
 from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError  # noqa: E402
-from core.hitl_scoring_workspace import validate_checkpoint_gitlinks  # noqa: E402
+from core.hitl_scoring_workspace import (  # noqa: E402
+    HitlScoringWorkspaceError,
+    _materialize_checkpoint_gitlinks,
+    validate_checkpoint_gitlinks,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -724,6 +728,28 @@ def test_rule_maker_gitlink_validation_rejects_head_mismatch(tmp_path):
         "Checkpointed nested repository `code/dependency` is at a different "
         "commit than the workspace Gitlink."
     ]
+
+
+def test_gitlink_materialization_rejects_symlink_outside_destination(tmp_path):
+    workspace, nested = _checkpointed_nested_repository(tmp_path)
+    (nested / "escape").symlink_to("../../../outside")
+    _git(nested, "add", "escape")
+    _git(nested, "commit", "-m", "add escaping symlink")
+    _git(workspace, "add", "code/dependency")
+    _git(workspace, "commit", "-m", "update dependency")
+    scorer_dir = tmp_path / "scorer"
+    scorer_dir.mkdir()
+
+    with pytest.raises(HitlScoringWorkspaceError, match="could not restore"):
+        _materialize_checkpoint_gitlinks(
+            work_dir=workspace,
+            scorer_dir=scorer_dir,
+            source_sha="HEAD",
+        )
+
+    extracted_link = scorer_dir / "code" / "dependency" / "escape"
+    assert not extracted_link.exists()
+    assert not extracted_link.is_symlink()
 
 
 def test_hitl_rule_maker_validation_includes_gitlink_issues(tmp_path, monkeypatch):
