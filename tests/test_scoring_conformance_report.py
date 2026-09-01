@@ -57,16 +57,18 @@ def test_invalid_evidence_is_a_concern_not_api_unavailability():
     assert "size constraints" in report
 
 
-def test_invalid_verifier_response_is_a_concern_not_api_unavailability():
+def test_invalid_verifier_response_is_inconclusive_not_a_scoring_concern():
     report = build_manager_conformance_report({
         "success": False,
         "failure_kind": "verdict_invalid",
         "passed": False,
         "violations": [{"check": "verdict"}],
     })
-    assert "CONCERNS" in report
+    assert "VERIFICATION INCONCLUSIVE" in report
+    assert "CONCERNS" not in report
     assert "API NOT AVAILABLE" not in report
     assert "malformed review" in report
+    assert "neither evidence of a scoring-design defect" in report
 
 
 def test_report_concerns_uses_canned_category_descriptions():

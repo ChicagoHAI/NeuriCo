@@ -381,6 +381,7 @@ def test_verifier_accepts_repository_api_keys(
     assert model == expected_model
     assert captured['api_key'] == 'shared-key'
     assert captured['timeout'] == 17
+    assert captured['max_retries'] == 0
     assert captured.get('base_url') == expected_base_url
 
 
@@ -427,8 +428,8 @@ def test_api_unavailable_returns_advisory_failure_without_writes(tmp_path, monke
     assert not (tmp_path / 'logs').exists()
 
 
-@pytest.mark.parametrize('raw', ['', 'not json'])
-def test_malformed_api_response_is_a_concern_not_api_unavailability(
+@pytest.mark.parametrize('raw', ['', 'not json', '{}'])
+def test_malformed_api_response_is_inconclusive_not_a_scoring_concern(
         tmp_path, monkeypatch, raw):
     _seed_verifier_evidence(tmp_path)
     monkeypatch.setattr(
@@ -442,8 +443,10 @@ def test_malformed_api_response_is_a_concern_not_api_unavailability(
 
     assert result['success'] is False and result['passed'] is False
     assert result['failure_kind'] == ev.FAILURE_KIND_VERDICT_INVALID
-    assert 'CONCERNS' in report
+    assert 'VERIFICATION INCONCLUSIVE' in report
+    assert 'CONCERNS' not in report
     assert 'API NOT AVAILABLE' not in report
+    assert 'neither evidence of a scoring-design defect' in report
     assert not (tmp_path / 'scoring' / 'verification.json').exists()
     assert not (tmp_path / 'logs').exists()
 

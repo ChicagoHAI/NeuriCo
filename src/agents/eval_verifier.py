@@ -337,9 +337,10 @@ def _verifier_api_client(timeout: int):
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
             timeout=timeout,
+            max_retries=0,
         )
         return client, configured_model or DEFAULT_OPENROUTER_MODEL, 'openrouter'
-    client = OpenAI(api_key=api_key, timeout=timeout)
+    client = OpenAI(api_key=api_key, timeout=timeout, max_retries=0)
     return client, configured_model or DEFAULT_OPENAI_MODEL, 'openai'
 
 
@@ -508,6 +509,17 @@ def run_eval_verifier(
         return failure_result(FAILURE_KIND_VERDICT_INVALID, type(exc).__name__)
 
     passed, verdict_violations = interpret_verdict(verdict, extract_eval_contract(idea))
+    if any(
+        isinstance(violation, dict) and violation.get('check') == 'verdict'
+        for violation in verdict_violations
+    ):
+        # The provider answered, but its object did not satisfy the verdict
+        # schema or contained internally inconsistent claims. This is neither
+        # API unavailability nor evidence that the scoring design is defective.
+        return failure_result(
+            FAILURE_KIND_VERDICT_INVALID,
+            'VerifierVerdictInvalidError',
+        )
     # Raw verifier prose ends here. Only fixed runtime-owned categories may be
     # returned, persisted, logged, or relayed to another agent.
     categories: List[str] = []
@@ -811,7 +823,8 @@ def format_violations_for_retry(
 # manager reads as advisory evidence when it reviews the rule maker.
 #
 # The report is leak-proof BY CONSTRUCTION: it is assembled only from a fixed
-# status (PASS / CONCERNS / API NOT AVAILABLE) and canned, code-owned descriptions
+# status (PASS / CONCERNS / VERIFICATION INCONCLUSIVE / API NOT AVAILABLE) and
+# canned, code-owned descriptions
 # keyed by the verifier's recognized check names. It never echoes the verdict's
 # `detail` or `evidence` strings, an unrecognized check name, or any other value
 # derived from the sealed files, so no sealed content can reach the manager
@@ -871,7 +884,8 @@ def build_manager_conformance_report(
     """Render a verifier verdict as a leak-proof, manager-facing report.
 
     - provider/API unavailable    -> API NOT AVAILABLE (manager continues normally)
-    - evidence/verdict invalid    -> CONCERNS
+    - evidence invalid            -> CONCERNS
+    - verdict invalid             -> VERIFICATION INCONCLUSIVE
     - contract satisfied          -> PASS
     - contract not satisfied      -> CONCERNS with canned per-check categories,
       naming the user's own declared requirements in that category verbatim
@@ -895,10 +909,11 @@ def build_manager_conformance_report(
         )
     if verdict.get('failure_kind') == FAILURE_KIND_VERDICT_INVALID:
         return (
-            "Automated conformance check: CONCERNS. The verifier API returned "
-            "a malformed review, so the scoring design was not successfully "
-            "verified. Do not treat this as API unavailability when deciding "
-            "whether to approve this checkpoint."
+            "Automated conformance check: VERIFICATION INCONCLUSIVE. The "
+            "verifier API returned a malformed review, so automated conformance "
+            "could not be determined. This is neither evidence of a scoring-design "
+            "defect nor API unavailability. Continue the normal manager review of "
+            "the public design."
         )
     if not verdict.get("success") or tampered:
         # A verifier that could not complete (or a legacy tamper signal) is not

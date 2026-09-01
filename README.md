@@ -192,7 +192,8 @@ declared contract and a bounded allowlist of scorer/function source to the
 configured external API; it never
 launches a coding agent. OpenRouter requests require zero-data-retention and
 deny data collection per request. In HITL mode an unavailable verifier is
-reported as `API NOT AVAILABLE` and manager review continues. In non-HITL
+reported as `API NOT AVAILABLE`, a malformed response is reported as
+`VERIFICATION INCONCLUSIVE`, and manager review continues. In non-HITL
 scoring, verification remains a gate and an unavailable API fails the
 rule-maker stage. `COHERE_API_KEY` is optional (improves paper ranking).
 
