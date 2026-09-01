@@ -195,7 +195,9 @@ deny data collection per request. In HITL mode an unavailable verifier is
 reported as `API NOT AVAILABLE`, a malformed response is reported as
 `VERIFICATION INCONCLUSIVE`, and manager review continues. In non-HITL
 scoring, verification remains a gate and an unavailable API fails the
-rule-maker stage. `COHERE_API_KEY` is optional (improves paper ranking).
+rule-maker stage. The verifier performs one request with SDK retries disabled
+and enforces an outer wall-clock deadline over the complete request.
+`COHERE_API_KEY` is optional (improves paper ranking).
 
 | Variable | Required | Description |
 | --- | --- | --- |

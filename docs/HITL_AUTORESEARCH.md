@@ -378,6 +378,11 @@ traversal, non-UTF-8 input, and evidence above the per-file or total byte caps,
 then submits that bundle and the user's declared evaluation contract to the
 configured OpenRouter or OpenAI API.
 
+Each verifier invocation makes one request with provider SDK retries disabled.
+An outer asynchronous deadline covers the complete request and cancels the
+in-flight HTTP operation when the configured verifier timeout expires; the
+HTTP transport's per-phase inactivity timeouts remain a secondary bound.
+
 Verifier access uses the configured OpenRouter or OpenAI API credential.
 OpenRouter calls additionally require a zero-data-retention endpoint and deny
 provider data collection on each request. If those

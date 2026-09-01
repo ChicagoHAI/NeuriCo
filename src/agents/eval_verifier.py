@@ -27,6 +27,7 @@ without evaluation.metrics or mandated functions skip it entirely.
 
 from pathlib import Path, PurePosixPath
 from typing import Optional, Dict, Any, List, Tuple
+import asyncio
 import hashlib
 import sys
 import time
@@ -327,25 +328,25 @@ def _verifier_api_client(timeout: int):
             "OPENAI_API_KEY; CLI fallback is intentionally disabled"
         )
     try:
-        from openai import OpenAI
+        from openai import AsyncOpenAI
     except ImportError as exc:
         raise RuntimeError("eval verifier requires the openai package") from exc
 
     configured_model = os.getenv('NEURICO_EVAL_VERIFIER_MODEL')
     if openrouter_key:
-        client = OpenAI(
+        client = AsyncOpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
             timeout=timeout,
             max_retries=0,
         )
         return client, configured_model or DEFAULT_OPENROUTER_MODEL, 'openrouter'
-    client = OpenAI(api_key=api_key, timeout=timeout, max_retries=0)
+    client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=0)
     return client, configured_model or DEFAULT_OPENAI_MODEL, 'openai'
 
 
-def _call_verifier_api(messages: List[Dict[str, str]], timeout: int):
-    """Make one tool-less API call and return (content, backend, model)."""
+async def _call_verifier_api_async(messages: List[Dict[str, str]], timeout: int):
+    """Make one asynchronous tool-less API call."""
     client, model, backend = _verifier_api_client(timeout)
     request: Dict[str, Any] = {
         'model': model,
@@ -367,7 +368,12 @@ def _call_verifier_api(messages: List[Dict[str, str]], timeout: int):
         # when store=false. Provider abuse-monitoring policy remains an account
         # concern. This uses the repository's configured shared API access.
         request['store'] = False
-    response = client.chat.completions.create(**request)
+    try:
+        response = await client.chat.completions.create(**request)
+    finally:
+        # Cancellation from the outer wall-clock deadline propagates into
+        # HTTPX. Close the transport before returning control to the pipeline.
+        await client.close()
     try:
         content = response.choices[0].message.content
     except (AttributeError, IndexError, KeyError, TypeError) as exc:
@@ -379,6 +385,18 @@ def _call_verifier_api(messages: List[Dict[str, str]], timeout: int):
             "eval verifier API returned an empty response"
         )
     return content, backend, model
+
+
+def _call_verifier_api(messages: List[Dict[str, str]], timeout: int):
+    """Make one tool-less API call under an end-to-end wall-clock deadline."""
+
+    async def bounded_call():
+        return await asyncio.wait_for(
+            _call_verifier_api_async(messages, timeout),
+            timeout=timeout,
+        )
+
+    return asyncio.run(bounded_call())
 
 
 def _parse_api_verdict(content: str) -> Dict[str, Any]:

@@ -8,7 +8,9 @@ Run: python -m pytest tests/test_eval_verifier.py
 """
 
 import json
+import asyncio
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -293,15 +295,19 @@ def test_api_call_has_no_tool_or_function_capabilities(monkeypatch):
     captured = {}
 
     class Completions:
-        def create(self, **kwargs):
+        async def create(self, **kwargs):
             captured.update(kwargs)
             message = type('Message', (), {'content': '{"pass": true}'})()
             choice = type('Choice', (), {'message': message})()
             return type('Response', (), {'choices': [choice]})()
 
-    client = type('Client', (), {
-        'chat': type('Chat', (), {'completions': Completions()})()
-    })()
+    class Client:
+        chat = type('Chat', (), {'completions': Completions()})()
+
+        async def close(self):
+            pass
+
+    client = Client()
     monkeypatch.setattr(
         ev, '_verifier_api_client',
         lambda timeout: (client, 'test-model', 'openrouter'))
@@ -324,15 +330,19 @@ def test_direct_openai_request_explicitly_disables_storage(monkeypatch):
     captured = {}
 
     class Completions:
-        def create(self, **kwargs):
+        async def create(self, **kwargs):
             captured.update(kwargs)
             message = type('Message', (), {'content': '{"pass": true}'})()
             choice = type('Choice', (), {'message': message})()
             return type('Response', (), {'choices': [choice]})()
 
-    client = type('Client', (), {
-        'chat': type('Chat', (), {'completions': Completions()})()
-    })()
+    class Client:
+        chat = type('Chat', (), {'completions': Completions()})()
+
+        async def close(self):
+            pass
+
+    client = Client()
     monkeypatch.setattr(
         ev, '_verifier_api_client',
         lambda timeout: (client, 'test-model', 'openai'))
@@ -341,6 +351,40 @@ def test_direct_openai_request_explicitly_disables_storage(monkeypatch):
 
     assert captured['store'] is False
     assert 'extra_body' not in captured
+
+
+def test_api_call_has_end_to_end_wall_clock_deadline(monkeypatch):
+    cancelled = False
+    closed = False
+
+    class Completions:
+        async def create(self, **kwargs):
+            nonlocal cancelled
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+
+    class Client:
+        chat = type('Chat', (), {'completions': Completions()})()
+
+        async def close(self):
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr(
+        ev, '_verifier_api_client',
+        lambda timeout: (Client(), 'test-model', 'openai'))
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        ev._call_verifier_api(
+            [{'role': 'user', 'content': 'evidence'}], timeout=0.02)
+
+    assert time.monotonic() - started < 1
+    assert cancelled is True
+    assert closed is True
 
 
 def test_missing_api_key_has_no_cli_fallback(monkeypatch):
@@ -368,11 +412,11 @@ def test_verifier_accepts_repository_api_keys(
     monkeypatch.setenv(env_name, 'shared-key')
     captured = {}
 
-    class FakeOpenAI:
+    class FakeAsyncOpenAI:
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-    fake_module = type('OpenAIModule', (), {'OpenAI': FakeOpenAI})
+    fake_module = type('OpenAIModule', (), {'AsyncOpenAI': FakeAsyncOpenAI})
     monkeypatch.setitem(sys.modules, 'openai', fake_module)
 
     _client, model, backend = ev._verifier_api_client(timeout=17)
