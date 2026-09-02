@@ -223,6 +223,46 @@ class HitlWorldModelSync:
         ]
         return selected, portfolio
 
+    def manager_frontier_node(
+        self,
+        node_sha: str,
+        *,
+        proposal_idea_id: str = "",
+    ) -> Dict[str, Any]:
+        """Render one frontier node without expanding every historical attempt."""
+        node = HitlFrontierStore(self.work_dir).node(node_sha)
+        decision_idea_ids = self._frontier_decision_idea_ids(self._ideas())
+        proposal_id = str(proposal_idea_id).strip()
+        if not proposal_id:
+            return {
+                **node,
+                "attempt_history": self._manager_attempt_history(
+                    node,
+                    decision_idea_ids=decision_idea_ids,
+                ),
+            }
+
+        matches = [
+            attempt
+            for attempt in node.get("attempt_history", [])
+            if isinstance(attempt, dict)
+            and str(attempt.get("proposal_idea_id", "")).strip() == proposal_id
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Frontier node {node_sha} does not contain exactly one attempt for "
+                f"proposal idea {proposal_id}."
+            )
+        decision_idea_id = decision_idea_ids.get(proposal_id)
+        if not decision_idea_id:
+            raise RuntimeError(
+                f"Frontier attempt for proposal idea {proposal_id} is missing its decision idea."
+            )
+        return {
+            **matches[0],
+            "decision_idea_id": decision_idea_id,
+        }
+
     def _frontier_decision_idea_ids(
         self,
         ideas: Iterable[Dict[str, Any]],
@@ -265,6 +305,27 @@ class HitlWorldModelSync:
         include_plan: bool,
         decision_idea_ids: Dict[str, str],
     ) -> Dict[str, Any]:
+        attempt_history = self._manager_attempt_history(
+            node,
+            decision_idea_ids=decision_idea_ids,
+        )
+        view = {
+            "parent_node_sha": node.get("parent_node_sha"),
+            "node_sha": node.get("node_sha"),
+            "objective_score": node.get("objective_score"),
+            "reason_for_acceptance": node.get("reason_for_acceptance"),
+            "attempt_history": attempt_history,
+        }
+        if include_plan:
+            view["saved_plan"] = node.get("plan", "")
+        return view
+
+    def _manager_attempt_history(
+        self,
+        node: Dict[str, Any],
+        *,
+        decision_idea_ids: Dict[str, str],
+    ) -> List[Dict[str, Any]]:
         attempt_history: List[Dict[str, Any]] = []
         for attempt in node.get("attempt_history", []):
             if not isinstance(attempt, dict):
@@ -282,16 +343,7 @@ class HitlWorldModelSync:
                 "accepted": attempt.get("accepted"),
             }
             attempt_history.append(history_entry)
-        view = {
-            "parent_node_sha": node.get("parent_node_sha"),
-            "node_sha": node.get("node_sha"),
-            "objective_score": node.get("objective_score"),
-            "reason_for_acceptance": node.get("reason_for_acceptance"),
-            "attempt_history": attempt_history,
-        }
-        if include_plan:
-            view["saved_plan"] = node.get("plan", "")
-        return view
+        return attempt_history
 
     def _sync_whiteboard(self, research: ResearchState) -> None:
         tips = self._active_whiteboard_tips()

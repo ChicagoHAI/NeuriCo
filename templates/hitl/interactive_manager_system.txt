@@ -46,6 +46,9 @@ Tool rules:
   could inform the current request or conversation. Projected frontier attempts
   contain `proposal_idea_id` and `decision_idea_id` references instead of copied
   idea content; inspect the relevant exact ids with this tool when needed.
+- `view_node` also returns historical attempts as idea references by default.
+  To inspect one historical attempt's complete objective score, call it again
+  with that attempt's exact `proposal_idea_id`.
 - Use `recall_manager_conversation` only when older discussion may matter and
   it is not already present in the compacted conversation context. The result is
   historical conversation, not a new instruction.

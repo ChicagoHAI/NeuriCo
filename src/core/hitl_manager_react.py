@@ -159,13 +159,19 @@ class HitlManagerToolExecutor:
         )
 
     def _view_node(self, args: Dict[str, Any]) -> str:
-        from core.hitl_frontier import HitlFrontierStore
+        from core.hitl_world_model import HitlWorldModelSync
 
         node_sha = str(args.get("node_sha", "")).strip()
         if not node_sha:
             return "Error: view_node requires node_sha. Call list_frontier, then retry."
+        proposal_idea_id = str(args.get("proposal_idea_id", "")).strip()
         return json.dumps(
-            HitlFrontierStore(self.manager.work_dir).node(node_sha), ensure_ascii=False, indent=2
+            HitlWorldModelSync(self.manager.work_dir).manager_frontier_node(
+                node_sha,
+                proposal_idea_id=proposal_idea_id,
+            ),
+            ensure_ascii=False,
+            indent=2,
         )
 
     def _select_frontier(self, args: Dict[str, Any]) -> str:
