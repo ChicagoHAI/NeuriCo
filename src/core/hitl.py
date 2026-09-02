@@ -862,6 +862,10 @@ class HitlRuntime:
         self._tool_url: str = ""
         self._tool_token: str = ""
         self._tool_context: Dict[str, Any] = {}
+        # Optional callback that returns a sanitized scoring-conformance report
+        # for the manager's rule-maker review. Set per stage by the orchestrator;
+        # None for stages that have no evaluator to report on.
+        self._scoring_conformance_reporter: Optional[Callable[[], str]] = None
         self._phase_finish_result: Optional[Dict[str, Any]] = None
         self._phase_finish_request_key: str = ""
         self._phase_finish_response: Optional[Dict[str, Any]] = None
@@ -2338,6 +2342,53 @@ class HitlRuntime:
             },
         )
 
+    def set_scoring_conformance_reporter(
+        self, reporter: Optional[Callable[[], str]]
+    ) -> None:
+        """Provide the sanitized scoring-conformance reporter for manager review.
+
+        The report is advisory evidence for the rule-maker review, never a gate.
+        A falsy reporter clears it.
+        """
+        self._scoring_conformance_reporter = reporter or None
+
+    def _scoring_conformance_report_for_review(self, hitl_stage: str) -> str:
+        """Produce the manager-facing conformance report for this finish, if any.
+
+        Only runs past the plan phase, where the evaluator exists. A reporter
+        that raises degrades to an ``UNAVAILABLE`` note rather than failing the
+        review, so a verifier fault never blocks the rule maker.
+        """
+        reporter = self._scoring_conformance_reporter
+        if not callable(reporter) or hitl_stage == "plan":
+            return ""
+        try:
+            return str(reporter() or "")
+        except Exception as exc:
+            print(f"⚠️  Scoring conformance report unavailable: {exc}")
+            return (
+                "Automated conformance check: UNAVAILABLE (the verifier errored). "
+                "Decide from your own review of the public design."
+            )
+
+    def _durable_conformance_report(self, request_key: str, hitl_stage: str) -> str:
+        """Return the conformance report for this phase-finish request, once.
+
+        The report is part of the durable phase-finish request. A resumed request
+        replays the report persisted on its pending command instead of rerunning
+        the model verifier, so recovery continues from the same evidence and does
+        not repeat an expensive verifier call. It is generated only the first
+        time this request is raised, then persisted by ``review_phase_finish``.
+        """
+        pending = self._pending_worker_command()
+        if (
+            isinstance(pending, dict)
+            and str(pending.get("request_key", "")) == request_key
+            and "verifier_report" in pending
+        ):
+            return str(pending.get("verifier_report") or "")
+        return self._scoring_conformance_report_for_review(hitl_stage)
+
     def finish_tool_phase(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self._worker_request_lock.acquire(blocking=False):
             raise HitlActiveWorkerRequestError(self._pending_worker_command())
@@ -2972,10 +3023,12 @@ class HitlRuntime:
                 workspace_fingerprint=workspace_fingerprint,
                 finish_summary=summary,
                 related_artifacts=related_artifacts,
+                request_key=request_key,
                 requires_human_approval=bool(self._tool_context.get("requires_human_approval")),
                 allow_scoring_approval=bool(self._tool_context.get("allow_scoring_approval"))
                 and hitl_stage in {"execution", "review"},
                 scoring_handoff_context=dict(self._tool_context.get("provenance") or {}),
+                verifier_report=self._durable_conformance_report(request_key, hitl_stage),
                 on_finalize=persist_phase_review,
                 on_scoring_approval=persist_scoring_approval,
                 hitl_mode=self.hitl_mode,

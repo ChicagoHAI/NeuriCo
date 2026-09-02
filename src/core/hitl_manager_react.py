@@ -1083,11 +1083,13 @@ class HitlManager:
         plan_text: str,
         finish_summary: str,
         related_artifacts: List[Dict[str, str]],
+        request_key: str,
         requires_human_approval: bool,
         plan_fingerprint: str = "",
         workspace_fingerprint: str = "",
         allow_scoring_approval: bool = False,
         scoring_handoff_context: Optional[Dict[str, Any]] = None,
+        verifier_report: str = "",
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         on_scoring_approval: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
@@ -1101,6 +1103,9 @@ class HitlManager:
 
         human_inputs: List[Dict[str, Any]] = []
         selected_mode = normalize_hitl_mode(hitl_mode)
+        request_key = self._require_text(
+            request_key, "request_key", "Phase-finish review"
+        )
         requires_human_approval = (
             requires_human_approval and selected_mode is HitlMode.FULL
         )
@@ -1172,15 +1177,26 @@ class HitlManager:
             requires_human_approval=requires_human_approval,
             allow_scoring_approval=allow_scoring_approval,
             is_rule_maker=(pipeline_stage == "rule_maker"),
+            has_verifier_report=bool(str(verifier_report).strip()),
+            verifier_report=str(verifier_report),
             hitl_mode=selected_mode.value,
         )
         return self.request_worker_resolution(
             command={
-                "request_key": self._request_key("phase_finish", request),
+                # Runtime owns phase-finish identity because it computes the
+                # fingerprints used for worker-command retry and recovery.
+                # Persist that exact key instead of independently hashing a
+                # similar manager payload that can drift from runtime's key.
+                "request_key": request_key,
                 "kind": "phase_finish",
                 "hitl_mode": selected_mode.value,
                 "requires_human_approval": requires_human_approval,
                 **request,
+                # Persist the verifier report as part of the durable request so a
+                # restart replays the same evidence instead of rerunning the model
+                # verifier. It is added after `request`, so it never enters the
+                # request-key identity (which must stay deterministic).
+                "verifier_report": str(verifier_report),
             },
             prompt=prompt,
             validate=validate,
