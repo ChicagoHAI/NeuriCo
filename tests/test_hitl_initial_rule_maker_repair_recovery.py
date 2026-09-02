@@ -1,13 +1,16 @@
 """Recovery tests for initial-scoring rule-maker repair."""
 
+import json
 import sys
 from pathlib import Path
 
 import pytest
+from git import Repo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import core.pipeline_orchestrator as pipeline  # noqa: E402
+from core.autoresearch import CheckpointManager  # noqa: E402
 from core.hitl_git_state import HitlGitStateStore  # noqa: E402
 from core.hitl_run_control import HitlRunStopRequested  # noqa: E402
 from core.scoring_seal import seal_scoring_files, sealed_dir_for  # noqa: E402
@@ -53,6 +56,46 @@ def test_repair_handoff_survives_experiment_recovery_and_unseals(tmp_path):
     # unseal it again or lose the manager's feedback.
     restarted = _orchestrator(tmp_path)
     assert restarted._prepare_initial_rule_maker_repair() == "repair the evaluator"
+
+
+def test_repair_handoff_survives_crash_after_public_restore_with_legacy_state(
+    tmp_path,
+):
+    (tmp_path / "public.txt").write_text("pre-experiment\n", encoding="utf-8")
+    orchestrator = _orchestrator(tmp_path)
+
+    # Reproduce an existing workspace whose controller state was tracked before
+    # it became private runtime state.
+    repo = Repo.init(tmp_path)
+    with repo.config_writer() as config:
+        config.set_value("user", "name", "NeuriCo test")
+        config.set_value("user", "email", "test@neurico.dev")
+    repo.git.add(A=True)
+    repo.index.commit("legacy workspace")
+    assert repo.git.ls_files(".neurico/pipeline_state.json").strip()
+
+    recovery = orchestrator._arm_experiment_runner_recovery_checkpoint()
+    assert not repo.git.ls_files(".neurico/pipeline_state.json").strip()
+    orchestrator._begin_initial_rule_maker_repair("repair the evaluator")
+    (tmp_path / "public.txt").write_text("experiment mutation\n", encoding="utf-8")
+
+    # Stop at the exact crash boundary: public state has been restored, but the
+    # live orchestrator has not rewritten or cleared any recovery state.
+    CheckpointManager(tmp_path).restore_checkpoint(
+        recovery["checkpoint_sha"],
+        clean_untracked_public=True,
+    )
+
+    persisted = json.loads(
+        (tmp_path / ".neurico" / "pipeline_state.json").read_text(encoding="utf-8")
+    )
+    assert persisted["runtime_recovery"]["rule_maker"]["manager_feedback"] == (
+        "repair the evaluator"
+    )
+    assert (tmp_path / "public.txt").read_text(encoding="utf-8") == "pre-experiment\n"
+
+    restarted = _orchestrator(tmp_path)
+    assert restarted._initial_rule_maker_repair_recovery()["status"] == "requested"
 
 
 def test_repair_recovery_record_fails_closed_when_malformed(tmp_path):

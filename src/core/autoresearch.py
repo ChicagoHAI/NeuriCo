@@ -64,6 +64,7 @@ BOOTSTRAP_BASELINE_STATE_PATTERNS = (".neurico/bootstrap_baseline_state.json",)
 AGENT_LOCAL_PATTERNS = (".claude/", ".gemini/", ".codex/")
 PRIVATE_RUNTIME_PATTERNS = (
     f"{HITL_RELATIVE_ROOT.as_posix()}/",
+    ".neurico/pipeline_state.json",
     ".neurico/runs/",
     ".experiment_runner_plan_complete",
     ".experiment_runner_complete",
