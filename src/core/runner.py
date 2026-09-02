@@ -82,14 +82,19 @@ def _with_hitl_workspace_run_ownership(method):
         from core.hitl_lock import hitl_workspace_run_lease
 
         idea_id = str(arguments.arguments["idea_id"])
+        expected_work_dir = self._hitl_workspace_for_run_ownership(
+            idea_id,
+            force_fresh=bool(arguments.arguments["force_fresh"]),
+        )
         requested_work_dir = arguments.arguments.get("hitl_work_dir")
-        if requested_work_dir is None:
-            work_dir = self._hitl_workspace_for_run_ownership(
-                idea_id,
-                force_fresh=bool(arguments.arguments["force_fresh"]),
-            )
-        else:
-            work_dir = Path(requested_work_dir).resolve()
+        if requested_work_dir is not None:
+            requested_work_dir = Path(requested_work_dir).expanduser().resolve()
+            if requested_work_dir != expected_work_dir:
+                raise ValueError(
+                    "HITL workspace does not match the workspace registered for "
+                    f"idea {idea_id}."
+                )
+        work_dir = expected_work_dir
         arguments.arguments["hitl_work_dir"] = work_dir
         mode = "continue" if arguments.arguments["hitl_continue_autoresearch"] else "fresh"
         hitl_mode = normalize_hitl_mode(arguments.arguments["hitl_mode"])
