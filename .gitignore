@@ -80,6 +80,19 @@ Thumbs.db
 # Paper-finder build artifacts
 services/paper-finder/.venv/
 services/paper-finder/**/__pycache__/
+tmp_runtime_test/
 
-# axle_check.py runtime scratch (normalized snippet sent to AXLE)
-.axle_last_check.lean
+# Log analysis generated outputs
+src/core/log_analysis/sample_data/parsed/
+*.db
+*.db-shm
+*.db-wal
+
+# Large local log corpora
+log_analysis/raw/
+log_analysis/parsed/
+
+.neurico/neurico.db
+.neurico/*.db
+.neurico/*.db-shm
+.neurico/*.db-wal
