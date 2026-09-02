@@ -2217,11 +2217,8 @@ class HitlManager:
 
         self.world_model.reconcile(self.research)
         research_state = self.research.digest_section()
-        conversation = self.conversation.prepare(
-            research_state=research_state,
-            summarize=lambda prior, state: self._summarize(prior, state, generation),
-        )
-        return [
+        conversation_prefix = "Chronological manager conversation:\n"
+        messages = [
             {
                 "role": "system",
                 "content": _load_hitl_template(
@@ -2244,8 +2241,27 @@ class HitlManager:
                     + "\n--- END UNTRUSTED RESEARCHSTATE ---"
                 ),
             },
-            {"role": "user", "content": "Chronological manager conversation:\n" + conversation},
+            {"role": "user", "content": conversation_prefix},
         ]
+        fixed_context_tokens = max(
+            1,
+            len(
+                json.dumps(
+                    {"messages": messages, "tools": tools},
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            )
+            // 4,
+        )
+        conversation = self.conversation.prepare(
+            research_state=research_state,
+            summarize=lambda prior, state: self._summarize(prior, state, generation),
+            fixed_context_tokens=fixed_context_tokens,
+        )
+        messages[-1]["content"] = conversation_prefix + conversation
+        return messages
 
     def _summarize(self, prior: str, research_state: str, generation: int) -> str:
         from core.hitl import _load_hitl_template
