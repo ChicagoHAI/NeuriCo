@@ -13,16 +13,21 @@ import core.pipeline_orchestrator as pipeline  # noqa: E402
 from core.autoresearch import CheckpointManager  # noqa: E402
 from core.hitl_git_state import HitlGitStateStore  # noqa: E402
 from core.hitl_run_control import HitlRunStopRequested  # noqa: E402
-from core.scoring_seal import seal_scoring_files, sealed_dir_for  # noqa: E402
+from core.scoring_seal import (  # noqa: E402
+    seal_scoring_files,
+    sealed_dir_for,
+    unseal_scoring_files,
+)
 
 
-def _write_evaluator(work_dir: Path) -> None:
+def _write_evaluator(work_dir: Path, *, include_log: bool = True) -> None:
     scoring = work_dir / "scoring"
     scoring.mkdir(parents=True, exist_ok=True)
     (scoring / "eval.py").write_text("print('score')\n", encoding="utf-8")
     (scoring / "targets.json").write_text("{}\n", encoding="utf-8")
     (scoring / "interface.md").write_text("interface\n", encoding="utf-8")
-    (scoring / "rule_maker_log.md").write_text("log\n", encoding="utf-8")
+    if include_log:
+        (scoring / "rule_maker_log.md").write_text("log\n", encoding="utf-8")
 
 
 def _orchestrator(work_dir: Path) -> pipeline.ResearchPipelineOrchestrator:
@@ -56,6 +61,41 @@ def test_repair_handoff_survives_experiment_recovery_and_unseals(tmp_path):
     # unseal it again or lose the manager's feedback.
     restarted = _orchestrator(tmp_path)
     assert restarted._prepare_initial_rule_maker_repair() == "repair the evaluator"
+
+
+def test_repair_unseals_evaluator_without_optional_rule_maker_log(tmp_path):
+    _write_evaluator(tmp_path, include_log=False)
+    orchestrator = _orchestrator(tmp_path)
+    orchestrator._arm_experiment_runner_recovery_checkpoint()
+    seal_scoring_files(tmp_path)
+    orchestrator._begin_initial_rule_maker_repair("repair without log")
+
+    assert orchestrator._prepare_initial_rule_maker_repair() == "repair without log"
+    assert (tmp_path / "scoring" / "eval.py").is_file()
+    assert (tmp_path / "scoring" / "targets.json").is_file()
+    assert (tmp_path / "scoring" / "interface.md").is_file()
+    assert not (tmp_path / "scoring" / "rule_maker_log.md").exists()
+    assert orchestrator.state.get_runtime_recovery("rule_maker")["status"] == "ready"
+
+
+def test_repair_accepts_already_restored_evaluator_without_optional_log(tmp_path):
+    _write_evaluator(tmp_path, include_log=False)
+    orchestrator = _orchestrator(tmp_path)
+    orchestrator._arm_experiment_runner_recovery_checkpoint()
+    sealed_dir = seal_scoring_files(tmp_path)
+    orchestrator._begin_initial_rule_maker_repair("resume without log")
+
+    # Reproduce a restart after unsealing completed but before the repair
+    # recovery record was advanced to ready.
+    unseal_scoring_files(tmp_path, sealed_dir)
+
+    restarted = _orchestrator(tmp_path)
+    assert restarted._prepare_initial_rule_maker_repair() == "resume without log"
+    assert (tmp_path / "scoring" / "eval.py").is_file()
+    assert (tmp_path / "scoring" / "targets.json").is_file()
+    assert (tmp_path / "scoring" / "interface.md").is_file()
+    assert not (tmp_path / "scoring" / "rule_maker_log.md").exists()
+    assert restarted.state.get_runtime_recovery("rule_maker")["status"] == "ready"
 
 
 def test_repair_handoff_survives_crash_after_public_restore_with_legacy_state(

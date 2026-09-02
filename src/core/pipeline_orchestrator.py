@@ -730,7 +730,6 @@ class ResearchPipelineOrchestrator:
                 "scoring/eval.py",
                 "scoring/targets.json",
                 "scoring/interface.md",
-                "scoring/rule_maker_log.md",
             )
             missing = [
                 relative
@@ -2158,7 +2157,6 @@ class ResearchPipelineOrchestrator:
             "scoring/eval.py",
             "scoring/targets.json",
             "scoring/interface.md",
-            "scoring/rule_maker_log.md",
         )
         missing = [
             relative for relative in required if not (self.work_dir / relative).is_file()
