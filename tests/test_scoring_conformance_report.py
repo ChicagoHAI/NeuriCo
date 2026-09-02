@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import core.pipeline_orchestrator as po  # noqa: E402
 from agents.eval_verifier import build_manager_conformance_report  # noqa: E402
 from core.hitl import HitlRuntime, _load_hitl_template  # noqa: E402
+from core.hitl_manager_react import HitlManager  # noqa: E402
 from core.pipeline_orchestrator import ResearchPipelineOrchestrator  # noqa: E402
 
 
@@ -348,13 +349,50 @@ def test_durable_report_generates_when_no_pending_command():
     assert calls == [1], "first raise must generate the report"
 
 
-def test_durable_report_replays_persisted_without_rerunning():
+def test_durable_report_replays_real_manager_request_without_rerunning():
+    identity_runtime = HitlRuntime.__new__(HitlRuntime)
+    identity_runtime.pipeline_stage = "rule_maker"
+    identity_runtime._tool_context = {
+        "actor": "rule_maker",
+        "provenance": {"candidate_id": "candidate-1"},
+    }
+    request_key = identity_runtime._phase_finish_request_key_for(
+        hitl_stage="review",
+        plan_fingerprint="plan-sha",
+        workspace_fingerprint="workspace-sha",
+        summary="Scoring contract is ready.",
+        related_artifacts=[{"path": "scoring/interface.md", "description": "contract"}],
+    )
+
+    captured = {}
+    manager = HitlManager.__new__(HitlManager)
+    manager.request_worker_resolution = (
+        lambda **kwargs: captured.update(kwargs) or {"status": "pending"}
+    )
+    manager.review_phase_finish(
+        pipeline_stage="rule_maker",
+        hitl_stage="review",
+        plan_text="Review the scoring contract.",
+        finish_summary="Scoring contract is ready.",
+        related_artifacts=[{"path": "scoring/interface.md", "description": "contract"}],
+        request_key=request_key,
+        requires_human_approval=False,
+        plan_fingerprint="plan-sha",
+        workspace_fingerprint="workspace-sha",
+        scoring_handoff_context={"candidate_id": "candidate-1"},
+        verifier_report="PERSISTED report",
+        hitl_mode="auto",
+    )
+    pending = captured["command"]
+
     calls = []
-    pending = {"request_key": "rk1", "verifier_report": "PERSISTED report"}
     runtime = _runtime_with_pending(
         lambda: calls.append(1) or "FRESH report", pending=pending)
     # The resumed request replays the persisted report and never calls the model.
-    assert runtime._durable_conformance_report("rk1", "review") == "PERSISTED report"
+    assert pending["request_key"] == request_key
+    assert runtime._durable_conformance_report(
+        request_key, "review"
+    ) == "PERSISTED report"
     assert calls == [], "a resumed request must not rerun the verifier"
 
 

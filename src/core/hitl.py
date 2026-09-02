@@ -3023,6 +3023,7 @@ class HitlRuntime:
                 workspace_fingerprint=workspace_fingerprint,
                 finish_summary=summary,
                 related_artifacts=related_artifacts,
+                request_key=request_key,
                 requires_human_approval=bool(self._tool_context.get("requires_human_approval")),
                 allow_scoring_approval=bool(self._tool_context.get("allow_scoring_approval"))
                 and hitl_stage in {"execution", "review"},

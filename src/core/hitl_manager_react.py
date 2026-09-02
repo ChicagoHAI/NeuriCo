@@ -1083,6 +1083,7 @@ class HitlManager:
         plan_text: str,
         finish_summary: str,
         related_artifacts: List[Dict[str, str]],
+        request_key: str,
         requires_human_approval: bool,
         plan_fingerprint: str = "",
         workspace_fingerprint: str = "",
@@ -1102,6 +1103,9 @@ class HitlManager:
 
         human_inputs: List[Dict[str, Any]] = []
         selected_mode = normalize_hitl_mode(hitl_mode)
+        request_key = self._require_text(
+            request_key, "request_key", "Phase-finish review"
+        )
         requires_human_approval = (
             requires_human_approval and selected_mode is HitlMode.FULL
         )
@@ -1179,7 +1183,11 @@ class HitlManager:
         )
         return self.request_worker_resolution(
             command={
-                "request_key": self._request_key("phase_finish", request),
+                # Runtime owns phase-finish identity because it computes the
+                # fingerprints used for worker-command retry and recovery.
+                # Persist that exact key instead of independently hashing a
+                # similar manager payload that can drift from runtime's key.
+                "request_key": request_key,
                 "kind": "phase_finish",
                 "hitl_mode": selected_mode.value,
                 "requires_human_approval": requires_human_approval,
