@@ -323,6 +323,7 @@ def run_autoresearch_proposer(
                 env=env,
                 timeout=timeout,
                 provider=provider,
+                defer_provider_failure_to_runtime=True,
             )
             return_code = launch["return_code"]
             if launch["timed_out"]:

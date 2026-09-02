@@ -553,6 +553,7 @@ def run_rule_maker(
             env=env,
             timeout=timeout,
             provider=provider,
+            defer_provider_failure_to_runtime=completion_mode == "hitl_runtime",
         )
         return_code = launch["return_code"]
         if launch["timed_out"]:

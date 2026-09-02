@@ -284,6 +284,7 @@ class HitlRuntimeState:
             self._state = self._load_unlocked() or self._default()
             value = self._copy(continuation)
             value["replacement_count"] = 0
+            value["consecutive_provider_failures"] = 0
             value["status"] = "running"
             value["started_at"] = _now()
             self._state["worker_continuation"] = value
@@ -293,6 +294,20 @@ class HitlRuntimeState:
                 activity="working",
             )
             self._save_unlocked()
+
+    def record_worker_provider_result(self, *, failed: bool) -> int:
+        """Record one provider-process result for the active continuation."""
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            continuation = self._state.get("worker_continuation")
+            if not isinstance(continuation, dict):
+                return 0
+            failures = int(continuation.get("consecutive_provider_failures", 0))
+            failures = failures + 1 if failed else 0
+            continuation["consecutive_provider_failures"] = failures
+            continuation["updated_at"] = _now()
+            self._save_unlocked()
+            return failures
 
     def update_worker_continuation(self, **updates: Any) -> None:
         with self._locked():

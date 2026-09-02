@@ -51,6 +51,7 @@ HITL_WORKER_ACTORS = PIPELINE_STAGES | {"autoresearch_proposer", "comment_handle
 HITL_STAGES = {"plan", "execution", "proposal", "review"}
 LEVELS = {"A", "B", "C"}
 IDEA_TYPES = {"decision", "evidence", "proposal"}
+MAX_CONSECUTIVE_PROVIDER_FAILURES = 3
 
 _WORKER_COMMAND_MODULES = {
     "hitl-report-idea": "hitl_report_idea.py",
@@ -1403,6 +1404,34 @@ class HitlRuntime:
         continuation = HitlRuntimeState(self.work_dir).worker_continuation()
         return dict(continuation) if isinstance(continuation, dict) else None
 
+    def _record_worker_provider_result(self, result: Dict[str, Any]) -> None:
+        """Stop after the active continuation exhausts its provider attempts."""
+        if "provider_process_failed" not in result:
+            return
+        failed = bool(result.get("provider_process_failed"))
+        if not failed and result.get("return_code") != 0:
+            return
+
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        failures = HitlRuntimeState(self.work_dir).record_worker_provider_result(
+            failed=failed
+        )
+        if failures < MAX_CONSECUTIVE_PROVIDER_FAILURES:
+            return
+
+        from core.hitl_run_control import (
+            HitlRunStopRequested,
+            active_hitl_run_stop_control,
+        )
+
+        control = active_hitl_run_stop_control()
+        if control is not None:
+            control.request(requested_by="provider_unavailable")
+        raise HitlRunStopRequested(
+            "HITL run stopped after three consecutive provider process failures."
+        )
+
     def resolved_worker_response(self) -> Optional[Dict[str, Any]]:
         """Return the response retained for an idempotent worker-command retry."""
         from core.hitl_runtime_state import HitlRuntimeState
@@ -1875,6 +1904,7 @@ class HitlRuntime:
                     else ""
                 ),
             }
+        self._record_worker_provider_result(result)
         if submitted and submitted.get("status") == "feedback":
             continuation = self.worker_continuation()
             prompt_block = str((continuation or {}).get("prompt_block", "")).strip()
@@ -3251,6 +3281,8 @@ class HitlRuntime:
                     else ""
                 ),
             }
+
+        self._record_worker_provider_result(result)
 
         pending_replacement = self._pending_worker_request_replacement(
             phase=phase,

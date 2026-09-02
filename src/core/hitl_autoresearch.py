@@ -2815,6 +2815,7 @@ def run_hitl_autoresearch_loop(
                 env=launch["env"],
                 timeout=comment_timeout,
                 provider=provider,
+                defer_provider_failure_to_runtime=True,
             )
             if result.get("timed_out"):
                 result["error"] = (

@@ -231,6 +231,7 @@ def run_prebuilt_cli_agent(
     timeout: Optional[int] = None,
     tracker: Optional[RunTracker] = None,
     provider: Optional[str] = None,
+    defer_provider_failure_to_runtime: bool = False,
 ) -> Dict[str, Any]:
     """
     Execute a caller-constructed CLI command with streaming capture.
@@ -348,14 +349,18 @@ def run_prebuilt_cli_agent(
         _flush_output()
 
     elapsed = time.time() - start_time
-    provider_unavailable = bool(
+    provider_process_failed = bool(
         str(provider or "").strip()
         and return_code not in {None, 0}
         and not timed_out
         and not stopped
         and not background_processes_terminated
     )
-    if provider_unavailable and _request_provider_unavailable_stop(provider):
+    if (
+        provider_process_failed
+        and not defer_provider_failure_to_runtime
+        and _request_provider_unavailable_stop(provider)
+    ):
         from core.hitl_run_control import HitlRunStopRequested
 
         raise HitlRunStopRequested(
@@ -378,6 +383,7 @@ def run_prebuilt_cli_agent(
         "timed_out": timed_out,
         "stopped": stopped,
         "background_processes_terminated": background_processes_terminated,
+        "provider_process_failed": provider_process_failed,
     }
 
 

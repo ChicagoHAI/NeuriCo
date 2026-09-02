@@ -1249,6 +1249,7 @@ class ResearchPipelineOrchestrator:
                 env=env,
                 timeout=timeout,
                 provider=provider,
+                defer_provider_failure_to_runtime=runtime_prompt is not None,
             )
             return_code = run_result["return_code"]
 

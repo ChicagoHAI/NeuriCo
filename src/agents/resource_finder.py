@@ -189,6 +189,7 @@ def run_resource_finder(
                 env=env,
                 timeout=timeout,
                 provider=provider,
+                defer_provider_failure_to_runtime=True,
             )
             return_code = launch["return_code"]
             if launch["timed_out"]:
