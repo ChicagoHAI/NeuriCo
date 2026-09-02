@@ -22,6 +22,18 @@ from core.scoring_seal import SEALED_PATHS, verify_sealed_scoring_manifest
 from core.hitl_util import atomic_write_bytes, sha256_file
 
 
+def _safe_tarfile_module(stdlib_module: Any = tarfile) -> Any:
+    """Return a tarfile implementation with the safe data extraction filter."""
+    if hasattr(stdlib_module, "data_filter"):
+        return stdlib_module
+    from backports import tarfile as backported_tarfile
+
+    return backported_tarfile
+
+
+safe_tarfile = _safe_tarfile_module()
+
+
 class HitlScoringWorkspaceError(RuntimeError):
     """Raised when runtime cannot prepare an isolated HITL scorer workspace."""
 
@@ -205,7 +217,7 @@ def validate_checkpoint_gitlinks(
 
 def _extract_git_archive(archive_path: Path, destination: Path) -> None:
     """Extract an archive produced by Git after validating its member paths."""
-    with tarfile.open(archive_path, mode="r:") as archive:
+    with safe_tarfile.open(archive_path, mode="r:") as archive:
         members = archive.getmembers()
         for member in members:
             member_path = PurePosixPath(member.name)
@@ -218,7 +230,11 @@ def _extract_git_archive(archive_path: Path, destination: Path) -> None:
                 raise HitlScoringWorkspaceError(
                     "Runtime rejected an unsafe path in a checkpointed nested repository."
                 )
-        archive.extractall(destination, members=members, filter="data")
+        archive.extractall(
+            destination,
+            members=members,
+            filter=safe_tarfile.data_filter,
+        )
 
 
 def _materialize_checkpoint_gitlinks(
@@ -296,7 +312,7 @@ def _materialize_checkpoint_gitlinks(
             )
         try:
             _extract_git_archive(archive_path, destination)
-        except (OSError, tarfile.TarError) as exc:
+        except (OSError, safe_tarfile.TarError) as exc:
             raise HitlScoringWorkspaceError(
                 "Runtime could not restore checkpointed nested repository "
                 f"{relative.as_posix()}: {exc}"
