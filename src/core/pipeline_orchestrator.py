@@ -1828,9 +1828,11 @@ class ResearchPipelineOrchestrator:
             )
             for phase in ("plan", "execution", "review")
         }
+        repair_feedback = str(initial_scoring_repair_feedback).strip()
         rollback = HitlStageRollback.capture(
             self.work_dir,
             "HITL rule maker starting state",
+            include_rule_maker_repair_state=bool(repair_feedback),
         )
 
         def rule_maker_artifact_validator() -> Dict[str, Any]:
@@ -1903,7 +1905,6 @@ class ResearchPipelineOrchestrator:
             )
 
         try:
-            repair_feedback = str(initial_scoring_repair_feedback).strip()
             if repair_feedback:
                 runtime.prepare_idea_tool_context(
                     hitl_stage="review",

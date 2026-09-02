@@ -131,17 +131,28 @@ class HitlStageRollback:
     hitl_snapshot: HitlGitSnapshot
 
     @classmethod
-    def capture(cls, work_dir: Path, checkpoint_message: str) -> "HitlStageRollback":
+    def capture(
+        cls,
+        work_dir: Path,
+        checkpoint_message: str,
+        *,
+        include_rule_maker_repair_state: bool = False,
+    ) -> "HitlStageRollback":
         from core.autoresearch import CheckpointManager
 
         root = Path(work_dir)
         checkpoint = CheckpointManager(root).create_checkpoint(checkpoint_message)
         state_store = HitlGitStateStore(root)
+        hitl_snapshot = (
+            state_store.create_rule_maker_repair_rollback_snapshot()
+            if include_rule_maker_repair_state
+            else state_store.create_rollback_snapshot()
+        )
         return cls(
             work_dir=root,
             checkpoint_sha=checkpoint.sha,
             state_store=state_store,
-            hitl_snapshot=state_store.create_rollback_snapshot(),
+            hitl_snapshot=hitl_snapshot,
         )
 
     def restore(self, runtime: Any, reason: str, *, cleanup_label: str) -> None:

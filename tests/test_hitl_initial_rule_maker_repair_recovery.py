@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import core.pipeline_orchestrator as pipeline  # noqa: E402
+from core.hitl_git_state import HitlGitStateStore  # noqa: E402
 from core.hitl_run_control import HitlRunStopRequested  # noqa: E402
 from core.scoring_seal import seal_scoring_files, sealed_dir_for  # noqa: E402
 
@@ -103,7 +104,9 @@ def test_stopped_rule_maker_restores_stage_and_keeps_repair_record(
     monkeypatch.setattr(
         pipeline.HitlStageRollback,
         "capture",
-        classmethod(lambda cls, work_dir, message: _Rollback()),
+        classmethod(
+            lambda cls, work_dir, message, **kwargs: _Rollback()
+        ),
     )
     monkeypatch.setattr(orchestrator, "_create_hitl_runtime", lambda stage: _Runtime())
     monkeypatch.setattr(
@@ -131,6 +134,94 @@ def test_stopped_rule_maker_restores_stage_and_keeps_repair_record(
     assert orchestrator.state.get_runtime_recovery("rule_maker")["manager_feedback"] == (
         "repair feedback"
     )
+
+
+def test_failed_rule_maker_repair_restores_complete_evaluator_bytes(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "public.txt").write_text("public\n", encoding="utf-8")
+    _write_evaluator(tmp_path)
+    interface_path = tmp_path / "scoring" / "interface.md"
+    verification_path = tmp_path / "scoring" / "verification.json"
+    verification_path.write_bytes(b'{"verified": true}\n')
+    test_dir = tmp_path / "data" / ".test"
+    test_dir.mkdir(parents=True)
+    test_input_path = test_dir / "input.bin"
+    test_input_path.write_bytes(b"original private input\x00\xff")
+
+    controlled_paths = {
+        "scoring/eval.py": (tmp_path / "scoring" / "eval.py").read_bytes(),
+        "scoring/targets.json": (tmp_path / "scoring" / "targets.json").read_bytes(),
+        "scoring/interface.md": interface_path.read_bytes(),
+        "scoring/rule_maker_log.md": (
+            tmp_path / "scoring" / "rule_maker_log.md"
+        ).read_bytes(),
+        "scoring/verification.json": verification_path.read_bytes(),
+        "data/.test/input.bin": test_input_path.read_bytes(),
+    }
+
+    orchestrator = _orchestrator(tmp_path)
+    snapshots = []
+    create_snapshot = HitlGitStateStore.create_rule_maker_repair_rollback_snapshot
+
+    def record_snapshot(store):
+        snapshot = create_snapshot(store)
+        snapshots.append(snapshot)
+        return snapshot
+
+    class _Runtime:
+        def prepare_idea_tool_context(self, **kwargs):
+            pass
+
+        def compose_worker_prompt(self, *, hitl_stage, phase_prompt):
+            return f"{hitl_stage}: {phase_prompt}"
+
+        def review_prompt_block(self, feedback):
+            return feedback
+
+        def abandon_pending_worker_request_for_rollback(self, reason):
+            pass
+
+        def reload_manager_after_state_restore(self):
+            pass
+
+        def clear_idea_tool_context(self):
+            pass
+
+    def fail_after_mutating_evaluator(**kwargs):
+        (tmp_path / "scoring" / "eval.py").write_bytes(b"broken evaluator\n")
+        (tmp_path / "scoring" / "targets.json").unlink()
+        interface_path.write_bytes(b"broken public interface\n")
+        (tmp_path / "scoring" / "rule_maker_log.md").write_bytes(b"partial log\n")
+        verification_path.unlink()
+        test_input_path.write_bytes(b"modified private input")
+        (test_dir / "new.bin").write_bytes(b"new repair artifact")
+        return {"success": False}, {"approved": False, "error": "repair failed"}
+
+    monkeypatch.setattr(
+        HitlGitStateStore,
+        "create_rule_maker_repair_rollback_snapshot",
+        record_snapshot,
+    )
+    monkeypatch.setattr(orchestrator, "_create_hitl_runtime", lambda stage: _Runtime())
+    monkeypatch.setattr(pipeline, "run_worker_with_replacements", fail_after_mutating_evaluator)
+
+    result = orchestrator._run_rule_maker_hitl(
+        idea={},
+        provider="codex",
+        timeout=None,
+        full_permissions=True,
+        initial_scoring_repair_feedback="repair the evaluator",
+    )
+
+    assert result["success"] is False
+    assert result["hitl_rollback_completed"] is True
+    for relative, expected in controlled_paths.items():
+        assert (tmp_path / relative).read_bytes() == expected
+    assert not (test_dir / "new.bin").exists()
+    assert len(snapshots) == 1
+    assert not HitlGitStateStore(tmp_path).has_snapshot(snapshots[0].ref)
 
 
 def test_pipeline_restart_routes_pending_repair_before_experiment(tmp_path, monkeypatch):
@@ -192,4 +283,3 @@ def test_pipeline_restart_routes_pending_repair_before_experiment(tmp_path, monk
     assert result["success"] is True
     assert rule_maker_feedback == ["persisted repair feedback"]
     assert orchestrator.state.get_runtime_recovery("rule_maker") is None
-
