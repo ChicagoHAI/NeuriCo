@@ -74,7 +74,7 @@ idea:
     compute: cpu_only  # Using APIs, no GPU needed
     time_limit: 7200   # 2 hours (rate limiting consideration)
     memory: "8GB"
-    budget: "$50"      # Estimated API costs
+    budget: 50         # Estimated API costs in USD (numeric per schema)
     dependencies:
       - "openai>=1.0.0"
       - "anthropic>=0.18.0"

@@ -14,6 +14,7 @@ from datetime import datetime
 import yaml
 import json
 import hashlib
+import re
 import sys
 import os
 
@@ -26,6 +27,336 @@ from core.local_resources import (
     validate_evaluation_spec,
     validate_local_resources,
 )
+
+
+def _check_mapping(value: Any, label: str, errors: List[str]) -> bool:
+    """Record an error unless value is a mapping. Returns True when it is.
+
+    Callers gate further inspection on the return value: every consumer of
+    these blocks (prompt_generator, the agents) calls .get() on them, so a
+    non-mapping is a crash waiting to happen rather than a cosmetic problem.
+    """
+    if not isinstance(value, dict):
+        errors.append(f"{label} must be a mapping, got {type(value).__name__}")
+        return False
+    return True
+
+
+def _check_string(value: Any, label: str, errors: List[str],
+                  min_length: int = None, max_length: int = None) -> bool:
+    """Record an error unless value is a string within the schema's bounds."""
+    if not isinstance(value, str):
+        errors.append(f"{label} must be a string, got {type(value).__name__}")
+        return False
+    if min_length is not None and len(value) < min_length:
+        errors.append(f"{label} must be at least {min_length} characters "
+                      f"(got {len(value)})")
+        return False
+    if max_length is not None and len(value) > max_length:
+        errors.append(f"{label} must be at most {max_length} characters "
+                      f"(got {len(value)})")
+        return False
+    return True
+
+
+def _check_list(value: Any, label: str, errors: List[str],
+                item_type: type = None, item_label: str = "item") -> bool:
+    """Record an error unless value is a list, optionally of item_type."""
+    if not isinstance(value, list):
+        errors.append(f"{label} must be a list, got {type(value).__name__}")
+        return False
+    if item_type is not None:
+        for idx, item in enumerate(value):
+            if not isinstance(item, item_type):
+                errors.append(
+                    f"{label}[{idx}]: {item_label} must be "
+                    f"{item_type.__name__}, got {type(item).__name__}")
+                return False
+    return True
+
+
+def _validate_background(background: Any, errors: List[str],
+                         warnings: List[str]) -> None:
+    """Validate idea.background against the schema."""
+    if not _check_mapping(background, "background", errors):
+        return
+
+    if 'description' in background:
+        _check_string(background['description'], "background.description", errors)
+
+    # papers: each entry needs a description plus either a url or a path
+    if 'papers' in background and background['papers'] is not None:
+        if _check_list(background['papers'], "background.papers", errors):
+            for idx, paper in enumerate(background['papers']):
+                label = f"background.papers[{idx}]"
+                if not _check_mapping(paper, label, errors):
+                    continue
+                if 'url' not in paper and 'path' not in paper:
+                    errors.append(f"{label}: must provide either 'url' or 'path'")
+                if 'description' not in paper:
+                    errors.append(f"{label}: missing required field 'description'")
+
+    if 'datasets' in background and background['datasets'] is not None:
+        if _check_list(background['datasets'], "background.datasets", errors):
+            for idx, dataset in enumerate(background['datasets']):
+                label = f"background.datasets[{idx}]"
+                if not _check_mapping(dataset, label, errors):
+                    continue
+                for field in ('name', 'source'):
+                    if field not in dataset:
+                        errors.append(f"{label}: missing required field '{field}'")
+
+    if 'code_references' in background and background['code_references'] is not None:
+        if _check_list(background['code_references'], "background.code_references", errors):
+            for idx, ref in enumerate(background['code_references']):
+                label = f"background.code_references[{idx}]"
+                if not _check_mapping(ref, label, errors):
+                    continue
+                for field in ('repo', 'description'):
+                    if field not in ref:
+                        errors.append(f"{label}: missing required field '{field}'")
+
+
+def _validate_methodology(methodology: Any, errors: List[str]) -> None:
+    """Validate idea.methodology against the schema."""
+    if not _check_mapping(methodology, "methodology", errors):
+        return
+
+    if 'approach' in methodology:
+        _check_string(methodology['approach'], "methodology.approach", errors)
+
+    for field in ('steps', 'baselines', 'metrics'):
+        if field in methodology and methodology[field] is not None:
+            _check_list(methodology[field], f"methodology.{field}", errors,
+                        item_type=str, item_label="entry")
+
+
+def _validate_constraints(constraints: Any, errors: List[str],
+                          warnings: List[str]) -> None:
+    """Validate idea.constraints against the schema."""
+    if not _check_mapping(constraints, "constraints", errors):
+        return
+
+    if 'compute' in constraints:
+        valid_compute = ['cpu_only', 'gpu_required', 'multi_gpu', 'tpu', 'any']
+        if constraints['compute'] not in valid_compute:
+            errors.append(f"Invalid compute constraint: {constraints['compute']}")
+
+    if 'time_limit' in constraints:
+        # Range stays advisory: an out-of-range limit is a judgement call, not
+        # a structural fault, and nothing downstream breaks on it.
+        if not isinstance(constraints['time_limit'], int) or \
+                isinstance(constraints['time_limit'], bool):
+            errors.append("time_limit must be an integer (seconds)")
+        elif constraints['time_limit'] < 60:
+            warnings.append("time_limit is very short (< 60 seconds)")
+        elif constraints['time_limit'] > 86400:
+            warnings.append("time_limit is very long (> 24 hours)")
+
+    if 'memory' in constraints:
+        if _check_string(constraints['memory'], "constraints.memory", errors):
+            if not re.fullmatch(r'[0-9]+(GB|MB)', constraints['memory']):
+                errors.append(
+                    f"constraints.memory must look like '8GB' or '512MB', "
+                    f"got {constraints['memory']!r}")
+
+    if 'budget' in constraints:
+        budget = constraints['budget']
+        if isinstance(budget, bool) or not isinstance(budget, (int, float)):
+            errors.append(
+                f"constraints.budget must be a number, got {type(budget).__name__}")
+        elif budget < 0:
+            errors.append("constraints.budget must not be negative")
+
+    if 'dependencies' in constraints and constraints['dependencies'] is not None:
+        _check_list(constraints['dependencies'], "constraints.dependencies",
+                    errors, item_type=str, item_label="dependency")
+
+
+def _validate_metadata(metadata: Any, errors: List[str]) -> None:
+    """Validate idea.metadata against the schema."""
+    if not _check_mapping(metadata, "metadata", errors):
+        return
+
+    for field in ('author', 'source', 'source_url', 'estimated_duration'):
+        if field in metadata and metadata[field] is not None:
+            _check_string(metadata[field], f"metadata.{field}", errors)
+
+    for field in ('tags', 'related_ideas'):
+        if field in metadata and metadata[field] is not None:
+            _check_list(metadata[field], f"metadata.{field}", errors,
+                        item_type=str, item_label="entry")
+
+    if 'priority' in metadata:
+        valid_priorities = ['low', 'medium', 'high', 'urgent']
+        if metadata['priority'] not in valid_priorities:
+            errors.append(
+                f"Invalid metadata.priority: {metadata['priority']}. "
+                f"Must be one of: {', '.join(valid_priorities)}")
+
+
+def _validate_expected_outputs(expected_outputs: Any, errors: List[str],
+                               warnings: List[str]) -> None:
+    """Validate idea.expected_outputs against the schema."""
+    if not _check_list(expected_outputs, "expected_outputs", errors):
+        return
+
+    if not expected_outputs:
+        warnings.append("expected_outputs is empty - agent will determine appropriate outputs")
+        return
+
+    # The schema lists an enum, but output types are open-ended in practice:
+    # the shipped math/Lean examples declare 'proof' and
+    # 'computational_verification', and domains keep inventing their own. So
+    # an unrecognized type warns rather than fails -- the same treatment
+    # unknown domains already get. Structure (mapping, type, format) stays a
+    # hard requirement, since that is what consumers actually index into.
+    known_types = ['metrics', 'visualization', 'model', 'dataset', 'report',
+                   'code', 'analysis']
+    for idx, output in enumerate(expected_outputs):
+        if not _check_mapping(output, f"Output {idx}", errors):
+            continue
+        if 'type' not in output:
+            errors.append(f"Output {idx}: missing 'type' field")
+        elif output['type'] not in known_types:
+            warnings.append(f"Output {idx}: unrecognized type "
+                            f"{output['type']!r} (known types: "
+                            f"{', '.join(known_types)})")
+        if 'format' not in output:
+            errors.append(f"Output {idx}: missing 'format' field")
+
+
+def validate_idea_spec(idea_spec: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate an idea specification against the NeuriCo schema.
+
+    Module-level so callers that only need validation (e.g. the IdeaHub
+    converter, which validates before anything is written) can reach it
+    without constructing an IdeaManager -- whose __init__ creates the
+    submitted/in_progress/completed directories as a side effect.
+
+    Args:
+        idea_spec: Idea specification dictionary
+
+    Returns:
+        Dictionary with keys:
+        - 'valid': bool
+        - 'errors': List of error messages
+        - 'warnings': List of warning messages
+    """
+    errors = []
+    warnings = []
+
+    # Check top-level structure
+    if not isinstance(idea_spec, dict) or 'idea' not in idea_spec:
+        errors.append("Missing top-level 'idea' key")
+        return {'valid': False, 'errors': errors, 'warnings': warnings}
+
+    idea = idea_spec['idea']
+
+    # Every check below indexes into `idea`; a non-mapping here would turn
+    # membership tests into substring tests (or raise), so stop now.
+    if not _check_mapping(idea, "idea", errors):
+        return {'valid': False, 'errors': errors, 'warnings': warnings}
+
+    # Required fields (v1.1 - reduced from v1.0)
+    required_fields = ['title', 'domain', 'hypothesis']
+    for field in required_fields:
+        if field not in idea or not idea[field]:
+            errors.append(f"Missing required field: {field}")
+
+    # Required-field types and lengths, per ideas/schema.yaml. Only checked
+    # when present and non-empty; absence is already an error above.
+    if idea.get('title'):
+        _check_string(idea['title'], "title", errors, min_length=10, max_length=200)
+    if idea.get('hypothesis'):
+        _check_string(idea['hypothesis'], "hypothesis", errors, min_length=20)
+
+    # Validate domain
+    domain_is_string = True
+    if idea.get('domain'):
+        domain_is_string = _check_string(idea['domain'], "domain", errors)
+
+    config_loader = ConfigLoader()
+    valid_domains = config_loader.get_valid_domains()
+    allow_unknown = config_loader.should_allow_unknown_domains()
+
+    if domain_is_string and 'domain' in idea and idea['domain'] not in valid_domains:
+        if allow_unknown:
+            default_domain = config_loader.get_default_domain()
+            warnings.append(
+                f"Unknown domain '{idea['domain']}' will be treated as '{default_domain}'. "
+                f"Valid domains: {', '.join(valid_domains)}"
+            )
+        else:
+            errors.append(
+                f"Invalid domain: {idea['domain']}. "
+                f"Must be one of: {', '.join(valid_domains)}"
+            )
+
+    if 'max_directions' in idea:
+        max_directions = idea['max_directions']
+        if not isinstance(max_directions, int) or isinstance(max_directions, bool):
+            errors.append("max_directions must be an integer")
+        elif not 1 <= max_directions <= 10:
+            errors.append("max_directions must be between 1 and 10")
+
+    if 'comments' in idea and idea['comments'] is not None:
+        _check_string(idea['comments'], "comments", errors)
+
+    # Optional structured blocks. Each is a mapping or list downstream
+    # (prompt_generator and the agents call .get()/iterate on them), so a
+    # wrong type here becomes a crash mid-run rather than a bad prompt.
+    #
+    # An explicit null is treated as absent rather than as a type error:
+    # `constraints:` with nothing under it is ordinary YAML for "no
+    # constraints", and every consumer guards with `if constraints:`, so None
+    # is skipped safely. A *string* like `constraints: none` is not -- that
+    # reaches constraints.get('compute') and raises. Hence the isinstance
+    # checks below rather than a truthiness test.
+    if 'background' in idea and idea['background'] is not None:
+        _validate_background(idea['background'], errors, warnings)
+
+    if 'methodology' in idea and idea['methodology'] is not None:
+        _validate_methodology(idea['methodology'], errors)
+
+    if 'constraints' in idea and idea['constraints'] is not None:
+        _validate_constraints(idea['constraints'], errors, warnings)
+
+    if 'metadata' in idea and idea['metadata'] is not None:
+        _validate_metadata(idea['metadata'], errors)
+
+    # Validate expected outputs (optional in v1.1)
+    if 'expected_outputs' in idea and idea['expected_outputs'] is not None:
+        _validate_expected_outputs(idea['expected_outputs'], errors, warnings)
+    else:
+        warnings.append("No expected_outputs specified - agent will determine appropriate outputs based on research type")
+
+    # Validate evaluation criteria
+    if 'evaluation_criteria' in idea and idea['evaluation_criteria'] is not None:
+        if _check_list(idea['evaluation_criteria'], "evaluation_criteria",
+                       errors, item_type=str, item_label="criterion"):
+            if len(idea['evaluation_criteria']) == 0:
+                warnings.append("No evaluation criteria specified")
+
+    # Validate local resources (contractual: path + usage required,
+    # missing paths are warnings until staging)
+    lr_errors, lr_warnings = validate_local_resources(idea)
+    errors.extend(lr_errors)
+    warnings.extend(lr_warnings)
+
+    # Validate structured evaluation spec
+    ev_errors, ev_warnings = validate_evaluation_spec(idea)
+    errors.extend(ev_errors)
+    warnings.extend(ev_warnings)
+
+    valid = len(errors) == 0
+
+    return {
+        'valid': valid,
+        'errors': errors,
+        'warnings': warnings
+    }
 
 
 def resolve_ideas_dir(project_root: Optional[Path] = None) -> Path:
@@ -140,6 +471,9 @@ class IdeaManager:
         """
         Validate idea specification.
 
+        Delegates to the module-level validate_idea_spec() so the converter
+        and the submit path enforce exactly the same rules.
+
         Args:
             idea_spec: Idea specification dictionary
 
@@ -149,109 +483,7 @@ class IdeaManager:
             - 'errors': List of error messages
             - 'warnings': List of warning messages
         """
-        errors = []
-        warnings = []
-
-        # Check top-level structure
-        if 'idea' not in idea_spec:
-            errors.append("Missing top-level 'idea' key")
-            return {'valid': False, 'errors': errors, 'warnings': warnings}
-
-        idea = idea_spec['idea']
-
-        # Required fields (v1.1 - reduced from v1.0)
-        required_fields = ['title', 'domain', 'hypothesis']
-        for field in required_fields:
-            if field not in idea or not idea[field]:
-                errors.append(f"Missing required field: {field}")
-
-        # Validate domain
-        config_loader = ConfigLoader()
-        valid_domains = config_loader.get_valid_domains()
-        allow_unknown = config_loader.should_allow_unknown_domains()
-
-        if 'domain' in idea and idea['domain'] not in valid_domains:
-            if allow_unknown:
-                default_domain = config_loader.get_default_domain()
-                warnings.append(
-                    f"Unknown domain '{idea['domain']}' will be treated as '{default_domain}'. "
-                    f"Valid domains: {', '.join(valid_domains)}"
-                )
-            else:
-                errors.append(
-                    f"Invalid domain: {idea['domain']}. "
-                    f"Must be one of: {', '.join(valid_domains)}"
-                )
-
-        # Validate hypothesis length
-        if 'hypothesis' in idea and len(idea['hypothesis']) < 20:
-            warnings.append("Hypothesis is very short (< 20 characters). "
-                          "Consider providing more detail.")
-
-        if 'max_directions' in idea:
-            max_directions = idea['max_directions']
-            if not isinstance(max_directions, int) or isinstance(max_directions, bool):
-                errors.append("max_directions must be an integer")
-            elif not 1 <= max_directions <= 10:
-                errors.append("max_directions must be between 1 and 10")
-
-        # Validate expected outputs (optional in v1.1)
-        if 'expected_outputs' in idea:
-            if not isinstance(idea['expected_outputs'], list):
-                errors.append("expected_outputs must be a list")
-            elif len(idea['expected_outputs']) == 0:
-                warnings.append("expected_outputs is empty - agent will determine appropriate outputs")
-            else:
-                for idx, output in enumerate(idea['expected_outputs']):
-                    if 'type' not in output:
-                        errors.append(f"Output {idx}: missing 'type' field")
-                    if 'format' not in output:
-                        errors.append(f"Output {idx}: missing 'format' field")
-        else:
-            warnings.append("No expected_outputs specified - agent will determine appropriate outputs based on research type")
-
-        # Validate constraints
-        if 'constraints' in idea:
-            constraints = idea['constraints']
-
-            if 'compute' in constraints:
-                valid_compute = ['cpu_only', 'gpu_required', 'multi_gpu', 'tpu', 'any']
-                if constraints['compute'] not in valid_compute:
-                    errors.append(f"Invalid compute constraint: {constraints['compute']}")
-
-            if 'time_limit' in constraints:
-                if not isinstance(constraints['time_limit'], int):
-                    errors.append("time_limit must be an integer (seconds)")
-                elif constraints['time_limit'] < 60:
-                    warnings.append("time_limit is very short (< 60 seconds)")
-                elif constraints['time_limit'] > 86400:
-                    warnings.append("time_limit is very long (> 24 hours)")
-
-        # Validate evaluation criteria
-        if 'evaluation_criteria' in idea:
-            if not isinstance(idea['evaluation_criteria'], list):
-                errors.append("evaluation_criteria must be a list")
-            elif len(idea['evaluation_criteria']) == 0:
-                warnings.append("No evaluation criteria specified")
-
-        # Validate local resources (contractual: path + usage required,
-        # missing paths are warnings until staging)
-        lr_errors, lr_warnings = validate_local_resources(idea)
-        errors.extend(lr_errors)
-        warnings.extend(lr_warnings)
-
-        # Validate structured evaluation spec
-        ev_errors, ev_warnings = validate_evaluation_spec(idea)
-        errors.extend(ev_errors)
-        warnings.extend(ev_warnings)
-
-        valid = len(errors) == 0
-
-        return {
-            'valid': valid,
-            'errors': errors,
-            'warnings': warnings
-        }
+        return validate_idea_spec(idea_spec)
 
     def get_idea(self, idea_id: str) -> Optional[Dict[str, Any]]:
         """

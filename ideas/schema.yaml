@@ -432,6 +432,15 @@ properties:
             type: string
             description: "Who submitted this idea"
 
+          source:
+            type: string
+            description: "Where the idea came from (auto-generated)"
+            examples: ["IdeaHub"]
+
+          source_url:
+            type: string
+            description: "Original URL the idea was fetched from (auto-generated)"
+
           created_at:
             type: string
             format: date-time
