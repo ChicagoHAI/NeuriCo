@@ -43,9 +43,6 @@ def workspace_for_idea(project_root: Path, idea_id: str) -> Path:
     local_workspace = str(metadata.get("local_workspace", "")).strip()
     if local_workspace:
         candidates.append(Path(local_workspace).expanduser())
-    repository_name = str(metadata.get("github_repo_name", "")).strip()
-    if repository_name:
-        candidates.append(workspace_root / repository_name)
     candidates.append(workspace_root / idea_id)
 
     for candidate in candidates:

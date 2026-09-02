@@ -82,10 +82,15 @@ def _with_hitl_workspace_run_ownership(method):
         from core.hitl_lock import hitl_workspace_run_lease
 
         idea_id = str(arguments.arguments["idea_id"])
-        work_dir = self._hitl_workspace_for_run_ownership(
-            idea_id,
-            force_fresh=bool(arguments.arguments["force_fresh"]),
-        )
+        requested_work_dir = arguments.arguments.get("hitl_work_dir")
+        if requested_work_dir is None:
+            work_dir = self._hitl_workspace_for_run_ownership(
+                idea_id,
+                force_fresh=bool(arguments.arguments["force_fresh"]),
+            )
+        else:
+            work_dir = Path(requested_work_dir).resolve()
+        arguments.arguments["hitl_work_dir"] = work_dir
         mode = "continue" if arguments.arguments["hitl_continue_autoresearch"] else "fresh"
         hitl_mode = normalize_hitl_mode(arguments.arguments["hitl_mode"])
         with hitl_workspace_run_lease(
@@ -103,7 +108,7 @@ def _with_hitl_workspace_run_ownership(method):
             # waiting to acquire this lease. Honor that request before the
             # runner mutates any research state.
             raise_if_hitl_run_stop_requested()
-            return method(self, *args, **kwargs)
+            return method(*arguments.args, **arguments.kwargs)
 
     return owned_run
 
@@ -170,15 +175,6 @@ class ResearchRunner:
         if idea is None:
             raise ValueError(f"Idea not found: {idea_id}")
         metadata = dict(idea.get("idea", {}).get("metadata", {}) or {})
-
-        if self.use_github and self.github_manager is not None:
-            repo_name = str(metadata.get("github_repo_name", "")).strip() or None
-            existing = self.github_manager.get_workspace_path(idea_id, repo_name)
-            if existing is not None:
-                return Path(existing).resolve()
-            if repo_name:
-                return (Path(self.github_manager.workspace_dir) / repo_name).resolve()
-
         local_workspace = str(metadata.get("local_workspace", "")).strip()
         if not force_fresh and local_workspace:
             candidate = Path(local_workspace).expanduser()
@@ -224,6 +220,7 @@ class ResearchRunner:
         hitl_manager_no_browser: bool = False,
         hitl_host: Optional[Any] = None,
         hitl_mode: str = "full",
+        hitl_work_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -249,6 +246,8 @@ class ResearchRunner:
                 ``web`` or ``cli``.
             hitl_continue_autoresearch: Human interface for continuing an
                 existing HITL AutoResearch workspace: ``web`` or ``cli``.
+            hitl_work_dir: Authoritative workspace selected by the HITL launcher.
+                Internal to HITL execution; GitHub publication cannot replace it.
 
         Returns:
             Dictionary with:
@@ -277,6 +276,8 @@ class ResearchRunner:
         if len(selected_hitl_modes) > 1:
             raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
         hitl = hitl_autoresearch or hitl_continue_autoresearch
+        if hitl_work_dir is not None and not hitl:
+            raise ValueError("hitl_work_dir is valid only with a HITL AutoResearch entry mode.")
         selected_hitl_mode = normalize_hitl_mode(hitl_mode)
         if selected_hitl_mode is HitlMode.AUTO and not hitl:
             raise ValueError("--auto is valid only with a HITL AutoResearch entry mode.")
@@ -352,11 +353,56 @@ class ResearchRunner:
         # Update status
         self.idea_manager.update_status(idea_id, "in_progress")
 
-        # Setup working directory (GitHub repo or local runs/)
+        # Setup working directory. HITL launchers select the authoritative local
+        # workspace before the run; GitHub is only an optional publication target.
         github_url = None
         github_repo = None
 
-        if self.use_github and self.github_manager:
+        if hitl_work_dir is not None:
+            work_dir = Path(hitl_work_dir).resolve()
+            if not work_dir.exists() or not work_dir.is_dir():
+                raise ValueError(f"HITL workspace does not exist: {work_dir}")
+            is_resuming = (work_dir / ".neurico" / "pipeline_state.json").exists()
+            print(f"\n✅ Using authoritative HITL workspace: {work_dir}\n")
+
+            if self.use_github and self.github_manager:
+                try:
+                    metadata = idea_spec.setdefault("metadata", {})
+                    repo_name = str(metadata.get("github_repo_name", "")).strip()
+                    if repo_name:
+                        repo_info = self.github_manager.get_research_repo(repo_name)
+                    else:
+                        repo_info = self.github_manager.create_research_repo(
+                            idea_id=idea_id,
+                            title=title,
+                            description=idea_spec.get("hypothesis", ""),
+                            private=private,
+                            domain=idea_spec.get("domain", "research"),
+                            provider=provider,
+                            no_hash=no_hash,
+                            hypothesis=idea_spec.get("hypothesis", ""),
+                            auto_init=False,
+                        )
+                    self.github_manager.attach_remote(work_dir, repo_info["clone_url"])
+                    github_url = repo_info["repo_url"]
+                    metadata["github_repo_name"] = repo_info["repo_name"]
+                    metadata["github_repo_url"] = github_url
+                    idea_path = self.idea_manager.get_idea_path(idea_id)
+                    with open(idea_path, "w", encoding="utf-8") as f:
+                        yaml.dump(
+                            without_runtime_compute_backend(idea),
+                            f,
+                            default_flow_style=False,
+                            sort_keys=False,
+                        )
+                    print("✅ GitHub storage attached to the HITL workspace")
+                    print(f"   URL: {github_url}\n")
+                except Exception as e:
+                    print(f"\n⚠️  GitHub storage setup failed: {e}")
+                    print("   Continuing in the authoritative HITL workspace\n")
+                    self.use_github = False
+
+        elif self.use_github and self.github_manager:
             # Check if workspace already exists from submission
             # Try to get repo_name from metadata (new method with short names)
             repo_name = idea_spec.get("metadata", {}).get("github_repo_name")
@@ -454,7 +500,7 @@ class ResearchRunner:
                     self.use_github = False
                     # Fall through to local setup below
 
-        if not self.use_github:
+        if hitl_work_dir is None and not self.use_github:
             existing_workspace = idea.get("idea", {}).get("metadata", {}).get("local_workspace")
 
             if not force_fresh and existing_workspace and Path(existing_workspace).exists():
@@ -602,7 +648,15 @@ class ResearchRunner:
                 print(f"\n❌ Continue AutoResearch error: {e}")
                 success = False
             finally:
-                self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                self._finalize_research(
+                    idea_id,
+                    work_dir,
+                    github_url,
+                    title,
+                    provider,
+                    success,
+                    push_existing=hitl_work_dir is not None,
+                )
                 if owns_hitl_host:
                     hitl_host.stop()
 
@@ -655,7 +709,15 @@ class ResearchRunner:
                 print(f"\n❌ Bootstrap AutoResearch baseline error: {e}")
                 success = False
             finally:
-                self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                self._finalize_research(
+                    idea_id,
+                    work_dir,
+                    github_url,
+                    title,
+                    provider,
+                    success,
+                    push_existing=hitl_work_dir is not None,
+                )
                 if owns_hitl_host:
                     hitl_host.stop()
 
@@ -843,7 +905,15 @@ class ResearchRunner:
                 # Don't raise - let finally block handle cleanup
             finally:
                 # GitHub integration and status updates
-                self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                self._finalize_research(
+                    idea_id,
+                    work_dir,
+                    github_url,
+                    title,
+                    provider,
+                    success,
+                    push_existing=hitl_work_dir is not None,
+                )
                 if owns_hitl_host:
                     hitl_host.stop()
 
@@ -1339,6 +1409,7 @@ https://github.com/ChicagoHAI/neurico
         title: str,
         provider: str,
         success: bool,
+        push_existing: bool = False,
     ):
         """
         Finalize research execution: commit to GitHub and update status.
@@ -1350,6 +1421,8 @@ https://github.com/ChicagoHAI/neurico
             title: Research title
             provider: AI provider used
             success: Whether research succeeded
+            push_existing: Push an already committed HITL checkpoint even when
+                finalization has no new working-tree changes.
         """
         # Commit and push to GitHub if enabled
         if self.use_github and self.github_manager:
@@ -1370,7 +1443,11 @@ https://github.com/ChicagoHAI/neurico
 """
 
                 # Commit and push
-                self.github_manager.commit_and_push(work_dir, commit_msg)
+                self.github_manager.commit_and_push(
+                    work_dir,
+                    commit_msg,
+                    push_if_clean=push_existing,
+                )
 
                 print(f"\n🎉 Results published to GitHub!")
                 if github_url:

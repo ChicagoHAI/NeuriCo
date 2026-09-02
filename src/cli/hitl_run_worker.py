@@ -208,6 +208,7 @@ def main() -> int:
                             str(request["interface"]) if continuation else None
                         ),
                         hitl_mode=hitl_mode,
+                        hitl_work_dir=work_dir,
                     )
         if control.requested() and not bool(result.get("success", False)):
             return _finalize_stopped_run(

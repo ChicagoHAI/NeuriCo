@@ -189,9 +189,6 @@ class HitlWebWorkspaceRegistry:
         local = str(metadata.get("local_workspace", "")).strip()
         if local:
             return Path(local).expanduser()
-        repository = str(metadata.get("github_repo_name", "")).strip()
-        if repository:
-            return self.workspace_root / repository
         return self.workspace_root / idea_id
 
     def catalog(self) -> Dict[str, Any]:

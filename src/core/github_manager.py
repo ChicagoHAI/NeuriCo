@@ -123,7 +123,8 @@ class GitHubManager:
                            domain: Optional[str] = None,
                            provider: Optional[str] = None,
                            no_hash: bool = False,
-                           hypothesis: Optional[str] = None) -> Dict[str, Any]:
+                           hypothesis: Optional[str] = None,
+                           auto_init: bool = True) -> Dict[str, Any]:
         """
         Create a new repository in the organization for research.
 
@@ -136,6 +137,8 @@ class GitHubManager:
             provider: AI provider (claude, gemini, codex)
             no_hash: If True, skip random hash in repo name (use when only one person runs the idea)
             hypothesis: Research hypothesis (fallback for naming when the title is unusable)
+            auto_init: Whether GitHub should create an initial commit. Disable when
+                attaching an existing local workspace to the new repository.
 
         Returns:
             Dictionary with repo information:
@@ -166,16 +169,18 @@ class GitHubManager:
         print(f"   Visibility: {'Private' if private else 'Public'}")
 
         try:
-            # auto_init=True creates an initial commit with README, ensuring the
-            # 'main' branch exists. The agent will overwrite README.md later.
-            # gitignore_template="Python" adds a Python .gitignore in that initial commit.
-            repo = self.owner.create_repo(
+            create_options = dict(
                 name=repo_name,
                 description=description,
                 private=private,
-                auto_init=True,
-                gitignore_template="Python",
+                auto_init=auto_init,
             )
+            # A gitignore template requires GitHub to create an initial commit.
+            # Existing HITL workspaces instead attach to an empty remote so their
+            # established history remains authoritative.
+            if auto_init:
+                create_options["gitignore_template"] = "Python"
+            repo = self.owner.create_repo(**create_options)
 
             print(f"✅ Repository created: {repo.html_url}")
 
@@ -211,6 +216,31 @@ class GitHubManager:
                 error_msg += f"  Status: {e.status}\n"
                 error_msg += f"  Message: {e.data if hasattr(e, 'data') else 'N/A'}"
                 raise RuntimeError(error_msg)
+
+    def attach_remote(self, repo_path: Path, clone_url: str) -> None:
+        """Attach a GitHub remote to an existing repository without fetching it."""
+        if not GITPYTHON_AVAILABLE:
+            raise ImportError("GitPython is required. Install with: pip install GitPython")
+
+        repo = Repo(repo_path)
+        try:
+            origin = repo.remote("origin")
+        except ValueError:
+            repo.create_remote("origin", clone_url)
+        else:
+            origin.set_url(clone_url)
+
+    def get_research_repo(self, repo_name: str) -> Dict[str, Any]:
+        """Return repository metadata without cloning or fetching its contents."""
+        repo = self.owner.get_repo(repo_name)
+        return {
+            "repo_name": repo_name,
+            "repo_url": repo.html_url,
+            "clone_url": repo.clone_url,
+            "ssh_url": repo.ssh_url,
+            "local_path": self.workspace_dir / repo_name,
+            "repo_object": repo,
+        }
 
     def clone_repo(self, clone_url: str, local_path: Path) -> 'Repo':
         """
@@ -250,7 +280,8 @@ class GitHubManager:
     def commit_and_push(self,
                        repo_path: Path,
                        commit_message: str,
-                       branch: str = "main") -> bool:
+                       branch: str = "main",
+                       push_if_clean: bool = False) -> bool:
         """
         Commit all changes and push to GitHub.
 
@@ -258,6 +289,9 @@ class GitHubManager:
             repo_path: Path to local repository
             commit_message: Commit message
             branch: Branch name (default: main)
+            push_if_clean: Push the existing HEAD even when there is no new
+                commit. Used when publishing an independently checkpointed
+                HITL workspace.
 
         Returns:
             True if successful
@@ -298,12 +332,16 @@ class GitHubManager:
                 print(f"   ⚠️  {len(large_files)} file(s) excluded from commit due to GitHub's 100MB file size limit.")
                 print(f"      These files remain in your local workspace but are not pushed to GitHub.")
 
-            # Check if there are changes to commit
-            if repo.is_dirty(untracked_files=True):
+            # Check if there are changes to commit. HITL checkpoints may have
+            # already committed the complete workspace, but that existing HEAD
+            # still needs to reach its external storage remote.
+            has_changes = repo.is_dirty(untracked_files=True)
+            if has_changes:
                 # Commit
                 repo.index.commit(commit_message)
                 print(f"   ✓ Committed: {commit_message}")
 
+            if has_changes or push_if_clean:
                 # Configure remote with authentication
                 origin = repo.remote('origin')
                 origin_url = list(repo.remote('origin').urls)[0]
