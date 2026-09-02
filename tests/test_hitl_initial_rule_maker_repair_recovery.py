@@ -1,5 +1,7 @@
 """Recovery tests for initial-scoring rule-maker repair."""
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,7 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import core.pipeline_orchestrator as pipeline  # noqa: E402
 from core.hitl_git_state import HitlGitStateStore  # noqa: E402
-from core.hitl_run_control import HitlRunStopRequested  # noqa: E402
+from core.hitl_paths import hitl_initial_scoring_repair_control_path  # noqa: E402
+from core.hitl_run_control import (  # noqa: E402
+    HitlInitialScoringRepairControl,
+    HitlRunStopRequested,
+)
 from core.scoring_seal import (  # noqa: E402
     seal_scoring_files,
     sealed_dir_for,
@@ -58,6 +64,97 @@ def test_repair_handoff_survives_experiment_recovery_and_unseals(tmp_path):
     # unseal it again or lose the manager's feedback.
     restarted = _orchestrator(tmp_path)
     assert restarted._prepare_initial_rule_maker_repair() == "repair the evaluator"
+
+
+def test_repair_handoff_reconstructs_pipeline_record_after_rollback(tmp_path):
+    orchestrator = _orchestrator(tmp_path)
+    orchestrator._begin_initial_rule_maker_repair("repair after rollback")
+
+    # Reproduce the public checkpoint restoring its synchronized pipeline state
+    # before the running process can advance the repair record.
+    orchestrator.state.clear_runtime_recovery("rule_maker")
+    assert orchestrator.state.get_runtime_recovery("rule_maker") is None
+
+    restarted = _orchestrator(tmp_path)
+    recovered = restarted._reconcile_initial_rule_maker_repair_handoff()
+
+    assert recovered == restarted.state.get_runtime_recovery("rule_maker")
+    assert recovered["kind"] == pipeline.INITIAL_SCORING_REPAIR_KIND
+    assert recovered["status"] == "requested"
+    assert recovered["manager_feedback"] == "repair after rollback"
+
+
+def test_repair_handoff_survives_private_hitl_state_restore(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    orchestrator = _orchestrator(tmp_path)
+    state_store = HitlGitStateStore(tmp_path)
+    snapshot = state_store.create_rollback_snapshot()
+    control = HitlInitialScoringRepairControl(tmp_path)
+    control.request("repair after private restore")
+
+    state_store.restore(snapshot)
+
+    assert control.record()["manager_feedback"] == "repair after private restore"
+
+
+def test_ready_repair_clears_replayed_handoff(tmp_path):
+    orchestrator = _orchestrator(tmp_path)
+    orchestrator._begin_initial_rule_maker_repair("already prepared")
+    record = orchestrator.state.get_runtime_recovery("rule_maker")
+    orchestrator.state.set_runtime_recovery(
+        "rule_maker", {**record, "status": "ready", "prepared_at": "now"}
+    )
+
+    assert orchestrator._prepare_initial_rule_maker_repair() == "already prepared"
+    assert not hitl_initial_scoring_repair_control_path(tmp_path).exists()
+
+
+def test_repair_handoff_is_kept_until_ready_state_is_durable(tmp_path, monkeypatch):
+    _write_evaluator(tmp_path)
+    orchestrator = _orchestrator(tmp_path)
+    orchestrator._arm_experiment_runner_recovery_checkpoint()
+    seal_scoring_files(tmp_path)
+    orchestrator._begin_initial_rule_maker_repair("retry after interrupted prepare")
+    original_set_runtime_recovery = orchestrator.state.set_runtime_recovery
+
+    def fail_ready_save(stage_name, payload):
+        if stage_name == "rule_maker" and payload.get("status") == "ready":
+            raise OSError("interrupted ready-state write")
+        original_set_runtime_recovery(stage_name, payload)
+
+    monkeypatch.setattr(
+        orchestrator.state, "set_runtime_recovery", fail_ready_save
+    )
+
+    with pytest.raises(OSError, match="interrupted ready-state write"):
+        orchestrator._prepare_initial_rule_maker_repair()
+
+    assert HitlInitialScoringRepairControl(tmp_path).record() is not None
+
+
+def test_repair_handoff_fails_closed_when_malformed(tmp_path):
+    path = hitl_initial_scoring_repair_control_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"version": 1, "action": "wrong"}), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="handoff is malformed"):
+        _orchestrator(tmp_path)._reconcile_initial_rule_maker_repair_handoff()
+
+
+def test_repair_handoff_fails_closed_on_conflicting_pipeline_state(tmp_path):
+    orchestrator = _orchestrator(tmp_path)
+    HitlInitialScoringRepairControl(tmp_path).request("control feedback")
+    orchestrator.state.set_runtime_recovery(
+        "rule_maker",
+        {
+            "kind": pipeline.INITIAL_SCORING_REPAIR_KIND,
+            "status": "requested",
+            "manager_feedback": "different pipeline feedback",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="conflicts with pipeline state"):
+        orchestrator._reconcile_initial_rule_maker_repair_handoff()
 
 
 def test_repair_unseals_evaluator_without_optional_rule_maker_log(tmp_path):

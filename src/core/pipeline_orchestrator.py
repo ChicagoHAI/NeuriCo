@@ -78,7 +78,10 @@ from core.hitl import (
 )
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
 from core.hitl_git import delete_git_ref
-from core.hitl_run_control import HitlRunStopRequested
+from core.hitl_run_control import (
+    HitlInitialScoringRepairControl,
+    HitlRunStopRequested,
+)
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_stage_runtime import (
     HitlStageRollback,
@@ -469,6 +472,7 @@ class ResearchPipelineOrchestrator:
             pending_repair: Optional[Dict[str, Any]] = None
             if scoring_enabled:
                 if hitl_enabled:
+                    self._reconcile_initial_rule_maker_repair_handoff()
                     pending_repair = self._initial_rule_maker_repair_recovery()
                     repair_feedback = (
                         self._prepare_initial_rule_maker_repair()
@@ -696,23 +700,55 @@ class ResearchPipelineOrchestrator:
                 raise RuntimeError(
                     "A different initial rule-maker repair is already pending."
                 )
+            HitlInitialScoringRepairControl(self.work_dir).request(feedback)
             return existing
+        handoff = HitlInitialScoringRepairControl(self.work_dir).request(feedback)
         record = {
             "kind": INITIAL_SCORING_REPAIR_KIND,
             "status": "requested",
             "manager_feedback": feedback,
-            "requested_at": utc_now(),
+            "requested_at": handoff["requested_at"],
+        }
+        self.state.set_runtime_recovery(RULE_MAKER_STAGE, record)
+        return dict(record)
+
+    def _reconcile_initial_rule_maker_repair_handoff(
+        self,
+    ) -> Optional[Dict[str, Any]]:
+        """Restore a repair record rolled back between its decision and preparation."""
+        control = HitlInitialScoringRepairControl(self.work_dir)
+        handoff = control.record()
+        existing = self._initial_rule_maker_repair_recovery()
+        if handoff is None:
+            return existing
+
+        feedback = str(handoff["manager_feedback"]).strip()
+        if existing is not None:
+            if str(existing.get("manager_feedback", "")).strip() != feedback:
+                raise RuntimeError(
+                    "Initial-scoring repair handoff conflicts with pipeline state."
+                )
+            if existing["status"] == "ready":
+                control.clear()
+            return existing
+
+        record = {
+            "kind": INITIAL_SCORING_REPAIR_KIND,
+            "status": "requested",
+            "manager_feedback": feedback,
+            "requested_at": handoff["requested_at"],
         }
         self.state.set_runtime_recovery(RULE_MAKER_STAGE, record)
         return dict(record)
 
     def _prepare_initial_rule_maker_repair(self) -> str:
         """Replay the pre-experiment handoff and make rule-maker repair ready."""
-        record = self._initial_rule_maker_repair_recovery()
+        record = self._reconcile_initial_rule_maker_repair_handoff()
         if record is None:
             raise RuntimeError("No initial rule-maker repair is pending.")
         feedback = str(record["manager_feedback"]).strip()
         if record["status"] == "ready":
+            HitlInitialScoringRepairControl(self.work_dir).clear()
             return feedback
 
         # The manager selected rule-maker repair while the initial experiment
@@ -748,6 +784,7 @@ class ResearchPipelineOrchestrator:
             "prepared_at": utc_now(),
         }
         self.state.set_runtime_recovery(RULE_MAKER_STAGE, ready)
+        HitlInitialScoringRepairControl(self.work_dir).clear()
         return feedback
 
     def _discard_experiment_runner_hitl_recovery_state(self) -> None:

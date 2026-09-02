@@ -10,12 +10,68 @@ import threading
 from typing import Any, Dict, Iterator, Optional
 
 from core.hitl_lock import active_hitl_workspace_run
-from core.hitl_paths import hitl_launch_status_path, hitl_stop_request_path
+from core.hitl_paths import (
+    hitl_initial_scoring_repair_control_path,
+    hitl_launch_status_path,
+    hitl_stop_request_path,
+)
 from core.hitl_util import atomic_write_json, utc_now
 
 
 class HitlRunStopRequested(RuntimeError):
     """Raised at a cooperative boundary after the current run is asked to stop."""
+
+
+class HitlInitialScoringRepairControl:
+    """Crash-safe handoff for one pending initial-scoring evaluator repair."""
+
+    def __init__(self, work_dir: Path) -> None:
+        self.path = hitl_initial_scoring_repair_control_path(Path(work_dir).resolve())
+
+    def request(self, manager_feedback: str) -> Dict[str, Any]:
+        feedback = str(manager_feedback).strip()
+        if not feedback:
+            raise ValueError("Initial-scoring repair requires manager feedback.")
+        existing = self.record()
+        if existing is not None:
+            if existing["manager_feedback"] != feedback:
+                raise RuntimeError(
+                    "A different initial-scoring repair handoff is already pending."
+                )
+            return existing
+        payload = {
+            "version": 1,
+            "action": "initial_scoring_repair",
+            "status": "requested",
+            "manager_feedback": feedback,
+            "requested_at": utc_now(),
+        }
+        atomic_write_json(self.path, payload)
+        return payload
+
+    def record(self) -> Optional[Dict[str, Any]]:
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                "Initial-scoring repair handoff is unavailable or invalid."
+            ) from exc
+        if not isinstance(value, dict):
+            raise RuntimeError("Initial-scoring repair handoff must be an object.")
+        if (
+            value.get("version") != 1
+            or value.get("action") != "initial_scoring_repair"
+            or value.get("status") != "requested"
+            or not str(value.get("manager_feedback", "")).strip()
+            or not str(value.get("requested_at", "")).strip()
+        ):
+            raise RuntimeError("Initial-scoring repair handoff is malformed.")
+        return dict(value)
+
+    def clear(self) -> None:
+        self.path.unlink(missing_ok=True)
 
 
 class HitlRunStopControl:
