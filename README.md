@@ -183,16 +183,27 @@ GitHub; `GITHUB_ORG` is optional (uses the personal account if empty)
 | `GITHUB_ORG` | No | GitHub org name (default: personal account) |
 
 <details>
-<summary>Paper Finder and agent API keys</summary>
+<summary>Paper Finder, scoring verifier, and agent API keys</summary>
 
-**Paper Finder** — `S2_API_KEY` and either `OPENROUTER_KEY` or
-`OPENAI_API_KEY` required for full paper-finder; `COHERE_API_KEY` optional
-(improves ranking)
+**Paper Finder and scoring verifier** — `S2_API_KEY` is required for full
+paper-finder, together with `OPENROUTER_KEY` or `OPENAI_API_KEY`. Scoring-contract
+verification uses the same configured OpenRouter or OpenAI API access. The verifier sends the
+declared contract and a bounded allowlist of scorer/function source to the
+configured external API; it never
+launches a coding agent. OpenRouter requests require zero-data-retention and
+deny data collection per request. In HITL mode an unavailable verifier is
+reported as `API NOT AVAILABLE`, a malformed response is reported as
+`VERIFICATION INCONCLUSIVE`, and manager review continues. In non-HITL
+scoring, verification remains a gate and an unavailable API fails the
+rule-maker stage. The verifier performs one request with SDK retries disabled
+and enforces an outer wall-clock deadline over the complete request.
+`COHERE_API_KEY` is optional (improves paper ranking).
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `OPENROUTER_KEY` | Yes, unless `OPENAI_API_KEY` is set | OpenRouter access for paper-finder, IdeaHub conversion, and LLM repo naming |
-| `OPENAI_API_KEY` | Yes, unless `OPENROUTER_KEY` is set | Direct OpenAI access for paper-finder, IdeaHub conversion, and LLM repo naming |
+| `OPENROUTER_KEY` | Yes, unless `OPENAI_API_KEY` is set | OpenRouter access for paper-finder, IdeaHub conversion, LLM repo naming, and experiments that need it |
+| `OPENAI_API_KEY` | Yes, unless `OPENROUTER_KEY` is set | Direct OpenAI access for paper-finder, IdeaHub conversion, LLM repo naming, and experiments that need it |
+| `NEURICO_EVAL_VERIFIER_MODEL` | No | Override the verifier model (`openai/gpt-4.1` through OpenRouter or `gpt-4.1` through OpenAI by default) |
 | `S2_API_KEY` | For paper-finder | Semantic Scholar API key ([get here](https://www.semanticscholar.org/product/api)) |
 | `COHERE_API_KEY` | No | Improves paper-finder ranking (~7% boost) |
 
