@@ -595,6 +595,7 @@ class ResearchRunner:
 
         if continue_autoresearch:
             success = False
+            hitl_stop_requested = False
             pipeline_result: Dict[str, Any] = {}
             try:
                 if hitl:
@@ -648,6 +649,7 @@ class ResearchRunner:
                         hitl_enabled=bool(hitl),
                     )
             except HitlRunStopRequested:
+                hitl_stop_requested = True
                 raise
             except Exception as e:
                 print(f"\n❌ Continue AutoResearch error: {e}")
@@ -661,6 +663,7 @@ class ResearchRunner:
                     provider,
                     success,
                     push_existing=hitl_work_dir is not None,
+                    publish_github=not hitl_stop_requested,
                 )
                 if owns_hitl_host:
                     hitl_host.stop()
@@ -769,6 +772,7 @@ class ResearchRunner:
                 hitl_mode=selected_hitl_mode,
             )
             success = False
+            hitl_stop_requested = False
 
             # If resuming into an existing workspace, check which stages already completed
             # and skip them — read pipeline_state.json directly rather than relying on
@@ -903,6 +907,7 @@ class ResearchRunner:
                     )
 
             except HitlRunStopRequested:
+                hitl_stop_requested = True
                 raise
             except Exception as e:
                 print(f"\n❌ Pipeline error: {e}")
@@ -918,6 +923,7 @@ class ResearchRunner:
                     provider,
                     success,
                     push_existing=hitl_work_dir is not None,
+                    publish_github=not hitl_stop_requested,
                 )
                 if owns_hitl_host:
                     hitl_host.stop()
@@ -1415,6 +1421,7 @@ https://github.com/ChicagoHAI/neurico
         provider: str,
         success: bool,
         push_existing: bool = False,
+        publish_github: bool = True,
     ):
         """
         Finalize research execution: commit to GitHub and update status.
@@ -1428,9 +1435,11 @@ https://github.com/ChicagoHAI/neurico
             success: Whether research succeeded
             push_existing: Push an already committed HITL checkpoint even when
                 finalization has no new working-tree changes.
+            publish_github: Whether this finalization may publish the workspace.
+                Disabled while a HITL stop is awaiting rollback.
         """
         # Commit and push to GitHub if enabled
-        if self.use_github and self.github_manager:
+        if publish_github and self.use_github and self.github_manager:
             try:
                 print()
                 print("📤 Pushing results to GitHub...")
