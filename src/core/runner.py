@@ -125,7 +125,11 @@ class ResearchRunner:
     """
 
     def __init__(
-        self, project_root: Optional[Path] = None, use_github: bool = True, github_org: str = ""
+        self,
+        project_root: Optional[Path] = None,
+        use_github: bool = True,
+        github_org: str = "",
+        github_required: bool = False,
     ):
         """
         Initialize research runner.
@@ -135,7 +139,11 @@ class ResearchRunner:
                          Defaults to parent of src/
             use_github: Whether to create GitHub repos for experiments (default: True)
             github_org: GitHub organization name (empty string = personal account)
+            github_required: Fail instead of falling back when requested GitHub
+                storage is unavailable. Used by detached HITL launches.
         """
+        if github_required and not use_github:
+            raise ValueError("github_required requires use_github=True.")
         if project_root is None:
             project_root = Path(__file__).parent.parent.parent
 
@@ -152,26 +160,38 @@ class ResearchRunner:
 
         # GitHub integration
         self.use_github = use_github
+        self.github_required = github_required
         self.github_manager = None
 
         if use_github:
             if not GITHUB_AVAILABLE:
+                if github_required:
+                    raise RuntimeError("GitHub storage is unavailable: dependencies are missing.")
                 print("⚠️  GitHub integration disabled: GitHubManager not available")
                 print("   Install dependencies: pip install PyGithub GitPython")
                 self.use_github = False
             elif not os.getenv("GITHUB_TOKEN"):
+                if github_required:
+                    raise RuntimeError("GitHub storage is unavailable: GITHUB_TOKEN is not set.")
                 print("⚠️  GitHub integration disabled: GITHUB_TOKEN not set")
                 print("   Set GITHUB_TOKEN environment variable or create .env file")
                 self.use_github = False
             else:
                 try:
-                    self.github_manager = GitHubManager(org_name=github_org or None)
+                    self.github_manager = GitHubManager(
+                        org_name=github_org or None,
+                        require_org=github_required,
+                    )
                     account_label = self.github_manager.owner_name
                     if self.github_manager.use_personal_account:
                         print(f"✅ GitHub integration enabled (personal account: {account_label})")
                     else:
                         print(f"✅ GitHub integration enabled (org: {account_label})")
                 except Exception as e:
+                    if github_required:
+                        raise RuntimeError(
+                            f"GitHub storage initialization failed: {e}"
+                        ) from e
                     print(f"⚠️  GitHub integration failed: {e}")
                     self.use_github = False
 
@@ -388,7 +408,6 @@ class ResearchRunner:
                             hypothesis=idea_spec.get("hypothesis", ""),
                             auto_init=False,
                         )
-                    self.github_manager.attach_remote(work_dir, repo_info["clone_url"])
                     github_url = repo_info["repo_url"]
                     metadata["github_repo_name"] = repo_info["repo_name"]
                     metadata["github_repo_url"] = github_url
@@ -400,9 +419,12 @@ class ResearchRunner:
                             default_flow_style=False,
                             sort_keys=False,
                         )
+                    self.github_manager.attach_remote(work_dir, repo_info["clone_url"])
                     print("✅ GitHub storage attached to the HITL workspace")
                     print(f"   URL: {github_url}\n")
                 except Exception as e:
+                    if self.github_required:
+                        raise RuntimeError(f"GitHub storage setup failed: {e}") from e
                     print(f"\n⚠️  GitHub storage setup failed: {e}")
                     print("   Continuing in the authoritative HITL workspace\n")
                     self.use_github = False

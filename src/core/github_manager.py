@@ -47,7 +47,8 @@ class GitHubManager:
     def __init__(self,
                  org_name: Optional[str] = None,
                  token: Optional[str] = None,
-                 workspace_dir: Optional[Path] = None):
+                 workspace_dir: Optional[Path] = None,
+                 require_org: bool = False):
         """
         Initialize GitHub manager.
 
@@ -55,8 +56,11 @@ class GitHubManager:
             org_name: GitHub organization name. If None/empty, uses personal account.
             token: GitHub personal access token. If None, reads from GITHUB_TOKEN env var.
             workspace_dir: Directory for cloning repos (default: project_root/workspace)
+            require_org: Fail instead of falling back to the personal account
+                when an explicitly configured organization is inaccessible.
         """
         self.org_name = org_name or None  # Normalize empty string to None
+        self.require_org = require_org
 
         # Get token from parameter or environment
         self.token = token or os.getenv('GITHUB_TOKEN')
@@ -98,6 +102,11 @@ class GitHubManager:
                 self.owner_name = self.org_name
                 print(f"✓ Connected to GitHub organization: {self.org_name}")
             except GithubException as e:
+                if self.require_org:
+                    raise ValueError(
+                        f"Failed to access configured GitHub organization "
+                        f"'{self.org_name}': {e}"
+                    ) from e
                 print(f"⚠️  Cannot access organization '{self.org_name}': {e}")
                 print(f"   Falling back to your personal GitHub account...")
                 self._setup_personal_account()

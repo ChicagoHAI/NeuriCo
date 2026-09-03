@@ -35,6 +35,18 @@ _REQUEST_NAME = re.compile(
 )
 
 
+def _load_project_environment(project_root: Path) -> None:
+    """Load the same project environment used by the ordinary runner CLI."""
+    from dotenv import load_dotenv
+
+    env_local = project_root / ".env.local"
+    env_file = project_root / ".env"
+    if env_local.exists():
+        load_dotenv(env_local, override=False)
+    elif env_file.exists():
+        load_dotenv(env_file, override=False)
+
+
 def _claim_request(path: Path) -> Path:
     expected_parent = hitl_launch_requests_dir(ConfigLoader().get_workspace_parent_dir()).resolve()
     path = path.resolve()
@@ -162,6 +174,7 @@ def main() -> int:
         hitl_mode = normalize_hitl_mode(request.get("hitl_mode")).value
         request["hitl_mode"] = hitl_mode
         project_root = PROJECT_ROOT.resolve()
+        _load_project_environment(project_root)
         request_id = str(request["request_id"])
         control = HitlRunStopControl(work_dir, request_id)
         os.environ["NEURICO_HITL_REQUEST_ID"] = request_id
@@ -194,9 +207,12 @@ def main() -> int:
             )
             with log_path.open("a", encoding="utf-8") as output:
                 with redirect_stdout(output), redirect_stderr(output):
+                    github_requested = bool(request.get("github", False))
                     result = ResearchRunner(
                         project_root=project_root,
-                        use_github=bool(request.get("github", False)),
+                        use_github=github_requested,
+                        github_org=os.getenv("GITHUB_ORG", ""),
+                        github_required=github_requested,
                     ).run_research(
                         str(request["idea_id"]),
                         provider=str(request["provider"]),
