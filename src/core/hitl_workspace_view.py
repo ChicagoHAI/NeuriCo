@@ -71,9 +71,10 @@ class HitlWorkspaceView:
         whiteboard = self._whiteboard()
         research = self._research_state()
         runtime = self._runtime_state()
+        launch_status = self._launch_status()
         inbox = self._inbox(runtime)
         conversation = self._conversation(inbox)
-        notifications = self._notifications(runtime, ideas)
+        notifications = self._notifications(runtime, ideas, launch_status)
         return {
             "workspace": self.work_dir.name,
             "autoresearch": self._autoresearch_status(),
@@ -104,7 +105,7 @@ class HitlWorkspaceView:
     def notifications(self) -> List[Dict[str, Any]]:
         """Return the shared, user-facing projection of durable interface events."""
         runtime = self._runtime_state()
-        return self._notifications(runtime, self._ideas())
+        return self._notifications(runtime, self._ideas(), self._launch_status())
 
     def interface_projection(self) -> Dict[str, Any]:
         """Return cached live status and notifications for passive UI refreshes."""
@@ -134,7 +135,11 @@ class HitlWorkspaceView:
             self._idea_revision = idea_revision
         projection = {
             "live": self._live_status(runtime, owner=owner, owner_checked=True),
-            "notifications": self._notifications(runtime, self._projected_ideas),
+            "notifications": self._notifications(
+                runtime,
+                self._projected_ideas,
+                self._launch_status(),
+            ),
         }
         self._interface_revision = revision
         self._interface_projection = projection
@@ -899,14 +904,36 @@ class HitlWorkspaceView:
             "summary": summaries.get(outcome, "Response recorded. Research continues."),
         }
 
+    def _launch_failure_notification(
+        self,
+        launch_status: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if str(launch_status.get("status", "")).strip() != "failed":
+            return None
+        created_at = str(
+            launch_status.get("failed_at") or launch_status.get("updated_at") or ""
+        ).strip()
+        request_id = str(launch_status.get("request_id", "")).strip()
+        return {
+            "id": f"launch_failed:{request_id or created_at}",
+            "kind": "run",
+            "created_at": created_at,
+            "tone": "error",
+            "title": "Research could not start",
+            "summary": self._compact_notification_text(
+                launch_status.get("message") or "Research could not start."
+            ),
+        }
+
     def _notifications(
         self,
         runtime: Dict[str, Any],
         ideas: List[Dict[str, Any]],
+        launch_status: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         events = runtime.get("interface_events", [])
         if not isinstance(events, list):
-            return []
+            events = []
         ideas_by_id = {str(idea.get("idea_id", "")): idea for idea in ideas}
         projected: List[Dict[str, Any]] = []
         last_phase_signature: Optional[tuple[str, str]] = None
@@ -957,6 +984,9 @@ class HitlWorkspaceView:
             elif event.get("kind") == "request_resolved":
                 if bool(event.get("human_involved")):
                     projected.append(self._request_notification(event))
+        launch_notification = self._launch_failure_notification(launch_status or {})
+        if launch_notification is not None:
+            projected.append(launch_notification)
         return sorted(projected, key=lambda item: str(item.get("created_at", "")))
 
     def _ideas(self) -> List[Dict[str, Any]]:

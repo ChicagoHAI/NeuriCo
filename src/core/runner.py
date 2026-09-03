@@ -419,6 +419,9 @@ class ResearchRunner:
                             default_flow_style=False,
                             sort_keys=False,
                         )
+                    from core.autoresearch import CheckpointManager
+
+                    CheckpointManager(work_dir)
                     self.github_manager.attach_remote(work_dir, repo_info["clone_url"])
                     print("✅ GitHub storage attached to the HITL workspace")
                     print(f"   URL: {github_url}\n")

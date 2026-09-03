@@ -276,6 +276,7 @@ def main() -> int:
                 hitl_launch_status_path(Path(str(request["work_dir"]))),
                 {
                     "status": "failed",
+                    "request_id": request.get("request_id", ""),
                     "failed_at": failed_at,
                     "updated_at": failed_at,
                     "mode": request.get("mode", ""),
