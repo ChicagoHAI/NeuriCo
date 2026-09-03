@@ -468,7 +468,7 @@ class ResearchRunner:
                     idea["idea"]["metadata"]["github_repo_url"] = github_url
 
                     # Save updated metadata
-                    idea_path = self.idea_manager.ideas_dir / "submitted" / f"{idea_id}.yaml"
+                    idea_path = self.idea_manager.get_idea_path(idea_id)
                     with open(idea_path, "w", encoding="utf-8") as f:
                         yaml.dump(
                             without_runtime_compute_backend(idea),
