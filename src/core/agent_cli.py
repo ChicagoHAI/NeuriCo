@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from typing import Mapping, Optional
 
+from core.security import remove_github_credentials
+
 
 CLI_COMMANDS = {
     "claude": "claude -p",
@@ -66,6 +68,7 @@ def build_agent_environment(
         env.update({str(key): str(value) for key, value in env_extra.items()})
     if provider == "gemini":
         env["GEMINI_CLI_IDE_DISABLE"] = "1"
+    remove_github_credentials(env)
     return env
 
 

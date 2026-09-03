@@ -25,6 +25,7 @@ from core.hitl_run_control import (  # noqa: E402
     activate_hitl_run_stop_control,
 )
 from core.hitl_util import atomic_write_json, utc_now  # noqa: E402
+from core.security import remove_github_credentials  # noqa: E402
 from core.runner import ResearchRunner  # noqa: E402
 from cli.hitl_launcher import workspace_for_idea  # noqa: E402
 
@@ -208,12 +209,17 @@ def main() -> int:
             with log_path.open("a", encoding="utf-8") as output:
                 with redirect_stdout(output), redirect_stderr(output):
                     github_requested = bool(request.get("github", False))
-                    result = ResearchRunner(
+                    runner = ResearchRunner(
                         project_root=project_root,
                         use_github=github_requested,
                         github_org=os.getenv("GITHUB_ORG", ""),
                         github_required=github_requested,
-                    ).run_research(
+                    )
+                    # The runtime-owned GitHub manager has captured its
+                    # credential. Everything launched by this dedicated run
+                    # process inherits the credential-free environment below.
+                    remove_github_credentials(os.environ)
+                    result = runner.run_research(
                         str(request["idea_id"]),
                         provider=str(request["provider"]),
                         write_paper=bool(request.get("write_paper", False)),

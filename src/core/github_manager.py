@@ -10,6 +10,7 @@ This module manages:
 
 from pathlib import Path
 from typing import Optional, Dict, Any
+import base64
 import os
 import subprocess
 import shlex
@@ -356,14 +357,23 @@ class GitHubManager:
                 origin = repo.remote('origin')
                 origin_url = list(repo.remote('origin').urls)[0]
 
-                # Inject token for push
-                if 'https://' in origin_url and self.token not in origin_url:
-                    auth_url = origin_url.replace('https://', f'https://{self.token}@')
-                    origin.set_url(auth_url)
+                # Authenticate only the Git process. Never persist a token in
+                # the workspace's remote URL where a later agent could read it.
+                git_environment = {"GIT_TERMINAL_PROMPT": "0"}
+                if origin_url.startswith("https://"):
+                    basic_auth = base64.b64encode(
+                        f"x-access-token:{self.token}".encode("utf-8")
+                    ).decode("ascii")
+                    git_environment.update(
+                        GIT_CONFIG_COUNT="1",
+                        GIT_CONFIG_KEY_0="http.extraHeader",
+                        GIT_CONFIG_VALUE_0=f"Authorization: Basic {basic_auth}",
+                    )
 
                 # Push using refspec HEAD:refs/heads/{branch} so it works even if
                 # the local branch name differs (e.g., "master" vs "main" on older git)
-                push_results = origin.push(f"HEAD:refs/heads/{branch}")
+                with repo.git.custom_environment(**git_environment):
+                    push_results = origin.push(f"HEAD:refs/heads/{branch}")
                 if not push_results:
                     raise RuntimeError("GitHub push returned no status.")
 
