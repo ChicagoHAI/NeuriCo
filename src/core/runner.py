@@ -619,6 +619,7 @@ class ResearchRunner:
             success = False
             hitl_stop_requested = False
             pipeline_result: Dict[str, Any] = {}
+            github_publication: Optional[Dict[str, Any]] = None
             try:
                 if hitl:
                     from core.hitl_autoresearch import continue_hitl_autoresearch
@@ -677,7 +678,7 @@ class ResearchRunner:
                 print(f"\n❌ Continue AutoResearch error: {e}")
                 success = False
             finally:
-                self._finalize_research(
+                github_publication = self._finalize_research(
                     idea_id,
                     work_dir,
                     github_url,
@@ -690,16 +691,20 @@ class ResearchRunner:
                 if owns_hitl_host:
                     hitl_host.stop()
 
-            return {
+            result = {
                 "work_dir": work_dir,
                 "github_url": github_url,
                 "success": success,
                 "autoresearch": pipeline_result.get("autoresearch"),
             }
+            if hitl:
+                result["github_publication"] = github_publication
+            return result
 
         if bootstrap_autoresearch_baseline or hitl_bootstrap_autoresearch_baseline:
             success = False
             baseline_result: Dict[str, Any] = {}
+            github_publication: Optional[Dict[str, Any]] = None
             try:
                 bootstrap_args = dict(
                     idea=idea,
@@ -739,7 +744,7 @@ class ResearchRunner:
                 print(f"\n❌ Bootstrap AutoResearch baseline error: {e}")
                 success = False
             finally:
-                self._finalize_research(
+                github_publication = self._finalize_research(
                     idea_id,
                     work_dir,
                     github_url,
@@ -751,12 +756,15 @@ class ResearchRunner:
                 if owns_hitl_host:
                     hitl_host.stop()
 
-            return {
+            result = {
                 "work_dir": work_dir,
                 "github_url": github_url,
                 "success": success,
                 "bootstrap_autoresearch_baseline": baseline_result,
             }
+            if hitl:
+                result["github_publication"] = github_publication
+            return result
 
         # Choose execution mode: multi-agent pipeline or legacy monolithic
         if multi_agent:
@@ -795,6 +803,7 @@ class ResearchRunner:
             )
             success = False
             hitl_stop_requested = False
+            github_publication: Optional[Dict[str, Any]] = None
 
             # If resuming into an existing workspace, check which stages already completed
             # and skip them — read pipeline_state.json directly rather than relying on
@@ -937,7 +946,7 @@ class ResearchRunner:
                 # Don't raise - let finally block handle cleanup
             finally:
                 # GitHub integration and status updates
-                self._finalize_research(
+                github_publication = self._finalize_research(
                     idea_id,
                     work_dir,
                     github_url,
@@ -957,6 +966,8 @@ class ResearchRunner:
                 "success": success,
                 "pipeline_result": pipeline_result,
             }
+            if hitl:
+                result["github_publication"] = github_publication
             if "autoresearch_initial_node" in pipeline_result:
                 result["autoresearch_initial_node"] = pipeline_result["autoresearch_initial_node"]
             if "autoresearch" in pipeline_result:
@@ -1444,7 +1455,7 @@ https://github.com/ChicagoHAI/neurico
         success: bool,
         push_existing: bool = False,
         publish_github: bool = True,
-    ):
+    ) -> Optional[Dict[str, Any]]:
         """
         Finalize research execution: commit to GitHub and update status.
 
@@ -1460,8 +1471,11 @@ https://github.com/ChicagoHAI/neurico
             publish_github: Whether this finalization may publish the workspace.
                 Disabled while a HITL stop is awaiting rollback.
         """
+        publication: Optional[Dict[str, Any]] = None
+
         # Commit and push to GitHub if enabled
         if publish_github and self.use_github and self.github_manager:
+            publication = {"requested": True, "status": "pending"}
             try:
                 print()
                 print("📤 Pushing results to GitHub...")
@@ -1479,18 +1493,32 @@ https://github.com/ChicagoHAI/neurico
 """
 
                 # Commit and push
-                self.github_manager.commit_and_push(
+                pushed = self.github_manager.commit_and_push(
                     work_dir,
                     commit_msg,
                     push_if_clean=push_existing,
                 )
 
-                print(f"\n🎉 Results published to GitHub!")
-                if github_url:
-                    print(f"   {github_url}")
+                if not pushed:
+                    if getattr(self, "github_required", False):
+                        raise RuntimeError("GitHub publication did not push a checkpoint.")
+                    publication["status"] = "unchanged"
+                else:
+                    from git import Repo as GitRepo
+
+                    publication.update(
+                        status="succeeded",
+                        commit_sha=GitRepo(work_dir).head.commit.hexsha,
+                    )
+
+                    print(f"\n🎉 Results published to GitHub!")
+                    if github_url:
+                        print(f"   {github_url}")
 
             except Exception as e:
-                print(f"\n⚠️  Failed to push to GitHub: {e}")
+                message = sanitize_text(str(e).strip() or e.__class__.__name__)
+                publication.update(status="failed", message=message)
+                print(f"\n⚠️  Failed to push to GitHub: {message}")
                 print("   Results are available locally")
 
         # Update idea status
@@ -1504,6 +1532,8 @@ https://github.com/ChicagoHAI/neurico
         print(f"   Location: {work_dir}")
         if github_url:
             print(f"   GitHub: {github_url}")
+
+        return publication
 
 
 def main():

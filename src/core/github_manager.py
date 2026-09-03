@@ -26,6 +26,7 @@ except ImportError:
 
 try:
     from git import Repo, GitCommandError
+    from git.remote import PushInfo
     GITPYTHON_AVAILABLE = True
 except ImportError:
     GITPYTHON_AVAILABLE = False
@@ -362,7 +363,26 @@ class GitHubManager:
 
                 # Push using refspec HEAD:refs/heads/{branch} so it works even if
                 # the local branch name differs (e.g., "master" vs "main" on older git)
-                origin.push(f"HEAD:refs/heads/{branch}")
+                push_results = origin.push(f"HEAD:refs/heads/{branch}")
+                if not push_results:
+                    raise RuntimeError("GitHub push returned no status.")
+
+                failure_flags = (
+                    PushInfo.ERROR
+                    | PushInfo.REJECTED
+                    | PushInfo.REMOTE_REJECTED
+                    | PushInfo.REMOTE_FAILURE
+                    | PushInfo.NO_MATCH
+                )
+                failures = [
+                    result for result in push_results if result.flags & failure_flags
+                ]
+                if failures:
+                    details = "; ".join(
+                        str(result.summary).strip() or "GitHub rejected the push."
+                        for result in failures
+                    )
+                    raise RuntimeError(f"GitHub push failed: {details}")
                 print(f"   ✓ Pushed to {branch}")
 
                 return True

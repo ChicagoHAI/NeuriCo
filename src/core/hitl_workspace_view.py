@@ -386,6 +386,10 @@ class HitlWorkspaceView:
         continuation_status = str(continuation.get("status", "")).strip()
         launch_status = self._launch_status()
         launch_state = str(launch_status.get("status", "")).strip()
+        github_publication = launch_status.get("github_publication")
+        github_publication = (
+            github_publication if isinstance(github_publication, dict) else {}
+        )
         launch_request_id = str(launch_status.get("request_id", "")).strip()
         launch_updated_at = self._parse_timestamp(
             launch_status.get("updated_at") or launch_status.get("created_at")
@@ -512,6 +516,24 @@ class HitlWorkspaceView:
                     active=False,
                     display_stage="Start failed",
                     display_phase="",
+                )
+            if (
+                launch_state == "completed"
+                and github_publication.get("status") == "failed"
+            ):
+                publication_error = str(github_publication.get("message", "")).strip()
+                detail = "Research completed locally, but GitHub publication failed."
+                if publication_error:
+                    detail = f"{detail} {publication_error}"
+                return projected(
+                    "publication_failed",
+                    "GitHub publication failed",
+                    detail,
+                    next_step="Fix the GitHub issue, then publish the saved checkpoint again.",
+                    record=launch_status,
+                    active=False,
+                    display_stage="Complete",
+                    display_phase="GitHub publication failed",
                 )
             if has_pending_work:
                 if unresolved:

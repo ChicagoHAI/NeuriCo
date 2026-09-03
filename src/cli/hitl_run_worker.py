@@ -233,21 +233,27 @@ def main() -> int:
                 control=control,
             )
         finished_at = utc_now()
+        publication = result.get("github_publication")
+        completed_status: Dict[str, Any] = {
+            "status": "completed",
+            "request_id": request["request_id"],
+            "started_at": started_at,
+            "completed_at": finished_at,
+            "updated_at": finished_at,
+            "mode": request["mode"],
+            "hitl_mode": hitl_mode,
+            "provider": request["provider"],
+            "success": bool(result.get("success", False)),
+        }
+        if isinstance(publication, dict):
+            completed_status["github_publication"] = publication
         atomic_write_json(
             hitl_launch_status_path(work_dir),
-            {
-                "status": "completed",
-                "request_id": request["request_id"],
-                "started_at": started_at,
-                "completed_at": finished_at,
-                "updated_at": finished_at,
-                "mode": request["mode"],
-                "hitl_mode": hitl_mode,
-                "provider": request["provider"],
-                "success": bool(result.get("success", False)),
-            },
+            completed_status,
         )
         control.clear()
+        if isinstance(publication, dict) and publication.get("status") == "failed":
+            return 1
         return 0
     except HitlRunStopRequested:
         if request.get("work_dir") and control is not None:
