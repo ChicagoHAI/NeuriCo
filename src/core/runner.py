@@ -58,6 +58,7 @@ LOGGER = logging.getLogger(__name__)
 
 try:
     from core.github_manager import GitHubManager
+    from github.GithubException import UnknownObjectException
 
     GITHUB_AVAILABLE = True
 except ImportError:
@@ -394,9 +395,14 @@ class ResearchRunner:
                 try:
                     metadata = idea_spec.setdefault("metadata", {})
                     repo_name = str(metadata.get("github_repo_name", "")).strip()
+                    repo_info = None
                     if repo_name:
-                        repo_info = self.github_manager.get_research_repo(repo_name)
-                    else:
+                        try:
+                            repo_info = self.github_manager.get_research_repo(repo_name)
+                        except UnknownObjectException as e:
+                            if e.status != 404:
+                                raise
+                    if repo_info is None:
                         repo_info = self.github_manager.create_research_repo(
                             idea_id=idea_id,
                             title=title,
