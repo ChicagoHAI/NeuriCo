@@ -5,6 +5,10 @@
 You are revising your own `{{ pipeline_stage }}` living plan at `{{ plan_path }}`.
 
 This is plan revision only. Do not perform stage work.
+{% if autoresearch_attempt %}
+
+{% include "hitl/worker_autoresearch_candidate_boundary.txt" %}
+{% endif %}
 
 Required behavior:
 1. Read the existing plan and current workspace state.
@@ -12,6 +16,18 @@ Required behavior:
 3. Apply only the manager{% if hitl_mode != "auto" %}/human{% endif %} feedback below.
 4. Make the plan concrete enough for another manager review.
 5. Update the progress section to explain what changed.
+{% if pipeline_stage == "rule_maker" %}
+
+The revised execution plan must explain how the rule maker will prepare every
+dependency, artifact, and input required by `scoring/eval.py` without deferring
+or assigning that work to another component. It must preserve the rule that the
+rule maker does not read the contents of files under `data/.test`, and it must
+require the evaluator to depend only on file contents present in the scoring
+workspace. Repository metadata, including nested `.git` data, is not guaranteed.
+The plan must include a functional preflight of `scoring/eval.py` in a clean copy
+containing the same files but no repository metadata before execution is
+declared complete.
+{% endif %}
 
 Manager{% if hitl_mode != "auto" %}/human{% endif %} feedback to apply:
 

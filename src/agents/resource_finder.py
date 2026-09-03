@@ -69,7 +69,7 @@ def run_resource_finder(
     work_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: int = 2700,  # 45 minutes default
+    timeout: Optional[int] = 2700,  # 45 minutes default
     full_permissions: bool = True,
     completion_marker_name: str = ".resource_finder_complete",
     completion_mode: str = "marker",
@@ -124,7 +124,8 @@ def run_resource_finder(
     print("🔍 Starting Resource Finder Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
-    print(f"   Timeout: {timeout}s ({timeout//60} minutes)")
+    timeout_label = "disabled" if timeout is None else f"{timeout}s ({timeout // 60} minutes)"
+    print(f"   Timeout: {timeout_label}")
     print("=" * 80)
 
     # Generate prompt
@@ -187,6 +188,8 @@ def run_resource_finder(
                 transcript_file=transcript_file,
                 env=env,
                 timeout=timeout,
+                provider=provider,
+                defer_provider_failure_to_runtime=True,
             )
             return_code = launch["return_code"]
             if launch["timed_out"]:
@@ -296,7 +299,7 @@ def run_resource_finder(
 
     print()
 
-    return {
+    result = {
         "success": success,
         "completion_marker": str(completion_marker) if completion_marker.exists() else None,
         "outputs": found_outputs,
@@ -307,6 +310,12 @@ def run_resource_finder(
         if completion_mode == "hitl_runtime"
         else False,
     }
+    if completion_mode == "hitl_runtime":
+        result["return_code"] = return_code
+        result["provider_process_failed"] = bool(
+            launch.get("provider_process_failed")
+        )
+    return result
 
 
 def wait_for_completion(work_dir: Path, timeout: int = 3600, check_interval: int = 5) -> bool:

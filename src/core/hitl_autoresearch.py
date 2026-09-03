@@ -122,6 +122,21 @@ class HitlRecoveryResult:
     frontier_transition: Optional[Dict[str, Any]] = None
 
 
+def _scorer_result_from_objective_score(objective_score: Any) -> Dict[str, Any]:
+    """Read both normalized and legacy HITL objective-score records."""
+    if not isinstance(objective_score, dict):
+        return {}
+    legacy = objective_score.get("scorer_result")
+    if not isinstance(legacy, dict):
+        return dict(objective_score)
+    scorer_result = dict(legacy)
+    if not isinstance(scorer_result.get("results"), dict) and isinstance(
+        objective_score.get("results"), dict
+    ):
+        scorer_result["results"] = objective_score["results"]
+    return scorer_result
+
+
 def _initial_publication_pipeline_result(
     work_dir: Path,
     transition: Dict[str, Any],
@@ -134,11 +149,8 @@ def _initial_publication_pipeline_result(
         payload = None
     if isinstance(payload, dict):
         return payload
-    objective_score = transition.get("objective_score")
-    scorer_result = (
-        dict(objective_score.get("scorer_result") or {})
-        if isinstance(objective_score, dict)
-        else {}
+    scorer_result = _scorer_result_from_objective_score(
+        transition.get("objective_score")
     )
     return {
         "success": True,
@@ -259,12 +271,12 @@ def run_fresh_hitl_autoresearch_initial_node(
     provider: str,
     pause_after_resources: bool,
     skip_resource_finder: bool,
-    resource_finder_timeout: int,
-    experiment_runner_timeout: int,
+    resource_finder_timeout: Optional[int],
+    experiment_runner_timeout: Optional[int],
     full_permissions: bool,
     use_scribe: bool,
-    rule_maker_timeout: int,
-    scorer_timeout: int,
+    rule_maker_timeout: Optional[int],
+    scorer_timeout: Optional[int],
     manifest_trimmer_timeout: int,
     autoresearch_history_dir: Optional[Path],
     manager: Optional[Any] = None,
@@ -1053,11 +1065,11 @@ def continue_hitl_autoresearch(
     templates_dir: Path,
     provider: str,
     full_permissions: bool,
-    scorer_timeout: int,
+    scorer_timeout: Optional[int],
     iterations: int,
     autoresearch_history_dir: Optional[Path],
-    proposer_timeout: int,
-    comment_timeout: int,
+    proposer_timeout: Optional[int],
+    comment_timeout: Optional[int],
     manager: Optional[Any] = None,
     channel: Optional[Any] = None,
     manager_config: Optional[Dict[str, Any]] = None,
@@ -2631,14 +2643,18 @@ class HitlAutoResearchController:
                 initial_results: Any = json.loads(results_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 initial_results = {"error": "scoring/results.json could not be read"}
-            return {"scorer_result": scorer_result, "results": initial_results}
-        trusted_results = scorer_result.get("results") if isinstance(scorer_result, dict) else None
+            complete = dict(scorer_result)
+            complete["results"] = initial_results
+            return complete
+        complete = dict(scorer_result) if isinstance(scorer_result, dict) else {}
+        trusted_results = complete.get("results")
         if not isinstance(trusted_results, dict):
             trusted_results = {
-                "error": str(scorer_result.get("error", "") if isinstance(scorer_result, dict) else "")
+                "error": str(complete.get("error", ""))
                 or "Runtime scorer produced no structured result payload."
             }
-        return {"scorer_result": scorer_result, "results": trusted_results}
+        complete["results"] = trusted_results
+        return complete
 
     def _initial_frontier_acceptance_reason(self) -> str:
         return _initial_frontier_acceptance_reason(self.work_dir)
@@ -2707,9 +2723,9 @@ def run_hitl_autoresearch_loop(
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
     full_permissions: bool = True,
-    proposal_timeout: int = 900,
-    comment_timeout: int = 1800,
-    scorer_timeout: int = 600,
+    proposal_timeout: Optional[int] = 900,
+    comment_timeout: Optional[int] = 1800,
+    scorer_timeout: Optional[int] = 600,
     hitl_manager: Optional[Any] = None,
     hitl_channel: Optional[Any] = None,
     hitl_manager_config: Optional[Dict[str, Any]] = None,
@@ -2798,6 +2814,8 @@ def run_hitl_autoresearch_loop(
                 transcript_file=launch["transcript_file"],
                 env=launch["env"],
                 timeout=comment_timeout,
+                provider=provider,
+                defer_provider_failure_to_runtime=True,
             )
             if result.get("timed_out"):
                 result["error"] = (

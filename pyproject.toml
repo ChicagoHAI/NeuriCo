@@ -42,6 +42,7 @@ dependencies = [
     "pandas>=2.3.3",
     "matplotlib>=3.10.9",
     "wcwidth>=0.2.13",
+    "backports.tarfile>=1.2.0; python_version < '3.12'",
 ]
 
 [project.optional-dependencies]

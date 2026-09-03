@@ -246,15 +246,27 @@ class HitlManagerContext:
                 if record.get("type") == "message"
             ]
 
-    def prepare(self, *, research_state: str, summarize: Callable[[str, str], str]) -> str:
+    def prepare(
+        self,
+        *,
+        research_state: str,
+        summarize: Callable[[str, str], str],
+        fixed_context_tokens: int = 0,
+    ) -> str:
         """Return active context, compacting only after Portable-style pressure."""
         with self._lock:
             records = list(self._records)
             threshold = int(self.context_tokens * 0.7)
-            pressure = (_estimate_tokens(records) / threshold) if threshold else 0.0
+            fixed_tokens = max(0, int(fixed_context_tokens))
+            pressure = (
+                (fixed_tokens + _estimate_tokens(records)) / threshold if threshold else 0.0
+            )
             if len(records) >= 6 and pressure >= MICROCOMPACT_TRIGGER_RATIO:
                 records = self._microcompact(records, pressure=pressure)
-            if len(records) >= 6 and _estimate_tokens(records) > threshold:
+            if (
+                len(records) >= 6
+                and fixed_tokens + _estimate_tokens(records) > threshold
+            ):
                 records = self._compact(records, research_state=research_state, summarize=summarize)
             self._records = records
             self._persist_locked()
@@ -491,8 +503,18 @@ class HitlManagerTranscript:
         self.context.persist()
         return str(record["output"]["content"])
 
-    def prepare(self, *, research_state: str, summarize: Callable[[str, str], str]) -> str:
-        return self.context.prepare(research_state=research_state, summarize=summarize)
+    def prepare(
+        self,
+        *,
+        research_state: str,
+        summarize: Callable[[str, str], str],
+        fixed_context_tokens: int = 0,
+    ) -> str:
+        return self.context.prepare(
+            research_state=research_state,
+            summarize=summarize,
+            fixed_context_tokens=fixed_context_tokens,
+        )
 
     def recall(self, query: str, *, limit: int = 4) -> str:
         return self.history.recall(query, limit=limit)

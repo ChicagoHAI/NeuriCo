@@ -16,12 +16,13 @@ from core.phase_state import (
 from core.pipeline_orchestrator import PipelineState
 
 
-def test_check_working_directory_records_mismatch_without_raising(tmp_path):
-    result = check_working_directory(tmp_path, actual_cwd=tmp_path / "caller")
+def test_check_working_directory_records_configured_workspace(tmp_path):
+    result = check_working_directory(tmp_path)
 
     assert result["healthy"] is True
-    assert result["cwd_matches"] is False
-    assert result["expected"] == str(tmp_path.resolve())
+    assert result["root"] == str(tmp_path.resolve())
+    assert "actual" not in result
+    assert "cwd_matches" not in result
 
 
 def test_validate_outputs_reports_missing_and_present_files(tmp_path):
@@ -59,6 +60,10 @@ def test_pipeline_writes_state_and_gates_missing_outputs(tmp_path):
     assert "Current phase: `resource_finder`" in state_text
     assert "No prior phases completed." in state_text
     assert "Resume summary" not in state_text
+    assert f"Root: `{tmp_path.resolve()}`" in state_text
+    assert "- Expected:" not in state_text
+    assert "- Actual:" not in state_text
+    assert "Current process matches workspace" not in state_text
 
     assert pipeline.complete_stage("resource_finder", success=True) is False
     assert pipeline.state["stages"]["resource_finder"]["success"] is False

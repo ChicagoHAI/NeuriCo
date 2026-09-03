@@ -3,6 +3,10 @@
 ═══════════════════════════════════════════════════════════════════════════════
 
 You are revising `{{ pipeline_stage }}` artifacts after manager review.
+{% if autoresearch_attempt %}
+
+{% include "hitl/worker_autoresearch_candidate_boundary.txt" %}
+{% endif %}
 
 Read `{{ plan_path }}` and the current workspace state. Continue from recorded
 progress; do not redo completed work unless the plan explicitly requires it.
@@ -22,8 +26,21 @@ location is `baselines/`; all other evaluator-owned outputs remain under
 Revalidate the approved rule-maker deliverables after the revision:
 `scoring/eval.py`, `scoring/targets.json`, `scoring/interface.md`, and
 `scoring/rule_maker_log.md`, plus every private evaluator input declared by
-`scoring/targets.json` under `data/.test/`. Do not seal them; runtime handles
-sealing only after final approval.
+`scoring/targets.json` under `data/.test/`.
+
+It is your responsibility to prepare every dependency, artifact, and input
+required by `scoring/eval.py` before completing this stage. Never defer or
+assign this work to another component.
+
+It is illegal for you to read the contents of files under `data/.test`.
+
+The evaluator must depend only on file contents present in the scoring
+workspace. Repository metadata, including nested `.git` data, is not guaranteed.
+Run the required preflight in a clean copy containing the same files but no
+repository metadata.
+
+Before declaring the phase complete, you must run a preflight test to ensure
+that `scoring/eval.py` works as expected with no error or failure.
 {% endif %}
 
 If another idea requires manager{% if hitl_mode != "auto" %}/human{% endif %} feedback, update `{{ plan_path }}`, call

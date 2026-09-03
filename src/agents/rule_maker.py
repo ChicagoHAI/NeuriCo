@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent_runner import next_attempt_number, run_prebuilt_cli_agent
 from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
+from core.hitl_scoring_workspace import validate_checkpoint_gitlinks
 from core.scorer import RESULTS_FILE_NAME
 
 # Files the rule_maker is responsible for producing (relative to scoring/)
@@ -94,7 +95,7 @@ def _validate_declared_sealed_inputs(
             try:
                 metadata = current.lstat()
             except FileNotFoundError:
-                issues.append(f"declared sealed input is missing: {relative}")
+                issues.append(f"Required evaluator input or artifact is missing: {relative}")
                 missing = True
                 break
             except OSError as exc:
@@ -455,7 +456,7 @@ def run_rule_maker(
     work_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: int = 1800,  # 30 min
+    timeout: Optional[int] = 1800,  # 30 min
     full_permissions: bool = True,
     prompt_suffix: str = "",
     completion_mode: str = "outputs",
@@ -493,7 +494,8 @@ def run_rule_maker(
     print("📐 Starting Rule Maker Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
-    print(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
+    timeout_label = "disabled" if timeout is None else f"{timeout}s ({timeout // 60} minutes)"
+    print(f"   Timeout: {timeout_label}")
     print("=" * 80)
 
     # Per-attempt artifact names: the orchestrator re-runs the rule maker
@@ -550,6 +552,8 @@ def run_rule_maker(
             transcript_file=transcript_file,
             env=env,
             timeout=timeout,
+            provider=provider,
+            defer_provider_failure_to_runtime=completion_mode == "hitl_runtime",
         )
         return_code = launch["return_code"]
         if launch["timed_out"]:
@@ -595,7 +599,7 @@ def run_rule_maker(
         if plan_path.exists():
             outputs["hitl_plan"] = str(plan_path)
 
-    return {
+    result = {
         "success": success,
         "outputs": outputs,
         "issues": validation["issues"],
@@ -606,6 +610,12 @@ def run_rule_maker(
         if completion_mode == "hitl_runtime"
         else False,
     }
+    if completion_mode == "hitl_runtime":
+        result["return_code"] = return_code
+        result["provider_process_failed"] = bool(
+            launch.get("provider_process_failed")
+        )
+    return result
 
 
 def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
@@ -723,17 +733,48 @@ def validate_hitl_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:
     try:
         targets = json.loads(targets_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"valid": False, "found": found, "issues": issues}
-
-    target_issues = (
-        ["scoring/targets.json must contain a JSON object."]
-        if not isinstance(targets, dict)
-        else _validate_declared_sealed_inputs(Path(work_dir), targets)
-    )
+        target_issues: list[str] = []
+    else:
+        target_issues = (
+            ["scoring/targets.json must contain a JSON object."]
+            if not isinstance(targets, dict)
+            else _validate_declared_sealed_inputs(Path(work_dir), targets)
+        )
     issues.extend(target_issues)
+    issues.extend(validate_checkpoint_gitlinks(Path(work_dir)))
     if target_issues:
         found.pop("targets", None)
-    return {"valid": len(issues) == 0, "found": found, "issues": issues}
+    result: Dict[str, Any] = {
+        "valid": len(issues) == 0,
+        "found": found,
+        "issues": issues,
+    }
+    if issues:
+        issue_text = "\n".join(
+            f"- {issue[:1].upper()}{issue[1:]}" for issue in issues if issue
+        )
+        feedback = (
+            "Your work and the evaluator are incomplete because validation found the "
+            f"following issue(s):\n{issue_text}\n\n"
+            "It is your responsibility to prepare every dependency, artifact, and input "
+            "required before completing this stage. Never defer or assign this work to "
+            "another component.\n\n"
+            "Correct every reported issue yourself, rerun the `scoring/eval.py` preflight "
+            "to ensure it completes without errors or failures, and then call "
+            "`hitl-finish-phase` again."
+        )
+        result.update(
+            {
+                "worker_feedback": feedback,
+                "worker_feedback_context": "The rule-maker evaluator is incomplete.",
+                "worker_instruction": (
+                    "Correct every reported issue yourself, rerun the `scoring/eval.py` "
+                    "preflight to ensure it completes without errors or failures, and then "
+                    "call `hitl-finish-phase` again."
+                ),
+            }
+        )
+    return result
 
 
 def load_interface_for_runner(work_dir: Path) -> str:

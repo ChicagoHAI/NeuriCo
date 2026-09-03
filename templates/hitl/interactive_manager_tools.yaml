@@ -108,14 +108,20 @@ tools:
   - name: view_node
     description: |
       View one accepted HITL AutoResearch frontier node. Use its SHA from
-      list_frontier. The result includes the parent SHA, saved plan, complete
-      objective score, acceptance rationale, and finalized attempt history.
+      list_frontier. By default, the result includes the parent SHA, saved plan,
+      complete current objective score, acceptance rationale, and reference-only
+      historical attempts. Supply one historical proposal idea id to retrieve
+      that attempt's complete objective score and rationale.
     parameters:
       node_sha:
         type: string
         description: Accepted frontier node SHA returned by list_frontier.
         required: true
-    returns: Full retained record for the requested accepted frontier node.
+      proposal_idea_id:
+        type: string
+        description: Optional exact proposal idea id from this node's attempt history.
+        required: false
+    returns: Compact node record, or one complete historical attempt when requested.
 
   - name: select_frontier
     description: |

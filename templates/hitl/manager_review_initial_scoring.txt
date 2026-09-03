@@ -1,16 +1,27 @@
 Objective scoring has completed for the initial experiment-stage workspace.
-This is the same runtime worker request that approved the completed work for scoring.
 
-Review the runtime-derived score result and the public workspace only to decide
-whether the scored initial workspace is error-free and ready to become the
-automatic root AutoResearch node.
+Review the runtime-derived score and the public workspace to decide whether the
+scored workspace is error-free and ready to become the initial AutoResearch
+node.
 
-Do not make an accept/reject frontier decision. Runtime creates the root
-automatically after an approved score review.
+This is not a frontier decision.
 
-If the score or completed work has a repairable error, finalize with precise
-worker-facing feedback. Preserve completed work and do not propose a new
-research direction. Runtime will start an experiment-worker continuation.
+If the score or completed work has an error, provide precise feedback and
+select the worker that owns the defect. Preserve completed work and do not
+propose a new research direction.
+
+Use `repair_target="experiment_runner"` when the experiment runner is
+responsible for the defect.
+
+Use `repair_target="rule_maker"` only when the scoring evidence shows that the
+rule maker is responsible for the defective evaluator or scoring contract
+implementation. A merely low score is not evidence of an evaluator defect.
+
+When selecting `repair_target="rule_maker"`, describe in `manager_feedback` the
+concrete conditions that produced the evaluator failure and require the rule
+maker to reproduce those conditions during the functional `scoring/eval.py`
+preflight, verify the correction, and record the evidence in
+`scoring/rule_maker_log.md`. Ensure that `manager_feedback` is self-contained.
 
 Use `finalize_worker_request` with one of:
 
@@ -18,7 +29,8 @@ Use `finalize_worker_request` with one of:
 {
   "status": "approved",
   "context": "neutral self-contained confirmation that the initial scored workspace is error-free",
-  "manager_feedback": ""
+  "manager_feedback": "",
+  "repair_target": ""
 }
 ```
 
@@ -28,7 +40,8 @@ or:
 {
   "status": "feedback",
   "context": "neutral self-contained description of the repairable problem",
-  "manager_feedback": "specific instructions for the continuation worker"
+  "manager_feedback": "specific revision instructions",
+  "repair_target": "experiment_runner"
 }
 ```
 

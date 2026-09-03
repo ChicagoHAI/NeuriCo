@@ -270,6 +270,7 @@ def _run_comment_handler_with_remote_workspace(
             transcript_file=launch["transcript_file"],
             env=launch["env"],
             timeout=timeout,
+            provider=provider,
         )
 
         print()

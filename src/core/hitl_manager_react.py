@@ -11,6 +11,8 @@ import json
 import hashlib
 import http.server
 import inspect
+import logging
+import math
 import os
 import queue
 import secrets
@@ -33,8 +35,15 @@ from core.hitl_runtime_state import (
 from core.hitl_workspace_inspection import HitlWorkspaceInspector
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class _StaleManagerTurn(RuntimeError):
     """Internal signal that rollback invalidated an in-flight manager turn."""
+
+
+class _ManagerProviderUnavailable(RuntimeError):
+    """The manager provider remained unavailable after its retry budget."""
 
 
 @dataclass
@@ -150,13 +159,19 @@ class HitlManagerToolExecutor:
         )
 
     def _view_node(self, args: Dict[str, Any]) -> str:
-        from core.hitl_frontier import HitlFrontierStore
+        from core.hitl_world_model import HitlWorldModelSync
 
         node_sha = str(args.get("node_sha", "")).strip()
         if not node_sha:
             return "Error: view_node requires node_sha. Call list_frontier, then retry."
+        proposal_idea_id = str(args.get("proposal_idea_id", "")).strip()
         return json.dumps(
-            HitlFrontierStore(self.manager.work_dir).node(node_sha), ensure_ascii=False, indent=2
+            HitlWorldModelSync(self.manager.work_dir).manager_frontier_node(
+                node_sha,
+                proposal_idea_id=proposal_idea_id,
+            ),
+            ensure_ascii=False,
+            indent=2,
         )
 
     def _select_frontier(self, args: Dict[str, Any]) -> str:
@@ -303,6 +318,22 @@ class HitlManager:
             0.1,
             float(config.get("manager", {}).get("hitl_manager_retry_delay_seconds", 1.0)),
         )
+        self.mcp_startup_timeout_seconds = float(
+            manager_config.get("hitl_manager_mcp_startup_timeout_seconds", 30.0)
+        )
+        self.mcp_startup_timeout_increment_seconds = float(
+            manager_config.get("hitl_manager_mcp_startup_timeout_increment_seconds", 15.0)
+        )
+        if (
+            not math.isfinite(self.mcp_startup_timeout_seconds)
+            or self.mcp_startup_timeout_seconds <= 0
+        ):
+            raise ValueError("HITL manager MCP startup timeout must be positive and finite")
+        if (
+            not math.isfinite(self.mcp_startup_timeout_increment_seconds)
+            or self.mcp_startup_timeout_increment_seconds <= 0
+        ):
+            raise ValueError("HITL manager MCP startup increment must be positive and finite")
         self._turns: "queue.Queue[_Turn]" = queue.Queue()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -637,6 +668,7 @@ class HitlManager:
                 self._CLI_MCP_SERVER_NAME: {
                     "command": sys.executable,
                     "args": [str(adapter)],
+                    "alwaysLoad": True,
                     "env": {
                         "NEURICO_HITL_MANAGER_URL": self._mcp_url,
                         "NEURICO_HITL_MANAGER_TOKEN": token,
@@ -998,6 +1030,7 @@ class HitlManager:
         plan_text: str,
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
+        request_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         from core.hitl import _load_hitl_template, _normalize_options, _validate_substantive_options
 
@@ -1053,12 +1086,22 @@ class HitlManager:
                 data.pop("decision", None)
             return data
 
+        provenance = dict(request_context or {})
+        assigned_candidate_sha = str(provenance.get("parent_node_id", "")).strip()
+        autoresearch_attempt = bool(
+            assigned_candidate_sha
+            and str(provenance.get("attempt_id", "")).strip()
+            and str(provenance.get("proposal_idea_id", "")).strip()
+        )
         prompt = _load_hitl_template(
             "manager_review_raised_idea.txt",
             pipeline_stage=pipeline_stage,
+            requesting_actor=str(raised_idea.get("actor", "")).strip(),
             plan_text=plan_text,
             raised_idea_json=json.dumps(raised_idea, indent=2, ensure_ascii=False),
             hitl_mode=selected_mode.value,
+            autoresearch_attempt=autoresearch_attempt,
+            assigned_candidate_sha=assigned_candidate_sha,
         )
         return self.request_worker_resolution(
             command={
@@ -1167,6 +1210,13 @@ class HitlManager:
             "related_artifacts": related_artifacts,
             "provenance": dict(scoring_handoff_context or {}),
         }
+        provenance = dict(scoring_handoff_context or {})
+        assigned_candidate_sha = str(provenance.get("parent_node_id", "")).strip()
+        autoresearch_attempt = bool(
+            assigned_candidate_sha
+            and str(provenance.get("attempt_id", "")).strip()
+            and str(provenance.get("proposal_idea_id", "")).strip()
+        )
         prompt = _load_hitl_template(
             "manager_review_phase_finish.txt",
             pipeline_stage=pipeline_stage,
@@ -1180,6 +1230,8 @@ class HitlManager:
             has_verifier_report=bool(str(verifier_report).strip()),
             verifier_report=str(verifier_report),
             hitl_mode=selected_mode.value,
+            autoresearch_attempt=autoresearch_attempt,
+            assigned_candidate_sha=assigned_candidate_sha,
         )
         return self.request_worker_resolution(
             command={
@@ -1373,11 +1425,19 @@ class HitlManager:
                     data.get("context"), "context", "Initial score review"
                 ),
                 "manager_feedback": str(data.get("manager_feedback", "")).strip(),
+                "repair_target": str(data.get("repair_target", "")).strip(),
             }
             if status == "feedback":
                 result["manager_feedback"] = self._require_text(
                     result["manager_feedback"], "manager_feedback", "Initial score repair"
                 )
+                if result["repair_target"] not in {"experiment_runner", "rule_maker"}:
+                    raise ValueError(
+                        "Initial score repair_target must be experiment_runner or rule_maker."
+                    )
+            else:
+                result["manager_feedback"] = ""
+                result["repair_target"] = ""
             return result
 
         return self.resume_worker_request(
@@ -2050,7 +2110,7 @@ class HitlManager:
         )
 
     def _cancel_backend_failed_runtime_request(self, turn: _Turn, exc: BaseException) -> None:
-        """Release the runtime action whose manager provider retries exhausted."""
+        """Stop the run when its manager provider retries are exhausted."""
         request_key = turn.request_key.strip()
         pending = self.runtime_state.pending_worker_command()
         detail = str(exc).strip()
@@ -2062,6 +2122,17 @@ class HitlManager:
             )
             if detail:
                 failure = f"{failure} Detail: {detail}"
+        if isinstance(exc, _ManagerProviderUnavailable):
+            from core.hitl_run_control import active_hitl_run_stop_control
+
+            control = active_hitl_run_stop_control()
+            if control is not None:
+                control.request(requested_by="provider_unavailable")
+                self.channel.send(
+                    f"{failure} NeuriCo is stopping this run and restoring saved progress.",
+                    kind="system",
+                )
+                return
         if (
             request_key
             and isinstance(pending, dict)
@@ -2162,11 +2233,8 @@ class HitlManager:
 
         self.world_model.reconcile(self.research)
         research_state = self.research.digest_section()
-        conversation = self.conversation.prepare(
-            research_state=research_state,
-            summarize=lambda prior, state: self._summarize(prior, state, generation),
-        )
-        return [
+        conversation_prefix = "Chronological manager conversation:\n"
+        messages = [
             {
                 "role": "system",
                 "content": _load_hitl_template(
@@ -2189,8 +2257,27 @@ class HitlManager:
                     + "\n--- END UNTRUSTED RESEARCHSTATE ---"
                 ),
             },
-            {"role": "user", "content": "Chronological manager conversation:\n" + conversation},
+            {"role": "user", "content": conversation_prefix},
         ]
+        fixed_context_tokens = max(
+            1,
+            len(
+                json.dumps(
+                    {"messages": messages, "tools": tools},
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            )
+            // 4,
+        )
+        conversation = self.conversation.prepare(
+            research_state=research_state,
+            summarize=lambda prior, state: self._summarize(prior, state, generation),
+            fixed_context_tokens=fixed_context_tokens,
+        )
+        messages[-1]["content"] = conversation_prefix + conversation
+        return messages
 
     def _summarize(self, prior: str, research_state: str, generation: int) -> str:
         from core.hitl import _load_hitl_template
@@ -2225,24 +2312,61 @@ class HitlManager:
     def _send(
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None
     ) -> Any:
+        from interactive.llm_backend import McpReadinessTimeout
+
         with self._backend_lifecycle_lock:
             last: Optional[Exception] = None
-            for attempt in range(self.max_backend_retries):
+            provider_attempt = 0
+            mcp_attempt = 0
+            while provider_attempt < self.max_backend_retries:
+                mcp_timeout = (
+                    self.mcp_startup_timeout_seconds
+                    + mcp_attempt * self.mcp_startup_timeout_increment_seconds
+                )
                 try:
-                    return self._send_once(messages, tools, backend=backend)
+                    return self._send_once(
+                        messages,
+                        tools,
+                        backend=backend,
+                        mcp_startup_timeout_seconds=mcp_timeout,
+                    )
+                except McpReadinessTimeout as exc:
+                    mcp_attempt += 1
+                    LOGGER.warning(
+                        "HITL manager MCP startup attempt %d failed for provider %s "
+                        "after a %.1fs window: %s",
+                        mcp_attempt,
+                        self.provider,
+                        mcp_timeout,
+                        exc,
+                    )
+                    if self._stop.is_set():
+                        raise RuntimeError(
+                            "HITL manager stopped during MCP initialization."
+                        ) from exc
+                    if self._stop.wait(self.backend_retry_delay_seconds):
+                        raise RuntimeError(
+                            "HITL manager stopped during MCP initialization."
+                        ) from exc
                 except Exception as exc:
                     last = exc
+                    provider_attempt += 1
                     if self._stop.is_set():
                         raise RuntimeError("HITL manager stopped during its provider turn.") from exc
-                    if attempt + 1 < self.max_backend_retries:
+                    if provider_attempt < self.max_backend_retries:
                         if self._stop.wait(self.backend_retry_delay_seconds):
                             raise RuntimeError(
                                 "HITL manager stopped during its provider turn."
                             ) from exc
-            raise RuntimeError("Manager backend was unavailable") from last
+            raise _ManagerProviderUnavailable("Manager backend was unavailable") from last
 
     def _send_once(
-        self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *, backend: Any = None
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        backend: Any = None,
+        mcp_startup_timeout_seconds: Optional[float] = None,
     ) -> Any:
         """Run one manager provider turn without a wall-clock deadline."""
         result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
@@ -2290,6 +2414,13 @@ class HitlManager:
                         kwargs["allowed_mcp_tools"] = [
                             self._mcp_allowed_tool_name(str(tool["name"])) for tool in tools
                         ]
+                        if "mcp_startup_timeout_seconds" in parameters or any(
+                            parameter.kind is inspect.Parameter.VAR_KEYWORD
+                            for parameter in parameters.values()
+                        ):
+                            kwargs["mcp_startup_timeout_seconds"] = (
+                                mcp_startup_timeout_seconds
+                            )
                         provider_tools = []
                     response = active_backend.send(messages, provider_tools, **kwargs)
                 else:

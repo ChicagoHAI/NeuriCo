@@ -56,7 +56,12 @@ from core.hitl_scoring_workspace import (
     scoring_source_workspace_fingerprint,
 )
 from core.hitl_runtime_state import HitlRuntimeState
-from core.scoring_seal import sealed_dir_for, seal_scoring_files, unseal_scoring_files
+from core.scoring_seal import (
+    sealed_dir_for,
+    seal_scoring_files,
+    unseal_scoring_files,
+    verify_sealed_scoring_manifest,
+)
 from core.workspace_manifest import build_manifest, curate_manifest
 from core.phase_state import (
     check_working_directory,
@@ -73,7 +78,10 @@ from core.hitl import (
 )
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
 from core.hitl_git import delete_git_ref
-from core.hitl_run_control import HitlRunStopRequested
+from core.hitl_run_control import (
+    HitlInitialScoringRepairControl,
+    HitlRunStopRequested,
+)
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_stage_runtime import (
     HitlStageRollback,
@@ -203,6 +211,7 @@ class PipelineState:
 # Stage names tracked in PipelineState when scoring_enabled=True
 RULE_MAKER_STAGE = "rule_maker"
 SCORER_STAGE = "scorer"
+INITIAL_SCORING_REPAIR_KIND = "initial_scoring_repair"
 
 # Stage names tracked in PipelineState when bootstrap_mode=True
 BOOTSTRAP_MANIFEST_STAGE = "bootstrap_manifest"
@@ -333,13 +342,13 @@ class ResearchPipelineOrchestrator:
         provider: str = "claude",
         pause_after_resources: bool = False,
         skip_resource_finder: bool = False,
-        resource_finder_timeout: int = 2700,  # 45 min
-        experiment_runner_timeout: int = 10800,  # 3 hours
+        resource_finder_timeout: Optional[int] = 2700,  # 45 min
+        experiment_runner_timeout: Optional[int] = 10800,  # 3 hours
         full_permissions: bool = True,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
-        rule_maker_timeout: int = 1800,  # 30 min
-        scorer_timeout: int = 600,  # 10 min
+        rule_maker_timeout: Optional[int] = 1800,  # 30 min
+        scorer_timeout: Optional[int] = 600,  # 10 min
         bootstrap_mode: bool = False,
         manifest_trimmer_timeout: int = 300,  # 5 min
         hitl_enabled: bool = False,
@@ -460,8 +469,16 @@ class ResearchPipelineOrchestrator:
             # STAGE 2.5 (scoring mode only): Rule Maker
             # Writes scoring/interface.md, scoring/eval.py, scoring/targets.json,
             # scoring/rule_maker_log.md before the runner sees the workspace.
+            pending_repair: Optional[Dict[str, Any]] = None
             if scoring_enabled:
                 if hitl_enabled:
+                    self._reconcile_initial_rule_maker_repair_handoff()
+                    pending_repair = self._initial_rule_maker_repair_recovery()
+                    repair_feedback = (
+                        self._prepare_initial_rule_maker_repair()
+                        if pending_repair is not None
+                        else ""
+                    )
                     results["stages"][RULE_MAKER_STAGE] = self._run_hitl_stage_until_complete(
                         stage_name=RULE_MAKER_STAGE,
                         run_stage=lambda: self._run_rule_maker_hitl(
@@ -469,6 +486,7 @@ class ResearchPipelineOrchestrator:
                             provider=provider,
                             timeout=rule_maker_timeout,
                             full_permissions=full_permissions,
+                            initial_scoring_repair_feedback=repair_feedback,
                         ),
                     )
                 else:
@@ -482,45 +500,83 @@ class ResearchPipelineOrchestrator:
                     print()
                     print("⚠️  Rule maker stage failed -- aborting.")
                     return results
+                if hitl_enabled and pending_repair is not None:
+                    self.state.clear_runtime_recovery(RULE_MAKER_STAGE)
 
             # STAGE 3: Experiment Runner
             # In scoring mode, seal eval.py / targets.json / rule_maker_log.md
             # out of the workspace for the duration of the runner stage. Always
             # unseal in the finally block (even on runner failure) so the scorer
             # can run.
-            if scoring_enabled and hitl_enabled:
-                recovery = self._arm_experiment_runner_recovery_checkpoint()
-                results["experiment_runner_recovery"] = recovery
-                experiment_recovery_armed = True
+            while True:
+                if scoring_enabled and hitl_enabled:
+                    recovery = self._arm_experiment_runner_recovery_checkpoint()
+                    results["experiment_runner_recovery"] = recovery
+                    experiment_recovery_armed = True
 
-            sealed_dir = self._seal_runner_inputs() if scoring_enabled else None
-            try:
-                if hitl_enabled:
-                    results["stages"]["experiment_runner"] = self._run_hitl_stage_until_complete(
-                        stage_name="experiment_runner",
-                        run_stage=lambda: self._run_experiment_runner_hitl(
+                sealed_dir = self._seal_runner_inputs() if scoring_enabled else None
+                try:
+                    if hitl_enabled:
+                        results["stages"]["experiment_runner"] = (
+                            self._run_hitl_stage_until_complete(
+                                stage_name="experiment_runner",
+                                run_stage=lambda: self._run_experiment_runner_hitl(
+                                    idea=idea,
+                                    provider=provider,
+                                    timeout=experiment_runner_timeout,
+                                    full_permissions=full_permissions,
+                                    use_scribe=use_scribe,
+                                    scoring_enabled=scoring_enabled,
+                                    scorer_timeout=scorer_timeout,
+                                    sealed_dir=sealed_dir,
+                                ),
+                            )
+                        )
+                    else:
+                        results["stages"]["experiment_runner"] = self._run_experiment_runner(
                             idea=idea,
                             provider=provider,
                             timeout=experiment_runner_timeout,
                             full_permissions=full_permissions,
                             use_scribe=use_scribe,
                             scoring_enabled=scoring_enabled,
-                            scorer_timeout=scorer_timeout,
-                            sealed_dir=sealed_dir,
-                        ),
+                        )
+                finally:
+                    if scoring_enabled and not hitl_enabled:
+                        self._unseal_runner_inputs(sealed_dir)
+
+                experiment_result = results["stages"]["experiment_runner"]
+                if not (
+                    scoring_enabled
+                    and hitl_enabled
+                    and experiment_result.get("rule_maker_repair_requested")
+                ):
+                    break
+
+                repair_feedback = str(experiment_result.get("manager_feedback", "")).strip()
+                if not repair_feedback:
+                    raise RuntimeError(
+                        "Initial rule-maker repair returned without manager feedback."
                     )
-                else:
-                    results["stages"]["experiment_runner"] = self._run_experiment_runner(
+                self._begin_initial_rule_maker_repair(repair_feedback)
+                repair_feedback = self._prepare_initial_rule_maker_repair()
+                experiment_recovery_armed = False
+                sealed_dir = None
+                results["stages"][RULE_MAKER_STAGE] = self._run_hitl_stage_until_complete(
+                    stage_name=RULE_MAKER_STAGE,
+                    run_stage=lambda: self._run_rule_maker_hitl(
                         idea=idea,
                         provider=provider,
-                        timeout=experiment_runner_timeout,
+                        timeout=rule_maker_timeout,
                         full_permissions=full_permissions,
-                        use_scribe=use_scribe,
-                        scoring_enabled=scoring_enabled,
-                    )
-            finally:
-                if scoring_enabled and not hitl_enabled:
-                    self._unseal_runner_inputs(sealed_dir)
+                        initial_scoring_repair_feedback=repair_feedback,
+                    ),
+                )
+                if not results["stages"][RULE_MAKER_STAGE]["success"]:
+                    print()
+                    print("⚠️  Rule maker repair failed -- aborting.")
+                    return results
+                self.state.clear_runtime_recovery(RULE_MAKER_STAGE)
 
             # STAGE 4 (scoring mode only): Scorer
             # Executes scoring/eval.py and captures results.json.
@@ -614,6 +670,122 @@ class ResearchPipelineOrchestrator:
         }
         self.state.set_runtime_recovery("experiment_runner", payload)
         return dict(payload)
+
+    def _initial_rule_maker_repair_recovery(self) -> Optional[Dict[str, Any]]:
+        """Return one validated durable initial-scoring repair handoff."""
+        recovery = self.state.get_runtime_recovery(RULE_MAKER_STAGE)
+        if recovery is None:
+            return None
+        if str(recovery.get("kind", "")).strip() != INITIAL_SCORING_REPAIR_KIND:
+            raise RuntimeError("Unsupported rule_maker runtime recovery record.")
+        status = str(recovery.get("status", "")).strip()
+        if status not in {"requested", "ready"}:
+            raise RuntimeError(
+                "Initial rule-maker repair recovery has an invalid status."
+            )
+        if not str(recovery.get("manager_feedback", "")).strip():
+            raise RuntimeError(
+                "Initial rule-maker repair recovery is missing manager feedback."
+            )
+        return dict(recovery)
+
+    def _begin_initial_rule_maker_repair(self, manager_feedback: str) -> Dict[str, Any]:
+        """Persist the repair decision before restoring the experiment boundary."""
+        feedback = str(manager_feedback).strip()
+        if not feedback:
+            raise RuntimeError("Initial rule-maker repair requires manager feedback.")
+        existing = self._initial_rule_maker_repair_recovery()
+        if existing is not None:
+            if str(existing.get("manager_feedback", "")).strip() != feedback:
+                raise RuntimeError(
+                    "A different initial rule-maker repair is already pending."
+                )
+            HitlInitialScoringRepairControl(self.work_dir).request(feedback)
+            return existing
+        handoff = HitlInitialScoringRepairControl(self.work_dir).request(feedback)
+        record = {
+            "kind": INITIAL_SCORING_REPAIR_KIND,
+            "status": "requested",
+            "manager_feedback": feedback,
+            "requested_at": handoff["requested_at"],
+        }
+        self.state.set_runtime_recovery(RULE_MAKER_STAGE, record)
+        return dict(record)
+
+    def _reconcile_initial_rule_maker_repair_handoff(
+        self,
+    ) -> Optional[Dict[str, Any]]:
+        """Restore a repair record rolled back between its decision and preparation."""
+        control = HitlInitialScoringRepairControl(self.work_dir)
+        handoff = control.record()
+        existing = self._initial_rule_maker_repair_recovery()
+        if handoff is None:
+            return existing
+
+        feedback = str(handoff["manager_feedback"]).strip()
+        if existing is not None:
+            if str(existing.get("manager_feedback", "")).strip() != feedback:
+                raise RuntimeError(
+                    "Initial-scoring repair handoff conflicts with pipeline state."
+                )
+            if existing["status"] == "ready":
+                control.clear()
+            return existing
+
+        record = {
+            "kind": INITIAL_SCORING_REPAIR_KIND,
+            "status": "requested",
+            "manager_feedback": feedback,
+            "requested_at": handoff["requested_at"],
+        }
+        self.state.set_runtime_recovery(RULE_MAKER_STAGE, record)
+        return dict(record)
+
+    def _prepare_initial_rule_maker_repair(self) -> str:
+        """Replay the pre-experiment handoff and make rule-maker repair ready."""
+        record = self._reconcile_initial_rule_maker_repair_handoff()
+        if record is None:
+            raise RuntimeError("No initial rule-maker repair is pending.")
+        feedback = str(record["manager_feedback"]).strip()
+        if record["status"] == "ready":
+            HitlInitialScoringRepairControl(self.work_dir).clear()
+            return feedback
+
+        # The manager selected rule-maker repair while the initial experiment
+        # recovery boundary still owned the workspace. Complete that established
+        # rollback first; the separate rule-maker recovery record survives it.
+        self._recover_experiment_runner_from_runtime_checkpoint()
+
+        canonical_sealed_dir = sealed_dir_for(self.work_dir)
+        if canonical_sealed_dir.exists():
+            self._restore_rule_maker_inputs_for_initial_scoring_repair(
+                canonical_sealed_dir
+            )
+        else:
+            required = (
+                "scoring/eval.py",
+                "scoring/targets.json",
+                "scoring/interface.md",
+            )
+            missing = [
+                relative
+                for relative in required
+                if not (self.work_dir / relative).is_file()
+            ]
+            if missing:
+                raise RuntimeError(
+                    "Initial rule-maker repair has neither a sealed evaluator nor "
+                    "complete restored evaluator artifacts: " + ", ".join(missing)
+                )
+
+        ready = {
+            **record,
+            "status": "ready",
+            "prepared_at": utc_now(),
+        }
+        self.state.set_runtime_recovery(RULE_MAKER_STAGE, ready)
+        HitlInitialScoringRepairControl(self.work_dir).clear()
+        return feedback
 
     def _discard_experiment_runner_hitl_recovery_state(self) -> None:
         recovery = self.state.get_runtime_recovery("experiment_runner")
@@ -824,7 +996,7 @@ class ResearchPipelineOrchestrator:
             raise
 
     def _run_resource_finder_hitl(
-        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
+        self, idea: Dict[str, Any], provider: str, timeout: Optional[int], full_permissions: bool
     ) -> Dict[str, Any]:
         """Run resource_finder through the plan-centered HITL workflow."""
         print()
@@ -1004,7 +1176,7 @@ class ResearchPipelineOrchestrator:
         self,
         idea: Dict[str, Any],
         provider: str,
-        timeout: int,
+        timeout: Optional[int],
         full_permissions: bool,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
@@ -1131,6 +1303,8 @@ class ResearchPipelineOrchestrator:
                 transcript_file=transcript_file,
                 env=env,
                 timeout=timeout,
+                provider=provider,
+                defer_provider_failure_to_runtime=runtime_prompt is not None,
             )
             return_code = run_result["return_code"]
 
@@ -1163,6 +1337,10 @@ class ResearchPipelineOrchestrator:
                     run_result.get("background_processes_terminated")
                 ),
             }
+            if runtime_prompt is not None:
+                result["provider_process_failed"] = bool(
+                    run_result.get("provider_process_failed")
+                )
             if success and dsi_remote_info is not None:
                 from core.dsi_slurm_artifacts import archive_dsi_slurm_artifacts
 
@@ -1208,6 +1386,7 @@ class ResearchPipelineOrchestrator:
                 idea,
                 root_dir=self.work_dir,
                 scoring_enabled=scoring_enabled,
+                include_implicit_time_limit=False,
             )
             return generate_instructions(
                 prompt=ordinary_prompt,
@@ -1237,11 +1416,11 @@ class ResearchPipelineOrchestrator:
         self,
         idea: Dict[str, Any],
         provider: str,
-        timeout: int,
+        timeout: Optional[int],
         full_permissions: bool,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
-        scorer_timeout: int = 600,
+        scorer_timeout: Optional[int] = 600,
         sealed_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Run experiment_runner through the plan-centered HITL workflow."""
@@ -1321,12 +1500,31 @@ class ResearchPipelineOrchestrator:
 
         def complete_approved_worker(worker_result: Dict[str, Any]) -> Dict[str, Any]:
             """Finish the stage after a worker has received runtime approval."""
+            finish_result = (
+                runtime.phase_finish_result()
+                or runtime.resolved_worker_response()
+                or {}
+            )
+            if finish_result.get("rule_maker_repair_requested"):
+                discard_completed_rollback_snapshot()
+                return {
+                    **worker_result,
+                    "success": False,
+                    "hitl": True,
+                    "phase": "complete",
+                    "rule_maker_repair_requested": True,
+                    "context": str(finish_result.get("context", "")),
+                    "manager_feedback": str(
+                        finish_result.get("manager_feedback")
+                        or finish_result.get("feedback", "")
+                    ),
+                    "record": dict(finish_result.get("record") or {}),
+                }
             if scored_checkpoint_sha:
                 CheckpointManager(self.work_dir).restore_checkpoint(
                     scored_checkpoint_sha,
                     clean_untracked_public=True,
                 )
-            finish_result = runtime.phase_finish_result() or {}
             self.state.complete_stage("experiment_runner", True, worker_result)
             discard_completed_rollback_snapshot()
             completed = {
@@ -1449,6 +1647,7 @@ class ResearchPipelineOrchestrator:
                     approved=review["status"] == "approved",
                     context=str(review["context"]),
                     manager_feedback=str(review.get("manager_feedback", "")),
+                    repair_target=str(review.get("repair_target", "")),
                 )
                 if review["status"] == "approved":
                     runtime.set_scoring_result(dict(scorer_result))
@@ -1458,7 +1657,12 @@ class ResearchPipelineOrchestrator:
                         "scorer_result": dict(scorer_result),
                     }
                 discard_repairable_scoring_handoff(scorer_result)
-                return runtime.scoring_repair_response(
+                response_factory = (
+                    runtime.initial_rule_maker_repair_response
+                    if review["repair_target"] == "rule_maker"
+                    else runtime.scoring_repair_response
+                )
+                return response_factory(
                     context=str(review["context"]),
                     manager_feedback=str(review["manager_feedback"]),
                     record=record,
@@ -1724,9 +1928,14 @@ class ResearchPipelineOrchestrator:
             return build_manager_conformance_report({"success": False})
 
     def _run_rule_maker_hitl(
-        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
+        self,
+        idea: Dict[str, Any],
+        provider: str,
+        timeout: Optional[int],
+        full_permissions: bool,
+        initial_scoring_repair_feedback: str = "",
     ) -> Dict[str, Any]:
-        """Run the normal forward rule-maker stage through ordinary-stage HITL."""
+        """Run forward rule-maker HITL or reopen its review for scoring repair."""
         print()
         print("─" * 80)
         print("STAGE: RULE MAKER  (HITL)")
@@ -1752,9 +1961,11 @@ class ResearchPipelineOrchestrator:
             )
             for phase in ("plan", "execution", "review")
         }
+        repair_feedback = str(initial_scoring_repair_feedback).strip()
         rollback = HitlStageRollback.capture(
             self.work_dir,
             "HITL rule maker starting state",
+            include_rule_maker_repair_state=bool(repair_feedback),
         )
 
         def rule_maker_artifact_validator() -> Dict[str, Any]:
@@ -1838,6 +2049,28 @@ class ResearchPipelineOrchestrator:
             )
 
         try:
+            if repair_feedback:
+                runtime.prepare_idea_tool_context(
+                    hitl_stage="review",
+                    actor=RULE_MAKER_STAGE,
+                    phase_finish_validator=rule_maker_artifact_validator,
+                    worker_prompt_contexts=worker_prompt_contexts,
+                )
+                result, finish = run_worker_with_replacements(
+                    runtime=runtime,
+                    launch_worker=launch_worker,
+                    worker_name=RULE_MAKER_STAGE,
+                    prompt=runtime.compose_worker_prompt(
+                        hitl_stage="review",
+                        phase_prompt=runtime.review_prompt_block(repair_feedback),
+                    ),
+                    log_prefix="hitl/rule_maker_hitl_initial_scoring_repair",
+                    phase="review",
+                )
+                if finish and finish.get("approved"):
+                    return complete_approved(result, finish)
+                return finalize_failed(finish or result)
+
             return run_plan_centered_hitl_stage(
                 runtime=runtime,
                 actor=RULE_MAKER_STAGE,
@@ -1852,6 +2085,12 @@ class ResearchPipelineOrchestrator:
             )
 
         except HitlRunStopRequested:
+            try:
+                restore_failed_hitl_state()
+            except Exception as restore_error:
+                raise RuntimeError(
+                    "HITL rule maker stopped, but its stage rollback could not complete."
+                ) from restore_error
             raise
         except Exception as exc:
             print(f"❌ HITL rule maker stage failed: {exc}")
@@ -1875,7 +2114,7 @@ class ResearchPipelineOrchestrator:
         finally:
             runtime.clear_idea_tool_context()
 
-    def _run_scorer(self, timeout: int,
+    def _run_scorer(self, timeout: Optional[int],
                     idea: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Run the scorer stage (scoring mode only). Executes scoring/eval.py
@@ -1936,6 +2175,38 @@ class ResearchPipelineOrchestrator:
         always called in a finally block.
         """
         unseal_scoring_files(self.work_dir, sealed_dir)
+
+    def _restore_rule_maker_inputs_for_initial_scoring_repair(
+        self,
+        sealed_dir: Optional[Path],
+    ) -> None:
+        """Restore the approved evaluator before reopening rule-maker review."""
+        if sealed_dir is None:
+            raise RuntimeError(
+                "Initial rule-maker repair cannot start without a sealed evaluator."
+            )
+
+        verify_sealed_scoring_manifest(sealed_dir)
+        self._unseal_runner_inputs(sealed_dir)
+
+        if sealed_dir.exists():
+            raise RuntimeError(
+                "Initial rule-maker repair did not fully restore the sealed evaluator payload."
+            )
+
+        required = (
+            "scoring/eval.py",
+            "scoring/targets.json",
+            "scoring/interface.md",
+        )
+        missing = [
+            relative for relative in required if not (self.work_dir / relative).is_file()
+        ]
+        if missing:
+            raise RuntimeError(
+                "Initial rule-maker repair could not restore required evaluator artifacts: "
+                + ", ".join(missing)
+            )
 
     # === Bootstrap mode ====================================================
     # When bootstrap_mode=True, the workspace was produced by an earlier

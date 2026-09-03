@@ -29,24 +29,14 @@ def _phase_notes_end(stage_name: str) -> str:
     return f"{PHASE_NOTES_END_PREFIX}{stage_name} -->"
 
 
-def check_working_directory(
-    work_dir: Path, actual_cwd: Optional[Path] = None
-) -> Dict[str, Any]:
-    """Return a serializable snapshot of the expected and actual directories.
-
-    The orchestrator is allowed to be launched from outside the research
-    workspace, so a mismatch is recorded for diagnosis instead of raising.
-    ``healthy`` only means that the configured workspace is usable.
-    """
-    expected = Path(work_dir).expanduser().resolve()
-    actual = Path(actual_cwd or Path.cwd()).expanduser().resolve()
+def check_working_directory(work_dir: Path) -> Dict[str, Any]:
+    """Return a serializable health snapshot of the configured workspace."""
+    root = Path(work_dir).expanduser().resolve()
     return {
-        "expected": str(expected),
-        "actual": str(actual),
-        "exists": expected.exists(),
-        "is_directory": expected.is_dir(),
-        "cwd_matches": actual == expected,
-        "healthy": expected.is_dir(),
+        "root": str(root),
+        "exists": root.exists(),
+        "is_directory": root.is_dir(),
+        "healthy": root.is_dir(),
     }
 
 
@@ -152,12 +142,11 @@ def render_state_markdown(state: Mapping[str, Any], agent_notes: str = "") -> st
 
     lines.extend(["", "## Workspace check", ""])
     if workspace:
+        root = workspace.get("root") or workspace.get("expected", "")
         lines.extend(
             [
-                f"- Expected: `{workspace.get('expected', '')}`",
-                f"- Actual: `{workspace.get('actual', '')}`",
+                f"- Root: `{root}`",
                 f"- Directory usable: `{workspace.get('healthy', False)}`",
-                f"- Current process matches workspace: `{workspace.get('cwd_matches', False)}`",
             ]
         )
     else:

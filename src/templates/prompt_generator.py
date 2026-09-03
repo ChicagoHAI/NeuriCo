@@ -134,7 +134,8 @@ class PromptGenerator:
 
     def generate_research_prompt(self, idea: Dict[str, Any],
                                  root_dir: Optional[Path] = None,
-                                 scoring_enabled: bool = False) -> str:
+                                 scoring_enabled: bool = False,
+                                 include_implicit_time_limit: bool = True) -> str:
         """
         Generate the main research prompt from an idea specification.
 
@@ -150,6 +151,9 @@ class PromptGenerator:
             scoring_enabled: If True, append base/researcher_scoring_addendum.txt
                              as an extra banner-delimited section. Default False
                              preserves bit-identical behavior to the legacy mode.
+            include_implicit_time_limit: If True, ideas with constraints but no
+                             explicit time limit retain the legacy 3600-second
+                             prompt default.
 
         Returns:
             Complete research prompt string
@@ -199,7 +203,11 @@ class PromptGenerator:
             "                    RESEARCH TASK SPECIFICATION",
             "=" * 80,
             "",
-            self._generate_task_section(idea_spec, scoring_enabled=scoring_enabled),
+            self._generate_task_section(
+                idea_spec,
+                scoring_enabled=scoring_enabled,
+                include_implicit_time_limit=include_implicit_time_limit,
+            ),
             "",
             "=" * 80,
             "                 RESEARCH METHODOLOGY (UNIVERSAL)",
@@ -329,7 +337,8 @@ Location: {run_dir}
         return variables
 
     def _generate_task_section(self, idea_spec: Dict[str, Any],
-                               scoring_enabled: bool = False) -> str:
+                               scoring_enabled: bool = False,
+                               include_implicit_time_limit: bool = True) -> str:
         """
         Generate the task-specific section of the prompt.
 
@@ -341,6 +350,8 @@ Location: {run_dir}
             scoring_enabled: If True, render scoring-only obligations such as
                              required_for_evaluation. Ordinary research runs
                              are unscored, so those obligations are omitted.
+            include_implicit_time_limit: If True, preserve the legacy
+                             3600-second default when no limit is declared.
 
         Returns:
             Formatted task section string
@@ -457,11 +468,13 @@ Location: {run_dir}
             compute = constraints.get('compute', 'any')
             lines.append(f"- **Compute**: {compute}")
 
-            time_limit = constraints.get('time_limit', 3600)
-            hours = time_limit // 3600
-            minutes = (time_limit % 3600) // 60
-            time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
-            lines.append(f"- **Time Limit**: {time_str} ({time_limit} seconds)")
+            time_limit = constraints.get('time_limit')
+            if time_limit is not None or include_implicit_time_limit:
+                time_limit = 3600 if time_limit is None else time_limit
+                hours = time_limit // 3600
+                minutes = (time_limit % 3600) // 60
+                time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+                lines.append(f"- **Time Limit**: {time_str} ({time_limit} seconds)")
 
             if 'memory' in constraints:
                 lines.append(f"- **Memory**: {constraints['memory']}")

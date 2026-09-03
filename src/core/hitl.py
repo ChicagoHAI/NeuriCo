@@ -51,6 +51,7 @@ HITL_WORKER_ACTORS = PIPELINE_STAGES | {"autoresearch_proposer", "comment_handle
 HITL_STAGES = {"plan", "execution", "proposal", "review"}
 LEVELS = {"A", "B", "C"}
 IDEA_TYPES = {"decision", "evidence", "proposal"}
+MAX_CONSECUTIVE_PROVIDER_FAILURES = 3
 
 _WORKER_COMMAND_MODULES = {
     "hitl-report-idea": "hitl_report_idea.py",
@@ -893,6 +894,21 @@ class HitlRuntime:
 
         return HitlManager(config, work_dir=work_dir, channel=channel)
 
+    def _autoresearch_candidate_prompt_context(self) -> Dict[str, Any]:
+        provenance = self._tool_context.get("provenance")
+        if not isinstance(provenance, dict):
+            provenance = {}
+        assigned_candidate_sha = str(provenance.get("parent_node_id", "")).strip()
+        autoresearch_attempt = bool(
+            assigned_candidate_sha
+            and str(provenance.get("attempt_id", "")).strip()
+            and str(provenance.get("proposal_idea_id", "")).strip()
+        )
+        return {
+            "autoresearch_attempt": autoresearch_attempt,
+            "assigned_candidate_sha": assigned_candidate_sha,
+        }
+
     def plan_prompt_block(
         self,
         approved_proposal: str = "",
@@ -913,6 +929,7 @@ class HitlRuntime:
             hitl_stage="plan",
             allow_raised_ideas=False,
             hitl_mode=self.hitl_mode.value,
+            **self._autoresearch_candidate_prompt_context(),
         )
 
     def execution_prompt_block(self, mode: str = "execute", feedback: str = "") -> str:
@@ -926,6 +943,7 @@ class HitlRuntime:
             allow_raised_ideas=True,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
+            **self._autoresearch_candidate_prompt_context(),
         )
 
     def review_prompt_block(self, feedback: str = "") -> str:
@@ -938,6 +956,7 @@ class HitlRuntime:
             allow_raised_ideas=True,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
+            **self._autoresearch_candidate_prompt_context(),
         )
 
     def plan_revision_prompt_block(self, feedback: str) -> str:
@@ -950,6 +969,7 @@ class HitlRuntime:
             allow_raised_ideas=False,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
+            **self._autoresearch_candidate_prompt_context(),
         )
 
     def compose_worker_prompt(self, *, hitl_stage: str, phase_prompt: str) -> str:
@@ -1093,6 +1113,7 @@ class HitlRuntime:
             plan_text=self._read_optional(self.paths.plan_path),
             on_finalize=persist_resolution,
             hitl_mode=self.hitl_mode,
+            request_context=dict(provenance or {}),
         )
         try:
             return finalized["record"]
@@ -1386,6 +1407,34 @@ class HitlRuntime:
 
         continuation = HitlRuntimeState(self.work_dir).worker_continuation()
         return dict(continuation) if isinstance(continuation, dict) else None
+
+    def _record_worker_provider_result(self, result: Dict[str, Any]) -> None:
+        """Stop after the active continuation exhausts its provider attempts."""
+        if "provider_process_failed" not in result:
+            return
+        failed = bool(result.get("provider_process_failed"))
+        if not failed and result.get("return_code") != 0:
+            return
+
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        failures = HitlRuntimeState(self.work_dir).record_worker_provider_result(
+            failed=failed
+        )
+        if failures < MAX_CONSECUTIVE_PROVIDER_FAILURES:
+            return
+
+        from core.hitl_run_control import (
+            HitlRunStopRequested,
+            active_hitl_run_stop_control,
+        )
+
+        control = active_hitl_run_stop_control()
+        if control is not None:
+            control.request(requested_by="provider_unavailable")
+        raise HitlRunStopRequested(
+            "HITL run stopped after three consecutive provider process failures."
+        )
 
     def resolved_worker_response(self) -> Optional[Dict[str, Any]]:
         """Return the response retained for an idempotent worker-command retry."""
@@ -1859,6 +1908,7 @@ class HitlRuntime:
                     else ""
                 ),
             }
+        self._record_worker_provider_result(result)
         if submitted and submitted.get("status") == "feedback":
             continuation = self.worker_continuation()
             prompt_block = str((continuation or {}).get("prompt_block", "")).strip()
@@ -2220,6 +2270,7 @@ class HitlRuntime:
         approved: bool,
         context: str,
         manager_feedback: str,
+        repair_target: str = "",
     ) -> Dict[str, Any]:
         """Record the manager's final initial-score readiness decision."""
         premise = _require_text(
@@ -2228,12 +2279,23 @@ class HitlRuntime:
             "Initial AutoResearch scoring decision",
         )
         feedback = str(manager_feedback).strip()
-        if not approved:
+        target = str(repair_target).strip()
+        if approved and target:
+            raise HitlValidationError(
+                "Approved initial scoring decisions cannot select a repair target."
+            )
+        if approved:
+            feedback = ""
+        else:
             feedback = _require_text(
                 feedback,
                 "manager_feedback",
                 "Initial AutoResearch scoring repair decision",
             )
+            if target not in {"experiment_runner", "rule_maker"}:
+                raise HitlValidationError(
+                    "Initial scoring feedback must target experiment_runner or rule_maker."
+                )
         record = {
             "pipeline_stage": "experiment_runner",
             "hitl_stage": "review",
@@ -2256,10 +2318,12 @@ class HitlRuntime:
             "decision_needed": "Is the scored initial experiment ready to become the AutoResearch root node?",
             "options": [
                 "Accept the error-free scored initial experiment as the root node.",
-                "Return repair feedback and score the initial experiment again.",
+                "Return targeted repair feedback either to the experiment runner or, after "
+                "restoring the pre-experiment boundary, to rule-maker execution review.",
             ],
             "decision": "O1" if approved else "O2",
             "manager_feedback": feedback,
+            "repair_target": target,
             "raised": not approved,
         }
         return self.log.append(record, idempotent=True)
@@ -2338,6 +2402,67 @@ class HitlRuntime:
                 ),
                 "prompt_block": prompt_block,
                 "final": False,
+                "record": dict(record),
+            },
+        )
+
+    def initial_rule_maker_repair_response(
+        self,
+        *,
+        context: str,
+        manager_feedback: str,
+        record: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """End the experiment request so runtime can reopen rule-maker review."""
+        feedback = _require_text(
+            manager_feedback,
+            "manager_feedback",
+            "Initial rule-maker scoring repair response",
+        )
+        pending = self._pending_worker_command()
+        if not str((pending or {}).get("request_key", "")).strip():
+            raise HitlValidationError(
+                "Initial rule-maker repair has no pending phase-finish request to resume."
+            )
+        request_key = self._phase_finish_request_key_for(
+            hitl_stage=str((pending or {}).get("hitl_stage", "")).strip(),
+            plan_fingerprint=str((pending or {}).get("plan_fingerprint", "")).strip(),
+            workspace_fingerprint=str(
+                (pending or {}).get("workspace_fingerprint", "")
+            ).strip(),
+            summary=str((pending or {}).get("finish_summary", "")).strip(),
+            related_artifacts=_as_related_artifacts(
+                (pending or {}).get("related_artifacts")
+            ),
+        )
+        normalized_context = _require_text(
+            context,
+            "context",
+            "Initial rule-maker scoring repair response",
+        )
+        self._phase_finish_result = {
+            "called": True,
+            "status": "feedback",
+            "hitl_stage": str((pending or {}).get("hitl_stage", "")).strip(),
+            "manager_feedback": feedback,
+            "context": normalized_context,
+            "record": dict(record),
+            "final": True,
+            "rule_maker_repair_requested": True,
+        }
+        return self._remember_phase_finish_response(
+            request_key,
+            {
+                "status": "feedback",
+                "feedback": feedback,
+                "context": normalized_context,
+                "instruction": (
+                    "This experiment-worker invocation is complete. Runtime will restore "
+                    "the pre-experiment boundary and reopen rule-maker execution review. "
+                    "Do not retry hitl-finish-phase."
+                ),
+                "final": True,
+                "rule_maker_repair_requested": True,
                 "record": dict(record),
             },
         )
@@ -2868,12 +2993,26 @@ class HitlRuntime:
                         f"- {str(issue)}" for issue in issues if str(issue).strip()
                     )
                     next_stage = "plan" if hitl_stage == "plan" else "review"
-                    feedback = (
+                    provided_feedback = str(validation.get("worker_feedback", "")).strip()
+                    feedback = provided_feedback or (
                         "Runtime validation found work outside the allowed HITL boundary. "
                         "Correct only these issues, preserve completed permitted work, then call "
                         "hitl-finish-phase again:\n"
                         + (issue_text or "- Recheck the active HITL workspace boundary.")
                     )
+                    feedback_context = str(
+                        validation.get(
+                            "worker_feedback_context",
+                            "Runtime validation rejected the phase boundary before manager review.",
+                        )
+                    ).strip()
+                    feedback_instruction = str(
+                        validation.get(
+                            "worker_instruction",
+                            "Correct the listed runtime validation issues in this same worker "
+                            "session, then call hitl-finish-phase again.",
+                        )
+                    ).strip()
                     self._tool_context["hitl_stage"] = next_stage
                     self.current_hitl_stage = next_stage
                     self._phase_finish_result = {
@@ -2885,7 +3024,7 @@ class HitlRuntime:
                         "summary": summary,
                         "related_artifacts": related_artifacts,
                         "manager_feedback": feedback,
-                        "context": "Runtime validation rejected the phase boundary before manager review.",
+                        "context": feedback_context,
                         "next_phase": next_stage,
                         "final": False,
                     }
@@ -2903,10 +3042,7 @@ class HitlRuntime:
                             "status": "feedback",
                             "feedback": feedback,
                             "next_phase": next_stage,
-                            "instruction": (
-                                "Correct the listed runtime validation issues in this same worker "
-                                "session, then call hitl-finish-phase again."
-                            ),
+                            "instruction": feedback_instruction,
                             "prompt_block": prompt_block,
                         },
                     )
@@ -3198,6 +3334,8 @@ class HitlRuntime:
                     else ""
                 ),
             }
+
+        self._record_worker_provider_result(result)
 
         pending_replacement = self._pending_worker_request_replacement(
             phase=phase,

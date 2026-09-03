@@ -10,6 +10,7 @@ Covers:
 Run: python -m pytest tests/test_hitl_autoresearch_review_fixes.py
 """
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import core.hitl_autoresearch as har  # noqa: E402
+import agents.rule_maker as rule_maker  # noqa: E402
+from core.hitl import render_hitl_template  # noqa: E402
 from core.hitl_autoresearch import (  # noqa: E402
     InitialAutoResearchNodeResult,
     _restore_bootstrap_agent_local,
@@ -25,6 +28,11 @@ from core.hitl_autoresearch import (  # noqa: E402
     construct_bootstrap_hitl_baseline,
 )
 from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError  # noqa: E402
+from core.hitl_scoring_workspace import (  # noqa: E402
+    HitlScoringWorkspaceError,
+    _materialize_checkpoint_gitlinks,
+    validate_checkpoint_gitlinks,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -650,3 +658,132 @@ def test_rollback_with_missing_snapshot_and_no_prior_provider_state_succeeds(
         "provider dir created by preparation must be removed on rollback"
     assert state.cleared_boundary is True
     assert result.success is True
+
+
+# --------------------------------------------------------------------------- #
+# 9. HITL rule-maker validation requires committed nested repositories
+# --------------------------------------------------------------------------- #
+
+def _git(path: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _checkpointed_nested_repository(tmp_path: Path) -> tuple[Path, Path]:
+    workspace = tmp_path / "workspace"
+    nested = workspace / "code" / "dependency"
+    nested.mkdir(parents=True)
+    _git(nested, "init")
+    _git(nested, "config", "user.name", "Test")
+    _git(nested, "config", "user.email", "test@example.com")
+    (nested / "dependency.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(nested, "add", "dependency.py")
+    _git(nested, "commit", "-m", "initial dependency")
+
+    _git(workspace, "init")
+    _git(workspace, "config", "user.name", "Test")
+    _git(workspace, "config", "user.email", "test@example.com")
+    (workspace / "README.md").write_text("workspace\n", encoding="utf-8")
+    _git(workspace, "add", "README.md", "code/dependency")
+    _git(workspace, "commit", "-m", "record dependency")
+    return workspace, nested
+
+
+def test_rule_maker_gitlink_validation_accepts_clean_matching_checkout(tmp_path):
+    workspace, _ = _checkpointed_nested_repository(tmp_path)
+
+    assert validate_checkpoint_gitlinks(workspace) == []
+
+
+@pytest.mark.parametrize("change", ["modified", "staged", "untracked"])
+def test_rule_maker_gitlink_validation_rejects_dirty_checkout(tmp_path, change):
+    workspace, nested = _checkpointed_nested_repository(tmp_path)
+    if change == "untracked":
+        (nested / "extra.py").write_text("EXTRA = True\n", encoding="utf-8")
+    else:
+        (nested / "dependency.py").write_text("VALUE = 2\n", encoding="utf-8")
+        if change == "staged":
+            _git(nested, "add", "dependency.py")
+
+    issues = validate_checkpoint_gitlinks(workspace)
+
+    assert len(issues) == 1
+    assert "contains staged, modified, or untracked files" in issues[0]
+
+
+def test_rule_maker_gitlink_validation_rejects_head_mismatch(tmp_path):
+    workspace, nested = _checkpointed_nested_repository(tmp_path)
+    (nested / "dependency.py").write_text("VALUE = 2\n", encoding="utf-8")
+    _git(nested, "add", "dependency.py")
+    _git(nested, "commit", "-m", "advance dependency")
+
+    issues = validate_checkpoint_gitlinks(workspace)
+
+    assert issues == [
+        "Checkpointed nested repository `code/dependency` is at a different "
+        "commit than the workspace Gitlink."
+    ]
+
+
+def test_gitlink_materialization_rejects_symlink_outside_destination(tmp_path):
+    workspace, nested = _checkpointed_nested_repository(tmp_path)
+    (nested / "escape").symlink_to("../../../outside")
+    _git(nested, "add", "escape")
+    _git(nested, "commit", "-m", "add escaping symlink")
+    _git(workspace, "add", "code/dependency")
+    _git(workspace, "commit", "-m", "update dependency")
+    scorer_dir = tmp_path / "scorer"
+    scorer_dir.mkdir()
+
+    with pytest.raises(HitlScoringWorkspaceError, match="could not restore"):
+        _materialize_checkpoint_gitlinks(
+            work_dir=workspace,
+            scorer_dir=scorer_dir,
+            source_sha="HEAD",
+        )
+
+    extracted_link = scorer_dir / "code" / "dependency" / "escape"
+    assert not extracted_link.exists()
+    assert not extracted_link.is_symlink()
+
+
+def test_hitl_rule_maker_validation_includes_gitlink_issues(tmp_path, monkeypatch):
+    scoring = tmp_path / "scoring"
+    scoring.mkdir()
+    (scoring / "targets.json").write_text(
+        '{"sealed_inputs": []}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        rule_maker,
+        "validate_rule_maker_outputs",
+        lambda _work_dir: {"valid": True, "found": {"targets": "targets"}, "issues": []},
+    )
+    monkeypatch.setattr(
+        rule_maker,
+        "validate_checkpoint_gitlinks",
+        lambda _work_dir: ["nested repository is dirty"],
+    )
+
+    validation = rule_maker.validate_hitl_rule_maker_outputs(tmp_path)
+
+    assert validation["valid"] is False
+    assert validation["issues"] == ["nested repository is dirty"]
+    assert "Nested repository is dirty" in validation["worker_feedback"]
+
+
+def test_initial_scoring_repair_requires_preflight_evidence_not_test_artifact():
+    prompt = render_hitl_template(
+        "manager_review_initial_scoring.txt",
+        scorer_result_json="{}",
+    )
+
+    assert "reproduce those conditions during the functional `scoring/eval.py`" in prompt
+    assert "record the evidence in\n`scoring/rule_maker_log.md`" in prompt
+    assert "add matching preflight regression tests" not in prompt

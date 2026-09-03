@@ -23,6 +23,9 @@ from interactive.research_state import ResearchState
 _IDEA_SOURCE = "hitl_idea"
 _FRONTIER_NODE_SOURCE = "hitl_frontier_node"
 _WHITEBOARD_SECTION = "hitl_cross_attempt_lessons"
+_FRONTIER_DECISION_QUESTION = (
+    "Should the scored candidate be retained in the HITL research frontier?"
+)
 
 
 class HitlWorldModelSync:
@@ -198,18 +201,14 @@ class HitlWorldModelSync:
         # runtime state: hiding corruption would let the manager reason from a
         # false empty portfolio.
         state = store.state(allow_unselected=True)
-        proposals = {
-            self._idea_id(record): str(record.get("proposal", "")).strip()
-            for record in ideas
-            if record.get("idea_type") == "proposal" and self._idea_id(record)
-        }
+        records = list(ideas)
+        decision_idea_ids = self._frontier_decision_idea_ids(records)
         selected_sha = state["selected_frontier_node_sha"]
         selected = (
             self._manager_node_view(
                 store.node(selected_sha),
                 include_plan=True,
-                include_proposal_content=True,
-                proposals=proposals,
+                decision_idea_ids=decision_idea_ids,
             )
             if selected_sha
             else {"status": "runtime frontier selection is pending"}
@@ -218,40 +217,98 @@ class HitlWorldModelSync:
             self._manager_node_view(
                 store.node(node_sha),
                 include_plan=False,
-                include_proposal_content=False,
-                proposals=proposals,
+                decision_idea_ids=decision_idea_ids,
             )
             for node_sha in state["active_frontier_node_shas"]
         ]
         return selected, portfolio
+
+    def manager_frontier_node(
+        self,
+        node_sha: str,
+        *,
+        proposal_idea_id: str = "",
+    ) -> Dict[str, Any]:
+        """Render one frontier node without expanding every historical attempt."""
+        node = HitlFrontierStore(self.work_dir).node(node_sha)
+        decision_idea_ids = self._frontier_decision_idea_ids(self._ideas())
+        proposal_id = str(proposal_idea_id).strip()
+        if not proposal_id:
+            return {
+                **node,
+                "attempt_history": self._manager_attempt_history(
+                    node,
+                    decision_idea_ids=decision_idea_ids,
+                ),
+            }
+
+        matches = [
+            attempt
+            for attempt in node.get("attempt_history", [])
+            if isinstance(attempt, dict)
+            and str(attempt.get("proposal_idea_id", "")).strip() == proposal_id
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Frontier node {node_sha} does not contain exactly one attempt for "
+                f"proposal idea {proposal_id}."
+            )
+        decision_idea_id = decision_idea_ids.get(proposal_id)
+        if not decision_idea_id:
+            raise RuntimeError(
+                f"Frontier attempt for proposal idea {proposal_id} is missing its decision idea."
+            )
+        return {
+            **matches[0],
+            "decision_idea_id": decision_idea_id,
+        }
+
+    def _frontier_decision_idea_ids(
+        self,
+        ideas: Iterable[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        records = list(ideas)
+        proposal_ids = {
+            self._idea_id(record)
+            for record in records
+            if record.get("idea_type") == "proposal" and self._idea_id(record)
+        }
+        decisions: Dict[str, str] = {}
+        for record in records:
+            if (
+                record.get("idea_type") != "decision"
+                or record.get("actor") != "manager"
+                or record.get("decision_needed") != _FRONTIER_DECISION_QUESTION
+            ):
+                continue
+            idea_id = self._idea_id(record)
+            matched_proposals = [
+                premise for premise in self._premises(record) if premise in proposal_ids
+            ]
+            if not idea_id or len(matched_proposals) != 1:
+                raise RuntimeError(
+                    "A finalized HITL frontier decision must reference exactly one proposal idea."
+                )
+            proposal_id = matched_proposals[0]
+            existing = decisions.get(proposal_id)
+            if existing is not None and existing != idea_id:
+                raise RuntimeError(
+                    f"Proposal idea {proposal_id} has multiple finalized HITL frontier decisions."
+                )
+            decisions[proposal_id] = idea_id
+        return decisions
 
     def _manager_node_view(
         self,
         node: Dict[str, Any],
         *,
         include_plan: bool,
-        include_proposal_content: bool,
-        proposals: Dict[str, str],
+        decision_idea_ids: Dict[str, str],
     ) -> Dict[str, Any]:
-        attempt_history: List[Dict[str, Any]] = []
-        for attempt in node.get("attempt_history", []):
-            if not isinstance(attempt, dict):
-                continue
-            history_entry = {
-                "proposal_idea_id": attempt.get("proposal_idea_id"),
-                "proposal_type": attempt.get("proposal_type"),
-                "objective_score": attempt.get("objective_score"),
-                "accepted": attempt.get("accepted"),
-                "manager_rationale": (
-                    attempt.get("reason_for_acceptance")
-                    or attempt.get("reason_for_rejection")
-                    or ""
-                ),
-            }
-            if include_proposal_content:
-                proposal_id = str(attempt.get("proposal_idea_id", "")).strip()
-                history_entry["proposal"] = proposals.get(proposal_id, "")
-            attempt_history.append(history_entry)
+        attempt_history = self._manager_attempt_history(
+            node,
+            decision_idea_ids=decision_idea_ids,
+        )
         view = {
             "parent_node_sha": node.get("parent_node_sha"),
             "node_sha": node.get("node_sha"),
@@ -262,6 +319,31 @@ class HitlWorldModelSync:
         if include_plan:
             view["saved_plan"] = node.get("plan", "")
         return view
+
+    def _manager_attempt_history(
+        self,
+        node: Dict[str, Any],
+        *,
+        decision_idea_ids: Dict[str, str],
+    ) -> List[Dict[str, Any]]:
+        attempt_history: List[Dict[str, Any]] = []
+        for attempt in node.get("attempt_history", []):
+            if not isinstance(attempt, dict):
+                continue
+            proposal_id = str(attempt.get("proposal_idea_id", "")).strip()
+            decision_idea_id = decision_idea_ids.get(proposal_id)
+            if not proposal_id or not decision_idea_id:
+                raise RuntimeError(
+                    "A finalized HITL frontier attempt is missing its proposal or decision idea."
+                )
+            history_entry = {
+                "proposal_idea_id": proposal_id,
+                "decision_idea_id": decision_idea_id,
+                "proposal_type": attempt.get("proposal_type"),
+                "accepted": attempt.get("accepted"),
+            }
+            attempt_history.append(history_entry)
+        return attempt_history
 
     def _sync_whiteboard(self, research: ResearchState) -> None:
         tips = self._active_whiteboard_tips()

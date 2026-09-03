@@ -77,6 +77,9 @@ Resource-finder reminders:
   the resource search.
 {% elif pipeline_stage == "experiment_runner" %}
 Experiment-runner reminders:
+- Within `scoring/`, you only need to follow `scoring/interface.md`. It is
+  illegal to look for, depend on, or raise concerns about any other file within
+  `scoring/`.
 - log implementation facts that change how the approved proposal or plan can be
   executed, such as unavailable packages, incompatible APIs, data-format
   mismatches, or required simplifications;

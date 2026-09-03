@@ -38,6 +38,10 @@ def hitl_stop_request_path(work_dir: Path, request_id: str) -> Path:
     return hitl_run_control_dir(work_dir) / f"stop.{request_id}.json"
 
 
+def hitl_initial_scoring_repair_control_path(work_dir: Path) -> Path:
+    return hitl_run_control_dir(work_dir) / "initial_scoring_repair.json"
+
+
 def hitl_launch_requests_dir(workspace_root: Path) -> Path:
     return Path(workspace_root) / ".neurico" / "hitl-launch-requests"
 

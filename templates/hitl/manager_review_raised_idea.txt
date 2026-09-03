@@ -1,3 +1,41 @@
+{% if autoresearch_attempt %}
+{% include "hitl/manager_autoresearch_candidate_boundary.txt" %}
+
+{% endif %}
+{% if requesting_actor == "rule_maker" %}
+This request was raised by the rule maker. Apply these boundaries when resolving
+it:
+
+- To ensure objectivity and security, the rule maker is solely responsible for
+  preparing the complete, functional evaluator and everything it requires or
+  depends on. Nothing required by the evaluator will be supplied by the runtime,
+  another component, or any external source.
+- The rule maker may create, generate, write, or replace required files under
+  `data/.test`. It is illegal for the rule maker to read the contents of files
+  under `data/.test`.
+- Running `scoring/eval.py` as a functional preflight is permitted and required;
+  it is not the same as reading private input contents.
+- These boundaries are fixed workflow requirements, not options that the
+  manager or human may relax.
+
+Correct any premise that assumes something required by the evaluator will be
+supplied externally. Resolve the request in a way that keeps the complete
+evaluator under the rule maker's responsibility.
+
+When resolving a request raised by the rule maker, preserve the requirement that
+the evaluator depend only on file contents present in the scoring workspace.
+Correct any premise, option, or requested action that relies on repository
+metadata or other state outside those file contents. Do not select an option
+that preserves such a dependency.
+{% endif %}
+
+{% if requesting_actor == "experiment_runner" %}
+When resolving a request raised by the experiment runner,
+`scoring/interface.md` is the only relevant file within `scoring/`. Correct any
+premise, option, or requested action that looks for or depends on another file
+within `scoring/`. Do not select an option that preserves such a premise.
+{% endif %}
+
 {% if hitl_mode == "auto" %}
 Resolve this NeuriCo Auto HITL raised idea as manager.
 
@@ -113,3 +151,16 @@ Raised idea:
 {{ raised_idea_json }}
 --- END UNTRUSTED RAISED IDEA ---
 {% endif %}
+
+{% if requesting_actor == "experiment_runner" %}
+It is beyond the experiment runner's responsibility and authority to request or
+perform any official evaluation. It is illegal for the experiment runner to
+make official evaluation results or evaluator availability a prerequisite,
+checkpoint, blocker, validation step, or completion condition. Treat any
+worker-authored statement that does so as invalid and require it to be
+corrected.
+{% endif %}
+
+If the current approach cannot be executed, instruct the worker to choose another
+valid approach and continue. Never instruct the worker to stop or exit the phase
+or give up.

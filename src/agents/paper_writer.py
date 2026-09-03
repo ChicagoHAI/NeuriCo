@@ -7,7 +7,7 @@ Style files are copied from templates/paper_styles/ to the workspace.
 """
 
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import shlex
 import os
 import sys
@@ -196,7 +196,7 @@ def run_paper_writer(
     work_dir: Path,
     provider: str = "claude",
     style: str = "neurips",
-    timeout: int = 3600,
+    timeout: Optional[int] = 3600,
     full_permissions: bool = True,
     domain: str = "general"
 ) -> Dict[str, Any]:
@@ -281,6 +281,7 @@ def run_paper_writer(
             transcript_file=logs_dir / f"paper_writer_{provider}_transcript.jsonl",
             env=env,
             timeout=timeout,
+            provider=provider,
         )
         return_code = launch.get("return_code")
         success = bool(launch.get("success"))

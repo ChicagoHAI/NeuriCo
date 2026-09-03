@@ -71,6 +71,21 @@ class HitlGitStateStore:
             retain_history=False,
         )
 
+    def create_rule_maker_repair_rollback_snapshot(self) -> HitlGitSnapshot:
+        """Capture ordinary HITL state plus the unsealed evaluator under repair."""
+        from core.scoring_seal import SEALED_PATHS
+
+        ref = f"refs/neurico/hitl-rollback/{uuid.uuid4().hex}"
+        return self._capture(
+            ref=ref,
+            paths=(
+                *DURABLE_HITL_STATE_PATHS,
+                *(path.rstrip("/") for path in SEALED_PATHS),
+            ),
+            message="NeuriCo HITL rule-maker repair rollback snapshot",
+            retain_history=False,
+        )
+
     def begin_autoresearch_hitl_attempt(self, attempt_id: str) -> HitlGitSnapshot:
         """Create the private Git rollback boundary for one HITL attempt."""
         ref = self._autoresearch_hitl_rollback_ref(attempt_id)
