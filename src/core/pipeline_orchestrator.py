@@ -1337,6 +1337,10 @@ class ResearchPipelineOrchestrator:
                     run_result.get("background_processes_terminated")
                 ),
             }
+            if runtime_prompt is not None:
+                result["provider_process_failed"] = bool(
+                    run_result.get("provider_process_failed")
+                )
             if success and dsi_remote_info is not None:
                 from core.dsi_slurm_artifacts import archive_dsi_slurm_artifacts
 

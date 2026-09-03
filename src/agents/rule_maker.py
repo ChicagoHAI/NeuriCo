@@ -599,7 +599,7 @@ def run_rule_maker(
         if plan_path.exists():
             outputs["hitl_plan"] = str(plan_path)
 
-    return {
+    result = {
         "success": success,
         "outputs": outputs,
         "issues": validation["issues"],
@@ -610,6 +610,12 @@ def run_rule_maker(
         if completion_mode == "hitl_runtime"
         else False,
     }
+    if completion_mode == "hitl_runtime":
+        result["return_code"] = return_code
+        result["provider_process_failed"] = bool(
+            launch.get("provider_process_failed")
+        )
+    return result
 
 
 def validate_rule_maker_outputs(work_dir: Path) -> Dict[str, Any]:

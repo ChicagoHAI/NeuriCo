@@ -299,7 +299,7 @@ def run_resource_finder(
 
     print()
 
-    return {
+    result = {
         "success": success,
         "completion_marker": str(completion_marker) if completion_marker.exists() else None,
         "outputs": found_outputs,
@@ -310,6 +310,12 @@ def run_resource_finder(
         if completion_mode == "hitl_runtime"
         else False,
     }
+    if completion_mode == "hitl_runtime":
+        result["return_code"] = return_code
+        result["provider_process_failed"] = bool(
+            launch.get("provider_process_failed")
+        )
+    return result
 
 
 def wait_for_completion(work_dir: Path, timeout: int = 3600, check_interval: int = 5) -> bool:

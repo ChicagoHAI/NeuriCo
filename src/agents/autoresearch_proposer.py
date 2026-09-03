@@ -383,7 +383,7 @@ def run_autoresearch_proposer(
             f"(return_code={return_code}, error={error})"
         )
 
-    return {
+    result = {
         "success": success,
         "return_code": return_code,
         "proposal_path": str(proposal_path),
@@ -396,6 +396,11 @@ def run_autoresearch_proposer(
             launch.get("background_processes_terminated")
         ),
     }
+    if hitl_submission:
+        result["provider_process_failed"] = bool(
+            launch.get("provider_process_failed")
+        )
+    return result
 
 
 def _read_text_if_exists(path: Path) -> str:
