@@ -7,8 +7,8 @@ This module provides:
 3. API key pattern detection and redaction
 """
 
-import re
 import os
+import re
 from typing import Dict, Set, Optional
 from pathlib import Path
 
@@ -72,6 +72,8 @@ API_KEY_PATTERNS = [
 
     # Google/Gemini API keys
     (r'AIza[A-Za-z0-9_-]{35,}', '[REDACTED_GOOGLE_KEY]'),
+    (r'ya29\.[A-Za-z0-9_-]{20,}', '[REDACTED_GOOGLE_OAUTH_ACCESS]'),
+    (r'1//0[A-Za-z0-9_-]{20,}', '[REDACTED_GOOGLE_OAUTH_REFRESH]'),
 
     # AWS keys
     (r'AKIA[A-Z0-9]{16}', '[REDACTED_AWS_ACCESS_KEY]'),
@@ -86,6 +88,10 @@ API_KEY_PATTERNS = [
 # Compile patterns once for performance
 _COMPILED_PATTERNS = [(re.compile(pattern), replacement)
                        for pattern, replacement in API_KEY_PATTERNS]
+
+
+class SanitizationError(RuntimeError):
+    """Raised when a security-boundary file cannot be safely inspected."""
 
 
 def sanitize_text(text: str) -> str:
@@ -104,6 +110,55 @@ def sanitize_text(text: str) -> str:
     return result
 
 
+def contains_sensitive_data(text: str) -> bool:
+    """Return True if text contains a recognized sensitive credential."""
+    return any(pattern.search(text) for pattern, _ in _COMPILED_PATTERNS)
+
+
+def _is_within_git_dir(file_path: Path) -> bool:
+    return ".git" in file_path.parts
+
+
+def sanitize_file(file_path: Path, *, strict: bool = False) -> bool:
+    """
+    Sanitize an arbitrary text file in-place by redacting API keys.
+
+    Binary or non-UTF-8 files are skipped without modification. Missing files
+    are skipped to support deleted staged paths.
+    """
+    file_path = Path(file_path)
+
+    if _is_within_git_dir(file_path) or not file_path.exists() or not file_path.is_file():
+        return False
+
+    try:
+        raw_content = file_path.read_bytes()
+    except Exception as e:
+        if strict:
+            raise SanitizationError(f"Could not read {file_path}: {e}") from e
+        print(f"Warning: Could not sanitize {file_path}: {e}")
+        return False
+
+    try:
+        content = raw_content.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+
+    sanitized = sanitize_text(content)
+    if sanitized == content:
+        return False
+
+    try:
+        file_path.write_text(sanitized, encoding="utf-8")
+    except Exception as e:
+        if strict:
+            raise SanitizationError(f"Could not write sanitized {file_path}: {e}") from e
+        print(f"Warning: Could not sanitize {file_path}: {e}")
+        return False
+
+    return True
+
+
 def sanitize_log_file(file_path: Path) -> bool:
     """
     Sanitize a log file in-place by redacting API keys.
@@ -115,16 +170,7 @@ def sanitize_log_file(file_path: Path) -> bool:
         True if file was modified, False otherwise
     """
     try:
-        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
-
-        sanitized = sanitize_text(content)
-
-        if sanitized != content:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(sanitized)
-            return True
-        return False
+        return sanitize_file(file_path, strict=False)
 
     except Exception as e:
         print(f"Warning: Could not sanitize {file_path}: {e}")
