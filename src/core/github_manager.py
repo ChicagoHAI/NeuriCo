@@ -135,7 +135,8 @@ class GitHubManager:
                            provider: Optional[str] = None,
                            no_hash: bool = False,
                            hypothesis: Optional[str] = None,
-                           auto_init: bool = True) -> Dict[str, Any]:
+                           auto_init: bool = True,
+                           exact_repo_name: Optional[str] = None) -> Dict[str, Any]:
         """
         Create a new repository in the organization for research.
 
@@ -150,6 +151,8 @@ class GitHubManager:
             hypothesis: Research hypothesis (fallback for naming when the title is unusable)
             auto_init: Whether GitHub should create an initial commit. Disable when
                 attaching an existing local workspace to the new repository.
+            exact_repo_name: Reuse this exact name instead of generating one. Used
+                only when restoring a previously recorded publication destination.
 
         Returns:
             Dictionary with repo information:
@@ -158,9 +161,17 @@ class GitHubManager:
             - clone_url: URL for cloning
             - local_path: Local path where repo will be cloned
         """
-        # Generate a concise repo name mechanically from the idea content
-        repo_name = self._generate_repo_name(title, domain, idea_id, provider=provider,
-                                             no_hash=no_hash, hypothesis=hypothesis)
+        # First-time repositories receive the established generated name. A
+        # deleted publication destination must instead be reconstructed with
+        # its exact recorded name.
+        repo_name = exact_repo_name or self._generate_repo_name(
+            title,
+            domain,
+            idea_id,
+            provider=provider,
+            no_hash=no_hash,
+            hypothesis=hypothesis,
+        )
 
         # Create description (must be single line, no newlines allowed by GitHub)
         if description is None:
@@ -205,7 +216,8 @@ class GitHubManager:
                 'clone_url': repo.clone_url,
                 'ssh_url': repo.ssh_url,
                 'local_path': self.workspace_dir / repo_name,
-                'repo_object': repo
+                'repo_object': repo,
+                'private': bool(repo.private),
             }
 
         except GithubException as e:
@@ -219,7 +231,8 @@ class GitHubManager:
                     'clone_url': repo.clone_url,
                     'ssh_url': repo.ssh_url,
                     'local_path': self.workspace_dir / repo_name,
-                    'repo_object': repo
+                    'repo_object': repo,
+                    'private': bool(repo.private),
                 }
             else:
                 # Provide detailed error information
@@ -251,6 +264,7 @@ class GitHubManager:
             "ssh_url": repo.ssh_url,
             "local_path": self.workspace_dir / repo_name,
             "repo_object": repo,
+            "private": bool(repo.private),
         }
 
     def clone_repo(self, clone_url: str, local_path: Path) -> 'Repo':

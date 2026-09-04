@@ -160,6 +160,7 @@ def main():
                     idea['idea']['metadata'] = idea['idea'].get('metadata', {})
                     idea['idea']['metadata']['github_repo_name'] = repo_name
                     idea['idea']['metadata']['github_repo_url'] = github_repo_url
+                    idea['idea']['metadata']['github_repo_private'] = repo_info['private']
 
                     # Save updated metadata
                     idea_path = manager.ideas_dir / "submitted" / f"{idea_id}.yaml"

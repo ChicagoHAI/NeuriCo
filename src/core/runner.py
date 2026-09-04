@@ -19,6 +19,7 @@ import shlex
 import sys
 import os
 import yaml
+from urllib.parse import urlparse
 
 # Force UTF-8 stdout/stderr on Windows where the default is cp1252.
 # Claude CLI output contains Unicode characters that cp1252 cannot represent,
@@ -63,6 +64,51 @@ try:
     GITHUB_AVAILABLE = True
 except ImportError:
     GITHUB_AVAILABLE = False
+
+
+def _recorded_github_repository(metadata: Dict[str, Any]) -> Optional[tuple[str, str]]:
+    """Return the exact owner/name encoded by a recorded GitHub URL."""
+    repo_url = str(metadata.get("github_repo_url", "")).strip()
+    if not repo_url:
+        return None
+    parsed = urlparse(repo_url)
+    if parsed.scheme != "https" or parsed.netloc.casefold() not in {
+        "github.com",
+        "www.github.com",
+    }:
+        raise RuntimeError("The recorded GitHub repository URL is invalid.")
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) != 2:
+        raise RuntimeError("The recorded GitHub repository URL is invalid.")
+    owner, url_name = parts
+    if url_name.endswith(".git"):
+        url_name = url_name[:-4]
+    recorded_name = str(metadata.get("github_repo_name", "")).strip()
+    if recorded_name and recorded_name.casefold() != url_name.casefold():
+        raise RuntimeError(
+            "The recorded GitHub repository name does not match its URL."
+        )
+    return owner, url_name
+
+
+def _github_repository_private(repo_info: Dict[str, Any]) -> bool:
+    """Return GitHub's actual visibility from one resolved repository."""
+    private = repo_info.get("private")
+    if not isinstance(private, bool):
+        repo = repo_info.get("repo_object")
+        private = getattr(repo, "private", None)
+    if not isinstance(private, bool):
+        raise RuntimeError("GitHub did not report the repository visibility.")
+    return private
+
+
+def _record_github_repository(
+    metadata: Dict[str, Any], repo_info: Dict[str, Any]
+) -> None:
+    """Persist the complete publication destination returned by GitHub."""
+    metadata["github_repo_name"] = repo_info["repo_name"]
+    metadata["github_repo_url"] = repo_info["repo_url"]
+    metadata["github_repo_private"] = _github_repository_private(repo_info)
 
 
 def _with_hitl_workspace_run_ownership(method):
@@ -396,12 +442,49 @@ class ResearchRunner:
                     metadata = idea_spec.setdefault("metadata", {})
                     repo_name = str(metadata.get("github_repo_name", "")).strip()
                     repo_info = None
-                    if repo_name:
+                    recorded_repo = _recorded_github_repository(metadata)
+                    if recorded_repo is not None:
+                        recorded_owner, repo_name = recorded_repo
+                        configured_owner = str(self.github_manager.owner_name or "").strip()
+                        if configured_owner.casefold() != recorded_owner.casefold():
+                            raise RuntimeError(
+                                "The recorded GitHub repository belongs to "
+                                f"'{recorded_owner}', but NeuriCo is configured for "
+                                f"'{configured_owner or '<unknown>'}'."
+                            )
                         try:
                             repo_info = self.github_manager.get_research_repo(repo_name)
                         except UnknownObjectException as e:
                             if e.status != 404:
                                 raise
+                            recorded_private = metadata.get("github_repo_private")
+                            if not isinstance(recorded_private, bool):
+                                raise RuntimeError(
+                                    "The recorded GitHub repository is unavailable and "
+                                    "its previous visibility was not recorded."
+                                ) from e
+                            repo_info = self.github_manager.create_research_repo(
+                                idea_id=idea_id,
+                                title=title,
+                                description=idea_spec.get("hypothesis", ""),
+                                private=recorded_private,
+                                domain=idea_spec.get("domain", "research"),
+                                provider=provider,
+                                no_hash=no_hash,
+                                hypothesis=idea_spec.get("hypothesis", ""),
+                                auto_init=False,
+                                exact_repo_name=repo_name,
+                            )
+                    elif repo_name:
+                        try:
+                            repo_info = self.github_manager.get_research_repo(repo_name)
+                        except UnknownObjectException as e:
+                            if e.status != 404:
+                                raise
+                            raise RuntimeError(
+                                "The recorded GitHub repository is unavailable and "
+                                "has no canonical repository URL."
+                            ) from e
                     if repo_info is None:
                         repo_info = self.github_manager.create_research_repo(
                             idea_id=idea_id,
@@ -415,8 +498,7 @@ class ResearchRunner:
                             auto_init=False,
                         )
                     github_url = repo_info["repo_url"]
-                    metadata["github_repo_name"] = repo_info["repo_name"]
-                    metadata["github_repo_url"] = github_url
+                    _record_github_repository(metadata, repo_info)
                     idea_path = self.idea_manager.get_idea_path(idea_id)
                     with open(idea_path, "w", encoding="utf-8") as f:
                         yaml.dump(
@@ -495,8 +577,7 @@ class ResearchRunner:
 
                     # Store repo_name in idea metadata
                     idea["idea"]["metadata"] = idea["idea"].get("metadata", {})
-                    idea["idea"]["metadata"]["github_repo_name"] = repo_info["repo_name"]
-                    idea["idea"]["metadata"]["github_repo_url"] = github_url
+                    _record_github_repository(idea["idea"]["metadata"], repo_info)
 
                     # Save updated metadata
                     idea_path = self.idea_manager.get_idea_path(idea_id)
