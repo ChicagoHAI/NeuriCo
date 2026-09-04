@@ -42,7 +42,7 @@ from core.agent_cli import (
     build_agent_command,
     build_agent_environment,
 )
-from core.security import sanitize_text
+from core.security import remove_github_credentials, sanitize_text
 from core.hitl_util import utc_now
 
 
@@ -248,6 +248,8 @@ def run_prebuilt_cli_agent(
     stopped = False
     background_processes_terminated = False
     return_code: Optional[int] = None
+    process_env = dict(env)
+    remove_github_credentials(process_env)
 
     with (
         open(log_file, "w", encoding="utf-8") as log_f,
@@ -259,7 +261,7 @@ def run_prebuilt_cli_agent(
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                env=env,
+                env=process_env,
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
