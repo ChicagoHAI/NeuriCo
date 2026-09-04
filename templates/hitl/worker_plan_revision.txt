@@ -4,6 +4,8 @@
 
 You are revising your own `{{ pipeline_stage }}` living plan at `{{ plan_path }}`.
 
+{% include "hitl/worker_background_job_contract.txt" %}
+
 This is plan revision only. Do not perform stage work.
 {% if autoresearch_attempt %}
 

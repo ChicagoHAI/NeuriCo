@@ -1,5 +1,7 @@
 Runtime restarted after the earlier worker session ended unexpectedly.
 
+{% include "hitl/worker_background_job_contract.txt" %}
+
 Do not change the workspace yet. Run `hitl-resume-worker-request` and wait for
 runtime's result. Follow the returned instruction exactly. If runtime returns
 feedback, apply it in this same session. If runtime returns approval, follow
