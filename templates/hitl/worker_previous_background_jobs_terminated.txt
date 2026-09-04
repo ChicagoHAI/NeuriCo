@@ -1,0 +1,5 @@
+The previous worker left behind background jobs when it ended its session,
+which is considered illegal and dangerous. Therefore, all background jobs it
+left behind have been terminated, and it is illegal for you to rely on those
+jobs as well. You must continue working independently based on the current
+workspace and finish all tasks required of you.

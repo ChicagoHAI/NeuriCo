@@ -12,10 +12,18 @@ import agents.resource_finder as resource_finder  # noqa: E402
 import agents.rule_maker as rule_maker  # noqa: E402
 import core.agent_runner as agent_runner  # noqa: E402
 import core.pipeline_orchestrator as pipeline  # noqa: E402
-from core.hitl import HitlRuntime  # noqa: E402
+from core.hitl import HitlRuntime, _load_hitl_template  # noqa: E402
 from core.hitl_run_control import HitlRunStopRequested  # noqa: E402
 from core.hitl_runtime_state import HitlRuntimeState  # noqa: E402
 from core.hitl_stage_runtime import run_worker_with_replacements  # noqa: E402
+
+
+BACKGROUND_JOB_RULE = (
+    "It is illegal to end the session or request phase completion while any job you"
+)
+TERMINATED_BACKGROUND_JOB_NOTICE = (
+    "The previous worker left behind background jobs when it ended its session"
+)
 
 
 def _launch_result(*, failed: bool, return_code: int) -> dict:
@@ -179,3 +187,138 @@ def test_finalized_result_wins_over_late_provider_process_failure(tmp_path):
 
     assert result["approved"] is True
     assert HitlRuntimeState(tmp_path).worker_continuation() is None
+
+
+def test_all_stage_worker_prompts_include_background_job_rule(tmp_path):
+    runtime = HitlRuntime(
+        tmp_path,
+        "rule_maker",
+        channel=object(),
+        manager=object(),
+    )
+
+    prompts = [
+        runtime.plan_prompt_block(),
+        runtime.execution_prompt_block(),
+        runtime.plan_revision_prompt_block("revise"),
+        runtime.review_prompt_block("revise"),
+        _load_hitl_template("worker_resume_pending_request.txt"),
+    ]
+
+    assert all(BACKGROUND_JOB_RULE in prompt for prompt in prompts)
+
+
+def test_hitl_proposer_prompt_includes_background_job_rule(tmp_path):
+    attempt_dir = tmp_path / "attempt"
+    attempt_dir.mkdir()
+
+    prompt = proposer.generate_autoresearch_proposal_prompt(
+        {"idea": {"title": "Test"}},
+        tmp_path,
+        parent_sha="abc123",
+        attempt_dir=attempt_dir,
+        templates_dir=Path(__file__).resolve().parents[1] / "templates",
+        hitl_idea_reporting=True,
+        hitl_submission=True,
+    )
+    ordinary_prompt = proposer.generate_autoresearch_proposal_prompt(
+        {"idea": {"title": "Test"}},
+        tmp_path,
+        parent_sha="abc123",
+        attempt_dir=attempt_dir,
+        templates_dir=Path(__file__).resolve().parents[1] / "templates",
+    )
+
+    assert BACKGROUND_JOB_RULE in prompt
+    assert BACKGROUND_JOB_RULE not in ordinary_prompt
+
+
+def test_replacement_prompt_reports_only_actual_background_job_cleanup(tmp_path):
+    runtime = HitlRuntime(
+        tmp_path,
+        "rule_maker",
+        channel=object(),
+        manager=object(),
+    )
+    clean_result = _launch_result(failed=False, return_code=0)
+    background_result = {
+        **clean_result,
+        "success": False,
+        "background_processes_terminated": True,
+    }
+
+    clean_prompt = runtime._replacement_prompt_after_worker_exit(
+        "Continue the phase.",
+        clean_result,
+    )
+    replacement_prompt = runtime._replacement_prompt_after_worker_exit(
+        "Continue the phase.",
+        background_result,
+    )
+
+    assert clean_prompt == "Continue the phase."
+    assert TERMINATED_BACKGROUND_JOB_NOTICE not in clean_prompt
+    assert replacement_prompt.startswith(TERMINATED_BACKGROUND_JOB_NOTICE)
+    assert replacement_prompt.endswith("Continue the phase.")
+
+
+def test_pending_request_replacement_receives_background_job_notice(tmp_path):
+    runtime = HitlRuntime(
+        tmp_path,
+        "rule_maker",
+        channel=object(),
+        manager=object(),
+    )
+    runtime.paths.tool_bin_dir.mkdir(parents=True, exist_ok=True)
+    runtime.register_worker_prompt("Continue the phase.")
+    HitlRuntimeState(tmp_path).begin_worker_command(
+        {
+            "request_key": "request-1",
+            "kind": "phase_finish",
+            "hitl_stage": "execution",
+            "status": "pending",
+        }
+    )
+    result = {
+        **_launch_result(failed=False, return_code=0),
+        "success": False,
+        "background_processes_terminated": True,
+    }
+
+    replacement = runtime.handle_worker_exit_after_finish(
+        result,
+        phase="execute",
+        worker_name="rule maker",
+    )
+
+    assert replacement["replacement"] is True
+    assert replacement["prompt_block"].startswith(TERMINATED_BACKGROUND_JOB_NOTICE)
+    assert BACKGROUND_JOB_RULE in replacement["prompt_block"]
+
+
+def test_proposal_feedback_replacement_receives_background_job_notice(tmp_path):
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    runtime.register_worker_prompt("Create the replacement proposal.")
+    runtime._proposal_submit_result = {
+        "status": "feedback",
+        "feedback": "Revise the proposal.",
+    }
+    result = {
+        **_launch_result(failed=False, return_code=0),
+        "success": False,
+        "background_processes_terminated": True,
+    }
+
+    replacement = runtime.proposal_submit_result_after_worker_exit(
+        result,
+        worker_name="proposal generator",
+    )
+
+    assert replacement["replacement"] is True
+    assert replacement["prompt_block"].startswith(TERMINATED_BACKGROUND_JOB_NOTICE)
+    assert replacement["prompt_block"].endswith("Create the replacement proposal.")

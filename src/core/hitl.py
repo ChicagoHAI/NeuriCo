@@ -1446,11 +1446,26 @@ class HitlRuntime:
         response = pending.get("response")
         return dict(response) if isinstance(response, dict) else None
 
+    def _replacement_prompt_after_worker_exit(
+        self,
+        prompt_block: str,
+        result: Dict[str, Any],
+    ) -> str:
+        """Report prior job cleanup only when runtime actually performed it."""
+        prompt = str(prompt_block).strip()
+        if not result.get("background_processes_terminated"):
+            return prompt
+        notice = _load_hitl_template(
+            "worker_previous_background_jobs_terminated.txt"
+        ).strip()
+        return f"{notice}\n\n{prompt}"
+
     def _pending_worker_request_replacement(
         self,
         *,
         phase: str,
         worker_name: str,
+        result: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """Reconnect a replacement worker to one durable held command."""
         from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
@@ -1463,7 +1478,10 @@ class HitlRuntime:
         if not str(continuation.get("prompt_block", "")).strip():
             return None
 
-        prompt_block = _load_hitl_template("worker_resume_pending_request.txt")
+        prompt_block = self._replacement_prompt_after_worker_exit(
+            _load_hitl_template("worker_resume_pending_request.txt"),
+            result,
+        )
         self._update_worker_continuation(
             prompt_block=prompt_block,
             hitl_stage=str(continuation.get("hitl_stage", "")).strip() or None,
@@ -1913,6 +1931,10 @@ class HitlRuntime:
             continuation = self.worker_continuation()
             prompt_block = str((continuation or {}).get("prompt_block", "")).strip()
             if prompt_block:
+                prompt_block = self._replacement_prompt_after_worker_exit(
+                    prompt_block,
+                    result,
+                )
                 self._update_worker_continuation(status="replacement_pending")
                 from core.hitl_runtime_state import HitlRuntimeState
 
@@ -1939,6 +1961,7 @@ class HitlRuntime:
         pending_replacement = self._pending_worker_request_replacement(
             phase="proposal",
             worker_name=worker_name,
+            result=result,
         )
         if pending_replacement is not None:
             return pending_replacement
@@ -1957,6 +1980,10 @@ class HitlRuntime:
         continuation = HitlRuntime.worker_continuation(self)
         prompt_block = str((continuation or {}).get("prompt_block", "")).strip()
         if prompt_block:
+            prompt_block = self._replacement_prompt_after_worker_exit(
+                prompt_block,
+                result,
+            )
             self._update_worker_continuation(status="replacement_pending")
             from core.hitl_runtime_state import HitlRuntimeState
 
@@ -3340,6 +3367,7 @@ class HitlRuntime:
         pending_replacement = self._pending_worker_request_replacement(
             phase=phase,
             worker_name=worker_name,
+            result=result,
         )
         if pending_replacement is not None:
             return pending_replacement
@@ -3363,6 +3391,10 @@ class HitlRuntime:
                 (finish or {}).get("prompt_block") or continuation.get("prompt_block", "")
             ).strip()
             if prompt_block:
+                prompt_block = self._replacement_prompt_after_worker_exit(
+                    prompt_block,
+                    result,
+                )
                 self._update_worker_continuation(
                     prompt_block=prompt_block,
                     hitl_stage=str(

@@ -1,0 +1,5 @@
+It is illegal to end the session or request phase completion while any job you
+started is running in the background. You must monitor all jobs that you start
+until they complete successfully, and you must verify their outputs before
+proceeding. Any background job you leave behind unattended is considered
+illegal and dangerous, and it will be terminated.

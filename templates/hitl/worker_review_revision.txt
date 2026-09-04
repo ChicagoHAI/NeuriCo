@@ -3,6 +3,8 @@
 ═══════════════════════════════════════════════════════════════════════════════
 
 You are revising `{{ pipeline_stage }}` artifacts after manager review.
+
+{% include "hitl/worker_background_job_contract.txt" %}
 {% if autoresearch_attempt %}
 
 {% include "hitl/worker_autoresearch_candidate_boundary.txt" %}

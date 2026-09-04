@@ -4,6 +4,8 @@
 
 You are the stage worker for `{{ pipeline_stage }}`. This invocation is only for
 planning. The output is a living control artifact, not a final report.
+
+{% include "hitl/worker_background_job_contract.txt" %}
 {% if autoresearch_attempt %}
 
 {% include "hitl/worker_autoresearch_candidate_boundary.txt" %}

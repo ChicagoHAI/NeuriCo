@@ -18,7 +18,6 @@ instruction and retry it in this same worker session. If it prints
 in this worker session. Only if an external non-HITL blocker prevents that retry,
 record the current progress and blocker in the plan.
 
-Do not leave required work running unattended in the background.
 Do not state that you will return later.
 Do not create or modify `scoring/results.json`.
 Do not read or modify hidden scoring files.
