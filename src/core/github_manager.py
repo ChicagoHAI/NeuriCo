@@ -10,6 +10,7 @@ This module manages:
 
 from pathlib import Path
 from typing import Optional, Dict, Any
+import base64
 import os
 import subprocess
 import shlex
@@ -26,6 +27,7 @@ except ImportError:
 
 try:
     from git import Repo, GitCommandError
+    from git.remote import PushInfo
     GITPYTHON_AVAILABLE = True
 except ImportError:
     GITPYTHON_AVAILABLE = False
@@ -47,7 +49,8 @@ class GitHubManager:
     def __init__(self,
                  org_name: Optional[str] = None,
                  token: Optional[str] = None,
-                 workspace_dir: Optional[Path] = None):
+                 workspace_dir: Optional[Path] = None,
+                 require_org: bool = False):
         """
         Initialize GitHub manager.
 
@@ -55,8 +58,11 @@ class GitHubManager:
             org_name: GitHub organization name. If None/empty, uses personal account.
             token: GitHub personal access token. If None, reads from GITHUB_TOKEN env var.
             workspace_dir: Directory for cloning repos (default: project_root/workspace)
+            require_org: Fail instead of falling back to the personal account
+                when an explicitly configured organization is inaccessible.
         """
         self.org_name = org_name or None  # Normalize empty string to None
+        self.require_org = require_org
 
         # Get token from parameter or environment
         self.token = token or os.getenv('GITHUB_TOKEN')
@@ -98,6 +104,11 @@ class GitHubManager:
                 self.owner_name = self.org_name
                 print(f"✓ Connected to GitHub organization: {self.org_name}")
             except GithubException as e:
+                if self.require_org:
+                    raise ValueError(
+                        f"Failed to access configured GitHub organization "
+                        f"'{self.org_name}': {e}"
+                    ) from e
                 print(f"⚠️  Cannot access organization '{self.org_name}': {e}")
                 print(f"   Falling back to your personal GitHub account...")
                 self._setup_personal_account()
@@ -123,7 +134,9 @@ class GitHubManager:
                            domain: Optional[str] = None,
                            provider: Optional[str] = None,
                            no_hash: bool = False,
-                           hypothesis: Optional[str] = None) -> Dict[str, Any]:
+                           hypothesis: Optional[str] = None,
+                           auto_init: bool = True,
+                           exact_repo_name: Optional[str] = None) -> Dict[str, Any]:
         """
         Create a new repository in the organization for research.
 
@@ -136,6 +149,10 @@ class GitHubManager:
             provider: AI provider (claude, gemini, codex)
             no_hash: If True, skip random hash in repo name (use when only one person runs the idea)
             hypothesis: Research hypothesis (fallback for naming when the title is unusable)
+            auto_init: Whether GitHub should create an initial commit. Disable when
+                attaching an existing local workspace to the new repository.
+            exact_repo_name: Reuse this exact name instead of generating one. Used
+                only when restoring a previously recorded publication destination.
 
         Returns:
             Dictionary with repo information:
@@ -144,9 +161,17 @@ class GitHubManager:
             - clone_url: URL for cloning
             - local_path: Local path where repo will be cloned
         """
-        # Generate a concise repo name mechanically from the idea content
-        repo_name = self._generate_repo_name(title, domain, idea_id, provider=provider,
-                                             no_hash=no_hash, hypothesis=hypothesis)
+        # First-time repositories receive the established generated name. A
+        # deleted publication destination must instead be reconstructed with
+        # its exact recorded name.
+        repo_name = exact_repo_name or self._generate_repo_name(
+            title,
+            domain,
+            idea_id,
+            provider=provider,
+            no_hash=no_hash,
+            hypothesis=hypothesis,
+        )
 
         # Create description (must be single line, no newlines allowed by GitHub)
         if description is None:
@@ -166,16 +191,18 @@ class GitHubManager:
         print(f"   Visibility: {'Private' if private else 'Public'}")
 
         try:
-            # auto_init=True creates an initial commit with README, ensuring the
-            # 'main' branch exists. The agent will overwrite README.md later.
-            # gitignore_template="Python" adds a Python .gitignore in that initial commit.
-            repo = self.owner.create_repo(
+            create_options = dict(
                 name=repo_name,
                 description=description,
                 private=private,
-                auto_init=True,
-                gitignore_template="Python",
+                auto_init=auto_init,
             )
+            # A gitignore template requires GitHub to create an initial commit.
+            # Existing HITL workspaces instead attach to an empty remote so their
+            # established history remains authoritative.
+            if auto_init:
+                create_options["gitignore_template"] = "Python"
+            repo = self.owner.create_repo(**create_options)
 
             print(f"✅ Repository created: {repo.html_url}")
 
@@ -189,7 +216,8 @@ class GitHubManager:
                 'clone_url': repo.clone_url,
                 'ssh_url': repo.ssh_url,
                 'local_path': self.workspace_dir / repo_name,
-                'repo_object': repo
+                'repo_object': repo,
+                'private': bool(repo.private),
             }
 
         except GithubException as e:
@@ -203,7 +231,8 @@ class GitHubManager:
                     'clone_url': repo.clone_url,
                     'ssh_url': repo.ssh_url,
                     'local_path': self.workspace_dir / repo_name,
-                    'repo_object': repo
+                    'repo_object': repo,
+                    'private': bool(repo.private),
                 }
             else:
                 # Provide detailed error information
@@ -211,6 +240,32 @@ class GitHubManager:
                 error_msg += f"  Status: {e.status}\n"
                 error_msg += f"  Message: {e.data if hasattr(e, 'data') else 'N/A'}"
                 raise RuntimeError(error_msg)
+
+    def attach_remote(self, repo_path: Path, clone_url: str) -> None:
+        """Attach a GitHub remote to an existing repository without fetching it."""
+        if not GITPYTHON_AVAILABLE:
+            raise ImportError("GitPython is required. Install with: pip install GitPython")
+
+        repo = Repo(repo_path)
+        try:
+            origin = repo.remote("origin")
+        except ValueError:
+            repo.create_remote("origin", clone_url)
+        else:
+            origin.set_url(clone_url)
+
+    def get_research_repo(self, repo_name: str) -> Dict[str, Any]:
+        """Return repository metadata without cloning or fetching its contents."""
+        repo = self.owner.get_repo(repo_name)
+        return {
+            "repo_name": repo_name,
+            "repo_url": repo.html_url,
+            "clone_url": repo.clone_url,
+            "ssh_url": repo.ssh_url,
+            "local_path": self.workspace_dir / repo_name,
+            "repo_object": repo,
+            "private": bool(repo.private),
+        }
 
     def clone_repo(self, clone_url: str, local_path: Path) -> 'Repo':
         """
@@ -250,7 +305,8 @@ class GitHubManager:
     def commit_and_push(self,
                        repo_path: Path,
                        commit_message: str,
-                       branch: str = "main") -> bool:
+                       branch: str = "main",
+                       push_if_clean: bool = False) -> bool:
         """
         Commit all changes and push to GitHub.
 
@@ -258,6 +314,9 @@ class GitHubManager:
             repo_path: Path to local repository
             commit_message: Commit message
             branch: Branch name (default: main)
+            push_if_clean: Push the existing HEAD even when there is no new
+                commit. Used when publishing an independently checkpointed
+                HITL workspace.
 
         Returns:
             True if successful
@@ -298,24 +357,56 @@ class GitHubManager:
                 print(f"   ⚠️  {len(large_files)} file(s) excluded from commit due to GitHub's 100MB file size limit.")
                 print(f"      These files remain in your local workspace but are not pushed to GitHub.")
 
-            # Check if there are changes to commit
-            if repo.is_dirty(untracked_files=True):
+            # Check if there are changes to commit. HITL checkpoints may have
+            # already committed the complete workspace, but that existing HEAD
+            # still needs to reach its external storage remote.
+            has_changes = repo.is_dirty(untracked_files=True)
+            if has_changes:
                 # Commit
                 repo.index.commit(commit_message)
                 print(f"   ✓ Committed: {commit_message}")
 
+            if has_changes or push_if_clean:
                 # Configure remote with authentication
                 origin = repo.remote('origin')
                 origin_url = list(repo.remote('origin').urls)[0]
 
-                # Inject token for push
-                if 'https://' in origin_url and self.token not in origin_url:
-                    auth_url = origin_url.replace('https://', f'https://{self.token}@')
-                    origin.set_url(auth_url)
+                # Authenticate only the Git process. Never persist a token in
+                # the workspace's remote URL where a later agent could read it.
+                git_environment = {"GIT_TERMINAL_PROMPT": "0"}
+                if origin_url.startswith("https://"):
+                    basic_auth = base64.b64encode(
+                        f"x-access-token:{self.token}".encode("utf-8")
+                    ).decode("ascii")
+                    git_environment.update(
+                        GIT_CONFIG_COUNT="1",
+                        GIT_CONFIG_KEY_0="http.extraHeader",
+                        GIT_CONFIG_VALUE_0=f"Authorization: Basic {basic_auth}",
+                    )
 
                 # Push using refspec HEAD:refs/heads/{branch} so it works even if
                 # the local branch name differs (e.g., "master" vs "main" on older git)
-                origin.push(f"HEAD:refs/heads/{branch}")
+                with repo.git.custom_environment(**git_environment):
+                    push_results = origin.push(f"HEAD:refs/heads/{branch}")
+                if not push_results:
+                    raise RuntimeError("GitHub push returned no status.")
+
+                failure_flags = (
+                    PushInfo.ERROR
+                    | PushInfo.REJECTED
+                    | PushInfo.REMOTE_REJECTED
+                    | PushInfo.REMOTE_FAILURE
+                    | PushInfo.NO_MATCH
+                )
+                failures = [
+                    result for result in push_results if result.flags & failure_flags
+                ]
+                if failures:
+                    details = "; ".join(
+                        str(result.summary).strip() or "GitHub rejected the push."
+                        for result in failures
+                    )
+                    raise RuntimeError(f"GitHub push failed: {details}")
                 print(f"   ✓ Pushed to {branch}")
 
                 return True

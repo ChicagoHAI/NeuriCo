@@ -9,7 +9,7 @@ This module provides:
 
 import re
 import os
-from typing import Dict, Set, Optional
+from typing import Dict, MutableMapping, Set, Optional
 from pathlib import Path
 
 
@@ -49,6 +49,19 @@ SENSITIVE_ENV_VARS: Set[str] = {
     'COMET_API_KEY',
     'REPLICATE_API_TOKEN',
 }
+
+GITHUB_CREDENTIAL_ENV_VARS = frozenset({
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_PAT",
+})
+
+
+def remove_github_credentials(environment: MutableMapping[str, str]) -> None:
+    """Keep runtime-owned GitHub credentials out of research subprocesses."""
+    for name in GITHUB_CREDENTIAL_ENV_VARS:
+        environment.pop(name, None)
+
 
 # Regex patterns for detecting API keys in text
 # Each tuple is (pattern, replacement)

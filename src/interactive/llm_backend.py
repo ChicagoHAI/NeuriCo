@@ -18,6 +18,8 @@ import subprocess
 import threading
 import time
 
+from core.security import remove_github_credentials
+
 
 @dataclass
 class ToolCall:
@@ -75,6 +77,13 @@ class LLMBackend:
         with self._process_lock:
             if self._active_process is process:
                 self._active_process = None
+
+    @staticmethod
+    def _manager_process_environment() -> Dict[str, str]:
+        """Return provider environment without runtime-owned GitHub credentials."""
+        environment = os.environ.copy()
+        remove_github_credentials(environment)
+        return environment
 
     def send(
         self,
@@ -168,6 +177,7 @@ class LLMBackend:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=self._manager_process_environment(),
             start_new_session=(os.name == "posix"),
         )
         self._set_active_process(process)
@@ -388,6 +398,11 @@ class LLMBackend:
             # Safe mode also suppresses local hooks and project instructions,
             # while preserving OAuth/keychain authentication for Claude Code.
             cmd.extend(["--safe-mode", "--tools", ""])
+
+        if process_env is None:
+            process_env = self._manager_process_environment()
+        else:
+            remove_github_credentials(process_env)
 
         process = subprocess.Popen(
             cmd,

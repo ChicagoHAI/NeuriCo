@@ -19,6 +19,7 @@ import shlex
 import sys
 import os
 import yaml
+from urllib.parse import urlparse
 
 # Force UTF-8 stdout/stderr on Windows where the default is cp1252.
 # Claude CLI output contains Unicode characters that cp1252 cannot represent,
@@ -58,10 +59,56 @@ LOGGER = logging.getLogger(__name__)
 
 try:
     from core.github_manager import GitHubManager
+    from github.GithubException import UnknownObjectException
 
     GITHUB_AVAILABLE = True
 except ImportError:
     GITHUB_AVAILABLE = False
+
+
+def _recorded_github_repository(metadata: Dict[str, Any]) -> Optional[tuple[str, str]]:
+    """Return the exact owner/name encoded by a recorded GitHub URL."""
+    repo_url = str(metadata.get("github_repo_url", "")).strip()
+    if not repo_url:
+        return None
+    parsed = urlparse(repo_url)
+    if parsed.scheme != "https" or parsed.netloc.casefold() not in {
+        "github.com",
+        "www.github.com",
+    }:
+        raise RuntimeError("The recorded GitHub repository URL is invalid.")
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) != 2:
+        raise RuntimeError("The recorded GitHub repository URL is invalid.")
+    owner, url_name = parts
+    if url_name.endswith(".git"):
+        url_name = url_name[:-4]
+    recorded_name = str(metadata.get("github_repo_name", "")).strip()
+    if recorded_name and recorded_name.casefold() != url_name.casefold():
+        raise RuntimeError(
+            "The recorded GitHub repository name does not match its URL."
+        )
+    return owner, url_name
+
+
+def _github_repository_private(repo_info: Dict[str, Any]) -> bool:
+    """Return GitHub's actual visibility from one resolved repository."""
+    private = repo_info.get("private")
+    if not isinstance(private, bool):
+        repo = repo_info.get("repo_object")
+        private = getattr(repo, "private", None)
+    if not isinstance(private, bool):
+        raise RuntimeError("GitHub did not report the repository visibility.")
+    return private
+
+
+def _record_github_repository(
+    metadata: Dict[str, Any], repo_info: Dict[str, Any]
+) -> None:
+    """Persist the complete publication destination returned by GitHub."""
+    metadata["github_repo_name"] = repo_info["repo_name"]
+    metadata["github_repo_url"] = repo_info["repo_url"]
+    metadata["github_repo_private"] = _github_repository_private(repo_info)
 
 
 def _with_hitl_workspace_run_ownership(method):
@@ -82,10 +129,20 @@ def _with_hitl_workspace_run_ownership(method):
         from core.hitl_lock import hitl_workspace_run_lease
 
         idea_id = str(arguments.arguments["idea_id"])
-        work_dir = self._hitl_workspace_for_run_ownership(
+        expected_work_dir = self._hitl_workspace_for_run_ownership(
             idea_id,
             force_fresh=bool(arguments.arguments["force_fresh"]),
         )
+        requested_work_dir = arguments.arguments.get("hitl_work_dir")
+        if requested_work_dir is not None:
+            requested_work_dir = Path(requested_work_dir).expanduser().resolve()
+            if requested_work_dir != expected_work_dir:
+                raise ValueError(
+                    "HITL workspace does not match the workspace registered for "
+                    f"idea {idea_id}."
+                )
+        work_dir = expected_work_dir
+        arguments.arguments["hitl_work_dir"] = work_dir
         mode = "continue" if arguments.arguments["hitl_continue_autoresearch"] else "fresh"
         hitl_mode = normalize_hitl_mode(arguments.arguments["hitl_mode"])
         with hitl_workspace_run_lease(
@@ -103,7 +160,7 @@ def _with_hitl_workspace_run_ownership(method):
             # waiting to acquire this lease. Honor that request before the
             # runner mutates any research state.
             raise_if_hitl_run_stop_requested()
-            return method(self, *args, **kwargs)
+            return method(*arguments.args, **arguments.kwargs)
 
     return owned_run
 
@@ -115,7 +172,11 @@ class ResearchRunner:
     """
 
     def __init__(
-        self, project_root: Optional[Path] = None, use_github: bool = True, github_org: str = ""
+        self,
+        project_root: Optional[Path] = None,
+        use_github: bool = True,
+        github_org: str = "",
+        github_required: bool = False,
     ):
         """
         Initialize research runner.
@@ -125,7 +186,11 @@ class ResearchRunner:
                          Defaults to parent of src/
             use_github: Whether to create GitHub repos for experiments (default: True)
             github_org: GitHub organization name (empty string = personal account)
+            github_required: Fail instead of falling back when requested GitHub
+                storage is unavailable. Used by detached HITL launches.
         """
+        if github_required and not use_github:
+            raise ValueError("github_required requires use_github=True.")
         if project_root is None:
             project_root = Path(__file__).parent.parent.parent
 
@@ -142,26 +207,38 @@ class ResearchRunner:
 
         # GitHub integration
         self.use_github = use_github
+        self.github_required = github_required
         self.github_manager = None
 
         if use_github:
             if not GITHUB_AVAILABLE:
+                if github_required:
+                    raise RuntimeError("GitHub storage is unavailable: dependencies are missing.")
                 print("⚠️  GitHub integration disabled: GitHubManager not available")
                 print("   Install dependencies: pip install PyGithub GitPython")
                 self.use_github = False
             elif not os.getenv("GITHUB_TOKEN"):
+                if github_required:
+                    raise RuntimeError("GitHub storage is unavailable: GITHUB_TOKEN is not set.")
                 print("⚠️  GitHub integration disabled: GITHUB_TOKEN not set")
                 print("   Set GITHUB_TOKEN environment variable or create .env file")
                 self.use_github = False
             else:
                 try:
-                    self.github_manager = GitHubManager(org_name=github_org or None)
+                    self.github_manager = GitHubManager(
+                        org_name=github_org or None,
+                        require_org=github_required,
+                    )
                     account_label = self.github_manager.owner_name
                     if self.github_manager.use_personal_account:
                         print(f"✅ GitHub integration enabled (personal account: {account_label})")
                     else:
                         print(f"✅ GitHub integration enabled (org: {account_label})")
                 except Exception as e:
+                    if github_required:
+                        raise RuntimeError(
+                            f"GitHub storage initialization failed: {e}"
+                        ) from e
                     print(f"⚠️  GitHub integration failed: {e}")
                     self.use_github = False
 
@@ -170,15 +247,6 @@ class ResearchRunner:
         if idea is None:
             raise ValueError(f"Idea not found: {idea_id}")
         metadata = dict(idea.get("idea", {}).get("metadata", {}) or {})
-
-        if self.use_github and self.github_manager is not None:
-            repo_name = str(metadata.get("github_repo_name", "")).strip() or None
-            existing = self.github_manager.get_workspace_path(idea_id, repo_name)
-            if existing is not None:
-                return Path(existing).resolve()
-            if repo_name:
-                return (Path(self.github_manager.workspace_dir) / repo_name).resolve()
-
         local_workspace = str(metadata.get("local_workspace", "")).strip()
         if not force_fresh and local_workspace:
             candidate = Path(local_workspace).expanduser()
@@ -224,6 +292,7 @@ class ResearchRunner:
         hitl_manager_no_browser: bool = False,
         hitl_host: Optional[Any] = None,
         hitl_mode: str = "full",
+        hitl_work_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -249,6 +318,8 @@ class ResearchRunner:
                 ``web`` or ``cli``.
             hitl_continue_autoresearch: Human interface for continuing an
                 existing HITL AutoResearch workspace: ``web`` or ``cli``.
+            hitl_work_dir: Authoritative workspace selected by the HITL launcher.
+                Internal to HITL execution; GitHub publication cannot replace it.
 
         Returns:
             Dictionary with:
@@ -277,6 +348,8 @@ class ResearchRunner:
         if len(selected_hitl_modes) > 1:
             raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
         hitl = hitl_autoresearch or hitl_continue_autoresearch
+        if hitl_work_dir is not None and not hitl:
+            raise ValueError("hitl_work_dir is valid only with a HITL AutoResearch entry mode.")
         selected_hitl_mode = normalize_hitl_mode(hitl_mode)
         if selected_hitl_mode is HitlMode.AUTO and not hitl:
             raise ValueError("--auto is valid only with a HITL AutoResearch entry mode.")
@@ -352,11 +425,102 @@ class ResearchRunner:
         # Update status
         self.idea_manager.update_status(idea_id, "in_progress")
 
-        # Setup working directory (GitHub repo or local runs/)
+        # Setup working directory. HITL launchers select the authoritative local
+        # workspace before the run; GitHub is only an optional publication target.
         github_url = None
         github_repo = None
 
-        if self.use_github and self.github_manager:
+        if hitl_work_dir is not None:
+            work_dir = Path(hitl_work_dir).resolve()
+            if not work_dir.exists() or not work_dir.is_dir():
+                raise ValueError(f"HITL workspace does not exist: {work_dir}")
+            is_resuming = (work_dir / ".neurico" / "pipeline_state.json").exists()
+            print(f"\n✅ Using authoritative HITL workspace: {work_dir}\n")
+
+            if self.use_github and self.github_manager:
+                try:
+                    metadata = idea_spec.setdefault("metadata", {})
+                    repo_name = str(metadata.get("github_repo_name", "")).strip()
+                    repo_info = None
+                    recorded_repo = _recorded_github_repository(metadata)
+                    if recorded_repo is not None:
+                        recorded_owner, repo_name = recorded_repo
+                        configured_owner = str(self.github_manager.owner_name or "").strip()
+                        if configured_owner.casefold() != recorded_owner.casefold():
+                            raise RuntimeError(
+                                "The recorded GitHub repository belongs to "
+                                f"'{recorded_owner}', but NeuriCo is configured for "
+                                f"'{configured_owner or '<unknown>'}'."
+                            )
+                        try:
+                            repo_info = self.github_manager.get_research_repo(repo_name)
+                        except UnknownObjectException as e:
+                            if e.status != 404:
+                                raise
+                            recorded_private = metadata.get("github_repo_private")
+                            if not isinstance(recorded_private, bool):
+                                raise RuntimeError(
+                                    "The recorded GitHub repository is unavailable and "
+                                    "its previous visibility was not recorded."
+                                ) from e
+                            repo_info = self.github_manager.create_research_repo(
+                                idea_id=idea_id,
+                                title=title,
+                                description=idea_spec.get("hypothesis", ""),
+                                private=recorded_private,
+                                domain=idea_spec.get("domain", "research"),
+                                provider=provider,
+                                no_hash=no_hash,
+                                hypothesis=idea_spec.get("hypothesis", ""),
+                                auto_init=False,
+                                exact_repo_name=repo_name,
+                            )
+                    elif repo_name:
+                        try:
+                            repo_info = self.github_manager.get_research_repo(repo_name)
+                        except UnknownObjectException as e:
+                            if e.status != 404:
+                                raise
+                            raise RuntimeError(
+                                "The recorded GitHub repository is unavailable and "
+                                "has no canonical repository URL."
+                            ) from e
+                    if repo_info is None:
+                        repo_info = self.github_manager.create_research_repo(
+                            idea_id=idea_id,
+                            title=title,
+                            description=idea_spec.get("hypothesis", ""),
+                            private=private,
+                            domain=idea_spec.get("domain", "research"),
+                            provider=provider,
+                            no_hash=no_hash,
+                            hypothesis=idea_spec.get("hypothesis", ""),
+                            auto_init=False,
+                        )
+                    github_url = repo_info["repo_url"]
+                    _record_github_repository(metadata, repo_info)
+                    idea_path = self.idea_manager.get_idea_path(idea_id)
+                    with open(idea_path, "w", encoding="utf-8") as f:
+                        yaml.dump(
+                            without_runtime_compute_backend(idea),
+                            f,
+                            default_flow_style=False,
+                            sort_keys=False,
+                        )
+                    from core.autoresearch import CheckpointManager
+
+                    CheckpointManager(work_dir)
+                    self.github_manager.attach_remote(work_dir, repo_info["clone_url"])
+                    print("✅ GitHub storage attached to the HITL workspace")
+                    print(f"   URL: {github_url}\n")
+                except Exception as e:
+                    if self.github_required:
+                        raise RuntimeError(f"GitHub storage setup failed: {e}") from e
+                    print(f"\n⚠️  GitHub storage setup failed: {e}")
+                    print("   Continuing in the authoritative HITL workspace\n")
+                    self.use_github = False
+
+        elif self.use_github and self.github_manager:
             # Check if workspace already exists from submission
             # Try to get repo_name from metadata (new method with short names)
             repo_name = idea_spec.get("metadata", {}).get("github_repo_name")
@@ -413,11 +577,10 @@ class ResearchRunner:
 
                     # Store repo_name in idea metadata
                     idea["idea"]["metadata"] = idea["idea"].get("metadata", {})
-                    idea["idea"]["metadata"]["github_repo_name"] = repo_info["repo_name"]
-                    idea["idea"]["metadata"]["github_repo_url"] = github_url
+                    _record_github_repository(idea["idea"]["metadata"], repo_info)
 
                     # Save updated metadata
-                    idea_path = self.idea_manager.ideas_dir / "submitted" / f"{idea_id}.yaml"
+                    idea_path = self.idea_manager.get_idea_path(idea_id)
                     with open(idea_path, "w", encoding="utf-8") as f:
                         yaml.dump(
                             without_runtime_compute_backend(idea),
@@ -454,7 +617,7 @@ class ResearchRunner:
                     self.use_github = False
                     # Fall through to local setup below
 
-        if not self.use_github:
+        if hitl_work_dir is None and not self.use_github:
             existing_workspace = idea.get("idea", {}).get("metadata", {}).get("local_workspace")
 
             if not force_fresh and existing_workspace and Path(existing_workspace).exists():
@@ -544,7 +707,9 @@ class ResearchRunner:
 
         if continue_autoresearch:
             success = False
+            hitl_stop_requested = False
             pipeline_result: Dict[str, Any] = {}
+            github_publication: Optional[Dict[str, Any]] = None
             try:
                 if hitl:
                     from core.hitl_autoresearch import continue_hitl_autoresearch
@@ -597,25 +762,39 @@ class ResearchRunner:
                         hitl_enabled=bool(hitl),
                     )
             except HitlRunStopRequested:
+                hitl_stop_requested = True
                 raise
             except Exception as e:
                 print(f"\n❌ Continue AutoResearch error: {e}")
                 success = False
             finally:
-                self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                github_publication = self._finalize_research(
+                    idea_id,
+                    work_dir,
+                    github_url,
+                    title,
+                    provider,
+                    success,
+                    push_existing=hitl_work_dir is not None,
+                    publish_github=not hitl_stop_requested,
+                )
                 if owns_hitl_host:
                     hitl_host.stop()
 
-            return {
+            result = {
                 "work_dir": work_dir,
                 "github_url": github_url,
                 "success": success,
                 "autoresearch": pipeline_result.get("autoresearch"),
             }
+            if hitl:
+                result["github_publication"] = github_publication
+            return result
 
         if bootstrap_autoresearch_baseline or hitl_bootstrap_autoresearch_baseline:
             success = False
             baseline_result: Dict[str, Any] = {}
+            github_publication: Optional[Dict[str, Any]] = None
             try:
                 bootstrap_args = dict(
                     idea=idea,
@@ -655,16 +834,27 @@ class ResearchRunner:
                 print(f"\n❌ Bootstrap AutoResearch baseline error: {e}")
                 success = False
             finally:
-                self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                github_publication = self._finalize_research(
+                    idea_id,
+                    work_dir,
+                    github_url,
+                    title,
+                    provider,
+                    success,
+                    push_existing=hitl_work_dir is not None,
+                )
                 if owns_hitl_host:
                     hitl_host.stop()
 
-            return {
+            result = {
                 "work_dir": work_dir,
                 "github_url": github_url,
                 "success": success,
                 "bootstrap_autoresearch_baseline": baseline_result,
             }
+            if hitl:
+                result["github_publication"] = github_publication
+            return result
 
         # Choose execution mode: multi-agent pipeline or legacy monolithic
         if multi_agent:
@@ -702,6 +892,8 @@ class ResearchRunner:
                 hitl_mode=selected_hitl_mode,
             )
             success = False
+            hitl_stop_requested = False
+            github_publication: Optional[Dict[str, Any]] = None
 
             # If resuming into an existing workspace, check which stages already completed
             # and skip them — read pipeline_state.json directly rather than relying on
@@ -836,6 +1028,7 @@ class ResearchRunner:
                     )
 
             except HitlRunStopRequested:
+                hitl_stop_requested = True
                 raise
             except Exception as e:
                 print(f"\n❌ Pipeline error: {e}")
@@ -843,7 +1036,16 @@ class ResearchRunner:
                 # Don't raise - let finally block handle cleanup
             finally:
                 # GitHub integration and status updates
-                self._finalize_research(idea_id, work_dir, github_url, title, provider, success)
+                github_publication = self._finalize_research(
+                    idea_id,
+                    work_dir,
+                    github_url,
+                    title,
+                    provider,
+                    success,
+                    push_existing=hitl_work_dir is not None,
+                    publish_github=not hitl_stop_requested,
+                )
                 if owns_hitl_host:
                     hitl_host.stop()
 
@@ -854,6 +1056,8 @@ class ResearchRunner:
                 "success": success,
                 "pipeline_result": pipeline_result,
             }
+            if hitl:
+                result["github_publication"] = github_publication
             if "autoresearch_initial_node" in pipeline_result:
                 result["autoresearch_initial_node"] = pipeline_result["autoresearch_initial_node"]
             if "autoresearch" in pipeline_result:
@@ -1339,7 +1543,9 @@ https://github.com/ChicagoHAI/neurico
         title: str,
         provider: str,
         success: bool,
-    ):
+        push_existing: bool = False,
+        publish_github: bool = True,
+    ) -> Optional[Dict[str, Any]]:
         """
         Finalize research execution: commit to GitHub and update status.
 
@@ -1350,9 +1556,16 @@ https://github.com/ChicagoHAI/neurico
             title: Research title
             provider: AI provider used
             success: Whether research succeeded
+            push_existing: Push an already committed HITL checkpoint even when
+                finalization has no new working-tree changes.
+            publish_github: Whether this finalization may publish the workspace.
+                Disabled while a HITL stop is awaiting rollback.
         """
+        publication: Optional[Dict[str, Any]] = None
+
         # Commit and push to GitHub if enabled
-        if self.use_github and self.github_manager:
+        if publish_github and self.use_github and self.github_manager:
+            publication = {"requested": True, "status": "pending"}
             try:
                 print()
                 print("📤 Pushing results to GitHub...")
@@ -1370,14 +1583,32 @@ https://github.com/ChicagoHAI/neurico
 """
 
                 # Commit and push
-                self.github_manager.commit_and_push(work_dir, commit_msg)
+                pushed = self.github_manager.commit_and_push(
+                    work_dir,
+                    commit_msg,
+                    push_if_clean=push_existing,
+                )
 
-                print(f"\n🎉 Results published to GitHub!")
-                if github_url:
-                    print(f"   {github_url}")
+                if not pushed:
+                    if getattr(self, "github_required", False):
+                        raise RuntimeError("GitHub publication did not push a checkpoint.")
+                    publication["status"] = "unchanged"
+                else:
+                    from git import Repo as GitRepo
+
+                    publication.update(
+                        status="succeeded",
+                        commit_sha=GitRepo(work_dir).head.commit.hexsha,
+                    )
+
+                    print(f"\n🎉 Results published to GitHub!")
+                    if github_url:
+                        print(f"   {github_url}")
 
             except Exception as e:
-                print(f"\n⚠️  Failed to push to GitHub: {e}")
+                message = sanitize_text(str(e).strip() or e.__class__.__name__)
+                publication.update(status="failed", message=message)
+                print(f"\n⚠️  Failed to push to GitHub: {message}")
                 print("   Results are available locally")
 
         # Update idea status
@@ -1391,6 +1622,8 @@ https://github.com/ChicagoHAI/neurico
         print(f"   Location: {work_dir}")
         if github_url:
             print(f"   GitHub: {github_url}")
+
+        return publication
 
 
 def main():

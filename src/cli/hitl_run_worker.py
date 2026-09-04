@@ -25,6 +25,7 @@ from core.hitl_run_control import (  # noqa: E402
     activate_hitl_run_stop_control,
 )
 from core.hitl_util import atomic_write_json, utc_now  # noqa: E402
+from core.security import remove_github_credentials  # noqa: E402
 from core.runner import ResearchRunner  # noqa: E402
 from cli.hitl_launcher import workspace_for_idea  # noqa: E402
 
@@ -33,6 +34,18 @@ _REQUEST_NAME = re.compile(
     r"^request\.(?P<idea_id>[A-Za-z0-9][A-Za-z0-9._-]*)\."
     r"(?P<request_id>[0-9a-f]{32})\.json(?:\.claimed)?$"
 )
+
+
+def _load_project_environment(project_root: Path) -> None:
+    """Load the same project environment used by the ordinary runner CLI."""
+    from dotenv import load_dotenv
+
+    env_local = project_root / ".env.local"
+    env_file = project_root / ".env"
+    if env_local.exists():
+        load_dotenv(env_local, override=False)
+    elif env_file.exists():
+        load_dotenv(env_file, override=False)
 
 
 def _claim_request(path: Path) -> Path:
@@ -162,6 +175,7 @@ def main() -> int:
         hitl_mode = normalize_hitl_mode(request.get("hitl_mode")).value
         request["hitl_mode"] = hitl_mode
         project_root = PROJECT_ROOT.resolve()
+        _load_project_environment(project_root)
         request_id = str(request["request_id"])
         control = HitlRunStopControl(work_dir, request_id)
         os.environ["NEURICO_HITL_REQUEST_ID"] = request_id
@@ -194,10 +208,18 @@ def main() -> int:
             )
             with log_path.open("a", encoding="utf-8") as output:
                 with redirect_stdout(output), redirect_stderr(output):
-                    result = ResearchRunner(
+                    github_requested = bool(request.get("github", False))
+                    runner = ResearchRunner(
                         project_root=project_root,
-                        use_github=bool(request.get("github", False)),
-                    ).run_research(
+                        use_github=github_requested,
+                        github_org=os.getenv("GITHUB_ORG", ""),
+                        github_required=github_requested,
+                    )
+                    # The runtime-owned GitHub manager has captured its
+                    # credential. Everything launched by this dedicated run
+                    # process inherits the credential-free environment below.
+                    remove_github_credentials(os.environ)
+                    result = runner.run_research(
                         str(request["idea_id"]),
                         provider=str(request["provider"]),
                         write_paper=bool(request.get("write_paper", False)),
@@ -208,6 +230,7 @@ def main() -> int:
                             str(request["interface"]) if continuation else None
                         ),
                         hitl_mode=hitl_mode,
+                        hitl_work_dir=work_dir,
                     )
         if control.requested() and not bool(result.get("success", False)):
             return _finalize_stopped_run(
@@ -216,19 +239,23 @@ def main() -> int:
                 control=control,
             )
         finished_at = utc_now()
+        publication = result.get("github_publication")
+        completed_status: Dict[str, Any] = {
+            "status": "completed",
+            "request_id": request["request_id"],
+            "started_at": started_at,
+            "completed_at": finished_at,
+            "updated_at": finished_at,
+            "mode": request["mode"],
+            "hitl_mode": hitl_mode,
+            "provider": request["provider"],
+            "success": bool(result.get("success", False)),
+        }
+        if isinstance(publication, dict):
+            completed_status["github_publication"] = publication
         atomic_write_json(
             hitl_launch_status_path(work_dir),
-            {
-                "status": "completed",
-                "request_id": request["request_id"],
-                "started_at": started_at,
-                "completed_at": finished_at,
-                "updated_at": finished_at,
-                "mode": request["mode"],
-                "hitl_mode": hitl_mode,
-                "provider": request["provider"],
-                "success": bool(result.get("success", False)),
-            },
+            completed_status,
         )
         control.clear()
         return 0
@@ -247,6 +274,7 @@ def main() -> int:
                 hitl_launch_status_path(Path(str(request["work_dir"]))),
                 {
                     "status": "failed",
+                    "request_id": request.get("request_id", ""),
                     "failed_at": failed_at,
                     "updated_at": failed_at,
                     "mode": request.get("mode", ""),
