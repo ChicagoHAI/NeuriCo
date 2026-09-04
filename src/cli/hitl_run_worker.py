@@ -258,8 +258,6 @@ def main() -> int:
             completed_status,
         )
         control.clear()
-        if isinstance(publication, dict) and publication.get("status") == "failed":
-            return 1
         return 0
     except HitlRunStopRequested:
         if request.get("work_dir") and control is not None:
