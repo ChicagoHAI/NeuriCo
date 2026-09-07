@@ -840,11 +840,13 @@ class HitlRuntime:
         config: Optional[Dict[str, Any]] = None,
         use_hitl_autoresearch_whiteboard: bool = False,
         hitl_mode: HitlMode | str = HitlMode.FULL,
+        invocation_id: str = "",
     ):
         if pipeline_stage not in PIPELINE_STAGES:
             raise ValueError(f"Unsupported HITL pipeline stage: {pipeline_stage}")
         self.work_dir = Path(work_dir)
         self.pipeline_stage = pipeline_stage
+        self.invocation_id = str(invocation_id).strip()
         self.use_hitl_autoresearch_whiteboard = use_hitl_autoresearch_whiteboard
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
         self.paths = HitlPaths(self.work_dir, pipeline_stage)
@@ -1019,7 +1021,7 @@ class HitlRuntime:
 
         levels = ("A",) if self.requires_human_plan_approval else ("A", "B")
         return HitlRuntimeState(self.work_dir).has_plan_approval(
-            pipeline_stage=self.pipeline_stage,
+            pipeline_stage=self._plan_approval_scope(),
             plan_fingerprint=self._current_plan_fingerprint(),
             approval_levels=levels,
         )
@@ -1030,8 +1032,15 @@ class HitlRuntime:
         from core.hitl_runtime_state import HitlRuntimeState
 
         return HitlRuntimeState(self.work_dir).has_plan_approval(
-            pipeline_stage=self.pipeline_stage,
+            pipeline_stage=self._plan_approval_scope(),
             plan_fingerprint=self._current_plan_fingerprint(),
+        )
+
+    def _plan_approval_scope(self) -> str:
+        return (
+            f"{self.pipeline_stage}:{self.invocation_id}"
+            if self.invocation_id
+            else self.pipeline_stage
         )
 
     def resolve_raised_payload(
@@ -3227,7 +3236,7 @@ class HitlRuntime:
                 from core.hitl_runtime_state import HitlRuntimeState
 
                 HitlRuntimeState(self.work_dir).mark_plan_approved(
-                    pipeline_stage=self.pipeline_stage,
+                    pipeline_stage=self._plan_approval_scope(),
                     plan_fingerprint=plan_fingerprint,
                     approval_level=(
                         "A"

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
 from core.hitl_run_control import HitlRunStopRequested, hitl_run_stop_requested
@@ -71,6 +71,7 @@ def run_plan_centered_hitl_stage(
     execution_log_prefix: str,
     on_approved: StageResultHandler,
     on_failed: StageFailureHandler,
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run the shared plan/execution state machine for ordinary HITL stages."""
     plan_approved = getattr(
@@ -87,6 +88,7 @@ def run_plan_centered_hitl_stage(
             ),
             phase_finish_validator=phase_finish_validator,
             worker_prompt_contexts=worker_prompt_contexts,
+            provenance=provenance,
         )
         prompt = runtime.compose_worker_prompt(
             hitl_stage="plan",
@@ -100,6 +102,7 @@ def run_plan_centered_hitl_stage(
             actor=actor,
             phase_finish_validator=phase_finish_validator,
             worker_prompt_contexts=worker_prompt_contexts,
+            provenance=provenance,
         )
         prompt = runtime.compose_worker_prompt(
             hitl_stage="execution",

@@ -92,6 +92,7 @@ class HitlManagerToolExecutor:
             "view_node": self._view_node,
             "select_frontier": self._select_frontier,
             "prune_frontier": self._prune_frontier,
+            "request_agent_run": self._request_agent_run,
             "ask_human": self._ask_human,
             "update_research_state": self._update_research_state,
             "design_panel": self._design_panel,
@@ -185,6 +186,13 @@ class HitlManagerToolExecutor:
         if not node_sha:
             return "Error: prune_frontier requires node_sha. Call list_frontier, then retry."
         return self.manager.prune_frontier(node_sha, str(args.get("reason", "")).strip())
+
+    def _request_agent_run(self, args: Dict[str, Any]) -> str:
+        return self.manager.request_agent_run(
+            str(args.get("agent", "")).strip(),
+            str(args.get("objective", "")).strip(),
+            str(args.get("reason", "")).strip(),
+        )
 
     def _ask_human(self, args: Dict[str, Any]) -> str:
         message = str(args.get("message", "")).strip()
@@ -460,6 +468,16 @@ class HitlManager:
             kind = str(action.get("kind", "")).strip()
             if kind in {"prune_frontier", "select_frontier"}:
                 names.add(kind)
+            if (
+                kind == "select_frontier"
+                and action.get("status") == "pending"
+                and bool(action.get("allow_agent_request"))
+                and not (
+                    isinstance(snapshot.get("manager_agent_action"), dict)
+                    and not snapshot["manager_agent_action"].get("context_sha")
+                )
+            ):
+                names.add("request_agent_run")
             return names
 
         pending = snapshot.get("pending_worker_command")
@@ -1735,6 +1753,39 @@ class HitlManager:
             )
         return "Runtime recorded the selected frontier node. The waiting controller will apply it."
 
+    def request_agent_run(self, agent: str, objective: str, reason: str) -> str:
+        """Queue a bounded agent run for the controller's next safe transition."""
+        from core.manager_callable_agents import manager_callable_agent
+
+        try:
+            agent = manager_callable_agent(agent)
+        except ValueError as exc:
+            return f"Error: {exc}"
+        if not objective:
+            return "Error: request_agent_run requires a concrete objective."
+        if not reason:
+            return "Error: request_agent_run requires a strategic reason."
+        try:
+            action = self.runtime_state.snapshot().get("next_autoresearch_action")
+            if not isinstance(action, dict):
+                return "Error: request_agent_run is available only during frontier selection."
+            request_id = hashlib.sha256(
+                f"{agent}\0{action.get('created_at', '')}\0{objective}\0{reason}".encode(
+                    "utf-8"
+                )
+            ).hexdigest()[:24]
+            record = self.runtime_state.request_manager_agent_action(
+                {
+                    "request_id": request_id,
+                    "agent": agent,
+                    "objective": objective,
+                    "reason": reason,
+                }
+            )
+        except Exception as exc:
+            return f"Error: runtime could not queue the agent run: {exc}."
+        return f"Runtime attached {record['agent']} to this frontier selection."
+
     def prune_frontier(self, node_sha: str, reason: str) -> str:
         if not reason:
             return (
@@ -1805,9 +1856,18 @@ class HitlManager:
         return result
 
     def begin_frontier_selection(
-        self, prompt: str, selector: Callable[[str, str], Dict[str, Any]]
+        self,
+        prompt: str,
+        selector: Callable[[str, str], Dict[str, Any]],
+        *,
+        allow_agent_request: bool = False,
     ) -> Dict[str, Any]:
-        action = self.runtime_state.begin_next_autoresearch_action({"kind": "select_frontier"})
+        action = self.runtime_state.begin_next_autoresearch_action(
+            {
+                "kind": "select_frontier",
+                "allow_agent_request": bool(allow_agent_request),
+            }
+        )
         if action.get("status") == "resolved" and isinstance(action.get("result"), dict):
             result = dict(action["result"])
             self.runtime_state.clear_completed_next_autoresearch_action("select_frontier")
@@ -1905,6 +1965,7 @@ class HitlManager:
         self,
         *,
         on_select: Callable[[Dict[str, Any]], Dict[str, Any]],
+        allow_agent_request: bool = False,
     ) -> Dict[str, Any]:
         from core.hitl import _load_hitl_template
 
@@ -1949,8 +2010,18 @@ class HitlManager:
                     store.select(previous)
                 raise
 
+        prompt = _load_hitl_template("manager_select_frontier.txt")
+        if allow_agent_request:
+            prompt += (
+                "\n\nIf a concrete information gap would make the next proposal premature, "
+                "you may first call `request_agent_run` with a bounded objective and reason. "
+                "Then complete this boundary with `select_frontier`; runtime atomically binds "
+                "the request to the node you select."
+            )
         return self.begin_frontier_selection(
-            _load_hitl_template("manager_select_frontier.txt"), selector
+            prompt,
+            selector,
+            allow_agent_request=allow_agent_request,
         )
 
     def prune_frontier_before_next_proposal(

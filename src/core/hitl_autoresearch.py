@@ -79,6 +79,7 @@ from core.scoring_seal import (
 )
 
 HitlCommentModeHook = Callable[..., Dict[str, Any]]
+ManagerCallableAgentHook = Callable[..., Dict[str, Any]]
 MAX_ACTIVE_HITL_FRONTIER_NODES = 10
 
 
@@ -1212,6 +1213,7 @@ class HitlAutoResearchController:
         hitl_comment_mode: Optional[HitlCommentModeHook] = None,
         pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
+        manager_callable_agent_runner: Optional[ManagerCallableAgentHook] = None,
     ):
         self.idea = idea
         self.idea_id = idea_id
@@ -1225,6 +1227,7 @@ class HitlAutoResearchController:
         self.hitl_frontier = HitlFrontierStore(self.work_dir)
         self.pending_hitl_recovery = pending_hitl_recovery
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
+        self.manager_callable_agent_runner = manager_callable_agent_runner
 
     def run(self, iterations: int) -> AutoResearchRunResult:
         """
@@ -1291,15 +1294,20 @@ class HitlAutoResearchController:
 
         needs_another_proposal = len(resumed_results) < iterations
         if resumed_frontier_selection_required:
-            current_best_sha = self._maintain_frontier_after_scored_iteration()
+            current_best_sha = self._maintain_frontier_after_scored_iteration(
+                allow_agent_request=needs_another_proposal
+            )
         elif needs_another_proposal:
-            resumed_selection = self._resume_frontier_boundary_if_needed()
+            resumed_selection = self._resume_frontier_boundary_if_needed(
+                allow_agent_request=True
+            )
             if resumed_selection is not None:
                 current_best_sha = resumed_selection
 
         first_iteration = len(resumed_results) + 1
         for iteration in range(first_iteration, iterations + 1):
             raise_if_hitl_run_stop_requested()
+            self._advance_manager_agent_action(current_best_sha)
             result = self._run_iteration_until_scored(iteration, current_best_sha)
             iteration_results.append(result)
             if bool(getattr(result, "terminal_failure", False)):
@@ -1309,7 +1317,9 @@ class HitlAutoResearchController:
                     current_best_sha=current_best_sha,
                     iterations=iteration_results,
                 )
-            current_best_sha = self._maintain_frontier_after_scored_iteration()
+            current_best_sha = self._maintain_frontier_after_scored_iteration(
+                allow_agent_request=iteration < iterations
+            )
 
         return AutoResearchRunResult(
             success=True,
@@ -1326,7 +1336,13 @@ class HitlAutoResearchController:
         """Relaunch a rolled-back HITL iteration from its selected parent."""
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
+        iteration_start_sha = self.checkpoints.current_sha()
         while True:
+            if self.checkpoints.current_sha() != iteration_start_sha:
+                self.checkpoints.restore_checkpoint(
+                    iteration_start_sha,
+                    clean_untracked_public=True,
+                )
             result = self.run_iteration(iteration, parent_sha)
             if bool(getattr(result, "terminal_failure", False)) or self._is_normal_scored_iteration(
                 result
@@ -1338,7 +1354,11 @@ class HitlAutoResearchController:
                 "relaunching from the selected parent frontier node."
             )
 
-    def _select_frontier_before_next_proposal(self) -> str:
+    def _select_frontier_before_next_proposal(
+        self,
+        *,
+        allow_agent_request: bool = False,
+    ) -> str:
         """Require a manager-selected active node before launching a proposer."""
         runtime = self._proposal_hitl_runtime()
         premise_idea_id = self._latest_frontier_manager_decision_id(runtime)
@@ -1356,6 +1376,7 @@ class HitlAutoResearchController:
 
         selected_result = runtime.manager.select_frontier_for_next_proposal(
             on_select=persist_selection,
+            allow_agent_request=allow_agent_request,
         )
         selected = str(selected_result.get("selected_frontier_node_sha", "")).strip()
         state = self.hitl_frontier.state()
@@ -1363,10 +1384,74 @@ class HitlAutoResearchController:
             raise RuntimeError("HITL manager did not finalize a valid frontier selection.")
         return selected
 
-    def _maintain_frontier_after_scored_iteration(self) -> str:
+    def _advance_manager_agent_action(self, parent_sha: str) -> None:
+        """Run one bound manager insertion through the standard HITL executor."""
+        runtime_state = HitlRuntimeState(self.work_dir)
+        action = runtime_state.manager_agent_action()
+        if not isinstance(action, dict):
+            return
+        context_sha = str(action.get("context_sha", ""))
+        if context_sha:
+            if (
+                str(action.get("parent_sha", "")) == parent_sha
+                and self.checkpoints.current_sha() != context_sha
+            ):
+                self.checkpoints.restore_checkpoint(context_sha, clean_untracked_public=True)
+            return
+        if not action.get("parent_sha"):
+            raise HitlRuntimeStateError("Manager agent action has not been bound to a frontier")
+        if str(action.get("parent_sha", "")) != parent_sha:
+            raise HitlRuntimeStateError("Manager agent action is bound to a different frontier")
+        if self.manager_callable_agent_runner is None:
+            raise RuntimeError("No manager-callable agent runner is configured.")
+
+        request_id = str(action.get("request_id", ""))
+        base_context_sha = str(action.get("base_context_sha", ""))
+        if (
+            base_context_sha
+            and str(action.get("base_parent_sha", "")) == parent_sha
+            and self.checkpoints.current_sha() != base_context_sha
+        ):
+            self.checkpoints.restore_checkpoint(
+                base_context_sha,
+                clean_untracked_public=True,
+            )
+        sealed_dir: Optional[Path] = None
+        try:
+            sealed_dir = seal_scoring_files(self.work_dir, immutable=True)
+            result = self.manager_callable_agent_runner(
+                str(action.get("agent", "")),
+                str(action.get("objective", "")),
+                request_id,
+            )
+        finally:
+            from core.scoring_seal import unseal_scoring_files
+
+            unseal_scoring_files(self.work_dir, sealed_dir)
+        if not result.get("success"):
+            if result.get("stopped"):
+                from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+                raise_if_hitl_run_stop_requested()
+            raise RuntimeError(str(result.get("error") or "Manager-requested agent run failed."))
+        context = self.checkpoints.create_checkpoint(
+            f"Manager-requested {action.get('agent')} context"
+        )
+        runtime_state.update_manager_agent_action(
+            request_id,
+            context_sha=context.sha,
+        )
+
+    def _maintain_frontier_after_scored_iteration(
+        self,
+        *,
+        allow_agent_request: bool = False,
+    ) -> str:
         """Close one scored iteration with pruning and an explicit selection."""
         self._prune_frontier_before_next_proposal()
-        return self._select_frontier_before_next_proposal()
+        return self._select_frontier_before_next_proposal(
+            allow_agent_request=allow_agent_request
+        )
 
     def _prune_frontier_before_next_proposal(self) -> None:
         """Restore the active portfolio limit after a completed iteration."""
@@ -1408,7 +1493,11 @@ class HitlAutoResearchController:
                     return idea_id
         raise RuntimeError("Frontier maintenance requires a preceding manager decision idea.")
 
-    def _resume_frontier_boundary_if_needed(self) -> Optional[str]:
+    def _resume_frontier_boundary_if_needed(
+        self,
+        *,
+        allow_agent_request: bool = False,
+    ) -> Optional[str]:
         """Resume a persisted pruning or selection boundary after recovery."""
         runtime = self._proposal_hitl_runtime()
         action = runtime.manager.runtime_state.snapshot().get("next_autoresearch_action")
@@ -1416,12 +1505,16 @@ class HitlAutoResearchController:
             return None
         if action.get("kind") == "prune_frontier":
             self._run_frontier_pruning_boundary()
-            return self._select_frontier_before_next_proposal()
+            return self._select_frontier_before_next_proposal(
+                allow_agent_request=allow_agent_request
+            )
         if action.get("kind") != "select_frontier":
             raise RuntimeError(
                 "A persisted AutoResearch runtime action exists outside frontier maintenance."
             )
-        return self._select_frontier_before_next_proposal()
+        return self._select_frontier_before_next_proposal(
+            allow_agent_request=allow_agent_request
+        )
 
     @staticmethod
     def _is_normal_scored_iteration(result: AutoResearchIterationResult) -> bool:
@@ -2733,6 +2826,7 @@ def run_hitl_autoresearch_loop(
     proposal_timeout: Optional[int] = 900,
     comment_timeout: Optional[int] = 1800,
     scorer_timeout: Optional[int] = 600,
+    resource_finder_timeout: Optional[int] = None,
     hitl_manager: Optional[Any] = None,
     hitl_channel: Optional[Any] = None,
     hitl_manager_config: Optional[Dict[str, Any]] = None,
@@ -2844,6 +2938,35 @@ def run_hitl_autoresearch_loop(
             idea=idea,
         )
 
+    def manager_callable_agent_runner(
+        agent: str,
+        objective: str,
+        invocation_id: str,
+    ) -> Dict[str, Any]:
+        from core.pipeline_orchestrator import ResearchPipelineOrchestrator
+
+        orchestrator = ResearchPipelineOrchestrator(
+            work_dir,
+            templates_dir,
+            hitl_manager=hitl_manager,
+            hitl_channel=hitl_channel,
+            hitl_manager_config=hitl_manager_config,
+            hitl_autoresearch=True,
+            hitl_mode=hitl_mode,
+        )
+        return orchestrator._run_hitl_stage_until_complete(
+            stage_name="resource_finder",
+            run_stage=lambda: orchestrator.run_hitl_agent_stage(
+                "resource_finder",
+                idea=idea,
+                provider=provider,
+                timeout=resource_finder_timeout,
+                full_permissions=full_permissions,
+                manager_objective=objective,
+                invocation_id=invocation_id,
+            ),
+        )
+
     controller = HitlAutoResearchController(
         idea=idea,
         idea_id=idea_id,
@@ -2865,5 +2988,6 @@ def run_hitl_autoresearch_loop(
         hitl_comment_mode=hitl_comment_mode,
         pending_hitl_recovery=pending_hitl_recovery,
         hitl_mode=hitl_mode,
+        manager_callable_agent_runner=manager_callable_agent_runner,
     )
     return controller.run(iterations=iterations)

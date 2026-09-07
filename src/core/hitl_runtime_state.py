@@ -94,6 +94,7 @@ class HitlRuntimeState:
             "worker_continuation": None,
             "pending_worker_command": None,
             "next_autoresearch_action": None,
+            "manager_agent_action": None,
             "rejected_whiteboard_cleanup": None,
             "frontier_decision_transition": None,
             "bootstrap_prepublication_boundary": None,
@@ -692,6 +693,70 @@ class HitlRuntimeState:
             self._save_unlocked()
             return self._copy(record)
 
+    def manager_agent_action(self) -> Optional[Dict[str, Any]]:
+        value = self.snapshot().get("manager_agent_action")
+        return value if isinstance(value, dict) and value else None
+
+    def request_manager_agent_action(
+        self,
+        request: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Persist one manager request independently of frontier selection."""
+        request_id = str(request.get("request_id", "")).strip()
+        agent = str(request.get("agent", "")).strip()
+        objective = str(request.get("objective", "")).strip()
+        if not all((request_id, agent, objective)):
+            raise HitlRuntimeStateError("Manager agent request is incomplete")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if (
+                not isinstance(action, dict)
+                or action.get("kind") != "select_frontier"
+                or action.get("status") != "pending"
+                or not bool(action.get("allow_agent_request"))
+            ):
+                raise HitlRuntimeStateError(
+                    "Agent requests are allowed only before an eligible frontier selection"
+                )
+            existing = self._state.get("manager_agent_action")
+            if isinstance(existing, dict) and not existing.get("context_sha"):
+                if existing.get("request_id") == request_id:
+                    if any(
+                        existing.get(key) != request.get(key)
+                        for key in ("agent", "objective", "reason")
+                    ):
+                        raise HitlRuntimeStateError(
+                            "Manager agent request retry does not match its persisted request"
+                        )
+                    return self._copy(existing)
+                raise HitlRuntimeStateError("Another manager agent action is active")
+            record = self._copy(request)
+            if isinstance(existing, dict) and existing.get("context_sha"):
+                record["base_context_sha"] = existing.get("context_sha")
+                record["base_parent_sha"] = existing.get("parent_sha")
+            record["created_at"] = _now()
+            self._state["manager_agent_action"] = record
+            self._save_unlocked()
+            return self._copy(record)
+
+    def update_manager_agent_action(
+        self,
+        request_id: str,
+        **updates: Any,
+    ) -> Dict[str, Any]:
+        """Apply an idempotent controller-owned update to the active request."""
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            record = self._state.get("manager_agent_action")
+            if not isinstance(record, dict) or record.get("request_id") != request_id:
+                raise HitlRuntimeStateError("No matching manager agent action")
+            record.update(self._copy(updates))
+            record["updated_at"] = _now()
+            self._state["manager_agent_action"] = record
+            self._save_unlocked()
+            return self._copy(record)
+
     def record_next_autoresearch_action_decision(
         self,
         kind: str,
@@ -727,6 +792,15 @@ class HitlRuntimeState:
             action["status"] = "decision_recorded"
             action["decision_recorded_at"] = _now()
             self._state["next_autoresearch_action"] = action
+            manager_action = self._state.get("manager_agent_action")
+            if (
+                normalized_kind == "select_frontier"
+                and isinstance(manager_action, dict)
+                and not manager_action.get("parent_sha")
+            ):
+                manager_action["parent_sha"] = str(decision.get("node_sha", "")).strip()
+                manager_action["updated_at"] = _now()
+                self._state["manager_agent_action"] = manager_action
             self._record_phase_transition_unlocked(
                 stage="frontier",
                 phase=(
