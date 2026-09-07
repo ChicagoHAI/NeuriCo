@@ -13,7 +13,6 @@ from typing import Dict, MutableMapping, Set, Optional
 from pathlib import Path
 
 
-
 # These are sensitive credentials that could be echoed in logs
 SENSITIVE_ENV_VARS: Set[str] = {
     # OpenAI
@@ -98,9 +97,16 @@ API_KEY_PATTERNS = [
      r'\1\2=[REDACTED]'),
 ]
 
-# Compile patterns once for performance
+# Compile patterns once for performance. The byte variants let the final Git
+# publication boundary inspect arbitrary staged blobs without a UTF-8 bypass.
 _COMPILED_PATTERNS = [(re.compile(pattern), replacement)
                        for pattern, replacement in API_KEY_PATTERNS]
+_COMPILED_BYTE_PATTERNS = [re.compile(pattern.encode("ascii"))
+                           for pattern, _ in API_KEY_PATTERNS]
+
+
+class SanitizationError(RuntimeError):
+    """Raised when staged content cannot be safely inspected or published."""
 
 
 def sanitize_text(text: str) -> str:
@@ -117,6 +123,16 @@ def sanitize_text(text: str) -> str:
     for pattern, replacement in _COMPILED_PATTERNS:
         result = pattern.sub(replacement, result)
     return result
+
+
+def contains_sensitive_data(text: str) -> bool:
+    """Return True when text contains a recognized credential pattern."""
+    return any(pattern.search(text) for pattern, _ in _COMPILED_PATTERNS)
+
+
+def contains_sensitive_data_bytes(data: bytes) -> bool:
+    """Return True when arbitrary bytes contain a recognized credential."""
+    return any(pattern.search(data) for pattern in _COMPILED_BYTE_PATTERNS)
 
 
 def sanitize_log_file(file_path: Path) -> bool:
