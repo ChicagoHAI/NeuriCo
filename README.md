@@ -231,6 +231,7 @@ NeuriCo accepts YAML, Markdown or text, and IdeaHub pages. Follow the
 | YAML | `./neurico submit <idea.yaml>` | `uv run python src/cli/submit.py <idea.yaml>` |
 | [Markdown or text](docs/LOCAL_IDEA_SUBMISSION.md) | `./neurico submit-local idea.md` | `uv run python src/cli/submit_local.py idea.md` |
 | [IdeaHub](docs/IDEAHUB_INTEGRATION.md) | `./neurico fetch <ideahub_url>` | `uv run python src/cli/fetch_from_ideahub.py <ideahub_url>` |
+| [Web form](docs/IDEA_SUBMISSION_WEB.md) | not yet available | `uv run python src/cli/submit_web.py` |
 
 Without `--submit`, Markdown, text, and IdeaHub inputs are converted to a YAML
 draft for review; submit the reviewed draft later with the YAML command above.
