@@ -2228,6 +2228,71 @@ class HitlRuntime:
         _apply_runtime_provenance(record, provenance)
         return self.log.append(record, idempotent=True)
 
+    def log_proposal_preparation_decision(
+        self,
+        *,
+        choice: str,
+        reason: str,
+        parent_sha: str,
+        premise_idea_id: str,
+        agent: str = "",
+        objective: str = "",
+        request_id: str = "",
+    ) -> Dict[str, Any]:
+        """Log one runtime-controlled proceed-or-insert manager decision."""
+        if choice not in {"proceed", "insert"}:
+            raise HitlValidationError("Proposal preparation choice must be proceed or insert")
+        rationale = _require_text(reason, "reason", "Proposal preparation decision")
+        parent = _require_text(parent_sha, "parent_sha", "Proposal preparation decision")
+        premise = _require_text(
+            premise_idea_id, "premise_idea_id", "Proposal preparation decision"
+        )
+        selected_agent = str(agent).strip()
+        selected_objective = str(objective).strip()
+        selected_request = str(request_id).strip()
+        if choice == "insert":
+            _require_text(selected_agent, "agent", "Proposal preparation decision")
+            _require_text(selected_objective, "objective", "Proposal preparation decision")
+            _require_text(selected_request, "request_id", "Proposal preparation decision")
+        identity = selected_request if choice == "insert" else f"proceed:{parent}:{premise}"
+        context = (
+            f"Runtime proposal-preparation decision {identity} for frontier node {parent}."
+        )
+        for existing in reversed(self.log.records()):
+            if (
+                existing.get("idea_type") == "decision"
+                and existing.get("level") == "B"
+                and existing.get("actor") == "manager"
+                and existing.get("context") == context
+            ):
+                return existing
+        feedback = rationale
+        if choice == "insert":
+            feedback = f"{rationale}\n\nAgent: {selected_agent}\nObjective: {selected_objective}"
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "decision",
+            "idea_category": "search_strategy",
+            "level": "B",
+            "actor": "manager",
+            "premises": [premise],
+            "context": context,
+            "related_artifacts": [],
+            "decision_needed": (
+                "Should runtime proceed to the next proposal or insert a specialized agent first?"
+            ),
+            "options": [
+                "Proceed to the next proposal using the available evidence.",
+                "Insert a specialized agent before deciding again.",
+            ],
+            "decision": "O1" if choice == "proceed" else "O2",
+            "manager_feedback": feedback,
+            "raised": False,
+            "parent_node_id": parent,
+        }
+        return self.log.append(record, idempotent=True)
+
     def log_scoring_recovery_decision(
         self,
         *,

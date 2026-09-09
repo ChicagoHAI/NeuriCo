@@ -1,0 +1,9 @@
+The runtime has selected the frontier basis for the next AutoResearch proposal.
+
+Decide whether the proposal has enough supporting evidence to proceed. Call
+`proceed_to_proposal` with your rationale if it does. If a concrete information
+gap should be resolved first, call `request_agent_run` with one available agent,
+a bounded objective, and your strategic reason. Runtime will execute an inserted
+agent outside your thread and return to this decision point afterward.
+
+You must complete this boundary with exactly one of those two tools.

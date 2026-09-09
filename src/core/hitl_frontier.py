@@ -239,7 +239,7 @@ class HitlFrontierStore:
         git_dir = self.paths.work_dir / ".git"
         if not git_dir.exists():
             return
-        if kind not in {"frontier", "attempt"}:
+        if kind not in {"frontier", "attempt", "resource"}:
             raise HitlFrontierError(f"Invalid private HITL ref kind: {kind}")
         ref_name = self._require_sha(name, "private HITL ref name")
         target = self._require_sha(node_sha or name, "private HITL ref target SHA")
@@ -248,6 +248,29 @@ class HitlFrontierStore:
             run_git(self.paths.work_dir, "update-ref", ref, target)
         except HitlGitCommandError as exc:
             raise HitlFrontierError(f"Could not retain HITL {kind} Git ref: {exc}") from exc
+
+    def retain_resource_context(self, parent_sha: str, context_sha: str) -> None:
+        """Keep the latest cumulative resource context reachable for one frontier."""
+        self._retain_git_object("resource", parent_sha, context_sha)
+
+    def resource_context(self, parent_sha: str) -> str | None:
+        """Return one frontier's retained resource context, when it has one."""
+        parent = self._require_sha(parent_sha, "resource-context parent SHA")
+        if not (self.paths.work_dir / ".git").exists():
+            return None
+        ref = f"refs/neurico/hitl/resources/{parent}"
+        try:
+            result = run_git(
+                self.paths.work_dir,
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                ref,
+                check=False,
+            )
+        except HitlGitCommandError as exc:
+            raise HitlFrontierError(f"Could not read HITL resource Git ref: {exc}") from exc
+        return result.stdout.strip() if result.returncode == 0 else None
 
     def _write_state(self, *, selected: str | None, active: List[str]) -> None:
         payload = self._read_json(self.paths.state) if self.paths.state.exists() else {}

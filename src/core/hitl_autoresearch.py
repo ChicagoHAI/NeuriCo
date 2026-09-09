@@ -111,6 +111,12 @@ def _raise_if_hitl_worker_stopped(result: Dict[str, Any]) -> None:
     raise_if_hitl_run_stop_requested()
 
 
+def _manager_agent_action_inflight(runtime_state: HitlRuntimeState) -> bool:
+    """Whether a persisted manager insertion still needs standard execution."""
+    action = runtime_state.manager_agent_action()
+    return isinstance(action, dict) and not bool(action.get("context_sha"))
+
+
 @dataclass(frozen=True)
 class HitlRecoveryResult:
     """Summary of an interrupted HITL attempt recovery."""
@@ -1097,6 +1103,7 @@ def continue_hitl_autoresearch(
     pending_frontier_transition = bool(
         recovery and recovery.recovery_classification == "frontier_decision_transition"
     )
+    manager_agent_inflight = _manager_agent_action_inflight(runtime_state)
     frontier = HitlFrontierStore(work_dir)
     if not frontier.exists():
         raise RuntimeError("Cannot continue HITL AutoResearch without initialized frontier state.")
@@ -1116,18 +1123,34 @@ def continue_hitl_autoresearch(
         and next_action.get("kind") in {"prune_frontier", "select_frontier"}
         and next_action.get("status") in {"pending", "decision_recorded", "cancelled"}
     )
+    proposal_preparation_pending = (
+        isinstance(next_action, dict)
+        and next_action.get("kind") == "prepare_proposal"
+        and next_action.get("status") in {"pending", "decision_recorded", "cancelled"}
+    )
     if selected_sha is None and not frontier_boundary_pending:
         raise RuntimeError("HITL frontier has no selected node outside a frontier boundary.")
-    if not pending_worker_request and not pending_frontier_transition and selected_sha:
-        if checkpoints.current_sha() != selected_sha:
-            checkpoints.restore_checkpoint(selected_sha, clean_untracked_public=True)
+    if (
+        not pending_worker_request
+        and not pending_frontier_transition
+        and not manager_agent_inflight
+        and selected_sha
+    ):
+        restore_sha = frontier.resource_context(selected_sha) or selected_sha
+        if checkpoints.current_sha() != restore_sha:
+            checkpoints.restore_checkpoint(restore_sha, clean_untracked_public=True)
         current_sha = checkpoints.current_sha()
-        if current_sha != selected_sha:
-            raise RuntimeError("HITL runtime could not restore the selected frontier checkpoint.")
+        if current_sha != restore_sha:
+            raise RuntimeError("HITL runtime could not restore the selected frontier context.")
     else:
         current_sha = selected_sha or checkpoints.current_sha()
 
-    if iterations == 0 and (pending_worker_request or pending_frontier_transition):
+    if iterations == 0 and (
+        pending_worker_request
+        or pending_frontier_transition
+        or manager_agent_inflight
+        or proposal_preparation_pending
+    ):
         raise RuntimeError(
             "Cannot finish HITL AutoResearch with iterations=0 while runtime recovery is pending. "
             "Resume recovery first or explicitly roll back the interrupted attempt."
@@ -1264,7 +1287,15 @@ class HitlAutoResearchController:
             frontier_state = self.hitl_frontier.state(allow_unselected=True)
             current_best_sha = frontier_state["selected_frontier_node_sha"]
             if current_best_sha:
-                self.checkpoints.restore_checkpoint(current_best_sha, clean_untracked_public=True)
+                if not _manager_agent_action_inflight(HitlRuntimeState(self.work_dir)):
+                    restore_sha = (
+                        self.hitl_frontier.resource_context(current_best_sha)
+                        or current_best_sha
+                    )
+                    self.checkpoints.restore_checkpoint(
+                        restore_sha,
+                        clean_untracked_public=True,
+                    )
                 initial = Checkpoint(current_best_sha, "Existing HITL AutoResearch frontier root")
             else:
                 current_best_sha = self.checkpoints.current_sha()
@@ -1294,20 +1325,16 @@ class HitlAutoResearchController:
 
         needs_another_proposal = len(resumed_results) < iterations
         if resumed_frontier_selection_required:
-            current_best_sha = self._maintain_frontier_after_scored_iteration(
-                allow_agent_request=needs_another_proposal
-            )
+            current_best_sha = self._maintain_frontier_after_scored_iteration()
         elif needs_another_proposal:
-            resumed_selection = self._resume_frontier_boundary_if_needed(
-                allow_agent_request=True
-            )
+            resumed_selection = self._resume_frontier_boundary_if_needed()
             if resumed_selection is not None:
                 current_best_sha = resumed_selection
 
         first_iteration = len(resumed_results) + 1
         for iteration in range(first_iteration, iterations + 1):
             raise_if_hitl_run_stop_requested()
-            self._advance_manager_agent_action(current_best_sha)
+            self._prepare_next_proposal(current_best_sha)
             result = self._run_iteration_until_scored(iteration, current_best_sha)
             iteration_results.append(result)
             if bool(getattr(result, "terminal_failure", False)):
@@ -1317,9 +1344,7 @@ class HitlAutoResearchController:
                     current_best_sha=current_best_sha,
                     iterations=iteration_results,
                 )
-            current_best_sha = self._maintain_frontier_after_scored_iteration(
-                allow_agent_request=iteration < iterations
-            )
+            current_best_sha = self._maintain_frontier_after_scored_iteration()
 
         return AutoResearchRunResult(
             success=True,
@@ -1356,8 +1381,6 @@ class HitlAutoResearchController:
 
     def _select_frontier_before_next_proposal(
         self,
-        *,
-        allow_agent_request: bool = False,
     ) -> str:
         """Require a manager-selected active node before launching a proposer."""
         runtime = self._proposal_hitl_runtime()
@@ -1376,7 +1399,6 @@ class HitlAutoResearchController:
 
         selected_result = runtime.manager.select_frontier_for_next_proposal(
             on_select=persist_selection,
-            allow_agent_request=allow_agent_request,
         )
         selected = str(selected_result.get("selected_frontier_node_sha", "")).strip()
         state = self.hitl_frontier.state()
@@ -1384,19 +1406,64 @@ class HitlAutoResearchController:
             raise RuntimeError("HITL manager did not finalize a valid frontier selection.")
         return selected
 
+    def _prepare_next_proposal(self, parent_sha: str) -> None:
+        """Let the manager proceed or insert one agent, repeating after insertion."""
+        while True:
+            runtime_state = HitlRuntimeState(self.work_dir)
+            pending_boundary = runtime_state.snapshot().get("next_autoresearch_action")
+            preparation_is_persisted = (
+                isinstance(pending_boundary, dict)
+                and pending_boundary.get("kind") == "prepare_proposal"
+            )
+            if (
+                _manager_agent_action_inflight(runtime_state)
+                and not preparation_is_persisted
+            ):
+                self._advance_manager_agent_action(parent_sha)
+            else:
+                retained = self.hitl_frontier.resource_context(parent_sha)
+                restore_sha = retained or parent_sha
+                if self.checkpoints.current_sha() != restore_sha:
+                    self.checkpoints.restore_checkpoint(
+                        restore_sha,
+                        clean_untracked_public=True,
+                    )
+
+            runtime = self._proposal_hitl_runtime()
+            premise_idea_id = self._latest_frontier_manager_decision_id(runtime)
+
+            def persist_decision(decision: Dict[str, Any]) -> Dict[str, Any]:
+                record = runtime.log_proposal_preparation_decision(
+                    choice=str(decision.get("choice", "")).strip(),
+                    reason=str(decision.get("reason", "")).strip(),
+                    parent_sha=parent_sha,
+                    premise_idea_id=premise_idea_id,
+                    agent=str(decision.get("agent", "")).strip(),
+                    objective=str(decision.get("objective", "")).strip(),
+                    request_id=str(decision.get("request_id", "")).strip(),
+                )
+                return {**decision, "idea_id": record["idea_id"]}
+
+            decision = runtime.manager.begin_proposal_preparation(
+                parent_sha=parent_sha,
+                on_decision=persist_decision,
+            )
+            if decision.get("choice") == "proceed":
+                return
+            if decision.get("choice") != "insert":
+                raise RuntimeError("Manager returned an invalid proposal-preparation decision.")
+            self._advance_manager_agent_action(parent_sha)
+
     def _advance_manager_agent_action(self, parent_sha: str) -> None:
         """Run one bound manager insertion through the standard HITL executor."""
         runtime_state = HitlRuntimeState(self.work_dir)
         action = runtime_state.manager_agent_action()
         if not isinstance(action, dict):
             return
-        context_sha = str(action.get("context_sha", ""))
-        if context_sha:
-            if (
-                str(action.get("parent_sha", "")) == parent_sha
-                and self.checkpoints.current_sha() != context_sha
-            ):
-                self.checkpoints.restore_checkpoint(context_sha, clean_untracked_public=True)
+        if action.get("context_sha"):
+            retained = self.hitl_frontier.resource_context(parent_sha)
+            if retained and self.checkpoints.current_sha() != retained:
+                self.checkpoints.restore_checkpoint(retained, clean_untracked_public=True)
             return
         if not action.get("parent_sha"):
             raise HitlRuntimeStateError("Manager agent action has not been bound to a frontier")
@@ -1406,10 +1473,13 @@ class HitlAutoResearchController:
             raise RuntimeError("No manager-callable agent runner is configured.")
 
         request_id = str(action.get("request_id", ""))
-        base_context_sha = str(action.get("base_context_sha", ""))
+        base_context_sha = self.hitl_frontier.resource_context(parent_sha)
+        resuming_worker = worker_command_requires_resume(
+            runtime_state.pending_worker_command()
+        )
         if (
-            base_context_sha
-            and str(action.get("base_parent_sha", "")) == parent_sha
+            not resuming_worker
+            and base_context_sha
             and self.checkpoints.current_sha() != base_context_sha
         ):
             self.checkpoints.restore_checkpoint(
@@ -1437,21 +1507,16 @@ class HitlAutoResearchController:
         context = self.checkpoints.create_checkpoint(
             f"Manager-requested {action.get('agent')} context"
         )
+        self.hitl_frontier.retain_resource_context(parent_sha, context.sha)
         runtime_state.update_manager_agent_action(
             request_id,
             context_sha=context.sha,
         )
 
-    def _maintain_frontier_after_scored_iteration(
-        self,
-        *,
-        allow_agent_request: bool = False,
-    ) -> str:
+    def _maintain_frontier_after_scored_iteration(self) -> str:
         """Close one scored iteration with pruning and an explicit selection."""
         self._prune_frontier_before_next_proposal()
-        return self._select_frontier_before_next_proposal(
-            allow_agent_request=allow_agent_request
-        )
+        return self._select_frontier_before_next_proposal()
 
     def _prune_frontier_before_next_proposal(self) -> None:
         """Restore the active portfolio limit after a completed iteration."""
@@ -1493,11 +1558,7 @@ class HitlAutoResearchController:
                     return idea_id
         raise RuntimeError("Frontier maintenance requires a preceding manager decision idea.")
 
-    def _resume_frontier_boundary_if_needed(
-        self,
-        *,
-        allow_agent_request: bool = False,
-    ) -> Optional[str]:
+    def _resume_frontier_boundary_if_needed(self) -> Optional[str]:
         """Resume a persisted pruning or selection boundary after recovery."""
         runtime = self._proposal_hitl_runtime()
         action = runtime.manager.runtime_state.snapshot().get("next_autoresearch_action")
@@ -1505,16 +1566,14 @@ class HitlAutoResearchController:
             return None
         if action.get("kind") == "prune_frontier":
             self._run_frontier_pruning_boundary()
-            return self._select_frontier_before_next_proposal(
-                allow_agent_request=allow_agent_request
-            )
+            return self._select_frontier_before_next_proposal()
+        if action.get("kind") == "prepare_proposal":
+            return None
         if action.get("kind") != "select_frontier":
             raise RuntimeError(
                 "A persisted AutoResearch runtime action exists outside frontier maintenance."
             )
-        return self._select_frontier_before_next_proposal(
-            allow_agent_request=allow_agent_request
-        )
+        return self._select_frontier_before_next_proposal()
 
     @staticmethod
     def _is_normal_scored_iteration(result: AutoResearchIterationResult) -> bool:
@@ -2955,9 +3014,9 @@ def run_hitl_autoresearch_loop(
             hitl_mode=hitl_mode,
         )
         return orchestrator._run_hitl_stage_until_complete(
-            stage_name="resource_finder",
+            stage_name=agent,
             run_stage=lambda: orchestrator.run_hitl_agent_stage(
-                "resource_finder",
+                agent,
                 idea=idea,
                 provider=provider,
                 timeout=resource_finder_timeout,

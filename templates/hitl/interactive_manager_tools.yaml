@@ -143,9 +143,9 @@ tools:
   - name: request_agent_run
     description: |
       Request one specialized agent run before the next AutoResearch proposal.
-      This does not execute the agent on the manager thread. During frontier
-      selection, call it before select_frontier; runtime binds the request to the
-      node selected for the next proposal. Only one request may be queued at a time.
+      This does not execute the agent on the manager thread. It completes the
+      runtime-managed proposal-preparation decision; runtime binds the request
+      to the already-selected frontier node. Only one request may be queued at a time.
     parameters:
       agent:
         type: string
@@ -160,7 +160,19 @@ tools:
         type: string
         description: Why this run is needed before another experiment proposal.
         required: true
-    returns: Confirmation that runtime durably attached the request, or a retryable error.
+    returns: Confirmation that runtime durably recorded the insertion, or a retryable error.
+
+  - name: proceed_to_proposal
+    description: |
+      Complete the runtime-managed proposal-preparation decision without
+      inserting another specialized agent. Use this when the selected frontier
+      already has enough evidence for the next experiment proposal.
+    parameters:
+      reason:
+        type: string
+        description: Why another specialized agent run is unnecessary now.
+        required: true
+    returns: Confirmation that runtime durably recorded the proceed decision.
 
   - name: prune_frontier
     description: |

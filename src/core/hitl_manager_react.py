@@ -93,6 +93,7 @@ class HitlManagerToolExecutor:
             "select_frontier": self._select_frontier,
             "prune_frontier": self._prune_frontier,
             "request_agent_run": self._request_agent_run,
+            "proceed_to_proposal": self._proceed_to_proposal,
             "ask_human": self._ask_human,
             "update_research_state": self._update_research_state,
             "design_panel": self._design_panel,
@@ -193,6 +194,9 @@ class HitlManagerToolExecutor:
             str(args.get("objective", "")).strip(),
             str(args.get("reason", "")).strip(),
         )
+
+    def _proceed_to_proposal(self, args: Dict[str, Any]) -> str:
+        return self.manager.proceed_to_proposal(str(args.get("reason", "")).strip())
 
     def _ask_human(self, args: Dict[str, Any]) -> str:
         message = str(args.get("message", "")).strip()
@@ -468,16 +472,14 @@ class HitlManager:
             kind = str(action.get("kind", "")).strip()
             if kind in {"prune_frontier", "select_frontier"}:
                 names.add(kind)
-            if (
-                kind == "select_frontier"
-                and action.get("status") == "pending"
-                and bool(action.get("allow_agent_request"))
-                and not (
+            if kind == "prepare_proposal" and action.get("status") == "pending":
+                if (
                     isinstance(snapshot.get("manager_agent_action"), dict)
                     and not snapshot["manager_agent_action"].get("context_sha")
-                )
-            ):
-                names.add("request_agent_run")
+                ):
+                    names.add("request_agent_run")
+                else:
+                    names.update({"proceed_to_proposal", "request_agent_run"})
             return names
 
         pending = snapshot.get("pending_worker_command")
@@ -514,6 +516,8 @@ class HitlManager:
             if name in cls._REQUEST_FINALIZER_TOOL_NAMES or name in {
                 "prune_frontier",
                 "select_frontier",
+                "proceed_to_proposal",
+                "request_agent_run",
             }:
                 return name
         return ""
@@ -558,6 +562,14 @@ class HitlManager:
                 f"{scoring_handoff} Direct assistant text does not advance the action."
             )
         else:
+            tool_names = {str(tool.get("name", "")).strip() for tool in tools}
+            if {"proceed_to_proposal", "request_agent_run"} <= tool_names:
+                lines.append(
+                    "The proposal-preparation action remains unresolved until either "
+                    "`proceed_to_proposal` or `request_agent_run` succeeds. Direct "
+                    "assistant text does not complete the action."
+                )
+                return "\n".join(lines)
             completion_name = cls._runtime_completion_tool_name(tools)
             if not completion_name:
                 return "\n".join(lines)
@@ -580,6 +592,14 @@ class HitlManager:
             return (
                 native_retry + "The worker request remains unresolved. "
                 f"{scoring_handoff} Direct assistant text cannot advance it."
+            )
+        tool_names = {str(tool.get("name", "")).strip() for tool in tools}
+        if {"proceed_to_proposal", "request_agent_run"} <= tool_names:
+            return (
+                native_retry
+                + "The proposal-preparation decision remains unresolved. Continue reviewing, "
+                "then call either `proceed_to_proposal` or `request_agent_run`. Direct "
+                "assistant text cannot complete it."
             )
         completion_name = self._runtime_completion_tool_name(tools)
         if completion_name:
@@ -756,11 +776,11 @@ class HitlManager:
         action = snapshot.get("next_autoresearch_action")
         if isinstance(action, dict) and action.get("status") != "resolved":
             kind = str(action.get("kind", "")).strip()
-            if kind in {"prune_frontier", "select_frontier"}:
+            if kind in {"prune_frontier", "select_frontier", "prepare_proposal"}:
                 return (
                     f"Error: {tool_name} is unavailable at this runtime boundary. "
-                    f"Runtime is waiting for {kind}. Inspect the frontier if needed, "
-                    f"then call {kind} with the required rationale."
+                    f"Runtime is waiting for {kind}. Inspect the available context if needed, "
+                    "then complete the requested decision with an available runtime tool."
                 )
 
         pending = snapshot.get("pending_worker_command")
@@ -1767,8 +1787,8 @@ class HitlManager:
             return "Error: request_agent_run requires a strategic reason."
         try:
             action = self.runtime_state.snapshot().get("next_autoresearch_action")
-            if not isinstance(action, dict):
-                return "Error: request_agent_run is available only during frontier selection."
+            if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
+                return "Error: request_agent_run is available only while preparing a proposal."
             request_id = hashlib.sha256(
                 f"{agent}\0{action.get('created_at', '')}\0{objective}\0{reason}".encode(
                     "utf-8"
@@ -1782,9 +1802,40 @@ class HitlManager:
                     "reason": reason,
                 }
             )
+            self.runtime_state.record_next_autoresearch_action_decision(
+                "prepare_proposal",
+                {
+                    "choice": "insert",
+                    "request_id": record["request_id"],
+                    "agent": record["agent"],
+                    "objective": record["objective"],
+                    "reason": record["reason"],
+                    "parent_sha": record["parent_sha"],
+                },
+            )
         except Exception as exc:
             return f"Error: runtime could not queue the agent run: {exc}."
-        return f"Runtime attached {record['agent']} to this frontier selection."
+        return f"Runtime recorded the decision to run {record['agent']} before the next proposal."
+
+    def proceed_to_proposal(self, reason: str) -> str:
+        """Record that existing evidence is sufficient for the next proposal."""
+        if not reason:
+            return "Error: proceed_to_proposal requires a strategic reason."
+        try:
+            action = self.runtime_state.snapshot().get("next_autoresearch_action")
+            if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
+                return "Error: proceed_to_proposal is available only while preparing a proposal."
+            self.runtime_state.record_next_autoresearch_action_decision(
+                "prepare_proposal",
+                {
+                    "choice": "proceed",
+                    "reason": reason,
+                    "parent_sha": str(action.get("parent_sha", "")).strip(),
+                },
+            )
+        except Exception as exc:
+            return f"Error: runtime could not record the proposal decision: {exc}."
+        return "Runtime recorded the decision to proceed to the next proposal."
 
     def prune_frontier(self, node_sha: str, reason: str) -> str:
         if not reason:
@@ -1859,15 +1910,8 @@ class HitlManager:
         self,
         prompt: str,
         selector: Callable[[str, str], Dict[str, Any]],
-        *,
-        allow_agent_request: bool = False,
     ) -> Dict[str, Any]:
-        action = self.runtime_state.begin_next_autoresearch_action(
-            {
-                "kind": "select_frontier",
-                "allow_agent_request": bool(allow_agent_request),
-            }
-        )
+        action = self.runtime_state.begin_next_autoresearch_action({"kind": "select_frontier"})
         if action.get("status") == "resolved" and isinstance(action.get("result"), dict):
             result = dict(action["result"])
             self.runtime_state.clear_completed_next_autoresearch_action("select_frontier")
@@ -1961,11 +2005,73 @@ class HitlManager:
                 )
             threading.Event().wait(0.1)
 
+    def begin_proposal_preparation(
+        self,
+        *,
+        parent_sha: str,
+        on_decision: Callable[[Dict[str, Any]], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Wait for one durable proceed-or-insert decision before a proposal."""
+        from core.hitl import _load_hitl_template
+
+        kind = "prepare_proposal"
+        action = self.runtime_state.begin_next_autoresearch_action(
+            {"kind": kind, "parent_sha": str(parent_sha).strip()}
+        )
+        if str(action.get("parent_sha", "")).strip() != str(parent_sha).strip():
+            raise HitlRuntimeStateError("Proposal preparation targets a different frontier")
+
+        def complete_recorded() -> Dict[str, Any]:
+            current = self.runtime_state.snapshot().get("next_autoresearch_action")
+            decision = current.get("decision") if isinstance(current, dict) else None
+            if not isinstance(decision, dict):
+                raise HitlRuntimeStateError("Proposal preparation is missing its manager decision")
+            if str(decision.get("parent_sha", "")).strip() != str(parent_sha).strip():
+                raise HitlRuntimeStateError("Proposal preparation targets a different frontier")
+            result = on_decision(dict(decision))
+            self.runtime_state.complete_next_autoresearch_action(kind, result)
+            return result
+
+        if action.get("status") == "resolved" and isinstance(action.get("result"), dict):
+            result = dict(action["result"])
+            self.runtime_state.clear_completed_next_autoresearch_action(kind)
+            return result
+        if action.get("status") == "decision_recorded":
+            result = complete_recorded()
+            self.runtime_state.clear_completed_next_autoresearch_action(kind)
+            return result
+
+        self.notify_runtime(
+            _load_hitl_template("manager_prepare_proposal.txt"),
+            runtime_action_kind=kind,
+        )
+        while True:
+            from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+            raise_if_hitl_run_stop_requested()
+            current = self.runtime_state.snapshot().get("next_autoresearch_action")
+            if isinstance(current, dict) and current.get("kind") == kind:
+                if current.get("status") == "decision_recorded":
+                    result = complete_recorded()
+                    self.runtime_state.clear_completed_next_autoresearch_action(kind)
+                    return result
+                if current.get("status") == "resolved":
+                    result = dict(current.get("result") or {})
+                    self.runtime_state.clear_completed_next_autoresearch_action(kind)
+                    return result
+                if current.get("status") == "cancelled":
+                    raise RuntimeError(
+                        str(
+                            current.get("cancellation_reason")
+                            or "HITL proposal preparation was cancelled."
+                        )
+                    )
+            threading.Event().wait(0.1)
+
     def select_frontier_for_next_proposal(
         self,
         *,
         on_select: Callable[[Dict[str, Any]], Dict[str, Any]],
-        allow_agent_request: bool = False,
     ) -> Dict[str, Any]:
         from core.hitl import _load_hitl_template
 
@@ -2011,18 +2117,7 @@ class HitlManager:
                 raise
 
         prompt = _load_hitl_template("manager_select_frontier.txt")
-        if allow_agent_request:
-            prompt += (
-                "\n\nIf a concrete information gap would make the next proposal premature, "
-                "you may first call `request_agent_run` with a bounded objective and reason. "
-                "Then complete this boundary with `select_frontier`; runtime atomically binds "
-                "the request to the node you select."
-            )
-        return self.begin_frontier_selection(
-            prompt,
-            selector,
-            allow_agent_request=allow_agent_request,
-        )
+        return self.begin_frontier_selection(prompt, selector)
 
     def prune_frontier_before_next_proposal(
         self,
@@ -2228,9 +2323,11 @@ class HitlManager:
 
         action_kind = turn.runtime_action_kind.strip()
         if action_kind:
-            boundary = (
-                "frontier selection" if action_kind == "select_frontier" else "frontier pruning"
-            )
+            boundary = {
+                "select_frontier": "frontier selection",
+                "prune_frontier": "frontier pruning",
+                "prepare_proposal": "proposal preparation",
+            }.get(action_kind, "AutoResearch")
             reason = f"{failure} The {boundary} boundary was not completed; restart HITL AutoResearch to retry it."
             self.runtime_state.cancel_next_autoresearch_action(action_kind, reason=reason)
             self.channel.send(reason, kind="system")

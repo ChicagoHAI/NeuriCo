@@ -686,8 +686,14 @@ class HitlRuntimeState:
             record["created_at"] = _now()
             self._state["next_autoresearch_action"] = record
             self._record_phase_transition_unlocked(
-                stage="frontier",
-                phase="pruning" if kind == "prune_frontier" else "selecting_next",
+                stage="frontier" if kind != "prepare_proposal" else "experiment_runner",
+                phase=(
+                    "pruning"
+                    if kind == "prune_frontier"
+                    else "selecting_next"
+                    if kind == "select_frontier"
+                    else "preparing_next_proposal"
+                ),
                 activity="reviewing",
             )
             self._save_unlocked()
@@ -701,7 +707,7 @@ class HitlRuntimeState:
         self,
         request: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Persist one manager request independently of frontier selection."""
+        """Persist one manager request at the proposal-preparation boundary."""
         request_id = str(request.get("request_id", "")).strip()
         agent = str(request.get("agent", "")).strip()
         objective = str(request.get("objective", "")).strip()
@@ -712,12 +718,11 @@ class HitlRuntimeState:
             action = self._state.get("next_autoresearch_action")
             if (
                 not isinstance(action, dict)
-                or action.get("kind") != "select_frontier"
+                or action.get("kind") != "prepare_proposal"
                 or action.get("status") != "pending"
-                or not bool(action.get("allow_agent_request"))
             ):
                 raise HitlRuntimeStateError(
-                    "Agent requests are allowed only before an eligible frontier selection"
+                    "Agent requests are allowed only while preparing the next proposal"
                 )
             existing = self._state.get("manager_agent_action")
             if isinstance(existing, dict) and not existing.get("context_sha"):
@@ -732,9 +737,9 @@ class HitlRuntimeState:
                     return self._copy(existing)
                 raise HitlRuntimeStateError("Another manager agent action is active")
             record = self._copy(request)
-            if isinstance(existing, dict) and existing.get("context_sha"):
-                record["base_context_sha"] = existing.get("context_sha")
-                record["base_parent_sha"] = existing.get("parent_sha")
+            record["parent_sha"] = str(action.get("parent_sha", "")).strip()
+            if not record["parent_sha"]:
+                raise HitlRuntimeStateError("Proposal preparation is missing its frontier parent")
             record["created_at"] = _now()
             self._state["manager_agent_action"] = record
             self._save_unlocked()
@@ -792,21 +797,18 @@ class HitlRuntimeState:
             action["status"] = "decision_recorded"
             action["decision_recorded_at"] = _now()
             self._state["next_autoresearch_action"] = action
-            manager_action = self._state.get("manager_agent_action")
-            if (
-                normalized_kind == "select_frontier"
-                and isinstance(manager_action, dict)
-                and not manager_action.get("parent_sha")
-            ):
-                manager_action["parent_sha"] = str(decision.get("node_sha", "")).strip()
-                manager_action["updated_at"] = _now()
-                self._state["manager_agent_action"] = manager_action
             self._record_phase_transition_unlocked(
-                stage="frontier",
+                stage=(
+                    "experiment_runner"
+                    if normalized_kind == "prepare_proposal"
+                    else "frontier"
+                ),
                 phase=(
                     "saving_prune_decision"
                     if normalized_kind == "prune_frontier"
                     else "saving_selection"
+                    if normalized_kind == "select_frontier"
+                    else "saving_proposal_preparation"
                 ),
                 activity="saving",
             )
