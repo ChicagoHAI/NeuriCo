@@ -59,13 +59,15 @@ idea
   -> initial experiment
   -> isolated scoring
   -> automatic root frontier node
+  -> manager proposal-preparation choice
+  -> optional resource finding
   -> proposal
   -> human admission
   -> candidate experiment
   -> isolated scoring
   -> manager accept / reject / repair
   -> frontier maintenance
-  -> next proposal
+  -> next manager proposal-preparation choice
 ```
 
 Each research stage has a living plan and an execution phase. A worker requests
@@ -165,7 +167,34 @@ publication without repeating scientific judgment.
 
 After the root exists, every iteration follows the selected frontier node.
 
-### 1. Proposal generation
+### 1. Proposal preparation
+
+Before each proposal, runtime opens a manager-only preparation boundary for the
+selected frontier node. The manager may inspect the workspace, frontier, and
+finalized ideas, then must call exactly one terminal tool:
+
+- `proceed_to_proposal` when the current research record is sufficient;
+- `request_resource_finder` when one focused resource objective must be
+  completed first.
+
+The manager supplies the rationale and either finalized premise IDs or a
+complete manager-authored evidence record. Runtime validates and records those
+exact values; it does not search for evidence or construct a semantic relation
+on the manager's behalf.
+
+A requested resource run uses the established resource-finder planning,
+approval, execution, review, worker-replacement, and idea-reporting lifecycle.
+In Full mode, its existing human plan-approval behavior remains in effect. In
+Auto mode, its existing manager approval behavior remains in effect. The
+routing choice itself belongs to the manager in both modes. After one approved
+resource run, proposal generation begins without reopening the routing choice.
+
+The approved resource workspace is an unscored proposal base. It does not
+replace or mutate the selected frontier node, its objective score, or its public
+audit record. Proposal and experiment failure restore this prepared base for a
+retry; a scored rejection restores the selected frontier node.
+
+### 2. Proposal generation
 
 The proposal worker receives the current idea, selected direction, accepted
 experiment plan, and relevant attempt history. It submits one complete proposal
@@ -177,7 +206,7 @@ through `hitl-submit-proposal` and labels it as:
 The proposal must make one concrete experiment-stage change while preserving
 the research question and scoring protocol.
 
-### 2. Proposal admission
+### 3. Proposal admission
 
 The manager first checks only whether the proposal is legal under the scoring
 and experiment boundaries. It does not rewrite the method or treat legality as
@@ -189,7 +218,7 @@ a recommendation.
 - A legal proposal is presented to the human for approval or concrete
   feedback.
 
-### 3. Candidate execution and scoring
+### 4. Candidate execution and scoring
 
 The experiment worker plans and executes the admitted proposal. After manager
 approval of the completed execution, runtime checkpoints the exact reviewed
@@ -206,7 +235,7 @@ The manager receives the complete objective result and decides one action:
 Runtime records and applies the manager's decision; it does not reinterpret the
 score.
 
-### 4. Frontier maintenance
+### 5. Frontier maintenance
 
 Accepting an exploitation candidate replaces its parent in that active
 direction. Accepting an exploration candidate retains both the parent and child
@@ -281,6 +310,11 @@ worker-facing instructions.
 Only the finalizer authorized for the current boundary can release a held
 request. For example, initial scoring uses `finalize_worker_request`, while a
 candidate frontier decision uses `finalize_frontier_decision`.
+
+The proposal-preparation boundary instead exposes the two mutually exclusive
+terminal tools `proceed_to_proposal` and `request_resource_finder`. Direct
+manager text cannot advance that boundary, and both tools become unavailable
+as soon as one choice is durably recorded.
 
 ### Manager tool isolation
 
@@ -452,6 +486,10 @@ record.
 
 Recovery distinguishes several cases:
 
+- a pending proposal-preparation choice resumes with the same two manager
+  tools;
+- a recorded resource-finder choice resumes its held planning, execution, or
+  review phase, while a completed resource run reuses its prepared checkpoint;
 - an unresolved worker command is resumed by a replacement worker;
 - finalized feedback is replayed until the worker consumes it;
 - an interrupted scoring handoff resumes from its saved fingerprint and
@@ -522,6 +560,7 @@ The main implementation entry points are:
 | Shared runner integration | `src/core/runner.py` |
 | Worker command runtime and idea log | `src/core/hitl.py` |
 | Initial root and iterative frontier workflow | `src/core/hitl_autoresearch.py` |
+| Shared resource-finder HITL lifecycle | `src/core/hitl_resource_finder.py`, `src/core/hitl_stage_runtime.py` |
 | Long-running manager and MCP tool policy | `src/core/hitl_manager_react.py` |
 | Durable worker requests and transitions | `src/core/hitl_runtime_state.py` |
 | Frontier nodes, attempts, pruning, and selection | `src/core/hitl_frontier.py` |

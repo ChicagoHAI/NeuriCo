@@ -32,6 +32,7 @@ def generate_resource_finder_prompt(
     provider: str = "claude",
     hitl_phase: Optional[str] = None,
     scoring_enabled: bool = False,
+    objective: str = "",
 ) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
@@ -61,6 +62,7 @@ def generate_resource_finder_prompt(
         provider=provider,
         hitl_phase=hitl_phase,
         scoring_enabled=scoring_enabled,
+        objective=objective,
     )
 
 

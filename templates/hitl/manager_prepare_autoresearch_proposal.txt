@@ -1,0 +1,21 @@
+Runtime has restored the selected HITL AutoResearch frontier node and is ready
+to begin one new proposal.
+
+Decide whether the current workspace and finalized research record are already
+sufficient for proposal generation, or whether one focused resource-finder run
+is needed first. Inspect the frontier, workspace, and finalized ideas as needed.
+
+Call exactly one of the runtime tools available for this boundary:
+
+- `proceed_to_proposal` when proposal generation should begin now.
+- `request_resource_finder` when a concrete missing resource should be gathered
+  before proposal generation. Give the resource finder a specific objective.
+
+Support the decision with finalized premise idea ids. If no suitable finalized
+premise exists, supply one complete supporting-evidence record through the
+chosen tool. Runtime will record that manager-authored evidence before it records
+the decision.
+
+If resource finding is selected, its established planning, review, execution,
+and approval lifecycle will run once. After it succeeds, runtime proceeds
+directly to proposal without opening this decision boundary again.

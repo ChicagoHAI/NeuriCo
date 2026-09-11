@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 
-from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
+from agents.resource_finder import run_resource_finder
 from agents.eval_verifier import (
     FAILURE_KIND_EVIDENCE_INVALID,
     build_manager_conformance_report,
@@ -80,11 +80,10 @@ from core.phase_state import (
 from core.hitl import (
     HitlValidationError,
     HitlRuntime,
-    RequiredArtifact,
     persist_hitl_required_artifact_contract,
     validate_required_artifact_contract,
-    verify_required_artifacts,
 )
+from core.hitl_resource_finder import run_resource_finder_hitl
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
 from core.hitl_git import delete_git_ref
 from core.hitl_run_control import (
@@ -1442,41 +1441,12 @@ class ResearchPipelineOrchestrator:
         if not self._initial_stage_request("resource_finder"):
             self.state.start_stage("resource_finder")
         runtime = self._create_hitl_runtime("resource_finder")
-        worker_prompt_contexts = {
-            phase: generate_resource_finder_prompt(
-                idea,
-                self.templates_dir,
-                hitl_runtime_completion=True,
-                provider=provider,
-                hitl_phase=phase,
-            )
-            for phase in ("plan", "execution", "review")
-        }
         # Keep ordinary-stage HITL failure semantics consistent: a failed
         # resource run must not leave public artifacts or private idea state.
         rollback = self._stage_rollback(
             "resource_finder",
             "HITL resource finder starting state",
         )
-
-        def resource_artifact_validator() -> Dict[str, Any]:
-            required = [
-                RequiredArtifact(
-                    path=relative,
-                    purpose="Resource-finder stage output",
-                    required=True,
-                )
-                for relative in ("literature_review.md", "resources.md")
-            ]
-            issues: List[str] = []
-            for artifact in required:
-                try:
-                    verify_required_artifacts(self.work_dir, [artifact])
-                except HitlValidationError:
-                    issues.append(
-                        f"Required resource artifact is missing or empty: {artifact.path}"
-                    )
-            return {"valid": not issues, "issues": issues}
 
         def restore_failed_hitl_state() -> None:
             self._restore_stage_rollback(
@@ -1514,44 +1484,18 @@ class ResearchPipelineOrchestrator:
                 ),
             }
 
-        def launch_worker(
-            worker_prompt: str,
-            worker_log_prefix: str,
-            *,
-            record_continuation: bool,
-        ) -> Dict[str, Any]:
-            if record_continuation:
-                runtime.register_worker_prompt(worker_prompt)
-            return run_resource_finder(
+        try:
+            return run_resource_finder_hitl(
+                runtime=runtime,
                 idea=idea,
                 work_dir=self.work_dir,
                 provider=provider,
                 templates_dir=self.templates_dir,
                 timeout=timeout,
                 full_permissions=full_permissions,
-                completion_mode="hitl_runtime",
-                log_prefix=worker_log_prefix,
-                include_hitl_outputs=True,
-                env_extra=runtime.idea_tool_env(),
-                prompt_override=worker_prompt,
-            )
-
-        try:
-            resumed = self._resume_initial_worker(runtime, launch_worker, worker_prompt_contexts, resource_artifact_validator)
-            if resumed is not None:
-                result, finish = resumed
-                return complete_approved(result, finish) if finish.get("approved") else finalize_failed(finish or result)
-            return run_plan_centered_hitl_stage(
-                runtime=runtime,
-                actor="resource_finder",
-                worker_name="resource_finder",
-                worker_prompt_contexts=worker_prompt_contexts,
-                phase_finish_validator=resource_artifact_validator,
-                launch_worker=launch_worker,
-                plan_log_prefix="resource_finder_hitl_plan",
-                execution_log_prefix="resource_finder_hitl_execute_1",
                 on_approved=complete_approved,
                 on_failed=finalize_failed,
+                resume_worker=self._resume_initial_worker,
             )
 
         except HitlRunStopRequested:

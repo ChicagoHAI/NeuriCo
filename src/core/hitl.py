@@ -2189,6 +2189,119 @@ class HitlRuntime:
             provenance=provenance,
         )
 
+    def log_proposal_preparation_decision(
+        self,
+        *,
+        choice: str,
+        reason: str,
+        parent_node_id: str,
+        objective: str = "",
+        premise_idea_ids: Optional[List[str]] = None,
+        supporting_evidence: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Finalize the manager-authored decision immediately before proposal."""
+        if choice not in {"proceed_to_proposal", "request_resource_finder"}:
+            raise HitlValidationError("Unknown proposal-preparation choice")
+        rationale = _require_text(reason, "reason", "Proposal-preparation decision")
+        parent = _require_text(
+            parent_node_id,
+            "parent_node_id",
+            "Proposal-preparation decision",
+        )
+        resource_objective = str(objective).strip()
+        if choice == "request_resource_finder" and not resource_objective:
+            raise HitlValidationError(
+                "Resource-finder proposal preparation requires a non-empty objective"
+            )
+        if choice == "proceed_to_proposal" and resource_objective:
+            raise HitlValidationError(
+                "Direct proposal preparation must not include a resource-finder objective"
+            )
+        premises = _normalize_premises(premise_idea_ids or [])
+        evidence_payload = supporting_evidence if isinstance(supporting_evidence, dict) else None
+        if bool(premises) == bool(evidence_payload):
+            raise HitlValidationError(
+                "Proposal-preparation decision requires either `premise_idea_ids` "
+                "or `supporting_evidence`, but not both."
+            )
+
+        evidence_record: Optional[Dict[str, Any]] = None
+        if evidence_payload is not None:
+            evidence_record = self.log.append(
+                {
+                    "pipeline_stage": "experiment_runner",
+                    "hitl_stage": "proposal",
+                    "idea_type": "evidence",
+                    "idea_category": _require_text(
+                        evidence_payload.get("idea_category"),
+                        "idea_category",
+                        "Proposal-preparation supporting evidence",
+                    ),
+                    "level": "B",
+                    "actor": "manager",
+                    "premises": [],
+                    "context": _require_text(
+                        evidence_payload.get("context"),
+                        "context",
+                        "Proposal-preparation supporting evidence",
+                    ),
+                    "evidence": _require_text(
+                        evidence_payload.get("evidence"),
+                        "evidence",
+                        "Proposal-preparation supporting evidence",
+                    ),
+                    "related_artifacts": list(
+                        evidence_payload.get("related_artifacts") or []
+                    ),
+                    "raised": False,
+                    "parent_node_id": parent,
+                },
+                idempotent=True,
+            )
+            premises = [str(evidence_record["idea_id"])]
+
+        decision_record = self.log.append(
+            {
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "proposal",
+                "idea_type": "decision",
+                "idea_category": "search_strategy",
+                "level": "B",
+                "actor": "manager",
+                "premises": premises,
+                "context": (
+                    "Manager assessed whether more external resources were needed "
+                    "before the next AutoResearch proposal."
+                    + (
+                        f" Requested resource objective: {resource_objective}"
+                        if resource_objective
+                        else ""
+                    )
+                ),
+                "related_artifacts": [],
+                "decision_needed": (
+                    "What preparation should happen before the next AutoResearch proposal?"
+                ),
+                "options": [
+                    "Proceed directly to proposal.",
+                    "Run the resource finder before proposal.",
+                ],
+                "decision": "O1" if choice == "proceed_to_proposal" else "O2",
+                "manager_feedback": rationale,
+                "raised": False,
+                "parent_node_id": parent,
+            },
+            idempotent=True,
+        )
+        return {
+            "decision_idea_id": str(decision_record["idea_id"]),
+            **(
+                {"supporting_evidence_idea_id": str(evidence_record["idea_id"])}
+                if evidence_record is not None
+                else {}
+            ),
+        }
+
     def log_frontier_maintenance_decision(
         self,
         *,
