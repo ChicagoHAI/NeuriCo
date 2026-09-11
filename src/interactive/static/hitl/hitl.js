@@ -841,8 +841,11 @@
   function runPanel() {
     if (!state.runPanel || state.snapshot?.live?.active) return null;
     const title = "Start research";
+    const live = state.snapshot?.live || {};
+    const workflowLocked = Boolean(live.workflow_locked);
+    if (workflowLocked) state.runDraft.workflow = live.workflow === "ordinary" ? "ordinary" : "autoresearch";
     const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
-    const workflow = q("select", { id: "run-workflow", "data-focus-key": "run-workflow" }); [["autoresearch", "AutoResearch"], ["ordinary", "Ordinary"]].forEach(([value, label]) => workflow.append(q("option", { value, text: label }))); workflow.value = state.runDraft.workflow; workflow.onchange = () => { state.runDraft.workflow = workflow.value; render({ preserveScroll: true }); };
+    const workflow = q("select", { id: "run-workflow", "data-focus-key": "run-workflow", ...(workflowLocked ? { disabled: "disabled", title: "The workspace research workflow cannot be changed" } : {}) }); [["autoresearch", "AutoResearch"], ["ordinary", "Ordinary"]].forEach(([value, label]) => workflow.append(q("option", { value, text: label }))); workflow.value = state.runDraft.workflow; workflow.onchange = () => { state.runDraft.workflow = workflow.value; render({ preserveScroll: true }); };
     const hitlMode = q("select", { id: "run-hitl-mode", "data-focus-key": "run-hitl-mode" }); [["full", "No"], ["auto", "Yes"]].forEach(([value, label]) => hitlMode.append(q("option", { value, text: label }))); hitlMode.value = state.runDraft.hitlMode; hitlMode.onchange = () => { state.runDraft.hitlMode = hitlMode.value; };
     const iterations = q("input", { id: "run-iterations", type: "number", min: "1", max: "100", step: "1", required: "required", value: state.runDraft.iterations, "data-focus-key": "run-iterations" }); iterations.oninput = () => { state.runDraft.iterations = iterations.value; iterations.setCustomValidity(""); };
     const paper = q("input", { id: "run-paper", type: "checkbox", "data-focus-key": "run-paper" }); paper.checked = state.runDraft.writePaper; paper.onchange = () => { state.runDraft.writePaper = paper.checked; };

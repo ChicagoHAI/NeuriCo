@@ -957,13 +957,21 @@ class HitlTerminalChannel(UserChannel):
                 "Choose claude or codex.",
                 cancellable=True,
             )
-            workflow = self._read_choice(
-                "Research [AutoResearch] (AutoResearch/ordinary): ",
-                "autoresearch",
-                {"autoresearch", "ordinary"},
-                "Choose AutoResearch or ordinary.",
-                cancellable=True,
-            )
+            if bool(status.get("workflow_locked")):
+                workflow = str(status.get("workflow", "autoresearch")).strip().lower()
+                self._write_block(
+                    self._ui.system(
+                        f"Research: {'Ordinary' if workflow == 'ordinary' else 'AutoResearch'}"
+                    )
+                )
+            else:
+                workflow = self._read_choice(
+                    "Research [AutoResearch] (AutoResearch/ordinary): ",
+                    "autoresearch",
+                    {"autoresearch", "ordinary"},
+                    "Choose AutoResearch or ordinary.",
+                    cancellable=True,
+                )
             auto = self._read_yes_no(
                 "Auto [Y] (Y/n): ", default=True, cancellable=True
             )

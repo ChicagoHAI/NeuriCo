@@ -293,6 +293,14 @@ class HitlWorkspaceView:
         if not owner_checked:
             owner = active_hitl_workspace_run(self.work_dir)
         pipeline = self._pipeline_state()
+        pipeline_workflow = (
+            "ordinary"
+            if str(pipeline.get("workflow", "")).strip().lower() == "ordinary"
+            else "autoresearch"
+            if pipeline
+            else ""
+        )
+        workflow_locked = bool(pipeline)
         pending = runtime.get("pending_worker_command")
         pending = pending if isinstance(pending, dict) else {}
         continuation = runtime.get("worker_continuation")
@@ -326,7 +334,11 @@ class HitlWorkspaceView:
         started_at = str((owner or {}).get("started_at") or "").strip()
         provider = str((owner or {}).get("provider") or "").strip()
         mode = str((owner or {}).get("mode") or "").strip()
-        workflow = str((owner or {}).get("workflow") or "autoresearch").strip().lower()
+        workflow = str(
+            pipeline_workflow
+            or (owner or {}).get("workflow")
+            or "autoresearch"
+        ).strip().lower()
         hitl_mode = str(
             (owner or {}).get("hitl_mode")
             or active_pending.get("hitl_mode")
@@ -368,6 +380,7 @@ class HitlWorkspaceView:
                 "label": label,
                 "mode": mode,
                 "workflow": workflow if workflow in {"ordinary", "autoresearch"} else "autoresearch",
+                "workflow_locked": workflow_locked,
                 "hitl_mode": hitl_mode if hitl_mode in {"full", "auto"} else "full",
                 "provider": provider,
                 "started_at": started_at,
@@ -412,7 +425,8 @@ class HitlWorkspaceView:
 
         if launch_status:
             mode = str(launch_status.get("mode", mode)).strip()
-            workflow = str(launch_status.get("workflow", workflow)).strip().lower()
+            if not workflow_locked:
+                workflow = str(launch_status.get("workflow", workflow)).strip().lower()
             hitl_mode = str(launch_status.get("hitl_mode", hitl_mode)).strip().lower()
             provider = str(launch_status.get("provider", provider)).strip()
             if not started_at:

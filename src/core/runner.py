@@ -168,6 +168,12 @@ def _with_hitl_workspace_run_ownership(method):
                 "request_id": str(os.environ.get("NEURICO_HITL_REQUEST_ID", "")).strip(),
             },
         ):
+            from core.pipeline_orchestrator import PipelineState
+
+            PipelineState.require_compatible_workflow(
+                work_dir,
+                "ordinary" if arguments.arguments["hitl_research"] else "autoresearch",
+            )
             # A renderer can request stop while the detached worker is still
             # waiting to acquire this lease. Honor that request before the
             # runner mutates any research state.

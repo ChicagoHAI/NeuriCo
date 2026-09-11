@@ -119,6 +119,9 @@ class HitlRunController:
                 raise RuntimeError(
                     "Wait for the current manager message to finish before starting research."
                 )
+            from core.pipeline_orchestrator import PipelineState
+
+            PipelineState.require_compatible_workflow(self.work_dir, workflow)
             launch_path = hitl_launch_status_path(self.work_dir)
             if launch_path.exists():
                 try:

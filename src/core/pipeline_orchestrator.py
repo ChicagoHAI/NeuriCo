@@ -96,13 +96,14 @@ from templates.research_agent_instructions import generate_instructions
 class PipelineState:
     """Tracks pipeline execution state."""
 
-    def __init__(self, work_dir: Path):
+    def __init__(self, work_dir: Path, *, workflow: Optional[str] = None):
         self.work_dir = Path(work_dir)
         self.state_file = self.work_dir / ".neurico" / "pipeline_state.json"
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_existed = self.state_file.exists()
 
         # Initialize or load state
-        if self.state_file.exists():
+        if state_existed:
             with open(self.state_file, "r", encoding="utf-8") as f:
                 self.state = json.load(f)
         else:
@@ -112,10 +113,50 @@ class PipelineState:
                 "current_stage": None,
                 "completed": False,
             }
+        if workflow is not None:
+            requested = str(workflow).strip().lower()
+            if requested != "ordinary":
+                raise ValueError("Only ordinary research records a pipeline workflow marker.")
+            recorded = str(self.state.get("workflow", "")).strip().lower()
+            if state_existed and recorded != requested:
+                raise RuntimeError(
+                    "This workspace belongs to AutoResearch and cannot be opened as "
+                    "Ordinary research."
+                )
+            self.state["workflow"] = requested
         self.state.setdefault("stages", {})
         self.state.setdefault("current_stage", None)
         self.state.setdefault("completed", False)
         self._save()
+
+    @classmethod
+    def require_compatible_workflow(cls, work_dir: Path, requested_workflow: str) -> None:
+        """Reject an unsupported switch between Ordinary and AutoResearch."""
+        requested = str(requested_workflow).strip().lower()
+        if requested not in {"ordinary", "autoresearch"}:
+            raise ValueError("Choose ordinary research or AutoResearch.")
+        state_file = Path(work_dir) / ".neurico" / "pipeline_state.json"
+        if not state_file.is_file():
+            return
+        try:
+            payload = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError("The workspace pipeline state is unreadable.") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("The workspace pipeline state is invalid.")
+        recorded = str(payload.get("workflow", "")).strip().lower()
+        if recorded and recorded not in {"ordinary", "autoresearch"}:
+            raise RuntimeError("The workspace pipeline state has an unsupported workflow.")
+        if requested == "ordinary" and recorded != "ordinary":
+            raise RuntimeError(
+                "This workspace belongs to AutoResearch and cannot be opened as "
+                "Ordinary research."
+            )
+        if requested == "autoresearch" and recorded == "ordinary":
+            raise RuntimeError(
+                "This workspace belongs to Ordinary research and cannot be opened as "
+                "AutoResearch."
+            )
 
     def _save(self):
         """Save state to disk."""
@@ -289,7 +330,16 @@ class ResearchPipelineOrchestrator:
             templates_dir: Path to templates directory (auto-detected if None)
         """
         self.work_dir = Path(work_dir)
-        self.state = PipelineState(self.work_dir)
+        self.hitl_autoresearch = hitl_autoresearch
+        self.managed_initial_run = managed_initial_run or hitl_autoresearch
+        self.state = PipelineState(
+            self.work_dir,
+            workflow=(
+                "ordinary"
+                if self.managed_initial_run and not self.hitl_autoresearch
+                else None
+            ),
+        )
 
         # Auto-detect templates directory if not provided
         if templates_dir is None:
@@ -298,8 +348,6 @@ class ResearchPipelineOrchestrator:
         self.hitl_manager = hitl_manager
         self.hitl_channel = hitl_channel
         self.hitl_manager_config = hitl_manager_config or {}
-        self.hitl_autoresearch = hitl_autoresearch
-        self.managed_initial_run = managed_initial_run or hitl_autoresearch
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
 
     def _managed_initial_stages(self) -> tuple[str, ...]:
