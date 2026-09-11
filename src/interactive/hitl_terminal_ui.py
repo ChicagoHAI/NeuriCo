@@ -388,8 +388,10 @@ class HitlTerminalUI:
         heading = label if not elapsed else f"{label}  ·  {elapsed}"
         lines = [self._style("Research status", "bold"), self._rule(), f"  {self._style(heading, 'bold')}"]
         if live.get("active"):
+            workflow = terminal_safe_text(live.get("workflow") or "autoresearch").strip().lower()
             mode = terminal_safe_text(live.get("hitl_mode") or "full").strip().lower()
-            lines.append(f"  HITL mode: {'Auto' if mode == 'auto' else 'Full'}")
+            lines.append(f"  Research: {'Ordinary' if workflow == 'ordinary' else 'AutoResearch'}")
+            lines.append(f"  Auto: {'Yes' if mode == 'auto' else 'No'}")
         if detail:
             lines.extend(self._wrap_paragraph(detail, indent="  "))
         if next_action:

@@ -326,6 +326,7 @@ class HitlWorkspaceView:
         started_at = str((owner or {}).get("started_at") or "").strip()
         provider = str((owner or {}).get("provider") or "").strip()
         mode = str((owner or {}).get("mode") or "").strip()
+        workflow = str((owner or {}).get("workflow") or "autoresearch").strip().lower()
         hitl_mode = str(
             (owner or {}).get("hitl_mode")
             or active_pending.get("hitl_mode")
@@ -366,6 +367,7 @@ class HitlWorkspaceView:
                 "phase_label": visible_phase,
                 "label": label,
                 "mode": mode,
+                "workflow": workflow if workflow in {"ordinary", "autoresearch"} else "autoresearch",
                 "hitl_mode": hitl_mode if hitl_mode in {"full", "auto"} else "full",
                 "provider": provider,
                 "started_at": started_at,
@@ -410,6 +412,7 @@ class HitlWorkspaceView:
 
         if launch_status:
             mode = str(launch_status.get("mode", mode)).strip()
+            workflow = str(launch_status.get("workflow", workflow)).strip().lower()
             hitl_mode = str(launch_status.get("hitl_mode", hitl_mode)).strip().lower()
             provider = str(launch_status.get("provider", provider)).strip()
             if not started_at:

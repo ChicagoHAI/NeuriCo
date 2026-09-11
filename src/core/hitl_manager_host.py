@@ -782,7 +782,7 @@ class HitlTerminalChannel(UserChannel):
                 return {"status": "unavailable"}
             try:
                 confirmed = self._read_yes_no(
-                    "Stop AutoResearch and restore the latest saved checkpoint? [y/N]: ",
+                    "Stop research and restore the latest saved checkpoint? [y/N]: ",
                     default=False,
                 )
                 if not confirmed:
@@ -957,17 +957,26 @@ class HitlTerminalChannel(UserChannel):
                 "Choose claude or codex.",
                 cancellable=True,
             )
+            workflow = self._read_choice(
+                "Research [AutoResearch] (AutoResearch/ordinary): ",
+                "autoresearch",
+                {"autoresearch", "ordinary"},
+                "Choose AutoResearch or ordinary.",
+                cancellable=True,
+            )
             auto = self._read_yes_no(
                 "Auto [Y] (Y/n): ", default=True, cancellable=True
             )
             hitl_mode = "auto" if auto else "full"
-            iterations = self._read_integer(
-                "Iterations [2] (1-100): ",
-                2,
-                minimum=1,
-                maximum=100,
-                cancellable=True,
-            )
+            iterations = 1
+            if workflow == "autoresearch":
+                iterations = self._read_integer(
+                    "Iterations [2] (1-100): ",
+                    2,
+                    minimum=1,
+                    maximum=100,
+                    cancellable=True,
+                )
             write_paper = self._read_yes_no(
                 "Write paper? [Y/n]: ", default=True, cancellable=True
             )
@@ -986,11 +995,12 @@ class HitlTerminalChannel(UserChannel):
             result = self._run_launcher(
                 {
                     "provider": provider,
+                    "workflow": workflow,
                     "hitl_mode": hitl_mode,
-                    "iterations": iterations,
                     "write_paper": write_paper,
                     "paper_style": paper_style,
                     "github": github,
+                    **({"iterations": iterations} if workflow == "autoresearch" else {}),
                 }
             )
         except _HitlPromptCancelled:
@@ -1002,9 +1012,10 @@ class HitlTerminalChannel(UserChannel):
             self._write_block(self._ui.system(str(exc), tone="error"), blank_before=True)
             return {"status": "invalid"}
         mode_label = "Auto" if hitl_mode == "auto" else "HITL"
+        workflow_label = "AutoResearch" if workflow == "autoresearch" else "ordinary research"
         self._write_block(
             self._ui.system(
-                f"Started {result['mode']} research in {mode_label} mode.",
+                f"Started {result['mode']} {workflow_label} in {mode_label} mode.",
                 tone="success",
             ),
         )
