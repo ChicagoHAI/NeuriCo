@@ -102,6 +102,7 @@ IDEA_RECORD_FIELD_ORDER = [
     "actor",
     "parent_node_id",
     "attempt_id",
+    "invocation_id",
     "premises",
     "worker_context",
     "context",
@@ -119,7 +120,7 @@ IDEA_RECORD_FIELD_ORDER = [
     "worker_escalation_reason",
     "manager_escalation_reason",
 ]
-RUNTIME_PROVENANCE_FIELDS = ("parent_node_id", "attempt_id")
+RUNTIME_PROVENANCE_FIELDS = ("parent_node_id", "attempt_id", "invocation_id")
 
 
 def _now() -> str:
@@ -840,11 +841,13 @@ class HitlRuntime:
         config: Optional[Dict[str, Any]] = None,
         use_hitl_autoresearch_whiteboard: bool = False,
         hitl_mode: HitlMode | str = HitlMode.FULL,
+        invocation_id: str = "",
     ):
         if pipeline_stage not in PIPELINE_STAGES:
             raise ValueError(f"Unsupported HITL pipeline stage: {pipeline_stage}")
         self.work_dir = Path(work_dir)
         self.pipeline_stage = pipeline_stage
+        self.invocation_id = str(invocation_id).strip()
         self.use_hitl_autoresearch_whiteboard = use_hitl_autoresearch_whiteboard
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
         self.paths = HitlPaths(self.work_dir, pipeline_stage)
@@ -1019,7 +1022,7 @@ class HitlRuntime:
 
         levels = ("A",) if self.requires_human_plan_approval else ("A", "B")
         return HitlRuntimeState(self.work_dir).has_plan_approval(
-            pipeline_stage=self.pipeline_stage,
+            pipeline_stage=self._plan_approval_scope(),
             plan_fingerprint=self._current_plan_fingerprint(),
             approval_levels=levels,
         )
@@ -1030,8 +1033,15 @@ class HitlRuntime:
         from core.hitl_runtime_state import HitlRuntimeState
 
         return HitlRuntimeState(self.work_dir).has_plan_approval(
-            pipeline_stage=self.pipeline_stage,
+            pipeline_stage=self._plan_approval_scope(),
             plan_fingerprint=self._current_plan_fingerprint(),
+        )
+
+    def _plan_approval_scope(self) -> str:
+        return (
+            f"{self.pipeline_stage}:{self.invocation_id}"
+            if self.invocation_id
+            else self.pipeline_stage
         )
 
     def resolve_raised_payload(
@@ -2219,6 +2229,62 @@ class HitlRuntime:
         _apply_runtime_provenance(record, provenance)
         return self.log.append(record, idempotent=True)
 
+    def log_proposal_preparation_decision(
+        self,
+        *,
+        choice: str,
+        reason: str,
+        parent_sha: str,
+        premise_idea_id: str,
+        invocation_id: str,
+        agent: str = "",
+        objective: str = "",
+    ) -> Dict[str, Any]:
+        """Persist a manager-authored proceed-or-insert decision."""
+        if choice not in {"proceed", "insert"}:
+            raise HitlValidationError("Proposal preparation choice must be proceed or insert")
+        rationale = _require_text(reason, "reason", "Proposal preparation decision")
+        parent = _require_text(parent_sha, "parent_sha", "Proposal preparation decision")
+        premise = _require_text(
+            premise_idea_id, "premise_idea_id", "Proposal preparation decision"
+        )
+        invocation = _require_text(
+            invocation_id, "invocation_id", "Proposal preparation decision"
+        )
+        selected_agent = str(agent).strip()
+        selected_objective = str(objective).strip()
+        if choice == "insert":
+            _require_text(selected_agent, "agent", "Proposal preparation decision")
+            _require_text(selected_objective, "objective", "Proposal preparation decision")
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "decision",
+            "idea_category": "search_strategy",
+            "level": "B",
+            "actor": "manager",
+            "premises": [premise],
+            "context": f"Manager prepared the next proposal from frontier node {parent}.",
+            "related_artifacts": [],
+            "decision_needed": (
+                "Should runtime proceed to the next proposal or insert a specialized agent first?"
+            ),
+            "options": [
+                "Proceed to the next proposal using the available evidence.",
+                "Insert a specialized agent before deciding again.",
+            ],
+            "decision": "O1" if choice == "proceed" else "O2",
+            "manager_feedback": (
+                rationale
+                if choice == "proceed"
+                else f"{rationale}\n\nAgent: {selected_agent}\nObjective: {selected_objective}"
+            ),
+            "raised": False,
+            "parent_node_id": parent,
+            "invocation_id": invocation,
+        }
+        return self.log.append(record, idempotent=True)
+
     def log_scoring_recovery_decision(
         self,
         *,
@@ -3227,7 +3293,7 @@ class HitlRuntime:
                 from core.hitl_runtime_state import HitlRuntimeState
 
                 HitlRuntimeState(self.work_dir).mark_plan_approved(
-                    pipeline_stage=self.pipeline_stage,
+                    pipeline_stage=self._plan_approval_scope(),
                     plan_fingerprint=plan_fingerprint,
                     approval_level=(
                         "A"

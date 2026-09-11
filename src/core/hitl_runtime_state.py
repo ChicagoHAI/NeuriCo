@@ -71,8 +71,8 @@ class HitlRuntimeState:
 
     A manager may converse freely at all times.  The only exclusive runtime
     resource is one blocking worker command, represented by
-    ``pending_worker_command``.  AutoResearch frontier selection is stored as a
-    separate next action because no worker is waiting for it.
+    ``pending_worker_command``. Runtime-controlled AutoResearch boundaries are
+    stored as a separate next action because no worker is waiting for them.
     """
 
     def __init__(self, work_dir: Path):
@@ -684,9 +684,14 @@ class HitlRuntimeState:
             record["status"] = "pending"
             record["created_at"] = _now()
             self._state["next_autoresearch_action"] = record
+            phase = {
+                "prune_frontier": "pruning",
+                "select_frontier": "selecting_next",
+                "prepare_proposal": "preparing_proposal",
+            }.get(kind, kind)
             self._record_phase_transition_unlocked(
-                stage="frontier",
-                phase="pruning" if kind == "prune_frontier" else "selecting_next",
+                stage=("experiment_runner" if kind == "prepare_proposal" else "frontier"),
+                phase=phase,
                 activity="reviewing",
             )
             self._save_unlocked()
@@ -697,9 +702,9 @@ class HitlRuntimeState:
         kind: str,
         decision: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Persist a manager's frontier choice before applying it.
+        """Persist a manager's AutoResearch choice before applying it.
 
-        A prune or selection changes more than one store.  Retaining the
+        A runtime-controlled choice may change more than one store. Retaining the
         command arguments in runtime state first makes the remaining log and
         frontier updates restartable without asking the manager to decide a
         second time.
@@ -727,13 +732,18 @@ class HitlRuntimeState:
             action["status"] = "decision_recorded"
             action["decision_recorded_at"] = _now()
             self._state["next_autoresearch_action"] = action
+            phase = {
+                "prune_frontier": "saving_prune_decision",
+                "select_frontier": "saving_selection",
+                "prepare_proposal": "saving_proposal_preparation",
+            }.get(normalized_kind, f"saving_{normalized_kind}")
             self._record_phase_transition_unlocked(
-                stage="frontier",
-                phase=(
-                    "saving_prune_decision"
-                    if normalized_kind == "prune_frontier"
-                    else "saving_selection"
+                stage=(
+                    "experiment_runner"
+                    if normalized_kind == "prepare_proposal"
+                    else "frontier"
                 ),
+                phase=phase,
                 activity="saving",
             )
             self._save_unlocked()

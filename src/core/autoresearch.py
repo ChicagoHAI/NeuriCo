@@ -51,6 +51,7 @@ HIDDEN_SCORING_PATTERNS = (
     "scoring/eval.py",
     "scoring/targets.json",
     "scoring/rule_maker_log.md",
+    "scoring/verification.json",
     "data/.test/",
     ".scoring_sealed/",
 )

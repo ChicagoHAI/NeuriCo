@@ -113,6 +113,7 @@ class PipelineState:
                 "completed": False,
             }
         self.state.setdefault("stages", {})
+        self.state.setdefault("stage_history", [])
         self.state.setdefault("current_stage", None)
         self.state.setdefault("completed", False)
         self._save()
@@ -127,8 +128,14 @@ class PipelineState:
         stage_name: str,
         expected_outputs: Optional[List[str]] = None,
         next_steps: Optional[List[str]] = None,
+        invocation_id: str = "",
     ):
         """Mark a stage as started."""
+        previous = self.state["stages"].get(stage_name)
+        if isinstance(previous, dict) and previous.get("status") in {"completed", "failed"}:
+            self.state["stage_history"].append(
+                {"stage": stage_name, **previous}
+            )
         self.state["current_stage"] = stage_name
         workspace_check = check_working_directory(self.work_dir)
         self.state["stages"][stage_name] = {
@@ -140,6 +147,7 @@ class PipelineState:
             "expected_outputs": list(expected_outputs or []),
             "next_steps": list(next_steps or []),
             "workspace_check": workspace_check,
+            **({"invocation_id": invocation_id} if invocation_id else {}),
         }
         self._save()
 
@@ -300,7 +308,7 @@ class ResearchPipelineOrchestrator:
         self.hitl_autoresearch = hitl_autoresearch
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
 
-    def _create_hitl_runtime(self, pipeline_stage: str) -> HitlRuntime:
+    def _create_hitl_runtime(self, pipeline_stage: str, *, invocation_id: str = "") -> HitlRuntime:
         whiteboard_mode: Dict[str, bool] = {}
         if self.hitl_autoresearch:
             whiteboard_mode["use_hitl_autoresearch_whiteboard"] = True
@@ -309,6 +317,7 @@ class ResearchPipelineOrchestrator:
                 self.work_dir,
                 pipeline_stage,
                 hitl_mode=self.hitl_mode,
+                invocation_id=invocation_id,
                 **whiteboard_mode,
             )
         return HitlRuntime(
@@ -318,10 +327,16 @@ class ResearchPipelineOrchestrator:
             channel=self.hitl_channel,
             config=self.hitl_manager_config,
             hitl_mode=self.hitl_mode,
+            invocation_id=invocation_id,
             **whiteboard_mode,
         )
 
-    def _initial_stage_request(self, stage: str) -> Optional[Dict[str, Any]]:
+    def _initial_stage_request(
+        self,
+        stage: str,
+        *,
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Find replayable work belonging to this incomplete initial stage."""
         if not self.hitl_autoresearch or self.state.is_stage_completed(stage):
             return None
@@ -332,11 +347,9 @@ class ResearchPipelineOrchestrator:
         started_at = self.state.state["stages"].get(stage, {}).get("started_at")
         if started_at and pending.get("created_at") and pending["created_at"] < started_at:
             return None  # A prior invocation's approval is not this stage's work.
-        provenance = pending.get("provenance") or {}
-        if provenance:
-            raise RuntimeError(
-                "Initial recovery found a request belonging to an AutoResearch attempt."
-            )
+        expected_provenance = dict(provenance or {})
+        if dict(pending.get("provenance") or {}) != expected_provenance:
+            raise RuntimeError("Initial recovery found a request from another invocation.")
         response = pending.get("response") or {}
         if not pending.get("request_key"):
             raise RuntimeError("Initial worker request has no request key.")
@@ -360,7 +373,7 @@ class ResearchPipelineOrchestrator:
         continuation = state.worker_continuation() or {}
         if (
             continuation.get("pipeline_stage") != stage
-            or continuation.get("provenance")
+            or dict(continuation.get("provenance") or {}) != expected_provenance
             or continuation.get("hitl_stage") not in {"plan", "execution", "review"}
             or not continuation.get("prompt_block")
             or pending.get("kind") not in {"phase_finish", "raised_idea"}
@@ -390,18 +403,25 @@ class ResearchPipelineOrchestrator:
         experiment = self.state.get_runtime_recovery("experiment_runner")
         if boundary:
             stage = str(boundary.get("stage", ""))
+            provenance = dict(boundary.get("provenance") or {})
             if stage not in {"resource_finder", RULE_MAKER_STAGE, "experiment_runner"}:
                 raise RuntimeError("Unknown initial stage rollback boundary.")
             if self.state.is_stage_completed(stage):
                 self._discard_initial_boundary(boundary)
-            elif self._initial_stage_request(stage):
+            elif self._initial_stage_request(stage, provenance=provenance):
                 HitlStageRollback.from_descriptor(self.work_dir, boundary)
                 if stage == "experiment_runner":
                     verify_sealed_scoring_manifest(sealed_dir_for(self.work_dir))
                 return True
             elif stage != "experiment_runner" or not experiment:
                 rollback = HitlStageRollback.from_descriptor(self.work_dir, boundary)
-                runtime = self._create_hitl_runtime(stage)
+                runtime = self._create_hitl_runtime(
+                    stage,
+                    invocation_id=str(
+                        provenance.get("invocation_id")
+                        or provenance.get("attempt_id", "")
+                    ),
+                )
                 try:
                     rollback.restore(
                         runtime, "Recovering interrupted initial stage.", cleanup_label="restored"
@@ -441,15 +461,23 @@ class ResearchPipelineOrchestrator:
         self.state.clear_runtime_recovery("initial_stage")
 
     def _stage_rollback(
-        self, stage: str, message: str, *, repair: bool = False
+        self,
+        stage: str,
+        message: str,
+        *,
+        repair: bool = False,
+        provenance: Optional[Dict[str, Any]] = None,
     ) -> HitlStageRollback:
+        expected_provenance = dict(provenance or {})
         if self.hitl_autoresearch:
             existing = self.state.get_runtime_recovery("initial_stage")
             if existing:
                 if existing.get("stage") != stage:
                     raise RuntimeError("Another initial stage still owns the rollback boundary.")
+                if dict(existing.get("provenance") or {}) != expected_provenance:
+                    raise RuntimeError("Stage rollback boundary belongs to another invocation.")
                 return HitlStageRollback.from_descriptor(self.work_dir, existing)
-            if self._initial_stage_request(stage):
+            if self._initial_stage_request(stage, provenance=expected_provenance):
                 experiment = self.state.get_runtime_recovery("experiment_runner")
                 if stage == "experiment_runner" and experiment:
                     return HitlStageRollback.from_descriptor(
@@ -479,7 +507,12 @@ class ResearchPipelineOrchestrator:
         )
         if self.hitl_autoresearch:
             self.state.set_runtime_recovery(
-                "initial_stage", {"stage": stage, **rollback.descriptor()}
+                "initial_stage",
+                {
+                    "stage": stage,
+                    **({"provenance": expected_provenance} if expected_provenance else {}),
+                    **rollback.descriptor(),
+                },
             )
         return rollback
 
@@ -513,10 +546,14 @@ class ResearchPipelineOrchestrator:
         validator: Any,
         *,
         scoring_handler: Any = None,
+        provenance: Optional[Dict[str, Any]] = None,
     ) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
         if not self.hitl_autoresearch:
             return None
-        pending = self._initial_stage_request(runtime.pipeline_stage)
+        pending = self._initial_stage_request(
+            runtime.pipeline_stage,
+            provenance=provenance,
+        )
         if pending is None:
             return None
         if pending.get("status") == "resolved" and (
@@ -545,6 +582,7 @@ class ResearchPipelineOrchestrator:
             worker_prompt_contexts=worker_prompt_contexts,
             allow_scoring_approval=scoring_handler is not None,
             scoring_handler=scoring_handler,
+            provenance=provenance,
         )
         return run_worker_with_replacements(
             runtime=runtime,
@@ -556,10 +594,18 @@ class ResearchPipelineOrchestrator:
             record_continuation=False,
         )
 
-    def _completed_initial_stage(self, stage: str) -> Optional[Dict[str, Any]]:
+    def _completed_initial_stage(
+        self,
+        stage: str,
+        *,
+        invocation_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
         if not self.hitl_autoresearch or not self.state.is_stage_completed(stage):
             return None
-        result = dict(self.state.state["stages"][stage].get("outputs") or {})
+        stage_record = self.state.state["stages"][stage]
+        if str(stage_record.get("invocation_id", "")) != str(invocation_id):
+            return None
+        result = dict(stage_record.get("outputs") or {})
         result.update(success=True, hitl=True, phase="complete")
         if stage == "experiment_runner":
             scorer = dict(self.state.state["stages"].get(SCORER_STAGE, {}).get("outputs") or {})
@@ -582,12 +628,16 @@ class ResearchPipelineOrchestrator:
         *,
         stage_name: str,
         run_stage: Callable[[], Dict[str, Any]],
+        invocation_id: str = "",
     ) -> Dict[str, Any]:
         """Relaunch a HITL stage only after its runtime rollback completed."""
         from core.hitl_run_control import hitl_run_stop_requested
 
         if self.hitl_autoresearch and not (stage_name == RULE_MAKER_STAGE and self._initial_rule_maker_repair_recovery()):
-            completed = self._completed_initial_stage(stage_name)
+            completed = self._completed_initial_stage(
+                stage_name,
+                invocation_id=invocation_id,
+            )
             if completed is not None:
                 return completed
         restart_count = 0
@@ -696,14 +746,14 @@ class ResearchPipelineOrchestrator:
             # STAGE 1: Resource Finder
             if not skip_resource_finder:
                 if hitl_enabled:
-                    results["stages"]["resource_finder"] = self._run_hitl_stage_until_complete(
-                        stage_name="resource_finder",
-                        run_stage=lambda: self._run_resource_finder_hitl(
+                    results["stages"]["resource_finder"] = (
+                        self.run_hitl_agent_stage_until_complete(
+                            "resource_finder",
                             idea=idea,
                             provider=provider,
                             timeout=resource_finder_timeout,
                             full_permissions=full_permissions,
-                        ),
+                        )
                     )
                 else:
                     results["stages"]["resource_finder"] = self._run_resource_finder(
@@ -1291,7 +1341,14 @@ class ResearchPipelineOrchestrator:
             raise
 
     def _run_resource_finder_hitl(
-        self, idea: Dict[str, Any], provider: str, timeout: Optional[int], full_permissions: bool
+        self,
+        idea: Dict[str, Any],
+        provider: str,
+        timeout: Optional[int],
+        full_permissions: bool,
+        manager_objective: str = "",
+        invocation_id: str = "",
+        parent_node_id: str = "",
     ) -> Dict[str, Any]:
         """Run resource_finder through the plan-centered HITL workflow."""
         print()
@@ -1300,16 +1357,41 @@ class ResearchPipelineOrchestrator:
         print("─" * 80)
         print()
 
-        if not self._initial_stage_request("resource_finder"):
-            self.state.start_stage("resource_finder")
-        runtime = self._create_hitl_runtime("resource_finder")
+        provenance = (
+            {"parent_node_id": parent_node_id, "invocation_id": invocation_id}
+            if invocation_id
+            else {}
+        )
+        stage = self.state.state["stages"].get("resource_finder") or {}
+        if invocation_id and stage.get("invocation_id") == invocation_id:
+            if stage.get("status") == "completed" and stage.get("success"):
+                return {
+                    **dict(stage.get("outputs") or {}),
+                    "success": True,
+                    "hitl": True,
+                    "phase": "complete",
+                    "resumed": True,
+                }
+        pending = self._initial_stage_request(
+            "resource_finder",
+            provenance=provenance,
+        )
+        if pending is None:
+            self.state.start_stage("resource_finder", invocation_id=invocation_id)
+        runtime = self._create_hitl_runtime(
+            "resource_finder",
+            invocation_id=invocation_id,
+        )
         worker_prompt_contexts = {
-            phase: generate_resource_finder_prompt(
-                idea,
-                self.templates_dir,
-                hitl_runtime_completion=True,
-                provider=provider,
-                hitl_phase=phase,
+            phase: self._with_manager_resource_objective(
+                generate_resource_finder_prompt(
+                    idea,
+                    self.templates_dir,
+                    hitl_runtime_completion=True,
+                    provider=provider,
+                    hitl_phase=phase,
+                ),
+                manager_objective,
             )
             for phase in ("plan", "execution", "review")
         }
@@ -1318,6 +1400,7 @@ class ResearchPipelineOrchestrator:
         rollback = self._stage_rollback(
             "resource_finder",
             "HITL resource finder starting state",
+            provenance=provenance,
         )
 
         def resource_artifact_validator() -> Dict[str, Any]:
@@ -1398,7 +1481,13 @@ class ResearchPipelineOrchestrator:
             )
 
         try:
-            resumed = self._resume_initial_worker(runtime, launch_worker, worker_prompt_contexts, resource_artifact_validator)
+            resumed = self._resume_initial_worker(
+                runtime,
+                launch_worker,
+                worker_prompt_contexts,
+                resource_artifact_validator,
+                provenance=provenance,
+            )
             if resumed is not None:
                 result, finish = resumed
                 return complete_approved(result, finish) if finish.get("approved") else finalize_failed(finish or result)
@@ -1409,10 +1498,19 @@ class ResearchPipelineOrchestrator:
                 worker_prompt_contexts=worker_prompt_contexts,
                 phase_finish_validator=resource_artifact_validator,
                 launch_worker=launch_worker,
-                plan_log_prefix="resource_finder_hitl_plan",
-                execution_log_prefix="resource_finder_hitl_execute_1",
+                plan_log_prefix=(
+                    f"resource_finder_hitl_plan_{invocation_id}"
+                    if invocation_id
+                    else "resource_finder_hitl_plan"
+                ),
+                execution_log_prefix=(
+                    f"resource_finder_hitl_execute_1_{invocation_id}"
+                    if invocation_id
+                    else "resource_finder_hitl_execute_1"
+                ),
                 on_approved=complete_approved,
                 on_failed=finalize_failed,
+                provenance=provenance,
             )
 
         except HitlRunStopRequested:
@@ -1434,6 +1532,77 @@ class ResearchPipelineOrchestrator:
             }
         finally:
             runtime.clear_idea_tool_context()
+
+    def _run_hitl_agent_stage_once(
+        self,
+        agent: str,
+        *,
+        idea: Dict[str, Any],
+        provider: str,
+        timeout: Optional[int],
+        full_permissions: bool,
+        manager_objective: str = "",
+        invocation_id: str = "",
+        parent_node_id: str = "",
+    ) -> Dict[str, Any]:
+        """Dispatch an agent through its existing plan-centered HITL stage."""
+        from core.manager_callable_agents import manager_callable_agent
+
+        selected = manager_callable_agent(agent)
+        if selected == "resource_finder":
+            return self._run_resource_finder_hitl(
+                idea=idea,
+                provider=provider,
+                timeout=timeout,
+                full_permissions=full_permissions,
+                manager_objective=manager_objective,
+                invocation_id=invocation_id,
+                parent_node_id=parent_node_id,
+            )
+        raise RuntimeError(f"No HITL stage executor is registered for {selected}")
+
+    def run_hitl_agent_stage_until_complete(
+        self,
+        agent: str,
+        *,
+        idea: Dict[str, Any],
+        provider: str,
+        timeout: Optional[int],
+        full_permissions: bool,
+        manager_objective: str = "",
+        invocation_id: str = "",
+        parent_node_id: str = "",
+    ) -> Dict[str, Any]:
+        """Run any registered agent through the shared HITL restart loop."""
+        from core.manager_callable_agents import manager_callable_agent
+
+        selected = manager_callable_agent(agent)
+        return self._run_hitl_stage_until_complete(
+            stage_name=selected,
+            invocation_id=invocation_id,
+            run_stage=lambda: self._run_hitl_agent_stage_once(
+                selected,
+                idea=idea,
+                provider=provider,
+                timeout=timeout,
+                full_permissions=full_permissions,
+                manager_objective=manager_objective,
+                invocation_id=invocation_id,
+                parent_node_id=parent_node_id,
+            ),
+        )
+
+    @staticmethod
+    def _with_manager_resource_objective(prompt: str, objective: str) -> str:
+        objective = str(objective).strip()
+        if not objective:
+            return prompt
+        return (
+            f"{prompt.rstrip()}\n\n"
+            "## MANAGER-REQUESTED FOCUS\n\n"
+            "Preserve useful existing resources and investigate this information gap:\n\n"
+            f"{objective}\n"
+        )
 
     def _wait_for_human_approval(self) -> Dict[str, Any]:
         """Wait for human to review resources and approve continuation."""

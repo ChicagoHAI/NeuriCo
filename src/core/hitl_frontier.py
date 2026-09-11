@@ -214,7 +214,11 @@ class HitlFrontierStore:
                 objective_score=objective_score,
                 reason_for_acceptance=reason_for_acceptance,
             )
-            self._retain_git_object("frontier", node_sha)
+            self._retain_git_object(
+                "frontier",
+                node_sha,
+                self.workspace_checkpoint_sha(node_sha),
+            )
             return
         self._write_node(
             parent_node_sha=None,
@@ -227,7 +231,11 @@ class HitlFrontierStore:
             selected=node_sha,
             active=[node_sha],
         )
-        self._retain_git_object("frontier", node_sha)
+        self._retain_git_object(
+            "frontier",
+            node_sha,
+            self.workspace_checkpoint_sha(node_sha),
+        )
 
     def _retain_git_object(self, kind: str, name: str, node_sha: str | None = None) -> None:
         """Keep runtime-owned frontier objects reachable across Git maintenance.
@@ -275,17 +283,51 @@ class HitlFrontierStore:
             raise HitlFrontierError("Accepted frontier node requires non-empty experiment plan")
         if not str(reason_for_acceptance).strip():
             raise HitlFrontierError("Accepted frontier node requires reason_for_acceptance")
-        self._write_json(
-            self.paths.node_json(node_sha),
-            {
-                "parent_node_sha": parent_node_sha,
-                "node_sha": node_sha,
-                "objective_score": objective_score,
-                "reason_for_acceptance": str(reason_for_acceptance).strip(),
-            },
-        )
+        node_path = self.paths.node_json(node_sha)
+        existing = self._read_json(node_path) if node_path.is_file() else {}
+        record = {
+            "parent_node_sha": parent_node_sha,
+            "node_sha": node_sha,
+            "objective_score": objective_score,
+            "reason_for_acceptance": str(reason_for_acceptance).strip(),
+        }
+        workspace_sha = str(existing.get("workspace_checkpoint_sha", "")).strip()
+        if workspace_sha and workspace_sha != node_sha:
+            record["workspace_checkpoint_sha"] = self._require_sha(
+                workspace_sha,
+                "frontier workspace checkpoint SHA",
+            )
+        self._write_json(node_path, record)
         plan_path = self.paths.node_plan(node_sha)
         self._write_text(plan_path, str(plan_text))
+
+    def workspace_checkpoint_sha(self, node_sha: str) -> str:
+        """Return the latest standard workspace checkpoint for a logical node."""
+        node = self._require_sha(node_sha, "frontier node SHA")
+        record = self._read_json(self.paths.node_json(node))
+        return self._require_sha(
+            record.get("workspace_checkpoint_sha") or node,
+            "frontier workspace checkpoint SHA",
+        )
+
+    def update_workspace_checkpoint(self, node_sha: str, checkpoint_sha: str) -> str:
+        """Attach an existing standard checkpoint to one logical frontier node."""
+        node = self._require_sha(node_sha, "frontier node SHA")
+        checkpoint = self._require_sha(
+            checkpoint_sha,
+            "frontier workspace checkpoint SHA",
+        )
+        node_path = self.paths.node_json(node)
+        record = self._read_json(node_path)
+        if str(record.get("node_sha", "")).strip() != node:
+            raise HitlFrontierError("Frontier node record does not match its requested SHA")
+        self._retain_git_object("frontier", node, checkpoint)
+        if checkpoint == node:
+            record.pop("workspace_checkpoint_sha", None)
+        else:
+            record["workspace_checkpoint_sha"] = checkpoint
+        self._write_json(node_path, record)
+        return checkpoint
 
     def finalize_attempt(
         self,
@@ -336,7 +378,11 @@ class HitlFrontierStore:
                     if candidate not in active:
                         active.append(candidate)
                     self._write_state(selected=candidate, active=active)
-                    self._retain_git_object("frontier", candidate)
+                    self._retain_git_object(
+                        "frontier",
+                        candidate,
+                        self.workspace_checkpoint_sha(candidate),
+                    )
                 self._retain_git_object("attempt", f"{parent}-{attempt_id}", candidate)
                 return existing
             raise HitlFrontierError(
@@ -370,7 +416,11 @@ class HitlFrontierStore:
             if candidate not in active:
                 active.append(candidate)
             self._write_state(selected=candidate, active=active)
-            self._retain_git_object("frontier", candidate)
+            self._retain_git_object(
+                "frontier",
+                candidate,
+                self.workspace_checkpoint_sha(candidate),
+            )
         return attempt
 
     def select(self, node_sha: str) -> Dict[str, Any]:
@@ -437,6 +487,7 @@ class HitlFrontierStore:
         return {
             "parent_node_sha": record.get("parent_node_sha"),
             "node_sha": node,
+            "workspace_checkpoint_sha": self.workspace_checkpoint_sha(node),
             "plan": plan.read_text(encoding="utf-8"),
             "objective_score": record.get("objective_score"),
             "reason_for_acceptance": record.get("reason_for_acceptance"),

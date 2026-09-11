@@ -1,0 +1,5 @@
+Review the finalized HITL ideas and the selected frontier workspace before the
+next proposal. If the available evidence is sufficient, call
+`proceed_to_proposal`. If a concrete information gap should be resolved first,
+call `request_agent_run` with an available agent. In either case, identify the
+finalized idea that supports your choice as `premise_idea_id`.

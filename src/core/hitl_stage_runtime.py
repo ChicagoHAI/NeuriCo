@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
 from core.hitl_run_control import HitlRunStopRequested, hitl_run_stop_requested
@@ -73,6 +73,7 @@ def run_plan_centered_hitl_stage(
     execution_log_prefix: str,
     on_approved: StageResultHandler,
     on_failed: StageFailureHandler,
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run the shared plan/execution state machine for ordinary HITL stages."""
     # A held request's saved phase takes precedence over plan approval on restart.
@@ -86,8 +87,8 @@ def run_plan_centered_hitl_stage(
             pending.get("pipeline_stage") != runtime.pipeline_stage
             or continuation.get("pipeline_stage") != runtime.pipeline_stage
             or continuation.get("actor") != actor
-            or pending.get("provenance")
-            or continuation.get("provenance")
+            or dict(pending.get("provenance") or {}) != dict(provenance or {})
+            or dict(continuation.get("provenance") or {}) != dict(provenance or {})
             or not str(pending.get("request_key") or "").strip()
             or pending.get("kind") not in {"phase_finish", "raised_idea"}
             or saved_phase not in {"plan", "execution", "review"}
@@ -105,6 +106,7 @@ def run_plan_centered_hitl_stage(
             actor=actor,
             phase_finish_validator=phase_finish_validator,
             worker_prompt_contexts=worker_prompt_contexts,
+            provenance=provenance,
         )
         prompt = _load_hitl_template("worker_resume_pending_request.txt")
         log_prefix = plan_log_prefix if saved_phase == "plan" else execution_log_prefix
@@ -122,6 +124,7 @@ def run_plan_centered_hitl_stage(
             ),
             phase_finish_validator=phase_finish_validator,
             worker_prompt_contexts=worker_prompt_contexts,
+            provenance=provenance,
         )
         prompt = runtime.compose_worker_prompt(
             hitl_stage="plan",
@@ -135,6 +138,7 @@ def run_plan_centered_hitl_stage(
             actor=actor,
             phase_finish_validator=phase_finish_validator,
             worker_prompt_contexts=worker_prompt_contexts,
+            provenance=provenance,
         )
         prompt = runtime.compose_worker_prompt(
             hitl_stage="execution",

@@ -157,6 +157,45 @@ tools:
         required: true
     returns: Updated active frontier state, or a retryable error.
 
+  - name: request_agent_run
+    description: |
+      Insert one available agent before the next AutoResearch proposal. This is
+      allowed only at the runtime-managed proposal-preparation boundary. Choose
+      a finalized idea that supports the request as its premise.
+    parameters:
+      agent:
+        type: string
+        description: Available agent name. Currently only resource_finder.
+        required: true
+      objective:
+        type: string
+        description: Concrete information gap for the agent to investigate.
+        required: true
+      reason:
+        type: string
+        description: Strategic rationale for inserting the agent before proposing.
+        required: true
+      premise_idea_id:
+        type: string
+        description: Finalized idea id supporting this decision.
+        required: true
+    returns: Confirmation that runtime recorded the insertion decision.
+
+  - name: proceed_to_proposal
+    description: |
+      Finish proposal preparation and proceed using the available evidence. This
+      is allowed only at the runtime-managed proposal-preparation boundary.
+    parameters:
+      reason:
+        type: string
+        description: Strategic rationale for proceeding without another agent run.
+        required: true
+      premise_idea_id:
+        type: string
+        description: Finalized idea id supporting this decision.
+        required: true
+    returns: Confirmation that runtime recorded the proceed decision.
+
   - name: ask_human
     description: |
       Ask the human researcher for input required to resolve the pending worker
