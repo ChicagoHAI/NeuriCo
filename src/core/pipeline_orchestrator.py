@@ -278,6 +278,7 @@ class ResearchPipelineOrchestrator:
         hitl_channel: Optional[Any] = None,
         hitl_manager_config: Optional[Dict[str, Any]] = None,
         hitl_autoresearch: bool = False,
+        managed_initial_run: bool = False,
         hitl_mode: HitlMode | str = HitlMode.FULL,
     ):
         """
@@ -298,7 +299,14 @@ class ResearchPipelineOrchestrator:
         self.hitl_channel = hitl_channel
         self.hitl_manager_config = hitl_manager_config or {}
         self.hitl_autoresearch = hitl_autoresearch
+        self.managed_initial_run = managed_initial_run or hitl_autoresearch
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
+
+    def _managed_initial_stages(self) -> tuple[str, ...]:
+        """Return stages that belong to this managed initial workflow."""
+        if self.hitl_autoresearch:
+            return ("resource_finder", RULE_MAKER_STAGE, "experiment_runner")
+        return ("resource_finder", "experiment_runner")
 
     def _create_hitl_runtime(self, pipeline_stage: str) -> HitlRuntime:
         whiteboard_mode: Dict[str, bool] = {}
@@ -323,7 +331,7 @@ class ResearchPipelineOrchestrator:
 
     def _initial_stage_request(self, stage: str) -> Optional[Dict[str, Any]]:
         """Find replayable work belonging to this incomplete initial stage."""
-        if not self.hitl_autoresearch or self.state.is_stage_completed(stage):
+        if not self.managed_initial_run or self.state.is_stage_completed(stage):
             return None
         state = HitlRuntimeState(self.work_dir)
         pending = state.pending_worker_command()
@@ -350,7 +358,11 @@ class ResearchPipelineOrchestrator:
                 and not _is_saved_initial_stage_approval(pending)
             ):
                 raise RuntimeError("Initial recovery found an invalid final stage response.")
-            if stage == "experiment_runner" and not response.get("rule_maker_repair_requested"):
+            if (
+                self.hitl_autoresearch
+                and stage == "experiment_runner"
+                and not response.get("rule_maker_repair_requested")
+            ):
                 score = response.get("scorer_result") or {}
                 if not isinstance(score.get("results"), dict) or not score.get("scored_checkpoint_sha"):
                     raise RuntimeError("Initial approval has no durable scored checkpoint/result.")
@@ -370,33 +382,39 @@ class ResearchPipelineOrchestrator:
 
     def prepare_initial_resume(self) -> bool:
         """Recover before new work; return whether reviewed inputs must be preserved."""
-        if not self.hitl_autoresearch:
+        if not self.managed_initial_run:
             return False
-        repair = self._reconcile_initial_rule_maker_repair_handoff()
-        if repair is not None:
-            completed_at = str(
-                self.state.state["stages"].get(RULE_MAKER_STAGE, {}).get("completed_at") or ""
-            )
-            if (
-                repair.get("status") == "ready"
-                and self.state.is_stage_completed(RULE_MAKER_STAGE)
-                and completed_at
-                and completed_at >= str(repair.get("prepared_at") or "~")
-            ):
-                self.state.clear_runtime_recovery(RULE_MAKER_STAGE)
-            else:
-                self._prepare_initial_rule_maker_repair()
+        stages = self._managed_initial_stages()
+        if self.hitl_autoresearch:
+            repair = self._reconcile_initial_rule_maker_repair_handoff()
+            if repair is not None:
+                completed_at = str(
+                    self.state.state["stages"].get(RULE_MAKER_STAGE, {}).get("completed_at") or ""
+                )
+                if (
+                    repair.get("status") == "ready"
+                    and self.state.is_stage_completed(RULE_MAKER_STAGE)
+                    and completed_at
+                    and completed_at >= str(repair.get("prepared_at") or "~")
+                ):
+                    self.state.clear_runtime_recovery(RULE_MAKER_STAGE)
+                else:
+                    self._prepare_initial_rule_maker_repair()
         boundary = self.state.get_runtime_recovery("initial_stage")
-        experiment = self.state.get_runtime_recovery("experiment_runner")
+        experiment = (
+            self.state.get_runtime_recovery("experiment_runner")
+            if self.hitl_autoresearch
+            else None
+        )
         if boundary:
             stage = str(boundary.get("stage", ""))
-            if stage not in {"resource_finder", RULE_MAKER_STAGE, "experiment_runner"}:
+            if stage not in stages:
                 raise RuntimeError("Unknown initial stage rollback boundary.")
             if self.state.is_stage_completed(stage):
                 self._discard_initial_boundary(boundary)
             elif self._initial_stage_request(stage):
                 HitlStageRollback.from_descriptor(self.work_dir, boundary)
-                if stage == "experiment_runner":
+                if self.hitl_autoresearch and stage == "experiment_runner":
                     verify_sealed_scoring_manifest(sealed_dir_for(self.work_dir))
                 return True
             elif stage != "experiment_runner" or not experiment:
@@ -416,13 +434,13 @@ class ResearchPipelineOrchestrator:
                 verify_sealed_scoring_manifest(sealed_dir_for(self.work_dir))
                 return True
             self._recover_experiment_runner_from_runtime_checkpoint()
-        for stage in ("resource_finder", RULE_MAKER_STAGE, "experiment_runner"):
+        for stage in stages:
             if self._initial_stage_request(stage):
                 return True
         continuation = HitlRuntimeState(self.work_dir).worker_continuation() or {}
         stage = str(continuation.get("pipeline_stage", ""))
         if (
-            stage in {"resource_finder", RULE_MAKER_STAGE, "experiment_runner"}
+            stage in stages
             and self.state.get_stage_status(stage) == "in_progress"
             and not self.state.get_runtime_recovery("initial_stage")
             and not self.state.get_runtime_recovery("experiment_runner")
@@ -440,17 +458,47 @@ class ResearchPipelineOrchestrator:
         HitlGitStateStore(self.work_dir).discard(ref)
         self.state.clear_runtime_recovery("initial_stage")
 
+    def restore_stopped_initial_run(self) -> Optional[Dict[str, str]]:
+        """Restore an explicitly stopped managed run to its active stage boundary."""
+        if not self.managed_initial_run:
+            return None
+        boundary = self.state.get_runtime_recovery("initial_stage")
+        if not boundary:
+            return None
+        stage = str(boundary.get("stage", ""))
+        if stage not in self._managed_initial_stages():
+            raise RuntimeError("Unknown initial stage rollback boundary.")
+        if self.state.is_stage_completed(stage):
+            self._discard_initial_boundary(boundary)
+            return {"stage": stage, "checkpoint_sha": str(boundary.get("checkpoint_sha", ""))}
+        rollback = HitlStageRollback.from_descriptor(self.work_dir, boundary)
+        runtime = self._create_hitl_runtime(stage)
+        try:
+            rollback.restore(
+                runtime,
+                "The managed research run was stopped and runtime is restoring its stage boundary.",
+                cleanup_label="stopped",
+            )
+        finally:
+            runtime.clear_idea_tool_context()
+        self.state = PipelineState(self.work_dir)
+        return {"stage": stage, "checkpoint_sha": rollback.checkpoint_sha}
+
     def _stage_rollback(
         self, stage: str, message: str, *, repair: bool = False
     ) -> HitlStageRollback:
-        if self.hitl_autoresearch:
+        if self.managed_initial_run:
             existing = self.state.get_runtime_recovery("initial_stage")
             if existing:
                 if existing.get("stage") != stage:
                     raise RuntimeError("Another initial stage still owns the rollback boundary.")
                 return HitlStageRollback.from_descriptor(self.work_dir, existing)
             if self._initial_stage_request(stage):
-                experiment = self.state.get_runtime_recovery("experiment_runner")
+                experiment = (
+                    self.state.get_runtime_recovery("experiment_runner")
+                    if self.hitl_autoresearch
+                    else None
+                )
                 if stage == "experiment_runner" and experiment:
                     return HitlStageRollback.from_descriptor(
                         self.work_dir,
@@ -477,14 +525,14 @@ class ResearchPipelineOrchestrator:
             if repair
             else HitlStageRollback.capture(self.work_dir, message)
         )
-        if self.hitl_autoresearch:
+        if self.managed_initial_run:
             self.state.set_runtime_recovery(
                 "initial_stage", {"stage": stage, **rollback.descriptor()}
             )
         return rollback
 
     def _discard_stage_rollback(self, rollback: HitlStageRollback, *, cleanup_label: str) -> None:
-        if self.hitl_autoresearch:
+        if self.managed_initial_run:
             self.state.clear_runtime_recovery("initial_stage")
             experiment = self.state.get_runtime_recovery("experiment_runner") or {}
             if experiment.get("hitl_snapshot_ref") == rollback.hitl_snapshot.ref:
@@ -502,7 +550,7 @@ class ResearchPipelineOrchestrator:
                 runtime.clear_idea_tool_context()
                 return
         rollback.restore(runtime, reason, cleanup_label="restored")
-        if self.hitl_autoresearch:
+        if self.managed_initial_run:
             self.state = PipelineState(self.work_dir)
 
     def _resume_initial_worker(
@@ -514,7 +562,7 @@ class ResearchPipelineOrchestrator:
         *,
         scoring_handler: Any = None,
     ) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
-        if not self.hitl_autoresearch:
+        if not self.managed_initial_run:
             return None
         pending = self._initial_stage_request(runtime.pipeline_stage)
         if pending is None:
@@ -523,16 +571,20 @@ class ResearchPipelineOrchestrator:
             (pending.get("response") or {}).get("final")
             or _is_saved_initial_stage_approval(pending)
         ):
-            if runtime.pipeline_stage in {"resource_finder", RULE_MAKER_STAGE}:
+            if runtime.pipeline_stage in {"resource_finder", RULE_MAKER_STAGE} or (
+                runtime.pipeline_stage == "experiment_runner"
+                and not self.hitl_autoresearch
+            ):
                 _require_reviewed_workspace_unchanged(
                     self.work_dir, str(pending.get("workspace_fingerprint", ""))
                 )
-                validation = validator()
-                if not validation.get("valid"):
-                    raise HitlValidationError(
-                        f"Recovered {runtime.pipeline_stage} approval failed artifact validation: "
-                        f"{validation.get('issues', [])}"
-                    )
+                if validator is not None:
+                    validation = validator()
+                    if not validation.get("valid"):
+                        raise HitlValidationError(
+                            f"Recovered {runtime.pipeline_stage} approval failed artifact validation: "
+                            f"{validation.get('issues', [])}"
+                        )
             HitlRuntimeState(self.work_dir).clear_worker_continuation()
             return {"success": True, "resumed": True}, {"approved": True}
         from core.hitl import _load_hitl_template
@@ -557,11 +609,11 @@ class ResearchPipelineOrchestrator:
         )
 
     def _completed_initial_stage(self, stage: str) -> Optional[Dict[str, Any]]:
-        if not self.hitl_autoresearch or not self.state.is_stage_completed(stage):
+        if not self.managed_initial_run or not self.state.is_stage_completed(stage):
             return None
         result = dict(self.state.state["stages"][stage].get("outputs") or {})
         result.update(success=True, hitl=True, phase="complete")
-        if stage == "experiment_runner":
+        if stage == "experiment_runner" and self.hitl_autoresearch:
             scorer = dict(self.state.state["stages"].get(SCORER_STAGE, {}).get("outputs") or {})
             if not isinstance(scorer.get("results"), dict) or not scorer.get(
                 "scored_checkpoint_sha"
@@ -586,7 +638,11 @@ class ResearchPipelineOrchestrator:
         """Relaunch a HITL stage only after its runtime rollback completed."""
         from core.hitl_run_control import hitl_run_stop_requested
 
-        if self.hitl_autoresearch and not (stage_name == RULE_MAKER_STAGE and self._initial_rule_maker_repair_recovery()):
+        if self.managed_initial_run and not (
+            stage_name == RULE_MAKER_STAGE
+            and self.hitl_autoresearch
+            and self._initial_rule_maker_repair_recovery()
+        ):
             completed = self._completed_initial_stage(stage_name)
             if completed is not None:
                 return completed
@@ -666,7 +722,7 @@ class ResearchPipelineOrchestrator:
                 scorer_timeout=scorer_timeout,
             )
 
-        if self.hitl_autoresearch and hitl_enabled:
+        if self.managed_initial_run and hitl_enabled:
             self.prepare_initial_resume()
 
         print()

@@ -120,7 +120,8 @@ def _with_hitl_workspace_run_ownership(method):
         arguments = method_signature.bind(self, *args, **kwargs)
         arguments.apply_defaults()
         hitl_interface = (
-            arguments.arguments["hitl_autoresearch"]
+            arguments.arguments["hitl_research"]
+            or arguments.arguments["hitl_autoresearch"]
             or arguments.arguments["hitl_continue_autoresearch"]
         )
         if not hitl_interface:
@@ -143,7 +144,15 @@ def _with_hitl_workspace_run_ownership(method):
                 )
         work_dir = expected_work_dir
         arguments.arguments["hitl_work_dir"] = work_dir
-        mode = "continue" if arguments.arguments["hitl_continue_autoresearch"] else "fresh"
+        mode = (
+            "continue"
+            if arguments.arguments["hitl_continue_autoresearch"]
+            or (
+                arguments.arguments["hitl_research"]
+                and (work_dir / ".neurico" / "pipeline_state.json").is_file()
+            )
+            else "fresh"
+        )
         hitl_mode = normalize_hitl_mode(arguments.arguments["hitl_mode"])
         with hitl_workspace_run_lease(
             work_dir,
@@ -151,6 +160,9 @@ def _with_hitl_workspace_run_ownership(method):
                 "idea_id": idea_id,
                 "interface": str(hitl_interface),
                 "mode": mode,
+                "workflow": (
+                    "ordinary" if arguments.arguments["hitl_research"] else "autoresearch"
+                ),
                 "hitl_mode": hitl_mode.value,
                 "provider": str(arguments.arguments["provider"]),
                 "request_id": str(os.environ.get("NEURICO_HITL_REQUEST_ID", "")).strip(),
@@ -286,6 +298,7 @@ class ResearchRunner:
         hitl_bootstrap_autoresearch_baseline: bool = False,
         proposer_timeout: int = 900,
         compute_backend: str = "local",
+        hitl_research: Optional[str] = None,
         hitl_autoresearch: Optional[str] = None,
         hitl_continue_autoresearch: Optional[str] = None,
         hitl_manager_port: int = 7890,
@@ -314,12 +327,14 @@ class ResearchRunner:
             paper_style: Paper template style (neurips, icml, acl, ams). None = auto-detect from domain
             paper_timeout: Timeout for paper writing in seconds
             force_fresh: Ignore existing local workspace and start a new run from scratch
+            hitl_research: Human interface for a manager-driven ordinary research
+                run: ``web`` or ``cli``.
             hitl_autoresearch: Human interface for fresh HITL AutoResearch:
                 ``web`` or ``cli``.
             hitl_continue_autoresearch: Human interface for continuing an
                 existing HITL AutoResearch workspace: ``web`` or ``cli``.
             hitl_work_dir: Authoritative workspace selected by the HITL launcher.
-                Internal to HITL execution; GitHub publication cannot replace it.
+                Internal to managed execution; GitHub publication cannot replace it.
 
         Returns:
             Dictionary with:
@@ -336,6 +351,7 @@ class ResearchRunner:
         compute_backend = normalize_compute_backend(compute_backend)
         print(f"   Compute backend: {compute_backend}")
         hitl_modes = {
+            "--hitl-research": hitl_research,
             "--hitl-autoresearch": hitl_autoresearch,
             "--hitl-continue-autoresearch": hitl_continue_autoresearch,
         }
@@ -347,22 +363,51 @@ class ResearchRunner:
         selected_hitl_modes = [name for name, mode in hitl_modes.items() if mode]
         if len(selected_hitl_modes) > 1:
             raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
-        hitl = hitl_autoresearch or hitl_continue_autoresearch
+        hitl = hitl_research or hitl_autoresearch or hitl_continue_autoresearch
         if hitl_work_dir is not None and not hitl:
-            raise ValueError("hitl_work_dir is valid only with a HITL AutoResearch entry mode.")
+            raise ValueError("hitl_work_dir is valid only with a managed research entry mode.")
         selected_hitl_mode = normalize_hitl_mode(hitl_mode)
         if selected_hitl_mode is HitlMode.AUTO and not hitl:
-            raise ValueError("--auto is valid only with a HITL AutoResearch entry mode.")
+            raise ValueError("--auto is valid only with a managed research entry mode.")
         if selected_hitl_mode is HitlMode.AUTO and pause_after_resources:
             raise ValueError(
                 "--pause-after-resources is not supported in Auto HITL because it is a "
                 "direct human checkpoint."
             )
+        if hitl_research and pause_after_resources:
+            raise ValueError(
+                "--pause-after-resources is not supported in managed ordinary research; "
+                "use the manager review instead."
+            )
         if hitl and provider not in {"claude", "codex"}:
             raise ValueError(
-                "HITL AutoResearch requires Claude or Codex so its workers and "
+                "Managed research requires Claude or Codex so its workers and "
                 "manager use the same backend."
             )
+        if hitl_research:
+            incompatible = [
+                name
+                for name, enabled in (
+                    ("--enable-scoring", scoring_enabled),
+                    ("--bootstrap-rule-maker", bootstrap_mode),
+                    ("--autoresearch", autoresearch),
+                    ("--continue-autoresearch", continue_autoresearch),
+                    ("--bootstrap-autoresearch-baseline", bootstrap_autoresearch_baseline),
+                    (
+                        "--hitl-bootstrap-autoresearch-baseline",
+                        hitl_bootstrap_autoresearch_baseline,
+                    ),
+                )
+                if enabled
+            ]
+            if incompatible:
+                raise ValueError(
+                    "--hitl-research selects ordinary research and cannot be combined with "
+                    + ", ".join(incompatible)
+                + "."
+            )
+        if hitl and not multi_agent:
+            raise ValueError("Managed research requires the multi-agent pipeline.")
         if continue_recover and not continue_autoresearch:
             raise ValueError(
                 "--continue-recover only applies with --continue-autoresearch."
@@ -645,7 +690,15 @@ class ResearchRunner:
                 print(f"📁 Working directory: {work_dir}\n")
 
         preserve_initial_inputs = False
-        if hitl and (autoresearch or continue_autoresearch):
+        if hitl_research:
+            from core.pipeline_orchestrator import ResearchPipelineOrchestrator
+
+            preserve_initial_inputs = ResearchPipelineOrchestrator(
+                work_dir=work_dir,
+                managed_initial_run=True,
+                hitl_mode=selected_hitl_mode,
+            ).prepare_initial_resume()
+        elif hitl and (autoresearch or continue_autoresearch):
             from core.hitl_autoresearch import (
                 initial_publication_requires_resume,
                 prepare_initial_hitl_resume,
@@ -696,8 +749,6 @@ class ResearchRunner:
 
         owns_hitl_host = False
         if hitl:
-            if not multi_agent:
-                raise ValueError("HITL AutoResearch requires the multi-agent pipeline.")
             from core.hitl_lock import select_hitl_manager_provider
             from core.hitl_manager_inbox import HitlManagerInbox
             from core.hitl_runtime_state import HitlRuntimeState
@@ -915,6 +966,7 @@ class ResearchRunner:
                 hitl_manager=hitl_host.manager if hitl_host else None,
                 hitl_channel=hitl_host.channel if hitl_host else None,
                 hitl_manager_config=hitl_host.manager.config if hitl_host else None,
+                managed_initial_run=bool(hitl_research),
                 hitl_mode=selected_hitl_mode,
             )
             success = False

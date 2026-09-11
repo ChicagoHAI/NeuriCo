@@ -62,7 +62,7 @@ def _claim_request(path: Path) -> Path:
 
 def _load_request(path: Path) -> Dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("version") not in {1, 2}:
+    if not isinstance(value, dict) or value.get("version") not in {1, 2, 3}:
         raise ValueError("Unsupported HITL launch request.")
     required = (
         "request_id",
@@ -83,6 +83,11 @@ def _load_request(path: Path) -> Dict[str, Any]:
         raise ValueError("HITL launch request has an unsupported source interface.")
     if value["version"] == 2 and not str(value.get("hitl_mode", "")).strip():
         raise ValueError("HITL launch request is missing its HITL mode.")
+    if value["version"] == 3 and not str(value.get("workflow", "")).strip():
+        raise ValueError("HITL launch request is missing its research workflow.")
+    value["workflow"] = str(value.get("workflow", "autoresearch")).strip().lower()
+    if value["workflow"] not in {"ordinary", "autoresearch"}:
+        raise ValueError("HITL launch request has an unsupported research workflow.")
     value["hitl_mode"] = normalize_hitl_mode(value.get("hitl_mode")).value
 
     identity = _REQUEST_NAME.fullmatch(path.name)
@@ -116,10 +121,19 @@ def _finalize_stopped_run(
 ) -> int:
     """Acknowledge a stop only after established recovery finishes."""
     try:
-        from core.hitl_autoresearch import recover_interrupted_hitl_autoresearch_attempt
-
         stop_record = control.record()
-        recovery = recover_interrupted_hitl_autoresearch_attempt(work_dir)
+        if request.get("workflow") == "ordinary":
+            from core.pipeline_orchestrator import ResearchPipelineOrchestrator
+
+            recovery = ResearchPipelineOrchestrator(
+                work_dir=work_dir,
+                managed_initial_run=True,
+                hitl_mode=request.get("hitl_mode", "full"),
+            ).restore_stopped_initial_run()
+        else:
+            from core.hitl_autoresearch import recover_interrupted_hitl_autoresearch_attempt
+
+            recovery = recover_interrupted_hitl_autoresearch_attempt(work_dir)
         stop_reason = (
             "provider_unavailable"
             if str(stop_record.get("requested_by", "")).strip() == "provider_unavailable"
@@ -132,13 +146,18 @@ def _finalize_stopped_run(
             "updated_at": stopped_at,
             "stopped_at": stopped_at,
             "mode": request.get("mode", ""),
+            "workflow": request.get("workflow", "autoresearch"),
             "hitl_mode": request.get("hitl_mode", "full"),
             "provider": request.get("provider", ""),
             "reason": stop_reason,
         }
         if recovery is not None:
-            status["resume_from"] = recovery.recovery_classification
-            status["checkpoint_sha"] = recovery.restored_checkpoint_sha
+            if isinstance(recovery, dict):
+                status["resume_from"] = str(recovery.get("stage", ""))
+                status["checkpoint_sha"] = str(recovery.get("checkpoint_sha", ""))
+            else:
+                status["resume_from"] = recovery.recovery_classification
+                status["checkpoint_sha"] = recovery.restored_checkpoint_sha
         atomic_write_json(hitl_launch_status_path(work_dir), status)
         control.clear()
         return 0
@@ -152,6 +171,7 @@ def _finalize_stopped_run(
                 "failed_at": failed_at,
                 "updated_at": failed_at,
                 "mode": request.get("mode", ""),
+                "workflow": request.get("workflow", "autoresearch"),
                 "hitl_mode": request.get("hitl_mode", "full"),
                 "provider": request.get("provider", ""),
                 "recovery_required": True,
@@ -202,6 +222,7 @@ def main() -> int:
                     "started_at": started_at,
                     "updated_at": started_at,
                     "mode": request["mode"],
+                    "workflow": request["workflow"],
                     "hitl_mode": hitl_mode,
                     "provider": request["provider"],
                 },
@@ -219,18 +240,28 @@ def main() -> int:
                     # credential. Everything launched by this dedicated run
                     # process inherits the credential-free environment below.
                     remove_github_credentials(os.environ)
+                    run_args = {
+                        "provider": str(request["provider"]),
+                        "write_paper": bool(request.get("write_paper", False)),
+                        "paper_style": request.get("paper_style") or None,
+                        "hitl_mode": hitl_mode,
+                        "hitl_work_dir": work_dir,
+                    }
+                    if request["workflow"] == "ordinary":
+                        run_args["hitl_research"] = str(request["interface"])
+                    else:
+                        run_args.update(
+                            autoresearch_iterations=int(request.get("iterations", 1)),
+                            hitl_autoresearch=(
+                                None if continuation else str(request["interface"])
+                            ),
+                            hitl_continue_autoresearch=(
+                                str(request["interface"]) if continuation else None
+                            ),
+                        )
                     result = runner.run_research(
                         str(request["idea_id"]),
-                        provider=str(request["provider"]),
-                        write_paper=bool(request.get("write_paper", False)),
-                        paper_style=request.get("paper_style") or None,
-                        autoresearch_iterations=int(request.get("iterations", 1)),
-                        hitl_autoresearch=None if continuation else str(request["interface"]),
-                        hitl_continue_autoresearch=(
-                            str(request["interface"]) if continuation else None
-                        ),
-                        hitl_mode=hitl_mode,
-                        hitl_work_dir=work_dir,
+                        **run_args,
                     )
         if control.requested() and not bool(result.get("success", False)):
             return _finalize_stopped_run(
@@ -247,6 +278,7 @@ def main() -> int:
             "completed_at": finished_at,
             "updated_at": finished_at,
             "mode": request["mode"],
+            "workflow": request["workflow"],
             "hitl_mode": hitl_mode,
             "provider": request["provider"],
             "success": bool(result.get("success", False)),
@@ -278,6 +310,7 @@ def main() -> int:
                     "failed_at": failed_at,
                     "updated_at": failed_at,
                     "mode": request.get("mode", ""),
+                    "workflow": request.get("workflow", "autoresearch"),
                     "hitl_mode": request.get("hitl_mode", "full"),
                     "provider": request.get("provider", ""),
                     "message": f"Research could not start: {str(exc).strip() or exc.__class__.__name__}",
