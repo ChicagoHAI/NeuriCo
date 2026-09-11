@@ -293,6 +293,14 @@ class HitlWorkspaceView:
         if not owner_checked:
             owner = active_hitl_workspace_run(self.work_dir)
         pipeline = self._pipeline_state()
+        pipeline_workflow = (
+            "ordinary"
+            if str(pipeline.get("workflow", "")).strip().lower() == "ordinary"
+            else "autoresearch"
+            if pipeline
+            else ""
+        )
+        workflow_locked = bool(pipeline)
         pending = runtime.get("pending_worker_command")
         pending = pending if isinstance(pending, dict) else {}
         continuation = runtime.get("worker_continuation")
@@ -326,6 +334,11 @@ class HitlWorkspaceView:
         started_at = str((owner or {}).get("started_at") or "").strip()
         provider = str((owner or {}).get("provider") or "").strip()
         mode = str((owner or {}).get("mode") or "").strip()
+        workflow = str(
+            pipeline_workflow
+            or (owner or {}).get("workflow")
+            or "autoresearch"
+        ).strip().lower()
         hitl_mode = str(
             (owner or {}).get("hitl_mode")
             or active_pending.get("hitl_mode")
@@ -366,6 +379,8 @@ class HitlWorkspaceView:
                 "phase_label": visible_phase,
                 "label": label,
                 "mode": mode,
+                "workflow": workflow if workflow in {"ordinary", "autoresearch"} else "autoresearch",
+                "workflow_locked": workflow_locked,
                 "hitl_mode": hitl_mode if hitl_mode in {"full", "auto"} else "full",
                 "provider": provider,
                 "started_at": started_at,
@@ -410,6 +425,8 @@ class HitlWorkspaceView:
 
         if launch_status:
             mode = str(launch_status.get("mode", mode)).strip()
+            if not workflow_locked:
+                workflow = str(launch_status.get("workflow", workflow)).strip().lower()
             hitl_mode = str(launch_status.get("hitl_mode", hitl_mode)).strip().lower()
             provider = str(launch_status.get("provider", provider)).strip()
             if not started_at:
@@ -563,6 +580,27 @@ class HitlWorkspaceView:
                     active=False,
                     display_stage=paused_stage,
                     display_phase=f"{paused_phase} paused" if paused_phase else "Paused",
+                )
+            if (
+                launch_state == "completed"
+                and workflow == "ordinary"
+                and launch_status.get("success") is False
+            ):
+                completed_at = str(
+                    launch_status.get("completed_at")
+                    or launch_status.get("updated_at")
+                    or ""
+                ).strip()
+                return projected(
+                    "failed",
+                    "Research incomplete",
+                    "Ordinary research ended without completing successfully.",
+                    next_step="Continue research to retry the incomplete stage.",
+                    record=launch_status,
+                    active=False,
+                    display_stage="Incomplete",
+                    display_phase="",
+                    phase_started_at=completed_at,
                 )
             if launch_state == "completed":
                 completed_at = str(

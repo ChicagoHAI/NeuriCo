@@ -53,7 +53,7 @@ with precise correction instructions. Do not ask the human to choose an
 alternative artifact boundary.
 {% endif %}
 
-{% if pipeline_stage == "experiment_runner" %}
+{% if pipeline_stage == "experiment_runner" and scoring_enabled %}
 When reviewing the experiment runner, `scoring/interface.md` is the only
 relevant file within `scoring/`. Correct any plan, completion request, or raised
 concern that looks for or depends on another file within `scoring/`.
@@ -201,7 +201,7 @@ Living plan, if readable:
 {{ plan_text }}
 --- END UNTRUSTED PLAN ---
 
-{% if pipeline_stage == "experiment_runner" %}
+{% if pipeline_stage == "experiment_runner" and scoring_enabled %}
 It is beyond the experiment runner's responsibility and authority to request or
 perform any official evaluation. It is illegal for the experiment runner to
 make official evaluation results or evaluator availability a prerequisite,

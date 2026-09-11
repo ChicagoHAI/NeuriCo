@@ -29,7 +29,7 @@ metadata or other state outside those file contents. Do not select an option
 that preserves such a dependency.
 {% endif %}
 
-{% if requesting_actor == "experiment_runner" %}
+{% if requesting_actor == "experiment_runner" and scoring_enabled %}
 When resolving a request raised by the experiment runner,
 `scoring/interface.md` is the only relevant file within `scoring/`. Correct any
 premise, option, or requested action that looks for or depends on another file
@@ -152,7 +152,7 @@ Raised idea:
 --- END UNTRUSTED RAISED IDEA ---
 {% endif %}
 
-{% if requesting_actor == "experiment_runner" %}
+{% if requesting_actor == "experiment_runner" and scoring_enabled %}
 It is beyond the experiment runner's responsibility and authority to request or
 perform any official evaluation. It is illegal for the experiment runner to
 make official evaluation results or evaluator availability a prerequisite,

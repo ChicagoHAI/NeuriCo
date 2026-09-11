@@ -14,7 +14,7 @@
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
     conversationScroll: { top: 0, nearBottom: true, captured: false },
     managerStatusSeq: -1,
-    runDraft: { hitlMode: "auto", iterations: 2, writePaper: true, paperStyle: "auto", github: false },
+    runDraft: { workflow: "autoresearch", hitlMode: "auto", iterations: 2, writePaper: true, paperStyle: "auto", github: false },
     portal: null, ideas: [], selectedIdeaId: initialIdeaId, catalogBusy: false,
     creatingIdea: false, ideaSchema: null, ideaDraft: {}, ideaSubmitError: "",
     renamingIdeaId: "", draggedIdeaId: "",
@@ -637,14 +637,12 @@
     const live = state.snapshot?.live || {};
     const runIsActive = Boolean(live.active);
     const runCanLaunch = Boolean(live.can_launch);
-    const runActionTitle = state.snapshot?.autoresearch?.mode === "continue"
-      ? "Continue AutoResearch"
-      : "Start AutoResearch";
+    const runActionTitle = "Start research";
     const runControl = runIsActive
       ? q("button", {
           class: "icon-button toolbar-action run-active",
-          title: live.state === "stopping" ? "Stopping AutoResearch" : "Stop AutoResearch",
-          "aria-label": live.state === "stopping" ? "Stopping AutoResearch" : "Stop AutoResearch",
+          title: live.state === "stopping" ? "Stopping research" : "Stop research",
+          "aria-label": live.state === "stopping" ? "Stopping research" : "Stop research",
           ...(live.state === "stopping" ? { disabled: "disabled" } : { onclick: requestRunStopConfirmation }),
           text: "■",
         })
@@ -655,7 +653,7 @@
       q("div", { class: "brand" }, [q("span", { class: "workspace-mark", text: "▱" }), q("span", { class: "workspace-title", text: workspace }), q("span", { class: "page-label", text: state.route === "conversation" ? "Conversation" : "Research" })]),
       q("div", { class: "topbar-spacer" }),
       workspaceStatus(),
-      runIsActive ? q("span", { class: "status-mode", title: "Active research mode", text: live.hitl_mode === "auto" ? "Auto" : "HITL" }) : null,
+      runIsActive ? q("span", { class: "status-mode", title: "Active research mode", text: `${live.workflow === "ordinary" ? "Ordinary" : "AutoResearch"} · ${live.hitl_mode === "auto" ? "Auto" : "HITL"}` }) : null,
       q("span", { class: `connection ${state.stale ? "warning" : ""}`, text: state.stale ? "Workspace data unavailable" : "Connected" }),
       state.route === "conversation" ? runControl : null,
       icon(state.route === "conversation" ? "▦" : "←", state.route === "conversation" ? "Research views" : "Back to conversation", () => navigate(state.route === "conversation" ? "research" : "conversation"), "toolbar-action"),
@@ -842,9 +840,12 @@
   }
   function runPanel() {
     if (!state.runPanel || state.snapshot?.live?.active) return null;
-    const mode = state.snapshot?.autoresearch?.mode === "continue" ? "continue" : "fresh";
-    const title = mode === "continue" ? "Continue AutoResearch" : "Fresh AutoResearch";
+    const title = "Start research";
+    const live = state.snapshot?.live || {};
+    const workflowLocked = Boolean(live.workflow_locked);
+    if (workflowLocked) state.runDraft.workflow = live.workflow === "ordinary" ? "ordinary" : "autoresearch";
     const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
+    const workflow = q("select", { id: "run-workflow", "data-focus-key": "run-workflow", ...(workflowLocked ? { disabled: "disabled", title: "The workspace research workflow cannot be changed" } : {}) }); [["autoresearch", "AutoResearch"], ["ordinary", "Ordinary"]].forEach(([value, label]) => workflow.append(q("option", { value, text: label }))); workflow.value = state.runDraft.workflow; workflow.onchange = () => { state.runDraft.workflow = workflow.value; render({ preserveScroll: true }); };
     const hitlMode = q("select", { id: "run-hitl-mode", "data-focus-key": "run-hitl-mode" }); [["full", "No"], ["auto", "Yes"]].forEach(([value, label]) => hitlMode.append(q("option", { value, text: label }))); hitlMode.value = state.runDraft.hitlMode; hitlMode.onchange = () => { state.runDraft.hitlMode = hitlMode.value; };
     const iterations = q("input", { id: "run-iterations", type: "number", min: "1", max: "100", step: "1", required: "required", value: state.runDraft.iterations, "data-focus-key": "run-iterations" }); iterations.oninput = () => { state.runDraft.iterations = iterations.value; iterations.setCustomValidity(""); };
     const paper = q("input", { id: "run-paper", type: "checkbox", "data-focus-key": "run-paper" }); paper.checked = state.runDraft.writePaper; paper.onchange = () => { state.runDraft.writePaper = paper.checked; };
@@ -852,17 +853,20 @@
     const style = q("select", { id: "run-style", "data-focus-key": "run-style" }); [["auto", "Automatic"], ["neurips", "NeurIPS"], ["icml", "ICML"], ["acl", "ACL"]].forEach(([value, label]) => style.append(q("option", { value, text: label }))); style.value = state.runDraft.paperStyle; style.onchange = () => { state.runDraft.paperStyle = style.value; };
     const row = (label, control) => q("label", { class: "run-row" }, [q("span", { text: label }), control]);
     const start = () => {
+      const autoresearch = workflow.value === "autoresearch";
       const iterationValue = Number(iterations.value);
-      if (!iterations.value.trim() || !Number.isInteger(iterationValue) || iterationValue < 1 || iterationValue > 100) {
+      if (autoresearch && (!iterations.value.trim() || !Number.isInteger(iterationValue) || iterationValue < 1 || iterationValue > 100)) {
         iterations.setCustomValidity("Enter a whole number from 1 to 100.");
         iterations.reportValidity();
         iterations.focus();
         return;
       }
       iterations.setCustomValidity("");
-      launchRun({ provider: provider.value, hitl_mode: hitlMode.value, iterations: iterationValue, write_paper: paper.checked, paper_style: style.value, github: github.checked });
+      const payload = { provider: provider.value, workflow: workflow.value, hitl_mode: hitlMode.value, write_paper: paper.checked, paper_style: style.value, github: github.checked };
+      if (autoresearch) payload.iterations = iterationValue;
+      launchRun(payload);
     };
-    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close AutoResearch setup", () => { state.runPanel = false; render(); })]), row("Model", provider), row("Auto", hitlMode), row("Iterations", iterations), q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", `Start ${title}`, start, "run-start")])]);
+    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), row("Model", provider), row("Research", workflow), row("Auto", hitlMode), workflow.value === "autoresearch" ? row("Iterations", iterations) : null, q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
   }
   function conversation() {
     const shell = q("main", { class: "conversation-shell" }); const thread = q("div", { class: "thread" }); const request = state.snapshot?.inbox?.pending_request; const requestId = String(request?.conversation_record_id || "");
@@ -895,9 +899,10 @@
     update();
   }
 
-  function sidebar() { const nav = [["understanding", "U", "Understanding"], ["ideas", "I", "Ideas"], ["nodes", "N", "Nodes"], ["whiteboard", "W", "Whiteboard"], ["activity", "A", "Activity"]]; return q("aside", { class: `research-sidebar ${state.sidebarCollapsed ? "collapsed" : ""}` }, [q("div", { class: "sidebar-head" }, [q("div", { class: "sidebar-top", text: "Research" }), q("button", { class: "sidebar-toggle", title: state.sidebarCollapsed ? "Expand research panel" : "Collapse research panel", "aria-label": state.sidebarCollapsed ? "Expand research panel" : "Collapse research panel", onclick: () => { state.sidebarCollapsed = !state.sidebarCollapsed; render({ preserveScroll: true }); }, text: state.sidebarCollapsed ? "→" : "←" })]), ...nav.map(([id, key, label]) => q("button", { class: `nav-item ${state.view === id ? "active" : ""}`, title: label, onclick: () => { state.view = id; state.drawer = null; render(); } }, [q("span", { class: "nav-key", text: key }), q("span", { class: "nav-label", text: label })]))]); }
+  function researchNavigation() { const nav = [["understanding", "U", "Understanding"], ["ideas", "I", "Ideas"], ["nodes", "N", "Nodes"], ["whiteboard", "W", "Whiteboard"], ["activity", "A", "Activity"]]; return state.snapshot?.live?.workflow === "ordinary" ? nav.filter(([id]) => !["nodes", "whiteboard"].includes(id)) : nav; }
+  function sidebar(nav) { return q("aside", { class: `research-sidebar ${state.sidebarCollapsed ? "collapsed" : ""}` }, [q("div", { class: "sidebar-head" }, [q("div", { class: "sidebar-top", text: "Research" }), q("button", { class: "sidebar-toggle", title: state.sidebarCollapsed ? "Expand research panel" : "Collapse research panel", "aria-label": state.sidebarCollapsed ? "Expand research panel" : "Collapse research panel", onclick: () => { state.sidebarCollapsed = !state.sidebarCollapsed; render({ preserveScroll: true }); }, text: state.sidebarCollapsed ? "→" : "←" })]), ...nav.map(([id, key, label]) => q("button", { class: `nav-item ${state.view === id ? "active" : ""}`, title: label, onclick: () => { state.view = id; state.drawer = null; render(); } }, [q("span", { class: "nav-key", text: key }), q("span", { class: "nav-label", text: label })]))]); }
   function title(main, label) { main.append(q("div", { class: "view-heading" }, [q("h1", { text: label })])); }
-  function research() { const main = q("main", { class: "research-main" }); ({understanding: renderUnderstanding, ideas: renderIdeas, nodes: renderNodes, whiteboard: renderWhiteboard, activity: renderActivity}[state.view])(main); return q("div", { class: `research ${state.sidebarCollapsed ? "sidebar-collapsed" : ""}` }, [sidebar(), main]); }
+  function research() { const nav = researchNavigation(); if (!nav.some(([id]) => id === state.view)) { state.view = "understanding"; state.drawer = null; } const main = q("main", { class: "research-main" }); ({understanding: renderUnderstanding, ideas: renderIdeas, nodes: renderNodes, whiteboard: renderWhiteboard, activity: renderActivity}[state.view])(main); return q("div", { class: `research ${state.sidebarCollapsed ? "sidebar-collapsed" : ""}` }, [sidebar(nav), main]); }
   function renderUnderstanding(main) { title(main, "Research Understanding"); const r = state.snapshot?.research || {}; let rendered = false; [["Where the research stands", r.narrative], ["Current crux", r.crux]].forEach(([name, value]) => { if (value) { rendered = true; main.append(q("section", { class: "section" }, [q("h2", { text: name }), md(value)])); } }); if (r.hypotheses?.length) { rendered = true; main.append(q("section", { class: "section" }, [q("h2", { text: "Hypotheses" }), ...r.hypotheses.map((item) => md(typeof item === "string" ? item : item.statement || ""))])); } if (r.open_questions?.length) { rendered = true; main.append(q("section", { class: "section" }, [q("h2", { text: "Open questions" }), ...r.open_questions.map((item) => md(item))])); } if (!rendered) main.append(q("p", { class: "empty", text: "Research understanding has not been synthesized yet." })); }
   function graphLegend(items) {
     return q("div", { class: "graph-legend" }, items.map(([color, label]) => {
@@ -1135,7 +1140,7 @@
         }
       },
     }, [
-      q("h2", { id: "stop-confirmation-title", text: "Stop AutoResearch?" }),
+      q("h2", { id: "stop-confirmation-title", text: "Stop research?" }),
       q("p", {
         id: "stop-confirmation-description",
         text: "NeuriCo will restore the latest saved checkpoint. Work after that checkpoint will be discarded.",

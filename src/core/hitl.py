@@ -1114,6 +1114,7 @@ class HitlRuntime:
             on_finalize=persist_resolution,
             hitl_mode=self.hitl_mode,
             request_context=dict(provenance or {}),
+            scoring_enabled=bool(self._tool_context.get("allow_scoring_approval")),
         )
         try:
             return finalized["record"]
@@ -3178,6 +3179,7 @@ class HitlRuntime:
                 requires_human_approval=bool(self._tool_context.get("requires_human_approval")),
                 allow_scoring_approval=bool(self._tool_context.get("allow_scoring_approval"))
                 and hitl_stage in {"execution", "review"},
+                scoring_enabled=bool(self._tool_context.get("allow_scoring_approval")),
                 scoring_handoff_context=dict(self._tool_context.get("provenance") or {}),
                 verifier_report=self._durable_conformance_report(request_key, hitl_stage),
                 on_finalize=persist_phase_review,

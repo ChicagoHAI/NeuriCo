@@ -58,7 +58,7 @@ def workspace_for_idea(project_root: Path, idea_id: str) -> Path:
 
 
 class HitlRunController:
-    """Launch and report one workspace-owned HITL AutoResearch run at a time."""
+    """Launch and report one workspace-owned managed research run at a time."""
 
     def __init__(
         self,
@@ -84,23 +84,28 @@ class HitlRunController:
         return HitlWorkspaceView(self.work_dir).live_status()
 
     def launch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        workflow = str(payload.get("workflow", "autoresearch")).strip().lower()
+        if workflow not in {"ordinary", "autoresearch"}:
+            raise ValueError("Choose ordinary research or AutoResearch.")
         provider = str(payload.get("provider", "")).strip().lower()
         if provider not in {"claude", "codex"}:
             raise ValueError(
                 "Choose Claude or Codex for HITL research so the workers and manager "
                 "can use the same backend."
             )
-        raw_iterations = payload.get("iterations", 1)
-        try:
-            iterations = int(raw_iterations)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("Iterations must be a whole number.") from exc
-        if isinstance(raw_iterations, bool) or (
-            isinstance(raw_iterations, float) and not raw_iterations.is_integer()
-        ):
-            raise ValueError("Iterations must be a whole number.")
-        if not 1 <= iterations <= 100:
-            raise ValueError("Iterations must be between 1 and 100.")
+        iterations = 1
+        if workflow == "autoresearch":
+            raw_iterations = payload.get("iterations", 1)
+            try:
+                iterations = int(raw_iterations)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("Iterations must be a whole number.") from exc
+            if isinstance(raw_iterations, bool) or (
+                isinstance(raw_iterations, float) and not raw_iterations.is_integer()
+            ):
+                raise ValueError("Iterations must be a whole number.")
+            if not 1 <= iterations <= 100:
+                raise ValueError("Iterations must be between 1 and 100.")
         style = str(payload.get("paper_style", "auto")).strip().lower()
         if style not in {"auto", "neurips", "icml", "acl"}:
             raise ValueError("Choose a supported paper style.")
@@ -114,6 +119,9 @@ class HitlRunController:
                 raise RuntimeError(
                     "Wait for the current manager message to finish before starting research."
                 )
+            from core.pipeline_orchestrator import PipelineState
+
+            PipelineState.require_compatible_workflow(self.work_dir, workflow)
             launch_path = hitl_launch_status_path(self.work_dir)
             if launch_path.exists():
                 try:
@@ -140,30 +148,37 @@ class HitlRunController:
                             )
                             stale_request.unlink(missing_ok=True)
             select_hitl_manager_provider(self.work_dir, provider)
-            from core.hitl_autoresearch import initial_publication_requires_resume
+            if workflow == "autoresearch":
+                from core.hitl_autoresearch import initial_publication_requires_resume
 
-            continuation = (
-                HitlFrontierStore(self.work_dir).exists()
-                and not initial_publication_requires_resume(self.work_dir)
-            )
+                continuation = (
+                    HitlFrontierStore(self.work_dir).exists()
+                    and not initial_publication_requires_resume(self.work_dir)
+                )
+            else:
+                continuation = (
+                    self.work_dir / ".neurico" / "pipeline_state.json"
+                ).is_file()
             mode = "continue" if continuation else "fresh"
             request_id = uuid.uuid4().hex
             request = {
-                "version": 2,
+                "version": 3,
                 "request_id": request_id,
                 "idea_id": self.idea_id,
                 "work_dir": str(self.work_dir.resolve()),
                 "project_root": str(self.project_root.resolve()),
                 "provider": provider,
-                "iterations": iterations,
                 "write_paper": bool(payload.get("write_paper", False)),
                 "paper_style": None if style == "auto" else style,
                 "github": bool(payload.get("github", False)),
                 "mode": mode,
+                "workflow": workflow,
                 "hitl_mode": hitl_mode,
                 "interface": self.interface,
                 "created_at": utc_now(),
             }
+            if workflow == "autoresearch":
+                request["iterations"] = iterations
             requests_dir = hitl_launch_requests_dir(ConfigLoader().get_workspace_parent_dir())
             requests_dir.mkdir(parents=True, exist_ok=True)
             request_path = requests_dir / f"request.{self.idea_id}.{request_id}.json"
@@ -181,6 +196,7 @@ class HitlRunController:
                         "created_at": request["created_at"],
                         "updated_at": request["created_at"],
                         "mode": mode,
+                        "workflow": workflow,
                         "hitl_mode": hitl_mode,
                         "provider": provider,
                     },
@@ -217,6 +233,7 @@ class HitlRunController:
         return {
             "status": "accepted",
             "mode": mode,
+            "workflow": workflow,
         }
 
     def stop(self) -> Dict[str, Any]:
