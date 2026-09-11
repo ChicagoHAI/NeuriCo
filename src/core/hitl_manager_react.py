@@ -1031,6 +1031,7 @@ class HitlManager:
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
         request_context: Optional[Dict[str, Any]] = None,
+        scoring_enabled: bool = False,
     ) -> Dict[str, Any]:
         from core.hitl import _load_hitl_template, _normalize_options, _validate_substantive_options
 
@@ -1102,6 +1103,7 @@ class HitlManager:
             hitl_mode=selected_mode.value,
             autoresearch_attempt=autoresearch_attempt,
             assigned_candidate_sha=assigned_candidate_sha,
+            scoring_enabled=scoring_enabled,
         )
         return self.request_worker_resolution(
             command={
@@ -1131,6 +1133,7 @@ class HitlManager:
         plan_fingerprint: str = "",
         workspace_fingerprint: str = "",
         allow_scoring_approval: bool = False,
+        scoring_enabled: bool = False,
         scoring_handoff_context: Optional[Dict[str, Any]] = None,
         verifier_report: str = "",
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
@@ -1226,6 +1229,7 @@ class HitlManager:
             related_artifacts_json=json.dumps(related_artifacts, indent=2, ensure_ascii=False),
             requires_human_approval=requires_human_approval,
             allow_scoring_approval=allow_scoring_approval,
+            scoring_enabled=scoring_enabled,
             is_rule_maker=(pipeline_stage == "rule_maker"),
             has_verifier_report=bool(str(verifier_report).strip()),
             verifier_report=str(verifier_report),
