@@ -581,6 +581,27 @@ class HitlWorkspaceView:
                     display_stage=paused_stage,
                     display_phase=f"{paused_phase} paused" if paused_phase else "Paused",
                 )
+            if (
+                launch_state == "completed"
+                and workflow == "ordinary"
+                and launch_status.get("success") is False
+            ):
+                completed_at = str(
+                    launch_status.get("completed_at")
+                    or launch_status.get("updated_at")
+                    or ""
+                ).strip()
+                return projected(
+                    "failed",
+                    "Research incomplete",
+                    "Ordinary research ended without completing successfully.",
+                    next_step="Continue research to retry the incomplete stage.",
+                    record=launch_status,
+                    active=False,
+                    display_stage="Incomplete",
+                    display_phase="",
+                    phase_started_at=completed_at,
+                )
             if launch_state == "completed":
                 completed_at = str(
                     launch_status.get("completed_at")
