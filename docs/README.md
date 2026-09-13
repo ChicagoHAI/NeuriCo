@@ -17,6 +17,7 @@ These documents describe the current supported NeuriCo workflow.
 | [`AUTORESEARCH.md`](AUTORESEARCH.md) | Starting, continuing, and recovering AutoResearch |
 | [`HITL_AUTORESEARCH.md`](HITL_AUTORESEARCH.md) | HITL interfaces, manager workflow, frontier, and recovery |
 | [`LOCAL_IDEA_SUBMISSION.md`](LOCAL_IDEA_SUBMISSION.md) | Markdown ideas, local datasets, functions, and evaluation contracts |
+| [`IDEA_SUBMISSION_WEB.md`](IDEA_SUBMISSION_WEB.md) | Browser form for submitting, viewing, and editing ideas |
 | [`IDEAHUB_INTEGRATION.md`](IDEAHUB_INTEGRATION.md) | Fetching and submitting IdeaHub ideas |
 | [`GITHUB_INTEGRATION.md`](GITHUB_INTEGRATION.md) | Optional repository creation and publishing |
 | [`../config/paper_finder.md`](../config/paper_finder.md) | Optional paper-finder configuration |
