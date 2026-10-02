@@ -2083,6 +2083,23 @@ class HitlAutoResearchController:
             and pending.get("kind") == "proposal_preparation"
             and pending.get("manager_decision_idea_id") == logged["decision_idea_id"]
         )
+        if matching_admission and pending.get("status") == "cancelled":
+            from core.hitl_manager_react import HitlManager
+
+            request_key = HitlManager._request_key(
+                "proposal_preparation",
+                {"manager_decision_idea_id": str(logged["decision_idea_id"])},
+            )
+            if pending.get("request_key") != request_key:
+                raise RuntimeError("Cancelled preparation admission has an invalid request key.")
+            # Retire the failed request on restart while retaining the recorded
+            # preparation choice and any finalized human admission.
+            runtime.abandon_pending_worker_request_for_rollback(
+                "Retiring the failed proposal-preparation admission before retry."
+            )
+            state.clear_completed_worker_command(request_key)
+            pending = state.pending_worker_command()
+            matching_admission = False
         admission = runtime._terminal_proposal_preparation_admission(
             str(logged["decision_idea_id"])
         )

@@ -19,6 +19,7 @@ from core.autoresearch import CheckpointManager  # noqa: E402
 from core.hitl import HitlIdeaLog, HitlRuntime  # noqa: E402
 from core.hitl_mode import HitlMode, human_resolution_allowed  # noqa: E402
 from core.hitl_manager_react import HitlManager  # noqa: E402
+from core.hitl_manager_inbox import HitlManagerInbox  # noqa: E402
 from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError  # noqa: E402
 from core.hitl_stage_runtime import run_plan_centered_hitl_stage  # noqa: E402
 from core.hitl_workspace_guard import HitlWorkspaceWriteGuard  # noqa: E402
@@ -905,7 +906,8 @@ def test_recorded_human_approval_releases_interrupted_admission_request(tmp_path
     assert len(human_admissions) == 1
 
 
-def test_recorded_human_approval_resumes_active_resource_request(tmp_path):
+@pytest.mark.parametrize("request_status", ["pending", "cancelled"])
+def test_recorded_human_approval_resumes_active_resource_request(tmp_path, request_status):
     state = HitlRuntimeState(tmp_path)
     state.begin_next_autoresearch_action(
         {"kind": "prepare_proposal", "parent_node_id": "frontier-parent"}
@@ -937,6 +939,7 @@ def test_recorded_human_approval_resumes_active_resource_request(tmp_path):
         {
             "request_key": "resource-request",
             "kind": "phase_finish",
+            "status": request_status,
             "pipeline_stage": "resource_finder",
             "hitl_stage": "plan",
             "provenance": {"parent_node_id": "frontier-parent"},
@@ -966,7 +969,133 @@ def test_recorded_human_approval_resumes_active_resource_request(tmp_path):
     assert len(dispatched) == 1
     pending = state.pending_worker_command()
     assert pending["request_key"] == "resource-request"
-    assert pending["status"] == "pending"
+    assert pending["status"] == request_status
+
+
+@pytest.mark.parametrize("mode", [HitlMode.FULL, HitlMode.AUTO])
+@pytest.mark.parametrize("terminal", [None, "approved", "feedback"])
+@pytest.mark.parametrize("interrupt_cleanup", [False, True])
+def test_cancelled_preparation_admission_recovers(
+    tmp_path, monkeypatch, mode, terminal, interrupt_cleanup
+):
+    state = HitlRuntimeState(tmp_path)
+    decision = {
+        "choice": "proceed_to_proposal",
+        "reason": "The current record is sufficient.",
+        "supporting_evidence": _manager_evidence(),
+    }
+    state.begin_next_autoresearch_action(
+        {"kind": "prepare_proposal", "parent_node_id": "parent"}
+    )
+    state.record_next_autoresearch_action_decision("prepare_proposal", decision)
+    original_action = state.snapshot()["next_autoresearch_action"]
+    runtime = _preparation_runtime(tmp_path)
+    logged = runtime.log_proposal_preparation_decision(parent_node_id="parent", **decision)
+    request_key = HitlManager._request_key(
+        "proposal_preparation", {"manager_decision_idea_id": logged["decision_idea_id"]}
+    )
+    state.begin_worker_command({
+        "kind": "proposal_preparation", "request_key": request_key,
+        "manager_decision_idea_id": logged["decision_idea_id"],
+        "hitl_mode": "full",
+    })
+    review = {
+        "status": terminal or "approved",
+        "human_feedback": (
+            "Provide feedback: verify the license first."
+            if terminal == "feedback" else "Approve manager recommendation."
+        ),
+        "manager_feedback": "Verify the license first." if terminal == "feedback" else "",
+        "context": "Human reviewed the preparation choice.",
+        "manager_escalation_reason": "Full mode requires human admission.",
+    }
+    if terminal:
+        runtime.finalize_proposal_preparation_human_admission(
+            manager_decision_idea_id=logged["decision_idea_id"],
+            choice=decision["choice"], review=review,
+        )
+    original_records = runtime.log.records()
+
+    def new_manager():
+        manager = _bare_manager(tmp_path)
+        manager._turn_lock = threading.RLock()
+        manager._generation_lock = threading.Lock()
+        manager._generation = 0
+        manager.channel = SimpleNamespace(
+            send=lambda *args, **kwargs: None,
+            clear_resolution_request=lambda: cleared.append(True),
+        )
+        return manager
+
+    cleared = []
+    manager = new_manager()
+    manager._cancel_backend_failed_runtime_request(
+        SimpleNamespace(request_key=request_key), RuntimeError("provider failed")
+    )
+    assert state.pending_worker_command()["status"] == "cancelled"
+    assert state.snapshot()["next_autoresearch_action"] == original_action
+    inbox = HitlManagerInbox(tmp_path)
+    inbox.submit_resolution_reply(request_key, "Obsolete queued reply")
+    inbox.enqueue("Preserve this ordinary conversation message.")
+    (tmp_path / "resource.txt").write_text("Preserve workspace contents.")
+
+    # Resume with new runtime objects, as after a process restart.
+    runtime = _preparation_runtime(tmp_path)
+    runtime.manager = new_manager()
+    controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    controller.hitl_mode = mode
+    state.adopt_hitl_mode(mode.value)
+    reviewed = []
+
+    def notify(_prompt, *, request_key):
+        assert mode is HitlMode.FULL and terminal is None
+        assert inbox.resolution_reply() is None
+        reviewed.append(request_key)
+        resolution = runtime.manager._resolutions[request_key]
+        resolution.human_inputs.append({"response": review["human_feedback"]})
+        assert runtime.manager.finalize_worker_request(dict(review)).startswith("Runtime finalized")
+
+    monkeypatch.setattr(runtime.manager, "notify_runtime", notify)
+    if interrupt_cleanup:
+        with monkeypatch.context() as patch:
+            def interrupt(*args):
+                raise RuntimeError("interrupted before command removal")
+            patch.setattr(HitlRuntimeState, "clear_completed_worker_command", interrupt)
+            with pytest.raises(RuntimeError, match="interrupted before command removal"):
+                controller._apply_proposal_preparation_decision(
+                    runtime=runtime, parent_sha="parent", decision=decision
+                )
+        assert state.pending_worker_command()["status"] == "cancelled"
+        assert inbox.resolution_reply() is None
+        runtime.manager = new_manager()
+        monkeypatch.setattr(runtime.manager, "notify_runtime", notify)
+
+    if terminal == "feedback":
+        with pytest.raises(har._ProposalPreparationRestart, match="license"):
+            controller._apply_proposal_preparation_decision(
+                runtime=runtime, parent_sha="parent", decision=decision
+            )
+        assert state.snapshot()["next_autoresearch_action"]["status"] == "cancelled"
+    else:
+        result = controller._apply_proposal_preparation_decision(
+            runtime=runtime, parent_sha="parent", decision=decision
+        )
+        assert result["proposal_base_sha"] == "parent"
+        assert state.snapshot()["next_autoresearch_action"] == original_action
+    assert reviewed == ([request_key] if mode is HitlMode.FULL and terminal is None else [])
+    assert runtime.manager._generation == 1
+    assert len(cleared) >= 2
+    assert inbox.resolution_reply() is None
+    assert inbox.snapshot()["active"]["text"] == "Preserve this ordinary conversation message."
+    assert (tmp_path / "resource.txt").read_text() == "Preserve workspace contents."
+    records = runtime.log.records()
+    assert records[:len(original_records)] == original_records
+    assert sum(record.get("level") == "A" for record in records) == (
+        1 if terminal or mode is HitlMode.FULL else 0
+    )
+    # The cancelled command no longer prevents the next worker interaction.
+    state.begin_worker_command({"kind": "proposal", "request_key": "next-request"})
 
 
 def test_auto_resume_makes_unresolved_manager_decision_final(tmp_path):
