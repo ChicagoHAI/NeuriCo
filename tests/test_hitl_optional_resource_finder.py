@@ -765,7 +765,18 @@ def test_recorded_human_feedback_is_replayed_without_reopening_approval(tmp_path
         parent_node_id="frontier-parent",
         **decision,
     )
-    runtime.finalize_proposal_preparation_human_admission(
+    state.begin_worker_command(
+        {
+            "request_key": "preparation-admission",
+            "kind": "proposal_preparation",
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "proposal",
+            "hitl_mode": "full",
+            "requires_human_approval": True,
+            "manager_decision_idea_id": logged["decision_idea_id"],
+        }
+    )
+    admission = runtime.finalize_proposal_preparation_human_admission(
         manager_decision_idea_id=logged["decision_idea_id"],
         choice=decision["choice"],
         review={
@@ -793,6 +804,105 @@ def test_recorded_human_feedback_is_replayed_without_reopening_approval(tmp_path
         )
 
     assert state.snapshot()["next_autoresearch_action"]["status"] == "cancelled"
+    pending = state.pending_worker_command()
+    assert pending["status"] == "resolved"
+    assert pending["response"] == admission
+    human_admissions = [
+        record
+        for record in runtime.log.records()
+        if record.get("level") == "A"
+        and logged["decision_idea_id"] in record.get("premises", [])
+    ]
+    assert len(human_admissions) == 1
+
+
+def test_recorded_human_approval_releases_interrupted_admission_request(tmp_path):
+    state = HitlRuntimeState(tmp_path)
+    state.begin_next_autoresearch_action(
+        {"kind": "prepare_proposal", "parent_node_id": "frontier-parent"}
+    )
+    decision = {
+        "choice": "request_resource_finder",
+        "reason": "A benchmark source is still missing.",
+        "objective": "Find the benchmark source.",
+        "premise_idea_ids": [],
+        "supporting_evidence": _manager_evidence("The benchmark source is missing."),
+    }
+    state.record_next_autoresearch_action_decision("prepare_proposal", decision)
+    runtime = _preparation_runtime(tmp_path)
+    logged = runtime.log_proposal_preparation_decision(
+        parent_node_id="frontier-parent",
+        **decision,
+    )
+    state.begin_worker_command(
+        {
+            "request_key": "preparation-admission",
+            "kind": "proposal_preparation",
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "proposal",
+            "hitl_mode": "full",
+            "requires_human_approval": True,
+            "manager_decision_idea_id": logged["decision_idea_id"],
+        }
+    )
+    admission = runtime.finalize_proposal_preparation_human_admission(
+        manager_decision_idea_id=logged["decision_idea_id"],
+        choice=decision["choice"],
+        review={
+            "status": "approved",
+            "human_feedback": "Approve manager recommendation.",
+            "manager_escalation_reason": "Human approval is required in Full mode.",
+            "context": "Human reviewed the manager recommendation.",
+        },
+    )
+    runtime.manager = SimpleNamespace(
+        review_proposal_preparation_decision=lambda **kwargs: pytest.fail(
+            "a recorded admission must not be reopened"
+        )
+    )
+    controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
+    controller.hitl_mode = HitlMode.FULL
+    controller.work_dir = tmp_path
+    reconciled = []
+
+    def run_resource_finder(**kwargs):
+        reconciled.append(state.pending_worker_command())
+        state.begin_worker_command(
+            {
+                "request_key": "resource-request",
+                "kind": "phase_finish",
+                "pipeline_stage": "resource_finder",
+                "hitl_stage": "plan",
+                "provenance": {"parent_node_id": "frontier-parent"},
+            }
+        )
+        return {
+            "proposal_base_sha": "resource-workspace",
+            **kwargs["logged"],
+        }
+
+    controller._run_inserted_resource_finder = run_resource_finder
+
+    result = controller._apply_proposal_preparation_decision(
+        runtime=runtime,
+        parent_sha="frontier-parent",
+        decision=decision,
+    )
+
+    assert result["human_decision_idea_id"] == admission["human_decision_idea_id"]
+    assert len(reconciled) == 1
+    assert reconciled[0]["status"] == "resolved"
+    assert reconciled[0]["response"] == admission
+    pending = state.pending_worker_command()
+    assert pending["request_key"] == "resource-request"
+    assert pending["status"] == "pending"
+    human_admissions = [
+        record
+        for record in runtime.log.records()
+        if record.get("level") == "A"
+        and logged["decision_idea_id"] in record.get("premises", [])
+    ]
+    assert len(human_admissions) == 1
 
 
 def test_recorded_human_approval_resumes_active_resource_request(tmp_path):

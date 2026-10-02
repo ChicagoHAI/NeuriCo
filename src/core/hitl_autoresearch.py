@@ -2086,6 +2086,12 @@ class HitlAutoResearchController:
         admission = runtime._terminal_proposal_preparation_admission(
             str(logged["decision_idea_id"])
         )
+        if (
+            admission is not None
+            and matching_admission
+            and pending.get("status") == "pending"
+        ):
+            state.complete_worker_command(str(pending["request_key"]), admission)
         if admission is None and self.hitl_mode is HitlMode.FULL:
             admission = runtime.manager.review_proposal_preparation_decision(
                 manager_decision_idea_id=str(logged["decision_idea_id"]),

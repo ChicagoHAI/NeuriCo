@@ -1975,6 +1975,7 @@ class HitlRuntime:
                     "manager_decision_idea_id": decision_idea_id,
                     "human_decision_idea_id": str(record.get("idea_id", "")).strip(),
                     "human_feedback": str(record.get("human_feedback", "")).strip(),
+                    "manager_feedback": "",
                 }
             return {
                 "status": "feedback",
