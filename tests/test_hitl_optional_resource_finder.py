@@ -21,6 +21,7 @@ from core.hitl_mode import HitlMode  # noqa: E402
 from core.hitl_manager_react import HitlManager  # noqa: E402
 from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError  # noqa: E402
 from core.hitl_stage_runtime import run_plan_centered_hitl_stage  # noqa: E402
+from core.hitl_workspace_guard import HitlWorkspaceWriteGuard  # noqa: E402
 
 
 def _bare_manager(work_dir: Path) -> HitlManager:
@@ -572,6 +573,39 @@ class _ResourceRuntimeStub:
         self.clears += 1
 
 
+class _ResourceResumeRuntimeStub:
+    def __init__(self, work_dir: Path):
+        self.work_dir = Path(work_dir)
+        self.pipeline_stage = "resource_finder"
+        self.prepared = []
+        self.enabled = []
+
+    def prepare_idea_tool_context(self, **kwargs):
+        self.prepared.append(kwargs)
+
+    def _enable_worker_command(self, command):
+        self.enabled.append(command)
+
+    def plan_has_required_approval(self):
+        return False
+
+    def plan_has_human_approval(self):
+        return False
+
+    def plan_prompt_block(self):
+        return "PLAN"
+
+    def execution_prompt_block(self, *, mode):
+        assert mode == "execute"
+        return "EXECUTE"
+
+    def compose_worker_prompt(self, *, hitl_stage, phase_prompt):
+        return f"{hitl_stage}:{phase_prompt}"
+
+    def handle_worker_exit_after_finish(self, result, **kwargs):
+        return {"approved": True}
+
+
 def _resource_controller(work_dir: Path, checkpoints: CheckpointManager):
     controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
     controller.work_dir = Path(work_dir)
@@ -600,6 +634,263 @@ def _record_resource_choice(work_dir: Path, parent_sha: str):
             "premise_idea_ids": [],
         },
     )
+
+
+def _record_resource_worker_recovery(
+    work_dir: Path,
+    *,
+    parent_sha: str,
+    continuation_phase: str,
+    pending_phase: str | None = None,
+    response: dict | None = None,
+    workspace_fingerprint: str = "",
+    request_kind: str = "phase_finish",
+):
+    state = HitlRuntimeState(work_dir)
+    provenance = {"parent_node_id": parent_sha}
+    state.record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": continuation_phase,
+            "actor": "resource_finder",
+            "provenance": provenance,
+            "prompt_block": f"saved {continuation_phase} prompt",
+        }
+    )
+    command = state.begin_worker_command(
+        {
+            "request_key": "resource-request",
+            "kind": request_kind,
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": pending_phase or continuation_phase,
+            "provenance": provenance,
+            "workspace_fingerprint": workspace_fingerprint,
+            **(
+                {"raised_idea": {"idea_type": "decision"}}
+                if request_kind == "raised_idea"
+                else {}
+            ),
+        }
+    )
+    if response is not None:
+        state.complete_worker_command(command["request_key"], response)
+
+
+@pytest.mark.parametrize(
+    ("continuation_phase", "pending_phase", "response", "handled_by_hook"),
+    [
+        ("plan", "plan", None, False),
+        ("execution", "execution", None, False),
+        ("review", "review", None, False),
+        (
+            "execution",
+            "plan",
+            {
+                "status": "approved",
+                "context": "The plan is ready for execution.",
+                "manager_feedback": "",
+            },
+            True,
+        ),
+        (
+            "review",
+            "execution",
+            {
+                "status": "feedback",
+                "context": "Review the execution changes.",
+                "manager_feedback": "Check the downloaded artifact.",
+            },
+            False,
+        ),
+    ],
+)
+def test_inserted_resource_reconnects_matching_worker_continuation(
+    tmp_path,
+    continuation_phase,
+    pending_phase,
+    response,
+    handled_by_hook,
+):
+    parent = "frontier-parent"
+    _record_resource_choice(tmp_path, parent)
+    _record_resource_worker_recovery(
+        tmp_path,
+        parent_sha=parent,
+        continuation_phase=continuation_phase,
+        pending_phase=pending_phase,
+        response=response,
+    )
+    controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    runtime = _ResourceResumeRuntimeStub(tmp_path)
+    launches = []
+
+    launch_worker = lambda prompt, prefix, **kwargs: launches.append(  # noqa: E731
+        (prompt, prefix, kwargs)
+    ) or {"success": True}
+    contexts = {phase: f"{phase} context" for phase in ("plan", "execution", "review")}
+    resumed = controller._resume_inserted_resource_worker(
+        runtime,
+        launch_worker,
+        contexts,
+        lambda: {"valid": True, "issues": []},
+    )
+    if handled_by_hook:
+        result, finish = resumed
+    else:
+        assert resumed is None
+        result, finish = run_plan_centered_hitl_stage(
+            runtime=runtime,
+            actor="resource_finder",
+            worker_name="resource_finder",
+            worker_prompt_contexts=contexts,
+            phase_finish_validator=lambda: {"valid": True, "issues": []},
+            launch_worker=launch_worker,
+            plan_log_prefix="plan-log",
+            execution_log_prefix="execution-log",
+            on_approved=lambda result, finish: (result, finish),
+            on_failed=lambda failed: ({"success": False}, failed),
+            expected_provenance={"parent_node_id": parent},
+            force_fresh_plan=True,
+        )
+
+    assert result["success"] is True
+    assert finish["approved"] is True
+    assert len(runtime.prepared) == 1
+    assert runtime.prepared[0]["hitl_stage"] == continuation_phase
+    assert runtime.prepared[0]["actor"] == "resource_finder"
+    assert runtime.prepared[0]["provenance"] == {"parent_node_id": parent}
+    assert runtime.prepared[0]["worker_prompt_contexts"] == {
+        phase: f"{phase} context" for phase in ("plan", "execution", "review")
+    }
+    assert runtime.enabled == []
+    if handled_by_hook:
+        assert launches[0][0] == "saved execution prompt"
+        assert launches[0][1] == "autoresearch_resource_finder_resume"
+    assert launches[0][2]["record_continuation"] is False
+
+
+def test_inserted_resource_replays_a_resolved_raised_idea_request(tmp_path):
+    parent = "frontier-parent"
+    _record_resource_choice(tmp_path, parent)
+    _record_resource_worker_recovery(
+        tmp_path,
+        parent_sha=parent,
+        continuation_phase="execution",
+        request_kind="raised_idea",
+        response={"decision": "O1", "manager_feedback": "Continue execution."},
+    )
+    controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    runtime = _ResourceResumeRuntimeStub(tmp_path)
+    launches = []
+
+    result, finish = controller._resume_inserted_resource_worker(
+        runtime,
+        lambda prompt, prefix, **kwargs: launches.append((prompt, prefix, kwargs))
+        or {"success": True},
+        {phase: phase for phase in ("plan", "execution", "review")},
+        lambda: {"valid": True, "issues": []},
+    )
+
+    assert result["success"] is True
+    assert finish["approved"] is True
+    assert runtime.prepared[0]["hitl_stage"] == "execution"
+    assert runtime.enabled == ["hitl-resume-worker-request"]
+    assert launches[0][2]["record_continuation"] is False
+
+
+def test_inserted_resource_final_approval_is_validated_without_worker_relaunch(tmp_path):
+    parent = "frontier-parent"
+    (tmp_path / "literature_review.md").write_text("review\n", encoding="utf-8")
+    (tmp_path / "resources.md").write_text("resources\n", encoding="utf-8")
+    fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path)
+    _record_resource_choice(tmp_path, parent)
+    _record_resource_worker_recovery(
+        tmp_path,
+        parent_sha=parent,
+        continuation_phase="review",
+        response={
+            "status": "approved",
+            "context": "The resource artifacts are complete.",
+            "manager_feedback": "",
+        },
+        workspace_fingerprint=fingerprint,
+    )
+    controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    runtime = _ResourceResumeRuntimeStub(tmp_path)
+    validations = []
+
+    result = controller._resume_inserted_resource_worker(
+        runtime,
+        lambda *args, **kwargs: pytest.fail("final approval must not relaunch a worker"),
+        {phase: phase for phase in ("plan", "execution", "review")},
+        lambda: validations.append(True) or {"valid": True, "issues": []},
+    )
+
+    assert result == ({"success": True, "resumed": True}, {"approved": True})
+    assert validations == [True]
+    assert HitlRuntimeState(tmp_path).worker_continuation() is None
+    assert runtime.prepared == []
+
+    HitlRuntimeState(tmp_path).complete_next_autoresearch_action(
+        "prepare_proposal", {"proposal_base_sha": "prepared-workspace"}
+    )
+    controller._discard_completed_preparation_rollback()
+    assert HitlRuntimeState(tmp_path).pending_worker_command() is None
+
+
+def test_inserted_resource_does_not_consume_another_parent_continuation(tmp_path):
+    _record_resource_choice(tmp_path, "current-parent")
+    _record_resource_worker_recovery(
+        tmp_path,
+        parent_sha="other-parent",
+        continuation_phase="plan",
+    )
+    controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    runtime = _ResourceResumeRuntimeStub(tmp_path)
+
+    result = controller._resume_inserted_resource_worker(
+        runtime,
+        lambda *args, **kwargs: pytest.fail("another insertion must not be resumed"),
+        {phase: phase for phase in ("plan", "execution", "review")},
+        lambda: {"valid": True, "issues": []},
+    )
+
+    assert result is None
+    assert runtime.prepared == []
+
+
+def test_inserted_resource_rejects_partial_owned_recovery_without_workspace_change(tmp_path):
+    parent = "frontier-parent"
+    marker = tmp_path / "workspace.txt"
+    marker.write_text("unchanged\n", encoding="utf-8")
+    _record_resource_choice(tmp_path, parent)
+    HitlRuntimeState(tmp_path).record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "execution",
+            "actor": "resource_finder",
+            "provenance": {"parent_node_id": parent},
+            "prompt_block": "saved execution prompt",
+        }
+    )
+    controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    runtime = _ResourceResumeRuntimeStub(tmp_path)
+
+    with pytest.raises(RuntimeError, match="no matching worker continuation"):
+        controller._resume_inserted_resource_worker(
+            runtime,
+            lambda *args, **kwargs: pytest.fail("partial recovery must not launch"),
+            {phase: phase for phase in ("plan", "execution", "review")},
+            lambda: {"valid": True, "issues": []},
+        )
+
+    assert marker.read_text(encoding="utf-8") == "unchanged\n"
+    assert runtime.prepared == []
 
 
 def test_inserted_resource_success_creates_unscored_workspace_without_frontier_mutation(

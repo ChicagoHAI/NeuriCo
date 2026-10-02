@@ -2207,21 +2207,91 @@ class HitlAutoResearchController:
 
         state = HitlRuntimeState(self.work_dir)
         pending = state.pending_worker_command()
-        if not isinstance(pending, dict) or pending.get("pipeline_stage") != "resource_finder":
-            return None
+        continuation = state.worker_continuation()
         action = state.snapshot().get("next_autoresearch_action")
-        expected = {
-            "parent_node_id": str((action or {}).get("parent_node_id", "")).strip()
-        }
-        if pending.get("provenance") != expected:
+        if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
+            raise RuntimeError("Resource-finder recovery lost its proposal-preparation action.")
+        parent_sha = str(action.get("parent_node_id", "")).strip()
+        if not parent_sha:
+            raise RuntimeError("Resource-finder recovery has no selected frontier parent.")
+        expected = {"parent_node_id": parent_sha}
+
+        def normalized_provenance(value: Any) -> Dict[str, str]:
+            if not isinstance(value, dict):
+                return {}
+            return {
+                str(key): str(item)
+                for key, item in value.items()
+                if str(item).strip()
+            }
+
+        pending_belongs_here = (
+            isinstance(pending, dict)
+            and pending.get("pipeline_stage") == "resource_finder"
+            and normalized_provenance(pending.get("provenance")) == expected
+        )
+        continuation_belongs_here = (
+            isinstance(continuation, dict)
+            and continuation.get("pipeline_stage") == "resource_finder"
+            and continuation.get("actor") == "resource_finder"
+            and normalized_provenance(continuation.get("provenance")) == expected
+        )
+        if continuation_belongs_here and not pending_belongs_here:
+            raise RuntimeError(
+                "Inserted resource-finder request has no matching worker continuation."
+            )
+        if not pending_belongs_here:
             return None
-        response = pending.get("response") or {}
+
+        request_key = str(pending.get("request_key", "")).strip()
+        request_kind = str(pending.get("kind", "")).strip()
+        if not request_key or request_kind not in {"phase_finish", "raised_idea"}:
+            raise RuntimeError(
+                "Inserted resource-finder request has no matching worker continuation."
+            )
+
+        saved_response = pending.get("response")
+        if pending.get("status") == "resolved" and not isinstance(saved_response, dict):
+            raise RuntimeError(
+                "Inserted resource-finder request has an invalid saved response."
+        )
+        response = saved_response if isinstance(saved_response, dict) else {}
         saved_approval = (
-            pending.get("kind") == "phase_finish"
+            request_kind == "phase_finish"
             and pending.get("status") == "resolved"
             and pending.get("hitl_stage") in {"execution", "review"}
             and response.get("status") == "approved"
         )
+        saved_plan_approval = (
+            request_kind == "phase_finish"
+            and pending.get("status") == "resolved"
+            and pending.get("hitl_stage") == "plan"
+            and response.get("status") == "approved"
+        )
+        saved_raised_idea = (
+            request_kind == "raised_idea" and pending.get("status") == "resolved"
+        )
+
+        if not (saved_approval or saved_plan_approval or saved_raised_idea):
+            if worker_command_requires_resume(pending):
+                # The shared plan-centered stage runner validates and reconnects
+                # unresolved requests and saved feedback.
+                return None
+            raise RuntimeError(
+                "Inserted resource-finder request cannot be resumed from its saved state."
+            )
+
+        if not continuation_belongs_here:
+            raise RuntimeError(
+                "Inserted resource-finder request has no matching worker continuation."
+            )
+        saved_phase = str(continuation.get("hitl_stage", "")).strip()
+        prompt_block = str(continuation.get("prompt_block", "")).strip()
+        if saved_phase not in {"plan", "execution", "review"} or not prompt_block:
+            raise RuntimeError(
+                "Inserted resource-finder request has no matching worker continuation."
+            )
+
         if saved_approval:
             expected_fingerprint = str(pending.get("workspace_fingerprint", "")).strip()
             current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
@@ -2237,23 +2307,66 @@ class HitlAutoResearchController:
                 )
             state.clear_worker_continuation()
             return {"success": True, "resumed": True}, {"approved": True}
-        # The shared plan-centered runtime owns unresolved plan, execution, and
-        # review continuation. This hook only consumes a final approval that
-        # was persisted before proposal-preparation publication completed.
-        return None
+
+        resume_prompt = _load_hitl_template("worker_resume_pending_request.txt")
+        if saved_plan_approval:
+            # Plan approval has already released its held request. The existing
+            # continuation contains the runtime-rendered execution prompt.
+            if saved_phase != "execution":
+                raise RuntimeError(
+                    "Approved resource-finder plan has no saved execution continuation."
+                )
+            resume_prompt = prompt_block
+
+        runtime.prepare_idea_tool_context(
+            hitl_stage=saved_phase,
+            actor="resource_finder",
+            provenance=expected,
+            phase_finish_validator=validator,
+            worker_prompt_contexts=worker_prompt_contexts,
+        )
+        if saved_raised_idea:
+            runtime._enable_worker_command("hitl-resume-worker-request")
+        return run_worker_with_replacements(
+            runtime=runtime,
+            launch_worker=launch_worker,
+            prompt=resume_prompt,
+            log_prefix="autoresearch_resource_finder_resume",
+            phase="stage",
+            worker_name="resource_finder",
+            record_continuation=False,
+        )
 
     def _discard_completed_preparation_rollback(self) -> None:
         state = HitlRuntimeState(self.work_dir)
         action = state.snapshot().get("next_autoresearch_action")
         recovery = action.get("recovery") if isinstance(action, dict) else None
-        if not isinstance(recovery, dict):
-            return
-        rollback = HitlStageRollback.from_descriptor(self.work_dir, recovery)
-        state.clear_next_autoresearch_action_recovery(
-            "prepare_proposal",
-            snapshot_ref=rollback.hitl_snapshot.ref,
-        )
-        rollback.discard(cleanup_label="completed")
+        if isinstance(recovery, dict):
+            rollback = HitlStageRollback.from_descriptor(self.work_dir, recovery)
+            state.clear_next_autoresearch_action_recovery(
+                "prepare_proposal",
+                snapshot_ref=rollback.hitl_snapshot.ref,
+            )
+            rollback.discard(cleanup_label="completed")
+
+        pending = state.pending_worker_command()
+        response = pending.get("response") if isinstance(pending, dict) else None
+        expected = {
+            "parent_node_id": str((action or {}).get("parent_node_id", "")).strip()
+        }
+        if (
+            isinstance(action, dict)
+            and action.get("kind") == "prepare_proposal"
+            and action.get("status") == "resolved"
+            and isinstance(pending, dict)
+            and pending.get("pipeline_stage") == "resource_finder"
+            and pending.get("provenance") == expected
+            and pending.get("status") == "resolved"
+            and isinstance(response, dict)
+            and response.get("status") == "approved"
+            and pending.get("hitl_stage") in {"execution", "review"}
+        ):
+            state.clear_completed_worker_command(str(pending.get("request_key", "")))
 
     def _clear_completed_proposal_preparation(self, parent_sha: str) -> None:
         state = HitlRuntimeState(self.work_dir)
