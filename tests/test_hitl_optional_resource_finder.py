@@ -103,6 +103,84 @@ def test_terminal_choice_is_idempotent_and_conflicting_replay_is_rejected(tmp_pa
     assert action["decision"]["objective"] == arguments["objective"]
 
 
+@pytest.mark.parametrize(
+    ("choice", "objective"),
+    [
+        ("proceed_to_proposal", ""),
+        ("request_resource_finder", "Find a public benchmark."),
+    ],
+)
+def test_preparation_choice_persists_canonical_supporting_evidence(
+    tmp_path, choice, objective
+):
+    manager = _bare_manager(tmp_path)
+    _begin_preparation(manager)
+    arguments = {
+        "reason": "  The research record supports this choice.  ",
+        "supporting_evidence": {
+            "idea_category": "  constraint_or_risk  ",
+            "context": "  Manager reviewed the selected frontier.  ",
+            "evidence": "  The benchmark requirements are documented.  ",
+            "related_artifacts": [
+                {
+                    "path": "  notes/benchmark.md  ",
+                    "description": "  Benchmark notes  ",
+                }
+            ],
+        },
+    }
+    if objective:
+        arguments["objective"] = f"  {objective}  "
+
+    first = manager.record_proposal_preparation_choice(choice, arguments)
+    decision = manager.runtime_state.snapshot()["next_autoresearch_action"]["decision"]
+    expected_evidence = {
+        "idea_category": "constraint_or_risk",
+        "context": "Manager reviewed the selected frontier.",
+        "evidence": "The benchmark requirements are documented.",
+        "related_artifacts": [
+            {"path": "notes/benchmark.md", "description": "Benchmark notes"}
+        ],
+    }
+
+    assert not first.startswith("Error:")
+    assert decision["reason"] == "The research record supports this choice."
+    assert decision["supporting_evidence"] == expected_evidence
+    if objective:
+        assert decision["objective"] == objective
+
+    clean_arguments = {
+        "reason": decision["reason"],
+        "supporting_evidence": expected_evidence,
+        **({"objective": objective} if objective else {}),
+    }
+    replay = manager.record_proposal_preparation_choice(choice, clean_arguments)
+    conflicting_arguments = {
+        **clean_arguments,
+        "supporting_evidence": {
+            **expected_evidence,
+            "evidence": "The benchmark requirements have changed.",
+        },
+    }
+    conflict = manager.record_proposal_preparation_choice(choice, conflicting_arguments)
+
+    assert not replay.startswith("Error:")
+    assert conflict.startswith("Error:")
+
+    runtime = _preparation_runtime(tmp_path)
+    first_log = runtime.log_proposal_preparation_decision(
+        parent_node_id="parent-sha", **decision
+    )
+    replayed_log = runtime.log_proposal_preparation_decision(
+        parent_node_id="parent-sha", **decision
+    )
+    records = runtime.log.records()
+
+    assert replayed_log == first_log
+    assert len(records) == 2
+    assert records[0]["related_artifacts"] == expected_evidence["related_artifacts"]
+
+
 def test_invalid_premise_does_not_advance_preparation(tmp_path):
     manager = _bare_manager(tmp_path)
     _begin_preparation(manager)

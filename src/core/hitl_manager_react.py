@@ -2009,17 +2009,22 @@ class HitlManager:
                     raise HitlValidationError(
                         "Unsupported supporting-evidence category: " + category
                     )
-                _require_text(
-                    evidence.get("context"),
-                    "context",
-                    "Proposal-preparation supporting evidence",
-                )
-                _require_text(
-                    evidence.get("evidence"),
-                    "evidence",
-                    "Proposal-preparation supporting evidence",
-                )
-                _as_related_artifacts(evidence.get("related_artifacts") or [])
+                evidence = {
+                    "idea_category": category,
+                    "context": _require_text(
+                        evidence.get("context"),
+                        "context",
+                        "Proposal-preparation supporting evidence",
+                    ),
+                    "evidence": _require_text(
+                        evidence.get("evidence"),
+                        "evidence",
+                        "Proposal-preparation supporting evidence",
+                    ),
+                    "related_artifacts": _as_related_artifacts(
+                        evidence.get("related_artifacts") or []
+                    ),
+                }
             self.runtime_state.record_next_autoresearch_action_decision(
                 "prepare_proposal",
                 {
