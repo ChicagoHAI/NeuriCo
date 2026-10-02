@@ -11,6 +11,7 @@ files.
 from pathlib import Path
 from typing import Any, Dict, Optional
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -29,6 +30,34 @@ from core.agent_cli import (
     build_agent_environment,
     provider_skill_root,
 )
+
+
+MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS = 900_000
+MAX_RESULTS_SUMMARY_DEPTH = 3
+MAX_RESULTS_SUMMARY_ENTRIES = 1_000
+MAX_RESULTS_SUMMARY_CHARS = 100_000
+MAX_SRC_TREE_ENTRIES = 2_000
+MAX_SRC_TREE_CHARS = 160_000
+
+_CONTEXT_DIRECTORY_NAMES_TO_PRUNE = frozenset(
+    {
+        ".git",
+        ".github",
+        ".neurico",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        ".ipynb_checkpoints",
+        "node_modules",
+    }
+)
+
+
+class AutoResearchProposerPromptTooLargeError(RuntimeError):
+    """Raised before provider launch when a proposer prompt is not safely bounded."""
 
 
 def _generate_compute_backend_section(idea_spec: Dict[str, Any], provider: str = "claude") -> str:
@@ -151,7 +180,7 @@ def generate_autoresearch_proposal_prompt(
         "_(whiteboard has no active tips)_\n",
     )
 
-    return template.render(
+    prompt = template.render(
         title=idea_spec.get("title", "Untitled Research"),
         domain=idea_spec.get("domain", ""),
         work_dir=str(work_dir),
@@ -168,6 +197,20 @@ def generate_autoresearch_proposal_prompt(
         whiteboard_active_tips_md=whiteboard_active_tips_md,
         compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
     )
+    if len(prompt) > MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS:
+        field_sizes = {
+            key: len(json.dumps(value, ensure_ascii=False, default=str))
+            for key, value in context.items()
+        }
+        field_sizes["whiteboard_active_tips_md"] = len(whiteboard_active_tips_md)
+        largest = sorted(field_sizes.items(), key=lambda item: item[1], reverse=True)[:5]
+        details = ", ".join(f"{name}={size}" for name, size in largest)
+        raise AutoResearchProposerPromptTooLargeError(
+            "AutoResearch proposer prompt exceeds NeuriCo's safe internal limit "
+            f"({len(prompt)} > {MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS} characters). "
+            f"Largest context fields: {details}."
+        )
+    return prompt
 
 
 def collect_public_proposal_context(
@@ -279,6 +322,13 @@ def run_autoresearch_proposer(
         hitl_mode=str((env_extra or {}).get("NEURICO_HITL_MODE", "full")),
     )
     prompt = append_prompt_block(prompt, prompt_suffix)
+    if len(prompt) > MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS:
+        raise AutoResearchProposerPromptTooLargeError(
+            "AutoResearch proposer prompt exceeds NeuriCo's safe internal limit after "
+            f"runtime continuation context was added ({len(prompt)} > "
+            f"{MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS} characters; "
+            f"continuation={len(prompt_suffix)} characters)."
+        )
 
     prompt_file = attempt_dir / "proposer_prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
@@ -392,14 +442,10 @@ def run_autoresearch_proposer(
         "elapsed_time": elapsed,
         "error": error,
         "timed_out": bool(launch.get("timed_out")),
-        "background_processes_terminated": bool(
-            launch.get("background_processes_terminated")
-        ),
+        "background_processes_terminated": bool(launch.get("background_processes_terminated")),
     }
     if hitl_submission:
-        result["provider_process_failed"] = bool(
-            launch.get("provider_process_failed")
-        )
+        result["provider_process_failed"] = bool(launch.get("provider_process_failed"))
     return result
 
 
@@ -422,40 +468,150 @@ def _read_json_or_text(path: Path) -> Any:
 def _summarize_directory(path: Path) -> list[Dict[str, Any]]:
     if not path.exists() or not path.is_dir():
         return []
-    entries = []
-    for child in sorted(path.rglob("*")):
-        rel = child.relative_to(path).as_posix()
-        if _is_hidden_context_path(rel):
-            continue
-        if child.is_file():
-            entries.append(
-                {
-                    "path": rel,
-                    "type": "file",
-                    "bytes": child.stat().st_size,
-                }
-            )
-        elif child.is_dir():
-            entries.append(
-                {
-                    "path": rel + "/",
-                    "type": "dir",
-                }
-            )
+    entries: list[Dict[str, Any]] = []
+    used_chars = 0
+    truncated = False
+    budget_exhausted = False
+    root = path.resolve()
+
+    for current, dir_names, file_names in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        current_rel = current_path.relative_to(root)
+        current_depth = len(current_rel.parts)
+        dir_names.sort()
+        file_names.sort()
+
+        retained_dirs: list[str] = []
+        for name in dir_names:
+            child = current_path / name
+            rel = child.relative_to(root).as_posix()
+            if _is_hidden_context_path(rel) or _prune_context_directory(child):
+                continue
+            entry = {"path": rel + "/", "type": "dir"}
+            if not _append_bounded_context_entry(
+                entries,
+                entry,
+                used_chars=used_chars,
+                max_entries=MAX_RESULTS_SUMMARY_ENTRIES,
+                max_chars=MAX_RESULTS_SUMMARY_CHARS,
+            ):
+                truncated = True
+                budget_exhausted = True
+                break
+            entries.append(entry)
+            used_chars += _context_entry_chars(entry)
+            if current_depth + 1 < MAX_RESULTS_SUMMARY_DEPTH:
+                retained_dirs.append(name)
+            else:
+                truncated = True
+        if budget_exhausted:
+            break
+        dir_names[:] = retained_dirs
+
+        for name in file_names:
+            child = current_path / name
+            rel = child.relative_to(root).as_posix()
+            if _is_hidden_context_path(rel):
+                continue
+            try:
+                size = child.stat().st_size
+            except FileNotFoundError:
+                continue
+            entry = {"path": rel, "type": "file", "bytes": size}
+            if not _append_bounded_context_entry(
+                entries,
+                entry,
+                used_chars=used_chars,
+                max_entries=MAX_RESULTS_SUMMARY_ENTRIES,
+                max_chars=MAX_RESULTS_SUMMARY_CHARS,
+            ):
+                truncated = True
+                budget_exhausted = True
+                break
+            entries.append(entry)
+            used_chars += _context_entry_chars(entry)
+        if budget_exhausted:
+            break
+
+    if truncated:
+        entries.append(
+            {
+                "type": "truncated",
+                "message": (
+                    "Additional result artifacts remain available in results/ and may be "
+                    "inspected directly when relevant."
+                ),
+            }
+        )
     return entries
 
 
 def _list_tree(path: Path) -> list[str]:
     if not path.exists() or not path.is_dir():
         return []
-    tree = []
-    for child in sorted(path.rglob("*")):
-        rel = child.relative_to(path).as_posix()
-        if _is_hidden_context_path(rel):
-            continue
-        suffix = "/" if child.is_dir() else ""
-        tree.append(f"src/{rel}{suffix}")
+    tree: list[str] = []
+    used_chars = 0
+    truncated = False
+    root = path.resolve()
+
+    for current, dir_names, file_names in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        dir_names.sort()
+        file_names.sort()
+
+        retained_dirs: list[str] = []
+        for name in dir_names:
+            child = current_path / name
+            rel = child.relative_to(root).as_posix()
+            if _is_hidden_context_path(rel) or _prune_context_directory(child):
+                continue
+            value = f"src/{rel}/"
+            if len(tree) >= MAX_SRC_TREE_ENTRIES or used_chars + len(value) > MAX_SRC_TREE_CHARS:
+                truncated = True
+                break
+            tree.append(value)
+            used_chars += len(value)
+            retained_dirs.append(name)
+        if truncated:
+            break
+        dir_names[:] = retained_dirs
+
+        for name in file_names:
+            child = current_path / name
+            rel = child.relative_to(root).as_posix()
+            if _is_hidden_context_path(rel):
+                continue
+            value = f"src/{rel}"
+            if len(tree) >= MAX_SRC_TREE_ENTRIES or used_chars + len(value) > MAX_SRC_TREE_CHARS:
+                truncated = True
+                break
+            tree.append(value)
+            used_chars += len(value)
+        if truncated:
+            break
+
+    if truncated:
+        tree.append("src/[additional entries omitted; inspect src/ directly when relevant]")
     return tree
+
+
+def _append_bounded_context_entry(
+    entries: list[Dict[str, Any]],
+    entry: Dict[str, Any],
+    *,
+    used_chars: int,
+    max_entries: int,
+    max_chars: int,
+) -> bool:
+    return len(entries) < max_entries and used_chars + _context_entry_chars(entry) <= max_chars
+
+
+def _context_entry_chars(entry: Dict[str, Any]) -> int:
+    return len(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+
+
+def _prune_context_directory(path: Path) -> bool:
+    return path.name in _CONTEXT_DIRECTORY_NAMES_TO_PRUNE
 
 
 def _is_hidden_context_path(rel_path: str) -> bool:

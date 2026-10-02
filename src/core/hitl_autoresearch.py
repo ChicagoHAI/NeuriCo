@@ -62,6 +62,7 @@ from core.hitl_runtime_state import (
 from core.hitl_scoring_workspace import (
     run_isolated_scorer,
     scoring_source_workspace_fingerprint,
+    scoring_source_workspace_scope,
 )
 from core.hitl_stage_runtime import run_worker_with_replacements
 from core.hitl_util import atomic_write_json, utc_now
@@ -2522,13 +2523,20 @@ class HitlAutoResearchController:
                     pending,
                     cached_score,
                 )
+                reviewed_scope = scoring_source_workspace_scope(
+                    pending,
+                    cached_score,
+                )
                 from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
                 if not reviewed_fingerprint:
                     raise RuntimeError(
                         "HITL candidate scoring is missing its reviewed workspace fingerprint."
                     )
-                current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
+                current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+                    self.work_dir,
+                    scope=reviewed_scope,
+                )
                 if current_fingerprint != reviewed_fingerprint:
                     raise RuntimeError(
                         "The public workspace changed after the worker submitted its reviewed finish "
@@ -2543,7 +2551,8 @@ class HitlAutoResearchController:
                 else:
                     self._clear_stale_results_json()
                     source_workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
-                        self.work_dir
+                        self.work_dir,
+                        scope=reviewed_scope,
                     )
                     source_sha = self.checkpoints.create_checkpoint(
                         "HITL AutoResearch candidate before isolated scoring"
@@ -2554,6 +2563,7 @@ class HitlAutoResearchController:
                             "status": "prepared",
                             "source_checkpoint_sha": source_sha,
                             "source_workspace_fingerprint": source_workspace_fingerprint,
+                            "source_workspace_fingerprint_scope": reviewed_scope,
                         },
                     )
                 try:
