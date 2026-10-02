@@ -2076,6 +2076,71 @@ class HitlAutoResearchController:
             premise_idea_ids=list(decision.get("premise_idea_ids") or []),
             supporting_evidence=decision.get("supporting_evidence"),
         )
+        state = HitlRuntimeState(self.work_dir)
+        pending = state.pending_worker_command()
+        matching_admission = (
+            isinstance(pending, dict)
+            and pending.get("kind") == "proposal_preparation"
+            and pending.get("manager_decision_idea_id") == logged["decision_idea_id"]
+        )
+        admission: Optional[Dict[str, Any]] = None
+        if matching_admission and pending.get("status") == "resolved":
+            saved_response = pending.get("response")
+            if not isinstance(saved_response, dict):
+                raise RuntimeError(
+                    "Resolved proposal-preparation admission has no saved response."
+                )
+            admission = dict(saved_response)
+        elif self.hitl_mode is HitlMode.FULL:
+            admission = runtime.manager.review_proposal_preparation_decision(
+                manager_decision_idea_id=str(logged["decision_idea_id"]),
+                choice=choice,
+                reason=str(decision.get("reason", "")).strip(),
+                objective=str(decision.get("objective", "")).strip(),
+                on_finalize=lambda review: runtime.finalize_proposal_preparation_human_admission(
+                    manager_decision_idea_id=str(logged["decision_idea_id"]),
+                    choice=choice,
+                    review=review,
+                ),
+            )
+        elif matching_admission and pending.get("status") == "pending":
+            # adopt_hitl_mode() has already removed any unresolved human reply
+            # when a Full run is deliberately resumed in Auto. The recorded
+            # B-level manager decision is therefore final under the new policy.
+            admission = {
+                "status": "approved",
+                "manager_decision_idea_id": str(logged["decision_idea_id"]),
+            }
+            state.complete_worker_command(str(pending["request_key"]), admission)
+
+        if admission is not None:
+            if admission.get("status") == "feedback":
+                feedback = str(
+                    admission.get("manager_feedback")
+                    or admission.get("human_feedback")
+                    or "Revise the proposal-preparation recommendation."
+                ).strip()
+                state.cancel_next_autoresearch_action(
+                    "prepare_proposal",
+                    reason=feedback,
+                )
+                raise _ProposalPreparationRestart(feedback)
+            if admission.get("status") != "approved":
+                raise RuntimeError(
+                    "Proposal-preparation admission returned an unknown status."
+                )
+            logged = {
+                **logged,
+                **(
+                    {
+                        "human_decision_idea_id": str(
+                            admission["human_decision_idea_id"]
+                        ).strip()
+                    }
+                    if admission.get("human_decision_idea_id")
+                    else {}
+                ),
+            }
         if choice == "proceed_to_proposal":
             return {
                 "choice": choice,

@@ -129,6 +129,8 @@ tools:
       for the next AutoResearch proposal. Available only at the runtime-managed
       proposal-preparation boundary. Supply either finalized premise idea ids or
       one complete supporting-evidence record authored from your own analysis.
+      Auto mode applies the recorded recommendation immediately; Full mode
+      presents it for human admission before proposal generation begins.
     parameters:
       reason:
         type: string
@@ -172,7 +174,9 @@ tools:
       Decide that the next AutoResearch proposal needs a focused resource-finder
       run first. Available only at the runtime-managed proposal-preparation
       boundary. Runtime runs the established resource-finder HITL lifecycle and
-      then proceeds directly to proposal.
+      then proceeds directly to proposal. Auto mode applies the recorded
+      recommendation immediately; Full mode presents it for human admission
+      before resource finding begins.
     parameters:
       objective:
         type: string

@@ -59,7 +59,8 @@ idea
   -> initial experiment
   -> isolated scoring
   -> automatic root frontier node
-  -> manager proposal-preparation choice
+  -> manager proposal-preparation recommendation
+  -> Full: human admission / Auto: immediate application
   -> optional resource finding
   -> proposal
   -> human admission
@@ -67,7 +68,7 @@ idea
   -> isolated scoring
   -> manager accept / reject / repair
   -> frontier maintenance
-  -> next manager proposal-preparation choice
+  -> next manager proposal-preparation recommendation
 ```
 
 Each research stage has a living plan and an execution phase. A worker requests
@@ -184,10 +185,14 @@ on the manager's behalf.
 
 A requested resource run uses the established resource-finder planning,
 approval, execution, review, worker-replacement, and idea-reporting lifecycle.
-In Full mode, its existing human plan-approval behavior remains in effect. In
-Auto mode, its existing manager approval behavior remains in effect. The
-routing choice itself belongs to the manager in both modes. After one approved
-resource run, proposal generation begins without reopening the routing choice.
+The routing recommendation is a B-level manager decision. Auto mode applies it
+immediately. Full mode holds the recommendation for human admission: approval
+is recorded as an A-level decision citing the manager decision before runtime
+applies the route, while feedback returns the preparation boundary to the
+manager for a revised recommendation. If resource finding is approved, its
+existing Full-mode human plan approval and Auto-mode manager plan approval
+remain unchanged. After one approved resource run, proposal generation begins
+without reopening the routing choice.
 
 The approved resource workspace is an unscored proposal base. It does not
 replace or mutate the selected frontier node, its objective score, or its public
@@ -488,6 +493,8 @@ Recovery distinguishes several cases:
 
 - a pending proposal-preparation choice resumes with the same two manager
   tools;
+- a recorded Full-mode preparation recommendation resumes its held human
+  admission request before either route can begin;
 - a recorded resource-finder choice resumes its held planning, execution, or
   review phase, while a completed resource run reuses its prepared checkpoint;
 - an unresolved worker command is resumed by a replacement worker;

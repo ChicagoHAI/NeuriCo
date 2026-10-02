@@ -1443,6 +1443,127 @@ class HitlManager:
             human_inputs=human_inputs,
         )
 
+    def review_proposal_preparation_decision(
+        self,
+        *,
+        manager_decision_idea_id: str,
+        choice: str,
+        reason: str,
+        objective: str = "",
+        on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Obtain Full-HITL admission for one recorded manager recommendation."""
+        from core.hitl import (
+            _is_feedback_placeholder,
+            _load_hitl_template,
+            _normalize_options,
+            _resolve_human_decision,
+        )
+
+        decision_idea_id = self._require_text(
+            manager_decision_idea_id,
+            "manager_decision_idea_id",
+            "Proposal-preparation admission",
+        )
+        selected_choice = self._require_text(
+            choice, "choice", "Proposal-preparation admission"
+        )
+        if selected_choice not in self._PROPOSAL_PREPARATION_TOOL_NAMES:
+            raise ValueError("Proposal-preparation admission has an unknown manager choice.")
+        rationale = self._require_text(
+            reason, "reason", "Proposal-preparation admission"
+        )
+        resource_objective = str(objective).strip()
+        if selected_choice == "request_resource_finder" and not resource_objective:
+            raise ValueError(
+                "Resource-finder proposal preparation requires a non-empty objective."
+            )
+        if selected_choice == "proceed_to_proposal" and resource_objective:
+            raise ValueError(
+                "Direct proposal preparation must not include a resource-finder objective."
+            )
+
+        human_inputs: List[Dict[str, Any]] = []
+        options = _normalize_options(
+            ["Approve manager recommendation.", "Provide feedback."]
+        )
+
+        def validate(data: Dict[str, Any]) -> Dict[str, Any]:
+            status = str(data.get("status", "")).strip()
+            if status not in {"approved", "feedback"}:
+                raise ValueError(
+                    "Proposal-preparation admission status must be approved or feedback."
+                )
+            self._require_text(
+                data.get("context"), "context", "Proposal-preparation admission"
+            )
+            feedback = self._require_text(
+                data.get("human_feedback"),
+                "human_feedback",
+                "Proposal-preparation admission",
+            )
+            if feedback != self._human_reply(
+                human_inputs, "Proposal-preparation admission"
+            ):
+                raise ValueError(
+                    "human_feedback must exactly match the latest ask_human response."
+                )
+            self._require_text(
+                data.get("manager_escalation_reason"),
+                "manager_escalation_reason",
+                "Proposal-preparation admission",
+            )
+            decision = _resolve_human_decision(feedback, options)["decision"]
+            expected = "approved" if decision == "O1" else "feedback"
+            if status != expected:
+                raise ValueError(
+                    "status must match the latest human proposal-preparation response."
+                )
+            if status == "feedback":
+                if _is_feedback_placeholder(feedback):
+                    raise ValueError(
+                        "Ask again for concrete preparation feedback before finalizing."
+                    )
+                self._require_text(
+                    data.get("manager_feedback"),
+                    "manager_feedback",
+                    "Proposal-preparation feedback",
+                )
+            else:
+                data["manager_feedback"] = ""
+            return data
+
+        request = {
+            "manager_decision_idea_id": decision_idea_id,
+            "choice": selected_choice,
+            "reason": rationale,
+            "objective": resource_objective,
+        }
+        prompt = _load_hitl_template(
+            "manager_review_proposal_preparation.txt",
+            choice=selected_choice,
+            reason=rationale,
+            objective=resource_objective,
+        )
+        return self.request_worker_resolution(
+            command={
+                "request_key": self._request_key(
+                    "proposal_preparation",
+                    {"manager_decision_idea_id": decision_idea_id},
+                ),
+                "kind": "proposal_preparation",
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "proposal",
+                "hitl_mode": HitlMode.FULL.value,
+                "requires_human_approval": True,
+                **request,
+            },
+            prompt=prompt,
+            validate=validate,
+            finalize=on_finalize,
+            human_inputs=human_inputs,
+        )
+
     def review_frontier_candidate(
         self,
         *,

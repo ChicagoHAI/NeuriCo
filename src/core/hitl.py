@@ -2302,6 +2302,114 @@ class HitlRuntime:
             ),
         }
 
+    def finalize_proposal_preparation_human_admission(
+        self,
+        *,
+        manager_decision_idea_id: str,
+        choice: str,
+        review: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Record Full HITL's admission of one manager preparation choice."""
+        decision_idea_id = _require_text(
+            manager_decision_idea_id,
+            "manager_decision_idea_id",
+            "Proposal-preparation admission",
+        )
+        manager_record = next(
+            (
+                record
+                for record in reversed(self.log.records())
+                if record.get("idea_id") == decision_idea_id
+            ),
+            None,
+        )
+        if not isinstance(manager_record, dict) or (
+            manager_record.get("idea_type") != "decision"
+            or manager_record.get("level") != "B"
+            or manager_record.get("actor") != "manager"
+            or manager_record.get("decision_needed")
+            != "What preparation should happen before the next AutoResearch proposal?"
+        ):
+            raise HitlValidationError(
+                "Proposal-preparation admission requires its recorded B-level manager decision."
+            )
+        expected_choice = {
+            "O1": "proceed_to_proposal",
+            "O2": "request_resource_finder",
+        }.get(str(manager_record.get("decision", "")).strip())
+        if expected_choice != str(choice).strip():
+            raise HitlValidationError(
+                "Proposal-preparation admission does not match the recorded manager choice."
+            )
+
+        options = _normalize_options(
+            ["Approve manager recommendation.", "Provide feedback."]
+        )
+        human_feedback = _require_text(
+            review.get("human_feedback"),
+            "human_feedback",
+            "Proposal-preparation admission",
+        )
+        human_decision = _resolve_human_decision(human_feedback, options)
+        decision = human_decision["decision"]
+        approved = decision == "O1"
+        expected_status = "approved" if approved else "feedback"
+        if str(review.get("status", "")).strip() != expected_status:
+            raise HitlValidationError(
+                "Proposal-preparation status does not match the human response."
+            )
+        if not approved and _is_feedback_placeholder(human_feedback):
+            raise HitlValidationError(
+                "Proposal-preparation feedback must contain concrete instructions."
+            )
+        manager_feedback = (
+            ""
+            if approved
+            else _require_text(
+                review.get("manager_feedback"),
+                "manager_feedback",
+                "Proposal-preparation feedback",
+            )
+        )
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "proposal",
+            "idea_type": "decision",
+            "idea_category": "search_strategy",
+            "level": "A",
+            "actor": "human",
+            "premises": [decision_idea_id],
+            "context": str(
+                review.get(
+                    "context",
+                    "Human reviewed the manager's proposal-preparation recommendation.",
+                )
+            ).strip(),
+            "related_artifacts": [],
+            "decision_needed": (
+                "Should the manager's proposal-preparation recommendation be approved?"
+            ),
+            "options": options,
+            "decision": decision,
+            "human_feedback": human_feedback,
+            "manager_feedback": manager_feedback,
+            "manager_escalation_reason": _require_text(
+                review.get("manager_escalation_reason"),
+                "manager_escalation_reason",
+                "Proposal-preparation admission",
+            ),
+            "raised": True,
+            "parent_node_id": str(manager_record.get("parent_node_id", "")).strip(),
+        }
+        human_record = self.log.append(record, idempotent=True)
+        return {
+            "status": expected_status,
+            "manager_decision_idea_id": decision_idea_id,
+            "human_decision_idea_id": str(human_record["idea_id"]),
+            "human_feedback": human_feedback,
+            "manager_feedback": manager_feedback,
+        }
+
     def log_frontier_maintenance_decision(
         self,
         *,
