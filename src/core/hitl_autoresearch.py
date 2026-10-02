@@ -2083,15 +2083,10 @@ class HitlAutoResearchController:
             and pending.get("kind") == "proposal_preparation"
             and pending.get("manager_decision_idea_id") == logged["decision_idea_id"]
         )
-        admission: Optional[Dict[str, Any]] = None
-        if matching_admission and pending.get("status") == "resolved":
-            saved_response = pending.get("response")
-            if not isinstance(saved_response, dict):
-                raise RuntimeError(
-                    "Resolved proposal-preparation admission has no saved response."
-                )
-            admission = dict(saved_response)
-        elif self.hitl_mode is HitlMode.FULL:
+        admission = runtime._terminal_proposal_preparation_admission(
+            str(logged["decision_idea_id"])
+        )
+        if admission is None and self.hitl_mode is HitlMode.FULL:
             admission = runtime.manager.review_proposal_preparation_decision(
                 manager_decision_idea_id=str(logged["decision_idea_id"]),
                 choice=choice,
@@ -2103,7 +2098,11 @@ class HitlAutoResearchController:
                     review=review,
                 ),
             )
-        elif matching_admission and pending.get("status") == "pending":
+        elif (
+            admission is None
+            and matching_admission
+            and pending.get("status") == "pending"
+        ):
             # adopt_hitl_mode() has already removed any unresolved human reply
             # when a Full run is deliberately resumed in Auto. The recorded
             # B-level manager decision is therefore final under the new policy.
@@ -2346,17 +2345,6 @@ class HitlAutoResearchController:
                 "Inserted resource-finder request cannot be resumed from its saved state."
             )
 
-        if not continuation_belongs_here:
-            raise RuntimeError(
-                "Inserted resource-finder request has no matching worker continuation."
-            )
-        saved_phase = str(continuation.get("hitl_stage", "")).strip()
-        prompt_block = str(continuation.get("prompt_block", "")).strip()
-        if saved_phase not in {"plan", "execution", "review"} or not prompt_block:
-            raise RuntimeError(
-                "Inserted resource-finder request has no matching worker continuation."
-            )
-
         if saved_approval:
             expected_fingerprint = str(pending.get("workspace_fingerprint", "")).strip()
             current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
@@ -2372,6 +2360,17 @@ class HitlAutoResearchController:
                 )
             state.clear_worker_continuation()
             return {"success": True, "resumed": True}, {"approved": True}
+
+        if not continuation_belongs_here:
+            raise RuntimeError(
+                "Inserted resource-finder request has no matching worker continuation."
+            )
+        saved_phase = str(continuation.get("hitl_stage", "")).strip()
+        prompt_block = str(continuation.get("prompt_block", "")).strip()
+        if saved_phase not in {"plan", "execution", "review"} or not prompt_block:
+            raise RuntimeError(
+                "Inserted resource-finder request has no matching worker continuation."
+            )
 
         resume_prompt = _load_hitl_template("worker_resume_pending_request.txt")
         if saved_plan_approval:

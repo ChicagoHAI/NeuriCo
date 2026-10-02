@@ -1950,6 +1950,41 @@ class HitlRuntime:
                 }
         return None
 
+    def _terminal_proposal_preparation_admission(
+        self,
+        manager_decision_idea_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return Full HITL's recorded admission of one preparation choice."""
+        decision_idea_id = str(manager_decision_idea_id).strip()
+        if not decision_idea_id:
+            return None
+        for record in reversed(self.log.records()):
+            if (
+                record.get("idea_type") != "decision"
+                or record.get("level") != "A"
+                or record.get("actor") != "human"
+                or str(record.get("decision_needed", "")).strip()
+                != "Should the manager's proposal-preparation recommendation be approved?"
+                or decision_idea_id not in _normalize_premises(record.get("premises"))
+            ):
+                continue
+            decision = str(record.get("decision", "")).strip()
+            if decision == "O1":
+                return {
+                    "status": "approved",
+                    "manager_decision_idea_id": decision_idea_id,
+                    "human_decision_idea_id": str(record.get("idea_id", "")).strip(),
+                    "human_feedback": str(record.get("human_feedback", "")).strip(),
+                }
+            return {
+                "status": "feedback",
+                "manager_decision_idea_id": decision_idea_id,
+                "human_decision_idea_id": str(record.get("idea_id", "")).strip(),
+                "human_feedback": str(record.get("human_feedback", "")).strip(),
+                "manager_feedback": str(record.get("manager_feedback", "")).strip(),
+            }
+        return None
+
     def proposal_submit_result_after_worker_exit(
         self,
         result: Dict[str, Any],

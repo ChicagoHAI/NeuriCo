@@ -42,6 +42,12 @@ def _manager_evidence(text: str = "The current research record needs one focused
     }
 
 
+def _preparation_runtime(work_dir: Path) -> HitlRuntime:
+    runtime = HitlRuntime.__new__(HitlRuntime)
+    runtime.log = HitlIdeaLog(work_dir)
+    return runtime
+
+
 def _begin_preparation(manager: HitlManager, parent: str = "parent-sha") -> None:
     manager.runtime_state.begin_next_autoresearch_action(
         {"kind": "prepare_proposal", "parent_node_id": parent}
@@ -608,7 +614,8 @@ def test_controller_dispatches_only_the_recorded_preparation_choice(
     logged = []
     runtime = SimpleNamespace(
         log_proposal_preparation_decision=lambda **kwargs: logged.append(kwargs)
-        or {"decision_idea_id": "I7"}
+        or {"decision_idea_id": "I7"},
+        _terminal_proposal_preparation_admission=lambda idea_id: None,
     )
     controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
     controller.hitl_mode = HitlMode.AUTO
@@ -660,6 +667,7 @@ def test_full_mode_requires_admission_before_dispatch(tmp_path):
             ("manager_decision", kwargs)
         )
         or {"decision_idea_id": "I7"},
+        _terminal_proposal_preparation_admission=lambda idea_id: None,
     )
     controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
     controller.hitl_mode = HitlMode.FULL
@@ -716,6 +724,7 @@ def test_full_mode_feedback_reopens_preparation_without_dispatch(tmp_path):
         log_proposal_preparation_decision=lambda **kwargs: {
             "decision_idea_id": "I7"
         },
+        _terminal_proposal_preparation_admission=lambda idea_id: None,
     )
     controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
     controller.hitl_mode = HitlMode.FULL
@@ -739,7 +748,7 @@ def test_full_mode_feedback_reopens_preparation_without_dispatch(tmp_path):
     assert state.snapshot()["next_autoresearch_action"]["status"] == "cancelled"
 
 
-def test_resolved_human_feedback_is_replayed_without_reopening_approval(tmp_path):
+def test_recorded_human_feedback_is_replayed_without_reopening_approval(tmp_path):
     state = HitlRuntimeState(tmp_path)
     state.begin_next_autoresearch_action(
         {"kind": "prepare_proposal", "parent_node_id": "frontier-parent"}
@@ -747,39 +756,30 @@ def test_resolved_human_feedback_is_replayed_without_reopening_approval(tmp_path
     decision = {
         "choice": "proceed_to_proposal",
         "reason": "The current record is sufficient.",
-        "premise_idea_ids": ["I1"],
+        "premise_idea_ids": [],
+        "supporting_evidence": _manager_evidence("The current record is sufficient."),
     }
     state.record_next_autoresearch_action_decision("prepare_proposal", decision)
-    state.begin_worker_command(
-        {
-            "request_key": "approval-key",
-            "kind": "proposal_preparation",
-            "pipeline_stage": "experiment_runner",
-            "hitl_stage": "proposal",
-            "hitl_mode": "full",
-            "requires_human_approval": True,
-            "manager_decision_idea_id": "I7",
-        }
+    runtime = _preparation_runtime(tmp_path)
+    logged = runtime.log_proposal_preparation_decision(
+        parent_node_id="frontier-parent",
+        **decision,
     )
-    state.complete_worker_command(
-        "approval-key",
-        {
+    runtime.finalize_proposal_preparation_human_admission(
+        manager_decision_idea_id=logged["decision_idea_id"],
+        choice=decision["choice"],
+        review={
             "status": "feedback",
-            "manager_decision_idea_id": "I7",
-            "human_decision_idea_id": "I8",
             "human_feedback": "Provide feedback: verify the license first.",
             "manager_feedback": "Verify the license first.",
+            "manager_escalation_reason": "Human approval is required in Full mode.",
+            "context": "Human reviewed the manager recommendation.",
         },
     )
-    runtime = SimpleNamespace(
-        manager=SimpleNamespace(
-            review_proposal_preparation_decision=lambda **kwargs: pytest.fail(
-                "a resolved admission must not be reopened"
-            )
-        ),
-        log_proposal_preparation_decision=lambda **kwargs: {
-            "decision_idea_id": "I7"
-        },
+    runtime.manager = SimpleNamespace(
+        review_proposal_preparation_decision=lambda **kwargs: pytest.fail(
+            "a recorded admission must not be reopened"
+        )
     )
     controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
     controller.hitl_mode = HitlMode.FULL
@@ -793,6 +793,70 @@ def test_resolved_human_feedback_is_replayed_without_reopening_approval(tmp_path
         )
 
     assert state.snapshot()["next_autoresearch_action"]["status"] == "cancelled"
+
+
+def test_recorded_human_approval_resumes_active_resource_request(tmp_path):
+    state = HitlRuntimeState(tmp_path)
+    state.begin_next_autoresearch_action(
+        {"kind": "prepare_proposal", "parent_node_id": "frontier-parent"}
+    )
+    decision = {
+        "choice": "request_resource_finder",
+        "reason": "A benchmark source is still missing.",
+        "objective": "Find the benchmark source.",
+        "premise_idea_ids": [],
+        "supporting_evidence": _manager_evidence("The benchmark source is missing."),
+    }
+    state.record_next_autoresearch_action_decision("prepare_proposal", decision)
+    runtime = _preparation_runtime(tmp_path)
+    logged = runtime.log_proposal_preparation_decision(
+        parent_node_id="frontier-parent",
+        **decision,
+    )
+    admission = runtime.finalize_proposal_preparation_human_admission(
+        manager_decision_idea_id=logged["decision_idea_id"],
+        choice=decision["choice"],
+        review={
+            "status": "approved",
+            "human_feedback": "Approve manager recommendation.",
+            "manager_escalation_reason": "Human approval is required in Full mode.",
+            "context": "Human reviewed the manager recommendation.",
+        },
+    )
+    state.begin_worker_command(
+        {
+            "request_key": "resource-request",
+            "kind": "phase_finish",
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+            "provenance": {"parent_node_id": "frontier-parent"},
+        }
+    )
+    runtime.manager = SimpleNamespace(
+        review_proposal_preparation_decision=lambda **kwargs: pytest.fail(
+            "a recorded admission must not be reopened"
+        )
+    )
+    controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
+    controller.hitl_mode = HitlMode.FULL
+    controller.work_dir = tmp_path
+    dispatched = []
+    controller._run_inserted_resource_finder = lambda **kwargs: dispatched.append(kwargs) or {
+        "proposal_base_sha": "resource-workspace",
+        **kwargs["logged"],
+    }
+
+    result = controller._apply_proposal_preparation_decision(
+        runtime=runtime,
+        parent_sha="frontier-parent",
+        decision=decision,
+    )
+
+    assert result["human_decision_idea_id"] == admission["human_decision_idea_id"]
+    assert len(dispatched) == 1
+    pending = state.pending_worker_command()
+    assert pending["request_key"] == "resource-request"
+    assert pending["status"] == "pending"
 
 
 def test_auto_resume_makes_unresolved_manager_decision_final(tmp_path):
@@ -821,7 +885,8 @@ def test_auto_resume_makes_unresolved_manager_decision_final(tmp_path):
     runtime = SimpleNamespace(
         log_proposal_preparation_decision=lambda **kwargs: {
             "decision_idea_id": "I7"
-        }
+        },
+        _terminal_proposal_preparation_admission=lambda idea_id: None,
     )
     controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
     controller.hitl_mode = HitlMode.AUTO
@@ -1163,6 +1228,7 @@ def test_inserted_resource_final_approval_is_validated_without_worker_relaunch(t
         },
         workspace_fingerprint=fingerprint,
     )
+    HitlRuntimeState(tmp_path).clear_worker_continuation()
     controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
     controller.work_dir = tmp_path
     runtime = _ResourceResumeRuntimeStub(tmp_path)
@@ -1185,6 +1251,40 @@ def test_inserted_resource_final_approval_is_validated_without_worker_relaunch(t
     )
     controller._discard_completed_preparation_rollback()
     assert HitlRuntimeState(tmp_path).pending_worker_command() is None
+
+
+def test_inserted_resource_final_approval_rejects_changed_workspace_without_continuation(
+    tmp_path,
+):
+    parent = "frontier-parent"
+    (tmp_path / "literature_review.md").write_text("review\n", encoding="utf-8")
+    (tmp_path / "resources.md").write_text("resources\n", encoding="utf-8")
+    fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path)
+    _record_resource_choice(tmp_path, parent)
+    _record_resource_worker_recovery(
+        tmp_path,
+        parent_sha=parent,
+        continuation_phase="review",
+        response={
+            "status": "approved",
+            "context": "The resource artifacts are complete.",
+            "manager_feedback": "",
+        },
+        workspace_fingerprint=fingerprint,
+    )
+    state = HitlRuntimeState(tmp_path)
+    state.clear_worker_continuation()
+    (tmp_path / "resources.md").write_text("changed after review\n", encoding="utf-8")
+    controller = har.HitlAutoResearchController.__new__(har.HitlAutoResearchController)
+    controller.work_dir = tmp_path
+
+    with pytest.raises(RuntimeError, match="workspace changed"):
+        controller._resume_inserted_resource_worker(
+            _ResourceResumeRuntimeStub(tmp_path),
+            lambda *args, **kwargs: pytest.fail("final approval must not relaunch a worker"),
+            {phase: phase for phase in ("plan", "execution", "review")},
+            lambda: {"valid": True, "issues": []},
+        )
 
 
 def test_inserted_resource_does_not_consume_another_parent_continuation(tmp_path):
