@@ -597,6 +597,98 @@ def test_shared_resource_runner_injects_objective_without_pipeline_bookkeeping(
     assert delegated["force_fresh_plan"] is False
 
 
+def test_optional_resource_runner_preserves_each_physical_launch_log(tmp_path, monkeypatch):
+    delegated = {}
+    launches = []
+
+    monkeypatch.setattr(
+        hrf,
+        "generate_resource_finder_prompt",
+        lambda *args, **kwargs: kwargs["hitl_phase"],
+    )
+    monkeypatch.setattr(
+        hrf,
+        "run_plan_centered_hitl_stage",
+        lambda **kwargs: delegated.update(kwargs) or {"success": True},
+    )
+
+    def run_resource_finder(**kwargs):
+        launches.append(kwargs["log_prefix"])
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / f'{kwargs["log_prefix"]}_prompt.txt').write_text(
+            kwargs["prompt_override"], encoding="utf-8"
+        )
+        return {"success": True}
+
+    monkeypatch.setattr(hrf, "run_resource_finder", run_resource_finder)
+    runtime = SimpleNamespace(
+        register_worker_prompt=lambda prompt: None,
+        idea_tool_env=lambda: {},
+    )
+    hrf.run_resource_finder_hitl(
+        runtime=runtime,
+        idea={"title": "Research"},
+        work_dir=tmp_path,
+        provider="codex",
+        templates_dir=tmp_path,
+        timeout=None,
+        full_permissions=True,
+        preserve_log_history=True,
+        on_approved=lambda result, finish: result,
+        on_failed=lambda failed: failed,
+    )
+
+    launch_worker = delegated["launch_worker"]
+    launch_worker("first prompt", "shared-prefix", record_continuation=False)
+    launch_worker("second prompt", "shared-prefix", record_continuation=False)
+
+    assert launches == ["shared-prefix_attempt1", "shared-prefix_attempt2"]
+    assert (tmp_path / "logs" / "shared-prefix_attempt1_prompt.txt").read_text(
+        encoding="utf-8"
+    ) == "first prompt"
+
+
+def test_resource_runner_keeps_fixed_log_prefix_by_default(tmp_path, monkeypatch):
+    delegated = {}
+    launches = []
+
+    monkeypatch.setattr(
+        hrf,
+        "generate_resource_finder_prompt",
+        lambda *args, **kwargs: kwargs["hitl_phase"],
+    )
+    monkeypatch.setattr(
+        hrf,
+        "run_plan_centered_hitl_stage",
+        lambda **kwargs: delegated.update(kwargs) or {"success": True},
+    )
+    monkeypatch.setattr(
+        hrf,
+        "run_resource_finder",
+        lambda **kwargs: launches.append(kwargs["log_prefix"]) or {"success": True},
+    )
+    runtime = SimpleNamespace(
+        register_worker_prompt=lambda prompt: None,
+        idea_tool_env=lambda: {},
+    )
+    hrf.run_resource_finder_hitl(
+        runtime=runtime,
+        idea={"title": "Research"},
+        work_dir=tmp_path,
+        provider="codex",
+        templates_dir=tmp_path,
+        timeout=None,
+        full_permissions=True,
+        on_approved=lambda result, finish: result,
+        on_failed=lambda failed: failed,
+    )
+
+    delegated["launch_worker"]("prompt", "fixed-prefix", record_continuation=False)
+
+    assert launches == ["fixed-prefix"]
+
+
 def test_fixed_resource_stage_keeps_its_existing_pipeline_bookkeeping(tmp_path, monkeypatch):
     events = []
     delegated = {}
@@ -1671,6 +1763,7 @@ def test_inserted_resource_success_creates_unscored_workspace_without_frontier_m
     controller, runtime = _resource_controller(tmp_path, checkpoints)
 
     def approve(**kwargs):
+        assert kwargs["preserve_log_history"] is True
         (tmp_path / "literature_review.md").write_text("review\n", encoding="utf-8")
         (tmp_path / "resources.md").write_text("resources\n", encoding="utf-8")
         return kwargs["on_approved"]({"outputs": {}}, {"approved": True})

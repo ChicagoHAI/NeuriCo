@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
+from core.agent_runner import next_attempt_number
 from core.hitl import HitlValidationError, RequiredArtifact, verify_required_artifacts
 from core.hitl_stage_runtime import run_plan_centered_hitl_stage
 
@@ -31,6 +32,7 @@ def run_resource_finder_hitl(
     resume_worker: Optional[ResumeHook] = None,
     force_fresh_plan: bool = False,
     log_prefix: str = "resource_finder_hitl",
+    preserve_log_history: bool = False,
 ) -> Dict[str, Any]:
     """Run the established resource-finder plan/review/execution lifecycle."""
     root = Path(work_dir)
@@ -72,6 +74,14 @@ def run_resource_finder_hitl(
     ) -> Dict[str, Any]:
         if record_continuation:
             runtime.register_worker_prompt(worker_prompt)
+        launch_log_prefix = worker_log_prefix
+        if preserve_log_history:
+            logs_dir = root / "logs"
+            attempt = next_attempt_number(
+                logs_dir,
+                lambda number: f"{worker_log_prefix}_attempt{number}_prompt.txt",
+            )
+            launch_log_prefix = f"{worker_log_prefix}_attempt{attempt}"
         return run_resource_finder(
             idea=idea,
             work_dir=root,
@@ -80,7 +90,7 @@ def run_resource_finder_hitl(
             timeout=timeout,
             full_permissions=full_permissions,
             completion_mode="hitl_runtime",
-            log_prefix=worker_log_prefix,
+            log_prefix=launch_log_prefix,
             include_hitl_outputs=True,
             env_extra=runtime.idea_tool_env(),
             prompt_override=worker_prompt,

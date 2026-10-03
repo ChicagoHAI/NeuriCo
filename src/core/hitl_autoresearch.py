@@ -2416,6 +2416,7 @@ class HitlAutoResearchController:
                 resume_worker=self._resume_inserted_resource_worker,
                 force_fresh_plan=True,
                 log_prefix=f"autoresearch_resource_finder_{decision_idea_id}",
+                preserve_log_history=True,
                 on_approved=complete_approved,
                 on_failed=restore_failed,
             )
