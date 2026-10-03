@@ -370,6 +370,7 @@ class ResearchRunner:
         private: bool = False,
         force_fresh: bool = False,
         scoring_enabled: bool = False,
+        benchmark_mode: bool = False,
         rule_maker_timeout: int = 1800,
         scorer_timeout: int = 600,
         bootstrap_mode: bool = False,
@@ -412,6 +413,8 @@ class ResearchRunner:
             resource_finder_timeout: Timeout for resource finder in seconds (default: 45 min)
             use_scribe: Use scribe for notebook integration (default: False, raw CLI)
             write_paper: Generate paper draft after experiments (default: False)
+            benchmark_mode: Treat the supplied workspace artifact and scorer as
+                the completion contract instead of requiring REPORT.md.
             paper_style: Paper template style (neurips, icml, acl, ams). None = auto-detect from domain
             paper_timeout: Timeout for paper writing in seconds
             force_fresh: Ignore existing local workspace and start a new run from scratch
@@ -1262,6 +1265,7 @@ class ResearchRunner:
                             hitl_mode=selected_hitl_mode,
                         )
                     else:
+                        initial_args["benchmark_mode"] = benchmark_mode
                         initial_result = construct_fresh_initial_node(**initial_args)
                     pipeline_result = initial_result.pipeline_result or {
                         "success": initial_result.success,
@@ -1312,6 +1316,7 @@ class ResearchRunner:
                         full_permissions=full_permissions,
                         use_scribe=use_scribe,
                         scoring_enabled=scoring_enabled,
+                        benchmark_mode=benchmark_mode,
                         rule_maker_timeout=None if hitl else rule_maker_timeout,
                         scorer_timeout=None if hitl else scorer_timeout,
                         bootstrap_mode=bootstrap_mode,

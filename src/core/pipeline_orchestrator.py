@@ -762,6 +762,7 @@ class ResearchPipelineOrchestrator:
         full_permissions: bool = True,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
+        benchmark_mode: bool = False,
         rule_maker_timeout: Optional[int] = 1800,  # 30 min
         scorer_timeout: Optional[int] = 600,  # 10 min
         bootstrap_mode: bool = False,
@@ -784,6 +785,8 @@ class ResearchPipelineOrchestrator:
                              (rule_maker between resource_finder and experiment_runner,
                              scorer after experiment_runner) and seals scoring/ inputs
                              from the runner. Default False = legacy two-stage flow.
+            benchmark_mode: If True, the scored workspace artifact is the output;
+                             do not require the research-only REPORT.md deliverable.
             rule_maker_timeout: Timeout for rule_maker stage in seconds (scoring mode only)
             scorer_timeout: Timeout for scorer stage in seconds (scoring mode only)
             bootstrap_mode: If True, design scoring for an existing workspace whose
@@ -973,6 +976,7 @@ class ResearchPipelineOrchestrator:
                             full_permissions=full_permissions,
                             use_scribe=use_scribe,
                             scoring_enabled=scoring_enabled,
+                            benchmark_mode=benchmark_mode,
                         )
                 finally:
                     if scoring_enabled and not hitl_enabled:
@@ -1618,6 +1622,7 @@ class ResearchPipelineOrchestrator:
         full_permissions: bool,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
+        benchmark_mode: bool = False,
         runtime_prompt: Optional[str] = None,
         log_prefix: str = "execution",
         track_pipeline_state: bool = True,
@@ -1636,7 +1641,7 @@ class ResearchPipelineOrchestrator:
         if track_pipeline_state:
             self.state.start_stage(
                 "experiment_runner",
-                expected_outputs=["REPORT.md"],
+                expected_outputs=[] if benchmark_mode else ["REPORT.md"],
                 next_steps=[
                     "Validate the report and experimental artifacts before finalizing."
                 ],
