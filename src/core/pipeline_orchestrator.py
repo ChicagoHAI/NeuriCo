@@ -28,7 +28,10 @@ import subprocess
 import sys
 import time
 
-from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder, parse_token_usage, print_token_summary
 from agents.eval_verifier import (
     FAILURE_KIND_EVIDENCE_INVALID,
     build_manager_conformance_report,
@@ -1717,6 +1720,9 @@ class ResearchPipelineOrchestrator:
             elapsed = time.time() - start_time
             print(f"⏱️  Experiment runner completed in {elapsed:.1f}s ({elapsed / 60:.1f} minutes)")
 
+            token_usage = parse_token_usage(transcript_file, provider=provider)
+            print_token_summary(token_usage, label="Experiment Runner")
+
             if run_result.get("timed_out"):
                 print(f"\n⏱️  Experiment runner timed out after {timeout} seconds")
                 success = False
@@ -1739,6 +1745,7 @@ class ResearchPipelineOrchestrator:
                 "background_processes_terminated": bool(
                     run_result.get("background_processes_terminated")
                 ),
+                "token_usage": token_usage,
             }
             if runtime_prompt is not None:
                 result["provider_process_failed"] = bool(
