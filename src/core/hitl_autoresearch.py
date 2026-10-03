@@ -1300,8 +1300,11 @@ def _finish_persisted_frontier_decision(
     return _restore_selected_checkpoint(work_dir, selected)
 
 
-def _require_budget_exhausted_stop(work_dir: Path, request_id: str) -> None:
-    """Refuse to apply benchmark finalization without its exact persisted cause."""
+_BUDGET_PREPARATION_CLEANUP_KEY = "autoresearch_preparation_cleanup"
+_BUDGET_PREPARATION_CLEANUP_STATUSES = {"prepared", "restored", "completed"}
+
+
+def _read_budget_exhausted_stop(work_dir: Path, request_id: str) -> Dict[str, Any]:
     normalized = str(request_id).strip()
     if not normalized or not re.fullmatch(r"[A-Za-z0-9_.-]+", normalized):
         raise ValueError("Budget finalization requires a valid request ID.")
@@ -1318,6 +1321,157 @@ def _require_budget_exhausted_stop(work_dir: Path, request_id: str) -> None:
         or record.get("requested_by") != "budget_exhausted"
     ):
         raise RuntimeError("Budget finalization is available only for budget_exhausted.")
+    return record
+
+
+def _require_budget_exhausted_stop(work_dir: Path, request_id: str) -> None:
+    """Refuse to apply benchmark finalization without its exact persisted cause."""
+    _read_budget_exhausted_stop(work_dir, request_id)
+
+
+def _validate_budget_preparation_cleanup(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise RuntimeError("Budget preparation cleanup state is invalid.")
+    status = str(value.get("status", "")).strip()
+    parent = str(value.get("parent_node_id", "")).strip()
+    action_status = str(value.get("action_status", "")).strip()
+    recovery = value.get("recovery")
+    if (
+        status not in _BUDGET_PREPARATION_CLEANUP_STATUSES
+        or not parent
+        or action_status not in {"pending", "decision_recorded", "resolved", "cancelled"}
+        or (recovery is not None and not isinstance(recovery, dict))
+    ):
+        raise RuntimeError("Budget preparation cleanup state is malformed.")
+    return dict(value)
+
+
+def _begin_budget_preparation_cleanup(
+    work_dir: Path,
+    *,
+    request_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Move active preparation rollback ownership into the durable stop request."""
+    path = hitl_stop_request_path(work_dir, request_id)
+    stop = _read_budget_exhausted_stop(work_dir, request_id)
+    existing = stop.get(_BUDGET_PREPARATION_CLEANUP_KEY)
+    if existing is not None:
+        return _validate_budget_preparation_cleanup(existing)
+
+    action = HitlRuntimeState(work_dir).snapshot().get("next_autoresearch_action")
+    if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
+        return None
+    parent = str(action.get("parent_node_id", "")).strip()
+    status = str(action.get("status", "")).strip()
+    if not parent or status not in {
+        "pending",
+        "decision_recorded",
+        "resolved",
+        "cancelled",
+    }:
+        raise RuntimeError("Active proposal preparation is invalid.")
+    recovery = action.get("recovery")
+    if recovery is not None:
+        if not isinstance(recovery, dict):
+            raise RuntimeError("Proposal preparation has invalid recovery state.")
+        # Validate both rollback objects before the stop request assumes ownership.
+        HitlStageRollback.from_descriptor(work_dir, recovery)
+
+    cleanup = {
+        "version": 1,
+        "status": "prepared",
+        "parent_node_id": parent,
+        "action_status": status,
+        **({"recovery": dict(recovery)} if isinstance(recovery, dict) else {}),
+    }
+    stop[_BUDGET_PREPARATION_CLEANUP_KEY] = cleanup
+    atomic_write_json(path, stop, ensure_ascii=True, indent=2)
+    return cleanup
+
+
+def _advance_budget_preparation_cleanup(
+    work_dir: Path,
+    *,
+    request_id: str,
+    expected_status: str,
+    status: str,
+) -> Dict[str, Any]:
+    stop = _read_budget_exhausted_stop(work_dir, request_id)
+    cleanup = _validate_budget_preparation_cleanup(stop.get(_BUDGET_PREPARATION_CLEANUP_KEY))
+    current = str(cleanup.get("status", "")).strip()
+    if current == status:
+        return cleanup
+    if current != expected_status:
+        raise RuntimeError("Budget preparation cleanup changed during finalization.")
+    cleanup["status"] = status
+    stop[_BUDGET_PREPARATION_CLEANUP_KEY] = cleanup
+    atomic_write_json(
+        hitl_stop_request_path(work_dir, request_id),
+        stop,
+        ensure_ascii=True,
+        indent=2,
+    )
+    return cleanup
+
+
+def _finalize_budget_exhausted_preparation(
+    work_dir: Path,
+    *,
+    request_id: str,
+    selected_sha: str,
+) -> None:
+    """Reconcile pre-proposal work before acknowledging budget exhaustion."""
+    cleanup = _begin_budget_preparation_cleanup(
+        work_dir,
+        request_id=request_id,
+    )
+    if cleanup is None:
+        _restore_selected_checkpoint(work_dir, selected_sha)
+        return
+
+    status = str(cleanup["status"])
+    recovery = cleanup.get("recovery")
+    if status == "prepared":
+        if cleanup["action_status"] != "resolved" and isinstance(recovery, dict):
+            rollback = HitlStageRollback.from_descriptor(work_dir, recovery)
+            CheckpointManager(work_dir).restore_checkpoint(
+                rollback.checkpoint_sha,
+                clean_untracked_public=True,
+            )
+            rollback.state_store.restore(rollback.hitl_snapshot)
+
+        request_key = HitlRuntimeState(work_dir).retire_proposal_preparation_for_budget(
+            parent_node_id=str(cleanup["parent_node_id"]),
+        )
+        if request_key:
+            HitlManagerInbox(work_dir).discard_resolution_reply(request_key)
+        cleanup = _advance_budget_preparation_cleanup(
+            work_dir,
+            request_id=request_id,
+            expected_status="prepared",
+            status="restored",
+        )
+        status = "restored"
+
+    if status == "restored":
+        _restore_selected_checkpoint(work_dir, selected_sha)
+        if isinstance(recovery, dict):
+            ref = str(recovery.get("hitl_snapshot_ref", "")).strip()
+            if not ref.startswith("refs/neurico/hitl-rollback/"):
+                raise RuntimeError("Budget preparation cleanup has an invalid snapshot ref.")
+            HitlGitStateStore(work_dir).discard(ref)
+        _advance_budget_preparation_cleanup(
+            work_dir,
+            request_id=request_id,
+            expected_status="restored",
+            status="completed",
+        )
+        return
+
+    if status == "completed":
+        _restore_selected_checkpoint(work_dir, selected_sha)
+        return
+    raise RuntimeError("Budget preparation cleanup has an unknown status.")
 
 
 def finalize_budget_exhausted_autoresearch(
@@ -1360,46 +1514,47 @@ def finalize_budget_exhausted_autoresearch(
                 marker=marker,
                 attempt_dir=attempt_dir,
             )
-            return BudgetExhaustionFinalizationResult(
-                outcome="selected_node_restored",
-                restored_checkpoint_sha=selected,
-            )
-
-        selected = frontier.state(allow_unselected=True)["selected_frontier_node_sha"]
-        if selected is None:
-            return BudgetExhaustionFinalizationResult(outcome="no_selected_node")
-        rejected_cleanup = state.pending_rejected_whiteboard_cleanup()
-        if (
-            isinstance(rejected_cleanup, dict)
-            and rejected_cleanup.get("status") == "pending"
-            and rejected_cleanup.get("attempt_id") == marker
-        ):
-            _restore_selected_checkpoint(work_dir, selected)
-            _recover_rejected_whiteboard_cleanup(
-                work_dir=work_dir,
-                attempt_dir=attempt_dir,
-                attempt_marker=marker,
-                runtime_state=state,
-            )
         else:
-            _rollback_interrupted_attempt_to_selected_node(
-                work_dir=work_dir,
-                marker=marker,
-                attempt_dir=attempt_dir,
-                history_root=history_root,
-                selected_sha=selected,
-                phase="budget_exhausted",
-                reason=(
-                    "The launch exhausted its time budget before this attempt reached "
-                    "a recorded frontier decision."
-                ),
-                verify_selected_checkpoint=True,
-            )
+            selected = frontier.state(allow_unselected=True)["selected_frontier_node_sha"]
+            if selected is None:
+                return BudgetExhaustionFinalizationResult(outcome="no_selected_node")
+            rejected_cleanup = state.pending_rejected_whiteboard_cleanup()
+            if (
+                isinstance(rejected_cleanup, dict)
+                and rejected_cleanup.get("status") == "pending"
+                and rejected_cleanup.get("attempt_id") == marker
+            ):
+                _restore_selected_checkpoint(work_dir, selected)
+                _recover_rejected_whiteboard_cleanup(
+                    work_dir=work_dir,
+                    attempt_dir=attempt_dir,
+                    attempt_marker=marker,
+                    runtime_state=state,
+                )
+            else:
+                _rollback_interrupted_attempt_to_selected_node(
+                    work_dir=work_dir,
+                    marker=marker,
+                    attempt_dir=attempt_dir,
+                    history_root=history_root,
+                    selected_sha=selected,
+                    phase="budget_exhausted",
+                    reason=(
+                        "The launch exhausted its time budget before this attempt reached "
+                        "a recorded frontier decision."
+                    ),
+                    verify_selected_checkpoint=True,
+                )
     else:
         selected = frontier.state(allow_unselected=True)["selected_frontier_node_sha"]
         if selected is None:
             return BudgetExhaustionFinalizationResult(outcome="no_selected_node")
-        _restore_selected_checkpoint(work_dir, selected)
+
+    _finalize_budget_exhausted_preparation(
+        work_dir,
+        request_id=request_id,
+        selected_sha=selected,
+    )
 
     return BudgetExhaustionFinalizationResult(
         outcome="selected_node_restored",

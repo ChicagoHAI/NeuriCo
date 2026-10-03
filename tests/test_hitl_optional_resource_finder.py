@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -17,11 +19,14 @@ import core.pipeline_orchestrator as pipeline_orchestrator  # noqa: E402
 from agents.resource_finder import generate_resource_finder_prompt  # noqa: E402
 from core.autoresearch import CheckpointManager  # noqa: E402
 from core.hitl import HitlIdeaLog, HitlRuntime  # noqa: E402
+from core.hitl_frontier import HitlFrontierStore  # noqa: E402
+from core.hitl_git_state import HitlGitStateStore  # noqa: E402
 from core.hitl_mode import HitlMode, human_resolution_allowed  # noqa: E402
 from core.hitl_manager_react import HitlManager  # noqa: E402
 from core.hitl_manager_inbox import HitlManagerInbox  # noqa: E402
+from core.hitl_paths import hitl_stop_request_path  # noqa: E402
 from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError  # noqa: E402
-from core.hitl_stage_runtime import run_plan_centered_hitl_stage  # noqa: E402
+from core.hitl_stage_runtime import HitlStageRollback, run_plan_centered_hitl_stage  # noqa: E402
 from core.hitl_workspace_guard import HitlWorkspaceWriteGuard  # noqa: E402
 
 
@@ -1730,3 +1735,310 @@ def test_inserted_resource_failure_restores_boundary_and_keeps_recorded_choice(
     assert runtime.abandoned
     assert runtime.reloads == 1
     assert runtime.clears >= 1
+
+
+def _seed_budget_finalization_workspace(tmp_path: Path, monkeypatch):
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("selected frontier\n", encoding="utf-8")
+    checkpoints = CheckpointManager(tmp_path)
+    parent = checkpoints.create_checkpoint("selected frontier").sha
+    history_root = tmp_path / "autoresearch-history"
+    history_root.mkdir()
+    frontier = HitlFrontierStore(tmp_path)
+    frontier.initialize_root(
+        node_sha=parent,
+        plan_text="Selected frontier plan",
+        objective_score={"score": 1.0},
+        reason_for_acceptance="Initial selected frontier",
+    )
+    frontier.configure_autoresearch_run(
+        history_root=history_root,
+        lineage_source_sha=parent,
+        last_iteration=0,
+    )
+    request_id = "budget-test"
+    stop_path = hitl_stop_request_path(tmp_path, request_id)
+    stop_path.parent.mkdir(parents=True, exist_ok=True)
+    stop_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "action": "stop",
+                "request_id": request_id,
+                "requested_at": "2026-09-11T00:00:00Z",
+                "requested_by": "budget_exhausted",
+            }
+        ),
+        encoding="utf-8",
+    )
+    import core.hitl_lock as hitl_lock
+
+    monkeypatch.setattr(
+        hitl_lock,
+        "active_hitl_workspace_run",
+        lambda _work_dir: {"pid": os.getpid(), "request_id": request_id},
+    )
+    return checkpoints, parent, request_id, stop_path
+
+
+def _seed_unfinished_budget_resource_stage(tmp_path: Path, parent: str):
+    _record_resource_choice(tmp_path, parent)
+    rollback = HitlStageRollback.capture(
+        tmp_path,
+        "resource preparation boundary",
+    )
+    state = HitlRuntimeState(tmp_path)
+    state.record_next_autoresearch_action_recovery("prepare_proposal", rollback.descriptor())
+    (tmp_path / "baseline.txt").write_text("partial resource changes\n", encoding="utf-8")
+    (tmp_path / "resources.md").write_text("partial resources\n", encoding="utf-8")
+    _record_resource_worker_recovery(
+        tmp_path,
+        parent_sha=parent,
+        continuation_phase="execution",
+    )
+    HitlManagerInbox(tmp_path).submit_resolution_reply(
+        "resource-request", "Approve partial resource work."
+    )
+    return rollback
+
+
+def test_budget_exhaustion_rolls_back_unfinished_resource_preparation(tmp_path, monkeypatch):
+    checkpoints, parent, request_id, stop_path = _seed_budget_finalization_workspace(
+        tmp_path, monkeypatch
+    )
+    rollback = _seed_unfinished_budget_resource_stage(tmp_path, parent)
+
+    result = har.finalize_budget_exhausted_autoresearch(
+        tmp_path,
+        request_id=request_id,
+    )
+
+    assert result.restored_checkpoint_sha == parent
+    assert checkpoints.current_sha() == parent
+    assert (tmp_path / "baseline.txt").read_text(encoding="utf-8") == "selected frontier\n"
+    assert not (tmp_path / "resources.md").exists()
+    state = HitlRuntimeState(tmp_path)
+    assert state.snapshot()["next_autoresearch_action"] is None
+    assert state.pending_worker_command() is None
+    assert state.worker_continuation() is None
+    assert HitlManagerInbox(tmp_path).resolution_reply() is None
+    assert not HitlGitStateStore(tmp_path).has_snapshot(rollback.hitl_snapshot.ref)
+    stop = json.loads(stop_path.read_text(encoding="utf-8"))
+    assert stop[har._BUDGET_PREPARATION_CLEANUP_KEY]["status"] == "completed"
+
+
+def test_budget_exhaustion_preserves_completed_resource_research(tmp_path, monkeypatch):
+    checkpoints, parent, request_id, stop_path = _seed_budget_finalization_workspace(
+        tmp_path, monkeypatch
+    )
+    _record_resource_choice(tmp_path, parent)
+    rollback = HitlStageRollback.capture(tmp_path, "resource preparation boundary")
+    state = HitlRuntimeState(tmp_path)
+    state.record_next_autoresearch_action_recovery("prepare_proposal", rollback.descriptor())
+    record = HitlIdeaLog(tmp_path).append(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "review",
+            "idea_type": "evidence",
+            "idea_category": "paper_finding",
+            "level": "C",
+            "actor": "resource_finder",
+            "premises": [],
+            "context": "Completed resource review.",
+            "evidence": "A useful benchmark was found.",
+            "related_artifacts": [],
+            "raised": False,
+        }
+    )
+    (tmp_path / "resources.md").write_text("completed resources\n", encoding="utf-8")
+    prepared = checkpoints.create_checkpoint("completed resource preparation").sha
+    state.complete_next_autoresearch_action(
+        "prepare_proposal",
+        {"choice": "request_resource_finder", "proposal_base_sha": prepared},
+    )
+
+    har.finalize_budget_exhausted_autoresearch(tmp_path, request_id=request_id)
+
+    assert checkpoints.current_sha() == parent
+    assert not (tmp_path / "resources.md").exists()
+    assert any(item.get("idea_id") == record["idea_id"] for item in HitlIdeaLog(tmp_path).records())
+    assert HitlRuntimeState(tmp_path).snapshot()["next_autoresearch_action"] is None
+    assert not HitlGitStateStore(tmp_path).has_snapshot(rollback.hitl_snapshot.ref)
+    stop = json.loads(stop_path.read_text(encoding="utf-8"))
+    assert stop[har._BUDGET_PREPARATION_CLEANUP_KEY]["action_status"] == "resolved"
+    assert stop[har._BUDGET_PREPARATION_CLEANUP_KEY]["status"] == "completed"
+
+
+def test_budget_preparation_cleanup_replays_after_private_restore(tmp_path, monkeypatch):
+    checkpoints, parent, request_id, stop_path = _seed_budget_finalization_workspace(
+        tmp_path, monkeypatch
+    )
+    rollback = _seed_unfinished_budget_resource_stage(tmp_path, parent)
+    original_advance = har._advance_budget_preparation_cleanup
+    interrupted = False
+
+    def interrupt_once(*args, **kwargs):
+        nonlocal interrupted
+        if kwargs.get("status") == "restored" and not interrupted:
+            interrupted = True
+            raise RuntimeError("interrupted after private restore")
+        return original_advance(*args, **kwargs)
+
+    monkeypatch.setattr(har, "_advance_budget_preparation_cleanup", interrupt_once)
+    with pytest.raises(RuntimeError, match="interrupted after private restore"):
+        har.finalize_budget_exhausted_autoresearch(tmp_path, request_id=request_id)
+
+    stop = json.loads(stop_path.read_text(encoding="utf-8"))
+    assert stop[har._BUDGET_PREPARATION_CLEANUP_KEY]["status"] == "prepared"
+    assert checkpoints.current_sha() == rollback.checkpoint_sha
+    assert HitlGitStateStore(tmp_path).has_snapshot(rollback.hitl_snapshot.ref)
+
+    result = har.finalize_budget_exhausted_autoresearch(
+        tmp_path,
+        request_id=request_id,
+    )
+
+    assert result.restored_checkpoint_sha == parent
+    assert checkpoints.current_sha() == parent
+    assert HitlRuntimeState(tmp_path).snapshot()["next_autoresearch_action"] is None
+    assert not HitlGitStateStore(tmp_path).has_snapshot(rollback.hitl_snapshot.ref)
+
+
+def test_budget_preparation_cleanup_replays_after_snapshot_discard(tmp_path, monkeypatch):
+    checkpoints, parent, request_id, stop_path = _seed_budget_finalization_workspace(
+        tmp_path, monkeypatch
+    )
+    rollback = _seed_unfinished_budget_resource_stage(tmp_path, parent)
+    original_advance = har._advance_budget_preparation_cleanup
+    interrupted = False
+
+    def interrupt_once(*args, **kwargs):
+        nonlocal interrupted
+        if kwargs.get("status") == "completed" and not interrupted:
+            interrupted = True
+            raise RuntimeError("interrupted after snapshot discard")
+        return original_advance(*args, **kwargs)
+
+    monkeypatch.setattr(har, "_advance_budget_preparation_cleanup", interrupt_once)
+    with pytest.raises(RuntimeError, match="interrupted after snapshot discard"):
+        har.finalize_budget_exhausted_autoresearch(tmp_path, request_id=request_id)
+
+    stop = json.loads(stop_path.read_text(encoding="utf-8"))
+    assert stop[har._BUDGET_PREPARATION_CLEANUP_KEY]["status"] == "restored"
+    assert checkpoints.current_sha() == parent
+    assert not HitlGitStateStore(tmp_path).has_snapshot(rollback.hitl_snapshot.ref)
+
+    har.finalize_budget_exhausted_autoresearch(tmp_path, request_id=request_id)
+
+    stop = json.loads(stop_path.read_text(encoding="utf-8"))
+    assert stop[har._BUDGET_PREPARATION_CLEANUP_KEY]["status"] == "completed"
+    assert checkpoints.current_sha() == parent
+
+
+def test_budget_preparation_retirement_preserves_unrelated_worker_state(tmp_path):
+    state = HitlRuntimeState(tmp_path)
+    state.begin_next_autoresearch_action(
+        {"kind": "prepare_proposal", "parent_node_id": "frontier-parent"}
+    )
+    state.begin_worker_command(
+        {
+            "request_key": "unrelated-request",
+            "kind": "phase_finish",
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "execution",
+            "provenance": {"attempt_id": "attempt_7"},
+        }
+    )
+    state.record_worker_continuation(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "execution",
+            "actor": "experiment_runner",
+            "provenance": {"attempt_id": "attempt_7"},
+            "prompt_block": "resume experiment",
+        }
+    )
+
+    assert state.retire_proposal_preparation_for_budget(parent_node_id="frontier-parent") == ""
+    assert state.snapshot()["next_autoresearch_action"] is None
+    assert state.pending_worker_command()["request_key"] == "unrelated-request"
+    assert state.worker_continuation()["actor"] == "experiment_runner"
+
+
+def test_budget_exhaustion_retires_direct_preparation_admission(tmp_path, monkeypatch):
+    checkpoints, parent, request_id, _stop_path = _seed_budget_finalization_workspace(
+        tmp_path, monkeypatch
+    )
+    state = HitlRuntimeState(tmp_path)
+    state.begin_next_autoresearch_action(
+        {"kind": "prepare_proposal", "parent_node_id": parent}
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {
+            "choice": "proceed_to_proposal",
+            "reason": "The current record is sufficient.",
+            "premise_idea_ids": ["I1"],
+        },
+    )
+    state.begin_worker_command(
+        {
+            "request_key": "preparation-admission",
+            "kind": "proposal_preparation",
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "proposal",
+            "hitl_mode": "full",
+            "requires_human_approval": True,
+            "manager_decision_idea_id": "I7",
+        }
+    )
+    HitlManagerInbox(tmp_path).submit_resolution_reply(
+        "preparation-admission", "Approve the preparation choice."
+    )
+
+    har.finalize_budget_exhausted_autoresearch(tmp_path, request_id=request_id)
+
+    assert checkpoints.current_sha() == parent
+    assert state.snapshot()["next_autoresearch_action"] is None
+    assert state.pending_worker_command() is None
+    assert HitlManagerInbox(tmp_path).resolution_reply() is None
+
+
+def test_budget_frontier_decision_path_also_finalizes_preparation(
+    tmp_path, monkeypatch
+):
+    _checkpoints, parent, request_id, _stop_path = _seed_budget_finalization_workspace(
+        tmp_path, monkeypatch
+    )
+    history_root = Path(HitlFrontierStore(tmp_path).autoresearch_run()["history_root"])
+    attempt_dir = history_root / parent / "attempt_1"
+    attempt_dir.mkdir(parents=True)
+    har.write_hitl_current_attempt_marker(tmp_path, f"{parent}/attempt_1")
+    transition = {
+        "attempt_id": "attempt_1",
+        "parent_node_sha": parent,
+    }
+    monkeypatch.setattr(
+        HitlRuntimeState,
+        "frontier_decision_transition",
+        lambda self: dict(transition),
+    )
+    monkeypatch.setattr(
+        har,
+        "_finish_persisted_frontier_decision",
+        lambda *args, **kwargs: parent,
+    )
+    finalized = []
+    monkeypatch.setattr(
+        har,
+        "_finalize_budget_exhausted_preparation",
+        lambda *args, **kwargs: finalized.append(kwargs),
+    )
+
+    result = har.finalize_budget_exhausted_autoresearch(
+        tmp_path,
+        request_id=request_id,
+    )
+
+    assert result.restored_checkpoint_sha == parent
+    assert finalized == [{"request_id": request_id, "selected_sha": parent}]

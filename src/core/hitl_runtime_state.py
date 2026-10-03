@@ -843,6 +843,68 @@ class HitlRuntimeState:
                 self._state["next_autoresearch_action"] = None
                 self._save_unlocked()
 
+    def retire_proposal_preparation_for_budget(
+        self,
+        *,
+        parent_node_id: str,
+    ) -> str:
+        """Retire only control state owned by one budget-ended preparation.
+
+        The operation is intentionally replay-safe: budget finalization can
+        restore the preparation's private rollback snapshot and call this
+        method again after a process interruption.
+        """
+        parent = str(parent_node_id).strip()
+        if not parent:
+            raise HitlRuntimeStateError("Budget preparation cleanup requires a frontier parent")
+
+        def normalized_provenance(value: Any) -> Dict[str, str]:
+            if not isinstance(value, dict):
+                return {}
+            return {str(key): str(item).strip() for key, item in value.items() if str(item).strip()}
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if isinstance(action, dict) and action:
+                if action.get("kind") != "prepare_proposal":
+                    raise HitlRuntimeStateError(
+                        "Another AutoResearch action replaced proposal preparation"
+                    )
+                if str(action.get("parent_node_id", "")).strip() != parent:
+                    raise HitlRuntimeStateError(
+                        "Proposal preparation belongs to a different frontier node"
+                    )
+
+            request_key = ""
+            command = self._state.get("pending_worker_command")
+            if isinstance(command, dict) and command:
+                command_kind = str(command.get("kind", "")).strip()
+                resource_command = command.get(
+                    "pipeline_stage"
+                ) == "resource_finder" and normalized_provenance(command.get("provenance")) == {
+                    "parent_node_id": parent
+                }
+                preparation_admission = command_kind == "proposal_preparation"
+                if resource_command or preparation_admission:
+                    request_key = str(command.get("request_key", "")).strip()
+                    self._state["pending_worker_command"] = None
+
+            continuation = self._state.get("worker_continuation")
+            if (
+                isinstance(continuation, dict)
+                and continuation.get("pipeline_stage") == "resource_finder"
+                and continuation.get("actor") == "resource_finder"
+                and normalized_provenance(continuation.get("provenance"))
+                == {"parent_node_id": parent}
+            ):
+                self._state["worker_continuation"] = None
+
+            if isinstance(action, dict) and action:
+                self._state["next_autoresearch_action"] = None
+            self._save_unlocked()
+            return request_key
+
     def cancel_next_autoresearch_action(self, kind: str, *, reason: str) -> Dict[str, Any]:
         message = str(reason).strip()
         if not message:
