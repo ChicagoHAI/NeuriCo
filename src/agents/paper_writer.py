@@ -201,7 +201,8 @@ def run_paper_writer(
     style: str = "neurips",
     timeout: Optional[int] = 3600,
     full_permissions: bool = True,
-    domain: str = "general"
+    domain: str = "general",
+    prompt_prefix: str = "",
 ) -> Dict[str, Any]:
     """
     Run paper writing agent.
@@ -243,6 +244,8 @@ def run_paper_writer(
 
     # Generate prompt
     prompt = generate_paper_writer_prompt(work_dir, style, provider=provider, domain=domain)
+    if prompt_prefix:
+        prompt = prompt_prefix + prompt
 
     # Save prompt for debugging
     logs_dir = work_dir / "logs"

@@ -73,6 +73,43 @@ _TOKEN_PARSERS = {
 }
 
 
+def load_model_pricing(provider: str = "claude") -> dict:
+    """Load pricing for a provider from config/model_pricing.yaml."""
+    import yaml as _yaml
+
+    pricing_file = Path(__file__).parent.parent.parent / "config" / "model_pricing.yaml"
+    try:
+        with open(pricing_file, "r", encoding="utf-8") as f:
+            data = _yaml.safe_load(f)
+        return data.get("providers", {}).get(provider, {})
+    except (OSError, _yaml.YAMLError):
+        return {}
+
+
+def budget_to_tokens(remaining_usd: float, provider: str = "claude") -> int:
+    """Convert remaining budget in USD to a conservative token estimate.
+
+    Uses output token price (most expensive) so the estimate is never exceeded.
+    Returns 0 if pricing data is unavailable.
+    """
+    pricing = load_model_pricing(provider)
+    output_price = pricing.get("output_per_token")
+    if not output_price or remaining_usd <= 0:
+        return 0
+    return int(remaining_usd / output_price)
+
+
+def budget_prompt_note(remaining_usd: float, provider: str = "claude") -> str:
+    """Return a prompt note with the remaining token budget, or empty string if unavailable."""
+    tokens = budget_to_tokens(remaining_usd, provider)
+    if tokens <= 0:
+        return ""
+    return (
+        f"Note: Approximately {tokens:,} output tokens remain in your API budget. "
+        f"Stay within this limit.\n\n"
+    )
+
+
 def parse_token_usage(transcript_file: Path, provider: str = "claude") -> dict:
     """
     Parse token usage from a provider transcript file.

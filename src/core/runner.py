@@ -52,6 +52,7 @@ from core.compute_backend import (
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_run_control import HitlRunStopRequested, raise_if_hitl_run_stop_requested
 from core.hitl_util import atomic_write_json
+from agents.resource_finder import budget_prompt_note
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -1119,6 +1120,14 @@ class ResearchRunner:
                         print(f"🛑 Budget limit reached after pipeline (${spent:.4f} >= ${budget_usd:.4f})")
                         print("   Skipping paper writer.")
                         write_paper = False
+                pw_prompt_prefix = ""
+                if write_paper and success and budget_usd is not None:
+                    stages = pipeline_result.get("stages", {})
+                    spent = sum(
+                        stages.get(s, {}).get("token_usage", {}).get("total_cost_usd", 0.0)
+                        for s in ("resource_finder", "experiment_runner")
+                    )
+                    pw_prompt_prefix = budget_prompt_note(budget_usd - spent, provider)
                 if write_paper and success:
                     paper_result = self._run_paper_writer_stage(
                         idea=idea,
@@ -1128,6 +1137,7 @@ class ResearchRunner:
                         paper_timeout=None if hitl else paper_timeout,
                         full_permissions=full_permissions,
                         hitl_enabled=bool(hitl),
+                        prompt_prefix=pw_prompt_prefix,
                     )
                     # Append paper_writer results to pipeline_results.json
                     results_file = work_dir / ".neurico" / "pipeline_results.json"
@@ -1486,6 +1496,7 @@ https://github.com/ChicagoHAI/neurico
         paper_timeout: Optional[int],
         full_permissions: bool,
         hitl_enabled: bool = False,
+        prompt_prefix: str = "",
     ) -> Dict[str, Any]:
         print()
         print("=" * 80)
@@ -1526,6 +1537,7 @@ https://github.com/ChicagoHAI/neurico
             timeout=paper_timeout,
             full_permissions=full_permissions,
             domain=domain,
+            prompt_prefix=prompt_prefix,
         )
 
         if hitl_enabled and paper_result.get("stopped"):
