@@ -51,6 +51,7 @@ from core.compute_backend import (
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_run_control import HitlRunStopRequested, raise_if_hitl_run_stop_requested
+from core.hitl_util import atomic_write_json
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -1128,6 +1129,17 @@ class ResearchRunner:
                         full_permissions=full_permissions,
                         hitl_enabled=bool(hitl),
                     )
+                    # Append paper_writer results to pipeline_results.json
+                    results_file = work_dir / ".neurico" / "pipeline_results.json"
+                    if results_file.exists():
+                        import json
+                        with open(results_file, "r", encoding="utf-8") as f:
+                            saved = json.load(f)
+                        saved.setdefault("stages", {})["paper_writer"] = {
+                            "success": paper_result.get("success"),
+                            "token_usage": paper_result.get("token_usage", {}),
+                        }
+                        atomic_write_json(results_file, saved)
 
                 self._print_cost_summary(pipeline_result, paper_result)
 
