@@ -831,6 +831,16 @@ class ResearchPipelineOrchestrator:
                     )
                     print("   3. Manually add resources to workspace and continue")
                     return results
+
+                budget_usd = idea.get("idea", {}).get("constraints", {}).get("budget")
+                if budget_usd is not None:
+                    rf_cost = results["stages"]["resource_finder"].get("token_usage", {}).get("total_cost_usd", 0.0)
+                    if rf_cost >= budget_usd:
+                        print()
+                        print(f"🛑 Budget limit reached after resource finder (${rf_cost:.4f} >= ${budget_usd:.4f})")
+                        print("   Skipping experiment runner and remaining stages.")
+                        results["budget_exceeded"] = True
+                        return results
             else:
                 print("⏭️  Skipping resource finder stage (resources assumed to be ready)")
                 completed = self._completed_initial_stage("resource_finder")

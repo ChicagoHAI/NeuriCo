@@ -1104,6 +1104,20 @@ class ResearchRunner:
 
                 # Paper writing stage (optional)
                 paper_result: Optional[Dict[str, Any]] = None
+                budget_usd = idea.get("idea", {}).get("constraints", {}).get("budget")
+                if pipeline_result.get("budget_exceeded"):
+                    write_paper = False
+                elif budget_usd is not None and success:
+                    stages = pipeline_result.get("stages", {})
+                    spent = sum(
+                        stages.get(s, {}).get("token_usage", {}).get("total_cost_usd", 0.0)
+                        for s in ("resource_finder", "experiment_runner")
+                    )
+                    if spent >= budget_usd:
+                        print()
+                        print(f"🛑 Budget limit reached after pipeline (${spent:.4f} >= ${budget_usd:.4f})")
+                        print("   Skipping paper writer.")
+                        write_paper = False
                 if write_paper and success:
                     paper_result = self._run_paper_writer_stage(
                         idea=idea,
@@ -1116,6 +1130,15 @@ class ResearchRunner:
                     )
 
                 self._print_cost_summary(pipeline_result, paper_result)
+
+                if budget_usd is not None and paper_result is not None:
+                    stages = pipeline_result.get("stages", {})
+                    total_spent = sum(
+                        stages.get(s, {}).get("token_usage", {}).get("total_cost_usd", 0.0)
+                        for s in ("resource_finder", "experiment_runner")
+                    ) + paper_result.get("token_usage", {}).get("total_cost_usd", 0.0)
+                    if total_spent >= budget_usd:
+                        print(f"⚠️  Budget exceeded after paper writer (${total_spent:.4f} >= ${budget_usd:.4f})")
 
             except HitlRunStopRequested:
                 hitl_stop_requested = True
@@ -1997,6 +2020,7 @@ def main():
     ]
     if len(autoresearch_modes) > 1:
         parser.error("Choose at most one AutoResearch entry mode: " + ", ".join(autoresearch_modes))
+
     runner = ResearchRunner(use_github=not args.no_github, github_org=args.github_org)
 
     # Handle comment mode separately
