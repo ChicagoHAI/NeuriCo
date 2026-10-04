@@ -834,8 +834,9 @@ class ResearchRunner:
                     )
                 success = pipeline_result.get("success", False)
 
+                paper_result_ar: Optional[Dict[str, Any]] = None
                 if write_paper and success:
-                    self._run_paper_writer_stage(
+                    paper_result_ar = self._run_paper_writer_stage(
                         idea=idea,
                         work_dir=work_dir,
                         provider=provider,
@@ -844,6 +845,8 @@ class ResearchRunner:
                         full_permissions=full_permissions,
                         hitl_enabled=bool(hitl),
                     )
+
+                self._print_cost_summary(pipeline_result, paper_result_ar)
             except HitlRunStopRequested:
                 hitl_stop_requested = True
                 raise
@@ -1100,8 +1103,9 @@ class ResearchRunner:
                     success = pipeline_result.get("success", False)
 
                 # Paper writing stage (optional)
+                paper_result: Optional[Dict[str, Any]] = None
                 if write_paper and success:
-                    self._run_paper_writer_stage(
+                    paper_result = self._run_paper_writer_stage(
                         idea=idea,
                         work_dir=work_dir,
                         provider=provider,
@@ -1110,6 +1114,8 @@ class ResearchRunner:
                         full_permissions=full_permissions,
                         hitl_enabled=bool(hitl),
                     )
+
+                self._print_cost_summary(pipeline_result, paper_result)
 
             except HitlRunStopRequested:
                 hitl_stop_requested = True
@@ -1503,6 +1509,39 @@ https://github.com/ChicagoHAI/neurico
         else:
             print(f"\n⚠️  Paper generation failed (research still succeeded)")
         return paper_result
+
+    def _print_cost_summary(
+        self,
+        pipeline_result: Dict[str, Any],
+        paper_result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Print a combined cost summary across all pipeline stages."""
+        stages = pipeline_result.get("stages", {})
+        rf_usage = stages.get("resource_finder", {}).get("token_usage", {})
+        er_usage = stages.get("experiment_runner", {}).get("token_usage", {})
+        pw_usage = (paper_result or {}).get("token_usage", {})
+
+        rf_cost = rf_usage.get("total_cost_usd", 0.0)
+        er_cost = er_usage.get("total_cost_usd", 0.0)
+        pw_cost = pw_usage.get("total_cost_usd", 0.0)
+        total_cost = rf_cost + er_cost + pw_cost
+
+        if total_cost == 0.0 and not rf_usage and not er_usage and not pw_usage:
+            return
+
+        print()
+        print("=" * 80)
+        print("💰 RUN COST SUMMARY")
+        print("=" * 80)
+        if rf_usage:
+            print(f"   Resource Finder:     ${rf_cost:>8.4f}")
+        if er_usage:
+            print(f"   Experiment Runner:   ${er_cost:>8.4f}")
+        if pw_usage:
+            print(f"   Paper Writer:        ${pw_cost:>8.4f}")
+        print(f"   {'─' * 30}")
+        print(f"   Total:               ${total_cost:>8.4f}")
+        print()
 
     def _copy_workspace_resources(self, work_dir: Path, compute_backend: str = "local"):
         """
