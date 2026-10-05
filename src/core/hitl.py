@@ -2265,6 +2265,63 @@ class HitlRuntime:
         _apply_runtime_provenance(record, provenance)
         return self.log.append(record, idempotent=True)
 
+    def log_proposal_preparation_decision(
+        self,
+        *,
+        choice: str,
+        reason: str,
+        premise_idea_id: str,
+        provenance: Dict[str, Any],
+        agent: str = "",
+        objective: str = "",
+    ) -> Dict[str, Any]:
+        """Persist one manager-authored proposal-preparation decision.
+
+        Operational run ordinals intentionally stay in attempt-local log paths;
+        the idea record carries only the physical attempt provenance and the
+        manager's semantic choice.
+        """
+        if choice not in {"proceed", "call_additional_agent"}:
+            raise HitlValidationError(
+                "Proposal preparation choice must be proceed or call_additional_agent"
+            )
+        rationale = _require_text(reason, "reason", "Proposal preparation decision")
+        premise = _require_text(
+            premise_idea_id, "premise_idea_id", "Proposal preparation decision"
+        )
+        selected_agent = str(agent).strip()
+        selected_objective = str(objective).strip()
+        if choice == "call_additional_agent":
+            _require_text(selected_agent, "agent", "Proposal preparation decision")
+            _require_text(selected_objective, "objective", "Proposal preparation decision")
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "decision",
+            "idea_category": "search_strategy",
+            "level": "B",
+            "actor": "manager",
+            "premises": [premise],
+            "context": "Manager prepared the next proposal within the active AutoResearch attempt.",
+            "related_artifacts": [],
+            "decision_needed": (
+                "Should runtime proceed to the next proposal or run an additional agent first?"
+            ),
+            "options": [
+                "Proceed to the next proposal using the available evidence.",
+                "Run an additional agent, then return to proposal preparation.",
+            ],
+            "decision": "O1" if choice == "proceed" else "O2",
+            "manager_feedback": (
+                rationale
+                if choice == "proceed"
+                else f"{rationale}\n\nAgent: {selected_agent}\nObjective: {selected_objective}"
+            ),
+            "raised": False,
+        }
+        _apply_runtime_provenance(record, provenance)
+        return self.log.append(record, idempotent=True)
+
     def log_scoring_recovery_decision(
         self,
         *,
