@@ -44,9 +44,14 @@ from agents.rule_maker import (
     generate_rule_maker_prompt,
     run_rule_maker,
     validate_hitl_rule_maker_outputs,
-    validate_rule_maker_outputs,
 )
-from agents.rule_maker_bootstrap import run_bootstrap_rule_maker
+from agents.rule_maker_bootstrap import (
+    BOOTSTRAP_OUTPUT_FILES,
+    generate_bootstrap_rule_maker_prompt,
+    generate_managed_baseline_rule_maker_prompt,
+    run_bootstrap_rule_maker,
+    validate_bootstrap_outputs,
+)
 from agents.manifest_trimmer import make_trimmer_callable
 from core.agent_cli import (
     PROVIDER_WORKSPACE_ROOTS,
@@ -65,7 +70,11 @@ from core.scoring_seal import (
     unseal_scoring_files,
     verify_sealed_scoring_manifest,
 )
-from core.workspace_manifest import build_manifest, curate_manifest
+from core.workspace_manifest import (
+    build_baseline_candidate_manifest,
+    build_manifest,
+    curate_manifest,
+)
 from core.phase_state import (
     check_working_directory,
     validate_outputs,
@@ -222,6 +231,18 @@ class PipelineState:
         self.state["completed_at"] = utc_now()
         self._save()
 
+    def convert_completed_ordinary_to_autoresearch(self) -> None:
+        """Commit the one supported workflow transition after baseline approval."""
+        recorded = str(self.state.get("workflow", "")).strip().lower()
+        if recorded == "" and bool(self.state.get("completed")):
+            return
+        if recorded != "ordinary" or not bool(self.state.get("completed")):
+            raise RuntimeError(
+                "Baseline construction requires a completed Ordinary research workspace."
+            )
+        self.state.pop("workflow", None)
+        self._save()
+
     def get_stage_status(self, stage_name: str) -> Optional[str]:
         """Get status of a stage (in_progress, completed, failed, or None)."""
         return self.state["stages"].get(stage_name, {}).get("status")
@@ -323,6 +344,7 @@ class ResearchPipelineOrchestrator:
         hitl_manager_config: Optional[Dict[str, Any]] = None,
         hitl_autoresearch: bool = False,
         managed_initial_run: bool = False,
+        baseline_construction: bool = False,
         hitl_mode: HitlMode | str = HitlMode.FULL,
     ):
         """
@@ -334,7 +356,8 @@ class ResearchPipelineOrchestrator:
         """
         self.work_dir = Path(work_dir)
         self.hitl_autoresearch = hitl_autoresearch
-        self.managed_initial_run = managed_initial_run or hitl_autoresearch
+        self.baseline_construction = baseline_construction
+        self.managed_initial_run = managed_initial_run or hitl_autoresearch or baseline_construction
         self.state = PipelineState(
             self.work_dir,
             workflow=(
@@ -357,6 +380,8 @@ class ResearchPipelineOrchestrator:
         """Return stages that belong to this managed initial workflow."""
         if self.hitl_autoresearch:
             return ("resource_finder", RULE_MAKER_STAGE, "experiment_runner")
+        if self.baseline_construction:
+            return (RULE_MAKER_STAGE,)
         return ("resource_finder", "experiment_runner")
 
     def _create_hitl_runtime(self, pipeline_stage: str) -> HitlRuntime:
@@ -612,6 +637,9 @@ class ResearchPipelineOrchestrator:
         validator: Any,
         *,
         scoring_handler: Any = None,
+        baseline_construction: bool = False,
+        baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
+        plan_finish_validator: Any = None,
     ) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
         if not self.managed_initial_run:
             return None
@@ -626,16 +654,25 @@ class ResearchPipelineOrchestrator:
                 runtime.pipeline_stage == "experiment_runner"
                 and not self.hitl_autoresearch
             ):
-                _require_reviewed_workspace_unchanged(
-                    self.work_dir, str(pending.get("workspace_fingerprint", ""))
-                )
-                if validator is not None:
-                    validation = validator()
-                    if not validation.get("valid"):
+                if baseline_construction:
+                    scorer_result = (pending.get("response") or {}).get("scorer_result")
+                    if not isinstance(scorer_result, dict) or not isinstance(
+                        scorer_result.get("results"), dict
+                    ):
                         raise HitlValidationError(
-                            f"Recovered {runtime.pipeline_stage} approval failed artifact validation: "
-                            f"{validation.get('issues', [])}"
+                            "Recovered baseline approval has no durable scoring result."
                         )
+                else:
+                    _require_reviewed_workspace_unchanged(
+                        self.work_dir, str(pending.get("workspace_fingerprint", ""))
+                    )
+                    if validator is not None:
+                        validation = validator()
+                        if not validation.get("valid"):
+                            raise HitlValidationError(
+                                f"Recovered {runtime.pipeline_stage} approval failed artifact validation: "
+                                f"{validation.get('issues', [])}"
+                            )
             HitlRuntimeState(self.work_dir).clear_worker_continuation()
             return {"success": True, "resumed": True}, {"approved": True}
         from core.hitl import _load_hitl_template
@@ -644,10 +681,13 @@ class ResearchPipelineOrchestrator:
         runtime.prepare_idea_tool_context(
             hitl_stage=continuation["hitl_stage"],
             actor=runtime.pipeline_stage,
+            plan_finish_validator=plan_finish_validator,
             phase_finish_validator=validator,
             worker_prompt_contexts=worker_prompt_contexts,
             allow_scoring_approval=scoring_handler is not None,
             scoring_handler=scoring_handler,
+            baseline_construction=baseline_construction,
+            baseline_candidate_manifest=baseline_candidate_manifest,
         )
         return run_worker_with_replacements(
             runtime=runtime,
@@ -701,7 +741,7 @@ class ResearchPipelineOrchestrator:
         while True:
             result = run_stage()
             if hitl_run_stop_requested():
-                return {**result, "success": False, "stopped": True}
+                raise HitlRunStopRequested("HITL run stop requested.")
             if (
                 result.get("success")
                 or result.get("hitl_terminal_failure")
@@ -1050,7 +1090,12 @@ class ResearchPipelineOrchestrator:
 
         finally:
             if experiment_recovery_armed and not results.get("success", False):
-                self._recover_experiment_runner_from_runtime_checkpoint()
+                if self.hitl_autoresearch:
+                    # Shutdown and restart must select the same durable boundary,
+                    # including a pending or already-scored initial candidate.
+                    self.prepare_initial_resume()
+                else:
+                    self._recover_experiment_runner_from_runtime_checkpoint()
 
             # Sweep any Modal-side resources before the workspace is closed out.
             # Gated on .neurico/modal_resources.json — non-Modal runs are a
@@ -1212,15 +1257,18 @@ class ResearchPipelineOrchestrator:
         if not recovery:
             return
         initial_boundary = self.state.get_runtime_recovery("initial_stage") if self.hitl_autoresearch else None
+        # Validate both halves before retiring score evidence or changing files.
+        rollback = HitlStageRollback.from_descriptor(
+            self.work_dir,
+            {**recovery, "hitl_snapshot_paths": list(HitlGitStateStore.rollback_paths())},
+        )
         self._retire_initial_scoring_refs_before_rollback()
         canceller = getattr(self.hitl_manager, "abandon_worker_request_for_rollback", None)
         if callable(canceller):
             canceller(
                 "The scored HITL experiment did not complete and runtime is restoring the pre-experiment state."
             )
-        checkpoint_sha = str(recovery.get("checkpoint_sha", "")).strip()
-        if not checkpoint_sha:
-            raise RuntimeError("Missing experiment_runner runtime recovery checkpoint_sha")
+        checkpoint_sha = rollback.checkpoint_sha
 
         from core.autoresearch import CheckpointManager
 
@@ -1230,23 +1278,10 @@ class ResearchPipelineOrchestrator:
             checkpoint_sha,
             clean_untracked_public=True,
         )
-        snapshot_ref = str(recovery.get("hitl_snapshot_ref", "")).strip()
-        snapshot_commit = str(recovery.get("hitl_snapshot_commit", "")).strip()
-        if not snapshot_ref or not snapshot_commit:
-            raise RuntimeError(
-                "Missing HITL private-state recovery snapshot for experiment_runner."
-            )
-        if not snapshot_ref.startswith("refs/neurico/hitl-rollback/"):
-            raise RuntimeError("Invalid HITL private-state recovery snapshot reference.")
-        state_store = HitlGitStateStore(self.work_dir)
+        snapshot_ref = rollback.hitl_snapshot.ref
+        state_store = rollback.state_store
         try:
-            state_store.restore(
-                HitlGitSnapshot(
-                    ref=snapshot_ref,
-                    commit_sha=snapshot_commit,
-                    paths=state_store.rollback_paths(),
-                )
-            )
+            state_store.restore(rollback.hitl_snapshot)
         except Exception as exc:
             raise RuntimeError(
                 "Could not restore the armed HITL private-state recovery boundary."
@@ -2394,6 +2429,8 @@ class ResearchPipelineOrchestrator:
             return build_manager_conformance_report(
                 verdict, extract_eval_contract(idea)
             )
+        except HitlRunStopRequested:
+            raise
         except Exception as exc:
             # Keep arbitrary provider/runtime exception prose out of manager
             # and console channels. Every failure at this advisory boundary
@@ -2409,6 +2446,17 @@ class ResearchPipelineOrchestrator:
         timeout: Optional[int],
         full_permissions: bool,
         initial_scoring_repair_feedback: str = "",
+        worker_prompt_contexts: Optional[Dict[str, str]] = None,
+        artifact_validator: Optional[Callable[[], Dict[str, Any]]] = None,
+        plan_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
+        scoring_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
+        baseline_construction: bool = False,
+        baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
+        runtime_override: Optional[HitlRuntime] = None,
+        rule_maker_output_validator: Optional[
+            Callable[[Path], Dict[str, Any]]
+        ] = None,
+        persist_required_contract: bool = True,
     ) -> Dict[str, Any]:
         """Run forward rule-maker HITL or reopen its review for scoring repair."""
         print()
@@ -2419,7 +2467,7 @@ class ResearchPipelineOrchestrator:
 
         if not self._initial_stage_request(RULE_MAKER_STAGE):
             self.state.start_stage(RULE_MAKER_STAGE)
-        runtime = self._create_hitl_runtime(RULE_MAKER_STAGE)
+        runtime = runtime_override or self._create_hitl_runtime(RULE_MAKER_STAGE)
         # Give the manager a sanitized conformance report as advisory evidence:
         # the verifier reads the private evaluator draft (which the manager may not) and
         # reports conclusions only. The manager still owns the accept/rerun call.
@@ -2428,15 +2476,16 @@ class ResearchPipelineOrchestrator:
             runtime.set_scoring_conformance_reporter(
                 lambda: self._scoring_conformance_report(idea)
             )
-        worker_prompt_contexts = {
-            phase: generate_rule_maker_prompt(
-                idea,
-                self.work_dir,
-                self.templates_dir,
-                hitl_phase=phase,
-            )
-            for phase in ("plan", "execution", "review")
-        }
+        if worker_prompt_contexts is None:
+            worker_prompt_contexts = {
+                phase: generate_rule_maker_prompt(
+                    idea,
+                    self.work_dir,
+                    self.templates_dir,
+                    hitl_phase=phase,
+                )
+                for phase in ("plan", "execution", "review")
+            }
         repair_feedback = str(initial_scoring_repair_feedback).strip()
         rollback = self._stage_rollback(
             RULE_MAKER_STAGE,
@@ -2445,13 +2494,19 @@ class ResearchPipelineOrchestrator:
         )
 
         def rule_maker_artifact_validator() -> Dict[str, Any]:
-            validation = validate_hitl_rule_maker_outputs(self.work_dir)
+            if callable(artifact_validator):
+                boundary = artifact_validator()
+                if not boundary.get("valid"):
+                    return boundary
+            validator = rule_maker_output_validator or validate_hitl_rule_maker_outputs
+            validation = validator(self.work_dir)
             if not validation.get("valid"):
                 return validation
-            try:
-                persist_hitl_required_artifact_contract(self.work_dir)
-            except Exception as exc:
-                return {"valid": False, "issues": [str(exc)]}
+            if persist_required_contract:
+                try:
+                    persist_hitl_required_artifact_contract(self.work_dir)
+                except Exception as exc:
+                    return {"valid": False, "issues": [str(exc)]}
             return validation
 
         def restore_failed_hitl_state() -> None:
@@ -2482,16 +2537,21 @@ class ResearchPipelineOrchestrator:
             # the public snapshot that was validated and reviewed. This also
             # catches accidental background writers during a long API/manager
             # turn instead of approving stale conformance evidence.
-            approved = runtime.phase_finish_result() or {}
+            approved = (
+                runtime.resolved_worker_response()
+                or runtime.phase_finish_result()
+                or {}
+            )
             if not approved and self.hitl_autoresearch:
                 approved = self._initial_stage_request(RULE_MAKER_STAGE) or {}
-            _require_reviewed_workspace_unchanged(
-                self.work_dir,
-                str(approved.get("workspace_fingerprint", "")),
-            )
+            if scoring_handler is None:
+                _require_reviewed_workspace_unchanged(
+                    self.work_dir,
+                    str(approved.get("workspace_fingerprint", "")),
+                )
             self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
             discard_completed_rollback_snapshot()
-            return {
+            completed = {
                 **result,
                 "success": True,
                 "hitl": True,
@@ -2502,6 +2562,10 @@ class ResearchPipelineOrchestrator:
                     else {}
                 ),
             }
+            scorer_result = approved.get("scorer_result")
+            if isinstance(scorer_result, dict):
+                completed["scorer"] = dict(scorer_result)
+            return completed
 
         def launch_worker(
             worker_prompt: str,
@@ -2526,7 +2590,16 @@ class ResearchPipelineOrchestrator:
             )
 
         try:
-            resumed = self._resume_initial_worker(runtime, launch_worker, worker_prompt_contexts, rule_maker_artifact_validator)
+            resumed = self._resume_initial_worker(
+                runtime,
+                launch_worker,
+                worker_prompt_contexts,
+                rule_maker_artifact_validator,
+                scoring_handler=scoring_handler,
+                baseline_construction=baseline_construction,
+                baseline_candidate_manifest=baseline_candidate_manifest,
+                plan_finish_validator=plan_finish_validator,
+            )
             if resumed is not None:
                 result, finish = resumed
                 return complete_approved(result, finish) if finish.get("approved") else finalize_failed(finish or result)
@@ -2535,7 +2608,12 @@ class ResearchPipelineOrchestrator:
                     hitl_stage="review",
                     actor=RULE_MAKER_STAGE,
                     phase_finish_validator=rule_maker_artifact_validator,
+                    plan_finish_validator=plan_finish_validator,
                     worker_prompt_contexts=worker_prompt_contexts,
+                    allow_scoring_approval=bool(scoring_handler),
+                    scoring_handler=scoring_handler,
+                    baseline_construction=baseline_construction,
+                    baseline_candidate_manifest=baseline_candidate_manifest,
                 )
                 result, finish = run_worker_with_replacements(
                     runtime=runtime,
@@ -2563,6 +2641,11 @@ class ResearchPipelineOrchestrator:
                 execution_log_prefix="hitl/rule_maker_hitl_execute_1",
                 on_approved=complete_approved,
                 on_failed=finalize_failed,
+                plan_finish_validator=plan_finish_validator,
+                allow_scoring_approval=bool(scoring_handler),
+                scoring_handler=scoring_handler,
+                baseline_construction=baseline_construction,
+                baseline_candidate_manifest=baseline_candidate_manifest,
             )
 
         except HitlRunStopRequested:
@@ -2702,6 +2785,312 @@ class ResearchPipelineOrchestrator:
     # The forward-mode resource_finder, rule_maker, and experiment_runner are
     # skipped — they already ran in the original session that produced this
     # workspace.
+
+    def run_managed_baseline_construction(
+        self,
+        *,
+        idea: Dict[str, Any],
+        provider: str,
+        full_permissions: bool,
+        manifest_trimmer_timeout: int,
+        rule_maker_timeout: Optional[int],
+        scorer_timeout: Optional[int],
+    ) -> Dict[str, Any]:
+        """Construct and review an evaluator for a completed Ordinary run."""
+        if not self.baseline_construction:
+            raise RuntimeError(
+                "Managed baseline construction requires baseline_construction=True."
+            )
+        if str(self.state.state.get("workflow", "")).strip().lower() != "ordinary" or not bool(
+            self.state.state.get("completed")
+        ):
+            raise RuntimeError(
+                "Baseline construction requires a completed Ordinary research workspace."
+            )
+
+        results: Dict[str, Any] = {
+            "success": False,
+            "mode": "construct_baseline",
+            "work_dir": str(self.work_dir),
+            "stages": {},
+        }
+        # Keep the legacy bootstrap trimmer unchanged. Managed construction
+        # uses deterministic structural candidates and assigns the semantic
+        # output choice to the reviewed rule-maker plan.
+        manifest_result = self._run_managed_baseline_manifest()
+        results["stages"][BOOTSTRAP_MANIFEST_STAGE] = manifest_result
+        if not manifest_result.get("success"):
+            return results
+
+        candidate_manifest = manifest_result["candidate_manifest"]
+        candidate_paths = set(candidate_manifest.get("candidate_output_paths", []))
+        sealed_outputs = self._seal_bootstrap_inputs()
+        output_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
+        scoring_result: Dict[str, Any] = {}
+
+        def validate_bootstrap_evaluator(path: Path) -> Dict[str, Any]:
+            report = validate_bootstrap_outputs(
+                path,
+                allowed_primary_outputs=candidate_paths,
+            )
+            checks = dict(report.get("checks") or {})
+            missing = [
+                f"scoring/{filename} is missing."
+                for filename in BOOTSTRAP_OUTPUT_FILES.values()
+                if not (Path(path) / "scoring" / filename).is_file()
+            ]
+            failed = [name for name, passed in checks.items() if passed is False]
+            issues = list(missing)
+            primary_output_error = str(report.get("primary_output_error") or "").strip()
+            if primary_output_error:
+                issues.append(primary_output_error)
+            if checks.get("targets_avoid_generic_artifact_validity") is False:
+                issues.append(
+                    "scoring/targets.json uses the generic `artifact_validity` "
+                    "property instead of a meaningful research property."
+                )
+            explained = {
+                "primary_outputs_parse",
+                "primary_outputs_are_candidates",
+                "targets_avoid_generic_artifact_validity",
+            }
+            issues.extend(
+                f"Bootstrap evaluator check failed: {name}."
+                for name in failed
+                if name not in explained
+            )
+            return {
+                "valid": not issues,
+                "issues": issues,
+                "validation": report,
+            }
+
+        def validate_baseline_artifacts() -> Dict[str, Any]:
+            integrity = output_guard.allow_only_under(
+                [
+                    "scoring",
+                    "data/.test",
+                    "plans/rule_maker_plan.md",
+                ]
+            )
+            if not integrity.get("valid"):
+                return {
+                    **integrity,
+                    "restart_stage": True,
+                    "worker_feedback": (
+                        "Runtime rejected this rule-maker invocation because it changed "
+                        "the completed experiment outside the evaluator boundary."
+                    ),
+                }
+            return {"valid": True, "issues": []}
+
+        def validate_baseline_plan() -> Dict[str, Any]:
+            integrity = output_guard.allow_only_under(
+                ["plans/rule_maker_plan.md"]
+            )
+            if not integrity.get("valid"):
+                return {
+                    **integrity,
+                    "restart_stage": True,
+                    "worker_feedback": (
+                        "Runtime rejected this rule-maker invocation because it changed "
+                        "the completed experiment during planning."
+                    ),
+                }
+            return managed_runtime._validate_living_plan_file()
+
+        def score_baseline(approval: Dict[str, Any]) -> None:
+            nonlocal sealed_outputs, scoring_result
+            runtime = managed_runtime
+            runtime_state = HitlRuntimeState(self.work_dir)
+            pending = runtime_state.pending_worker_command() or {}
+            request_key = str(pending.get("request_key", "")).strip()
+            if not request_key:
+                raise RuntimeError("Baseline scoring has no held rule-maker request.")
+
+            reviewed = scoring_source_workspace_fingerprint(pending, None)
+            if HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir) != reviewed:
+                raise RuntimeError(
+                    "The baseline workspace changed after rule-maker review; refusing to score it."
+                )
+
+            evaluator_dir = seal_scoring_files(self.work_dir)
+            if evaluator_dir is None:
+                raise RuntimeError("Baseline scoring has no evaluator payload.")
+            self._unseal_bootstrap_inputs(sealed_outputs)
+            sealed_outputs = None
+            stale_results = self.work_dir / "scoring" / "results.json"
+            stale_results.unlink(missing_ok=True)
+            from core.autoresearch import CheckpointManager
+
+            source_sha = CheckpointManager(self.work_dir).create_checkpoint(
+                "Managed baseline before isolated scoring"
+            ).sha
+            self.state.start_stage(SCORER_STAGE)
+            try:
+                scoring_result = run_isolated_scorer(
+                    work_dir=self.work_dir,
+                    source_sha=source_sha,
+                    sealed_dir=evaluator_dir,
+                    scorer=lambda scorer_work_dir: run_scorer(
+                        work_dir=scorer_work_dir,
+                        timeout=scorer_timeout,
+                        idea=idea,
+                    ),
+                    temporary_ref=f"refs/neurico/hitl/scoring/{request_key}",
+                )
+                self.state.complete_stage(
+                    SCORER_STAGE,
+                    isinstance(scoring_result.get("results"), dict),
+                    scoring_result,
+                )
+            except Exception as exc:
+                scoring_result = {
+                    "success": False,
+                    "error": f"Runtime isolated scorer failed: {exc}",
+                }
+                self.state.complete_stage(SCORER_STAGE, False, scoring_result)
+
+            def finalize_review(review: Dict[str, Any]) -> Dict[str, Any]:
+                nonlocal sealed_outputs
+                approved = review["status"] == "approved"
+                record = runtime.log_baseline_construction_decision(
+                    scoring_review_idea_id=str(
+                        approval.get("scoring_review_idea_id", "")
+                    ),
+                    approved=approved,
+                    context=str(review["context"]),
+                    manager_feedback=str(review.get("manager_feedback", "")),
+                )
+                if approved:
+                    runtime.set_scoring_result(dict(scoring_result))
+                    return {
+                        **review,
+                        "final": True,
+                        "scorer_result": dict(scoring_result),
+                    }
+
+                scoring_ref = str(scoring_result.get("scoring_ref", "")).strip()
+                if scoring_ref:
+                    delete_git_ref(self.work_dir, scoring_ref, strict=False)
+                stale_results.unlink(missing_ok=True)
+                sealed_outputs = self._seal_bootstrap_inputs()
+                unseal_scoring_files(self.work_dir, evaluator_dir)
+                return runtime.scoring_repair_response(
+                    context=str(review["context"]),
+                    manager_feedback=str(review["manager_feedback"]),
+                    record=record,
+                )
+
+            runtime.manager.review_baseline_scoring_result(
+                scorer_result=scoring_result,
+                on_finalize=finalize_review,
+            )
+
+        worker_prompt_contexts = {
+            phase: generate_managed_baseline_rule_maker_prompt(
+                candidate_manifest,
+                self.work_dir,
+                self.templates_dir,
+                hitl_phase=phase,
+            )
+            for phase in ("plan", "execution", "review")
+        }
+        managed_runtime = self._create_hitl_runtime(RULE_MAKER_STAGE)
+
+        try:
+            rule_result = self._run_hitl_stage_until_complete(
+                stage_name=RULE_MAKER_STAGE,
+                run_stage=lambda: self._run_rule_maker_hitl(
+                    idea=idea,
+                    provider=provider,
+                    timeout=rule_maker_timeout,
+                    full_permissions=full_permissions,
+                    worker_prompt_contexts=worker_prompt_contexts,
+                    artifact_validator=validate_baseline_artifacts,
+                    plan_finish_validator=validate_baseline_plan,
+                    scoring_handler=score_baseline,
+                    baseline_construction=True,
+                    baseline_candidate_manifest=candidate_manifest,
+                    runtime_override=managed_runtime,
+                    rule_maker_output_validator=validate_bootstrap_evaluator,
+                ),
+            )
+        except Exception:
+            if sealed_outputs is not None:
+                self._unseal_bootstrap_inputs(sealed_outputs)
+                sealed_outputs = None
+            evaluator_dir = sealed_dir_for(self.work_dir)
+            if evaluator_dir.exists():
+                unseal_scoring_files(self.work_dir, evaluator_dir)
+            raise
+        finally:
+            managed_runtime.clear_idea_tool_context()
+
+        results["stages"][RULE_MAKER_STAGE] = rule_result
+        results["stages"][SCORER_STAGE] = dict(scoring_result)
+        results["success"] = bool(
+            rule_result.get("success")
+            and isinstance(scoring_result.get("results"), dict)
+        )
+        if not results["success"] and sealed_outputs is not None:
+            self._unseal_bootstrap_inputs(sealed_outputs)
+        return results
+
+    def _run_managed_baseline_manifest(self) -> Dict[str, Any]:
+        """Persist deterministic output candidates for Construct baseline only."""
+        print()
+        print("=" * 80)
+        print(f"STAGE: {BOOTSTRAP_MANIFEST_STAGE}")
+        print("=" * 80)
+        relative_path = ".neurico/baseline_candidate_manifest.json"
+        self.state.start_stage(
+            BOOTSTRAP_MANIFEST_STAGE,
+            expected_outputs=[relative_path],
+        )
+        try:
+            raw_manifest = build_manifest(self.work_dir)
+            candidate_manifest = build_baseline_candidate_manifest(raw_manifest)
+            candidates = candidate_manifest.get("candidate_outputs", [])
+            if not candidates:
+                raise RuntimeError(
+                    "The completed Ordinary workspace has no mechanically identifiable "
+                    "experiment output for baseline construction."
+                )
+            manifest_path = self.work_dir / relative_path
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(
+                json.dumps(candidate_manifest, indent=2),
+                encoding="utf-8",
+            )
+            outputs = {
+                "candidate_manifest_path": str(manifest_path),
+                "curation": "mechanical_candidates",
+                "candidate_count": len(candidates),
+            }
+            success = self.state.complete_stage(
+                BOOTSTRAP_MANIFEST_STAGE,
+                success=True,
+                outputs=outputs,
+            )
+            print(
+                f"📐 Mechanical baseline candidates: {len(candidates)} "
+                "(semantic selection deferred to the rule maker)"
+            )
+            return {
+                "success": success,
+                "candidate_manifest": candidate_manifest,
+                **outputs,
+            }
+        except Exception as exc:
+            error = str(exc)
+            print(f"❌ Baseline candidate manifest error: {error}")
+            self.state.complete_stage(
+                BOOTSTRAP_MANIFEST_STAGE,
+                success=False,
+                outputs={"error": error},
+            )
+            return {"success": False, "error": error}
 
     def _run_bootstrap_pipeline(
         self,

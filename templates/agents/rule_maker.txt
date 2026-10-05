@@ -242,7 +242,23 @@ scorer to fail.
 | Path | Purpose | Required |
 |---|---|---|
 | `src/<file>.py` | <one-line purpose> | yes |
-| `<other_path>`   | <one-line purpose> | yes/no |
+| `<other_path>`   | <one-line purpose> | yes/no/recommended |
+
+Each `Path` cell must contain exactly one literal workspace-relative path.
+Never put alternatives or prose such as `` `a.json` or `b.json` `` in a Path
+cell. When at least one of several alternative artifacts is required, list each
+path in its own row and give every member the same `any-of:<group-name>` value
+in the Required column. Group names use lowercase letters, numbers, hyphens,
+and underscores. An any-of group must contain at least two paths; producing
+more than one member is allowed.
+
+For example:
+
+| Path | Purpose | Required |
+|---|---|---|
+| `src/solution.py` | Module exposing the callable being measured | yes |
+| `normal_samples.txt` | Samples from a normal target | any-of:sample-output |
+| `exponential_samples.txt` | Samples from an exponential target | any-of:sample-output |
 
 ## Entry points
 

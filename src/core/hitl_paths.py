@@ -34,6 +34,10 @@ def hitl_run_control_dir(work_dir: Path) -> Path:
     return hitl_state_dir(work_dir) / "control"
 
 
+def hitl_run_budget_path(work_dir: Path) -> Path:
+    return hitl_run_control_dir(work_dir) / "budget.json"
+
+
 def hitl_stop_request_path(work_dir: Path, request_id: str) -> Path:
     return hitl_run_control_dir(work_dir) / f"stop.{request_id}.json"
 

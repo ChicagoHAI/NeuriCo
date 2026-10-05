@@ -83,6 +83,23 @@ class HitlWorkspaceWriteGuard:
         allowed = {self._normalize_relative(path) for path in paths}
         return self._validate(allowed=allowed)
 
+    def allow_only_under(self, paths: Iterable[str]) -> dict[str, object]:
+        """Allow changes to each path and anything contained beneath it."""
+        roots = {self._normalize_relative(path) for path in paths}
+        current = self._current_snapshot()
+        changed = sorted(
+            path
+            for path in set(self.baseline) | set(current)
+            if self.baseline.get(path) != current.get(path)
+            and not any(path == root or path.startswith(root + "/") for root in roots)
+        )
+        if not changed:
+            return {"valid": True, "issues": []}
+        return {
+            "valid": False,
+            "issues": ["Runtime detected writes outside this HITL boundary: " + ", ".join(changed)],
+        }
+
     def require_unchanged(self) -> dict[str, object]:
         return self._validate(allowed=set())
 

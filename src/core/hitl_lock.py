@@ -1,13 +1,15 @@
-"""HITL-only file locking without leaking POSIX imports into main NeuriCo."""
+"""Workspace run ownership and HITL manager/interface file locking."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import errno
 import json
 import os
 from pathlib import Path
 import time
+import threading
 from typing import Any, Iterator, Mapping, TextIO
 
 from core.hitl_util import utc_now
@@ -16,6 +18,11 @@ try:
     import fcntl
 except ModuleNotFoundError:  # pragma: no cover - exercised on Windows only.
     fcntl = None  # type: ignore[assignment]
+
+
+_ACTIVE_RUN_LEASE: ContextVar[tuple | None] = ContextVar(
+    "neurico_workspace_run_lease", default=None
+)
 
 
 HITL_RUN_LOCK = Path(".neurico") / "hitl" / "run.lock"
@@ -152,10 +159,25 @@ def hitl_workspace_run_lease(
     work_dir: Path,
     *,
     owner: Mapping[str, Any] | None = None,
+    reuse: bool = False,
 ) -> Iterator[dict[str, Any]]:
-    """Own one workspace for the complete duration of an HITL run."""
+    """Own a workspace; a nested runner may reuse its exact launch's lease."""
     _require_fcntl()
     workspace = Path(work_dir).resolve()
+    active = _ACTIVE_RUN_LEASE.get()
+    if reuse and active is not None:
+        active_path, pid, thread_id, record = active
+        request_id = str((owner or {}).get("request_id", ""))
+        if (
+            active_path == workspace
+            and pid == os.getpid()
+            and thread_id == threading.get_ident()
+            and request_id
+            and request_id == record.get("request_id")
+        ):
+            yield record
+            return
+        raise HitlWorkspaceRunActiveError(workspace, record)
     lock_path = _run_lock_path(workspace)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as handle:
@@ -185,9 +207,13 @@ def hitl_workspace_run_lease(
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
+        token = _ACTIVE_RUN_LEASE.set(
+            (workspace, os.getpid(), threading.get_ident(), record)
+        )
         try:
             yield record
         finally:
+            _ACTIVE_RUN_LEASE.reset(token)
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 

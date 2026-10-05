@@ -26,6 +26,13 @@ Apply only this feedback, preserve completed progress, update the living plan
 when needed, then continue from the current workspace state.
 {% endif %}
 {% if pipeline_stage == "rule_maker" %}
+{% if baseline_construction %}
+
+The completed experiment and its outputs are fixed. Create only the approved
+bootstrap evaluator under `scoring/`; do not modify experiment files or sealed
+outputs. Do not execute `scoring/eval.py` while those outputs are withheld.
+Runtime will execute it after review.
+{% else %}
 
 The approved evaluation design may use a baseline implementation under
 `baselines/`. Private evaluator inputs belong under `data/.test/`; all other
@@ -49,6 +56,7 @@ Rule-maker execution requirements:
   prerequisites the experiment runner must create
 - keep metric direction, targets, interface requirements, and rationale aligned
   with the approved plan
+{% endif %}
 {% endif %}
 
 Idea protocol:

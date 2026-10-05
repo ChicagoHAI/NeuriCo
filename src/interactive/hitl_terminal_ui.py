@@ -389,9 +389,20 @@ class HitlTerminalUI:
         lines = [self._style("Research status", "bold"), self._rule(), f"  {self._style(heading, 'bold')}"]
         if live.get("active"):
             workflow = terminal_safe_text(live.get("workflow") or "autoresearch").strip().lower()
+            operation = terminal_safe_text(live.get("operation") or "research").strip().lower()
             mode = terminal_safe_text(live.get("hitl_mode") or "full").strip().lower()
-            lines.append(f"  Research: {'Ordinary' if workflow == 'ordinary' else 'AutoResearch'}")
+            research = (
+                "Baseline construction"
+                if operation == "construct_baseline"
+                else "Ordinary"
+                if workflow == "ordinary"
+                else "AutoResearch"
+            )
+            lines.append(f"  Research: {research}")
             lines.append(f"  Auto: {'Yes' if mode == 'auto' else 'No'}")
+            budget = terminal_safe_text(live.get("budget_remaining") or "").strip()
+            if budget:
+                lines.append(f"  Budget remaining: {budget}")
         if detail:
             lines.extend(self._wrap_paragraph(detail, indent="  "))
         if next_action:

@@ -37,12 +37,21 @@ request before calling `finalize_worker_request`:
 {% endif %}
 
 {% if allow_scoring_approval %}
+{% if baseline_construction %}
+This is a completed Ordinary research workspace being prepared as an
+AutoResearch baseline. The experiment and its outputs are fixed. When the
+bootstrap evaluator is semantically acceptable, call `approve_for_scoring`
+instead of `finalize_worker_request`. Runtime will execute the evaluator against
+the preserved experiment outputs and return the result for final review. If the
+evaluator needs revision, finalize `feedback` with precise rule-maker feedback.
+{% else %}
 This is an AutoResearch execution finish. When the completed work is
 semantically acceptable and ready for objective evaluation, call
 `approve_for_scoring` instead of `finalize_worker_request`. Runtime will keep this
 same request pending, run scoring, and add the complete score to the conversation for your final
 frontier accept/reject decision. If the work needs revision, finalize
 `feedback` with precise worker-facing manager_feedback.
+{% endif %}
 {% endif %}
 
 {% if pipeline_stage == "resource_finder" %}
@@ -60,6 +69,28 @@ concern that looks for or depends on another file within `scoring/`.
 {% endif %}
 
 {% if is_rule_maker %}
+{% if baseline_construction %}
+The completed experiment and its outputs are fixed. Review only whether the
+bootstrap evaluator provides a sound, complete scoring contract for that
+existing work. Do not request changes to the experiment or route work to an
+experiment runner.
+
+The rule maker received a mechanically generated, value-redacted list of
+possible completed outputs. It—not the mechanical scan—must select and justify
+the authoritative output or outputs. Before approving the plan, confirm that
+the selection is supported by the research objective and available structural
+evidence, and that the proposed properties measure the research result rather
+than merely whether a file exists. If the candidate information is insufficient
+for a defensible evaluator, return precise feedback instead of approving a
+generic artifact-validity objective.
+
+Use this read-only candidate manifest to verify the selected outputs. It is
+runtime evidence and must not be copied into the worker's plan or artifacts:
+
+```json
+{{ baseline_candidate_manifest_json }}
+```
+{% endif %}
 {% if hitl_stage == "plan" %}
 For this rule-maker review, determine whether the proposed evaluation design is
 scientifically sound and consistent with the research objective.
@@ -79,6 +110,12 @@ preparing the complete, functional evaluator and everything it requires or
 depends on. Nothing required by the evaluator will be supplied by the runtime,
 another component, or any external source.
 
+{% if baseline_construction %}
+Confirm that the metrics and targets are grounded in the research objective or
+documented external anchors, and that the evaluator references only outputs
+selected from the mechanical candidate manifest. Runtime—not the rule maker—will
+run the evaluator against the withheld completed outputs after approval.
+{% else %}
 The evaluator must depend only on file contents present in the scoring
 workspace. Repository metadata, including nested `.git` data, is not guaranteed.
 
@@ -124,6 +161,7 @@ that:
 
 If any point is absent, contradictory, or unsupported, return precise correction
 instructions.
+{% endif %}
 {% endif %}
 {% if hitl_stage in ["execution", "review"] %}
 

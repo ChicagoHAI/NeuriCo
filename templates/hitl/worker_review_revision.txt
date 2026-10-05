@@ -20,6 +20,13 @@ Manager feedback to apply:
 Apply only this feedback. Do not broaden the work beyond the approved plan.
 Keep `{{ plan_path }}` updated with progress and remaining gaps.
 {% if pipeline_stage == "rule_maker" %}
+{% if baseline_construction %}
+
+The completed experiment and its outputs are fixed. Revise only the bootstrap
+evaluator under `scoring/`; do not modify experiment files or sealed outputs.
+Do not execute `scoring/eval.py` while those outputs are withheld. Runtime will
+execute it after review.
+{% else %}
 
 If the approved evaluation design needs a baseline implementation, its permitted
 location is `baselines/`; all other evaluator-owned outputs remain under
@@ -43,6 +50,7 @@ repository metadata.
 
 Before declaring the phase complete, you must run a preflight test to ensure
 that `scoring/eval.py` works as expected with no error or failure.
+{% endif %}
 {% endif %}
 
 If another idea requires manager{% if hitl_mode != "auto" %}/human{% endif %} feedback, update `{{ plan_path }}`, call

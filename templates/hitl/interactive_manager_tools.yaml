@@ -266,6 +266,18 @@ tools:
         required: false
     returns: Confirmation that scoring will run and the worker request remains pending.
 
+  - name: finalize_baseline_construction
+    description: |
+      Finalize review of a scored baseline construction. Approve the scored
+      workspace as the AutoResearch root, or return evaluator feedback to the
+      held rule maker. This command cannot route work to an experiment runner.
+    parameters:
+      result:
+        type: object
+        description: '{"status":"approved|feedback","context":"...","manager_feedback":"..."}'
+        required: true
+    returns: Confirmation that runtime finalized the baseline scoring review.
+
   - name: finalize_frontier_decision
     description: |
       Persist the manager's accept/reject/repair decision for a scored AutoResearch

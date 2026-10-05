@@ -96,6 +96,7 @@ class HitlManagerToolExecutor:
             "update_research_state": self._update_research_state,
             "design_panel": self._design_panel,
             "finalize_worker_request": self._finalize_worker_request,
+            "finalize_baseline_construction": self._finalize_baseline_construction,
             "approve_for_scoring": self._approve_for_scoring,
             "finalize_frontier_decision": self._finalize_frontier_decision,
         }
@@ -260,6 +261,15 @@ class HitlManagerToolExecutor:
     def _approve_for_scoring(self, args: Dict[str, Any]) -> str:
         return self.manager.approve_for_scoring(str(args.get("context", "")).strip())
 
+    def _finalize_baseline_construction(self, args: Dict[str, Any]) -> str:
+        payload = args.get("result", args)
+        if not isinstance(payload, dict):
+            return (
+                "Error: finalize_baseline_construction requires a result object. "
+                "Correct it and retry."
+            )
+        return self.manager.finalize_worker_request(dict(payload))
+
     def _finalize_frontier_decision(self, args: Dict[str, Any]) -> str:
         payload = args.get("result", args)
         if not isinstance(payload, dict):
@@ -423,6 +433,7 @@ class HitlManager:
     _REQUEST_FINALIZER_TOOL_NAMES = frozenset(
         {
             "finalize_worker_request",
+            "finalize_baseline_construction",
             "finalize_frontier_decision",
         }
     )
@@ -815,6 +826,7 @@ class HitlManager:
         self._thread.start()
 
     def stop(self) -> None:
+        self._invalidate_turns()
         self._stop.set()
         self._turns.put(_Turn("runtime", ""))
         cancel_active = getattr(self.backend, "cancel_active", None)
@@ -1032,6 +1044,8 @@ class HitlManager:
         hitl_mode: HitlMode | str = HitlMode.FULL,
         request_context: Optional[Dict[str, Any]] = None,
         scoring_enabled: bool = False,
+        baseline_construction: bool = False,
+        baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         from core.hitl import _load_hitl_template, _normalize_options, _validate_substantive_options
 
@@ -1104,6 +1118,10 @@ class HitlManager:
             autoresearch_attempt=autoresearch_attempt,
             assigned_candidate_sha=assigned_candidate_sha,
             scoring_enabled=scoring_enabled,
+            baseline_construction=baseline_construction,
+            baseline_candidate_manifest_json=json.dumps(
+                baseline_candidate_manifest or {}, indent=2, ensure_ascii=False
+            ),
         )
         return self.request_worker_resolution(
             command={
@@ -1136,6 +1154,8 @@ class HitlManager:
         scoring_enabled: bool = False,
         scoring_handoff_context: Optional[Dict[str, Any]] = None,
         verifier_report: str = "",
+        baseline_construction: bool = False,
+        baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         on_scoring_approval: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
@@ -1162,7 +1182,12 @@ class HitlManager:
                 raise ValueError("Phase review status must be approved or feedback.")
             if allow_scoring_approval and status == "approved":
                 raise ValueError(
-                    "Use approve_for_scoring for this completed AutoResearch candidate."
+                    "Use approve_for_scoring for this completed "
+                    + (
+                        "baseline evaluator."
+                        if baseline_construction
+                        else "AutoResearch candidate."
+                    )
                 )
             if status == "feedback":
                 self._require_text(
@@ -1236,6 +1261,10 @@ class HitlManager:
             hitl_mode=selected_mode.value,
             autoresearch_attempt=autoresearch_attempt,
             assigned_candidate_sha=assigned_candidate_sha,
+            baseline_construction=baseline_construction,
+            baseline_candidate_manifest_json=json.dumps(
+                baseline_candidate_manifest or {}, indent=2, ensure_ascii=False
+            ),
         )
         return self.request_worker_resolution(
             command={
@@ -1453,6 +1482,51 @@ class HitlManager:
             finalize=on_finalize,
             manager_finalizer="finalize_worker_request",
             manager_review_kind="initial_scoring",
+        )
+
+    def review_baseline_scoring_result(
+        self,
+        *,
+        scorer_result: Dict[str, Any],
+        on_finalize: Callable[[Dict[str, Any]], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Review scoring for a fixed completed experiment and its evaluator."""
+        from core.hitl import _load_hitl_template
+
+        def validate(data: Dict[str, Any]) -> Dict[str, Any]:
+            status = str(data.get("status", "")).strip()
+            if status not in {"approved", "feedback"}:
+                raise ValueError("Baseline review status must be approved or feedback.")
+            result = {
+                "status": status,
+                "context": self._require_text(
+                    data.get("context"), "context", "Baseline scoring review"
+                ),
+                "manager_feedback": str(data.get("manager_feedback", "")).strip(),
+            }
+            if status == "feedback":
+                result["manager_feedback"] = self._require_text(
+                    result["manager_feedback"],
+                    "manager_feedback",
+                    "Baseline evaluator repair",
+                )
+            else:
+                if not isinstance(scorer_result.get("results"), dict):
+                    raise ValueError(
+                        "A baseline cannot be approved without a structured scoring result."
+                    )
+                result["manager_feedback"] = ""
+            return result
+
+        return self.resume_worker_request(
+            prompt=_load_hitl_template(
+                "manager_review_baseline_construction.txt",
+                scorer_result_json=json.dumps(scorer_result, ensure_ascii=False, indent=2),
+            ),
+            validate=validate,
+            finalize=on_finalize,
+            manager_finalizer="finalize_baseline_construction",
+            manager_review_kind="baseline_construction_scoring",
         )
 
     def submit_resolution_reply(
@@ -2373,6 +2447,11 @@ class HitlManager:
         mcp_startup_timeout_seconds: Optional[float] = None,
     ) -> Any:
         """Run one manager provider turn without a wall-clock deadline."""
+        from core.hitl_run_control import current_hitl_run_budget_prompt
+
+        budget_context = current_hitl_run_budget_prompt(self.work_dir)
+        if budget_context:
+            messages = [*messages, {"role": "system", "content": budget_context}]
         result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
 
         parameters: Dict[str, inspect.Parameter] = {}

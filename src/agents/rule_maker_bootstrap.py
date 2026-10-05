@@ -20,7 +20,7 @@ auditable-citation discipline.
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
 import json
 import shlex
@@ -88,6 +88,8 @@ def generate_bootstrap_rule_maker_prompt(
     curated_manifest: Dict[str, Any],
     work_dir: Path,
     templates_dir: Path,
+    *,
+    hitl_phase: Optional[str] = None,
 ) -> str:
     """
     Build the bootstrap rule_maker prompt by substituting workspace details,
@@ -115,7 +117,70 @@ def generate_bootstrap_rule_maker_prompt(
     prompt = template
     for placeholder, value in substitutions.items():
         prompt = prompt.replace(placeholder, value)
+    if hitl_phase is None:
+        return prompt
+    if hitl_phase not in {"plan", "execution", "review"}:
+        raise ValueError(f"Unsupported managed bootstrap rule-maker phase: {hitl_phase}")
+    phase_instruction = {
+        "plan": (
+            "This is the planning phase. Design the complete bootstrap evaluator, but do "
+            "not create or modify evaluator artifacts until the plan is approved."
+        ),
+        "execution": (
+            "This is the execution phase. Implement the approved bootstrap evaluator "
+            "without changing the completed experiment or its outputs."
+        ),
+        "review": (
+            "This is the review-revision phase. Apply only the returned feedback to the "
+            "bootstrap evaluator, preserving the completed experiment and its outputs."
+        ),
+    }[hitl_phase]
+    prompt = f"{phase_instruction}\n\n{prompt}"
     return prompt
+
+
+def generate_managed_baseline_rule_maker_prompt(
+    candidate_manifest: Dict[str, Any],
+    work_dir: Path,
+    templates_dir: Path,
+    *,
+    hitl_phase: str,
+) -> str:
+    """Render the candidate-selection prompt used only by Construct baseline."""
+    if hitl_phase not in {"plan", "execution", "review"}:
+        raise ValueError(f"Unsupported managed baseline rule-maker phase: {hitl_phase}")
+    work_dir = Path(work_dir)
+    template_path = Path(templates_dir) / "agents" / "rule_maker_baseline.txt"
+    if not template_path.is_file():
+        raise FileNotFoundError(
+            f"managed baseline rule_maker template not found at {template_path}"
+        )
+    phase_instruction = {
+        "plan": (
+            "This is the planning phase. Select and justify the completed experiment "
+            "outputs to evaluate, and design the complete evaluator. Do not create or "
+            "modify evaluator artifacts until the plan is approved."
+        ),
+        "execution": (
+            "This is the execution phase. Implement the approved evaluator without "
+            "changing the completed experiment or its outputs."
+        ),
+        "review": (
+            "This is the review-revision phase. Apply only the returned evaluator "
+            "feedback, preserving the completed experiment and its outputs."
+        ),
+    }[hitl_phase]
+    substitutions = {
+        "{workspace}": str(work_dir),
+        "{scoring_dir}": str(work_dir / "scoring"),
+        "{candidate_manifest_json}": json.dumps(candidate_manifest, indent=2),
+        "{idea_yaml}": _read_idea_yaml(work_dir),
+        "{resource_listing}": _summarize_resource_hints(work_dir),
+    }
+    prompt = template_path.read_text(encoding="utf-8")
+    for placeholder, value in substitutions.items():
+        prompt = prompt.replace(placeholder, value)
+    return f"{phase_instruction}\n\n{prompt}"
 
 
 def run_bootstrap_rule_maker(
@@ -275,7 +340,68 @@ def run_bootstrap_rule_maker(
     }
 
 
-def validate_bootstrap_outputs(work_dir: Path) -> Dict[str, Any]:
+def _parse_primary_output_table(interface_path: Path) -> list[str]:
+    """Parse the managed-baseline ``Primary outputs`` table."""
+    lines = interface_path.read_text(encoding="utf-8").splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == "## Primary outputs")
+    except StopIteration as exc:
+        raise ValueError("scoring/interface.md is missing `## Primary outputs`.") from exc
+    idx = start + 1
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx + 1 >= len(lines):
+        raise ValueError("`## Primary outputs` must be followed by a Markdown table.")
+
+    def cells(line: str) -> list[str]:
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            stripped = stripped[1:]
+        if stripped.endswith("|"):
+            stripped = stripped[:-1]
+        return [cell.strip() for cell in stripped.split("|")]
+
+    if cells(lines[idx]) != ["Path", "Format", "Purpose"]:
+        raise ValueError(
+            "Primary-outputs header must be exactly `Path | Format | Purpose`."
+        )
+    alignment = cells(lines[idx + 1])
+    if len(alignment) != 3 or any(
+        "-" not in value or value.replace(":", "").replace("-", "")
+        for value in alignment
+    ):
+        raise ValueError("Primary-outputs table has an invalid alignment row.")
+
+    selected: list[str] = []
+    row = idx + 2
+    while row < len(lines) and lines[row].strip().startswith("|"):
+        values = cells(lines[row])
+        if len(values) != 3:
+            raise ValueError("Primary-outputs rows must have exactly three cells.")
+        raw_path = values[0].strip().strip("`")
+        pure = PurePosixPath(raw_path)
+        if (
+            not raw_path
+            or pure.is_absolute()
+            or ".." in pure.parts
+            or str(pure) in {"", "."}
+        ):
+            raise ValueError(f"Invalid primary output path: {raw_path!r}")
+        normalized = pure.as_posix()
+        if normalized in selected:
+            raise ValueError(f"Duplicate primary output path: {normalized}")
+        selected.append(normalized)
+        row += 1
+    if not selected:
+        raise ValueError("Primary-outputs table must select at least one candidate.")
+    return selected
+
+
+def validate_bootstrap_outputs(
+    work_dir: Path,
+    *,
+    allowed_primary_outputs: Optional[set[str]] = None,
+) -> Dict[str, Any]:
     """
     Mechanical post-run validation of the four scoring files. Mirrors the
     normal rule_maker's validate_rule_maker_outputs but does not require
@@ -298,6 +424,26 @@ def validate_bootstrap_outputs(work_dir: Path) -> Dict[str, Any]:
         result["checks"]["interface_has_producer_api_section"] = (
             "## Producer API" in text or "producer api" in text.lower()
         )
+        if allowed_primary_outputs is not None:
+            try:
+                selected_outputs = _parse_primary_output_table(interface)
+                result["checks"]["primary_outputs_parse"] = True
+                result["checks"]["primary_outputs_are_candidates"] = all(
+                    path in allowed_primary_outputs for path in selected_outputs
+                )
+                result["selected_primary_outputs"] = selected_outputs
+                undeclared = [
+                    path for path in selected_outputs if path not in allowed_primary_outputs
+                ]
+                if undeclared:
+                    result["primary_output_error"] = (
+                        "Primary outputs are not present in the mechanical candidate "
+                        f"manifest: {undeclared}"
+                    )
+            except (OSError, ValueError) as exc:
+                result["checks"]["primary_outputs_parse"] = False
+                result["checks"]["primary_outputs_are_candidates"] = False
+                result["primary_output_error"] = str(exc)
 
     eval_py = scoring_dir / BOOTSTRAP_OUTPUT_FILES["eval_script"]
     result["checks"]["eval_exists"] = eval_py.exists()
@@ -324,6 +470,10 @@ def validate_bootstrap_outputs(work_dir: Path) -> Dict[str, Any]:
                 directions = {p.get("direction") for p in props.values() if isinstance(p, dict)}
                 result["checks"]["targets_all_directions_valid"] = directions.issubset({"max", "min"})
                 result["checks"]["targets_property_count"] = len(props)
+                if allowed_primary_outputs is not None:
+                    result["checks"]["targets_avoid_generic_artifact_validity"] = (
+                        "artifact_validity" not in props
+                    )
         except json.JSONDecodeError as e:
             result["checks"]["targets_parses_as_json"] = False
             result["checks"]["targets_json_error"] = str(e)

@@ -786,6 +786,130 @@ def build_manifest(work_dir: Path) -> dict:
     }
 
 
+def build_baseline_candidate_manifest(manifest: dict) -> dict:
+    """Build the deterministic, value-redacted input for managed baseline construction.
+
+    Unlike :func:`curate_manifest`, this function makes no semantic choice about
+    which completed artifact should be scored.  It narrows the mechanical
+    workspace scan to plausible experiment outputs and attaches only the
+    already-redacted structural extraction for each path.  The managed
+    rule-maker selects the authoritative output under manager review.
+    """
+    files = {
+        str(entry.get("path", "")): entry
+        for entry in manifest.get("files", [])
+        if isinstance(entry, dict) and str(entry.get("path", ""))
+    }
+    likely = [
+        entry
+        for entry in manifest.get("likely_runner_outputs", [])
+        if isinstance(entry, dict) and str(entry.get("path", "")) in files
+    ]
+    likely_by_path = {str(entry["path"]): entry for entry in likely}
+
+    # Canonical result-like artifacts come first.  Include source and notebook
+    # deliverables as deterministic candidates as well: for some research tasks
+    # the completed program or proof is the artifact to evaluate.  Resource-
+    # finder outputs are context, not completed experiment outputs.
+    eligible_roles = {"runtime_artifact", "source_code", "notebook"}
+    ordered_paths: list[str] = []
+    seen: set[str] = set()
+    for entry in likely:
+        path = str(entry["path"])
+        if path.startswith("artifacts/resource_finder/"):
+            continue
+        if path not in seen:
+            ordered_paths.append(path)
+            seen.add(path)
+    for path, entry in sorted(files.items()):
+        if path in seen or entry.get("role") not in eligible_roles:
+            continue
+        if path.startswith("artifacts/resource_finder/"):
+            continue
+        ordered_paths.append(path)
+        seen.add(path)
+
+    json_by_path = {
+        str(entry.get("path")): entry
+        for entry in manifest.get("json_schemas", [])
+        if isinstance(entry, dict)
+    }
+    jsonl_by_path = {
+        str(entry.get("path")): entry
+        for entry in manifest.get("jsonl_schemas", [])
+        if isinstance(entry, dict)
+    }
+    tabular_by_path = {
+        str(entry.get("path")): entry
+        for entry in manifest.get("tabular_schemas", [])
+        if isinstance(entry, dict)
+    }
+    markdown_by_path = {
+        str(entry.get("path")): entry
+        for entry in manifest.get("markdown_outlines", [])
+        if isinstance(entry, dict)
+    }
+    notebook_by_path = {
+        str(entry.get("path")): entry
+        for entry in manifest.get("notebook_outlines", [])
+        if isinstance(entry, dict)
+    }
+    signatures_by_path: dict[str, list[dict[str, Any]]] = {}
+    for signature in manifest.get("python_signatures", []):
+        if not isinstance(signature, dict):
+            continue
+        path = str(signature.get("path", ""))
+        if path:
+            signatures_by_path.setdefault(path, []).append(
+                {key: value for key, value in signature.items() if key != "path"}
+            )
+
+    candidates: list[dict[str, Any]] = []
+    for path in ordered_paths:
+        file_entry = files[path]
+        candidate: dict[str, Any] = {
+            "path": path,
+            "role": file_entry.get("role", "unknown"),
+            "format": file_entry.get("format", "unknown"),
+            "size_bucket": file_entry.get("size_bucket"),
+        }
+        likely_entry = likely_by_path.get(path)
+        if likely_entry is not None:
+            candidate["detection_evidence"] = list(likely_entry.get("evidence", []))
+        if path in json_by_path:
+            candidate["schema"] = json_by_path[path].get("schema")
+        if path in jsonl_by_path:
+            extracted = jsonl_by_path[path]
+            candidate["record_schema"] = extracted.get("record_schema")
+            candidate["record_count_bucket"] = extracted.get("record_count_bucket")
+        if path in tabular_by_path:
+            extracted = tabular_by_path[path]
+            candidate["columns"] = extracted.get("columns")
+            candidate["row_count_bucket"] = extracted.get("row_count_bucket")
+        if path in markdown_by_path:
+            candidate["outline"] = markdown_by_path[path].get("headers", [])
+        if path in notebook_by_path:
+            candidate["cells"] = notebook_by_path[path].get("cells", [])
+        if path in signatures_by_path:
+            candidate["public_signatures"] = signatures_by_path[path]
+        candidates.append(candidate)
+
+    warning_paths = set(ordered_paths)
+    relevant_warnings = [
+        dict(entry)
+        for entry in manifest.get("extraction_warnings", [])
+        if isinstance(entry, dict) and str(entry.get("path", "")) in warning_paths
+    ]
+    return {
+        "version": manifest.get("version", MANIFEST_VERSION),
+        "workspace_basename": manifest.get("workspace_basename"),
+        "curation": "mechanical_candidates",
+        "candidate_outputs": candidates,
+        "candidate_output_paths": ordered_paths,
+        "extraction_warnings": relevant_warnings,
+    }
+
+
 # Pass 2: Trim decision schema (closed enums; agent output target)
 
 class Role(str, Enum):

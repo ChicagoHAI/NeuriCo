@@ -20,9 +20,6 @@ STEP A — Python environment (for conjecture exploration with SymPy/NumPy):
    requires-python = ">=3.10"
    dependencies = []
 
-   [build-system]
-   requires = ["hatchling"]
-   build-backend = "hatchling.build"
    EOF
 
 3. Activate: source .venv/bin/activate

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -61,6 +62,33 @@ def _elapsed_phase_time(started_at: Any) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
+
+
+def _remaining_budget_time(deadline_at: Any) -> str:
+    if type(deadline_at) not in (int, float):
+        return ""
+    seconds = max(0, int(float(deadline_at) - time.time() + 0.999999))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def _terminal_status_with_budget(primary: str, budget: str) -> str:
+    suffix = f"  ·  Budget {budget} left" if budget else ""
+    if not suffix:
+        return primary
+    limit = max(1, shutil.get_terminal_size((100, 24)).columns - 3)
+    if len(primary) + len(suffix) <= limit:
+        return primary + suffix
+    available = max(0, limit - len(suffix) - 1)
+    shortened = (
+        primary
+        if len(primary) <= available
+        else primary[: max(0, available - 1)].rstrip() + "…"
+    )
+    return shortened + suffix
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -950,6 +978,18 @@ class HitlTerminalChannel(UserChannel):
             self._write_block(
                 self._ui.system("Type /cancel at any prompt to cancel setup.")
             )
+            operation = "research"
+            if bool(status.get("can_construct_baseline")):
+                operation = self._read_choice(
+                    "Action [ordinary] (ordinary/construct): ",
+                    "ordinary",
+                    {"ordinary", "construct"},
+                    "Choose ordinary or construct.",
+                    cancellable=True,
+                )
+                operation = (
+                    "construct_baseline" if operation == "construct" else "research"
+                )
             provider = self._read_choice(
                 "Model [claude] (claude/codex): ",
                 "claude",
@@ -957,7 +997,9 @@ class HitlTerminalChannel(UserChannel):
                 "Choose claude or codex.",
                 cancellable=True,
             )
-            if bool(status.get("workflow_locked")):
+            if operation == "construct_baseline":
+                workflow = "ordinary"
+            elif bool(status.get("workflow_locked")):
                 workflow = str(status.get("workflow", "autoresearch")).strip().lower()
                 self._write_block(
                     self._ui.system(
@@ -977,7 +1019,8 @@ class HitlTerminalChannel(UserChannel):
             )
             hitl_mode = "auto" if auto else "full"
             iterations = 1
-            if workflow == "autoresearch":
+            time_limit_seconds = None
+            if operation == "research" and workflow == "autoresearch":
                 iterations = self._read_integer(
                     "Iterations [2] (1-100): ",
                     2,
@@ -985,30 +1028,57 @@ class HitlTerminalChannel(UserChannel):
                     maximum=100,
                     cancellable=True,
                 )
-            write_paper = self._read_yes_no(
-                "Write paper? [Y/n]: ", default=True, cancellable=True
-            )
+                while True:
+                    raw_limit = self._read_setting(
+                        "Budget (sec) [none]: ",
+                        "", cancellable=True,
+                    )
+                    if not raw_limit:
+                        break
+                    try:
+                        from core.hitl_run_control import validate_run_time_limit
+
+                        time_limit_seconds = validate_run_time_limit(int(raw_limit))
+                        break
+                    except ValueError:
+                        self._write_block(self._ui.system(
+                            "Enter a positive whole number of seconds.",
+                            tone="error",
+                        ))
+            write_paper = False
             paper_style = "auto"
-            if write_paper:
-                paper_style = self._read_choice(
-                    "Paper style [auto] (auto/neurips/icml/acl): ",
-                    "auto",
-                    {"auto", "neurips", "icml", "acl"},
-                    "Choose auto, neurips, icml, or acl.",
-                    cancellable=True,
+            if operation == "research":
+                write_paper = self._read_yes_no(
+                    "Write paper? [Y/n]: ", default=True, cancellable=True
                 )
+                if write_paper:
+                    paper_style = self._read_choice(
+                        "Paper style [auto] (auto/neurips/icml/acl): ",
+                        "auto",
+                        {"auto", "neurips", "icml", "acl"},
+                        "Choose auto, neurips, icml, or acl.",
+                        cancellable=True,
+                    )
             github = self._read_yes_no(
                 "Publish to GitHub? [y/N]: ", default=False, cancellable=True
             )
             result = self._run_launcher(
                 {
                     "provider": provider,
+                    "operation": operation,
                     "workflow": workflow,
                     "hitl_mode": hitl_mode,
                     "write_paper": write_paper,
                     "paper_style": paper_style,
                     "github": github,
-                    **({"iterations": iterations} if workflow == "autoresearch" else {}),
+                    **(
+                        {
+                            "iterations": iterations,
+                            "time_limit_seconds": time_limit_seconds,
+                        }
+                        if operation == "research" and workflow == "autoresearch"
+                        else {}
+                    ),
                 }
             )
         except _HitlPromptCancelled:
@@ -1020,10 +1090,16 @@ class HitlTerminalChannel(UserChannel):
             self._write_block(self._ui.system(str(exc), tone="error"), blank_before=True)
             return {"status": "invalid"}
         mode_label = "Auto" if hitl_mode == "auto" else "HITL"
-        workflow_label = "AutoResearch" if workflow == "autoresearch" else "ordinary research"
+        if operation == "construct_baseline":
+            started = f"Started baseline construction in {mode_label} mode."
+        else:
+            workflow_label = (
+                "AutoResearch" if workflow == "autoresearch" else "ordinary research"
+            )
+            started = f"Started {result['mode']} {workflow_label} in {mode_label} mode."
         self._write_block(
             self._ui.system(
-                f"Started {result['mode']} {workflow_label} in {mode_label} mode.",
+                started,
                 tone="success",
             ),
         )
@@ -1121,6 +1197,11 @@ class HitlTerminalChannel(UserChannel):
         self._cache_live_status(status)
         visible = dict(status)
         visible["elapsed"] = _elapsed_phase_time(status.get("phase_started_at"))
+        visible["budget_remaining"] = (
+            _remaining_budget_time(status.get("budget_deadline_at"))
+            if bool(status.get("active"))
+            else ""
+        )
         self._write_block(self._ui.expanded_status(visible), blank_before=True)
 
     def _read_run_status(self) -> tuple[Optional[Dict[str, Any]], str]:
@@ -1157,6 +1238,12 @@ class HitlTerminalChannel(UserChannel):
             label = f"● {label}  {elapsed}"
         else:
             label = f"● {label}"
+        budget = (
+            _remaining_budget_time(status.get("budget_deadline_at"))
+            if bool(status.get("active"))
+            else ""
+        )
+        label = _terminal_status_with_budget(label, budget)
         return str(status.get("state", "idle")).strip(), label
 
     def print_help(self) -> None:

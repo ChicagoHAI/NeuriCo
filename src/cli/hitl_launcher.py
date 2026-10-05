@@ -84,8 +84,13 @@ class HitlRunController:
         return HitlWorkspaceView(self.work_dir).live_status()
 
     def launch(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        operation = str(payload.get("operation", "research")).strip().lower()
+        if operation not in {"research", "construct_baseline"}:
+            raise ValueError("Choose research or AutoResearch baseline construction.")
         workflow = str(payload.get("workflow", "autoresearch")).strip().lower()
-        if workflow not in {"ordinary", "autoresearch"}:
+        if operation == "construct_baseline":
+            workflow = "ordinary"
+        elif workflow not in {"ordinary", "autoresearch"}:
             raise ValueError("Choose ordinary research or AutoResearch.")
         provider = str(payload.get("provider", "")).strip().lower()
         if provider not in {"claude", "codex"}:
@@ -94,7 +99,7 @@ class HitlRunController:
                 "can use the same backend."
             )
         iterations = 1
-        if workflow == "autoresearch":
+        if operation == "research" and workflow == "autoresearch":
             raw_iterations = payload.get("iterations", 1)
             try:
                 iterations = int(raw_iterations)
@@ -106,9 +111,19 @@ class HitlRunController:
                 raise ValueError("Iterations must be a whole number.")
             if not 1 <= iterations <= 100:
                 raise ValueError("Iterations must be between 1 and 100.")
-        style = str(payload.get("paper_style", "auto")).strip().lower()
-        if style not in {"auto", "neurips", "icml", "acl"}:
-            raise ValueError("Choose a supported paper style.")
+        from core.hitl_run_control import validate_run_time_limit
+
+        time_limit_seconds = validate_run_time_limit(payload.get("time_limit_seconds"))
+        if (
+            (operation != "research" or workflow != "autoresearch")
+            and time_limit_seconds is not None
+        ):
+            raise ValueError("A run time limit is supported only for managed AutoResearch.")
+        style = "auto"
+        if operation == "research":
+            style = str(payload.get("paper_style", "auto")).strip().lower()
+            if style not in {"auto", "neurips", "icml", "acl"}:
+                raise ValueError("Choose a supported paper style.")
         hitl_mode = normalize_hitl_mode(payload.get("hitl_mode")).value
 
         with self._lock:
@@ -122,6 +137,14 @@ class HitlRunController:
             from core.pipeline_orchestrator import PipelineState
 
             PipelineState.require_compatible_workflow(self.work_dir, workflow)
+            if operation == "construct_baseline":
+                from core.hitl_autoresearch import (
+                    managed_baseline_construction_eligibility,
+                )
+
+                eligibility = managed_baseline_construction_eligibility(self.work_dir)
+                if not eligibility.get("available"):
+                    raise RuntimeError(str(eligibility.get("reason", "")).strip())
             launch_path = hitl_launch_status_path(self.work_dir)
             if launch_path.exists():
                 try:
@@ -148,21 +171,24 @@ class HitlRunController:
                             )
                             stale_request.unlink(missing_ok=True)
             select_hitl_manager_provider(self.work_dir, provider)
-            if workflow == "autoresearch":
-                from core.hitl_autoresearch import initial_publication_requires_resume
-
-                continuation = (
-                    HitlFrontierStore(self.work_dir).exists()
-                    and not initial_publication_requires_resume(self.work_dir)
-                )
+            if operation == "construct_baseline":
+                mode = "continue"
             else:
-                continuation = (
-                    self.work_dir / ".neurico" / "pipeline_state.json"
-                ).is_file()
-            mode = "continue" if continuation else "fresh"
+                if workflow == "autoresearch":
+                    from core.hitl_autoresearch import initial_publication_requires_resume
+
+                    continuation = (
+                        HitlFrontierStore(self.work_dir).exists()
+                        and not initial_publication_requires_resume(self.work_dir)
+                    )
+                else:
+                    continuation = (
+                        self.work_dir / ".neurico" / "pipeline_state.json"
+                    ).is_file()
+                mode = "continue" if continuation else "fresh"
             request_id = uuid.uuid4().hex
             request = {
-                "version": 3,
+                "version": 4,
                 "request_id": request_id,
                 "idea_id": self.idea_id,
                 "work_dir": str(self.work_dir.resolve()),
@@ -172,13 +198,18 @@ class HitlRunController:
                 "paper_style": None if style == "auto" else style,
                 "github": bool(payload.get("github", False)),
                 "mode": mode,
+                "operation": operation,
                 "workflow": workflow,
                 "hitl_mode": hitl_mode,
                 "interface": self.interface,
                 "created_at": utc_now(),
             }
-            if workflow == "autoresearch":
+            if operation == "construct_baseline":
+                request["write_paper"] = False
+                request["paper_style"] = None
+            elif workflow == "autoresearch":
                 request["iterations"] = iterations
+                request["time_limit_seconds"] = time_limit_seconds
             requests_dir = hitl_launch_requests_dir(ConfigLoader().get_workspace_parent_dir())
             requests_dir.mkdir(parents=True, exist_ok=True)
             request_path = requests_dir / f"request.{self.idea_id}.{request_id}.json"
@@ -196,6 +227,7 @@ class HitlRunController:
                         "created_at": request["created_at"],
                         "updated_at": request["created_at"],
                         "mode": mode,
+                        "operation": operation,
                         "workflow": workflow,
                         "hitl_mode": hitl_mode,
                         "provider": provider,
@@ -233,6 +265,7 @@ class HitlRunController:
         return {
             "status": "accepted",
             "mode": mode,
+            "operation": operation,
             "workflow": workflow,
         }
 

@@ -20,6 +20,7 @@ from core.hitl_util import atomic_write_json, utc_now
 # Durable review identity and the only finalizer legal at each scoring boundary.
 MANAGER_REVIEW_FINALIZERS = {
     "initial_scoring": "finalize_worker_request",
+    "baseline_construction_scoring": "finalize_baseline_construction",
     "frontier_scoring": "finalize_frontier_decision",
     "scoring_failure": "finalize_worker_request",
 }
@@ -155,6 +156,8 @@ class HitlRuntimeState:
         status = str(command.get("status", ""))
         if review_kind == "initial_scoring":
             stage, phase = "scoring", "initial_result_review"
+        elif review_kind == "baseline_construction_scoring":
+            stage, phase = "scoring", "baseline_result_review"
         elif review_kind == "frontier_scoring":
             stage, phase = "candidate_decision", "accept_or_reject"
         elif review_kind == "scoring_failure":

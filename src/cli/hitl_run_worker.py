@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import json
 import os
 import re
@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from core.config_loader import ConfigLoader  # noqa: E402
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path  # noqa: E402
+from core.hitl_lock import HitlWorkspaceRunActiveError, hitl_workspace_run_lease  # noqa: E402
 from core.hitl_mode import normalize_hitl_mode  # noqa: E402
 from core.hitl_run_control import (  # noqa: E402
     HitlRunStopControl,
@@ -62,7 +63,7 @@ def _claim_request(path: Path) -> Path:
 
 def _load_request(path: Path) -> Dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("version") not in {1, 2, 3}:
+    if not isinstance(value, dict) or value.get("version") not in {1, 2, 3, 4}:
         raise ValueError("Unsupported HITL launch request.")
     required = (
         "request_id",
@@ -83,11 +84,26 @@ def _load_request(path: Path) -> Dict[str, Any]:
         raise ValueError("HITL launch request has an unsupported source interface.")
     if value["version"] == 2 and not str(value.get("hitl_mode", "")).strip():
         raise ValueError("HITL launch request is missing its HITL mode.")
-    if value["version"] == 3 and not str(value.get("workflow", "")).strip():
+    if value["version"] in {3, 4} and not str(value.get("workflow", "")).strip():
         raise ValueError("HITL launch request is missing its research workflow.")
+    if value["version"] == 4 and not str(value.get("operation", "")).strip():
+        raise ValueError("HITL launch request is missing its operation.")
     value["workflow"] = str(value.get("workflow", "autoresearch")).strip().lower()
     if value["workflow"] not in {"ordinary", "autoresearch"}:
         raise ValueError("HITL launch request has an unsupported research workflow.")
+    value["operation"] = str(value.get("operation", "research")).strip().lower()
+    if value["operation"] not in {"research", "construct_baseline"}:
+        raise ValueError("HITL launch request has an unsupported operation.")
+    if value["operation"] == "construct_baseline" and value["workflow"] != "ordinary":
+        raise ValueError("Baseline construction requires an Ordinary research workspace.")
+    from core.hitl_run_control import validate_run_time_limit
+
+    value["time_limit_seconds"] = validate_run_time_limit(value.get("time_limit_seconds"))
+    if (
+        (value["operation"] != "research" or value["workflow"] != "autoresearch")
+        and value["time_limit_seconds"] is not None
+    ):
+        raise ValueError("A run time limit is supported only for managed AutoResearch.")
     value["hitl_mode"] = normalize_hitl_mode(value.get("hitl_mode")).value
 
     identity = _REQUEST_NAME.fullmatch(path.name)
@@ -120,25 +136,32 @@ def _finalize_stopped_run(
     control: HitlRunStopControl,
 ) -> int:
     """Acknowledge a stop only after established recovery finishes."""
+    stop_reason = "user_requested"
     try:
-        stop_record = control.record()
+        stop_reason = control.stop_reason()
         if request.get("workflow") == "ordinary":
             from core.pipeline_orchestrator import ResearchPipelineOrchestrator
 
             recovery = ResearchPipelineOrchestrator(
                 work_dir=work_dir,
                 managed_initial_run=True,
+                baseline_construction=(
+                    request.get("operation") == "construct_baseline"
+                ),
                 hitl_mode=request.get("hitl_mode", "full"),
             ).restore_stopped_initial_run()
         else:
-            from core.hitl_autoresearch import recover_interrupted_hitl_autoresearch_attempt
+            if stop_reason == "budget_exhausted":
+                from core.hitl_autoresearch import finalize_budget_exhausted_autoresearch
 
-            recovery = recover_interrupted_hitl_autoresearch_attempt(work_dir)
-        stop_reason = (
-            "provider_unavailable"
-            if str(stop_record.get("requested_by", "")).strip() == "provider_unavailable"
-            else "user_requested"
-        )
+                recovery = finalize_budget_exhausted_autoresearch(
+                    work_dir,
+                    request_id=str(request.get("request_id", "")),
+                )
+            else:
+                from core.hitl_autoresearch import recover_interrupted_hitl_autoresearch_attempt
+
+                recovery = recover_interrupted_hitl_autoresearch_attempt(work_dir)
         stopped_at = utc_now()
         status: Dict[str, Any] = {
             "status": "stopped",
@@ -146,13 +169,19 @@ def _finalize_stopped_run(
             "updated_at": stopped_at,
             "stopped_at": stopped_at,
             "mode": request.get("mode", ""),
+            "operation": request.get("operation", "research"),
             "workflow": request.get("workflow", "autoresearch"),
             "hitl_mode": request.get("hitl_mode", "full"),
             "provider": request.get("provider", ""),
             "reason": stop_reason,
         }
         if recovery is not None:
-            if isinstance(recovery, dict):
+            if hasattr(recovery, "outcome"):
+                status["budget_finalization"] = str(recovery.outcome)
+                status["checkpoint_sha"] = str(
+                    recovery.restored_checkpoint_sha or ""
+                )
+            elif isinstance(recovery, dict):
                 status["resume_from"] = str(recovery.get("stage", ""))
                 status["checkpoint_sha"] = str(recovery.get("checkpoint_sha", ""))
             else:
@@ -171,11 +200,19 @@ def _finalize_stopped_run(
                 "failed_at": failed_at,
                 "updated_at": failed_at,
                 "mode": request.get("mode", ""),
+                "operation": request.get("operation", "research"),
                 "workflow": request.get("workflow", "autoresearch"),
                 "hitl_mode": request.get("hitl_mode", "full"),
                 "provider": request.get("provider", ""),
                 "recovery_required": True,
-                "message": f"Run stopped, but rollback could not finish: {recovery_error}",
+                "reason": stop_reason,
+                "message": (
+                    "Time budget expired, but selected-result finalization could not "
+                    "finish: "
+                    if stop_reason == "budget_exhausted"
+                    else "Run stopped, but rollback could not finish: "
+                )
+                + str(recovery_error),
             },
         )
         return 1
@@ -189,6 +226,7 @@ def main() -> int:
     claimed = _claim_request(args.request)
     request: Dict[str, Any] = {}
     control: HitlRunStopControl | None = None
+    run_scope = ExitStack()
     try:
         request = _load_request(claimed)
         work_dir = Path(str(request["work_dir"])).resolve()
@@ -212,60 +250,79 @@ def main() -> int:
         continuation = request["mode"] == "continue"
         log_path = work_dir / "logs" / "hitl_runtime.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with activate_hitl_run_stop_control(control):
-            if control.requested():
-                raise HitlRunStopRequested("HITL run stopped before startup completed.")
-            atomic_write_json(
-                hitl_launch_status_path(work_dir),
-                {
-                    "status": "running",
-                    "pid": os.getpid(),
-                    "request_id": request["request_id"],
-                    "started_at": started_at,
-                    "updated_at": started_at,
+        run_scope.enter_context(
+            hitl_workspace_run_lease(
+                work_dir,
+                owner={
+                    "request_id": request_id,
+                    "idea_id": request["idea_id"],
+                    "provider": request["provider"],
                     "mode": request["mode"],
+                    "operation": request.get("operation", "research"),
                     "workflow": request["workflow"],
                     "hitl_mode": hitl_mode,
-                    "provider": request["provider"],
+                    "interface": request["interface"],
                 },
             )
-            with log_path.open("a", encoding="utf-8") as output:
-                with redirect_stdout(output), redirect_stderr(output):
-                    github_requested = bool(request.get("github", False))
-                    runner = ResearchRunner(
-                        project_root=project_root,
-                        use_github=github_requested,
-                        github_org=os.getenv("GITHUB_ORG", ""),
-                        github_required=github_requested,
+        )
+        run_scope.enter_context(activate_hitl_run_stop_control(control))
+        if control.requested():
+            raise HitlRunStopRequested("HITL run stopped before startup completed.")
+        atomic_write_json(
+            hitl_launch_status_path(work_dir),
+            {
+                "status": "running",
+                "pid": os.getpid(),
+                "request_id": request["request_id"],
+                "started_at": started_at,
+                "updated_at": started_at,
+                "mode": request["mode"],
+                "operation": request.get("operation", "research"),
+                "workflow": request["workflow"],
+                "hitl_mode": hitl_mode,
+                "provider": request["provider"],
+            },
+        )
+        with log_path.open("a", encoding="utf-8") as output:
+            with redirect_stdout(output), redirect_stderr(output):
+                github_requested = bool(request.get("github", False))
+                runner = ResearchRunner(
+                    project_root=project_root,
+                    use_github=github_requested,
+                    github_org=os.getenv("GITHUB_ORG", ""),
+                    github_required=github_requested,
+                )
+                # The runtime-owned GitHub manager has captured its
+                # credential. Everything launched by this dedicated run
+                # process inherits the credential-free environment below.
+                remove_github_credentials(os.environ)
+                run_args = {
+                    "provider": str(request["provider"]),
+                    "write_paper": bool(request.get("write_paper", False)),
+                    "paper_style": request.get("paper_style") or None,
+                    "hitl_mode": hitl_mode,
+                    "hitl_work_dir": work_dir,
+                }
+                if request.get("operation") == "construct_baseline":
+                    run_args["hitl_construct_baseline"] = str(request["interface"])
+                elif request["workflow"] == "ordinary":
+                    run_args["hitl_research"] = str(request["interface"])
+                else:
+                    run_args.update(
+                        autoresearch_iterations=int(request.get("iterations", 1)),
+                        time_limit_seconds=request.get("time_limit_seconds"),
+                        hitl_autoresearch=(
+                            None if continuation else str(request["interface"])
+                        ),
+                        hitl_continue_autoresearch=(
+                            str(request["interface"]) if continuation else None
+                        ),
                     )
-                    # The runtime-owned GitHub manager has captured its
-                    # credential. Everything launched by this dedicated run
-                    # process inherits the credential-free environment below.
-                    remove_github_credentials(os.environ)
-                    run_args = {
-                        "provider": str(request["provider"]),
-                        "write_paper": bool(request.get("write_paper", False)),
-                        "paper_style": request.get("paper_style") or None,
-                        "hitl_mode": hitl_mode,
-                        "hitl_work_dir": work_dir,
-                    }
-                    if request["workflow"] == "ordinary":
-                        run_args["hitl_research"] = str(request["interface"])
-                    else:
-                        run_args.update(
-                            autoresearch_iterations=int(request.get("iterations", 1)),
-                            hitl_autoresearch=(
-                                None if continuation else str(request["interface"])
-                            ),
-                            hitl_continue_autoresearch=(
-                                str(request["interface"]) if continuation else None
-                            ),
-                        )
-                    result = runner.run_research(
-                        str(request["idea_id"]),
-                        **run_args,
-                    )
-        if control.requested() and not bool(result.get("success", False)):
+                result = runner.run_research(
+                    str(request["idea_id"]),
+                    **run_args,
+                )
+        if control.requested():
             return _finalize_stopped_run(
                 work_dir=work_dir,
                 request=request,
@@ -280,6 +337,7 @@ def main() -> int:
             "completed_at": finished_at,
             "updated_at": finished_at,
             "mode": request["mode"],
+            "operation": request.get("operation", "research"),
             "workflow": request["workflow"],
             "hitl_mode": hitl_mode,
             "provider": request["provider"],
@@ -301,9 +359,17 @@ def main() -> int:
                 control=control,
             )
         raise
+    except HitlWorkspaceRunActiveError:
+        # A losing launch must not overwrite the current owner's live status.
+        raise
     except Exception as exc:
         if request.get("work_dir"):
             failed_at = utc_now()
+            stop_reason = (
+                control.stop_reason()
+                if control is not None and control.requested()
+                else ""
+            )
             atomic_write_json(
                 hitl_launch_status_path(Path(str(request["work_dir"]))),
                 {
@@ -312,14 +378,25 @@ def main() -> int:
                     "failed_at": failed_at,
                     "updated_at": failed_at,
                     "mode": request.get("mode", ""),
+                    "operation": request.get("operation", "research"),
                     "workflow": request.get("workflow", "autoresearch"),
                     "hitl_mode": request.get("hitl_mode", "full"),
                     "provider": request.get("provider", ""),
-                    "message": f"Research could not start: {str(exc).strip() or exc.__class__.__name__}",
+                    **(
+                        {"reason": stop_reason, "recovery_required": True}
+                        if stop_reason
+                        else {}
+                    ),
+                    "message": (
+                        "Time budget expired, but selected-result finalization failed: "
+                        if stop_reason == "budget_exhausted"
+                        else "Research could not start: "
+                    ) + (str(exc).strip() or exc.__class__.__name__),
                 },
             )
         raise
     finally:
+        run_scope.close()
         claimed.unlink(missing_ok=True)
 
 

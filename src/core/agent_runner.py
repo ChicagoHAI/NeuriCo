@@ -240,6 +240,13 @@ def run_prebuilt_cli_agent(
     backend setup/cleanup. This helper only handles subprocess execution,
     sanitized output streaming, optional wall-clock timeout, and reaping.
     """
+    from core.hitl_run_control import current_hitl_run_budget_prompt
+
+    budget_context = current_hitl_run_budget_prompt(work_dir)
+    if budget_context:
+        # Apply after restoring/composing saved prompts; do not rewrite the
+        # continuation record or let its previous budget govern a new Start.
+        prompt = prompt + "\n\n" + budget_context
     log_file.parent.mkdir(parents=True, exist_ok=True)
     transcript_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -343,10 +350,12 @@ def run_prebuilt_cli_agent(
                 return_code = process.wait()
         else:
             return_code = process.wait()
-            if process_group_id is not None:
-                background_processes_terminated = _terminate_lingering_process_group(
-                    process_group_id
-                )
+        # A stopped/timed-out parent may exit before a child that ignores TERM.
+        # Reuse the retained group ID after reaping the parent in every case.
+        if process_group_id is not None:
+            background_processes_terminated = _terminate_lingering_process_group(
+                process_group_id
+            )
         reader.join(timeout=5)
         _flush_output()
 

@@ -22,6 +22,7 @@ from core.hitl_paths import (
     hitl_idea_log_path,
     hitl_launch_status_path,
     hitl_run_control_dir,
+    hitl_run_budget_path,
     hitl_runtime_state_path,
     hitl_state_dir,
     hitl_stop_request_path,
@@ -301,6 +302,15 @@ class HitlWorkspaceView:
             else ""
         )
         workflow_locked = bool(pipeline)
+        from core.hitl_autoresearch import managed_baseline_construction_eligibility
+
+        baseline_eligibility = managed_baseline_construction_eligibility(
+            self.work_dir,
+            pipeline_state=pipeline,
+        )
+        can_construct_baseline = bool(
+            owner is None and baseline_eligibility.get("available")
+        )
         pending = runtime.get("pending_worker_command")
         pending = pending if isinstance(pending, dict) else {}
         continuation = runtime.get("worker_continuation")
@@ -332,9 +342,19 @@ class HitlWorkspaceView:
         stage_label = self._stage_label(stage) if stage else ""
         phase_label = self._working_phase_label(phase) if phase else ""
         owner_request_id = str((owner or {}).get("request_id") or "").strip()
+        budget_deadline_at = None
+        budget_path = hitl_run_budget_path(self.work_dir)
+        if owner_request_id and budget_path.exists():
+            budget = _read_object(budget_path, "run budget")
+            if budget.get("request_id") == owner_request_id:
+                from core.hitl_run_control import HitlRunStopControl
+
+                HitlRunStopControl._validate_budget(budget)
+                budget_deadline_at = budget["deadline_at"]
         started_at = str((owner or {}).get("started_at") or "").strip()
         provider = str((owner or {}).get("provider") or "").strip()
         mode = str((owner or {}).get("mode") or "").strip()
+        operation = str((owner or {}).get("operation") or "research").strip()
         workflow = str(
             pipeline_workflow
             or (owner or {}).get("workflow")
@@ -372,6 +392,8 @@ class HitlWorkspaceView:
                 "state": state,
                 "active": active,
                 "can_launch": not active,
+                "budget_deadline_at": budget_deadline_at if active else None,
+                "can_construct_baseline": can_construct_baseline and not active,
                 "title": title,
                 "detail": detail,
                 "stage": stage,
@@ -380,6 +402,7 @@ class HitlWorkspaceView:
                 "phase_label": visible_phase,
                 "label": label,
                 "mode": mode,
+                "operation": operation if operation in {"research", "construct_baseline"} else "research",
                 "workflow": workflow if workflow in {"ordinary", "autoresearch"} else "autoresearch",
                 "workflow_locked": workflow_locked,
                 "hitl_mode": hitl_mode if hitl_mode in {"full", "auto"} else "full",
@@ -394,6 +417,7 @@ class HitlWorkspaceView:
                 ),
                 "updated_at": self._record_timestamp(record),
                 "next_action": next_step,
+                "reason": str(record.get("reason", "")) if isinstance(record, dict) else "",
             }
 
         human_request = unresolved and bool(
@@ -425,6 +449,7 @@ class HitlWorkspaceView:
 
         if owner is None and launch_status:
             mode = str(launch_status.get("mode", mode)).strip()
+            operation = str(launch_status.get("operation", operation)).strip()
             if not workflow_locked:
                 workflow = str(launch_status.get("workflow", workflow)).strip().lower()
             hitl_mode = str(launch_status.get("hitl_mode", hitl_mode)).strip().lower()
@@ -442,6 +467,8 @@ class HitlWorkspaceView:
         def pending_labels() -> tuple[str, str]:
             if manager_review_kind == "initial_scoring":
                 return "Scoring", "Initial result review"
+            if manager_review_kind == "baseline_construction_scoring":
+                return "Scoring", "Baseline review"
             if manager_review_kind == "frontier_scoring":
                 return "Candidate decision", "Accept or reject"
             if manager_review_kind == "scoring_failure":
@@ -518,11 +545,40 @@ class HitlWorkspaceView:
                     display_phase="",
                 )
             if launch_state == "stopped":
+                exhausted = launch_status.get("reason") == "budget_exhausted"
+                budget_finalization = str(
+                    launch_status.get("budget_finalization", "")
+                ).strip()
+                if exhausted and budget_finalization == "selected_node_restored":
+                    detail = (
+                        "The time limit was reached and the currently selected "
+                        "completed result was restored."
+                    )
+                    next_step = (
+                        "Review the selected result, then start again with a new "
+                        "time limit or no limit."
+                    )
+                elif exhausted and budget_finalization == "no_selected_node":
+                    detail = (
+                        "The time limit was reached before a completed result was "
+                        "selected. Recoverable state was preserved."
+                    )
+                    next_step = (
+                        "Start again with a new time limit or no limit to continue."
+                    )
+                else:
+                    detail = "The run stopped and recoverable progress was preserved."
+                    next_step = (
+                        "Review the saved progress, then start again with a new time "
+                        "limit or no limit."
+                        if exhausted
+                        else "Continue research when ready."
+                    )
                 return projected(
                     "stopped",
-                    "Stopped",
-                    "The run stopped and recoverable progress was preserved.",
-                    next_step="Continue research when ready.",
+                    "Time budget exhausted" if exhausted else "Stopped",
+                    detail,
+                    next_step=next_step,
                     record=launch_status,
                     active=False,
                     display_stage="Stopped",

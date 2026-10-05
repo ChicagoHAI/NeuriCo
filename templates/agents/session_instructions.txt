@@ -31,9 +31,6 @@ REQUIRED STEPS (in order):
    requires-python = ">=3.10"
    dependencies = []
 
-   [build-system]
-   requires = ["hatchling"]
-   build-backend = "hatchling.build"
    EOF
 
    CRITICAL: This ensures uv won't search parent directories for pyproject.toml
