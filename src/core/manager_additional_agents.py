@@ -74,8 +74,20 @@ def _approved_saved_request(
 ) -> Optional[Dict[str, Any]]:
     """Reuse only the exact, manager-approved workspace that was reviewed."""
     state = HitlRuntimeState(work_dir)
+    action = state.snapshot().get("next_autoresearch_action")
+    resolved_agent_action = (
+        isinstance(action, dict)
+        and action.get("kind") == "prepare_proposal"
+        and action.get("status") == "resolved"
+        and dict(action.get("result") or {}).get("choice") == "call_additional_agent"
+    )
     pending = state.pending_worker_command()
     if not isinstance(pending, dict):
+        if resolved_agent_action:
+            raise RuntimeError(
+                "The recovered additional-agent action has no approved worker request. "
+                "The whole attempt must roll back."
+            )
         return None
     response = pending.get("response")
     matches = (
@@ -88,6 +100,11 @@ def _approved_saved_request(
         and dict(pending.get("provenance") or {}) == provenance
     )
     if not matches:
+        if resolved_agent_action:
+            raise RuntimeError(
+                "The recovered additional-agent action does not match its approved "
+                "worker request. The whole attempt must roll back."
+            )
         return None
     expected = str(pending.get("workspace_fingerprint", "")).strip()
     current = HitlWorkspaceWriteGuard.public_fingerprint(work_dir)

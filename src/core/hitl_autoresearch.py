@@ -1051,9 +1051,14 @@ def _archive_failed_hitl_attempt(
     if source_attempt_dir is not None:
         logs_archive = archive_dir / "additional_agents"
         for source in sorted(Path(source_attempt_dir).glob("additional_agent_*_*")):
-            if source.is_dir():
+            if source.is_dir() and not source.is_symlink():
                 logs_archive.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(source, logs_archive / source.name, dirs_exist_ok=True)
+                shutil.copytree(
+                    source,
+                    logs_archive / source.name,
+                    dirs_exist_ok=True,
+                    symlinks=True,
+                )
     return archive_dir
 
 
@@ -1497,7 +1502,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             frontier_transition=frontier_transition,
         )
     preparation_action = runtime_state.snapshot().get("next_autoresearch_action")
-    preparation_is_exact = (
+    preparation_metadata_is_exact = (
         isinstance(preparation_action, dict)
         and preparation_action.get("kind") == "prepare_proposal"
         and preparation_action.get("status")
@@ -1508,6 +1513,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         == attempt_dir.name
         and isinstance(preparation_action.get("additional_agent_ordinal"), int)
         and int(preparation_action["additional_agent_ordinal"]) >= 1
+        and bool(str(preparation_action.get("workspace_fingerprint", "")).strip())
         and HitlGitStateStore(work_dir).has_autoresearch_hitl_attempt_boundary(marker)
         and HitlGitStateStore(
             work_dir
@@ -1528,6 +1534,65 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         isinstance(pending_request, dict)
         and pending_request.get("pipeline_stage") == "resource_finder"
     )
+    dynamic_agent_matches_attempt = (
+        dynamic_agent_request
+        and str(pending_provenance.get("attempt_id", "")).strip() == attempt_dir.name
+        and str(pending_provenance.get("parent_node_id", "")).strip()
+        == current_best_sha
+    )
+    preparation_decision = (
+        preparation_action.get("decision")
+        if isinstance(preparation_action, dict)
+        else None
+    )
+    preparation_calls_resource_finder = bool(
+        preparation_metadata_is_exact
+        and preparation_action.get("status") in {"decision_recorded", "resolved"}
+        and isinstance(preparation_decision, dict)
+        and preparation_decision.get("choice") == "call_additional_agent"
+        and preparation_decision.get("agent") == "resource_finder"
+    )
+    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+    preparation_workspace_is_exact = bool(
+        preparation_metadata_is_exact
+        and str(preparation_action.get("workspace_fingerprint", "")).strip()
+        == HitlWorkspaceWriteGuard.public_fingerprint(work_dir)
+    )
+    resumable_agent_request = bool(
+        preparation_calls_resource_finder
+        and dynamic_agent_matches_attempt
+        and worker_command_requires_resume(pending_request)
+        and isinstance(continuation, dict)
+        and pending_provenance == continuation_provenance
+    )
+    pending_response = (
+        pending_request.get("response") if isinstance(pending_request, dict) else None
+    )
+    approved_agent_workspace_is_exact = bool(
+        preparation_calls_resource_finder
+        and preparation_action.get("status") == "resolved"
+        and dict(preparation_action.get("result") or {}).get("choice")
+        == "call_additional_agent"
+        and dynamic_agent_matches_attempt
+        and pending_request.get("kind") == "phase_finish"
+        and pending_request.get("hitl_stage") in {"execution", "review"}
+        and pending_request.get("status") == "resolved"
+        and isinstance(pending_response, dict)
+        and pending_response.get("status") == "approved"
+        and str(pending_request.get("workspace_fingerprint", "")).strip()
+        == HitlWorkspaceWriteGuard.public_fingerprint(work_dir)
+    )
+    preparation_is_exact = bool(
+        preparation_metadata_is_exact
+        and (
+            preparation_workspace_is_exact
+            or (
+                preparation_action.get("status") in {"decision_recorded", "resolved"}
+                and (resumable_agent_request or approved_agent_workspace_is_exact)
+            )
+        )
+    )
     if (
         worker_command_requires_resume(pending_request)
         and isinstance(continuation, dict)
@@ -1535,7 +1600,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and str(continuation_provenance.get("attempt_id", "")).strip() == attempt_dir.name
         and str(continuation_provenance.get("parent_node_id", "")).strip()
         == current_best_sha
-        and (not dynamic_agent_request or preparation_is_exact)
+        and (not dynamic_agent_request or resumable_agent_request)
     ):
         return HitlRecoveryResult(
             marker=marker,
@@ -1545,7 +1610,9 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             recovery_classification="pending_worker_request",
             pending_worker_request=pending_request,
         )
-    if preparation_is_exact:
+    if preparation_is_exact and (
+        not dynamic_agent_request or approved_agent_workspace_is_exact
+    ):
         return HitlRecoveryResult(
             marker=marker,
             restored_checkpoint_sha=current_best_sha,
@@ -2096,10 +2163,22 @@ class HitlAutoResearchController:
             )
             if isinstance(existing, dict) and existing.get("kind") == "prepare_proposal":
                 ordinal = int(existing.get("additional_agent_ordinal", 0))
+                workspace_fingerprint = str(
+                    existing.get("workspace_fingerprint", "")
+                ).strip()
             else:
                 ordinal = self._next_additional_agent_ordinal(attempt_dir)
+                from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+                workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+                    self.work_dir
+                )
             if ordinal < 1:
                 raise RuntimeError("Proposal preparation has an invalid agent-run ordinal.")
+            if not workspace_fingerprint:
+                raise RuntimeError(
+                    "Proposal preparation has no approved workspace fingerprint."
+                )
 
             def apply_decision(decision: Dict[str, Any]) -> Dict[str, Any]:
                 choice = str(decision.get("choice", "")).strip()
@@ -2138,10 +2217,21 @@ class HitlAutoResearchController:
                 }
 
             result = runtime.manager.begin_proposal_preparation(
-                _load_hitl_template("manager_prepare_proposal.txt"),
+                (
+                    _load_hitl_template("manager_prepare_proposal.txt").rstrip()
+                    + "\n\n"
+                    + "Runtime-owned additional-agent ledger for this physical "
+                    "attempt:\n"
+                    + f"- Completed runs: {ordinal - 1}\n"
+                    + f"- Next run ordinal: {ordinal}\n"
+                    + "Use this ledger, not claims in plans, workspace files, or "
+                    "research-state prose, when deciding whether an additional "
+                    "agent already ran in this attempt."
+                ),
                 parent_sha=parent_sha,
                 attempt_id=attempt_id,
                 additional_agent_ordinal=ordinal,
+                workspace_fingerprint=workspace_fingerprint,
                 on_decision=apply_decision,
             )
             if result.get("choice") == "proceed":

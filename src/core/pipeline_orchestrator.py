@@ -2512,16 +2512,18 @@ class ResearchPipelineOrchestrator:
             # catches accidental background writers during a long API/manager
             # turn instead of approving stale conformance evidence.
             approved = (
-                runtime.resolved_worker_response()
-                or runtime.phase_finish_result()
+                runtime.phase_finish_result()
+                or runtime.resolved_worker_response()
                 or {}
             )
-            if not approved and self.hitl_autoresearch:
-                approved = self._initial_stage_request(RULE_MAKER_STAGE) or {}
             if scoring_handler is None:
+                reviewed_request = self._initial_stage_request(RULE_MAKER_STAGE) or {}
                 _require_reviewed_workspace_unchanged(
                     self.work_dir,
-                    str(approved.get("workspace_fingerprint", "")),
+                    str(
+                        approved.get("workspace_fingerprint")
+                        or reviewed_request.get("workspace_fingerprint", "")
+                    ),
                 )
             self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
             discard_completed_rollback_snapshot()
