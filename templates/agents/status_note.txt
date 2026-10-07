@@ -1,0 +1,21 @@
+LIVE STATUS NOTE
+────────────────────────────────────────────────────────────────────────────────
+
+Keep `logs/status_now.md` current with two or three plain sentences that tell
+someone checking in, with no context, where your thinking is right now:
+- what this research is testing,
+- what you are working on at this moment and why,
+- what you have learned so far and what comes next.
+
+Write it when you start, rewrite it whenever your plan or understanding changes
+(for example after a key result, a failure, or a change of approach), and once
+more before you finish. Replace the whole file each time; never append.
+
+Use plain language. Do not include file paths, internal ids, commit hashes,
+metric variable names, or Markdown formatting.
+
+Example:
+Testing whether giving a coding assistant the relevant repo files makes it ask
+better clarifying questions. The first comparison looked promising but might be
+luck, so I am rerunning it several times. Next I will check whether the
+improvement holds across those reruns.

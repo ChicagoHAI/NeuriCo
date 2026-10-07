@@ -629,7 +629,8 @@ Location: {run_dir}
             'skill_path': skill_path,
         }
 
-        return self.render_template(template, variables)
+        rendered = self.render_template(template, variables)
+        return rendered + "\n" + self.load_template('agents/status_note.txt')
 
     @staticmethod
     def _skill_root_for_provider(provider: str) -> str:
@@ -854,7 +855,7 @@ and the general workflow, ALWAYS follow the user's instructions.
         # the placeholder. Ensure every experiment runner receives it.
         if 'RESEARCH STATE CONTRACT' not in rendered:
             rendered = state_contract + "\n" + rendered
-        return rendered
+        return rendered + "\n" + self.load_template('agents/status_note.txt')
 
     def _generate_local_resource_contract(self, idea_spec: Dict[str, Any],
                                           scoring_enabled: bool = False) -> str:
@@ -1132,7 +1133,10 @@ RESEARCH DOMAIN:
                 'phase_name': 'resource_finder',
             },
         )
-        full_prompt = research_context + "\n" + state_contract + "\n" + template
+        status_note = self.load_template('agents/status_note.txt')
+        full_prompt = (
+            research_context + "\n" + state_contract + "\n" + template + "\n" + status_note
+        )
 
         return full_prompt
 

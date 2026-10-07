@@ -1197,6 +1197,7 @@ class HitlTerminalChannel(UserChannel):
         self._cache_live_status(status)
         visible = dict(status)
         visible["elapsed"] = _elapsed_phase_time(status.get("phase_started_at"))
+        visible["summary_age"] = _elapsed_phase_time(status.get("summary_updated_at"))
         visible["budget_remaining"] = (
             _remaining_budget_time(status.get("budget_deadline_at"))
             if bool(status.get("active"))

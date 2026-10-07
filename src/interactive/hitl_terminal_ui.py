@@ -386,7 +386,15 @@ class HitlTerminalUI:
         next_action = terminal_safe_text(live.get("next_action") or "").strip()
         elapsed = terminal_safe_text(live.get("elapsed") or "").strip()
         heading = label if not elapsed else f"{label}  ·  {elapsed}"
-        lines = [self._style("Research status", "bold"), self._rule(), f"  {self._style(heading, 'bold')}"]
+        lines = [self._style("Research status", "bold"), self._rule()]
+        summary = terminal_safe_text(live.get("summary") or "").strip()
+        if summary:
+            lines.extend(self._wrap_paragraph(summary, indent="  "))
+            age = terminal_safe_text(live.get("summary_age") or "").strip()
+            if age:
+                lines.append(f"  {self._style(f'Updated {age} ago', 'muted')}")
+            lines.append("")
+        lines.append(f"  {self._style(heading, 'bold')}")
         if live.get("active"):
             workflow = terminal_safe_text(live.get("workflow") or "autoresearch").strip().lower()
             operation = terminal_safe_text(live.get("operation") or "research").strip().lower()

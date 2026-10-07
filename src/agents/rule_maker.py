@@ -382,6 +382,10 @@ def generate_rule_maker_prompt(
                 f"{supplement}\n"
             )
 
+    status_note = templates_dir / "agents" / "status_note.txt"
+    if status_note.exists():
+        prompt = f"{prompt}\n\n{status_note.read_text(encoding='utf-8')}"
+
     return prompt
 
 

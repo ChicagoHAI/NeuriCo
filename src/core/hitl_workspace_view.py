@@ -96,7 +96,16 @@ class HitlWorkspaceView:
     def live_status(self) -> Dict[str, Any]:
         """Project the durable workflow into one interface-neutral live status."""
         runtime = self._runtime_state()
-        return self._live_status(runtime)
+        status = self._live_status(runtime)
+        note_path = self.work_dir / "logs" / "status_now.md"
+        try:
+            summary = " ".join(note_path.read_text(encoding="utf-8").split())[:600]
+        except OSError:
+            summary = ""
+        if summary:
+            status["summary"] = summary
+            status["summary_updated_at"] = self._artifact_timestamp(note_path)
+        return status
 
     def pending_request(self) -> Optional[Dict[str, Any]]:
         """Return the currently actionable request from durable workspace state."""
