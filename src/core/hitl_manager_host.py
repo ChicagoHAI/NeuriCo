@@ -35,7 +35,8 @@ from core.hitl_lock import (
     resolve_hitl_manager_provider,
     select_hitl_manager_provider,
 )
-from core.hitl_manager_react import HitlManager
+from core.hitl_manager_react import HitlManager, hitl_manager_backend
+from core.hitl_status_summary import HitlStatusSummary
 from core.hitl_runtime_state import HitlResolutionReplyStaleError
 
 _RESOLUTION_REPLY = "resolution_reply"
@@ -462,6 +463,7 @@ class HitlTerminalChannel(UserChannel):
         self._thinking_stop = threading.Event()
         self._thinking_thread: Optional[threading.Thread] = None
         self._started = False
+        self.status_summary: Optional[HitlStatusSummary] = None
 
     def set_resolution_reply_handler(self, handler: Any) -> None:
         with self._state_lock:
@@ -839,7 +841,15 @@ class HitlTerminalChannel(UserChannel):
                     blank_before=True,
                 )
                 return {"status": "unavailable"}
-            self.present_run_status(status)
+            summary = ""
+            if self.status_summary is not None:
+                self._start_thinking_indicator()
+                try:
+                    summary = self.status_summary.summarize(status)
+                finally:
+                    if not self._thinking_requested.is_set():
+                        self._stop_thinking_indicator()
+            self.present_run_status(status, summary=summary)
             return {"status": "accepted"}
         if input_kind is None and text == "/activity":
             self.present_activity()
@@ -1193,11 +1203,11 @@ class HitlTerminalChannel(UserChannel):
                 self._ui.system("Answer Y or N.", tone="error")
             )
 
-    def present_run_status(self, status: Dict[str, Any]) -> None:
+    def present_run_status(self, status: Dict[str, Any], *, summary: str = "") -> None:
         self._cache_live_status(status)
         visible = dict(status)
+        visible["summary"] = summary
         visible["elapsed"] = _elapsed_phase_time(status.get("phase_started_at"))
-        visible["summary_age"] = _elapsed_phase_time(status.get("summary_updated_at"))
         visible["budget_remaining"] = (
             _remaining_budget_time(status.get("budget_deadline_at"))
             if bool(status.get("active"))
@@ -1593,6 +1603,13 @@ class HitlManagerHost:
                 self._open_browser = False
         elif interface == "cli":
             self.channel = HitlTerminalChannel(self.work_dir)
+            manager_config = config.get("manager", {})
+            manager_config = manager_config if isinstance(manager_config, dict) else {}
+            self.channel.status_summary = HitlStatusSummary(
+                self.work_dir,
+                lambda provider: hitl_manager_backend(provider, manager_config),
+                self.manager_provider,
+            )
             self._open_browser = False
         else:
             self.channel = HitlWebChannel(self.work_dir)
