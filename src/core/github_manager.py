@@ -16,7 +16,11 @@ import subprocess
 import shlex
 from datetime import datetime
 
-from core.security import sanitize_logs_directory
+from core.security import (
+    SanitizationError,
+    contains_sensitive_data_bytes,
+    sanitize_text,
+)
 
 try:
     from github import Github, GithubException, Auth
@@ -159,7 +163,7 @@ class GitHubManager:
             - repo_name: Name of created repository
             - repo_url: HTTPS URL for the repository
             - clone_url: URL for cloning
-            - local_path: Local path where repo will be cloned
+            - local_path: Path where repo will be cloned
         """
         # First-time repositories receive the established generated name. A
         # deleted publication destination must instead be reconstructed with
@@ -338,17 +342,12 @@ class GitHubManager:
                     git_config.set_value("user", "name", "NeuriCo")
                     git_config.set_value("user", "email", "noreply@neurico.dev")
 
-            # Sanitize log files before adding (remove any leaked API keys)
-            logs_dir = Path(repo_path) / "logs"
-            if logs_dir.exists():
-                sanitized_count = sanitize_logs_directory(logs_dir)
-                if sanitized_count > 0:
-                    print(f"   ✓ Sanitized {sanitized_count} log file(s)")
-
-            # Add all files
+            # Stage first. The Git index is the single authoritative publication
+            # boundary; real-time output redaction and other safeguards remain
+            # independent layers but are not duplicated here.
             repo.git.add(A=True)
 
-            # Unstage files exceeding GitHub's 100MB file size limit
+            # Exclude oversized staged blobs before any staged content is read.
             large_files = self._unstage_large_files(repo, repo_path)
             if large_files:
                 for lf_path, lf_size in large_files:
@@ -357,12 +356,16 @@ class GitHubManager:
                 print(f"   ⚠️  {len(large_files)} file(s) excluded from commit due to GitHub's 100MB file size limit.")
                 print(f"      These files remain in your local workspace but are not pushed to GitHub.")
 
-            # Check if there are changes to commit. HITL checkpoints may have
-            # already committed the complete workspace, but that existing HEAD
-            # still needs to reach its external storage remote.
-            has_changes = repo.is_dirty(untracked_files=True)
+            sanitized_files = self._sanitize_staged_files(repo, repo_path)
+            if sanitized_files:
+                print(f"   ✓ Sanitized {len(sanitized_files)} staged file(s)")
+            self._verify_staged_files_sanitized(repo)
+
+            # Only staged changes belong in the commit. Files intentionally
+            # unstaged above (for example oversized artifacts) must not trigger
+            # an empty commit merely because they remain in the working tree.
+            has_changes = bool(repo.git.diff('--cached', '--name-only').strip())
             if has_changes:
-                # Commit
                 repo.index.commit(commit_message)
                 print(f"   ✓ Committed: {commit_message}")
 
@@ -414,49 +417,182 @@ class GitHubManager:
                 print("   ℹ️  No changes to commit")
                 return False
 
+        except SanitizationError as e:
+            raise RuntimeError(f"Refusing to commit unsafe staged content: {e}") from e
         except GitCommandError as e:
             raise RuntimeError(f"Failed to commit and push: {e}")
 
+    def _run_git_bytes(self, repo: 'Repo', args: list, *, input_bytes: Optional[bytes] = None) -> bytes:
+        """Run a Git plumbing command and return exact bytes, failing closed."""
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=repo.working_tree_dir,
+                input=input_bytes,
+                capture_output=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            detail = e.stderr.decode("utf-8", errors="replace").strip()
+            raise SanitizationError(
+                f"Git inspection command failed ({' '.join(args)}): {detail or e}"
+            ) from e
+        return result.stdout
+
+    def _staged_paths(self, repo: 'Repo') -> list:
+        """Return staged added/copied/modified/renamed paths, excluding deletions."""
+        raw = self._run_git_bytes(
+            repo,
+            ["diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"],
+        )
+        return [os.fsdecode(path) for path in raw.split(b"\0") if path]
+
+    def _staged_entry(self, repo: 'Repo', relative_path: str) -> tuple:
+        """Return (mode, object_sha) for the stage-0 index entry."""
+        raw = self._run_git_bytes(
+            repo,
+            ["ls-files", "--stage", "-z", "--", relative_path],
+        )
+        for entry in raw.split(b"\0"):
+            if not entry:
+                continue
+            metadata, separator, _ = entry.partition(b"\t")
+            if not separator:
+                continue
+            parts = metadata.split()
+            if len(parts) == 3 and parts[2] == b"0":
+                return parts[0].decode("ascii"), parts[1].decode("ascii")
+        raise SanitizationError(
+            f"Could not resolve stage-0 Git index entry for {relative_path}"
+        )
+
+    def _staged_blob_size(self, repo: 'Repo', object_sha: str) -> int:
+        """Read Git object size without loading the object's content."""
+        raw = self._run_git_bytes(repo, ["cat-file", "-s", object_sha])
+        try:
+            return int(raw.strip())
+        except ValueError as e:
+            raise SanitizationError(
+                f"Could not determine staged Git object size for {object_sha}"
+            ) from e
+
+    def _read_staged_blob(self, repo: 'Repo', relative_path: str) -> tuple:
+        """Return (mode, bytes) for a bounded staged blob, never the worktree file."""
+        mode, object_sha = self._staged_entry(repo, relative_path)
+
+        # Gitlinks point at commits rather than blobs. They contain no artifact
+        # bytes to sanitize and are verified by their object identity instead.
+        if mode == "160000":
+            return mode, b""
+
+        size = self._staged_blob_size(repo, object_sha)
+        if size > MAX_FILE_SIZE:
+            raise SanitizationError(
+                f"Oversized staged blob reached sanitizer for {relative_path} "
+                f"({size} bytes > {MAX_FILE_SIZE})"
+            )
+
+        return mode, self._run_git_bytes(repo, ["cat-file", "blob", object_sha])
+
+    def _write_staged_blob(self, repo: 'Repo', relative_path: str, mode: str, content: bytes) -> None:
+        """Write sanitized bytes to the Git index without touching the worktree."""
+        object_sha = self._run_git_bytes(
+            repo,
+            ["hash-object", "-w", "--stdin"],
+            input_bytes=content,
+        ).strip().decode("ascii")
+        self._run_git_bytes(
+            repo,
+            ["update-index", "--cacheinfo", mode, object_sha, relative_path],
+        )
+
+    def _sanitize_staged_files(self, repo: 'Repo', repo_path: Path) -> list:
+        """
+        Sanitize staged UTF-8 text blobs directly in the Git index.
+
+        The worktree is never opened or rewritten here. Symbolic links therefore
+        cannot redirect sanitization outside the repository. Binary/non-UTF-8
+        blobs are preserved only when their raw bytes contain no recognized
+        credential pattern; otherwise publication fails closed.
+        """
+        _ = repo_path  # Kept for backward-compatible call sites.
+        sanitized_files = []
+
+        for relative_path in self._staged_paths(repo):
+            mode, raw_content = self._read_staged_blob(repo, relative_path)
+
+            if mode == "160000":
+                continue
+
+            # A symlink's staged blob is only its link target. Inspect that blob,
+            # but never follow or rewrite the filesystem target.
+            if mode == "120000":
+                if contains_sensitive_data_bytes(raw_content):
+                    raise SanitizationError(
+                        f"Recognized credential remains in staged symbolic-link blob {relative_path}"
+                    )
+                continue
+
+            is_binary = b"\0" in raw_content
+            try:
+                text = raw_content.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+
+            if is_binary or text is None:
+                if contains_sensitive_data_bytes(raw_content):
+                    raise SanitizationError(
+                        f"Recognized credential found in binary or non-UTF-8 staged file {relative_path}"
+                    )
+                continue
+
+            sanitized = sanitize_text(text)
+            if sanitized != text:
+                self._write_staged_blob(
+                    repo,
+                    relative_path,
+                    mode,
+                    sanitized.encode("utf-8"),
+                )
+                sanitized_files.append(relative_path)
+
+        return sanitized_files
+
+    def _verify_staged_files_sanitized(self, repo: 'Repo') -> None:
+        """Fail if any recognized credential remains in any bounded staged blob."""
+        for relative_path in self._staged_paths(repo):
+            mode, raw_content = self._read_staged_blob(repo, relative_path)
+            if mode == "160000":
+                continue
+            if contains_sensitive_data_bytes(raw_content):
+                raise SanitizationError(
+                    f"Recognized credential remains staged in {relative_path}"
+                )
+
     def _unstage_large_files(self, repo: 'Repo', repo_path: Path) -> list:
         """
-        Check staged files and unstage any exceeding GitHub's 100MB limit.
+        Unstage blobs exceeding GitHub's 100MB limit before reading content.
 
-        Args:
-            repo: GitPython Repo object
-            repo_path: Path to local repository
-
-        Returns:
-            List of (relative_path, size_bytes) tuples for unstaged files
+        Size is taken from the staged Git object, not the working-tree path, so
+        symbolic links are never followed and the publication boundary reflects
+        exactly what would be committed.
         """
+        _ = repo_path  # Kept for backward-compatible call sites.
         large_files = []
 
-        try:
-            # Get list of all staged files (relative paths)
-            staged_output = repo.git.diff('--cached', '--name-only')
-            if not staged_output.strip():
-                return large_files
-
-            staged_files = staged_output.strip().split('\n')
-
-            for filepath in staged_files:
-                filepath = filepath.strip()
-                if not filepath:
-                    continue
-
-                full_path = Path(repo_path) / filepath
-
-                # Skip deleted files (they appear in diff but don't exist on disk)
-                if not full_path.exists():
-                    continue
-
-                file_size = full_path.stat().st_size
-                if file_size > MAX_FILE_SIZE:
-                    # Unstage this file (does not delete it from working directory)
-                    repo.git.reset('--', filepath)
-                    large_files.append((filepath, file_size))
-
-        except Exception as e:
-            print(f"   ⚠️  Error checking staged file sizes: {e}")
+        for relative_path in self._staged_paths(repo):
+            mode, object_sha = self._staged_entry(repo, relative_path)
+            if mode == "160000":
+                continue
+            file_size = self._staged_blob_size(repo, object_sha)
+            if file_size > MAX_FILE_SIZE:
+                try:
+                    repo.git.reset('--', relative_path)
+                except GitCommandError as e:
+                    raise SanitizationError(
+                        f"Could not unstage oversized file {relative_path}: {e}"
+                    ) from e
+                large_files.append((relative_path, file_size))
 
         return large_files
 
