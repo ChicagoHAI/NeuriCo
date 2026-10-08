@@ -356,6 +356,26 @@ def _require_text(value: Any, field_name: str, context: str) -> str:
     return text
 
 
+def _phase_feedback_payload(
+    from_phase,
+    to_phase,
+    context,
+    manager_feedback,
+    human_feedback="",
+):
+    feedback = {
+        "type": "hitl_feedback",
+        "version": 1,
+        "from_phase": str(from_phase).strip(),
+        "to_phase": str(to_phase).strip(),
+        "context": str(context).strip(),
+        "manager_feedback": str(manager_feedback).strip(),
+        "human_feedback": str(human_feedback).strip(),
+    }
+
+    return feedback
+
+
 def _hitl_template_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "templates" / "hitl"
 
@@ -3622,9 +3642,16 @@ class HitlRuntime:
         next_phase = "plan" if human_resolved_plan else (
             "review" if hitl_stage == "execution" else hitl_stage
         )
+        structured_feedback = _phase_feedback_payload(
+            from_phase=hitl_stage,
+            to_phase=next_phase,
+            context=str(review.get("context", "")),
+            manager_feedback=feedback,
+            human_feedback=str(review.get("human_feedback", "")),
+        )
         prompt_block = self._finish_feedback_prompt_block(
             hitl_stage=next_phase,
-            feedback=feedback,
+            feedback=json.dumps(structured_feedback, ensure_ascii=False, indent=2),
         )
         current_stage = str(
             self._tool_context.get("hitl_stage", self.current_hitl_stage)
@@ -3649,6 +3676,7 @@ class HitlRuntime:
             "related_artifacts": related_artifacts,
             "manager_feedback": feedback,
             "context": str(review.get("context", "")),
+            "structured_feedback": structured_feedback,
             "next_phase": next_phase,
             "final": False,
             **({"record": normalized_record} if normalized_record is not None else {}),
@@ -3665,6 +3693,7 @@ class HitlRuntime:
         response = {
             "status": "feedback",
             "feedback": feedback,
+            "structured_feedback": structured_feedback,
             "next_phase": next_phase,
             "instruction": instruction,
             "prompt_block": prompt_block,
