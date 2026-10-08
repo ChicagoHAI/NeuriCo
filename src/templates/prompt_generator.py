@@ -956,6 +956,7 @@ substitutes.
         provider: str = "claude",
         hitl_phase: Optional[str] = None,
         scoring_enabled: bool = False,
+        objective: str = "",
     ) -> str:
         """
         Generate resource finder prompt from template.
@@ -1002,6 +1003,12 @@ RESEARCH HYPOTHESIS:
 RESEARCH DOMAIN:
 {domain}
 """
+
+        if objective.strip():
+            research_context += (
+                "\nRESOURCE-FINDING OBJECTIVE FOR THIS INVOCATION:\n"
+                f"{objective.strip()}\n"
+            )
 
         # Add background information if provided
         if background:

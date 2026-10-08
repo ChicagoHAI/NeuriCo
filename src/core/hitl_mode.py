@@ -41,4 +41,7 @@ def human_resolution_allowed(
         return False
     if command_kind in {"proposal", "raised_idea"}:
         return True
-    return command_kind == "phase_finish" and requires_human_approval
+    return (
+        command_kind in {"phase_finish", "proposal_preparation"}
+        and requires_human_approval
+    )

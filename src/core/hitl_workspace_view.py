@@ -490,6 +490,16 @@ class HitlWorkspaceView:
                     return "Frontier", (
                         "Selecting next" if action_status == "pending" else "Saving selection"
                     )
+                if kind == "prepare_proposal":
+                    if action_status == "decision_recorded" and continuation_status:
+                        return stage_label, (
+                            self._working_phase_label(phase) if phase else "Working"
+                        )
+                    return "Experiment", (
+                        "Preparing proposal"
+                        if action_status == "pending"
+                        else "Saving preparation decision"
+                    )
             if frontier_status not in {"", "completed"}:
                 return "Candidate decision", "Saving result"
             if root_status not in {"", "completed"}:
@@ -915,6 +925,8 @@ class HitlWorkspaceView:
             "selecting_next": "Selecting the next research basis.",
             "saving_prune_decision": "Saving the prune decision.",
             "saving_selection": "Saving the frontier selection.",
+            "preparing_proposal": "Deciding how to prepare the next proposal.",
+            "saving_preparation_decision": "Saving the proposal-preparation decision.",
             "saving_result": "Saving the candidate decision.",
             "creating_root": "Creating the initial frontier root.",
             "applying_result": "Applying the candidate decision.",

@@ -123,6 +123,102 @@ tools:
         required: false
     returns: Compact node record, or one complete historical attempt when requested.
 
+  - name: proceed_to_proposal
+    description: |
+      Decide that the selected frontier workspace already has enough resources
+      for the next AutoResearch proposal. Available only at the runtime-managed
+      proposal-preparation boundary. Supply either finalized premise idea ids or
+      one complete supporting-evidence record authored from your own analysis.
+      Auto mode applies the recorded recommendation immediately; Full mode
+      presents it for human admission before proposal generation begins.
+    parameters:
+      reason:
+        type: string
+        description: Strategic rationale for proceeding without more resource finding.
+        required: true
+      premise_idea_ids:
+        type: array
+        items:
+          type: string
+        description: Existing finalized idea ids that support this decision.
+        required: false
+      supporting_evidence:
+        type: object
+        additionalProperties: false
+        properties:
+          idea_category:
+            type: string
+            enum: [paper_finding, dataset_property, implementation_fact, experiment_result, constraint_or_risk, other]
+          context:
+            type: string
+          evidence:
+            type: string
+          related_artifacts:
+            type: array
+            items:
+              type: object
+              additionalProperties: false
+              properties:
+                path:
+                  type: string
+                description:
+                  type: string
+              required: [path, description]
+        required: [idea_category, context, evidence]
+        description: New B-level evidence to record when no finalized premise exists.
+        required: false
+    returns: Confirmation that runtime recorded the manager's preparation decision.
+
+  - name: request_resource_finder
+    description: |
+      Decide that the next AutoResearch proposal needs a focused resource-finder
+      run first. Available only at the runtime-managed proposal-preparation
+      boundary. Runtime runs the established resource-finder HITL lifecycle and
+      then proceeds directly to proposal. Auto mode applies the recorded
+      recommendation immediately; Full mode presents it for human admission
+      before resource finding begins.
+    parameters:
+      objective:
+        type: string
+        description: Concrete resource question or acquisition target for the resource finder.
+        required: true
+      reason:
+        type: string
+        description: Strategic rationale for gathering these resources before proposal.
+        required: true
+      premise_idea_ids:
+        type: array
+        items:
+          type: string
+        description: Existing finalized idea ids that support this decision.
+        required: false
+      supporting_evidence:
+        type: object
+        additionalProperties: false
+        properties:
+          idea_category:
+            type: string
+            enum: [paper_finding, dataset_property, implementation_fact, experiment_result, constraint_or_risk, other]
+          context:
+            type: string
+          evidence:
+            type: string
+          related_artifacts:
+            type: array
+            items:
+              type: object
+              additionalProperties: false
+              properties:
+                path:
+                  type: string
+                description:
+                  type: string
+              required: [path, description]
+        required: [idea_category, context, evidence]
+        description: New B-level evidence to record when no finalized premise exists.
+        required: false
+    returns: Confirmation that runtime recorded the focused resource-finder request.
+
   - name: select_frontier
     description: |
       Select an active HITL frontier node for the next proposal. This is allowed

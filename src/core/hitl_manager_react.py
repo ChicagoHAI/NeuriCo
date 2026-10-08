@@ -90,6 +90,8 @@ class HitlManagerToolExecutor:
             "recall_manager_conversation": self._recall,
             "list_frontier": self._list_frontier,
             "view_node": self._view_node,
+            "proceed_to_proposal": self._proceed_to_proposal,
+            "request_resource_finder": self._request_resource_finder,
             "select_frontier": self._select_frontier,
             "prune_frontier": self._prune_frontier,
             "ask_human": self._ask_human,
@@ -173,6 +175,16 @@ class HitlManagerToolExecutor:
             ),
             ensure_ascii=False,
             indent=2,
+        )
+
+    def _proceed_to_proposal(self, args: Dict[str, Any]) -> str:
+        return self.manager.record_proposal_preparation_choice(
+            "proceed_to_proposal", args
+        )
+
+    def _request_resource_finder(self, args: Dict[str, Any]) -> str:
+        return self.manager.record_proposal_preparation_choice(
+            "request_resource_finder", args
         )
 
     def _select_frontier(self, args: Dict[str, Any]) -> str:
@@ -437,6 +449,9 @@ class HitlManager:
             "finalize_frontier_decision",
         }
     )
+    _PROPOSAL_PREPARATION_TOOL_NAMES = frozenset(
+        {"proceed_to_proposal", "request_resource_finder"}
+    )
 
     def _current_hitl_mode(self) -> HitlMode:
         pending = self.runtime_state.pending_worker_command()
@@ -471,7 +486,10 @@ class HitlManager:
             kind = str(action.get("kind", "")).strip()
             if kind in {"prune_frontier", "select_frontier"}:
                 names.add(kind)
-            return names
+                return names
+            if kind == "prepare_proposal" and action.get("status") == "pending":
+                names.update(self._PROPOSAL_PREPARATION_TOOL_NAMES)
+                return names
 
         pending = snapshot.get("pending_worker_command")
         if not isinstance(pending, dict) or pending.get("status") != "pending":
@@ -550,6 +568,12 @@ class HitlManager:
                 "The current runtime-held action remains unresolved. "
                 f"{scoring_handoff} Direct assistant text does not advance the action."
             )
+        elif cls._PROPOSAL_PREPARATION_TOOL_NAMES <= set(names):
+            lines.append(
+                "The proposal-preparation boundary remains unresolved until exactly one "
+                "of `proceed_to_proposal` or `request_resource_finder` succeeds. "
+                "Direct assistant text does not complete the action."
+            )
         else:
             completion_name = cls._runtime_completion_tool_name(tools)
             if not completion_name:
@@ -573,6 +597,14 @@ class HitlManager:
             return (
                 native_retry + "The worker request remains unresolved. "
                 f"{scoring_handoff} Direct assistant text cannot advance it."
+            )
+        names = {str(tool.get("name", "")).strip() for tool in tools}
+        if self._PROPOSAL_PREPARATION_TOOL_NAMES <= names:
+            return (
+                native_retry
+                + "The proposal-preparation decision remains unresolved. Call exactly one "
+                "of `proceed_to_proposal` or `request_resource_finder`. Direct assistant "
+                "text cannot complete it."
             )
         completion_name = self._runtime_completion_tool_name(tools)
         if completion_name:
@@ -754,6 +786,12 @@ class HitlManager:
                     f"Error: {tool_name} is unavailable at this runtime boundary. "
                     f"Runtime is waiting for {kind}. Inspect the frontier if needed, "
                     f"then call {kind} with the required rationale."
+                )
+            if kind == "prepare_proposal" and action.get("status") == "pending":
+                return (
+                    f"Error: {tool_name} is unavailable at this runtime boundary. "
+                    "Inspect the current research state if needed, then call "
+                    "proceed_to_proposal or request_resource_finder."
                 )
 
         pending = snapshot.get("pending_worker_command")
@@ -1407,6 +1445,127 @@ class HitlManager:
             human_inputs=human_inputs,
         )
 
+    def review_proposal_preparation_decision(
+        self,
+        *,
+        manager_decision_idea_id: str,
+        choice: str,
+        reason: str,
+        objective: str = "",
+        on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Obtain Full-HITL admission for one recorded manager recommendation."""
+        from core.hitl import (
+            _is_feedback_placeholder,
+            _load_hitl_template,
+            _normalize_options,
+            _resolve_human_decision,
+        )
+
+        decision_idea_id = self._require_text(
+            manager_decision_idea_id,
+            "manager_decision_idea_id",
+            "Proposal-preparation admission",
+        )
+        selected_choice = self._require_text(
+            choice, "choice", "Proposal-preparation admission"
+        )
+        if selected_choice not in self._PROPOSAL_PREPARATION_TOOL_NAMES:
+            raise ValueError("Proposal-preparation admission has an unknown manager choice.")
+        rationale = self._require_text(
+            reason, "reason", "Proposal-preparation admission"
+        )
+        resource_objective = str(objective).strip()
+        if selected_choice == "request_resource_finder" and not resource_objective:
+            raise ValueError(
+                "Resource-finder proposal preparation requires a non-empty objective."
+            )
+        if selected_choice == "proceed_to_proposal" and resource_objective:
+            raise ValueError(
+                "Direct proposal preparation must not include a resource-finder objective."
+            )
+
+        human_inputs: List[Dict[str, Any]] = []
+        options = _normalize_options(
+            ["Approve manager recommendation.", "Provide feedback."]
+        )
+
+        def validate(data: Dict[str, Any]) -> Dict[str, Any]:
+            status = str(data.get("status", "")).strip()
+            if status not in {"approved", "feedback"}:
+                raise ValueError(
+                    "Proposal-preparation admission status must be approved or feedback."
+                )
+            self._require_text(
+                data.get("context"), "context", "Proposal-preparation admission"
+            )
+            feedback = self._require_text(
+                data.get("human_feedback"),
+                "human_feedback",
+                "Proposal-preparation admission",
+            )
+            if feedback != self._human_reply(
+                human_inputs, "Proposal-preparation admission"
+            ):
+                raise ValueError(
+                    "human_feedback must exactly match the latest ask_human response."
+                )
+            self._require_text(
+                data.get("manager_escalation_reason"),
+                "manager_escalation_reason",
+                "Proposal-preparation admission",
+            )
+            decision = _resolve_human_decision(feedback, options)["decision"]
+            expected = "approved" if decision == "O1" else "feedback"
+            if status != expected:
+                raise ValueError(
+                    "status must match the latest human proposal-preparation response."
+                )
+            if status == "feedback":
+                if _is_feedback_placeholder(feedback):
+                    raise ValueError(
+                        "Ask again for concrete preparation feedback before finalizing."
+                    )
+                self._require_text(
+                    data.get("manager_feedback"),
+                    "manager_feedback",
+                    "Proposal-preparation feedback",
+                )
+            else:
+                data["manager_feedback"] = ""
+            return data
+
+        request = {
+            "manager_decision_idea_id": decision_idea_id,
+            "choice": selected_choice,
+            "reason": rationale,
+            "objective": resource_objective,
+        }
+        prompt = _load_hitl_template(
+            "manager_review_proposal_preparation.txt",
+            choice=selected_choice,
+            reason=rationale,
+            objective=resource_objective,
+        )
+        return self.request_worker_resolution(
+            command={
+                "request_key": self._request_key(
+                    "proposal_preparation",
+                    {"manager_decision_idea_id": decision_idea_id},
+                ),
+                "kind": "proposal_preparation",
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "proposal",
+                "hitl_mode": HitlMode.FULL.value,
+                "requires_human_approval": True,
+                **request,
+            },
+            prompt=prompt,
+            validate=validate,
+            finalize=on_finalize,
+            human_inputs=human_inputs,
+        )
+
     def review_frontier_candidate(
         self,
         *,
@@ -1785,6 +1944,106 @@ class HitlManager:
         self._defer_current_turn = True
         return "Runtime started objective scoring. The worker remains held until runtime returns the score and you finalize the next step."
 
+    def record_proposal_preparation_choice(
+        self,
+        choice: str,
+        arguments: Dict[str, Any],
+    ) -> str:
+        """Persist one manager-authored choice at the pre-proposal boundary."""
+        from core.hitl import (
+            EVIDENCE_IDEA_CATEGORIES,
+            HitlIdeaLog,
+            HitlValidationError,
+            _as_related_artifacts,
+            _normalize_premises,
+            _require_text,
+        )
+
+        if choice not in self._PROPOSAL_PREPARATION_TOOL_NAMES:
+            return "Error: unknown proposal-preparation choice."
+        action = self.runtime_state.snapshot().get("next_autoresearch_action")
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") not in {"pending", "decision_recorded"}
+        ):
+            return (
+                "Error: proposal preparation is available only at the "
+                "runtime-managed pre-proposal boundary."
+            )
+        try:
+            reason = _require_text(
+                arguments.get("reason"), "reason", "Proposal-preparation choice"
+            )
+            objective = str(arguments.get("objective", "")).strip()
+            if choice == "request_resource_finder" and not objective:
+                raise HitlValidationError(
+                    "Resource-finder request must include a non-empty `objective`."
+                )
+            if choice == "proceed_to_proposal" and objective:
+                raise HitlValidationError(
+                    "Direct proposal preparation must not include a resource-finder objective."
+                )
+            premises = _normalize_premises(arguments.get("premise_idea_ids") or [])
+            evidence = arguments.get("supporting_evidence")
+            evidence = evidence if isinstance(evidence, dict) and evidence else None
+            if bool(premises) == bool(evidence):
+                raise HitlValidationError(
+                    "Supply either `premise_idea_ids` or `supporting_evidence`, but not both."
+                )
+            if premises:
+                known = {
+                    str(record.get("idea_id", "")).strip()
+                    for record in HitlIdeaLog(self.work_dir).records()
+                }
+                missing = [premise for premise in premises if premise not in known]
+                if missing:
+                    raise HitlValidationError(
+                        "Unknown finalized premise idea id(s): " + ", ".join(missing)
+                    )
+            if evidence is not None:
+                category = _require_text(
+                    evidence.get("idea_category"),
+                    "idea_category",
+                    "Proposal-preparation supporting evidence",
+                )
+                if category not in EVIDENCE_IDEA_CATEGORIES:
+                    raise HitlValidationError(
+                        "Unsupported supporting-evidence category: " + category
+                    )
+                evidence = {
+                    "idea_category": category,
+                    "context": _require_text(
+                        evidence.get("context"),
+                        "context",
+                        "Proposal-preparation supporting evidence",
+                    ),
+                    "evidence": _require_text(
+                        evidence.get("evidence"),
+                        "evidence",
+                        "Proposal-preparation supporting evidence",
+                    ),
+                    "related_artifacts": _as_related_artifacts(
+                        evidence.get("related_artifacts") or []
+                    ),
+                }
+            self.runtime_state.record_next_autoresearch_action_decision(
+                "prepare_proposal",
+                {
+                    "choice": choice,
+                    "reason": reason,
+                    "premise_idea_ids": premises,
+                    **({"objective": objective} if objective else {}),
+                    **({"supporting_evidence": evidence} if evidence is not None else {}),
+                },
+            )
+        except Exception as exc:
+            return f"Error: {exc} Correct the decision input and retry."
+        return (
+            "Runtime recorded the proposal-preparation decision. "
+            "The waiting controller will apply it."
+        )
+
     def select_frontier(self, node_sha: str, reason: str) -> str:
         if not reason:
             return "Error: select_frontier requires a non-empty strategic rationale. Retry with reason."
@@ -1977,6 +2236,83 @@ class HitlManager:
                 raise RuntimeError(
                     str(
                         current.get("cancellation_reason") or "HITL frontier pruning was cancelled."
+                    )
+                )
+            threading.Event().wait(0.1)
+
+    def prepare_next_autoresearch_proposal(
+        self,
+        *,
+        parent_node_id: str,
+        on_decision: Callable[[Dict[str, Any]], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Resolve one persisted manager choice before proposal generation."""
+        from core.hitl import _load_hitl_template
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        parent = str(parent_node_id).strip()
+        if not parent:
+            raise ValueError("Proposal preparation requires a selected frontier node.")
+        action = self.runtime_state.begin_next_autoresearch_action(
+            {"kind": "prepare_proposal", "parent_node_id": parent}
+        )
+        if str(action.get("parent_node_id", "")).strip() != parent:
+            raise HitlRuntimeStateError(
+                "Persisted proposal preparation belongs to a different frontier node."
+            )
+
+        if action.get("status") == "resolved":
+            result = action.get("result")
+            if not isinstance(result, dict):
+                raise HitlRuntimeStateError(
+                    "Resolved proposal preparation has no workspace result."
+                )
+            return dict(result)
+
+        if action.get("status") == "pending":
+            self.notify_runtime(
+                _load_hitl_template("manager_prepare_autoresearch_proposal.txt"),
+                runtime_action_kind="prepare_proposal",
+            )
+
+        while True:
+            raise_if_hitl_run_stop_requested()
+            current = self.runtime_state.snapshot().get("next_autoresearch_action")
+            if (
+                isinstance(current, dict)
+                and current.get("kind") == "prepare_proposal"
+                and current.get("status") == "decision_recorded"
+            ):
+                decision = current.get("decision")
+                if not isinstance(decision, dict):
+                    raise HitlRuntimeStateError(
+                        "Recorded proposal preparation is missing its manager decision."
+                    )
+                result = on_decision(dict(decision))
+                self.runtime_state.complete_next_autoresearch_action(
+                    "prepare_proposal", result
+                )
+                return dict(result)
+            if (
+                isinstance(current, dict)
+                and current.get("kind") == "prepare_proposal"
+                and current.get("status") == "resolved"
+            ):
+                result = current.get("result")
+                if not isinstance(result, dict):
+                    raise HitlRuntimeStateError(
+                        "Resolved proposal preparation has no workspace result."
+                    )
+                return dict(result)
+            if (
+                isinstance(current, dict)
+                and current.get("kind") == "prepare_proposal"
+                and current.get("status") == "cancelled"
+            ):
+                raise RuntimeError(
+                    str(
+                        current.get("cancellation_reason")
+                        or "HITL proposal preparation was cancelled."
                     )
                 )
             threading.Event().wait(0.1)
@@ -2237,9 +2573,11 @@ class HitlManager:
 
         action_kind = turn.runtime_action_kind.strip()
         if action_kind:
-            boundary = (
-                "frontier selection" if action_kind == "select_frontier" else "frontier pruning"
-            )
+            boundary = {
+                "select_frontier": "frontier selection",
+                "prune_frontier": "frontier pruning",
+                "prepare_proposal": "proposal preparation",
+            }.get(action_kind, action_kind)
             reason = f"{failure} The {boundary} boundary was not completed; restart HITL AutoResearch to retry it."
             self.runtime_state.cancel_next_autoresearch_action(action_kind, reason=reason)
             self.channel.send(reason, kind="system")

@@ -1,0 +1,37 @@
+Review the manager's recorded recommendation for what should happen before the
+next AutoResearch proposal.
+
+This recommendation is already recorded as a B-level manager decision. Present
+it neutrally to the human and use `ask_human` with exactly these options:
+
+- `Approve manager recommendation.`
+- `Provide feedback.`
+
+If the human requests feedback without giving concrete instructions, ask again
+for the concrete instructions. Preserve the exact final raw human response as
+`human_feedback`. Translate concrete feedback into `manager_feedback`. Do not
+reconsider the recommendation, select new evidence, or change the resource
+objective in this approval request.
+
+When ready, call `finalize_worker_request` with:
+
+{
+  "status": "approved | feedback",
+  "context": "neutral self-contained context for the approval",
+  "human_feedback": "exact final raw response supplied after ask_human",
+  "manager_escalation_reason": "why this manager recommendation requires human admission",
+  "manager_feedback": "concrete revised-choice instruction when status=feedback; empty when approved"
+}
+
+Manager recommendation: {{ choice }}
+Manager rationale:
+--- BEGIN MANAGER RATIONALE ---
+{{ reason }}
+--- END MANAGER RATIONALE ---
+{% if objective %}
+
+Resource-finder objective:
+--- BEGIN RESOURCE OBJECTIVE ---
+{{ objective }}
+--- END RESOURCE OBJECTIVE ---
+{% endif %}
