@@ -434,6 +434,13 @@ Submitted idea files move through `ideas/submitted/`, `ideas/in_progress/`, and
 `ideas/completed/` as runs progress. Workspace contents depend on the mode and
 run options.
 
+The shared agent runners flush sanitized log and transcript output as they
+capture it, so captured lines remain available in `logs/` if the runner is
+terminated unexpectedly. After a failed run, inspect these files alongside
+the workspace artifacts before restarting. Output still buffered by the
+provider or not yet captured by the runner cannot be recovered this way;
+these logs do not provide automatic resume or power-loss durability.
+
 <details>
 <summary>Workflow overview</summary>
 
