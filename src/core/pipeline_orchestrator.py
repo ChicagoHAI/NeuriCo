@@ -2535,24 +2535,28 @@ class ResearchPipelineOrchestrator:
             # the public snapshot that was validated and reviewed. This also
             # catches accidental background writers during a long API/manager
             # turn instead of approving stale conformance evidence.
-            approved = (
-                runtime.resolved_worker_response()
-                or runtime.phase_finish_result()
-                or {}
-            )
-            if not approved and self.hitl_autoresearch:
-                approved = self._initial_stage_request(RULE_MAKER_STAGE) or {}
+            # The worker-facing response intentionally contains only the
+            # continuation/result payload.  The reviewed workspace fingerprint
+            # belongs to the runtime's phase result, or to the durable pending
+            # command when this completion is being recovered after restart.
+            reviewed_approval = runtime.phase_finish_result() or {}
+            if not reviewed_approval.get("workspace_fingerprint"):
+                reviewed_approval = (
+                    self._initial_stage_request(RULE_MAKER_STAGE)
+                    or reviewed_approval
+                )
+            approved_response = runtime.resolved_worker_response() or {}
             if scoring_handler is None:
-                reviewed_scope = approved.get("workspace_fingerprint_scope")
+                reviewed_scope = reviewed_approval.get("workspace_fingerprint_scope")
                 if reviewed_scope is None:
                     _require_reviewed_workspace_unchanged(
                         self.work_dir,
-                        str(approved.get("workspace_fingerprint", "")),
+                        str(reviewed_approval.get("workspace_fingerprint", "")),
                     )
                 else:
                     _require_reviewed_workspace_unchanged(
                         self.work_dir,
-                        str(approved.get("workspace_fingerprint", "")),
+                        str(reviewed_approval.get("workspace_fingerprint", "")),
                         reviewed_scope,
                     )
             self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
@@ -2568,7 +2572,9 @@ class ResearchPipelineOrchestrator:
                     else {}
                 ),
             }
-            scorer_result = approved.get("scorer_result")
+            scorer_result = approved_response.get("scorer_result")
+            if not isinstance(scorer_result, dict):
+                scorer_result = reviewed_approval.get("scorer_result")
             if isinstance(scorer_result, dict):
                 completed["scorer"] = dict(scorer_result)
             return completed
