@@ -12,6 +12,9 @@ import shlex
 import os
 import sys
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from agents.resource_finder import parse_token_usage, print_token_summary
+
 # Force UTF-8 stdout on Windows so print() can handle Unicode from the Claude CLI.
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -198,7 +201,8 @@ def run_paper_writer(
     style: str = "neurips",
     timeout: Optional[int] = 3600,
     full_permissions: bool = True,
-    domain: str = "general"
+    domain: str = "general",
+    prompt_prefix: str = "",
 ) -> Dict[str, Any]:
     """
     Run paper writing agent.
@@ -240,6 +244,8 @@ def run_paper_writer(
 
     # Generate prompt
     prompt = generate_paper_writer_prompt(work_dir, style, provider=provider, domain=domain)
+    if prompt_prefix:
+        prompt = prompt_prefix + prompt
 
     # Save prompt for debugging
     logs_dir = work_dir / "logs"
@@ -285,6 +291,13 @@ def run_paper_writer(
         )
         return_code = launch.get("return_code")
         success = bool(launch.get("success"))
+
+        token_usage = parse_token_usage(
+            logs_dir / f"paper_writer_{provider}_transcript.jsonl",
+            provider=provider,
+        )
+        print_token_summary(token_usage, label="Paper Writer")
+
         if success:
             print(f"\n✅ Paper writer agent completed!")
             print(f"   Output directory: {draft_dir}")
@@ -301,6 +314,7 @@ def run_paper_writer(
             'log_file': str(log_file),
             'return_code': return_code,
             'stopped': bool(launch.get('stopped')),
+            'token_usage': token_usage,
         }
         if launch.get("timed_out"):
             result["error"] = "timeout"
@@ -319,6 +333,7 @@ if __name__ == "__main__":
     import argparse
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent))
+
     from core.config_loader import ConfigLoader
 
     default_style = ConfigLoader().get_default_paper_style()

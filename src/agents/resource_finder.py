@@ -24,6 +24,121 @@ from core.agent_runner import run_prebuilt_cli_agent
 from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
 
 
+def _parse_claude_token_usage(transcript_file: Path) -> dict:
+    """Parse token usage from a Claude stream-json transcript."""
+    import json as _json
+
+    usage = {}
+    try:
+        with open(transcript_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if event.get("type") == "result":
+                    raw = event.get("usage", {})
+                    usage = {
+                        "input_tokens": raw.get("input_tokens", 0),
+                        "output_tokens": raw.get("output_tokens", 0),
+                        "cache_read_input_tokens": raw.get("cache_read_input_tokens", 0),
+                        "cache_creation_input_tokens": raw.get("cache_creation_input_tokens", 0),
+                        "total_cost_usd": event.get("total_cost_usd", 0.0),
+                        "web_search_requests": (
+                            raw.get("server_tool_use", {}).get("web_search_requests", 0)
+                        ),
+                    }
+    except OSError:
+        pass
+    return usage
+
+
+def _parse_gemini_token_usage(transcript_file: Path) -> dict:
+    # TODO: implement once Gemini CLI stream-json format is known
+    return {}
+
+
+def _parse_codex_token_usage(transcript_file: Path) -> dict:
+    # TODO: implement once Codex --json format is known
+    return {}
+
+
+_TOKEN_PARSERS = {
+    "claude": _parse_claude_token_usage,
+    "gemini": _parse_gemini_token_usage,
+    "codex": _parse_codex_token_usage,
+}
+
+
+def load_model_pricing(provider: str = "claude") -> dict:
+    """Load pricing for a provider from config/model_pricing.yaml."""
+    import yaml as _yaml
+
+    pricing_file = Path(__file__).parent.parent.parent / "config" / "model_pricing.yaml"
+    try:
+        with open(pricing_file, "r", encoding="utf-8") as f:
+            data = _yaml.safe_load(f)
+        return data.get("providers", {}).get(provider, {})
+    except (OSError, _yaml.YAMLError):
+        return {}
+
+
+def budget_to_tokens(remaining_usd: float, provider: str = "claude") -> int:
+    """Convert remaining budget in USD to a conservative token estimate.
+
+    Uses output token price (most expensive) so the estimate is never exceeded.
+    Returns 0 if pricing data is unavailable.
+    """
+    pricing = load_model_pricing(provider)
+    output_price = pricing.get("output_per_token")
+    if not output_price or remaining_usd <= 0:
+        return 0
+    return int(remaining_usd / output_price)
+
+
+def budget_prompt_note(remaining_usd: float, provider: str = "claude") -> str:
+    """Return a prompt note with the remaining token budget, or empty string if unavailable."""
+    tokens = budget_to_tokens(remaining_usd, provider)
+    if tokens <= 0:
+        return ""
+    return (
+        f"Note: Approximately {tokens:,} output tokens remain in your API budget. "
+        f"Stay within this limit.\n\n"
+    )
+
+
+def parse_token_usage(transcript_file: Path, provider: str = "claude") -> dict:
+    """
+    Parse token usage from a provider transcript file.
+
+    Returns a dict with provider-specific token counts, or an empty dict
+    if the provider is unsupported or the transcript contains no usage data.
+    """
+    parser = _TOKEN_PARSERS.get(provider)
+    if parser is None:
+        return {}
+    return parser(transcript_file)
+
+
+def print_token_summary(usage: dict, label: str = "Resource Finder") -> None:
+    """Print a formatted token usage summary."""
+    if not usage:
+        print("   (no token data found in transcript)")
+        return
+    print(f"\n📊 Token Usage — {label}")
+    print(f"   Input tokens:              {usage['input_tokens']:>10,}")
+    print(f"   Output tokens:             {usage['output_tokens']:>10,}")
+    print(f"   Cache read tokens:         {usage['cache_read_input_tokens']:>10,}")
+    print(f"   Cache creation tokens:     {usage['cache_creation_input_tokens']:>10,}")
+    if usage.get("web_search_requests"):
+        print(f"   Web searches:              {usage['web_search_requests']:>10,}")
+    print(f"   Estimated cost:            ${usage['total_cost_usd']:>10.4f}")
+    print()
+
+
 def generate_resource_finder_prompt(
     idea: Dict[str, Any],
     templates_dir: Path,
@@ -235,6 +350,9 @@ def run_resource_finder(
         elapsed = time.time() - start_time
         print(f"⏱️  Resource finder completed in {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
 
+        token_usage = parse_token_usage(transcript_file, provider=provider)
+        print_token_summary(token_usage)
+
         if return_code == 0:
             print("✅ Agent execution completed successfully!")
         else:
@@ -306,6 +424,7 @@ def run_resource_finder(
         "log_file": str(log_file),
         "transcript_file": str(transcript_file),
         "elapsed_time": time.time() - start_time,
+        "token_usage": token_usage,
         "background_processes_terminated": bool(launch.get("background_processes_terminated"))
         if completion_mode == "hitl_runtime"
         else False,

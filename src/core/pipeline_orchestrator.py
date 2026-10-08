@@ -28,7 +28,10 @@ import subprocess
 import sys
 import time
 
-from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder, parse_token_usage, print_token_summary, budget_prompt_note
 from agents.eval_verifier import (
     FAILURE_KIND_EVIDENCE_INVALID,
     build_manager_conformance_report,
@@ -881,6 +884,16 @@ class ResearchPipelineOrchestrator:
                     )
                     print("   3. Manually add resources to workspace and continue")
                     return results
+
+                budget_usd = idea.get("idea", {}).get("constraints", {}).get("budget")
+                if budget_usd is not None:
+                    rf_cost = results["stages"]["resource_finder"].get("token_usage", {}).get("total_cost_usd", 0.0)
+                    if rf_cost >= budget_usd:
+                        print()
+                        print(f"🛑 Budget limit reached after resource finder (${rf_cost:.4f} >= ${budget_usd:.4f})")
+                        print("   Skipping experiment runner and remaining stages.")
+                        results["budget_exceeded"] = True
+                        return results
             else:
                 print("⏭️  Skipping resource finder stage (resources assumed to be ready)")
                 completed = self._completed_initial_stage("resource_finder")
@@ -979,6 +992,11 @@ class ResearchPipelineOrchestrator:
                             )
                         )
                     else:
+                        budget_usd = idea.get("idea", {}).get("constraints", {}).get("budget")
+                        er_prompt_prefix = ""
+                        if budget_usd is not None:
+                            rf_cost = results["stages"].get("resource_finder", {}).get("token_usage", {}).get("total_cost_usd", 0.0)
+                            er_prompt_prefix = budget_prompt_note(budget_usd - rf_cost, provider)
                         results["stages"]["experiment_runner"] = self._run_experiment_runner(
                             idea=idea,
                             provider=provider,
@@ -986,6 +1004,7 @@ class ResearchPipelineOrchestrator:
                             full_permissions=full_permissions,
                             use_scribe=use_scribe,
                             scoring_enabled=scoring_enabled,
+                            prompt_prefix=er_prompt_prefix,
                         )
                 finally:
                     if scoring_enabled and not hitl_enabled:
@@ -1635,6 +1654,7 @@ class ResearchPipelineOrchestrator:
         log_prefix: str = "execution",
         track_pipeline_state: bool = True,
         env_extra: Optional[Dict[str, str]] = None,
+        prompt_prefix: str = "",
     ) -> Dict[str, Any]:
         """Run experiment runner stage (raw CLI by default, scribe optional)."""
         print()
@@ -1680,6 +1700,8 @@ class ResearchPipelineOrchestrator:
                 prompt = prompt_generator.generate_research_prompt(
                     idea, root_dir=self.work_dir, scoring_enabled=scoring_enabled
                 )
+                if prompt_prefix:
+                    prompt = prompt_prefix + prompt
                 domain = idea.get("idea", {}).get("domain", "general")
                 session_instructions = generate_instructions(
                     prompt=prompt,
@@ -1765,6 +1787,9 @@ class ResearchPipelineOrchestrator:
             elapsed = time.time() - start_time
             print(f"⏱️  Experiment runner completed in {elapsed:.1f}s ({elapsed / 60:.1f} minutes)")
 
+            token_usage = parse_token_usage(transcript_file, provider=provider)
+            print_token_summary(token_usage, label="Experiment Runner")
+
             if run_result.get("timed_out"):
                 print(f"\n⏱️  Experiment runner timed out after {timeout} seconds")
                 success = False
@@ -1787,6 +1812,7 @@ class ResearchPipelineOrchestrator:
                 "background_processes_terminated": bool(
                     run_result.get("background_processes_terminated")
                 ),
+                "token_usage": token_usage,
             }
             if runtime_prompt is not None:
                 result["provider_process_failed"] = bool(

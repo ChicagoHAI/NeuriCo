@@ -53,6 +53,8 @@ from core.compute_backend import (
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_run_control import HitlRunStopRequested, raise_if_hitl_run_stop_requested
+from core.hitl_util import atomic_write_json
+from agents.resource_finder import budget_prompt_note
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -1067,8 +1069,9 @@ class ResearchRunner:
                     )
                 success = pipeline_result.get("success", False)
 
+                paper_result_ar: Optional[Dict[str, Any]] = None
                 if write_paper and success:
-                    self._run_paper_writer_stage(
+                    paper_result_ar = self._run_paper_writer_stage(
                         idea=idea,
                         work_dir=work_dir,
                         provider=provider,
@@ -1077,6 +1080,8 @@ class ResearchRunner:
                         full_permissions=full_permissions,
                         hitl_enabled=bool(hitl),
                     )
+
+                self._print_cost_summary(pipeline_result, paper_result_ar)
             except HitlRunStopRequested:
                 hitl_stop_requested = True
                 raise
@@ -1329,8 +1334,31 @@ class ResearchRunner:
                     success = pipeline_result.get("success", False)
 
                 # Paper writing stage (optional)
+                paper_result: Optional[Dict[str, Any]] = None
+                budget_usd = idea.get("idea", {}).get("constraints", {}).get("budget")
+                if pipeline_result.get("budget_exceeded"):
+                    write_paper = False
+                elif budget_usd is not None and success:
+                    stages = pipeline_result.get("stages", {})
+                    spent = sum(
+                        stages.get(s, {}).get("token_usage", {}).get("total_cost_usd", 0.0)
+                        for s in ("resource_finder", "experiment_runner")
+                    )
+                    if spent >= budget_usd:
+                        print()
+                        print(f"🛑 Budget limit reached after pipeline (${spent:.4f} >= ${budget_usd:.4f})")
+                        print("   Skipping paper writer.")
+                        write_paper = False
+                pw_prompt_prefix = ""
+                if write_paper and success and budget_usd is not None:
+                    stages = pipeline_result.get("stages", {})
+                    spent = sum(
+                        stages.get(s, {}).get("token_usage", {}).get("total_cost_usd", 0.0)
+                        for s in ("resource_finder", "experiment_runner")
+                    )
+                    pw_prompt_prefix = budget_prompt_note(budget_usd - spent, provider)
                 if write_paper and success:
-                    self._run_paper_writer_stage(
+                    paper_result = self._run_paper_writer_stage(
                         idea=idea,
                         work_dir=work_dir,
                         provider=provider,
@@ -1338,7 +1366,30 @@ class ResearchRunner:
                         paper_timeout=None if hitl else paper_timeout,
                         full_permissions=full_permissions,
                         hitl_enabled=bool(hitl),
+                        prompt_prefix=pw_prompt_prefix,
                     )
+                    # Append paper_writer results to pipeline_results.json
+                    results_file = work_dir / ".neurico" / "pipeline_results.json"
+                    if results_file.exists():
+                        import json
+                        with open(results_file, "r", encoding="utf-8") as f:
+                            saved = json.load(f)
+                        saved.setdefault("stages", {})["paper_writer"] = {
+                            "success": paper_result.get("success"),
+                            "token_usage": paper_result.get("token_usage", {}),
+                        }
+                        atomic_write_json(results_file, saved)
+
+                self._print_cost_summary(pipeline_result, paper_result)
+
+                if budget_usd is not None and paper_result is not None:
+                    stages = pipeline_result.get("stages", {})
+                    total_spent = sum(
+                        stages.get(s, {}).get("token_usage", {}).get("total_cost_usd", 0.0)
+                        for s in ("resource_finder", "experiment_runner")
+                    ) + paper_result.get("token_usage", {}).get("total_cost_usd", 0.0)
+                    if total_spent >= budget_usd:
+                        print(f"⚠️  Budget exceeded after paper writer (${total_spent:.4f} >= ${budget_usd:.4f})")
 
             except HitlRunStopRequested:
                 hitl_stop_requested = True
@@ -1672,6 +1723,7 @@ https://github.com/ChicagoHAI/neurico
         paper_timeout: Optional[int],
         full_permissions: bool,
         hitl_enabled: bool = False,
+        prompt_prefix: str = "",
     ) -> Dict[str, Any]:
         print()
         print("=" * 80)
@@ -1712,6 +1764,7 @@ https://github.com/ChicagoHAI/neurico
             timeout=paper_timeout,
             full_permissions=full_permissions,
             domain=domain,
+            prompt_prefix=prompt_prefix,
         )
 
         if hitl_enabled and paper_result.get("stopped"):
@@ -1730,6 +1783,39 @@ https://github.com/ChicagoHAI/neurico
         else:
             print(f"\n⚠️  Paper generation failed (research still succeeded)")
         return paper_result
+
+    def _print_cost_summary(
+        self,
+        pipeline_result: Dict[str, Any],
+        paper_result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Print a combined cost summary across all pipeline stages."""
+        stages = pipeline_result.get("stages", {})
+        rf_usage = stages.get("resource_finder", {}).get("token_usage", {})
+        er_usage = stages.get("experiment_runner", {}).get("token_usage", {})
+        pw_usage = (paper_result or {}).get("token_usage", {})
+
+        rf_cost = rf_usage.get("total_cost_usd", 0.0)
+        er_cost = er_usage.get("total_cost_usd", 0.0)
+        pw_cost = pw_usage.get("total_cost_usd", 0.0)
+        total_cost = rf_cost + er_cost + pw_cost
+
+        if total_cost == 0.0 and not rf_usage and not er_usage and not pw_usage:
+            return
+
+        print()
+        print("=" * 80)
+        print("💰 RUN COST SUMMARY")
+        print("=" * 80)
+        if rf_usage:
+            print(f"   Resource Finder:     ${rf_cost:>8.4f}")
+        if er_usage:
+            print(f"   Experiment Runner:   ${er_cost:>8.4f}")
+        if pw_usage:
+            print(f"   Paper Writer:        ${pw_cost:>8.4f}")
+        print(f"   {'─' * 30}")
+        print(f"   Total:               ${total_cost:>8.4f}")
+        print()
 
     def _copy_workspace_resources(self, work_dir: Path, compute_backend: str = "local"):
         """
@@ -2191,6 +2277,7 @@ def main():
     ]
     if len(autoresearch_modes) > 1:
         parser.error("Choose at most one AutoResearch entry mode: " + ", ".join(autoresearch_modes))
+
     runner = ResearchRunner(use_github=not args.no_github, github_org=args.github_org)
 
     # Handle comment mode separately

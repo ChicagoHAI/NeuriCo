@@ -1,0 +1,9 @@
+# Model pricing in USD per token.
+# TODO: extend with gemini and codex pricing when their CLIs report token usage.
+# Prices are for Claude Sonnet; assumed for all claude runs regardless of exact model version.
+providers:
+  claude:
+    model: claude-sonnet
+    input_per_token: 0.000003       # $3.00 / 1M input tokens
+    output_per_token: 0.000015      # $15.00 / 1M output tokens
+    cache_read_per_token: 0.0000003 # $0.30 / 1M cache read tokens
