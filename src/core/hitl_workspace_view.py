@@ -490,6 +490,12 @@ class HitlWorkspaceView:
                     return "Frontier", (
                         "Selecting next" if action_status == "pending" else "Saving selection"
                     )
+                if kind == "prepare_proposal":
+                    return "Experiment", (
+                        "Preparing proposal"
+                        if action_status == "pending"
+                        else "Starting additional agent"
+                    )
             if frontier_status not in {"", "completed"}:
                 return "Candidate decision", "Saving result"
             if root_status not in {"", "completed"}:
@@ -761,12 +767,21 @@ class HitlWorkspaceView:
 
         if action_status in {"pending", "decision_recorded"}:
             action_stage, action_phase = durable_boundary_labels()
+            preparing_proposal = next_action.get("kind") == "prepare_proposal"
             if action_status == "pending":
                 return projected(
                     "reviewing",
-                    "Reviewing",
-                    "Choosing the next research direction.",
-                    next_step="Research continues from the selected direction.",
+                    "Preparing proposal" if preparing_proposal else "Reviewing",
+                    (
+                        "Checking whether more evidence is needed before proposing."
+                        if preparing_proposal
+                        else "Choosing the next research direction."
+                    ),
+                    next_step=(
+                        "An additional agent runs, or proposal generation begins."
+                        if preparing_proposal
+                        else "Research continues from the selected direction."
+                    ),
                     record=next_action,
                     display_stage=action_stage,
                     display_phase=action_phase,
@@ -774,8 +789,16 @@ class HitlWorkspaceView:
             return projected(
                 "saving",
                 "Saving progress",
-                "Updating the research direction.",
-                next_step="Research continues from the selected direction.",
+                (
+                    "Starting the requested additional agent."
+                    if preparing_proposal
+                    else "Updating the research direction."
+                ),
+                next_step=(
+                    "Proposal preparation resumes after the agent finishes."
+                    if preparing_proposal
+                    else "Research continues from the selected direction."
+                ),
                 record=next_action,
                 display_stage=action_stage,
                 display_phase=action_phase,

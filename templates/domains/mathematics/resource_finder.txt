@@ -43,6 +43,7 @@ For example:
 - Create code/sympy_scripts/ → saves in workspace/code/sympy_scripts/
 - Create literature_review.md → saves in workspace/literature_review.md
 
+{% if resource_workspace_mode == "bootstrap" %}
 ═══════════════════════════════════════════════════════════════════════════════
                     CRITICAL: ENVIRONMENT SETUP
 ═══════════════════════════════════════════════════════════════════════════════
@@ -97,6 +98,16 @@ WHY THIS MATTERS:
 - Without an isolated environment, you could pollute the neurico installation
 - The pyproject.toml prevents uv from modifying parent directories
 - Dependencies you install will be documented automatically
+{% else %}
+═══════════════════════════════════════════════════════════════════════════════
+                  CRITICAL: PRESERVE THE EXISTING ENVIRONMENT
+═══════════════════════════════════════════════════════════════════════════════
+
+This is an additive resource-finding invocation inside an established workspace.
+Do not create, recreate, or replace `.venv`, `pyproject.toml`, lock files, or
+other dependency metadata. Do not install packages. Preserve existing resources
+and make only the focused resource additions requested for this invocation.
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                     IMPORTANT: PDF READING WITH CHUNKER

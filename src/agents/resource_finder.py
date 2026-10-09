@@ -32,6 +32,8 @@ def generate_resource_finder_prompt(
     provider: str = "claude",
     hitl_phase: Optional[str] = None,
     scoring_enabled: bool = False,
+    objective: str = "",
+    workspace_mode: str = "bootstrap",
 ) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
@@ -47,6 +49,9 @@ def generate_resource_finder_prompt(
         scoring_enabled: If True, surface scoring-only obligations such as the
                          required_for_evaluation mandate; ordinary unscored
                          runs omit them.
+        objective: Optional focused objective for an inserted invocation.
+        workspace_mode: ``bootstrap`` for the initial pipeline stage or
+                        ``additive`` for an established AutoResearch workspace.
 
     Returns:
         Complete prompt string for resource finder agent
@@ -61,6 +66,8 @@ def generate_resource_finder_prompt(
         provider=provider,
         hitl_phase=hitl_phase,
         scoring_enabled=scoring_enabled,
+        objective=objective,
+        workspace_mode=workspace_mode,
     )
 
 
@@ -78,6 +85,7 @@ def run_resource_finder(
     env_extra: Optional[Dict[str, str]] = None,
     prompt_override: Optional[str] = None,
     scoring_enabled: bool = False,
+    logs_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Launch resource finder agent to gather research resources.
@@ -100,6 +108,8 @@ def run_resource_finder(
             non-HITL resource finding leaves this false.
         env_extra: Optional environment overrides for this external agent
             invocation. HITL uses this to expose scoped runtime commands.
+        logs_dir: Optional runtime-owned directory for prompt, log, and
+            transcript artifacts. Ordinary pipeline runs use ``work_dir/logs``.
 
     Returns:
         Dictionary with:
@@ -141,7 +151,7 @@ def run_resource_finder(
             scoring_enabled=scoring_enabled,
         )
     # Save prompt for reference
-    logs_dir = work_dir / "logs"
+    logs_dir = Path(logs_dir) if logs_dir is not None else work_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     prompt_file = logs_dir / f"{log_prefix}_prompt.txt"
