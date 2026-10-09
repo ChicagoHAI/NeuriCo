@@ -156,12 +156,21 @@ def run_scorer(
     elapsed = time.time() - start_time
 
     results: Optional[Dict[str, Any]] = None
-    if results_path.exists():
+    if not results_path.exists():
+        results_err = f"{RESULTS_FILE_NAME} was not produced"
+        error = f"{error}; {results_err}" if error else results_err
+    else:
         try:
-            results = json.loads(results_path.read_text(encoding='utf-8'))
+            parsed_results = json.loads(results_path.read_text(encoding='utf-8'))
         except json.JSONDecodeError as e:
             json_err = f"results.json is not valid JSON: {e}"
             error = f"{error}; {json_err}" if error else json_err
+        else:
+            if isinstance(parsed_results, dict):
+                results = parsed_results
+            else:
+                json_err = "results.json must contain a JSON object"
+                error = f"{error}; {json_err}" if error else json_err
 
     success = return_code == 0 and results is not None and error is None
 
@@ -193,13 +202,14 @@ def load_scoring_results(work_dir: Path) -> Optional[Dict[str, Any]]:
     only need the score, not the full scorer-run dict.
 
     Returns:
-        Parsed results.json contents, or None if the file is missing or
-        unparseable.
+        Parsed results.json object, or None if the file is missing, invalid,
+        or contains a different JSON type.
     """
     results_path = Path(work_dir) / "scoring" / RESULTS_FILE_NAME
     if not results_path.exists():
         return None
     try:
-        return json.loads(results_path.read_text(encoding='utf-8'))
+        results = json.loads(results_path.read_text(encoding='utf-8'))
     except json.JSONDecodeError:
         return None
+    return results if isinstance(results, dict) else None
