@@ -145,95 +145,11 @@ def _validate_declared_sealed_inputs(
     return issues
 
 
-def _assigned_expressions(tree: ast.AST) -> dict[str, ast.AST]:
-    assignments: dict[str, ast.AST] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    assignments[target.id] = node.value
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if node.value is not None:
-                assignments[node.target.id] = node.value
-    return assignments
-
-
-def _path_string_parts(
-    node: ast.AST,
-    assignments: dict[str, ast.AST],
-    *,
-    resolving: Optional[set[str]] = None,
-) -> list[str]:
-    resolving = set(resolving or ())
-    if isinstance(node, ast.Name) and node.id in assignments and node.id not in resolving:
-        resolving.add(node.id)
-        return _path_string_parts(
-            assignments[node.id],
-            assignments,
-            resolving=resolving,
-        )
-    parts: list[str] = []
-    for child in ast.walk(node):
-        if isinstance(child, ast.Constant) and isinstance(child.value, str):
-            value = child.value.strip().replace("\\", "/")
-            if value:
-                parts.append(value)
-    return parts
-
-
-def _is_canonical_results_path(
-    node: ast.AST,
-    assignments: dict[str, ast.AST],
-) -> bool:
-    parts = _path_string_parts(node, assignments)
-    if any(part.rstrip("/").endswith(_EVALUATOR_RESULTS_PATH) for part in parts):
-        return True
-    if "scoring" in parts and "results.json" in parts:
-        return True
-    normalized = "/".join(part.strip("/") for part in parts)
-    return normalized.endswith(_EVALUATOR_RESULTS_PATH)
-
-
-def _write_path_expressions(tree: ast.AST) -> list[ast.AST]:
-    paths: list[ast.AST] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        function = node.func
-        if isinstance(function, ast.Attribute) and function.attr in {
-            "write_text",
-            "write_bytes",
-        }:
-            paths.append(function.value)
-            continue
-        if isinstance(function, ast.Attribute) and function.attr == "open":
-            mode = node.args[0] if node.args else None
-            for keyword in node.keywords:
-                if keyword.arg == "mode":
-                    mode = keyword.value
-            if (
-                isinstance(mode, ast.Constant)
-                and isinstance(mode.value, str)
-                and any(flag in mode.value for flag in "wax+")
-            ):
-                paths.append(function.value)
-            continue
-        if isinstance(function, ast.Name) and function.id == "open" and node.args:
-            mode = node.args[1] if len(node.args) > 1 else None
-            for keyword in node.keywords:
-                if keyword.arg == "mode":
-                    mode = keyword.value
-            if (
-                isinstance(mode, ast.Constant)
-                and isinstance(mode.value, str)
-                and any(flag in mode.value for flag in "wax+")
-            ):
-                paths.append(node.args[0])
-    return paths
-
-
 def _validate_evaluator_abi(tree: ast.AST) -> list[str]:
-    """Validate the fixed ``python scoring/eval.py`` scorer ABI."""
+    """Validate the statically observable ``python scoring/eval.py`` ABI.
+
+    Result production is validated from the executed scorer output.
+    """
     issues: list[str] = []
     sys_aliases = {"sys"}
     argv_aliases: set[str] = set()
@@ -273,16 +189,6 @@ def _validate_evaluator_abi(tree: ast.AST) -> list[str]:
                 "reading command-line arguments is not allowed."
             )
             break
-
-    assignments = _assigned_expressions(tree)
-    if not any(
-        _is_canonical_results_path(path, assignments)
-        for path in _write_path_expressions(tree)
-    ):
-        issues.append(
-            "scoring/eval.py must write its authoritative structured result to "
-            f"`{_EVALUATOR_RESULTS_PATH}`."
-        )
 
     return list(dict.fromkeys(issues))
 
