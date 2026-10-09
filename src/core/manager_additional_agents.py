@@ -95,7 +95,10 @@ def _approved_saved_request(
             )
         return None
     expected = str(pending.get("workspace_fingerprint", "")).strip()
-    current = HitlWorkspaceWriteGuard.public_fingerprint(work_dir)
+    current = HitlWorkspaceWriteGuard.public_fingerprint(
+        work_dir,
+        scope=pending.get("workspace_fingerprint_scope"),
+    )
     if not expected or current != expected:
         raise RuntimeError(
             "The recovered additional-agent workspace differs from the exact "

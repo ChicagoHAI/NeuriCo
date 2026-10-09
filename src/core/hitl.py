@@ -1233,7 +1233,10 @@ class HitlRuntime:
         if hitl_stage == "proposal" and proposal_submission_validator is None:
             from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
-            proposal_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
+            proposal_guard = HitlWorkspaceWriteGuard.capture_public(
+                self.work_dir,
+                scope=self._workspace_guard_scope(),
+            )
             proposal_submission_validator = proposal_guard.require_unchanged
         allowed_worker_commands = self._worker_commands_for_stage(hitl_stage)
         if self._time_budget_command_available():
@@ -1287,7 +1290,10 @@ class HitlRuntime:
             if callable(supplied):
                 self._tool_context["plan_finish_validator"] = supplied
                 return
-            plan_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
+            plan_guard = HitlWorkspaceWriteGuard.capture_public(
+                self.work_dir,
+                scope=self._workspace_guard_scope(),
+            )
             plan_path = self.paths.plan_path.relative_to(self.work_dir).as_posix()
 
             def validate_plan_finish() -> Dict[str, Any]:
@@ -2799,6 +2805,11 @@ class HitlRuntime:
 
         return HitlRuntimeState(self.work_dir).pending_worker_command()
 
+    def _workspace_guard_scope(self) -> Dict[str, Any]:
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        return HitlRuntimeState(self.work_dir).workspace_guard_scope()
+
     def _cancelled_worker_command_result(
         self,
         result: Dict[str, Any],
@@ -3137,7 +3148,11 @@ class HitlRuntime:
             plan_fingerprint = self._current_plan_fingerprint()
             from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
-            workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
+            workspace_fingerprint_scope = self._workspace_guard_scope()
+            workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+                self.work_dir,
+                scope=workspace_fingerprint_scope,
+            )
             request_key = self._phase_finish_request_key_for(
                 hitl_stage=hitl_stage,
                 plan_fingerprint=plan_fingerprint,
@@ -3360,6 +3375,7 @@ class HitlRuntime:
                 plan_text=self._read_optional(self.paths.plan_path),
                 plan_fingerprint=plan_fingerprint,
                 workspace_fingerprint=workspace_fingerprint,
+                workspace_fingerprint_scope=workspace_fingerprint_scope,
                 finish_summary=summary,
                 related_artifacts=related_artifacts,
                 request_key=request_key,
@@ -3451,6 +3467,7 @@ class HitlRuntime:
                 "hitl_stage": hitl_stage,
                 "plan_fingerprint": plan_fingerprint,
                 "workspace_fingerprint": workspace_fingerprint,
+                "workspace_fingerprint_scope": workspace_fingerprint_scope,
                 "summary": summary,
                 "related_artifacts": related_artifacts,
                 "manager_feedback": "",

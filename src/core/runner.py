@@ -39,7 +39,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.config_loader import ConfigLoader
-from core.local_resources import stage_local_resources
+from core.local_resources import stage_local_resources, staged_immutable_resource_roots
 from core.agent_cli import (
     build_agent_command,
     build_agent_environment,
@@ -924,9 +924,16 @@ class ResearchRunner:
             # Recovery may restore an older runtime.json. Record the selected
             # run backend after recovery and before the manager starts.
             select_hitl_manager_provider(work_dir, provider)
-            adoption = HitlRuntimeState(work_dir).adopt_hitl_mode(
-                selected_hitl_mode.value
+            runtime_state = HitlRuntimeState(work_dir)
+            guard_scope = runtime_state.workspace_guard_scope()
+            runtime_state.set_workspace_guard_scope(
+                runtime_private_roots=guard_scope["runtime_private_roots"],
+                immutable_resource_roots=sorted(
+                    set(guard_scope["immutable_resource_roots"])
+                    | set(staged_immutable_resource_roots(idea))
+                ),
             )
+            adoption = runtime_state.adopt_hitl_mode(selected_hitl_mode.value)
             stale_reply_key = str(
                 adoption.get("discard_resolution_reply_for", "")
             ).strip()

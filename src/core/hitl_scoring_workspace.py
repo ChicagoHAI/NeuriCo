@@ -52,6 +52,22 @@ def scoring_source_workspace_fingerprint(
     return str(pending.get("workspace_fingerprint", "")).strip()
 
 
+def scoring_source_workspace_scope(
+    pending: Dict[str, Any],
+    cached_score: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Return the frozen scope paired with the reviewed scoring fingerprint."""
+    from core.hitl_workspace_guard import WorkspaceGuardScope
+
+    if isinstance(cached_score, dict) and cached_score.get("status") == "prepared":
+        cached_scope = cached_score.get("source_workspace_fingerprint_scope")
+        if cached_scope is not None:
+            return WorkspaceGuardScope.from_value(cached_scope).to_dict()
+    return WorkspaceGuardScope.from_value(
+        pending.get("workspace_fingerprint_scope")
+    ).to_dict()
+
+
 def _copy_path(source: Path, destination: Path) -> None:
     if source.is_dir():
         shutil.copytree(source, destination, dirs_exist_ok=True)

@@ -64,6 +64,7 @@ from core.hitl_runtime_state import (
 from core.hitl_scoring_workspace import (
     run_isolated_scorer,
     scoring_source_workspace_fingerprint,
+    scoring_source_workspace_scope,
 )
 from core.hitl_stage_runtime import run_worker_with_replacements
 from core.hitl_util import atomic_write_json, utc_now
@@ -1563,7 +1564,10 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
     preparation_workspace_is_exact = bool(
         preparation_metadata_is_exact
         and str(preparation_action.get("workspace_fingerprint", "")).strip()
-        == HitlWorkspaceWriteGuard.public_fingerprint(work_dir)
+        == HitlWorkspaceWriteGuard.public_fingerprint(
+            work_dir,
+            scope=preparation_action.get("workspace_fingerprint_scope"),
+        )
     )
     resumable_agent_request = bool(
         preparation_calls_resource_finder
@@ -1591,7 +1595,10 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and pending_response.get("status") == "approved"
         and bool(pending_response.get("final"))
         and str(pending_request.get("workspace_fingerprint", "")).strip()
-        == HitlWorkspaceWriteGuard.public_fingerprint(work_dir)
+        == HitlWorkspaceWriteGuard.public_fingerprint(
+            work_dir,
+            scope=pending_request.get("workspace_fingerprint_scope"),
+        )
     )
     preparation_is_exact = bool(
         preparation_metadata_is_exact
@@ -2157,7 +2164,8 @@ class HitlAutoResearchController:
         provenance = {"parent_node_id": parent_sha, "attempt_id": attempt_id}
 
         while True:
-            existing = HitlRuntimeState(self.work_dir).snapshot().get(
+            runtime_state = HitlRuntimeState(self.work_dir)
+            existing = runtime_state.snapshot().get(
                 "next_autoresearch_action"
             )
             if isinstance(existing, dict) and existing.get("kind") == "prepare_proposal":
@@ -2165,12 +2173,17 @@ class HitlAutoResearchController:
                 workspace_fingerprint = str(
                     existing.get("workspace_fingerprint", "")
                 ).strip()
+                workspace_fingerprint_scope = existing.get(
+                    "workspace_fingerprint_scope"
+                )
             else:
                 ordinal = self._next_additional_agent_ordinal(attempt_dir)
                 from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
+                workspace_fingerprint_scope = runtime_state.workspace_guard_scope()
                 workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
-                    self.work_dir
+                    self.work_dir,
+                    scope=workspace_fingerprint_scope,
                 )
             if ordinal < 1:
                 raise RuntimeError("Proposal preparation has an invalid agent-run ordinal.")
@@ -2235,6 +2248,7 @@ class HitlAutoResearchController:
                 additional_agent_ordinal=ordinal,
                 workspace_fingerprint=workspace_fingerprint,
                 on_decision=apply_decision,
+                workspace_fingerprint_scope=workspace_fingerprint_scope,
             )
             if result.get("choice") == "proceed":
                 return
@@ -2242,8 +2256,11 @@ class HitlAutoResearchController:
                 raise RuntimeError("Proposal preparation completed without a valid choice.")
             from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
+            approved_request = runtime_state.pending_worker_command() or {}
+            approved_scope = approved_request.get("workspace_fingerprint_scope")
             approved_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
-                self.work_dir
+                self.work_dir,
+                scope=approved_scope,
             )
             completed_agent = str(result.get("agent", "")).strip()
             if not completed_agent:
@@ -2256,6 +2273,7 @@ class HitlAutoResearchController:
                 attempt_id=attempt_id,
                 completed_ordinal=ordinal,
                 workspace_fingerprint=approved_fingerprint,
+                workspace_fingerprint_scope=approved_scope,
                 provenance={
                     **provenance,
                     "additional_agent_ordinal": str(ordinal),
@@ -3106,13 +3124,20 @@ class HitlAutoResearchController:
                     pending,
                     cached_score,
                 )
+                reviewed_scope = scoring_source_workspace_scope(
+                    pending,
+                    cached_score,
+                )
                 from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
                 if not reviewed_fingerprint:
                     raise RuntimeError(
                         "HITL candidate scoring is missing its reviewed workspace fingerprint."
                     )
-                current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
+                current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+                    self.work_dir,
+                    scope=reviewed_scope,
+                )
                 if current_fingerprint != reviewed_fingerprint:
                     raise RuntimeError(
                         "The public workspace changed after the worker submitted its reviewed finish "
@@ -3127,7 +3152,8 @@ class HitlAutoResearchController:
                 else:
                     self._clear_stale_results_json()
                     source_workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
-                        self.work_dir
+                        self.work_dir,
+                        scope=reviewed_scope,
                     )
                     source_sha = self.checkpoints.create_checkpoint(
                         "HITL AutoResearch candidate before isolated scoring"
@@ -3138,6 +3164,7 @@ class HitlAutoResearchController:
                             "status": "prepared",
                             "source_checkpoint_sha": source_sha,
                             "source_workspace_fingerprint": source_workspace_fingerprint,
+                            "source_workspace_fingerprint_scope": reviewed_scope,
                         },
                     )
                 try:

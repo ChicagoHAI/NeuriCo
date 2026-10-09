@@ -1190,6 +1190,7 @@ class HitlManager:
         requires_human_approval: bool,
         plan_fingerprint: str = "",
         workspace_fingerprint: str = "",
+        workspace_fingerprint_scope: Optional[Dict[str, Any]] = None,
         allow_scoring_approval: bool = False,
         scoring_enabled: bool = False,
         scoring_handoff_context: Optional[Dict[str, Any]] = None,
@@ -1274,6 +1275,7 @@ class HitlManager:
             "hitl_stage": hitl_stage,
             "plan_fingerprint": plan_fingerprint,
             "workspace_fingerprint": workspace_fingerprint,
+            "workspace_fingerprint_scope": dict(workspace_fingerprint_scope or {}),
             "finish_summary": finish_summary,
             "related_artifacts": related_artifacts,
             "provenance": dict(scoring_handoff_context or {}),
@@ -2083,6 +2085,7 @@ class HitlManager:
         additional_agent_ordinal: int,
         workspace_fingerprint: str,
         on_decision: Callable[[Dict[str, Any]], Dict[str, Any]],
+        workspace_fingerprint_scope: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Wait for and apply one proceed-or-additional-agent decision."""
         kind = "prepare_proposal"
@@ -2102,6 +2105,12 @@ class HitlManager:
             "additional_agent_ordinal": ordinal,
             "workspace_fingerprint": boundary_fingerprint,
         }
+        if workspace_fingerprint_scope is not None:
+            from core.hitl_workspace_guard import WorkspaceGuardScope
+
+            expected["workspace_fingerprint_scope"] = WorkspaceGuardScope.from_value(
+                workspace_fingerprint_scope
+            ).to_dict()
         action = self.runtime_state.begin_next_autoresearch_action(expected)
         if any(action.get(key) != value for key, value in expected.items()):
             raise HitlRuntimeStateError(
@@ -2112,7 +2121,10 @@ class HitlManager:
             from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
             approved = str(current.get("workspace_fingerprint", "")).strip()
-            observed = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
+            observed = HitlWorkspaceWriteGuard.public_fingerprint(
+                self.work_dir,
+                scope=current.get("workspace_fingerprint_scope"),
+            )
             if not approved or observed != approved:
                 raise RuntimeError(
                     "The proposal-preparation workspace differs from its recorded "

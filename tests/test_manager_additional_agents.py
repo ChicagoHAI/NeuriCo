@@ -157,6 +157,48 @@ def test_proceed_decision_cannot_borrow_an_unrelated_agent_request(tmp_path):
         )
 
 
+def test_preparation_boundary_uses_its_recorded_workspace_scope(tmp_path):
+    immutable = tmp_path / "datasets" / "immutable"
+    immutable.mkdir(parents=True)
+    (immutable / "rows.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    state = HitlRuntimeState(tmp_path)
+    scope = state.set_workspace_guard_scope(
+        immutable_resource_roots=["datasets/immutable"]
+    )
+    manager = _manager(tmp_path, state)
+    fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path, scope=scope)
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": "parent",
+            "attempt_id": "attempt_1",
+            "additional_agent_ordinal": 1,
+            "workspace_fingerprint": fingerprint,
+            "workspace_fingerprint_scope": scope,
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {
+            "choice": "proceed",
+            "reason": "Evidence is sufficient.",
+            "premise_idea_id": "I1",
+        },
+    )
+
+    result = manager.begin_proposal_preparation(
+        "prepare",
+        parent_sha="parent",
+        attempt_id="attempt_1",
+        additional_agent_ordinal=1,
+        workspace_fingerprint=fingerprint,
+        workspace_fingerprint_scope=scope,
+        on_decision=lambda decision: decision,
+    )
+
+    assert result["choice"] == "proceed"
+
+
 def test_preparation_decision_log_uses_only_physical_attempt_provenance(tmp_path):
     premise = _premise(tmp_path)
     runtime = HitlRuntime.__new__(HitlRuntime)
@@ -378,15 +420,17 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
                     kwargs["additional_agent_ordinal"],
                 )
             )
-            state.begin_next_autoresearch_action(
-                {
-                    "kind": "prepare_proposal",
-                    "parent_node_sha": kwargs["parent_sha"],
-                    "attempt_id": kwargs["attempt_id"],
-                    "additional_agent_ordinal": kwargs["additional_agent_ordinal"],
-                    "workspace_fingerprint": kwargs["workspace_fingerprint"],
-                }
-            )
+            action = {
+                "kind": "prepare_proposal",
+                "parent_node_sha": kwargs["parent_sha"],
+                "attempt_id": kwargs["attempt_id"],
+                "additional_agent_ordinal": kwargs["additional_agent_ordinal"],
+                "workspace_fingerprint": kwargs["workspace_fingerprint"],
+                "workspace_fingerprint_scope": kwargs[
+                    "workspace_fingerprint_scope"
+                ],
+            }
+            state.begin_next_autoresearch_action(action)
             decision = next(decisions)
             state.record_next_autoresearch_action_decision("prepare_proposal", decision)
             result = kwargs["on_decision"](decision)
@@ -412,7 +456,8 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
         logs_dir.mkdir()
         (tmp_path / "literature_review.md").write_text("review\n", encoding="utf-8")
         (tmp_path / "resources.md").write_text("resources\n", encoding="utf-8")
-        fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path)
+        scope = state.workspace_guard_scope()
+        fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path, scope=scope)
         state.begin_worker_command(
             {
                 "request_key": "resource-request-1",
@@ -421,6 +466,7 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
                 "kind": "phase_finish",
                 "provenance": kwargs["provenance"],
                 "workspace_fingerprint": fingerprint,
+                "workspace_fingerprint_scope": scope,
             }
         )
         state.complete_worker_command("resource-request-1", {"status": "approved", "final": True})
@@ -454,6 +500,48 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
     final_action = state.snapshot()["next_autoresearch_action"]
     assert final_action["status"] == "resolved"
     assert final_action["result"]["choice"] == "proceed"
+    assert final_action["workspace_fingerprint_scope"] == state.workspace_guard_scope()
+
+
+def test_recovered_approval_uses_its_recorded_workspace_scope(tmp_path):
+    (tmp_path / "literature_review.md").write_text("review\n", encoding="utf-8")
+    (tmp_path / "resources.md").write_text("resources\n", encoding="utf-8")
+    immutable = tmp_path / "datasets" / "immutable"
+    immutable.mkdir(parents=True)
+    (immutable / "rows.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    provenance = {
+        "parent_node_id": "parent",
+        "attempt_id": "attempt_1",
+        "additional_agent_ordinal": "1",
+    }
+    state = HitlRuntimeState(tmp_path)
+    scope = state.set_workspace_guard_scope(
+        immutable_resource_roots=["datasets/immutable"]
+    )
+    state.begin_worker_command(
+        {
+            "request_key": "request-1",
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "review",
+            "kind": "phase_finish",
+            "provenance": provenance,
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path,
+                scope=scope,
+            ),
+            "workspace_fingerprint_scope": scope,
+        }
+    )
+    state.complete_worker_command("request-1", {"status": "approved", "final": True})
+
+    recovered = _approved_saved_request(
+        work_dir=tmp_path,
+        pipeline_stage="resource_finder",
+        provenance=provenance,
+    )
+
+    assert recovered is not None
+    assert recovered["workspace_fingerprint_scope"] == scope
 
 
 def test_recovered_approval_rejects_a_changed_public_workspace(tmp_path):
@@ -827,6 +915,9 @@ def test_recovery_rejects_agent_worker_without_manager_authorization(tmp_path):
 def test_recovery_allows_exact_approved_agent_workspace(tmp_path, complete_action):
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("scored root\n", encoding="utf-8")
+    immutable = tmp_path / "datasets" / "immutable"
+    immutable.mkdir(parents=True)
+    (immutable / "rows.csv").write_text("a,b\n1,2\n", encoding="utf-8")
     checkpoints = CheckpointManager(tmp_path)
     root = checkpoints.create_checkpoint("root")
     frontier = HitlFrontierStore(tmp_path)
@@ -850,13 +941,20 @@ def test_recovery_allows_exact_approved_agent_workspace(tmp_path, complete_actio
         "additional_agent_ordinal": "1",
     }
     state = HitlRuntimeState(tmp_path)
+    scope = state.set_workspace_guard_scope(
+        immutable_resource_roots=["datasets/immutable"]
+    )
     state.begin_next_autoresearch_action(
         {
             "kind": "prepare_proposal",
             "parent_node_sha": root.sha,
             "attempt_id": attempt_dir.name,
             "additional_agent_ordinal": 1,
-            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(tmp_path),
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path,
+                scope=scope,
+            ),
+            "workspace_fingerprint_scope": scope,
         }
     )
     state.record_next_autoresearch_action_decision(
@@ -877,7 +975,11 @@ def test_recovery_allows_exact_approved_agent_workspace(tmp_path, complete_actio
             "hitl_stage": "review",
             "kind": "phase_finish",
             "provenance": provenance,
-            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(tmp_path),
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path,
+                scope=scope,
+            ),
+            "workspace_fingerprint_scope": scope,
         }
     )
     state.complete_worker_command("request-1", {"status": "approved", "final": True})

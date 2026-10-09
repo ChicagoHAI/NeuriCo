@@ -41,6 +41,26 @@ FUNCTIONS_STAGING_DIR = "code/local"
 LARGE_DATASET_BYTES = 2 * 1024 ** 3
 
 
+def staged_immutable_resource_roots(idea_spec: Dict[str, Any]) -> List[str]:
+    """Return trusted workspace paths for staged, user-declared datasets."""
+    idea = idea_spec.get('idea')
+    if not isinstance(idea, dict):
+        return []
+    resources = idea.get('local_resources')
+    if not isinstance(resources, dict):
+        return []
+
+    prefix = f"{DATASETS_STAGING_DIR}/"
+    roots = set()
+    for entry in resources.get('datasets') or []:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get('path', '')).replace('\\', '/').strip('/')
+        if path.startswith(prefix):
+            roots.add(path)
+    return sorted(roots)
+
+
 # Path-like tokens: absolute (/...), relative (./ or ../), or home (~/) with at
 # least two segments. The lookbehind rejects tokens embedded in URLs or words
 # (e.g. the /data.csv inside https://example.com/data.csv).

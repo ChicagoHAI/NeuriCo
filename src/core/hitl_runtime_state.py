@@ -94,6 +94,11 @@ class HitlRuntimeState:
             "manager_provider": "",
             "worker_continuation": None,
             "pending_worker_command": None,
+            "workspace_guard_scope": {
+                "runtime_private_roots": [],
+                "immutable_resource_roots": [],
+                "immutable_resource_digests": {},
+            },
             "next_autoresearch_action": None,
             "rejected_whiteboard_cleanup": None,
             "frontier_decision_transition": None,
@@ -442,6 +447,93 @@ class HitlRuntimeState:
         value = self.snapshot().get("pending_worker_command")
         return value if isinstance(value, dict) and value else None
 
+    def workspace_guard_scope(self) -> Dict[str, Any]:
+        """Return the normalized runtime-owned public-fingerprint scope."""
+        from core.hitl_workspace_guard import WorkspaceGuardScope
+
+        value = self.snapshot().get("workspace_guard_scope")
+        return WorkspaceGuardScope.from_value(value).to_dict()
+
+    def set_workspace_guard_scope(
+        self,
+        *,
+        runtime_private_roots: Any = (),
+        immutable_resource_roots: Any = (),
+    ) -> Dict[str, Any]:
+        """Register exact, existing roots before a worker boundary begins."""
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard, WorkspaceGuardScope
+
+        requested = WorkspaceGuardScope.from_value(
+            {
+                "runtime_private_roots": runtime_private_roots,
+                "immutable_resource_roots": immutable_resource_roots,
+            }
+        )
+        for relative in requested.excluded_roots:
+            path = self.work_dir / relative
+            if not path.exists() and not path.is_symlink():
+                raise HitlRuntimeStateError(
+                    f"HITL workspace guard roots must exist before registration: {relative}"
+                )
+            if (
+                relative in requested.runtime_private_roots
+                and not path.is_dir()
+                and not path.is_symlink()
+            ):
+                raise HitlRuntimeStateError(
+                    f"HITL runtime-private roots must be directories or symlinks: {relative}"
+                )
+        try:
+            current_digests = {
+                relative: HitlWorkspaceWriteGuard.immutable_resource_digest(
+                    self.work_dir,
+                    relative,
+                )
+                for relative in requested.immutable_resource_roots
+            }
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            existing = WorkspaceGuardScope.from_value(self._state.get("workspace_guard_scope"))
+            removed = sorted(
+                set(existing.immutable_resource_roots) - set(requested.immutable_resource_roots)
+            )
+            if removed:
+                raise HitlRuntimeStateError(
+                    "HITL immutable resource roots cannot be unregistered: " + ", ".join(removed)
+                )
+
+            existing_digests = dict(existing.immutable_resource_digests)
+            trusted_digests: Dict[str, str] = {}
+            for relative in requested.immutable_resource_roots:
+                if relative in existing.immutable_resource_roots:
+                    expected = existing_digests.get(relative)
+                    if not expected:
+                        raise HitlRuntimeStateError(
+                            "HITL immutable resource has no trusted registration digest: "
+                            + relative
+                        )
+                else:
+                    expected = current_digests[relative]
+                current = current_digests[relative]
+                if current != expected:
+                    raise HitlRuntimeStateError(
+                        "HITL immutable resource changed after registration: " + relative
+                    )
+                trusted_digests[relative] = expected
+
+            scope = WorkspaceGuardScope.from_value(
+                {
+                    "runtime_private_roots": requested.runtime_private_roots,
+                    "immutable_resource_roots": requested.immutable_resource_roots,
+                    "immutable_resource_digests": trusted_digests,
+                }
+            ).require_immutable_resource_digests()
+            self._state["workspace_guard_scope"] = scope.to_dict()
+            self._save_unlocked()
+        return scope.to_dict()
+
     def begin_worker_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         """Persist one worker command or return its matching retry record."""
         request_key = str(command.get("request_key", "")).strip()
@@ -787,6 +879,7 @@ class HitlRuntimeState:
         attempt_id: str,
         completed_ordinal: int,
         workspace_fingerprint: str,
+        workspace_fingerprint_scope: Optional[Dict[str, Any]],
         provenance: Dict[str, Any],
         agent: str,
         pipeline_stage: str,
@@ -796,6 +889,14 @@ class HitlRuntimeState:
         attempt = str(attempt_id).strip()
         ordinal = int(completed_ordinal)
         fingerprint = str(workspace_fingerprint).strip()
+        if workspace_fingerprint_scope is None:
+            fingerprint_scope = None
+        else:
+            from core.hitl_workspace_guard import WorkspaceGuardScope
+
+            fingerprint_scope = WorkspaceGuardScope.from_value(
+                workspace_fingerprint_scope
+            ).to_dict()
         agent_name = str(agent).strip()
         stage = str(pipeline_stage).strip()
         expected_provenance = {
@@ -854,6 +955,11 @@ class HitlRuntimeState:
                 if isinstance(command, dict)
                 else {}
             )
+            command_scope = (
+                command.get("workspace_fingerprint_scope")
+                if isinstance(command, dict)
+                else None
+            )
             if (
                 not isinstance(command, dict)
                 or command.get("pipeline_stage") != stage
@@ -865,6 +971,7 @@ class HitlRuntimeState:
                 or not bool(response.get("final"))
                 or command_provenance != expected_provenance
                 or str(command.get("workspace_fingerprint", "")).strip() != fingerprint
+                or command_scope != fingerprint_scope
             ):
                 raise HitlRuntimeStateError(
                     "The completed agent call has no matching approved worker request"
@@ -879,6 +986,8 @@ class HitlRuntimeState:
                 "status": "pending",
                 "created_at": _now(),
             }
+            if fingerprint_scope is not None:
+                next_action["workspace_fingerprint_scope"] = fingerprint_scope
             self._state["pending_worker_command"] = None
             self._state["worker_continuation"] = None
             self._state["next_autoresearch_action"] = next_action
