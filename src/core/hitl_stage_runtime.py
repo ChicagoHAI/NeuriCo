@@ -79,12 +79,23 @@ def run_plan_centered_hitl_stage(
     baseline_construction: bool = False,
     baseline_candidate_manifest: Dict[str, Any] | None = None,
     provenance: Optional[Dict[str, Any]] = None,
+    force_fresh_plan: bool = False,
 ) -> Dict[str, Any]:
     """Run the shared plan/execution state machine for ordinary HITL stages."""
     # A held request's saved phase takes precedence over plan approval on restart.
     state = HitlRuntimeState(runtime.work_dir)
     pending = state.pending_worker_command()
-    resume_pending = worker_command_requires_resume(pending)
+    pending_response = pending.get("response") if isinstance(pending, dict) else None
+    resume_approved_plan = bool(
+        isinstance(pending, dict)
+        and pending.get("kind") == "phase_finish"
+        and pending.get("hitl_stage") == "plan"
+        and pending.get("status") == "resolved"
+        and isinstance(pending_response, dict)
+        and pending_response.get("status") == "approved"
+        and bool(pending_response.get("final"))
+    )
+    resume_pending = worker_command_requires_resume(pending) or resume_approved_plan
     if resume_pending:
         continuation = state.worker_continuation() or {}
         saved_phase = str(continuation.get("hitl_stage", "")).strip()
@@ -98,6 +109,7 @@ def run_plan_centered_hitl_stage(
             or pending.get("kind") not in {"phase_finish", "raised_idea"}
             or saved_phase not in {"plan", "execution", "review"}
             or not str(continuation.get("prompt_block") or "").strip()
+            or (resume_approved_plan and saved_phase != "execution")
             or (
                 pending.get("status") != "resolved"
                 and pending.get("hitl_stage") != saved_phase
@@ -118,10 +130,14 @@ def run_plan_centered_hitl_stage(
             baseline_candidate_manifest=baseline_candidate_manifest,
             provenance=provenance,
         )
-        prompt = _load_hitl_template("worker_resume_pending_request.txt")
+        prompt = (
+            str(continuation["prompt_block"])
+            if resume_approved_plan
+            else _load_hitl_template("worker_resume_pending_request.txt")
+        )
         log_prefix = plan_log_prefix if saved_phase == "plan" else execution_log_prefix
         phase = "stage"
-    elif not getattr(
+    elif force_fresh_plan or not getattr(
         runtime,
         "plan_has_required_approval",
         runtime.plan_has_human_approval,

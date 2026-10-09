@@ -32,6 +32,8 @@ def generate_resource_finder_prompt(
     provider: str = "claude",
     hitl_phase: Optional[str] = None,
     scoring_enabled: bool = False,
+    objective: str = "",
+    workspace_mode: str = "bootstrap",
 ) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
@@ -47,6 +49,9 @@ def generate_resource_finder_prompt(
         scoring_enabled: If True, surface scoring-only obligations such as the
                          required_for_evaluation mandate; ordinary unscored
                          runs omit them.
+        objective: Optional focused objective for an inserted invocation.
+        workspace_mode: ``bootstrap`` for the initial pipeline stage or
+                        ``additive`` for an established AutoResearch workspace.
 
     Returns:
         Complete prompt string for resource finder agent
@@ -61,6 +66,8 @@ def generate_resource_finder_prompt(
         provider=provider,
         hitl_phase=hitl_phase,
         scoring_enabled=scoring_enabled,
+        objective=objective,
+        workspace_mode=workspace_mode,
     )
 
 

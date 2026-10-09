@@ -2162,15 +2162,12 @@ class HitlManager:
                 result = on_decision(dict(decision))
             else:
                 require_boundary_workspace(current)
-            self.runtime_state.clear_completed_next_autoresearch_action(kind)
             return result
 
         if action.get("status") == "resolved":
             return reuse_resolved(action)
         if action.get("status") == "decision_recorded":
-            result = complete_recorded()
-            self.runtime_state.clear_completed_next_autoresearch_action(kind)
-            return result
+            return complete_recorded()
 
         require_boundary_workspace(action)
         self.notify_runtime(prompt, runtime_action_kind=kind)
@@ -2181,9 +2178,7 @@ class HitlManager:
             current = self.runtime_state.snapshot().get("next_autoresearch_action")
             if isinstance(current, dict) and current.get("kind") == kind:
                 if current.get("status") == "decision_recorded":
-                    result = complete_recorded()
-                    self.runtime_state.clear_completed_next_autoresearch_action(kind)
-                    return result
+                    return complete_recorded()
                 if current.get("status") == "resolved":
                     return reuse_resolved(current)
                 if current.get("status") == "cancelled":

@@ -11,16 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
-from core.hitl import (
-    HitlRuntime,
-    HitlValidationError,
-    RequiredArtifact,
-    verify_required_artifacts,
-)
+from core.hitl import HitlRuntime
 from core.hitl_mode import HitlMode
+from core.hitl_resource_finder import (
+    run_resource_finder_hitl,
+    validate_resource_finder_outputs,
+)
 from core.hitl_runtime_state import HitlRuntimeState
-from core.hitl_stage_runtime import run_plan_centered_hitl_stage
 from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
 
@@ -37,21 +34,7 @@ class AdditionalAgentSpec:
 
 
 def _resource_artifact_validator(work_dir: Path) -> Dict[str, Any]:
-    required = [
-        RequiredArtifact(
-            path=relative,
-            purpose="Resource-finder stage output",
-            required=True,
-        )
-        for relative in ("literature_review.md", "resources.md")
-    ]
-    issues = []
-    for artifact in required:
-        try:
-            verify_required_artifacts(work_dir, [artifact])
-        except (OSError, ValueError, HitlValidationError) as exc:
-            issues.append(str(exc))
-    return {"valid": not issues, "issues": issues}
+    return validate_resource_finder_outputs(work_dir)
 
 
 def _resource_outputs(work_dir: Path) -> Dict[str, str]:
@@ -78,8 +61,12 @@ def _approved_saved_request(
     resolved_agent_action = (
         isinstance(action, dict)
         and action.get("kind") == "prepare_proposal"
-        and action.get("status") == "resolved"
-        and dict(action.get("result") or {}).get("choice") == "call_additional_agent"
+        and action.get("status") in {"decision_recorded", "resolved"}
+        and (
+            dict(action.get("decision") or {}).get("choice") == "call_additional_agent"
+            or dict(action.get("result") or {}).get("choice")
+            == "call_additional_agent"
+        )
     )
     pending = state.pending_worker_command()
     if not isinstance(pending, dict):
@@ -97,6 +84,7 @@ def _approved_saved_request(
         and pending.get("hitl_stage") in {"execution", "review"}
         and isinstance(response, dict)
         and response.get("status") == "approved"
+        and bool(response.get("final"))
         and dict(pending.get("provenance") or {}) == provenance
     )
     if not matches:
@@ -121,18 +109,6 @@ def _approved_saved_request(
         )
     state.clear_worker_continuation()
     return pending
-
-
-def _with_manager_objective(prompt: str, objective: str) -> str:
-    focus = str(objective).strip()
-    if not focus:
-        return prompt
-    return (
-        f"{prompt.rstrip()}\n\n"
-        "## MANAGER-REQUESTED FOCUS\n\n"
-        "Preserve useful existing resources and investigate this information gap:\n\n"
-        f"{focus}\n"
-    )
 
 
 def _run_resource_finder_agent(
@@ -163,19 +139,6 @@ def _run_resource_finder_agent(
     )
     run_logs_dir = Path(attempt_dir) / f"additional_agent_{ordinal:02d}_resource_finder"
     run_logs_dir.mkdir(parents=True, exist_ok=True)
-    worker_prompt_contexts = {
-        phase: _with_manager_objective(
-            generate_resource_finder_prompt(
-                idea,
-                templates_dir,
-                hitl_runtime_completion=True,
-                provider=provider,
-                hitl_phase=phase,
-            ),
-            objective,
-        )
-        for phase in ("plan", "execution", "review")
-    }
 
     recovered = _approved_saved_request(
         work_dir=work_dir,
@@ -191,36 +154,6 @@ def _run_resource_finder_agent(
             "outputs": _resource_outputs(work_dir),
             "logs_dir": str(run_logs_dir),
         }
-
-    def validator() -> Dict[str, Any]:
-        return _resource_artifact_validator(work_dir)
-
-    def launch_worker(
-        worker_prompt: str,
-        worker_log_prefix: str,
-        *,
-        record_continuation: bool,
-    ) -> Dict[str, Any]:
-        if record_continuation:
-            runtime.register_worker_prompt(worker_prompt)
-        safe_prefix = str(worker_log_prefix).replace("/", "_")
-        launch_number = 1
-        while any(run_logs_dir.glob(f"launch_{launch_number:03d}_*")):
-            launch_number += 1
-        return run_resource_finder(
-            idea=idea,
-            work_dir=work_dir,
-            provider=provider,
-            templates_dir=templates_dir,
-            timeout=timeout,
-            full_permissions=full_permissions,
-            completion_mode="hitl_runtime",
-            log_prefix=f"launch_{launch_number:03d}_{safe_prefix}",
-            include_hitl_outputs=True,
-            env_extra=runtime.idea_tool_env(),
-            prompt_override=worker_prompt,
-            logs_dir=run_logs_dir,
-        )
 
     def approved(result: Dict[str, Any], finish: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -246,18 +179,22 @@ def _run_resource_finder_agent(
         }
 
     try:
-        return run_plan_centered_hitl_stage(
+        return run_resource_finder_hitl(
             runtime=runtime,
-            actor="resource_finder",
-            worker_name="resource_finder",
-            worker_prompt_contexts=worker_prompt_contexts,
-            phase_finish_validator=validator,
-            launch_worker=launch_worker,
-            plan_log_prefix="resource_finder_hitl_plan",
-            execution_log_prefix="resource_finder_hitl_execute",
+            idea=idea,
+            work_dir=work_dir,
+            provider=provider,
+            templates_dir=templates_dir,
+            timeout=timeout,
+            full_permissions=full_permissions,
             on_approved=approved,
             on_failed=failed,
             provenance=provenance,
+            objective=objective,
+            workspace_mode="additive",
+            force_fresh_plan=True,
+            logs_dir=run_logs_dir,
+            preserve_log_history=True,
         )
     finally:
         runtime.clear_idea_tool_context()

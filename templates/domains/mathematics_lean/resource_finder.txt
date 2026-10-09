@@ -41,6 +41,7 @@ FOLDER STRUCTURE - Keep resources SEPARATED:
 ⚠️  NEVER put papers in code/, code in papers/, etc.
 ⚠️  NEVER create files in parent directory (cd .. is dangerous!)
 
+{% if resource_workspace_mode == "bootstrap" %}
 ═══════════════════════════════════════════════════════════════════════════════
                     CRITICAL: ENVIRONMENT SETUP
 ═══════════════════════════════════════════════════════════════════════════════
@@ -73,6 +74,16 @@ NEVER use conda or conda install!
 NOTE: Do NOT construct proofs here — that is the experiment runner's job. You MAY,
 however, confirm that candidate Mathlib lemma names exist by sending `#check` snippets
 to the AXLE verifier (see Phase 3). No local Lean toolchain is needed or installed.
+{% else %}
+═══════════════════════════════════════════════════════════════════════════════
+                  CRITICAL: PRESERVE THE EXISTING ENVIRONMENT
+═══════════════════════════════════════════════════════════════════════════════
+
+This is an additive resource-finding invocation inside an established workspace.
+Do not create, recreate, or replace `.venv`, `pyproject.toml`, lock files, or
+other dependency metadata. Do not install packages. Preserve existing resources
+and make only the focused resource additions requested for this invocation.
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                     IMPORTANT: PDF READING WITH CHUNKER
