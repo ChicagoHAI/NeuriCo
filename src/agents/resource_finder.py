@@ -28,6 +28,7 @@ def generate_resource_finder_prompt(
     idea: Dict[str, Any],
     templates_dir: Path,
     *,
+    workspace_mode: str = "native",
     hitl_runtime_completion: bool = False,
     provider: str = "claude",
     hitl_phase: Optional[str] = None,
@@ -54,7 +55,7 @@ def generate_resource_finder_prompt(
     from templates.prompt_generator import PromptGenerator
 
     # templates_dir is typically project_root/templates, so parent is project_root
-    generator = PromptGenerator(templates_dir)
+    generator = PromptGenerator(templates_dir, workspace_mode=workspace_mode)
     return generator.generate_resource_finder_prompt(
         idea,
         hitl_runtime_completion=hitl_runtime_completion,
@@ -133,9 +134,12 @@ def run_resource_finder(
     if prompt_override is not None:
         prompt = prompt_override
     else:
+        from core.research_environment import read_workspace_mode
+
         prompt = generate_resource_finder_prompt(
             idea,
             templates_dir,
+            workspace_mode=read_workspace_mode(work_dir).value,
             hitl_runtime_completion=(completion_mode == "hitl_runtime"),
             provider=provider,
             scoring_enabled=scoring_enabled,

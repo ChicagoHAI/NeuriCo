@@ -459,7 +459,13 @@ def run_resource_finder(
     print(f"   Work dir: {work_dir}")
 
     # Generate prompt
-    prompt = generate_resource_finder_prompt(idea, templates_dir)
+    from core.research_environment import read_workspace_mode
+
+    prompt = generate_resource_finder_prompt(
+        idea,
+        templates_dir,
+        workspace_mode=read_workspace_mode(work_dir).value,
+    )
 
     # Save prompt for reference
     prompt_file = work_dir / "logs" / "resource_finder_prompt.txt"
@@ -530,7 +536,12 @@ def run_experiment_runner(
             print(f"   DSI remote workspace: {dsi_remote_info['remote_root']}")
 
         # Generate research prompt
-        prompt_generator = PromptGenerator(templates_dir)
+        from core.research_environment import read_workspace_mode
+
+        prompt_generator = PromptGenerator(
+            templates_dir,
+            workspace_mode=read_workspace_mode(work_dir),
+        )
         prompt = prompt_generator.generate_research_prompt(
             idea, root_dir=work_dir, scoring_enabled=scoring_enabled)
 

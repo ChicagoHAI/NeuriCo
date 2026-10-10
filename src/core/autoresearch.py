@@ -28,6 +28,7 @@ from core.autoresearch_common import (
 )
 from core.hitl_util import atomic_write_json, utc_now
 from core.hitl_paths import HITL_RELATIVE_ROOT
+from core.research_environment import WORKSPACE_MODE_STATE_RELATIVE_PATH
 from core.whiteboard import (
     Whiteboard,
     clear_current_attempt_marker,
@@ -65,6 +66,7 @@ AGENT_LOCAL_PATTERNS = (".claude/", ".gemini/", ".codex/")
 PRIVATE_RUNTIME_PATTERNS = (
     f"{HITL_RELATIVE_ROOT.as_posix()}/",
     ".neurico/runs/",
+    WORKSPACE_MODE_STATE_RELATIVE_PATH.as_posix(),
     ".experiment_runner_plan_complete",
     ".experiment_runner_complete",
 )

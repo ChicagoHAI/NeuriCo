@@ -176,16 +176,13 @@ This preserves all formatting perfectly (unlike text extraction which loses form
 **Dependencies:**
 ```bash
 # Using uv (recommended):
-uv add pypdf
-
-# Or with pip:
-pip install pypdf
+uv add --project {{ research_env_dir }} pypdf
 ```
 
 **How to run:**
 
 ```bash
-python .claude/skills/literature-review/scripts/pdf_chunker.py <pdf_path>
+{{ research_python_path }} .claude/skills/literature-review/scripts/pdf_chunker.py <pdf_path>
 ```
 
 Options:

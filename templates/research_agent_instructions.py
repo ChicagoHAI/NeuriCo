@@ -54,8 +54,10 @@ def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
     Returns:
         Complete session instructions string
     """
+    from core.research_environment import read_workspace_mode
     from templates.prompt_generator import PromptGenerator
-    generator = PromptGenerator()
+
+    generator = PromptGenerator(workspace_mode=read_workspace_mode(Path(work_dir)))
     try:
         return generator.generate_session_instructions(
             prompt,

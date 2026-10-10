@@ -100,6 +100,7 @@ from core.hitl_stage_runtime import (
 )
 from core.hitl_util import atomic_write_json, utc_now
 from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+from core.research_environment import normalize_workspace_mode, read_workspace_mode
 from templates.research_agent_instructions import generate_instructions
 
 
@@ -108,6 +109,7 @@ class PipelineState:
 
     def __init__(self, work_dir: Path, *, workflow: Optional[str] = None):
         self.work_dir = Path(work_dir)
+        self.workspace_mode = read_workspace_mode(self.work_dir)
         self.state_file = self.work_dir / ".neurico" / "pipeline_state.json"
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         state_existed = self.state_file.exists()
@@ -123,6 +125,14 @@ class PipelineState:
                 "current_stage": None,
                 "completed": False,
             }
+        recorded_workspace_mode = self.state.get("workspace_mode")
+        if recorded_workspace_mode is not None and (
+            normalize_workspace_mode(recorded_workspace_mode) is not self.workspace_mode
+        ):
+            raise RuntimeError(
+                "Pipeline state and protected research-environment state disagree."
+            )
+        self.state["workspace_mode"] = self.workspace_mode.value
         if workflow is not None:
             requested = str(workflow).strip().lower()
             if requested != "ordinary":
@@ -368,6 +378,7 @@ class ResearchPipelineOrchestrator:
                 else None
             ),
         )
+        self.workspace_mode = self.state.workspace_mode
 
         # Auto-detect templates directory if not provided
         if templates_dir is None:
@@ -1459,6 +1470,7 @@ class ResearchPipelineOrchestrator:
             phase: generate_resource_finder_prompt(
                 idea,
                 self.templates_dir,
+                workspace_mode=self.workspace_mode.value,
                 hitl_runtime_completion=True,
                 provider=provider,
                 hitl_phase=phase,
@@ -1676,7 +1688,10 @@ class ResearchPipelineOrchestrator:
             if runtime_prompt is None:
                 from templates.prompt_generator import PromptGenerator
 
-                prompt_generator = PromptGenerator(self.templates_dir)
+                prompt_generator = PromptGenerator(
+                    self.templates_dir,
+                    workspace_mode=self.workspace_mode,
+                )
                 prompt = prompt_generator.generate_research_prompt(
                     idea, root_dir=self.work_dir, scoring_enabled=scoring_enabled
                 )
@@ -1831,7 +1846,10 @@ class ResearchPipelineOrchestrator:
         """Render exactly one source context for an experiment-runner HITL phase."""
         from templates.prompt_generator import PromptGenerator
 
-        generator = PromptGenerator(self.templates_dir)
+        generator = PromptGenerator(
+            self.templates_dir,
+            workspace_mode=self.workspace_mode,
+        )
         if hitl_phase == "execution":
             ordinary_prompt = generator.generate_research_prompt(
                 idea,

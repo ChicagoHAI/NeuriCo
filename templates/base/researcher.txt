@@ -598,7 +598,7 @@ validation. The findings are documented and ready for review.
 2. Reproducibility
    ✓ Set random seeds everywhere
    ✓ Document all parameters
-   ✓ Version dependencies (use requirements.txt or environment.yml)
+   ✓ Version dependencies in {{ research_project_path }} or {{ research_requirements_path }}
    ✓ Save raw outputs (not just processed summaries)
    ✓ Make code runnable by others
 

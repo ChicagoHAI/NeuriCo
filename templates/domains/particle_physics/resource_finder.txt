@@ -49,12 +49,13 @@ DO NOT use the neurico environment or any existing environment.
 
 REQUIRED STEPS (at the START of your session):
 
-1. Create a fresh virtual environment using uv:
-   uv venv
+1. Create the dedicated dependency directory and a fresh virtual environment using uv:
+   mkdir -p {{ research_env_dir }}
+   uv venv {{ research_venv_dir }}
 
 2. Initialize project dependencies file:
 
-   cat > pyproject.toml << 'EOF'
+   cat > {{ research_project_path }} << 'EOF'
    [project]
    name = "research-workspace"
    version = "0.1.0"
@@ -65,21 +66,21 @@ REQUIRED STEPS (at the START of your session):
    EOF
 
 3. Activate the environment:
-   source .venv/bin/activate
+   source {{ research_venv_dir }}/bin/activate
 
 4. For any package installations, use this priority order:
 
    FIRST CHOICE - uv add:
-   uv add <package-name>
+   uv add --project {{ research_env_dir }} <package-name>
 
    Useful packages for BSM phenomenology:
-   - uv add numpy scipy matplotlib pandas
-   - uv add pypdf                  # PDF chunking
-   - uv add requests               # Downloading papers and HEPData records
-   - uv add flavio                 # Flavor observables
-   - uv add lhapdf                 # (when available as wheel) PDF evaluation
-   - uv add iminuit                # Likelihood fits
-   - uv add pyslha                 # SLHA file I/O for SUSY spectra
+   - uv add --project {{ research_env_dir }} numpy scipy matplotlib pandas
+   - uv add --project {{ research_env_dir }} pypdf # PDF chunking
+   - uv add --project {{ research_env_dir }} requests # Downloading papers and HEPData records
+   - uv add --project {{ research_env_dir }} flavio # Flavor observables
+   - uv add --project {{ research_env_dir }} lhapdf # (when available as wheel) PDF evaluation
+   - uv add --project {{ research_env_dir }} iminuit # Likelihood fits
+   - uv add --project {{ research_env_dir }} pyslha # SLHA file I/O for SUSY spectra
 
    Note: MadGraph, Pythia, Delphes, FeynRules, SModelS, micrOMEGAs, CheckMATE
    are typically installed from source or via separate tarballs — track them
@@ -87,16 +88,13 @@ REQUIRED STEPS (at the START of your session):
    code/README.md.
 
    SECOND CHOICE - if uv add doesn't work:
-   uv pip install <package-name>
-
-   LAST RESORT:
-   pip install <package-name>
+   uv pip install --python {{ research_python_path }} <package-name>
 
    NEVER use conda or conda install!
 
 WHY THIS MATTERS:
 - The experiment runner runs AFTER you and will reuse this venv
-- The pyproject.toml prevents uv from polluting parent environments
+- The dedicated pyproject.toml prevents uv from polluting parent environments
 - Heavy HEP tools (MadGraph etc.) live under code/ and are invoked as binaries
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -106,11 +104,11 @@ WHY THIS MATTERS:
 Use the PDF chunker to split papers into smaller PDF files that you can read
 directly. This preserves all formatting (unlike text extraction).
 
-DEPENDENCIES: uv add pypdf
+DEPENDENCIES: uv add --project {{ research_env_dir }} pypdf
 
 STEP 1: SPLIT PDF INTO CHUNKS
 ```bash
-python {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
+{{ research_python_path }} {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
 ```
 
 Options:
@@ -158,10 +156,10 @@ OUTPUT DELIVERABLES (in workspace):
 PAPER FINDER (Primary Method — Use First)
 ─────────────────────────────────────────────────────────────────────────────
 
-    python {{ skill_root }}/paper-finder/scripts/find_papers.py "your BSM topic"
+    {{ research_python_path }} {{ skill_root }}/paper-finder/scripts/find_papers.py "your BSM topic"
 
 Example:
-    python {{ skill_root }}/paper-finder/scripts/find_papers.py "scalar singlet dark matter Higgs portal HL-LHC invisible"
+    {{ research_python_path }} {{ skill_root }}/paper-finder/scripts/find_papers.py "scalar singlet dark matter Higgs portal HL-LHC invisible"
 
 Modes:
     --mode fast       Quick search
@@ -260,7 +258,7 @@ STEP 2: Pull Data from Authoritative Sources
 
 ✓ HEPData (https://www.hepdata.net) — digitized exclusion curves, likelihoods,
   correlation matrices. Many ATLAS/CMS/LHCb analyses deposit their full data here.
-  API: `pip install hepdata-cli` or direct REST endpoints.
+  API: `uv add --project {{ research_env_dir }} hepdata-cli` or direct REST endpoints.
   Download: JSON or YAML tables per analysis.
 
 ✓ PDG (https://pdg.lbl.gov) — world-averages for SM parameters and standard limits.

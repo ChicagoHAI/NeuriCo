@@ -54,13 +54,14 @@ DO NOT use the neurico environment or any existing environment.
 
 REQUIRED STEPS (at the START of your session):
 
-1. Create a fresh virtual environment using uv:
-   uv venv
+1. Create the dedicated dependency directory and a fresh virtual environment using uv:
+   mkdir -p {{ research_env_dir }}
+   uv venv {{ research_venv_dir }}
 
 2. Initialize project dependencies file:
-   Create pyproject.toml to manage dependencies in THIS workspace only:
+   Create {{ research_project_path }} to manage dependencies in THIS workspace only:
 
-   cat > pyproject.toml << 'EOF'
+   cat > {{ research_project_path }} << 'EOF'
    [project]
    name = "research-workspace"
    version = "0.1.0"
@@ -74,23 +75,20 @@ REQUIRED STEPS (at the START of your session):
    and contaminate the neurico environment!
 
 3. Activate the environment:
-   source .venv/bin/activate
+   source {{ research_venv_dir }}/bin/activate
 
 4. For any package installations, use this priority order:
 
    FIRST CHOICE - uv add (manages pyproject.toml automatically):
-   uv add <package-name>
+   uv add --project {{ research_env_dir }} <package-name>
 
    Examples:
-   - uv add pypdf          # For PDF chunking
-   - uv add requests       # For downloading papers
-   - uv add pandas         # For data inspection
+   - uv add --project {{ research_env_dir }} pypdf    # For PDF chunking
+   - uv add --project {{ research_env_dir }} requests # For downloading papers
+   - uv add --project {{ research_env_dir }} pandas   # For data inspection
 
    SECOND CHOICE - if uv add doesn't work:
-   uv pip install <package-name>
-
-   LAST RESORT - if uv fails entirely:
-   pip install <package-name>
+   uv pip install --python {{ research_python_path }} <package-name>
 
    NEVER use conda or conda install!
 
@@ -104,14 +102,14 @@ directly. This preserves all formatting perfectly (unlike text extraction).
 DEPENDENCIES:
 ─────────────────────────────────────────────────────────────────────────────
 The chunker requires pypdf. Install it in your activated environment:
-  uv add pypdf
+  uv add --project {{ research_env_dir }} pypdf
 
 STEP 1: SPLIT PDF INTO CHUNKS
 ─────────────────────────────────────────────────────────────────────────────
 
 For papers you want to read in detail, run the chunker:
 ```bash
-python {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
+{{ research_python_path }} {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
 ```
 
 Options:
@@ -169,7 +167,7 @@ PAPER FINDER (Primary Method - Use First)
 For quality literature review and proper academic citations, ALWAYS try the
 paper-finder service first.
 
-    python {{ skill_root }}/paper-finder/scripts/find_papers.py "your research topic"
+    {{ research_python_path }} {{ skill_root }}/paper-finder/scripts/find_papers.py "your research topic"
 
 Options:
     --mode fast      Quick search (default)
@@ -455,7 +453,7 @@ Total papers downloaded: X
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | reghdfe | HDFE regression | Stata: ssc install reghdfe |
-| pyfixest | Python HDFE | pip install pyfixest |
+| pyfixest | Python HDFE | `uv add --project {{ research_env_dir }} pyfixest` |
 | ...    | ...     | ...   |
 
 ### Replication Packages Found

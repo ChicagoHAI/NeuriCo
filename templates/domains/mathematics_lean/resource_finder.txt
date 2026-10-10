@@ -50,11 +50,12 @@ DO NOT use the neurico environment or any existing environment.
 
 REQUIRED STEPS (at the START of your session):
 
-1. Create a fresh virtual environment using uv:
-   uv venv
+1. Create the dedicated dependency directory and a fresh virtual environment using uv:
+   mkdir -p {{ research_env_dir }}
+   uv venv {{ research_venv_dir }}
 
 2. Initialize project dependencies file:
-   cat > pyproject.toml << 'EOF'
+   cat > {{ research_project_path }} << 'EOF'
    [project]
    name = "research-workspace"
    version = "0.1.0"
@@ -64,9 +65,9 @@ REQUIRED STEPS (at the START of your session):
 
    EOF
 
-3. Activate: source .venv/bin/activate
+3. Activate: source {{ research_venv_dir }}/bin/activate
 
-4. Install packages: uv add pypdf requests sympy
+4. Install packages: uv add --project {{ research_env_dir }} pypdf requests sympy
 
 NEVER use conda or conda install!
 
@@ -79,10 +80,10 @@ to the AXLE verifier (see Phase 3). No local Lean toolchain is needed or install
 ═══════════════════════════════════════════════════════════════════════════════
 
 Use the PDF chunker to split papers into smaller PDF files that you can read
-directly. Install pypdf first: uv add pypdf
+directly. Install pypdf first: uv add --project {{ research_env_dir }} pypdf
 
 Run the chunker:
-  python {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
+  {{ research_python_path }} {{ skill_root }}/paper-finder/scripts/pdf_chunker.py papers/paper.pdf
 
 Options:
 - --pages-per-chunk N  (default: 1, use 3 for faster reading)
@@ -122,7 +123,7 @@ PAPER FINDER (Primary Method - Use First)
 For quality literature review and proper academic citations, ALWAYS try the
 paper-finder service first:
 
-    python {{ skill_root }}/paper-finder/scripts/find_papers.py "your research topic"
+    {{ research_python_path }} {{ skill_root }}/paper-finder/scripts/find_papers.py "your research topic"
 
 Options:
     --mode fast      Quick search (default)
@@ -220,7 +221,7 @@ No local Lean install is needed. Confirm the API key is present, then send a
 
    echo "AXLE key: ${AXLE_API_KEY:0:6}..."   # should print pk_...
 
-   python {{ skill_root }}/axiom-lean-prover/scripts/axle_check.py --json --code '
+   {{ research_python_path }} {{ skill_root }}/axiom-lean-prover/scripts/axle_check.py --json --code '
    #check @Nat.add_comm
    #check @Finset.card_union_add_card_inter
    -- add more candidate names here
@@ -276,7 +277,7 @@ STEP 1: Assess Computational Needs
 - Visualization: Matplotlib
 
 STEP 2: Install Tools
-   uv add sympy networkx numpy scipy matplotlib
+   uv add --project {{ research_env_dir }} sympy networkx numpy scipy matplotlib
 
 STEP 3: Clone User-Specified Repositories (if any)
 If the research topic specifies code_references, clone them to code/ NOW.

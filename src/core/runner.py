@@ -53,6 +53,12 @@ from core.compute_backend import (
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_run_control import HitlRunStopRequested, raise_if_hitl_run_stop_requested
+from core.research_environment import (
+    configure_workspace_mode,
+    read_workspace_mode,
+    reject_ambiguous_root_venv,
+    render_research_environment_placeholders,
+)
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -393,6 +399,7 @@ class ResearchRunner:
         hitl_mode: str = "full",
         hitl_work_dir: Optional[Path] = None,
         time_limit_seconds: Optional[int] = None,
+        workspace_mode: Optional[str] = None,
         _hitl_host_scope: Optional[ExitStack] = None,
     ) -> Dict[str, Any]:
         """
@@ -425,6 +432,9 @@ class ResearchRunner:
                 AutoResearch baseline from completed Ordinary research.
             hitl_work_dir: Authoritative workspace selected by the HITL launcher.
                 Internal to managed execution; GitHub publication cannot replace it.
+            workspace_mode: Optional dependency-layout selection. ``native`` keeps
+                the historical root project; ``embedded`` isolates NeuriCo-owned
+                dependencies from an externally owned workspace root.
 
         Returns:
             Dictionary with:
@@ -833,6 +843,18 @@ class ResearchRunner:
                     )
 
                 print(f"📁 Working directory: {work_dir}\n")
+
+        active_workspace_mode = configure_workspace_mode(work_dir, workspace_mode)
+        print(f"   Workspace mode: {active_workspace_mode.value}")
+
+        if (
+            (continue_autoresearch and autoresearch_iterations != 0)
+            or bootstrap_mode
+            or bootstrap_autoresearch_baseline
+            or hitl_bootstrap_autoresearch_baseline
+            or bool(hitl_construct_baseline)
+        ):
+            reject_ambiguous_root_venv(work_dir)
 
         if hitl and not hitl_research:
             # Metadata above is persisted from the original idea. Downstream
@@ -1383,7 +1405,11 @@ class ResearchRunner:
 
         # Generate prompt
         print("📝 Generating research prompt...")
-        prompt = self.prompt_generator.generate_research_prompt(
+        prompt_generator = PromptGenerator(
+            self.project_root / "templates",
+            workspace_mode=read_workspace_mode(work_dir),
+        )
+        prompt = prompt_generator.generate_research_prompt(
             idea, root_dir=work_dir, scoring_enabled=scoring_enabled)
 
         # Save prompt for reference
@@ -1752,6 +1778,7 @@ https://github.com/ChicagoHAI/neurico
             "dsi-slurm": {"dsi-slurm"},
         }
         selected_compute_skills = backend_skill_names[compute_backend]
+        workspace_mode = read_workspace_mode(work_dir)
 
         if skills_src.exists():
             for provider_root in provider_skill_roots:
@@ -1772,6 +1799,19 @@ https://github.com/ChicagoHAI/neurico
                     if dst_skill_dir.exists():
                         shutil.rmtree(dst_skill_dir)
                     shutil.copytree(skill_dir, dst_skill_dir)
+                    for copied_path in dst_skill_dir.rglob("*"):
+                        if not copied_path.is_file():
+                            continue
+                        try:
+                            source_text = copied_path.read_text(encoding="utf-8")
+                        except (OSError, UnicodeDecodeError):
+                            continue
+                        rendered_text = render_research_environment_placeholders(
+                            source_text,
+                            workspace_mode,
+                        )
+                        if rendered_text != source_text:
+                            copied_path.write_text(rendered_text, encoding="utf-8")
                     copied += 1
                 print(f"   Copied {copied} skills to {provider_root}/skills/")
 
@@ -2050,6 +2090,14 @@ def main():
         help="Ignore existing local workspace and start a new run from scratch",
     )
     parser.add_argument(
+        "--workspace-mode",
+        choices=["native", "embedded"],
+        default=None,
+        help="Dependency layout for a new workspace: native keeps the root project; "
+        "embedded uses neurico-research-env/ for externally owned workspaces. "
+        "Existing workspaces retain their recorded mode.",
+    )
+    parser.add_argument(
         "--comment-mode",
         action="store_true",
         help="Run in comment mode: make targeted improvements based on comments in the idea file",
@@ -2260,6 +2308,7 @@ def main():
             hitl_manager_port=args.hitl_manager_port,
             hitl_manager_no_browser=args.hitl_manager_no_browser,
             hitl_mode="auto" if args.auto else "full",
+            workspace_mode=args.workspace_mode,
         )
 
         print()

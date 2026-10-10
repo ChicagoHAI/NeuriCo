@@ -17,6 +17,11 @@ import os
 import sys
 import time
 
+from core.research_environment import (
+    reject_ambiguous_root_venv,
+    research_python_candidates,
+)
+
 
 # Files the scorer reads / writes (relative to <workspace>/scoring/)
 EVAL_SCRIPT_NAME = "eval.py"
@@ -28,19 +33,19 @@ def _resolve_python_executable(work_dir: Path) -> str:
     """
     Pick the Python interpreter to invoke eval.py with.
 
-    The experiment_runner creates <workspace>/.venv during its setup phase
-    and installs all task-specific dependencies there. eval.py typically
-    imports those same dependencies (numpy, torch, sklearn, etc.), so it
-    must run under the workspace's interpreter rather than the
-    orchestrator's. Falls back to sys.executable if the workspace has no
-    .venv yet (e.g., during a scorer-only smoke test).
+    The experiment_runner creates the workspace mode's research environment
+    during setup and installs task-specific dependencies there. eval.py
+    typically imports those same dependencies (numpy, torch, sklearn, etc.),
+    so it must run under the selected research interpreter rather than the
+    orchestrator's. In embedded mode a root .venv is never used because it may
+    belong to the task or verifier.
     """
-    posix = work_dir / ".venv" / "bin" / "python"
+    posix, windows = research_python_candidates(work_dir)
     if posix.exists() and posix.is_file():
         return str(posix)
-    windows = work_dir / ".venv" / "Scripts" / "python.exe"
     if windows.exists() and windows.is_file():
         return str(windows)
+    reject_ambiguous_root_venv(work_dir)
     return sys.executable
 
 
@@ -59,8 +64,9 @@ def run_scorer(
                   runner's outputs.
         timeout: Max execution time for eval.py in seconds.
         python_executable: Python binary to use. Defaults to the workspace's
-                  own .venv interpreter (where the runner installed deps),
-                  falling back to sys.executable.
+                  workspace mode's research interpreter (where the runner
+                  installed dependencies), falling back to sys.executable when
+                  that mode has no environment yet.
         idea: The trusted submitted idea (held by the orchestrator, outside
                   the worker-visible workspace). Required so the staged-
                   function integrity check always fails closed against it.

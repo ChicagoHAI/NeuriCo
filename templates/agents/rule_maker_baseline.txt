@@ -116,11 +116,14 @@ path must appear in `candidate_output_paths`, and every selected path must be
 marked required.
 
 `scoring/eval.py` must be a self-contained script invoked from the workspace
-root as:
+root through the selected research interpreter as:
 
 ```bash
-python scoring/eval.py
+{research_python_path} scoring/eval.py
 ```
+
+This is the workspace-specific invocation of the fixed zero-argument
+`python scoring/eval.py` evaluator ABI.
 
 It must:
 
@@ -173,7 +176,9 @@ Before requesting completion, run a functional preflight in a clean temporary
 copy containing the evaluator, its configuration, and synthetic fixtures with
 the same declared structure as the selected outputs. Do not copy, open, or run
 the evaluator against the completed experiment outputs. Remove temporary test
-materials after the preflight and verify that no background job remains.
+materials after the preflight and verify that no background job remains. Run
+the temporary evaluator with `{research_python_path}` from the workspace root
+so the preflight uses the same dependency environment as the runtime scorer.
 
 The runtime alone executes the approved evaluator against the withheld completed
 experiment and returns that score for final manager review.

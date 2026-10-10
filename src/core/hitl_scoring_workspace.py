@@ -20,6 +20,7 @@ import tempfile
 from core.hitl_git import run_git
 from core.scoring_seal import SEALED_PATHS, verify_sealed_scoring_manifest
 from core.hitl_util import atomic_write_bytes, sha256_file
+from core.research_environment import copy_workspace_mode_state, research_venv_dir
 
 
 def _safe_tarfile_module(stdlib_module: Any = tarfile) -> Any:
@@ -411,6 +412,7 @@ def isolated_scoring_workspace(
         )
 
         _prepare_scoring_directory(scorer_dir)
+        copy_workspace_mode_state(work_dir, scorer_dir)
         copied = 0
         for relative in SEALED_PATHS:
             source = sealed_root / relative.rstrip("/")
@@ -433,9 +435,11 @@ def isolated_scoring_workspace(
         # The experiment's configured environment is untracked, but ordinary
         # scoring uses it for task dependencies. Make it available only inside
         # this private scorer worktree; the scored source remains immutable.
-        candidate_venv = work_dir / ".venv"
+        candidate_venv = research_venv_dir(work_dir)
         if candidate_venv.is_dir():
-            (scorer_dir / ".venv").symlink_to(candidate_venv, target_is_directory=True)
+            scorer_venv = research_venv_dir(scorer_dir)
+            scorer_venv.parent.mkdir(parents=True, exist_ok=True)
+            scorer_venv.symlink_to(candidate_venv, target_is_directory=True)
         yield scorer_dir, evaluator_manifest_sha256
     finally:
         if created:

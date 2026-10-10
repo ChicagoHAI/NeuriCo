@@ -7,22 +7,23 @@ neurico environment or any existing system environment.
 
 REQUIRED STEPS (in order):
 
-1. Check if a virtual environment already exists (the resource finder may have created one):
+1. Check if the dedicated virtual environment already exists (the resource finder may have created one):
 
-   If .venv/ directory exists:
+   If {{ research_venv_dir }}/ directory exists:
    - Skip to step 3 (activate it)
-   - The pyproject.toml should already exist
+   - {{ research_project_path }} should already exist
 
-   If .venv/ does NOT exist:
+   If {{ research_venv_dir }}/ does NOT exist:
    - Create a fresh virtual environment using uv:
-     uv venv
+     mkdir -p {{ research_env_dir }}
+     uv venv {{ research_venv_dir }}
 
 2. Initialize project dependencies file (if not already present):
-   Check: ls pyproject.toml 2>/dev/null || echo "NEED_PYPROJECT"
+   Check: ls {{ research_project_path }} 2>/dev/null || echo "NEED_PYPROJECT"
 
-   If pyproject.toml does NOT exist:
+   If {{ research_project_path }} does NOT exist:
 
-   cat > pyproject.toml << 'EOF'
+   cat > {{ research_project_path }} << 'EOF'
    [project]
    name = "research-workspace"
    version = "0.1.0"
@@ -36,23 +37,22 @@ REQUIRED STEPS (in order):
    and contaminate the neurico environment!
 
 3. Activate the environment:
-   source .venv/bin/activate
+   source {{ research_venv_dir }}/bin/activate
 
 4. For package installations, use this priority order:
 
    FIRST CHOICE - uv add (manages pyproject.toml automatically):
-   uv add <package-name>
+   uv add --project {{ research_env_dir }} <package-name>
 
    Examples useful for BSM phenomenology:
-   - uv add numpy scipy matplotlib pandas
-   - uv add flavio           # Flavor observables (B-physics, LFV, etc.)
-   - uv add iminuit          # Maximum-likelihood fits
-   - uv add pyslha           # SLHA spectrum file I/O
-   - uv add pypdf            # PDF chunker
-   - uv add sympy            # Symbolic Lagrangian manipulation if needed
+   - uv add --project {{ research_env_dir }} numpy scipy matplotlib pandas
+   - uv add --project {{ research_env_dir }} flavio # Flavor observables (B-physics, LFV, etc.)
+   - uv add --project {{ research_env_dir }} iminuit # Maximum-likelihood fits
+   - uv add --project {{ research_env_dir }} pyslha # SLHA spectrum file I/O
+   - uv add --project {{ research_env_dir }} pypdf # PDF chunker
+   - uv add --project {{ research_env_dir }} sympy # Symbolic Lagrangian manipulation if needed
 
-   SECOND CHOICE - uv pip install <package-name>
-   LAST RESORT - pip install <package-name>
+   SECOND CHOICE - uv pip install --python {{ research_python_path }} <package-name>
 
    NEVER use conda or conda install!
 
@@ -62,9 +62,9 @@ REQUIRED STEPS (in order):
    code/. Build / install them there as needed; do NOT try to pip-install them.
 
 5. Dependency Management:
-   - 'uv add' updates pyproject.toml automatically
-   - Verify with: cat pyproject.toml
-   - If you used pip: pip freeze > requirements.txt
+   - 'uv add --project {{ research_env_dir }}' updates {{ research_project_path }} automatically
+   - Verify with: cat {{ research_project_path }}
+   - If you used uv pip: uv pip freeze --python {{ research_python_path }} > {{ research_requirements_path }}
    - Document non-Python tool versions explicitly in REPORT.md
 
 WHY: Using an isolated environment ensures:
@@ -215,7 +215,7 @@ Phase 1: Planning & Model Specification (25-45 min)
   → DO NOT WAIT for user confirmation — this is fully automated!
 
 Phase 2: Environment & Tool Setup (10-25 min)
-  ✓ Set up isolated virtual environment (uv venv + pyproject.toml)
+  ✓ Set up isolated virtual environment and metadata under {{ research_env_dir }}/
   ✓ Install lightweight Python deps (numpy, scipy, matplotlib, flavio, iminuit, etc.)
   ✓ Verify cloned repositories under code/ are present and usable:
     - MadGraph: can you run ./mg5_aMC with --help?

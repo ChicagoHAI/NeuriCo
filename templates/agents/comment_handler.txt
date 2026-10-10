@@ -76,7 +76,9 @@ Current active tips (empty if none):
 
 4. When done, update documentation to reflect what changed.
 
-If a virtual environment exists (.venv/), activate it. If you need new packages, use `uv add`.
+If the research virtual environment exists ({{ research_venv_dir }}/), activate it.
+If you need new packages, use `uv add --project {{ research_env_dir }}` so the
+dependency metadata stays in the dedicated research environment directory.
 
 If .neurico/idea.yaml declares local_resources, those remain binding during
 iterations: staged datasets (datasets/local/) are the mandated data, and any

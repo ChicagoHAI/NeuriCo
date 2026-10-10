@@ -6,8 +6,10 @@ Calls the paper-finder API if available, otherwise returns graceful fallback.
 This script lives in .claude/skills/paper-finder/scripts/ when copied to workspaces.
 
 Usage:
-    python .claude/skills/paper-finder/scripts/find_papers.py "query about papers"
-    python .claude/skills/paper-finder/scripts/find_papers.py "query" --mode diligent
+    {{ research_python_path }} \
+        .claude/skills/paper-finder/scripts/find_papers.py "query about papers"
+    {{ research_python_path }} \
+        .claude/skills/paper-finder/scripts/find_papers.py "query" --mode diligent
 """
 
 import sys
@@ -23,7 +25,13 @@ def find_papers(query: str, mode: str = "fast", url: str = "http://localhost:800
     try:
         import httpx
     except ImportError:
-        return {"error": "httpx not installed. Install with: pip install httpx", "fallback": True}
+        return {
+            "error": (
+                "httpx not installed. Install with: "
+                "uv add --project {{ research_env_dir }} httpx"
+            ),
+            "fallback": True,
+        }
 
     try:
         with httpx.Client(timeout=300.0) as client:

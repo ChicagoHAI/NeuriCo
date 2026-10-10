@@ -33,6 +33,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.agent_runner import next_attempt_number, run_prebuilt_cli_agent
 from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
 from core.hitl_scoring_workspace import validate_checkpoint_gitlinks
+from core.research_environment import (
+    read_workspace_mode,
+    research_environment_template_variables,
+)
 from core.scorer import RESULTS_FILE_NAME
 
 # Files the rule_maker is responsible for producing (relative to scoring/)
@@ -312,6 +316,8 @@ def generate_rule_maker_prompt(
       {scoring_dir}      -- absolute path to scoring/
       {output_files}     -- list of files the agent must produce
       {resource_listing} -- short summary of resource_finder outputs
+      {research_env_dir} -- selected dependency-project directory
+      {research_python_path} -- selected research-environment interpreter
 
     Args:
         idea: Full idea specification.
@@ -353,12 +359,17 @@ def generate_rule_maker_prompt(
     except (TypeError, ValueError):
         idea_repr = repr(idea)
 
+    research_environment = research_environment_template_variables(
+        read_workspace_mode(work_dir)
+    )
     substitutions = {
         "{idea_yaml}": idea_repr,
         "{workspace}": str(work_dir),
         "{scoring_dir}": str(scoring_dir),
         "{output_files}": output_files,
         "{resource_listing}": resource_listing,
+        "{research_env_dir}": research_environment["research_env_dir"],
+        "{research_python_path}": research_environment["research_python_path"],
     }
 
     prompt = base_template

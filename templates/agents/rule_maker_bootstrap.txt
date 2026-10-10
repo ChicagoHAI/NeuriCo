@@ -152,7 +152,7 @@ Constraints:
   any threshold value in eval.py. If the user wants to retarget, they
   edit targets.json, not eval.py.
 - Use only the Python standard library plus pandas / numpy / sklearn if
-  the workspace's pyproject.toml already depends on them. Do not assume
+  `{research_project_path}` already depends on them. Do not assume
   exotic deps.
 - The script must terminate cleanly with exit code 0 on success.
 - Use `from pathlib import Path` and resolve artifact paths relative to
