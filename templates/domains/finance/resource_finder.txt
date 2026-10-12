@@ -45,6 +45,7 @@ FOLDER STRUCTURE - Keep resources SEPARATED:
 ⚠️  NEVER put papers in code/, code in papers/, etc.
 ⚠️  NEVER create files in parent directory (cd .. is dangerous!)
 
+{% if resource_workspace_mode == "bootstrap" %}
 ═══════════════════════════════════════════════════════════════════════════════
                     CRITICAL: ENVIRONMENT SETUP
 ═══════════════════════════════════════════════════════════════════════════════
@@ -93,6 +94,16 @@ REQUIRED STEPS (at the START of your session):
    pip install <package-name>
 
    NEVER use conda or conda install!
+{% else %}
+═══════════════════════════════════════════════════════════════════════════════
+                  CRITICAL: PRESERVE THE EXISTING ENVIRONMENT
+═══════════════════════════════════════════════════════════════════════════════
+
+This is an additive resource-finding invocation inside an established workspace.
+Do not create, recreate, or replace `.venv`, `pyproject.toml`, lock files, or
+other dependency metadata. Do not install packages. Preserve existing resources
+and make only the focused resource additions requested for this invocation.
+{% endif %}
 
 ═══════════════════════════════════════════════════════════════════════════════
                     IMPORTANT: PDF READING WITH CHUNKER

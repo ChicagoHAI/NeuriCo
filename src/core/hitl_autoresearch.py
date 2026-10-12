@@ -66,7 +66,7 @@ from core.hitl_scoring_workspace import (
     scoring_source_workspace_fingerprint,
     scoring_source_workspace_scope,
 )
-from core.hitl_stage_runtime import run_worker_with_replacements
+from core.hitl_stage_runtime import HitlStageRollback, run_worker_with_replacements
 from core.hitl_util import atomic_write_json, utc_now
 from core.hitl_whiteboard import (
     HitlAutoResearchWhiteboard,
@@ -82,6 +82,7 @@ from core.scoring_seal import (
 )
 
 HitlCommentModeHook = Callable[..., Dict[str, Any]]
+AdditionalAgentHook = Callable[..., Dict[str, Any]]
 MAX_ACTIVE_HITL_FRONTIER_NODES = 10
 
 
@@ -142,6 +143,10 @@ class HitlTerminalRuntimeError(RuntimeError):
     """A runtime dependency failed in a way that must stop this HITL run."""
 
 
+class _ProposalPreparationRestart(RuntimeError):
+    """A clean additional-agent rollback may resume its recorded decision."""
+
+
 def _raise_if_hitl_worker_stopped(result: Dict[str, Any]) -> None:
     """Honor run cancellation before worker exit can request a replacement."""
     from core.hitl_run_control import raise_if_hitl_run_stop_requested
@@ -162,6 +167,7 @@ class HitlRecoveryResult:
     recovery_classification: str = "complete"
     pending_worker_request: Optional[Dict[str, Any]] = None
     frontier_transition: Optional[Dict[str, Any]] = None
+    preparation_action: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -1019,6 +1025,7 @@ def _archive_failed_hitl_attempt(
     phase: str,
     reason: str,
     attempt_directory_removed: bool = True,
+    source_attempt_dir: Optional[Path] = None,
 ) -> Path:
     """Preserve a small, noncanonical runtime incident record before cleanup.
 
@@ -1046,6 +1053,17 @@ def _archive_failed_hitl_attempt(
     }
     incident_path = archive_dir / "runtime_incident.json"
     atomic_write_json(incident_path, payload, ensure_ascii=True, indent=2)
+    if source_attempt_dir is not None:
+        logs_archive = archive_dir / "additional_agents"
+        for source in sorted(Path(source_attempt_dir).glob("additional_agent_*_*")):
+            if source.is_dir() and not source.is_symlink():
+                logs_archive.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(
+                    source,
+                    logs_archive / source.name,
+                    dirs_exist_ok=True,
+                    symlinks=True,
+                )
     return archive_dir
 
 
@@ -1117,6 +1135,7 @@ def _rollback_interrupted_attempt_to_selected_node(
     phase: str,
     reason: str,
     verify_selected_checkpoint: bool = False,
+    restore_sha: Optional[str] = None,
 ) -> HitlRecoveryResult:
     """Apply the existing complete rollback sequence to one unfinished attempt."""
     classification, missing_paths = _classify_hitl_attempt_recovery(work_dir, attempt_dir)
@@ -1130,11 +1149,12 @@ def _rollback_interrupted_attempt_to_selected_node(
         )
     runtime_state = HitlRuntimeState(work_dir)
     _retire_runtime_scoring_refs(work_dir, runtime_state, strict=True)
-    if verify_selected_checkpoint:
-        _restore_selected_checkpoint(work_dir, selected_sha)
+    target_sha = str(restore_sha or selected_sha).strip()
+    if verify_selected_checkpoint and target_sha == selected_sha:
+        _restore_selected_checkpoint(work_dir, target_sha)
     else:
         CheckpointManager(work_dir).restore_checkpoint(
-            selected_sha,
+            target_sha,
             clean_untracked_public=True,
         )
     _restore_hitl_state_snapshot(work_dir, attempt_dir)
@@ -1151,7 +1171,7 @@ def _rollback_interrupted_attempt_to_selected_node(
     )
     return HitlRecoveryResult(
         marker=marker,
-        restored_checkpoint_sha=selected_sha,
+        restored_checkpoint_sha=target_sha,
         removed_attempt_dir=attempt_dir,
         attempt_dir_removed=False,
         recovery_classification=classification,
@@ -1296,8 +1316,11 @@ def _finish_persisted_frontier_decision(
     return _restore_selected_checkpoint(work_dir, selected)
 
 
-def _require_budget_exhausted_stop(work_dir: Path, request_id: str) -> None:
-    """Refuse to apply benchmark finalization without its exact persisted cause."""
+_BUDGET_PREPARATION_CLEANUP_KEY = "autoresearch_preparation_cleanup"
+_BUDGET_PREPARATION_CLEANUP_STATUSES = {"prepared", "restored", "completed"}
+
+
+def _read_budget_exhausted_stop(work_dir: Path, request_id: str) -> Dict[str, Any]:
     normalized = str(request_id).strip()
     if not normalized or not re.fullmatch(r"[A-Za-z0-9_.-]+", normalized):
         raise ValueError("Budget finalization requires a valid request ID.")
@@ -1314,6 +1337,157 @@ def _require_budget_exhausted_stop(work_dir: Path, request_id: str) -> None:
         or record.get("requested_by") != "budget_exhausted"
     ):
         raise RuntimeError("Budget finalization is available only for budget_exhausted.")
+    return record
+
+
+def _require_budget_exhausted_stop(work_dir: Path, request_id: str) -> None:
+    """Refuse to apply benchmark finalization without its exact persisted cause."""
+    _read_budget_exhausted_stop(work_dir, request_id)
+
+
+def _validate_budget_preparation_cleanup(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise RuntimeError("Budget preparation cleanup state is invalid.")
+    status = str(value.get("status", "")).strip()
+    parent = str(value.get("parent_node_sha", "")).strip()
+    action_status = str(value.get("action_status", "")).strip()
+    recovery = value.get("recovery")
+    if (
+        status not in _BUDGET_PREPARATION_CLEANUP_STATUSES
+        or not parent
+        or action_status not in {"pending", "decision_recorded", "resolved", "cancelled"}
+        or (recovery is not None and not isinstance(recovery, dict))
+    ):
+        raise RuntimeError("Budget preparation cleanup state is malformed.")
+    return dict(value)
+
+
+def _begin_budget_preparation_cleanup(
+    work_dir: Path,
+    *,
+    request_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Move active preparation rollback ownership into the durable stop request."""
+    path = hitl_stop_request_path(work_dir, request_id)
+    stop = _read_budget_exhausted_stop(work_dir, request_id)
+    existing = stop.get(_BUDGET_PREPARATION_CLEANUP_KEY)
+    if existing is not None:
+        return _validate_budget_preparation_cleanup(existing)
+
+    action = HitlRuntimeState(work_dir).snapshot().get("next_autoresearch_action")
+    if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
+        return None
+    parent = str(action.get("parent_node_sha", "")).strip()
+    status = str(action.get("status", "")).strip()
+    if not parent or status not in {
+        "pending",
+        "decision_recorded",
+        "resolved",
+        "cancelled",
+    }:
+        raise RuntimeError("Active proposal preparation is invalid.")
+    recovery = action.get("recovery")
+    if recovery is not None:
+        if not isinstance(recovery, dict):
+            raise RuntimeError("Proposal preparation has invalid recovery state.")
+        HitlStageRollback.from_descriptor(work_dir, recovery)
+
+    cleanup = {
+        "version": 1,
+        "status": "prepared",
+        "parent_node_sha": parent,
+        "action_status": status,
+        **({"recovery": dict(recovery)} if isinstance(recovery, dict) else {}),
+    }
+    stop[_BUDGET_PREPARATION_CLEANUP_KEY] = cleanup
+    atomic_write_json(path, stop, ensure_ascii=True, indent=2)
+    return cleanup
+
+
+def _advance_budget_preparation_cleanup(
+    work_dir: Path,
+    *,
+    request_id: str,
+    expected_status: str,
+    status: str,
+) -> Dict[str, Any]:
+    stop = _read_budget_exhausted_stop(work_dir, request_id)
+    cleanup = _validate_budget_preparation_cleanup(
+        stop.get(_BUDGET_PREPARATION_CLEANUP_KEY)
+    )
+    current = str(cleanup.get("status", "")).strip()
+    if current == status:
+        return cleanup
+    if current != expected_status:
+        raise RuntimeError("Budget preparation cleanup changed during finalization.")
+    cleanup["status"] = status
+    stop[_BUDGET_PREPARATION_CLEANUP_KEY] = cleanup
+    atomic_write_json(
+        hitl_stop_request_path(work_dir, request_id),
+        stop,
+        ensure_ascii=True,
+        indent=2,
+    )
+    return cleanup
+
+
+def _finalize_budget_exhausted_preparation(
+    work_dir: Path,
+    *,
+    request_id: str,
+    selected_sha: str,
+) -> None:
+    """Reconcile pre-proposal work before acknowledging budget exhaustion."""
+    cleanup = _begin_budget_preparation_cleanup(work_dir, request_id=request_id)
+    if cleanup is None:
+        _restore_selected_checkpoint(work_dir, selected_sha)
+        return
+
+    status = str(cleanup["status"])
+    recovery = cleanup.get("recovery")
+    if status == "prepared":
+        if cleanup["action_status"] != "resolved" and isinstance(recovery, dict):
+            rollback = HitlStageRollback.from_descriptor(work_dir, recovery)
+            CheckpointManager(work_dir).restore_checkpoint(
+                rollback.checkpoint_sha,
+                clean_untracked_public=True,
+            )
+            rollback.state_store.restore(rollback.hitl_snapshot)
+
+        request_key = HitlRuntimeState(
+            work_dir
+        ).retire_proposal_preparation_for_budget(
+            parent_node_sha=str(cleanup["parent_node_sha"]),
+        )
+        if request_key:
+            HitlManagerInbox(work_dir).discard_resolution_reply(request_key)
+        cleanup = _advance_budget_preparation_cleanup(
+            work_dir,
+            request_id=request_id,
+            expected_status="prepared",
+            status="restored",
+        )
+        status = "restored"
+
+    if status == "restored":
+        _restore_selected_checkpoint(work_dir, selected_sha)
+        if isinstance(recovery, dict):
+            ref = str(recovery.get("hitl_snapshot_ref", "")).strip()
+            if not ref.startswith("refs/neurico/hitl-rollback/"):
+                raise RuntimeError("Budget preparation cleanup has an invalid snapshot ref.")
+            HitlGitStateStore(work_dir).discard(ref)
+        _advance_budget_preparation_cleanup(
+            work_dir,
+            request_id=request_id,
+            expected_status="restored",
+            status="completed",
+        )
+        return
+
+    if status == "completed":
+        _restore_selected_checkpoint(work_dir, selected_sha)
+        return
+    raise RuntimeError("Budget preparation cleanup has an unknown status.")
 
 
 def finalize_budget_exhausted_autoresearch(
@@ -1356,46 +1530,47 @@ def finalize_budget_exhausted_autoresearch(
                 marker=marker,
                 attempt_dir=attempt_dir,
             )
-            return BudgetExhaustionFinalizationResult(
-                outcome="selected_node_restored",
-                restored_checkpoint_sha=selected,
-            )
-
-        selected = frontier.state(allow_unselected=True)["selected_frontier_node_sha"]
-        if selected is None:
-            return BudgetExhaustionFinalizationResult(outcome="no_selected_node")
-        rejected_cleanup = state.pending_rejected_whiteboard_cleanup()
-        if (
-            isinstance(rejected_cleanup, dict)
-            and rejected_cleanup.get("status") == "pending"
-            and rejected_cleanup.get("attempt_id") == marker
-        ):
-            _restore_selected_checkpoint(work_dir, selected)
-            _recover_rejected_whiteboard_cleanup(
-                work_dir=work_dir,
-                attempt_dir=attempt_dir,
-                attempt_marker=marker,
-                runtime_state=state,
-            )
         else:
-            _rollback_interrupted_attempt_to_selected_node(
-                work_dir=work_dir,
-                marker=marker,
-                attempt_dir=attempt_dir,
-                history_root=history_root,
-                selected_sha=selected,
-                phase="budget_exhausted",
-                reason=(
-                    "The launch exhausted its time budget before this attempt reached "
-                    "a recorded frontier decision."
-                ),
-                verify_selected_checkpoint=True,
-            )
+            selected = frontier.state(allow_unselected=True)["selected_frontier_node_sha"]
+            if selected is None:
+                return BudgetExhaustionFinalizationResult(outcome="no_selected_node")
+            rejected_cleanup = state.pending_rejected_whiteboard_cleanup()
+            if (
+                isinstance(rejected_cleanup, dict)
+                and rejected_cleanup.get("status") == "pending"
+                and rejected_cleanup.get("attempt_id") == marker
+            ):
+                _restore_selected_checkpoint(work_dir, selected)
+                _recover_rejected_whiteboard_cleanup(
+                    work_dir=work_dir,
+                    attempt_dir=attempt_dir,
+                    attempt_marker=marker,
+                    runtime_state=state,
+                )
+            else:
+                _rollback_interrupted_attempt_to_selected_node(
+                    work_dir=work_dir,
+                    marker=marker,
+                    attempt_dir=attempt_dir,
+                    history_root=history_root,
+                    selected_sha=selected,
+                    phase="budget_exhausted",
+                    reason=(
+                        "The launch exhausted its time budget before this attempt reached "
+                        "a recorded frontier decision."
+                    ),
+                    verify_selected_checkpoint=True,
+                )
     else:
         selected = frontier.state(allow_unselected=True)["selected_frontier_node_sha"]
         if selected is None:
             return BudgetExhaustionFinalizationResult(outcome="no_selected_node")
-        _restore_selected_checkpoint(work_dir, selected)
+
+    _finalize_budget_exhausted_preparation(
+        work_dir,
+        request_id=request_id,
+        selected_sha=selected,
+    )
 
     return BudgetExhaustionFinalizationResult(
         outcome="selected_node_restored",
@@ -1488,12 +1663,121 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             recovery_classification="frontier_decision_transition",
             frontier_transition=frontier_transition,
         )
+    preparation_action = runtime_state.snapshot().get("next_autoresearch_action")
+    preparation_metadata_is_exact = (
+        isinstance(preparation_action, dict)
+        and preparation_action.get("kind") == "prepare_proposal"
+        and preparation_action.get("status")
+        in {"pending", "decision_recorded", "resolved", "cancelled"}
+        and str(preparation_action.get("parent_node_sha", "")).strip()
+        == current_best_sha
+        and str(preparation_action.get("attempt_id", "")).strip()
+        == attempt_dir.name
+        and isinstance(preparation_action.get("additional_agent_ordinal"), int)
+        and int(preparation_action["additional_agent_ordinal"]) >= 1
+        and bool(str(preparation_action.get("workspace_fingerprint", "")).strip())
+        and HitlGitStateStore(work_dir).has_autoresearch_hitl_attempt_boundary(marker)
+        and HitlGitStateStore(
+            work_dir
+        ).has_hitl_autoresearch_whiteboard_attempt_boundary(marker)
+    )
     continuation = runtime_state.worker_continuation()
+    continuation_provenance = (
+        dict(continuation.get("provenance") or {})
+        if isinstance(continuation, dict)
+        else {}
+    )
+    pending_provenance = (
+        dict(pending_request.get("provenance") or {})
+        if isinstance(pending_request, dict)
+        else {}
+    )
+    dynamic_agent_request = (
+        isinstance(pending_request, dict)
+        and pending_request.get("pipeline_stage") == "resource_finder"
+    )
+    dynamic_agent_matches_attempt = (
+        dynamic_agent_request
+        and str(pending_provenance.get("attempt_id", "")).strip() == attempt_dir.name
+        and str(pending_provenance.get("parent_node_id", "")).strip()
+        == current_best_sha
+        and str(pending_provenance.get("additional_agent_ordinal", "")).strip()
+        == str(
+            preparation_action.get("additional_agent_ordinal", "")
+            if isinstance(preparation_action, dict)
+            else ""
+        ).strip()
+    )
+    preparation_decision = (
+        preparation_action.get("decision")
+        if isinstance(preparation_action, dict)
+        else None
+    )
+    preparation_calls_resource_finder = bool(
+        preparation_metadata_is_exact
+        and preparation_action.get("status") in {"decision_recorded", "resolved"}
+        and isinstance(preparation_decision, dict)
+        and preparation_decision.get("choice") == "call_additional_agent"
+        and preparation_decision.get("agent") == "resource_finder"
+    )
+    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+    preparation_workspace_is_exact = bool(
+        preparation_metadata_is_exact
+        and str(preparation_action.get("workspace_fingerprint", "")).strip()
+        == HitlWorkspaceWriteGuard.public_fingerprint(
+            work_dir,
+            scope=preparation_action.get("workspace_fingerprint_scope"),
+        )
+    )
+    resumable_agent_request = bool(
+        preparation_calls_resource_finder
+        and dynamic_agent_matches_attempt
+        and worker_command_requires_resume(pending_request)
+        and isinstance(continuation, dict)
+        and pending_provenance == continuation_provenance
+    )
+    pending_response = (
+        pending_request.get("response") if isinstance(pending_request, dict) else None
+    )
+    approved_agent_workspace_is_exact = bool(
+        preparation_calls_resource_finder
+        and preparation_action.get("status") in {"decision_recorded", "resolved"}
+        and (
+            preparation_action.get("status") == "decision_recorded"
+            or dict(preparation_action.get("result") or {}).get("choice")
+            == "call_additional_agent"
+        )
+        and dynamic_agent_matches_attempt
+        and pending_request.get("kind") == "phase_finish"
+        and pending_request.get("hitl_stage") in {"execution", "review"}
+        and pending_request.get("status") == "resolved"
+        and isinstance(pending_response, dict)
+        and pending_response.get("status") == "approved"
+        and str(pending_request.get("workspace_fingerprint", "")).strip()
+        == HitlWorkspaceWriteGuard.public_fingerprint(
+            work_dir,
+            scope=pending_request.get("workspace_fingerprint_scope"),
+        )
+    )
+    preparation_is_exact = bool(
+        preparation_metadata_is_exact
+        and (
+            preparation_workspace_is_exact
+            or (
+                preparation_action.get("status") in {"decision_recorded", "resolved"}
+                and (resumable_agent_request or approved_agent_workspace_is_exact)
+            )
+        )
+    )
     if (
         worker_command_requires_resume(pending_request)
         and isinstance(continuation, dict)
-        and str((continuation.get("provenance") or {}).get("attempt_id", "")).strip()
-        == attempt_dir.name
+        and continuation_provenance == pending_provenance
+        and str(continuation_provenance.get("attempt_id", "")).strip() == attempt_dir.name
+        and str(continuation_provenance.get("parent_node_id", "")).strip()
+        == current_best_sha
+        and (not dynamic_agent_request or resumable_agent_request)
     ):
         return HitlRecoveryResult(
             marker=marker,
@@ -1502,6 +1786,24 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             attempt_dir_removed=False,
             recovery_classification="pending_worker_request",
             pending_worker_request=pending_request,
+        )
+    if preparation_is_exact and (
+        not dynamic_agent_request or approved_agent_workspace_is_exact
+    ):
+        return HitlRecoveryResult(
+            marker=marker,
+            restored_checkpoint_sha=current_best_sha,
+            removed_attempt_dir=attempt_dir,
+            attempt_dir_removed=False,
+            recovery_classification="proposal_preparation_transition",
+            preparation_action=preparation_action,
+        )
+    prepared_restore_sha = _resolved_proposal_base(preparation_action)
+    if prepared_restore_sha and not CheckpointManager(work_dir).checkpoint_exists(
+        prepared_restore_sha
+    ):
+        raise RuntimeError(
+            "Interrupted candidate references a missing prepared workspace checkpoint."
         )
     return _rollback_interrupted_attempt_to_selected_node(
         work_dir=work_dir,
@@ -1514,6 +1816,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             "Runtime recovered an interrupted HITL attempt before it reached a "
             "frontier decision."
         ),
+        restore_sha=prepared_restore_sha or None,
     )
 
 
@@ -1639,6 +1942,37 @@ def _attempt_marker_for_dir(attempt_dir: Path) -> str:
     return f"{attempt_dir.parent.name}/{attempt_dir.name}"
 
 
+def _active_proposal_preparation(
+    action: Any,
+    *,
+    parent_sha: Optional[str],
+) -> bool:
+    """Return whether runtime owns a preparation transition for this parent."""
+    if (
+        not isinstance(action, dict)
+        or action.get("kind") != "prepare_proposal"
+        or action.get("status")
+        not in {"pending", "decision_recorded", "resolved", "cancelled"}
+    ):
+        return False
+    action_parent = str(action.get("parent_node_sha", "")).strip()
+    if parent_sha is not None and action_parent != str(parent_sha).strip():
+        raise RuntimeError(
+            "Persisted proposal preparation belongs to another frontier node."
+        )
+    return bool(action_parent)
+
+
+def _resolved_proposal_base(action: Any) -> str:
+    """Read a completed preparation's public workspace checkpoint, if any."""
+    if not isinstance(action, dict) or action.get("status") != "resolved":
+        return ""
+    result = action.get("result")
+    if not isinstance(result, dict) or result.get("choice") != "proceed":
+        return ""
+    return str(result.get("proposal_base_sha", "")).strip()
+
+
 def continue_hitl_autoresearch(
     *,
     idea: Dict[str, Any],
@@ -1652,6 +1986,7 @@ def continue_hitl_autoresearch(
     autoresearch_history_dir: Optional[Path],
     proposer_timeout: Optional[int],
     comment_timeout: Optional[int],
+    resource_finder_timeout: Optional[int] = None,
     manager: Optional[Any] = None,
     channel: Optional[Any] = None,
     manager_config: Optional[Dict[str, Any]] = None,
@@ -1677,6 +2012,10 @@ def continue_hitl_autoresearch(
     pending_frontier_transition = bool(
         recovery and recovery.recovery_classification == "frontier_decision_transition"
     )
+    pending_proposal_preparation = bool(
+        recovery
+        and recovery.recovery_classification == "proposal_preparation_transition"
+    )
     frontier = HitlFrontierStore(work_dir)
     if not frontier.exists():
         raise RuntimeError("Cannot continue HITL AutoResearch without initialized frontier state.")
@@ -1691,6 +2030,10 @@ def continue_hitl_autoresearch(
     lineage_source_sha = run_state["lineage_source_sha"]
     previous_last_iteration = run_state["last_iteration"]
     next_action = runtime_state.snapshot().get("next_autoresearch_action")
+    preparation_active = _active_proposal_preparation(
+        next_action,
+        parent_sha=selected_sha,
+    )
     frontier_boundary_pending = (
         isinstance(next_action, dict)
         and next_action.get("kind") in {"prune_frontier", "select_frontier"}
@@ -1698,16 +2041,34 @@ def continue_hitl_autoresearch(
     )
     if selected_sha is None and not frontier_boundary_pending:
         raise RuntimeError("HITL frontier has no selected node outside a frontier boundary.")
-    if not pending_worker_request and not pending_frontier_transition and selected_sha:
-        if checkpoints.current_sha() != selected_sha:
+    if (
+        not pending_worker_request
+        and not pending_frontier_transition
+        and not pending_proposal_preparation
+        and selected_sha
+    ):
+        prepared_sha = _resolved_proposal_base(next_action) if preparation_active else ""
+        if prepared_sha:
+            if not checkpoints.checkpoint_exists(prepared_sha):
+                raise RuntimeError(
+                    "Resolved proposal preparation references a missing workspace checkpoint."
+                )
+            if checkpoints.current_sha() != prepared_sha:
+                checkpoints.restore_checkpoint(
+                    prepared_sha, clean_untracked_public=True
+                )
+        elif not preparation_active and checkpoints.current_sha() != selected_sha:
             checkpoints.restore_checkpoint(selected_sha, clean_untracked_public=True)
-        current_sha = checkpoints.current_sha()
-        if current_sha != selected_sha:
-            raise RuntimeError("HITL runtime could not restore the selected frontier checkpoint.")
+        current_sha = selected_sha
     else:
         current_sha = selected_sha or checkpoints.current_sha()
 
-    if iterations == 0 and (pending_worker_request or pending_frontier_transition):
+    if iterations == 0 and (
+        pending_worker_request
+        or pending_frontier_transition
+        or pending_proposal_preparation
+        or preparation_active
+    ):
         raise RuntimeError(
             "Cannot finish HITL AutoResearch with iterations=0 while runtime recovery is pending. "
             "Resume recovery first or explicitly roll back the interrupted attempt."
@@ -1747,11 +2108,14 @@ def continue_hitl_autoresearch(
         proposal_timeout=proposer_timeout,
         comment_timeout=comment_timeout,
         scorer_timeout=scorer_timeout,
+        resource_finder_timeout=resource_finder_timeout,
         hitl_manager=manager,
         hitl_channel=channel,
         hitl_manager_config=manager_config,
         pending_hitl_recovery=recovery
-        if pending_worker_request or pending_frontier_transition
+        if pending_worker_request
+        or pending_frontier_transition
+        or pending_proposal_preparation
         else None,
         hitl_mode=selected_hitl_mode,
     )
@@ -1793,6 +2157,7 @@ class HitlAutoResearchController:
         hitl_comment_mode: Optional[HitlCommentModeHook] = None,
         pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
+        additional_agent_runner: Optional[AdditionalAgentHook] = None,
     ):
         self.idea = idea
         self.idea_id = idea_id
@@ -1806,6 +2171,7 @@ class HitlAutoResearchController:
         self.hitl_frontier = HitlFrontierStore(self.work_dir)
         self.pending_hitl_recovery = pending_hitl_recovery
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
+        self.additional_agent_runner = additional_agent_runner
 
     def run(self, iterations: int) -> AutoResearchRunResult:
         """
@@ -1842,7 +2208,28 @@ class HitlAutoResearchController:
             frontier_state = self.hitl_frontier.state(allow_unselected=True)
             current_best_sha = frontier_state["selected_frontier_node_sha"]
             if current_best_sha:
-                self.checkpoints.restore_checkpoint(current_best_sha, clean_untracked_public=True)
+                action = HitlRuntimeState(self.work_dir).snapshot().get(
+                    "next_autoresearch_action"
+                )
+                preparation_active = _active_proposal_preparation(
+                    action,
+                    parent_sha=current_best_sha,
+                )
+                prepared_sha = (
+                    _resolved_proposal_base(action) if preparation_active else ""
+                )
+                if prepared_sha:
+                    if not self.checkpoints.checkpoint_exists(prepared_sha):
+                        raise RuntimeError(
+                            "Resolved proposal preparation references a missing workspace checkpoint."
+                        )
+                    self.checkpoints.restore_checkpoint(
+                        prepared_sha, clean_untracked_public=True
+                    )
+                elif not preparation_active:
+                    self.checkpoints.restore_checkpoint(
+                        current_best_sha, clean_untracked_public=True
+                    )
                 initial = Checkpoint(current_best_sha, "Existing HITL AutoResearch frontier root")
             else:
                 current_best_sha = self.checkpoints.current_sha()
@@ -1904,11 +2291,22 @@ class HitlAutoResearchController:
         iteration: int,
         parent_sha: str,
     ) -> AutoResearchIterationResult:
-        """Relaunch a rolled-back HITL iteration from its selected parent."""
+        """Prepare once, then relaunch candidates from the approved workspace."""
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
         while True:
-            result = self.run_iteration(iteration, parent_sha)
+            attempt_dir = self._proposal_preparation_attempt_dir(parent_sha)
+            proposal_base_sha = self._prepare_next_proposal(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+                attempt_id=attempt_dir.name,
+            )
+            result = self.run_iteration(
+                iteration,
+                parent_sha,
+                proposal_base_sha=proposal_base_sha,
+                new_attempt_dir=attempt_dir,
+            )
             if bool(getattr(result, "terminal_failure", False)) or self._is_normal_scored_iteration(
                 result
             ):
@@ -1916,8 +2314,31 @@ class HitlAutoResearchController:
             raise_if_hitl_run_stop_requested()
             print(
                 "↻ HITL AutoResearch attempt rollback completed; "
-                "relaunching from the selected parent frontier node."
+                "relaunching from the prepared proposal workspace."
             )
+
+    def _proposal_preparation_attempt_dir(self, parent_sha: str) -> Path:
+        """Reuse the log directory owned by an active preparation transition."""
+        action = HitlRuntimeState(self.work_dir).snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
+            return self.history.next_attempt_dir(parent_sha)
+        if str(action.get("parent_node_sha", "")).strip() != parent_sha:
+            raise RuntimeError(
+                "Persisted proposal preparation belongs to another frontier node."
+            )
+        attempt_id = str(action.get("attempt_id", "")).strip()
+        if not re.fullmatch(r"attempt_\d+", attempt_id):
+            raise RuntimeError("Persisted proposal preparation has an invalid attempt id.")
+        attempt_dir = self.history.parent_dir(parent_sha) / attempt_id
+        if attempt_dir.is_dir():
+            return attempt_dir
+        if action.get("status") == "resolved" and dict(action.get("result") or {}).get(
+            "choice"
+        ) == "proceed":
+            return self.history.next_attempt_dir(parent_sha)
+        raise RuntimeError(
+            "Active proposal preparation has lost its runtime-owned log directory."
+        )
 
     def _select_frontier_before_next_proposal(self) -> str:
         """Require a manager-selected active node before launching a proposer."""
@@ -1989,11 +2410,328 @@ class HitlAutoResearchController:
                     return idea_id
         raise RuntimeError("Frontier maintenance requires a preceding manager decision idea.")
 
+    @staticmethod
+    def _next_additional_agent_ordinal(attempt_dir: Path) -> int:
+        ordinals = []
+        for path in Path(attempt_dir).glob("additional_agent_*_*"):
+            match = re.fullmatch(r"additional_agent_(\d+)_.*", path.name)
+            if match:
+                ordinals.append(int(match.group(1)))
+        return max(ordinals, default=0) + 1
+
+    def _prepare_next_proposal(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_id: str,
+    ) -> str:
+        """Advance approved preparation stages and return the candidate base."""
+        runtime = self._proposal_hitl_runtime()
+
+        while True:
+            runtime_state = HitlRuntimeState(self.work_dir)
+            existing = runtime_state.snapshot().get("next_autoresearch_action")
+            if isinstance(existing, dict) and existing.get("kind") == "prepare_proposal":
+                if str(existing.get("parent_node_sha", "")).strip() != parent_sha:
+                    raise RuntimeError(
+                        "Persisted proposal preparation belongs to another frontier node."
+                    )
+                preparation_attempt_id = str(existing.get("attempt_id", "")).strip()
+                ordinal = int(existing.get("additional_agent_ordinal", 0))
+                workspace_fingerprint = str(
+                    existing.get("workspace_fingerprint", "")
+                ).strip()
+                workspace_fingerprint_scope = existing.get(
+                    "workspace_fingerprint_scope"
+                )
+                proposal_base_sha = str(
+                    existing.get("proposal_base_sha")
+                    or dict(existing.get("result") or {}).get("proposal_base_sha")
+                    or parent_sha
+                ).strip()
+            else:
+                preparation_attempt_id = attempt_id
+                ordinal = self._next_additional_agent_ordinal(attempt_dir)
+                from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+                workspace_fingerprint_scope = runtime_state.workspace_guard_scope()
+                workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+                    self.work_dir,
+                    scope=workspace_fingerprint_scope,
+                )
+                proposal_base_sha = parent_sha
+            preparation_dir = (
+                Path(attempt_dir)
+                if Path(attempt_dir).name == preparation_attempt_id
+                else self.history.parent_dir(parent_sha) / preparation_attempt_id
+            )
+            if (
+                not preparation_dir.is_dir()
+                and not (
+                    isinstance(existing, dict)
+                    and existing.get("status") == "resolved"
+                    and dict(existing.get("result") or {}).get("choice") == "proceed"
+                )
+            ):
+                raise RuntimeError(
+                    "Active proposal preparation has lost its runtime-owned log directory."
+                )
+            provenance = {
+                "parent_node_id": parent_sha,
+                "attempt_id": preparation_attempt_id,
+            }
+            if ordinal < 1:
+                raise RuntimeError("Proposal preparation has an invalid agent-run ordinal.")
+            if not workspace_fingerprint:
+                raise RuntimeError(
+                    "Proposal preparation has no approved workspace fingerprint."
+                )
+            if not proposal_base_sha or not self.checkpoints.checkpoint_exists(
+                proposal_base_sha
+            ):
+                raise RuntimeError(
+                    "Proposal preparation has no valid prepared workspace checkpoint."
+                )
+
+            def apply_decision(decision: Dict[str, Any]) -> Dict[str, Any]:
+                choice = str(decision.get("choice", "")).strip()
+                record = runtime.log_proposal_preparation_decision(
+                    choice=choice,
+                    reason=str(decision.get("reason", "")),
+                    premise_idea_id=str(decision.get("premise_idea_id", "")),
+                    provenance=provenance,
+                    agent=str(decision.get("agent", "")),
+                    objective=str(decision.get("objective", "")),
+                )
+                if choice == "proceed":
+                    return {
+                        "choice": choice,
+                        "decision_idea_id": record["idea_id"],
+                        "proposal_base_sha": proposal_base_sha,
+                    }
+                if choice != "call_additional_agent":
+                    raise HitlRuntimeStateError(
+                        "Unknown proposal-preparation manager choice"
+                    )
+                if self.additional_agent_runner is None:
+                    raise RuntimeError("No additional-agent runner is configured.")
+                current = HitlRuntimeState(self.work_dir).snapshot().get(
+                    "next_autoresearch_action"
+                )
+                recovery = current.get("recovery") if isinstance(current, dict) else None
+                if isinstance(recovery, dict):
+                    rollback = HitlStageRollback.from_descriptor(self.work_dir, recovery)
+                else:
+                    rollback = HitlStageRollback.capture(
+                        self.work_dir,
+                        "HITL AutoResearch additional-agent preparation boundary",
+                    )
+                    HitlRuntimeState(
+                        self.work_dir
+                    ).record_next_autoresearch_action_recovery(
+                        "prepare_proposal", rollback.descriptor()
+                    )
+
+                def restore_agent_boundary(reason: str) -> None:
+                    rollback.restore(
+                        runtime,
+                        reason,
+                        cleanup_label="restored",
+                    )
+                    restored_state = HitlRuntimeState(self.work_dir)
+                    restored_action = restored_state.snapshot().get(
+                        "next_autoresearch_action"
+                    )
+                    restored_scope = (
+                        restored_action.get("workspace_fingerprint_scope")
+                        if isinstance(restored_action, dict)
+                        else None
+                    )
+                    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+                    restored_state.refresh_proposal_preparation_after_rollback(
+                        parent_node_sha=parent_sha,
+                        attempt_id=preparation_attempt_id,
+                        additional_agent_ordinal=ordinal,
+                        workspace_fingerprint=HitlWorkspaceWriteGuard.public_fingerprint(
+                            self.work_dir,
+                            scope=restored_scope,
+                        ),
+                    )
+
+                try:
+                    result = self.additional_agent_runner(
+                        agent=str(decision.get("agent", "")),
+                        objective=str(decision.get("objective", "")),
+                        attempt_dir=preparation_dir,
+                        ordinal=ordinal,
+                        provenance={
+                            **provenance,
+                            "additional_agent_ordinal": str(ordinal),
+                        },
+                    )
+                except HitlRunStopRequested:
+                    raise
+                except Exception as exc:
+                    try:
+                        restore_agent_boundary(
+                            "The manager-requested additional agent failed; runtime is "
+                            "restoring the preceding approved preparation boundary."
+                        )
+                    except Exception as restore_error:
+                        raise RuntimeError(
+                            "Additional-agent preparation failed and its rollback could not "
+                            f"complete: {restore_error}"
+                        ) from exc
+                    raise _ProposalPreparationRestart(str(exc)) from exc
+                if not result.get("success"):
+                    try:
+                        restore_agent_boundary(
+                            "The manager-requested additional agent failed; runtime is "
+                            "restoring the preceding approved preparation boundary."
+                        )
+                    except Exception as restore_error:
+                        raise RuntimeError(
+                            "Additional-agent preparation failed and its rollback could not "
+                            f"complete: {restore_error}"
+                        )
+                    raise _ProposalPreparationRestart(
+                        str(
+                            result.get("error")
+                            or "Manager-requested agent run failed after a clean rollback."
+                        )
+                    )
+                return {
+                    "choice": choice,
+                    "decision_idea_id": record["idea_id"],
+                    "agent": str(decision.get("agent", "")),
+                    "logs_dir": str(result.get("logs_dir", "")),
+                }
+
+            try:
+                result = runtime.manager.begin_proposal_preparation(
+                    (
+                        _load_hitl_template("manager_prepare_proposal.txt").rstrip()
+                        + "\n\n"
+                        + "Runtime-owned additional-agent ledger for this proposal "
+                        "preparation session:\n"
+                        + f"- Completed runs: {ordinal - 1}\n"
+                        + f"- Next run ordinal: {ordinal}\n"
+                        + "Use this ledger, not claims in plans, workspace files, or "
+                        "research-state prose, when deciding whether an additional "
+                        "agent already ran in this preparation session."
+                    ),
+                    parent_sha=parent_sha,
+                    attempt_id=preparation_attempt_id,
+                    additional_agent_ordinal=ordinal,
+                    workspace_fingerprint=workspace_fingerprint,
+                    on_decision=apply_decision,
+                    workspace_fingerprint_scope=workspace_fingerprint_scope,
+                    proposal_base_sha=proposal_base_sha,
+                )
+            except _ProposalPreparationRestart as exc:
+                print(f"↻ {exc}")
+                continue
+            if result.get("choice") == "proceed":
+                prepared_sha = str(result.get("proposal_base_sha", "")).strip()
+                if not prepared_sha or not self.checkpoints.checkpoint_exists(prepared_sha):
+                    raise RuntimeError(
+                        "Proposal preparation did not produce a valid workspace checkpoint."
+                    )
+                if self.checkpoints.current_sha() != prepared_sha:
+                    self.checkpoints.restore_checkpoint(
+                        prepared_sha, clean_untracked_public=True
+                    )
+                return prepared_sha
+            if result.get("choice") != "call_additional_agent":
+                raise RuntimeError("Proposal preparation completed without a valid choice.")
+            from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+            approved_request = runtime_state.pending_worker_command() or {}
+            approved_scope = approved_request.get("workspace_fingerprint_scope")
+            approved_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+                self.work_dir,
+                scope=approved_scope,
+            )
+            completed_agent = str(result.get("agent", "")).strip()
+            if not completed_agent:
+                raise RuntimeError("Completed proposal preparation has no agent identity.")
+            from core.manager_additional_agents import additional_agent_spec
+
+            completed_stage = additional_agent_spec(completed_agent).pipeline_stage
+            action = HitlRuntimeState(self.work_dir).snapshot().get(
+                "next_autoresearch_action"
+            )
+            recovery = action.get("recovery") if isinstance(action, dict) else None
+            rollback = (
+                HitlStageRollback.from_descriptor(self.work_dir, recovery)
+                if isinstance(recovery, dict)
+                else None
+            )
+            prepared_checkpoint = self.checkpoints.create_checkpoint(
+                "HITL AutoResearch resources prepared for proposal"
+            )
+            HitlRuntimeState(self.work_dir).advance_proposal_preparation_after_agent(
+                parent_node_sha=parent_sha,
+                attempt_id=preparation_attempt_id,
+                completed_ordinal=ordinal,
+                workspace_fingerprint=approved_fingerprint,
+                workspace_fingerprint_scope=approved_scope,
+                provenance={
+                    **provenance,
+                    "additional_agent_ordinal": str(ordinal),
+                },
+                agent=completed_agent,
+                pipeline_stage=completed_stage,
+                proposal_base_sha=prepared_checkpoint.sha,
+            )
+            if rollback is not None:
+                rollback.discard(cleanup_label="completed")
+
+    def _proposal_base_sha(self, parent_sha: str) -> str:
+        """Return the approved workspace base without changing frontier lineage."""
+        action = HitlRuntimeState(self.work_dir).snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
+            return parent_sha
+        if str(action.get("parent_node_sha", "")).strip() != parent_sha:
+            raise RuntimeError(
+                "Persisted proposal preparation belongs to another frontier node."
+            )
+        result = action.get("result")
+        prepared_sha = str(
+            (result.get("proposal_base_sha") if isinstance(result, dict) else None)
+            or action.get("proposal_base_sha")
+            or parent_sha
+        ).strip()
+        if not prepared_sha or not self.checkpoints.checkpoint_exists(prepared_sha):
+            raise RuntimeError(
+                "Persisted proposal preparation references a missing workspace checkpoint."
+            )
+        return prepared_sha
+
+    def _clear_completed_proposal_preparation(self, parent_sha: str) -> None:
+        """Retire the preparation session only after the scored attempt is durable."""
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if (
+            isinstance(action, dict)
+            and action.get("kind") == "prepare_proposal"
+            and action.get("status") == "resolved"
+            and str(action.get("parent_node_sha", "")).strip() == parent_sha
+            and dict(action.get("result") or {}).get("choice") == "proceed"
+        ):
+            state.clear_completed_next_autoresearch_action("prepare_proposal")
+
     def _resume_frontier_boundary_if_needed(self) -> Optional[str]:
         """Resume a persisted pruning or selection boundary after recovery."""
         runtime = self._proposal_hitl_runtime()
         action = runtime.manager.runtime_state.snapshot().get("next_autoresearch_action")
         if not isinstance(action, dict):
+            return None
+        if action.get("kind") == "prepare_proposal":
+            # Preparation now precedes the candidate-attempt marker. Let the
+            # ordinary iteration loop re-enter that durable boundary directly.
             return None
         if action.get("kind") == "prune_frontier":
             self._run_frontier_pruning_boundary()
@@ -2013,8 +2751,30 @@ class HitlAutoResearchController:
         recovery: HitlRecoveryResult,
     ) -> AutoResearchIterationResult:
         """Resume the one runtime-held worker request for this attempt."""
+        if recovery.recovery_classification == "proposal_preparation_transition":
+            action = recovery.preparation_action or {}
+            parent_sha = str(action.get("parent_node_sha", "")).strip()
+            if not parent_sha:
+                raise RuntimeError("Recovered proposal preparation has no frontier parent.")
+            return self.run_iteration(
+                0,
+                parent_sha,
+                resume_attempt_dir=recovery.removed_attempt_dir,
+            )
         if recovery.recovery_classification != "pending_worker_request":
             raise RuntimeError("Unexpected HITL recovery classification.")
+        pending = recovery.pending_worker_request or {}
+        if pending.get("pipeline_stage") == "resource_finder":
+            continuation = HitlRuntimeState(self.work_dir).worker_continuation() or {}
+            provenance = dict(continuation.get("provenance") or {})
+            parent_sha = str(provenance.get("parent_node_id", "")).strip()
+            if not parent_sha:
+                raise RuntimeError("Recovered additional-agent request has no frontier parent.")
+            return self.run_iteration(
+                0,
+                parent_sha,
+                resume_attempt_dir=recovery.removed_attempt_dir,
+            )
         return self._resume_react_worker_request(recovery)
 
     def _resume_frontier_decision_transition(
@@ -2241,13 +3001,16 @@ class HitlAutoResearchController:
         failure_reason: Optional[str] = None,
         terminal_failure: bool = False,
     ) -> AutoResearchIterationResult:
-        """Restore the parent only after scoring recovery has exhausted its retries."""
+        """Restore the prepared base after scoring recovery exhausts its retries."""
         self._abandon_pending_worker_request_for_rollback(
-            "The AutoResearch candidate could not be scored and runtime is restoring its parent."
+            "The AutoResearch candidate could not be scored and runtime is restoring "
+            "its prepared proposal workspace."
         )
         self._retire_temporary_scoring_ref(scorer_result, strict=True)
         self._retire_pending_scoring_ref(strict=True)
-        self.checkpoints.restore_checkpoint(parent_sha, clean_untracked_public=True)
+        self.checkpoints.restore_checkpoint(
+            self._proposal_base_sha(parent_sha), clean_untracked_public=True
+        )
         remove_public_sealed_paths(self.work_dir)
         _restore_hitl_state_snapshot(self.work_dir, attempt_dir)
         self._reload_manager_after_hitl_restore()
@@ -2268,6 +3031,7 @@ class HitlAutoResearchController:
                 or candidate_summary.error
                 or "Runtime could not obtain a valid objective score."
             ),
+            source_attempt_dir=attempt_dir,
         )
         shutil.rmtree(attempt_dir, ignore_errors=True)
         return AutoResearchIterationResult(
@@ -2317,6 +3081,7 @@ class HitlAutoResearchController:
                 attempt_id=self._attempt_id(attempt_dir),
                 clean_untracked_public=True,
             )
+        self._clear_completed_proposal_preparation(parent_sha)
         _remove_hitl_state_snapshot(self.work_dir, attempt_dir)
         clear_hitl_current_attempt_marker(self.work_dir)
         from core.hitl_runtime_state import HitlRuntimeState
@@ -2447,20 +3212,52 @@ class HitlAutoResearchController:
         self,
         iteration: int,
         parent_sha: str,
+        *,
+        resume_attempt_dir: Optional[Path] = None,
+        proposal_base_sha: Optional[str] = None,
+        new_attempt_dir: Optional[Path] = None,
     ) -> AutoResearchIterationResult:
         """Run one proposal/comment/scorer/checkpoint/compare attempt."""
-        parent_results_path = self.work_dir / "scoring" / "results.json"
-        try:
-            parent_results = json.loads(parent_results_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            parent_results = None
-        parent_summary = self._runtime_score_summary(parent_results, source="parent")
+        proposal_base_sha = proposal_base_sha or self._proposal_base_sha(parent_sha)
+        if not self.checkpoints.checkpoint_exists(proposal_base_sha):
+            raise RuntimeError("Proposal workspace checkpoint does not exist.")
+        if resume_attempt_dir is None and self.checkpoints.current_sha() != proposal_base_sha:
+            self.checkpoints.restore_checkpoint(
+                proposal_base_sha, clean_untracked_public=True
+            )
+        parent_summary = self._frontier_parent_summary(parent_sha)
 
         attempt_history = self._attempt_history_for(parent_sha)
-        attempt_dir = self.history.next_attempt_dir(parent_sha)
+        attempt_dir = (
+            Path(resume_attempt_dir)
+            if resume_attempt_dir is not None
+            else (
+                Path(new_attempt_dir)
+                if new_attempt_dir is not None
+                else self.history.next_attempt_dir(parent_sha)
+            )
+        )
         attempt_marker = self._attempt_id(attempt_dir)
         attempt_id = attempt_dir.name
-        attempt_marker = _begin_hitl_autoresearch_attempt_state(self.work_dir, attempt_dir)
+        if resume_attempt_dir is None:
+            attempt_marker = _begin_hitl_autoresearch_attempt_state(self.work_dir, attempt_dir)
+        else:
+            expected_marker = _attempt_marker_for_dir(attempt_dir)
+            if read_hitl_current_attempt_marker(self.work_dir) != expected_marker:
+                raise RuntimeError("Recovered proposal preparation is not the active attempt.")
+            if not HitlGitStateStore(self.work_dir).has_autoresearch_hitl_attempt_boundary(
+                expected_marker
+            ):
+                raise RuntimeError("Recovered proposal preparation has no rollback boundary.")
+            if not HitlGitStateStore(
+                self.work_dir
+            ).has_hitl_autoresearch_whiteboard_attempt_boundary(expected_marker):
+                raise RuntimeError(
+                    "Recovered proposal preparation has no whiteboard rollback boundary."
+                )
+            if parent_sha != self.hitl_frontier.state()["selected_frontier_node_sha"]:
+                raise RuntimeError("Recovered proposal preparation no longer matches the frontier.")
+            attempt_marker = expected_marker
 
         sealed_scoring: Dict[str, Optional[Path]] = {"path": None}
         proposal = ""
@@ -2530,10 +3327,13 @@ class HitlAutoResearchController:
                 error=f"AutoResearch proposal/comment stage failed: {pre_scoring_error}",
             )
             self._abandon_pending_worker_request_for_rollback(
-                "The AutoResearch attempt failed before scoring and runtime is restoring its parent."
+                "The AutoResearch attempt failed before scoring and runtime is restoring "
+                "its prepared proposal workspace."
             )
             self._retire_pending_scoring_ref(strict=True)
-            self.checkpoints.restore_checkpoint(parent_sha, clean_untracked_public=True)
+            self.checkpoints.restore_checkpoint(
+                proposal_base_sha, clean_untracked_public=True
+            )
             remove_public_sealed_paths(self.work_dir)
             _restore_hitl_state_snapshot(self.work_dir, attempt_dir)
             self._reload_manager_after_hitl_restore()
@@ -2547,6 +3347,7 @@ class HitlAutoResearchController:
                 attempt_id=attempt_marker,
                 phase="proposal_or_execution",
                 reason=candidate_summary.error or "HITL attempt failed before scoring.",
+                source_attempt_dir=attempt_dir,
             )
             shutil.rmtree(attempt_dir, ignore_errors=True)
             return AutoResearchIterationResult(
@@ -2597,12 +3398,13 @@ class HitlAutoResearchController:
 
         if child_sha is None:
             self._abandon_pending_worker_request_for_rollback(
-                "The AutoResearch candidate did not finalize and runtime is restoring its parent."
+                "The AutoResearch candidate did not finalize and runtime is restoring "
+                "its prepared proposal workspace."
             )
             self._retire_temporary_scoring_ref(scorer_result, strict=True)
             self._retire_pending_scoring_ref(strict=True)
             self.checkpoints.restore_checkpoint(
-                parent_sha,
+                proposal_base_sha,
                 clean_untracked_public=True,
             )
             remove_public_sealed_paths(self.work_dir)
@@ -2621,6 +3423,7 @@ class HitlAutoResearchController:
                 attempt_id=attempt_marker,
                 phase="frontier_publication",
                 reason=reason or "Runtime could not publish a scored HITL candidate.",
+                source_attempt_dir=attempt_dir,
             )
             shutil.rmtree(attempt_dir, ignore_errors=True)
             return AutoResearchIterationResult(
@@ -3243,6 +4046,7 @@ def run_hitl_autoresearch_loop(
     proposal_timeout: Optional[int] = 900,
     comment_timeout: Optional[int] = 1800,
     scorer_timeout: Optional[int] = 600,
+    resource_finder_timeout: Optional[int] = None,
     hitl_manager: Optional[Any] = None,
     hitl_channel: Optional[Any] = None,
     hitl_manager_config: Optional[Dict[str, Any]] = None,
@@ -3354,6 +4158,34 @@ def run_hitl_autoresearch_loop(
             idea=idea,
         )
 
+    experiment_runtime = HitlRuntime(
+        work_dir,
+        "experiment_runner",
+        manager=hitl_manager,
+        channel=hitl_channel,
+        config=hitl_manager_config,
+        use_hitl_autoresearch_whiteboard=True,
+        hitl_mode=hitl_mode,
+    )
+
+    def additional_agent_runner(**request: Any) -> Dict[str, Any]:
+        from core.manager_additional_agents import run_additional_agent
+
+        return run_additional_agent(
+            str(request.pop("agent", "")),
+            idea=idea,
+            work_dir=work_dir,
+            templates_dir=templates_dir,
+            provider=provider,
+            timeout=resource_finder_timeout,
+            full_permissions=full_permissions,
+            manager=experiment_runtime.manager,
+            channel=experiment_runtime.channel,
+            manager_config=hitl_manager_config,
+            hitl_mode=hitl_mode,
+            **request,
+        )
+
     controller = HitlAutoResearchController(
         idea=idea,
         idea_id=idea_id,
@@ -3361,19 +4193,10 @@ def run_hitl_autoresearch_loop(
         history_root=history_root,
         proposal_generator=proposal_generator,
         scorer=scorer,
-        hitl_runtime=(
-            HitlRuntime(
-                work_dir,
-                "experiment_runner",
-                manager=hitl_manager,
-                channel=hitl_channel,
-                config=hitl_manager_config,
-                use_hitl_autoresearch_whiteboard=True,
-                hitl_mode=hitl_mode,
-            )
-        ),
+        hitl_runtime=experiment_runtime,
         hitl_comment_mode=hitl_comment_mode,
         pending_hitl_recovery=pending_hitl_recovery,
         hitl_mode=hitl_mode,
+        additional_agent_runner=additional_agent_runner,
     )
     return controller.run(iterations=iterations)

@@ -340,6 +340,80 @@ def test_rule_maker_repair_receives_scoring_conformance_report(
     assert reports[0].startswith("Automated conformance check: PASS")
 
 
+@pytest.mark.parametrize("recover_from_request", [False, True])
+def test_rule_maker_completion_uses_reviewed_workspace_fingerprint(
+    tmp_path,
+    monkeypatch,
+    recover_from_request,
+):
+    orchestrator = _orchestrator(tmp_path)
+    reviewed_fingerprint = "reviewed-workspace"
+    checked = []
+
+    class _Rollback:
+        def restore(self, runtime, reason, *, cleanup_label):
+            raise AssertionError("An approved stage must not restore its boundary")
+
+        def discard(self, *, cleanup_label):
+            assert cleanup_label == "completed"
+
+    class _Runtime:
+        def phase_finish_result(self):
+            if recover_from_request:
+                return None
+            return {
+                "status": "approved",
+                "workspace_fingerprint": reviewed_fingerprint,
+            }
+
+        def resolved_worker_response(self):
+            return {"status": "approved", "final": True}
+
+        def clear_idea_tool_context(self):
+            pass
+
+    pending = {
+        "status": "resolved",
+        "workspace_fingerprint": reviewed_fingerprint,
+        "response": {"status": "approved", "final": True},
+    }
+    monkeypatch.setattr(
+        pipeline.HitlStageRollback,
+        "capture",
+        classmethod(lambda cls, work_dir, message, **kwargs: _Rollback()),
+    )
+    monkeypatch.setattr(orchestrator, "_create_hitl_runtime", lambda stage: _Runtime())
+    monkeypatch.setattr(orchestrator, "_initial_stage_request", lambda stage: pending)
+    monkeypatch.setattr(
+        pipeline,
+        "generate_rule_maker_prompt",
+        lambda *args, **kwargs: "rule-maker context",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_require_reviewed_workspace_unchanged",
+        lambda work_dir, fingerprint: checked.append(fingerprint),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "run_plan_centered_hitl_stage",
+        lambda **kwargs: kwargs["on_approved"](
+            {"success": True, "outputs": {}}, {"approved": True}
+        ),
+    )
+
+    result = orchestrator._run_rule_maker_hitl(
+        idea={},
+        provider="codex",
+        timeout=None,
+        full_permissions=True,
+        persist_required_contract=False,
+    )
+
+    assert result["success"] is True
+    assert checked == [reviewed_fingerprint]
+
+
 def test_failed_rule_maker_repair_restores_complete_evaluator_bytes(
     tmp_path,
     monkeypatch,
