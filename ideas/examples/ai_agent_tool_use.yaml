@@ -68,7 +68,7 @@ idea:
     compute: cpu_only
     time_limit: 10800  # 3 hours
     memory: "16GB"
-    budget: "$150"
+    budget: 150            # USD; numeric per schema (formatted as $%.2f downstream)
     dependencies:
       - "openai>=1.0.0"
       - "anthropic>=0.18.0"
