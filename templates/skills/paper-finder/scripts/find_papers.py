@@ -14,8 +14,86 @@ import sys
 import json
 import os
 import re
+import math
+import time
+import random
 import argparse
 from datetime import datetime
+
+# Transient errors: rate-limit or server hiccups
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+MAX_ATTEMPTS = 5
+BASE_DELAY = 1.0
+MAX_DELAY = 60.0
+
+def score_paper(paper, current_year=None):
+    if current_year is None:
+        current_year = datetime.now().year
+    relevance = paper.get("relevance", 0)
+    citations = paper.get("influential_citations", 0)
+    year = paper.get("year")
+    score = float(relevance)
+    score += min(math.log1p(citations), 2.0)
+    if year:
+        age = current_year - year
+        score += 0.5 * math.exp(-age / 5.0)
+    return score
+
+
+def _dedup_key(paper):
+    if paper.get("doi"):
+        return paper["doi"]
+    if paper.get("url"):
+        return paper["url"]
+    return (paper.get("title", "").lower(), paper.get("year"))
+
+
+def _dedup_papers(papers):
+    seen = set()
+    deduped = []
+    for paper in papers:
+        key = _dedup_key(paper)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(paper)
+    return deduped
+
+
+def _backoff_delay(attempt):
+    delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
+    return delay * random.uniform(0.5, 1.5)
+
+
+def _post_with_retry(client, url, payload):
+    """POST to url with exponential backoff and ±50% jitter.
+
+    Retries on:
+    - Response status codes in RETRYABLE_STATUS (429, 500, 502, 503, 504)
+    - httpx.RequestError (connection errors, timeouts, etc.)
+
+    Returns immediately without retrying on other 4xx responses (e.g. 404).
+    After MAX_ATTEMPTS, returns the final response for status-code errors;
+    re-raises the exception for httpx.RequestError.
+    """
+    import httpx  # Lazy import: find_papers() has verified availability
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = client.post(url, json=payload)
+            if response.status_code not in RETRYABLE_STATUS:
+                return response
+            if attempt == MAX_ATTEMPTS:
+                return response
+            reason = f"status {response.status_code}"
+        except httpx.RequestError as e:
+            if attempt == MAX_ATTEMPTS:
+                raise
+            reason = type(e).__name__
+        delay = _backoff_delay(attempt)
+        print(
+            f"Retry {attempt}/{MAX_ATTEMPTS - 1}: {reason}, retrying in {delay:.1f}s",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
 
 
 def find_papers(query: str, mode: str = "fast", url: str = "http://localhost:8000/api/2/rounds"):
@@ -27,7 +105,7 @@ def find_papers(query: str, mode: str = "fast", url: str = "http://localhost:800
 
     try:
         with httpx.Client(timeout=300.0) as client:
-            response = client.post(url, json={
+            response = _post_with_retry(client, url, {
                 "paper_description": query,
                 "operation_mode": mode,
                 "read_results_from_cache": True
@@ -64,8 +142,16 @@ def find_papers(query: str, mode: str = "fast", url: str = "http://localhost:800
             "url": doc.get('url', ''),
             "relevance": rel,
             "abstract": (doc.get('abstract') or ''),
-            "citations": doc.get('citation_count', 0) or 0
+            "citations": doc.get('citation_count', 0) or 0,
+            "venue": doc.get('venue', ''),
+            "influential_citations": doc.get('influential_citation_count', 0) or 0,
         })
+
+    for paper in results["papers"]:
+        paper["score"] = score_paper(paper)
+    results["papers"].sort(key=lambda p: -p["score"])
+    results["papers"] = _dedup_papers(results["papers"])
+    results["total"] = len(results["papers"])
 
     return results
 
