@@ -313,7 +313,7 @@ def test_fresh_plan_approval_resumes_same_invocation_execution(tmp_path):
             "provenance": provenance,
         }
     )
-    state.complete_worker_command("approved-plan", {"status": "approved", "final": True})
+    state.complete_worker_command("approved-plan", {"status": "approved"})
 
     class Runtime:
         work_dir = tmp_path
@@ -482,7 +482,7 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
                 "workspace_fingerprint_scope": scope,
             }
         )
-        state.complete_worker_command("resource-request-1", {"status": "approved", "final": True})
+        state.complete_worker_command("resource-request-1", {"status": "approved"})
         return {"success": True, "logs_dir": str(logs_dir)}
 
     controller.additional_agent_runner = run_agent
@@ -730,6 +730,12 @@ def test_later_agent_failure_preserves_earlier_preparation_and_retries_choice(tm
                     "workspace_fingerprint_scope"
                 ]
             action = state.begin_next_autoresearch_action(expected)
+            assert action["workspace_fingerprint"] == (
+                HitlWorkspaceWriteGuard.public_fingerprint(
+                    tmp_path,
+                    scope=action.get("workspace_fingerprint_scope"),
+                )
+            )
             if action["status"] == "pending":
                 decision = next(decisions)
                 state.record_next_autoresearch_action_decision(
@@ -796,9 +802,7 @@ def test_later_agent_failure_preserves_earlier_preparation_and_retries_choice(tm
                 "workspace_fingerprint_scope": scope,
             }
         )
-        state.complete_worker_command(
-            request_key, {"status": "approved", "final": True}
-        )
+        state.complete_worker_command(request_key, {"status": "approved"})
         return {"success": True, "logs_dir": str(logs_dir)}
 
     controller.additional_agent_runner = run_agent
@@ -964,7 +968,7 @@ def test_recovered_approval_uses_its_recorded_workspace_scope(tmp_path):
             "workspace_fingerprint_scope": scope,
         }
     )
-    state.complete_worker_command("request-1", {"status": "approved", "final": True})
+    state.complete_worker_command("request-1", {"status": "approved"})
 
     recovered = _approved_saved_request(
         work_dir=tmp_path,
@@ -974,6 +978,148 @@ def test_recovered_approval_uses_its_recorded_workspace_scope(tmp_path):
 
     assert recovered is not None
     assert recovered["workspace_fingerprint_scope"] == scope
+
+
+@pytest.mark.parametrize("approved_plan_handoff", [False, True])
+def test_matching_unfinished_agent_request_reaches_stage_resume(
+    tmp_path, approved_plan_handoff
+):
+    provenance = {
+        "parent_node_id": "parent",
+        "attempt_id": "attempt_1",
+        "additional_agent_ordinal": "1",
+    }
+    state = HitlRuntimeState(tmp_path)
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": "parent",
+            "attempt_id": "attempt_1",
+            "additional_agent_ordinal": 1,
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path
+            ),
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {
+            "choice": "call_additional_agent",
+            "agent": "resource_finder",
+            "objective": "Find a benchmark.",
+            "reason": "Evidence is missing.",
+            "premise_idea_id": "I1",
+        },
+    )
+    state.record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "execution" if approved_plan_handoff else "plan",
+            "actor": "resource_finder",
+            "prompt_block": "resume the saved resource worker",
+            "provenance": provenance,
+        }
+    )
+    state.begin_worker_command(
+        {
+            "request_key": "request-1",
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "plan",
+            "kind": "phase_finish",
+            "provenance": provenance,
+        }
+    )
+    if approved_plan_handoff:
+        state.complete_worker_command("request-1", {"status": "approved"})
+
+    assert (
+        _approved_saved_request(
+            work_dir=tmp_path,
+            pipeline_stage="resource_finder",
+            provenance=provenance,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("stale_resolved_request", [False, True])
+def test_new_agent_decision_can_start_after_preceding_worker(
+    tmp_path, stale_resolved_request
+):
+    provenance = {
+        "parent_node_id": "parent",
+        "attempt_id": "attempt_1",
+        "additional_agent_ordinal": "1",
+    }
+    state = HitlRuntimeState(tmp_path)
+    if stale_resolved_request:
+        state.begin_worker_command(
+            {
+                "request_key": "preceding-request",
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "review",
+                "kind": "phase_finish",
+            }
+        )
+        state.complete_worker_command(
+            "preceding-request", {"status": "approved", "final": True}
+        )
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": "parent",
+            "attempt_id": "attempt_1",
+            "additional_agent_ordinal": 1,
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path
+            ),
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {
+            "choice": "call_additional_agent",
+            "agent": "resource_finder",
+            "objective": "Find a benchmark.",
+            "reason": "Evidence is missing.",
+            "premise_idea_id": "I1",
+        },
+    )
+
+    assert (
+        _approved_saved_request(
+            work_dir=tmp_path,
+            pipeline_stage="resource_finder",
+            provenance=provenance,
+        )
+        is None
+    )
+
+
+def test_preparation_without_candidate_marker_reaches_iteration_loop(tmp_path):
+    state = HitlRuntimeState(tmp_path)
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": "parent",
+            "attempt_id": "attempt_1",
+            "additional_agent_ordinal": 1,
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path
+            ),
+        }
+    )
+
+    class FakeManager:
+        runtime_state = state
+
+    class FakeRuntime:
+        manager = FakeManager()
+
+    controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
+    controller.hitl_runtime = FakeRuntime()
+
+    assert controller._resume_frontier_boundary_if_needed() is None
 
 
 def test_recovered_approval_rejects_a_changed_public_workspace(tmp_path):
@@ -995,7 +1141,7 @@ def test_recovered_approval_rejects_a_changed_public_workspace(tmp_path):
             "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(tmp_path),
         }
     )
-    state.complete_worker_command("request-1", {"status": "approved", "final": True})
+    state.complete_worker_command("request-1", {"status": "approved"})
     (tmp_path / "resources.md").write_text("changed after approval\n", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="differs from the exact snapshot approved"):
@@ -1082,7 +1228,7 @@ def test_resolved_agent_action_revalidates_workspace_before_cleanup(tmp_path):
             "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(tmp_path),
         }
     )
-    state.complete_worker_command("request-1", {"status": "approved", "final": True})
+    state.complete_worker_command("request-1", {"status": "approved"})
     state.complete_next_autoresearch_action(
         "prepare_proposal",
         {"choice": "call_additional_agent", "agent": "resource_finder"},
@@ -1414,7 +1560,7 @@ def test_recovery_allows_exact_approved_agent_workspace(tmp_path, complete_actio
             "workspace_fingerprint_scope": scope,
         }
     )
-    state.complete_worker_command("request-1", {"status": "approved", "final": True})
+    state.complete_worker_command("request-1", {"status": "approved"})
     if complete_action:
         state.complete_next_autoresearch_action(
             "prepare_proposal",

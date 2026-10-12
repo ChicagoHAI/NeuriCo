@@ -895,6 +895,44 @@ class HitlRuntimeState:
             self._save_unlocked()
             return self._copy(action)
 
+    def refresh_proposal_preparation_after_rollback(
+        self,
+        *,
+        parent_node_sha: str,
+        attempt_id: str,
+        additional_agent_ordinal: int,
+        workspace_fingerprint: str,
+    ) -> Dict[str, Any]:
+        """Refresh metadata identity after a runtime-owned public restore."""
+        fingerprint = str(workspace_fingerprint).strip()
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            decision = action.get("decision") if isinstance(action, dict) else None
+            if (
+                not fingerprint
+                or not isinstance(action, dict)
+                or action.get("kind") != "prepare_proposal"
+                or action.get("status") != "decision_recorded"
+                or str(action.get("parent_node_sha", "")).strip()
+                != str(parent_node_sha).strip()
+                or str(action.get("attempt_id", "")).strip()
+                != str(attempt_id).strip()
+                or int(action.get("additional_agent_ordinal", 0))
+                != int(additional_agent_ordinal)
+                or not isinstance(decision, dict)
+                or decision.get("choice") != "call_additional_agent"
+            ):
+                raise HitlRuntimeStateError(
+                    "No matching rolled-back proposal preparation accepts a refreshed boundary"
+                )
+            action["workspace_fingerprint"] = fingerprint
+            action.pop("recovery", None)
+            action["updated_at"] = _now()
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(action)
+
     def clear_completed_next_autoresearch_action(self, kind: str) -> None:
         with self._locked():
             self._state = self._load_unlocked() or self._default()
@@ -1063,7 +1101,6 @@ class HitlRuntimeState:
                 or command.get("status") != "resolved"
                 or not isinstance(response, dict)
                 or response.get("status") != "approved"
-                or not bool(response.get("final"))
                 or command_provenance != expected_provenance
                 or str(command.get("workspace_fingerprint", "")).strip() != fingerprint
                 or command_scope != fingerprint_scope

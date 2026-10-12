@@ -1754,7 +1754,6 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and pending_request.get("status") == "resolved"
         and isinstance(pending_response, dict)
         and pending_response.get("status") == "approved"
-        and bool(pending_response.get("final"))
         and str(pending_request.get("workspace_fingerprint", "")).strip()
         == HitlWorkspaceWriteGuard.public_fingerprint(
             work_dir,
@@ -2533,6 +2532,34 @@ class HitlAutoResearchController:
                     ).record_next_autoresearch_action_recovery(
                         "prepare_proposal", rollback.descriptor()
                     )
+
+                def restore_agent_boundary(reason: str) -> None:
+                    rollback.restore(
+                        runtime,
+                        reason,
+                        cleanup_label="restored",
+                    )
+                    restored_state = HitlRuntimeState(self.work_dir)
+                    restored_action = restored_state.snapshot().get(
+                        "next_autoresearch_action"
+                    )
+                    restored_scope = (
+                        restored_action.get("workspace_fingerprint_scope")
+                        if isinstance(restored_action, dict)
+                        else None
+                    )
+                    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+                    restored_state.refresh_proposal_preparation_after_rollback(
+                        parent_node_sha=parent_sha,
+                        attempt_id=preparation_attempt_id,
+                        additional_agent_ordinal=ordinal,
+                        workspace_fingerprint=HitlWorkspaceWriteGuard.public_fingerprint(
+                            self.work_dir,
+                            scope=restored_scope,
+                        ),
+                    )
+
                 try:
                     result = self.additional_agent_runner(
                         agent=str(decision.get("agent", "")),
@@ -2544,28 +2571,13 @@ class HitlAutoResearchController:
                             "additional_agent_ordinal": str(ordinal),
                         },
                     )
-                    if not result.get("success"):
-                        rollback.restore(
-                            runtime,
-                            "The manager-requested additional agent failed; runtime is "
-                            "restoring the preceding approved preparation boundary.",
-                            cleanup_label="restored",
-                        )
-                        raise _ProposalPreparationRestart(
-                            str(
-                                result.get("error")
-                                or "Manager-requested agent run failed after a clean rollback."
-                            )
-                        )
-                except (HitlRunStopRequested, _ProposalPreparationRestart):
+                except HitlRunStopRequested:
                     raise
                 except Exception as exc:
                     try:
-                        rollback.restore(
-                            runtime,
+                        restore_agent_boundary(
                             "The manager-requested additional agent failed; runtime is "
-                            "restoring the preceding approved preparation boundary.",
-                            cleanup_label="restored",
+                            "restoring the preceding approved preparation boundary."
                         )
                     except Exception as restore_error:
                         raise RuntimeError(
@@ -2573,6 +2585,23 @@ class HitlAutoResearchController:
                             f"complete: {restore_error}"
                         ) from exc
                     raise _ProposalPreparationRestart(str(exc)) from exc
+                if not result.get("success"):
+                    try:
+                        restore_agent_boundary(
+                            "The manager-requested additional agent failed; runtime is "
+                            "restoring the preceding approved preparation boundary."
+                        )
+                    except Exception as restore_error:
+                        raise RuntimeError(
+                            "Additional-agent preparation failed and its rollback could not "
+                            f"complete: {restore_error}"
+                        )
+                    raise _ProposalPreparationRestart(
+                        str(
+                            result.get("error")
+                            or "Manager-requested agent run failed after a clean rollback."
+                        )
+                    )
                 return {
                     "choice": choice,
                     "decision_idea_id": record["idea_id"],
@@ -2699,6 +2728,10 @@ class HitlAutoResearchController:
         runtime = self._proposal_hitl_runtime()
         action = runtime.manager.runtime_state.snapshot().get("next_autoresearch_action")
         if not isinstance(action, dict):
+            return None
+        if action.get("kind") == "prepare_proposal":
+            # Preparation now precedes the candidate-attempt marker. Let the
+            # ordinary iteration loop re-enter that durable boundary directly.
             return None
         if action.get("kind") == "prune_frontier":
             self._run_frontier_pruning_boundary()

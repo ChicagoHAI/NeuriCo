@@ -17,7 +17,7 @@ from core.hitl_resource_finder import (
     run_resource_finder_hitl,
     validate_resource_finder_outputs,
 )
-from core.hitl_runtime_state import HitlRuntimeState
+from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
 from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
 
@@ -58,10 +58,11 @@ def _approved_saved_request(
     """Reuse only the exact, manager-approved workspace that was reviewed."""
     state = HitlRuntimeState(work_dir)
     action = state.snapshot().get("next_autoresearch_action")
+    action_status = str(action.get("status", "")) if isinstance(action, dict) else ""
     resolved_agent_action = (
         isinstance(action, dict)
         and action.get("kind") == "prepare_proposal"
-        and action.get("status") in {"decision_recorded", "resolved"}
+        and action_status in {"decision_recorded", "resolved"}
         and (
             dict(action.get("decision") or {}).get("choice") == "call_additional_agent"
             or dict(action.get("result") or {}).get("choice")
@@ -70,6 +71,8 @@ def _approved_saved_request(
     )
     pending = state.pending_worker_command()
     if not isinstance(pending, dict):
+        if resolved_agent_action and action_status == "decision_recorded":
+            return None
         if resolved_agent_action:
             raise RuntimeError(
                 "The recovered additional-agent action has no approved worker request. "
@@ -77,15 +80,46 @@ def _approved_saved_request(
             )
         return None
     response = pending.get("response")
-    matches = (
+    continuation = state.worker_continuation()
+    request_belongs_here = bool(
         pending.get("pipeline_stage") == pipeline_stage
+        and dict(pending.get("provenance") or {}) == provenance
+    )
+    if (
+        resolved_agent_action
+        and action_status == "decision_recorded"
+        and not request_belongs_here
+        and pending.get("status") == "resolved"
+    ):
+        # A newly authorized agent may replace the completed request retained
+        # for idempotence by the preceding stage.
+        return None
+    approved_plan_handoff = bool(
+        request_belongs_here
+        and pending.get("kind") == "phase_finish"
+        and pending.get("hitl_stage") == "plan"
+        and pending.get("status") == "resolved"
+        and isinstance(response, dict)
+        and response.get("status") == "approved"
+        and isinstance(continuation, dict)
+        and continuation.get("pipeline_stage") == pipeline_stage
+        and continuation.get("hitl_stage") == "execution"
+        and dict(continuation.get("provenance") or {}) == provenance
+    )
+    if resolved_agent_action and request_belongs_here and (
+        worker_command_requires_resume(pending) or approved_plan_handoff
+    ):
+        # The ordinary plan-centered stage validates the saved continuation
+        # before reconnecting a replacement worker. This helper only consumes
+        # a fully approved final workspace.
+        return None
+    matches = (
+        request_belongs_here
         and pending.get("kind") == "phase_finish"
         and pending.get("status") == "resolved"
         and pending.get("hitl_stage") in {"execution", "review"}
         and isinstance(response, dict)
         and response.get("status") == "approved"
-        and bool(response.get("final"))
-        and dict(pending.get("provenance") or {}) == provenance
     )
     if not matches:
         if resolved_agent_action:

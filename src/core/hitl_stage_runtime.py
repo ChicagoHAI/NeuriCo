@@ -86,6 +86,7 @@ def run_plan_centered_hitl_stage(
     state = HitlRuntimeState(runtime.work_dir)
     pending = state.pending_worker_command()
     pending_response = pending.get("response") if isinstance(pending, dict) else None
+    continuation = state.worker_continuation() or {}
     resume_approved_plan = bool(
         isinstance(pending, dict)
         and pending.get("kind") == "phase_finish"
@@ -93,11 +94,10 @@ def run_plan_centered_hitl_stage(
         and pending.get("status") == "resolved"
         and isinstance(pending_response, dict)
         and pending_response.get("status") == "approved"
-        and bool(pending_response.get("final"))
+        and continuation.get("hitl_stage") == "execution"
     )
     resume_pending = worker_command_requires_resume(pending) or resume_approved_plan
     if resume_pending:
-        continuation = state.worker_continuation() or {}
         saved_phase = str(continuation.get("hitl_stage", "")).strip()
         if (
             pending.get("pipeline_stage") != runtime.pipeline_stage
