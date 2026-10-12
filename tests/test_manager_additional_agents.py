@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -10,6 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from core import hitl_autoresearch as har  # noqa: E402
 from core.autoresearch import AttemptHistoryManager, CheckpointManager  # noqa: E402
 from core.hitl import HitlIdeaLog, HitlRuntime  # noqa: E402
 from core.hitl_autoresearch import (  # noqa: E402
@@ -19,9 +22,14 @@ from core.hitl_autoresearch import (  # noqa: E402
     recover_interrupted_hitl_attempt_if_needed,
 )
 from core.hitl_frontier import HitlFrontierStore  # noqa: E402
+from core.hitl_git_state import HitlGitStateStore  # noqa: E402
 from core.hitl_manager_react import HitlManager  # noqa: E402
+from core.hitl_paths import hitl_stop_request_path  # noqa: E402
 from core.hitl_runtime_state import HitlRuntimeState  # noqa: E402
-from core.hitl_stage_runtime import run_plan_centered_hitl_stage  # noqa: E402
+from core.hitl_stage_runtime import (  # noqa: E402
+    HitlStageRollback,
+    run_plan_centered_hitl_stage,
+)
 from core.hitl_workspace_guard import HitlWorkspaceWriteGuard  # noqa: E402
 from core.hitl_workspace_view import HitlWorkspaceView  # noqa: E402
 from core.hitl_whiteboard import read_hitl_current_attempt_marker  # noqa: E402
@@ -388,6 +396,9 @@ def test_additive_resource_prompt_omits_workspace_bootstrap(domain):
 
 
 def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
+    (tmp_path / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+    checkpoints = CheckpointManager(tmp_path)
+    parent_sha = checkpoints.create_checkpoint("frontier parent").sha
     decisions = iter(
         [
             {
@@ -429,6 +440,7 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
                 "workspace_fingerprint_scope": kwargs[
                     "workspace_fingerprint_scope"
                 ],
+                "proposal_base_sha": kwargs["proposal_base_sha"],
             }
             state.begin_next_autoresearch_action(action)
             decision = next(decisions)
@@ -447,6 +459,7 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
 
     controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
     controller.work_dir = tmp_path
+    controller.checkpoints = checkpoints
 
     def run_agent(**kwargs):
         runs.append(kwargs)
@@ -478,13 +491,16 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
     attempt_dir.mkdir()
 
     controller._prepare_next_proposal(
-        parent_sha="parent",
+        parent_sha=parent_sha,
         attempt_dir=attempt_dir,
         attempt_id="attempt_1",
     )
 
     assert len(begun) == 2
-    assert begun == [("parent", "attempt_1", 1), ("parent", "attempt_1", 2)]
+    assert begun == [
+        (parent_sha, "attempt_1", 1),
+        (parent_sha, "attempt_1", 2),
+    ]
     assert "Completed runs: 0" in prompts[0]
     assert "Next run ordinal: 1" in prompts[0]
     assert "Completed runs: 1" in prompts[1]
@@ -493,7 +509,7 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
     assert len(runs) == 1
     assert runs[0]["agent"] == "resource_finder"
     assert runs[0]["provenance"] == {
-        "parent_node_id": "parent",
+        "parent_node_id": parent_sha,
         "attempt_id": "attempt_1",
         "additional_agent_ordinal": "1",
     }
@@ -501,6 +517,422 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
     assert final_action["status"] == "resolved"
     assert final_action["result"]["choice"] == "proceed"
     assert final_action["workspace_fingerprint_scope"] == state.workspace_guard_scope()
+
+
+def test_candidate_failure_restores_prepared_base_without_rerunning_resource(tmp_path):
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("frontier\n", encoding="utf-8")
+    checkpoints = CheckpointManager(tmp_path)
+    parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    frontier = HitlFrontierStore(tmp_path)
+    frontier.initialize_root(
+        node_sha=parent_sha,
+        plan_text="plan\n",
+        objective_score={"results": {}},
+        reason_for_acceptance="root",
+    )
+    history = AttemptHistoryManager(
+        tmp_path / "logs" / "experiment-autoresearch", "idea"
+    )
+    attempt_dir = history.next_attempt_dir(parent_sha)
+
+    resource = tmp_path / "resources.md"
+    resource.write_text("approved resources\n", encoding="utf-8")
+    prepared_sha = checkpoints.create_checkpoint("approved proposal preparation").sha
+    state = HitlRuntimeState(tmp_path)
+    scope = state.workspace_guard_scope()
+    fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path, scope=scope)
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": parent_sha,
+            "attempt_id": attempt_dir.name,
+            "additional_agent_ordinal": 2,
+            "workspace_fingerprint": fingerprint,
+            "workspace_fingerprint_scope": scope,
+            "proposal_base_sha": prepared_sha,
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {
+            "choice": "proceed",
+            "reason": "Preparation is complete.",
+            "premise_idea_id": "I1",
+        },
+    )
+    state.complete_next_autoresearch_action(
+        "prepare_proposal",
+        {
+            "choice": "proceed",
+            "decision_idea_id": "I2",
+            "proposal_base_sha": prepared_sha,
+        },
+    )
+
+    controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    controller.checkpoints = checkpoints
+    controller.history = history
+    controller.hitl_frontier = frontier
+    controller.hitl_runtime = None
+    controller._reload_manager_after_hitl_restore = lambda: None
+
+    def fail_proposal(**_kwargs):
+        (tmp_path / "partial_candidate.txt").write_text("partial\n", encoding="utf-8")
+        raise RuntimeError("proposal failed")
+
+    controller._run_proposal_admission_loop = fail_proposal
+    result = controller.run_iteration(
+        1,
+        parent_sha,
+        proposal_base_sha=prepared_sha,
+        new_attempt_dir=attempt_dir,
+    )
+
+    assert result.child_sha is None
+    assert checkpoints.current_sha() == prepared_sha
+    assert resource.read_text(encoding="utf-8") == "approved resources\n"
+    assert not (tmp_path / "partial_candidate.txt").exists()
+    assert state.snapshot()["next_autoresearch_action"]["status"] == "resolved"
+
+    manager = _manager(tmp_path, state)
+
+    class ReuseRuntime:
+        pass
+
+    runtime = ReuseRuntime()
+    runtime.manager = manager
+    controller._proposal_hitl_runtime = lambda: runtime
+    controller.additional_agent_runner = lambda **_kwargs: pytest.fail(
+        "approved resource preparation must not run again"
+    )
+    retry_dir = history.next_attempt_dir(parent_sha)
+
+    assert (
+        controller._prepare_next_proposal(
+            parent_sha=parent_sha,
+            attempt_dir=retry_dir,
+            attempt_id=retry_dir.name,
+        )
+        == prepared_sha
+    )
+
+
+def test_crashed_candidate_recovers_to_prepared_base_not_frontier_parent(tmp_path):
+    (tmp_path / "baseline.txt").write_text("frontier\n", encoding="utf-8")
+    checkpoints = CheckpointManager(tmp_path)
+    parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    (tmp_path / "resources.md").write_text("approved resources\n", encoding="utf-8")
+    prepared_sha = checkpoints.create_checkpoint("approved proposal preparation").sha
+    frontier = HitlFrontierStore(tmp_path)
+    frontier.initialize_root(
+        node_sha=parent_sha,
+        plan_text="plan\n",
+        objective_score={"results": {}},
+        reason_for_acceptance="root",
+    )
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    frontier.configure_autoresearch_run(
+        history_root=history_root,
+        lineage_source_sha=parent_sha,
+        last_iteration=0,
+    )
+    attempt_dir = AttemptHistoryManager(history_root, "idea").next_attempt_dir(
+        parent_sha
+    )
+    state = HitlRuntimeState(tmp_path)
+    scope = state.workspace_guard_scope()
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": parent_sha,
+            "attempt_id": attempt_dir.name,
+            "additional_agent_ordinal": 2,
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path, scope=scope
+            ),
+            "workspace_fingerprint_scope": scope,
+            "proposal_base_sha": prepared_sha,
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {"choice": "proceed", "reason": "ready", "premise_idea_id": "I1"},
+    )
+    state.complete_next_autoresearch_action(
+        "prepare_proposal",
+        {"choice": "proceed", "proposal_base_sha": prepared_sha},
+    )
+    _begin_hitl_autoresearch_attempt_state(tmp_path, attempt_dir)
+    (tmp_path / "partial_candidate.txt").write_text("partial\n", encoding="utf-8")
+
+    recovered = recover_interrupted_hitl_attempt_if_needed(tmp_path)
+
+    assert recovered is not None
+    assert recovered.restored_checkpoint_sha == prepared_sha
+    assert checkpoints.current_sha() == prepared_sha
+    assert (tmp_path / "resources.md").read_text(encoding="utf-8") == (
+        "approved resources\n"
+    )
+    assert not (tmp_path / "partial_candidate.txt").exists()
+    action = state.snapshot()["next_autoresearch_action"]
+    assert action["status"] == "resolved"
+    assert action["result"]["proposal_base_sha"] == prepared_sha
+
+
+def test_later_agent_failure_preserves_earlier_preparation_and_retries_choice(tmp_path):
+    (tmp_path / "baseline.txt").write_text("frontier\n", encoding="utf-8")
+    checkpoints = CheckpointManager(tmp_path)
+    parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    history = AttemptHistoryManager(
+        tmp_path / "logs" / "experiment-autoresearch", "idea"
+    )
+    attempt_dir = history.next_attempt_dir(parent_sha)
+    state = HitlRuntimeState(tmp_path)
+    decisions = iter(
+        [
+            {
+                "choice": "call_additional_agent",
+                "agent": "resource_finder",
+                "objective": "Find the first resource.",
+                "reason": "The first evidence gap remains.",
+                "premise_idea_id": "I1",
+            },
+            {
+                "choice": "call_additional_agent",
+                "agent": "resource_finder",
+                "objective": "Find the second resource.",
+                "reason": "A second evidence gap remains.",
+                "premise_idea_id": "I2",
+            },
+            {
+                "choice": "proceed",
+                "reason": "The evidence is now sufficient.",
+                "premise_idea_id": "I3",
+            },
+        ]
+    )
+    runs = []
+
+    class ReplayManager:
+        def begin_proposal_preparation(self, _prompt, **kwargs):
+            expected = {
+                "kind": "prepare_proposal",
+                "parent_node_sha": kwargs["parent_sha"],
+                "attempt_id": kwargs["attempt_id"],
+                "additional_agent_ordinal": kwargs["additional_agent_ordinal"],
+                "workspace_fingerprint": kwargs["workspace_fingerprint"],
+                "proposal_base_sha": kwargs["proposal_base_sha"],
+            }
+            if kwargs["workspace_fingerprint_scope"] is not None:
+                expected["workspace_fingerprint_scope"] = kwargs[
+                    "workspace_fingerprint_scope"
+                ]
+            action = state.begin_next_autoresearch_action(expected)
+            if action["status"] == "pending":
+                decision = next(decisions)
+                state.record_next_autoresearch_action_decision(
+                    "prepare_proposal", decision
+                )
+            else:
+                decision = dict(action["decision"])
+            result = kwargs["on_decision"](decision)
+            current = state.snapshot()["next_autoresearch_action"]
+            if current["status"] == "decision_recorded":
+                state.complete_next_autoresearch_action("prepare_proposal", result)
+            return result
+
+    class ReplayRuntime:
+        manager = ReplayManager()
+
+        @staticmethod
+        def log_proposal_preparation_decision(**_values):
+            return {"idea_id": "decision"}
+
+        @staticmethod
+        def abandon_pending_worker_request_for_rollback(_reason):
+            pass
+
+        @staticmethod
+        def reload_manager_after_state_restore():
+            pass
+
+        @staticmethod
+        def clear_idea_tool_context():
+            pass
+
+    controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    controller.checkpoints = checkpoints
+    controller.history = history
+    controller._proposal_hitl_runtime = lambda: ReplayRuntime()
+
+    def run_agent(**kwargs):
+        ordinal = kwargs["ordinal"]
+        runs.append(ordinal)
+        logs_dir = kwargs["attempt_dir"] / f"additional_agent_{ordinal:02d}"
+        logs_dir.mkdir(exist_ok=True)
+        if ordinal == 1:
+            (tmp_path / "resource_1.txt").write_text("approved one\n", encoding="utf-8")
+        elif runs.count(2) == 1:
+            (tmp_path / "resource_2_partial.txt").write_text(
+                "failed partial\n", encoding="utf-8"
+            )
+            return {"success": False, "error": "second resource failed"}
+        else:
+            (tmp_path / "resource_2.txt").write_text("approved two\n", encoding="utf-8")
+        scope = state.workspace_guard_scope()
+        fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path, scope=scope)
+        request_key = f"resource-request-{ordinal}-{len(runs)}"
+        state.begin_worker_command(
+            {
+                "request_key": request_key,
+                "pipeline_stage": "resource_finder",
+                "hitl_stage": "review",
+                "kind": "phase_finish",
+                "provenance": kwargs["provenance"],
+                "workspace_fingerprint": fingerprint,
+                "workspace_fingerprint_scope": scope,
+            }
+        )
+        state.complete_worker_command(
+            request_key, {"status": "approved", "final": True}
+        )
+        return {"success": True, "logs_dir": str(logs_dir)}
+
+    controller.additional_agent_runner = run_agent
+
+    prepared_sha = controller._prepare_next_proposal(
+        parent_sha=parent_sha,
+        attempt_dir=attempt_dir,
+        attempt_id=attempt_dir.name,
+    )
+
+    assert runs == [1, 2, 2]
+    assert (tmp_path / "resource_1.txt").read_text(encoding="utf-8") == "approved one\n"
+    assert (tmp_path / "resource_2.txt").read_text(encoding="utf-8") == "approved two\n"
+    assert not (tmp_path / "resource_2_partial.txt").exists()
+    assert checkpoints.current_sha() == prepared_sha
+    action = state.snapshot()["next_autoresearch_action"]
+    assert action["status"] == "resolved"
+    assert action["result"]["choice"] == "proceed"
+    assert action["result"]["proposal_base_sha"] == prepared_sha
+
+
+def test_budget_exhaustion_rolls_back_unfinished_proposal_preparation(
+    tmp_path, monkeypatch
+):
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("selected frontier\n", encoding="utf-8")
+    checkpoints = CheckpointManager(tmp_path)
+    parent_sha = checkpoints.create_checkpoint("selected frontier").sha
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    history_root.mkdir(parents=True)
+    frontier = HitlFrontierStore(tmp_path)
+    frontier.initialize_root(
+        node_sha=parent_sha,
+        plan_text="Selected frontier plan",
+        objective_score={"results": {}},
+        reason_for_acceptance="root",
+    )
+    frontier.configure_autoresearch_run(
+        history_root=history_root,
+        lineage_source_sha=parent_sha,
+        last_iteration=0,
+    )
+    request_id = "budget-test"
+    stop_path = hitl_stop_request_path(tmp_path, request_id)
+    stop_path.parent.mkdir(parents=True, exist_ok=True)
+    stop_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "action": "stop",
+                "request_id": request_id,
+                "requested_at": "2026-10-12T00:00:00Z",
+                "requested_by": "budget_exhausted",
+            }
+        ),
+        encoding="utf-8",
+    )
+    import core.hitl_lock as hitl_lock
+
+    monkeypatch.setattr(
+        hitl_lock,
+        "active_hitl_workspace_run",
+        lambda _work_dir: {"pid": os.getpid(), "request_id": request_id},
+    )
+
+    state = HitlRuntimeState(tmp_path)
+    scope = state.workspace_guard_scope()
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": parent_sha,
+            "attempt_id": "attempt_1",
+            "additional_agent_ordinal": 1,
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path, scope=scope
+            ),
+            "workspace_fingerprint_scope": scope,
+            "proposal_base_sha": parent_sha,
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {
+            "choice": "call_additional_agent",
+            "agent": "resource_finder",
+            "objective": "Find a benchmark.",
+            "reason": "Evidence is missing.",
+            "premise_idea_id": "I1",
+        },
+    )
+    rollback = HitlStageRollback.capture(tmp_path, "resource preparation boundary")
+    state.record_next_autoresearch_action_recovery(
+        "prepare_proposal", rollback.descriptor()
+    )
+    provenance = {
+        "parent_node_id": parent_sha,
+        "attempt_id": "attempt_1",
+        "additional_agent_ordinal": "1",
+    }
+    state.record_worker_continuation(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "execution",
+            "actor": "resource_finder",
+            "prompt_block": "resume",
+            "provenance": provenance,
+        }
+    )
+    state.begin_worker_command(
+        {
+            "request_key": "resource-request",
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "execution",
+            "kind": "phase_finish",
+            "provenance": provenance,
+        }
+    )
+    baseline.write_text("partial resource changes\n", encoding="utf-8")
+    (tmp_path / "resources.md").write_text("partial resources\n", encoding="utf-8")
+
+    result = har.finalize_budget_exhausted_autoresearch(
+        tmp_path, request_id=request_id
+    )
+
+    assert result.restored_checkpoint_sha == parent_sha
+    assert checkpoints.current_sha() == parent_sha
+    assert baseline.read_text(encoding="utf-8") == "selected frontier\n"
+    assert not (tmp_path / "resources.md").exists()
+    assert state.snapshot()["next_autoresearch_action"] is None
+    assert state.pending_worker_command() is None
+    assert state.worker_continuation() is None
+    assert not HitlGitStateStore(tmp_path).has_snapshot(rollback.hitl_snapshot.ref)
+    stop = json.loads(stop_path.read_text(encoding="utf-8"))
+    assert stop[har._BUDGET_PREPARATION_CLEANUP_KEY]["status"] == "completed"
 
 
 def test_recovered_approval_uses_its_recorded_workspace_scope(tmp_path):

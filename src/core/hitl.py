@@ -2283,8 +2283,8 @@ class HitlRuntime:
     ) -> Dict[str, Any]:
         """Persist one manager-authored proposal-preparation decision.
 
-        Operational run ordinals intentionally stay in attempt-local log paths;
-        the idea record carries only the physical attempt provenance and the
+        Operational run ordinals intentionally stay in preparation-local log
+        paths; the idea record carries only the preparation provenance and the
         manager's semantic choice.
         """
         if choice not in {"proceed", "call_additional_agent"}:
@@ -2308,7 +2308,10 @@ class HitlRuntime:
             "level": "B",
             "actor": "manager",
             "premises": [premise],
-            "context": "Manager prepared the next proposal within the active AutoResearch attempt.",
+            "context": (
+                "Manager prepared the next proposal within the active "
+                "AutoResearch preparation session."
+            ),
             "related_artifacts": [],
             "decision_needed": (
                 "Should runtime proceed to the next proposal or run an additional agent first?"

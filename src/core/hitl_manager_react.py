@@ -2086,6 +2086,7 @@ class HitlManager:
         workspace_fingerprint: str,
         on_decision: Callable[[Dict[str, Any]], Dict[str, Any]],
         workspace_fingerprint_scope: Optional[Dict[str, Any]] = None,
+        proposal_base_sha: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Wait for and apply one proceed-or-additional-agent decision."""
         kind = "prepare_proposal"
@@ -2105,6 +2106,13 @@ class HitlManager:
             "additional_agent_ordinal": ordinal,
             "workspace_fingerprint": boundary_fingerprint,
         }
+        if proposal_base_sha is not None:
+            prepared_base = str(proposal_base_sha).strip()
+            if not prepared_base:
+                raise HitlRuntimeStateError(
+                    "Proposal preparation requires a valid prepared workspace base"
+                )
+            expected["proposal_base_sha"] = prepared_base
         if workspace_fingerprint_scope is not None:
             from core.hitl_workspace_guard import WorkspaceGuardScope
 

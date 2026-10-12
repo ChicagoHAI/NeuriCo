@@ -1,8 +1,8 @@
-"""Attempt-scoped agents available at manager-controlled preparation boundaries.
+"""Agents available inside a manager-controlled proposal-preparation session.
 
 These runs deliberately do not participate in ``PipelineState``.  They belong
-to the active AutoResearch attempt and use the ordinary plan-centered HITL
-worker lifecycle after the manager admits them.
+to the preparation session preceding an AutoResearch candidate and use the
+ordinary plan-centered HITL worker lifecycle after the manager admits them.
 """
 
 from __future__ import annotations

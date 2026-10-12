@@ -860,6 +860,41 @@ class HitlRuntimeState:
             self._state["next_autoresearch_action"] = action
             self._save_unlocked()
 
+    def record_next_autoresearch_action_recovery(
+        self,
+        kind: str,
+        recovery: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Attach one durable stage rollback descriptor to a recorded action."""
+        normalized_kind = str(kind).strip()
+        if not normalized_kind or not isinstance(recovery, dict) or not recovery:
+            raise HitlRuntimeStateError(
+                "AutoResearch action recovery requires a kind and descriptor"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if (
+                not isinstance(action, dict)
+                or action.get("kind") != normalized_kind
+                or action.get("status") not in {"decision_recorded", "resolved"}
+            ):
+                raise HitlRuntimeStateError(
+                    "No matching recorded AutoResearch action accepts recovery state"
+                )
+            existing = action.get("recovery")
+            if isinstance(existing, dict):
+                if existing == self._copy(recovery):
+                    return self._copy(action)
+                raise HitlRuntimeStateError(
+                    "AutoResearch action already has a different recovery descriptor"
+                )
+            action["recovery"] = self._copy(recovery)
+            action["updated_at"] = _now()
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(action)
+
     def clear_completed_next_autoresearch_action(self, kind: str) -> None:
         with self._locked():
             self._state = self._load_unlocked() or self._default()
@@ -872,6 +907,64 @@ class HitlRuntimeState:
                 self._state["next_autoresearch_action"] = None
                 self._save_unlocked()
 
+    def retire_proposal_preparation_for_budget(
+        self,
+        *,
+        parent_node_sha: str,
+    ) -> str:
+        """Replay-safely retire control state owned by budget-ended preparation."""
+        parent = str(parent_node_sha).strip()
+        if not parent:
+            raise HitlRuntimeStateError(
+                "Budget preparation cleanup requires a frontier parent"
+            )
+
+        def belongs_to_parent(value: Any) -> bool:
+            if not isinstance(value, dict):
+                return False
+            provenance = value.get("provenance")
+            return bool(
+                isinstance(provenance, dict)
+                and str(provenance.get("parent_node_id", "")).strip() == parent
+            )
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if isinstance(action, dict) and action:
+                if action.get("kind") != "prepare_proposal":
+                    raise HitlRuntimeStateError(
+                        "Another AutoResearch action replaced proposal preparation"
+                    )
+                if str(action.get("parent_node_sha", "")).strip() != parent:
+                    raise HitlRuntimeStateError(
+                        "Proposal preparation belongs to a different frontier node"
+                    )
+
+            request_key = ""
+            command = self._state.get("pending_worker_command")
+            if (
+                isinstance(command, dict)
+                and command.get("pipeline_stage") == "resource_finder"
+                and belongs_to_parent(command)
+            ):
+                request_key = str(command.get("request_key", "")).strip()
+                self._state["pending_worker_command"] = None
+
+            continuation = self._state.get("worker_continuation")
+            if (
+                isinstance(continuation, dict)
+                and continuation.get("pipeline_stage") == "resource_finder"
+                and continuation.get("actor") == "resource_finder"
+                and belongs_to_parent(continuation)
+            ):
+                self._state["worker_continuation"] = None
+
+            if isinstance(action, dict) and action:
+                self._state["next_autoresearch_action"] = None
+            self._save_unlocked()
+            return request_key
+
     def advance_proposal_preparation_after_agent(
         self,
         *,
@@ -883,6 +976,7 @@ class HitlRuntimeState:
         provenance: Dict[str, Any],
         agent: str,
         pipeline_stage: str,
+        proposal_base_sha: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Atomically retire one approved agent call and open the next boundary."""
         parent = str(parent_node_sha).strip()
@@ -899,6 +993,7 @@ class HitlRuntimeState:
             ).to_dict()
         agent_name = str(agent).strip()
         stage = str(pipeline_stage).strip()
+        prepared_base = str(proposal_base_sha or "").strip()
         expected_provenance = {
             str(key): str(value)
             for key, value in dict(provenance or {}).items()
@@ -986,6 +1081,8 @@ class HitlRuntimeState:
                 "status": "pending",
                 "created_at": _now(),
             }
+            if prepared_base:
+                next_action["proposal_base_sha"] = prepared_base
             if fingerprint_scope is not None:
                 next_action["workspace_fingerprint_scope"] = fingerprint_scope
             self._state["pending_worker_command"] = None
