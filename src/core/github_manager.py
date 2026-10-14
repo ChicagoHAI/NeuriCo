@@ -16,7 +16,8 @@ import subprocess
 import shlex
 from datetime import datetime
 
-from core.security import sanitize_logs_directory
+from core.agent_cli import model_slug
+from core.security import binary_files_with_secrets, sanitize_files, sanitize_logs_directory
 
 try:
     from github import Github, GithubException, Auth
@@ -136,7 +137,8 @@ class GitHubManager:
                            no_hash: bool = False,
                            hypothesis: Optional[str] = None,
                            auto_init: bool = True,
-                           exact_repo_name: Optional[str] = None) -> Dict[str, Any]:
+                           exact_repo_name: Optional[str] = None,
+                           model: Optional[str] = None) -> Dict[str, Any]:
         """
         Create a new repository in the organization for research.
 
@@ -153,6 +155,7 @@ class GitHubManager:
                 attaching an existing local workspace to the new repository.
             exact_repo_name: Reuse this exact name instead of generating one. Used
                 only when restoring a previously recorded publication destination.
+            model: Model the provider runs (optional, appended to the repo name)
 
         Returns:
             Dictionary with repo information:
@@ -171,6 +174,7 @@ class GitHubManager:
             provider=provider,
             no_hash=no_hash,
             hypothesis=hypothesis,
+            model=model,
         )
 
         # Create description (must be single line, no newlines allowed by GitHub)
@@ -347,6 +351,21 @@ class GitHubManager:
 
             # Add all files
             repo.git.add(A=True)
+
+            # Redact API key values in every staged text file, not only logs:
+            # agents can write a key into code, notes or result files.
+            staged = [f for f in repo.git.diff("--cached", "--name-only", "--diff-filter=AM", "-z").split("\0") if f]
+            redacted = sanitize_files(Path(repo_path), staged)
+            if redacted:
+                repo.git.add("--", *redacted)
+                print(f"   ✓ Redacted API keys in {len(redacted)} file(s): {', '.join(redacted[:10])}")
+            # Binary files that hold a key (core dumps carry the whole process
+            # environment) cannot be redacted; keep them out of the commit.
+            leaking = binary_files_with_secrets(Path(repo_path), staged)
+            if leaking:
+                repo.git.reset("--", *leaking)
+                print(f"   ⚠️  Excluded {len(leaking)} binary file(s) containing API keys or core dumps: "
+                      f"{', '.join(leaking[:10])}")
 
             # Unstage files exceeding GitHub's 100MB file size limit
             large_files = self._unstage_large_files(repo, repo_path)
@@ -565,7 +584,8 @@ class GitHubManager:
     def _generate_repo_name(self, title: str, domain: Optional[str], idea_id: str,
                             provider: Optional[str] = None,
                             no_hash: bool = False,
-                            hypothesis: Optional[str] = None) -> str:
+                            hypothesis: Optional[str] = None,
+                            model: Optional[str] = None) -> str:
         """
         Generate a concise repository name mechanically from the idea content.
 
@@ -582,10 +602,13 @@ class GitHubManager:
             provider: AI provider (claude, gemini, codex)
             no_hash: If True, skip the random hash suffix (single-runner ideas)
             hypothesis: Research hypothesis (fallback between title and domain)
+            model: Model the provider runs; appended after the provider when given
 
         Returns:
             Repository name:
             - Default: {slug}-{random}-{provider} (e.g., "llm-theory-of-mind-a3f2-claude")
+            - With model: {slug}-{random}-{provider}-{model}
+              (e.g., "llm-theory-of-mind-a3f2-claude-opus-5-5")
             - With no_hash: {slug}-{provider} (e.g., "llm-theory-of-mind-claude")
             - Without provider: {slug}-{random} (e.g., "llm-theory-of-mind-a3f2")
         """
@@ -598,6 +621,12 @@ class GitHubManager:
             return self._sanitize_repo_name(idea_id)
 
         random_suffix = secrets.token_hex(2)  # 4 hex chars for run uniqueness
+        if provider and model:
+            # The last provider word decides whose prefix the model label drops,
+            # so "zeroshot-claude" + "claude-opus-5-5" -> "zeroshot-claude-opus-5-5".
+            label = model_slug(provider.rsplit("-", 1)[-1], model)
+            if label:
+                provider = f"{provider}-{label}"
         if provider:
             repo_name = f"{slug}-{provider}" if no_hash else f"{slug}-{random_suffix}-{provider}"
         else:

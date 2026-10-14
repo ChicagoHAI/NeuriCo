@@ -42,7 +42,18 @@ def find_papers(query: str, mode: str = "fast", url: str = "http://localhost:800
                 "fallback": True,
                 "message": "Proceeding with manual search (arXiv, Semantic Scholar, Papers with Code)"
             }
-        return {"error": str(e), "fallback": True}
+        result = {"error": str(e), "fallback": True}
+        # The service explains failures (e.g. an exhausted API key) in the body.
+        response = getattr(e, "response", None)
+        if response is not None:
+            try:
+                detail = response.json().get("error") or response.text
+            except Exception:
+                detail = response.text
+            if detail:
+                result["detail"] = str(detail)[:500]
+                result["message"] = "Proceeding with manual search (arXiv, Semantic Scholar, Papers with Code)"
+        return result
 
     # Format results
     docs = data.get('doc_collection', {}).get('documents', [])

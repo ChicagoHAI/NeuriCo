@@ -393,7 +393,7 @@ class IdeaManager:
         """
         Generate a unique ID for an idea.
 
-        Uses a combination of timestamp and title hash for uniqueness.
+        Uses a combination of timestamp and a salted title hash for uniqueness.
 
         Args:
             idea_spec: Idea specification
@@ -404,8 +404,12 @@ class IdeaManager:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         title = idea_spec.get('idea', {}).get('title', 'untitled')
 
-        # Create a short hash of the title
-        title_hash = hashlib.md5(title.encode()).hexdigest()[:8]
+        # Short hash of the title plus a random salt: the same idea submitted
+        # twice in one second (concurrent runs with different providers) must
+        # not share an ID, or the second submission overwrites the first one's
+        # metadata and both runs end up in one workspace.
+        salt = os.urandom(8).hex()
+        title_hash = hashlib.md5(f"{title}{salt}".encode()).hexdigest()[:8]
 
         # Sanitize title for use in ID
         safe_title = title.lower()

@@ -256,6 +256,12 @@ def run_paper_writer(
         elif provider == "gemini":
             cmd += " --yolo --skip-trust"
 
+    from core.agent_cli import agent_model_flag
+
+    model_flag = agent_model_flag(provider)
+    if model_flag:
+        cmd += f" {model_flag}"
+
     # Add streaming JSON output flags for detailed logging
     if provider == "claude":
         cmd += " --verbose --output-format stream-json"

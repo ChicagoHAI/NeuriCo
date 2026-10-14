@@ -39,6 +39,7 @@ from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.config_loader import ConfigLoader
 from core.local_resources import stage_local_resources
 from core.agent_cli import (
+    MODEL_ENV_VAR,
     build_agent_command,
     build_agent_environment,
     provider_workspace_root,
@@ -621,6 +622,7 @@ class ResearchRunner:
                         provider=provider,
                         no_hash=no_hash,
                         hypothesis=idea_spec.get("hypothesis", ""),
+                        model=os.environ.get(MODEL_ENV_VAR),
                     )
 
                     github_url = repo_info["repo_url"]
@@ -1743,6 +1745,12 @@ def main():
         help="AI provider to use (default: claude)",
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help="Model for the provider CLI (e.g. claude-opus-5-5, gpt-5.6-sol). "
+        "Applies to every agent stage; default: the provider CLI's own default.",
+    )
+    parser.add_argument(
         "--compute-backend",
         default="local",
         choices=["local", "dsi-slurm", "modal"],
@@ -1754,7 +1762,7 @@ def main():
         help="Skip random hash in repo name if creating a new repo (use {slug}-{provider} instead of {slug}-{hash}-{provider})",
     )
     parser.add_argument(
-        "--timeout", type=int, default=3600, help="Timeout in seconds (default: 3600)"
+        "--timeout", type=int, default=3600, help="Timeout in seconds (default: 3600; 0 = no limit)"
     )
     parser.add_argument(
         "--no-github", action="store_true", help="Disable GitHub integration (run locally only)"
@@ -1792,7 +1800,7 @@ def main():
         "--resource-finder-timeout",
         type=int,
         default=2700,
-        help="Timeout for resource finder in seconds (default: 2700 = 45 min)",
+        help="Timeout for resource finder in seconds (default: 2700 = 45 min; 0 = no limit)",
     )
     parser.add_argument(
         "--use-scribe",
@@ -1815,7 +1823,7 @@ def main():
         "--paper-timeout",
         type=int,
         default=3600,
-        help="Timeout for paper writing in seconds (default: 3600 = 60 min)",
+        help="Timeout for paper writing in seconds (default: 3600 = 60 min; 0 = no limit)",
     )
     parser.add_argument(
         "--force-fresh",
@@ -1958,6 +1966,14 @@ def main():
     ]
     if len(autoresearch_modes) > 1:
         parser.error("Choose at most one AutoResearch entry mode: " + ", ".join(autoresearch_modes))
+    # A timeout of 0 disables that stage's wall-clock limit.
+    for name in ("timeout", "resource_finder_timeout", "paper_timeout"):
+        if getattr(args, name) is not None and getattr(args, name) <= 0:
+            setattr(args, name, None)
+    if args.model:
+        # Every stage builds its provider command from this run-wide override.
+        os.environ[MODEL_ENV_VAR] = args.model
+        print(f"   Model: {args.model}")
     runner = ResearchRunner(use_github=not args.no_github, github_org=args.github_org)
 
     # Handle comment mode separately

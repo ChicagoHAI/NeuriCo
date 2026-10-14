@@ -38,3 +38,12 @@ def test_max_directions_rejects_invalid_values(tmp_path):
         result = manager.validate_idea(_idea(value))
         assert result["valid"] is False
         assert any("max_directions" in error for error in result["errors"])
+
+
+def test_same_idea_submitted_in_the_same_second_gets_distinct_ids(tmp_path):
+    from core.idea_manager import IdeaManager
+
+    manager = IdeaManager(tmp_path)
+    spec = {"idea": {"title": "Same idea", "domain": "artificial_intelligence", "hypothesis": "h"}}
+    ids = {manager._generate_idea_id(spec) for _ in range(50)}
+    assert len(ids) == 50

@@ -1,0 +1,17 @@
+# =============================================================================
+# Local overlay image: the published NeuriCo image plus this checkout's source.
+#
+# Use this when src/, baseline/ or paper-finder's LLM layer has local changes
+# that are not in the registry image yet. It reuses every dependency layer of
+# the published image, so it builds in seconds (a full `./neurico build` reinstalls everything).
+#
+#   scripts/build_local_image.sh
+# =============================================================================
+ARG BASE_IMAGE=ghcr.io/chicagohai/neurico:latest
+FROM ${BASE_IMAGE}
+
+COPY --chown=neurico:neurico src /app/src
+COPY --chown=neurico:neurico baseline /app/baseline
+COPY --chown=neurico:neurico docker/entrypoint.sh /app/docker/entrypoint.sh
+# paper-finder is an editable install, so the service imports these files directly
+COPY --chown=neurico:neurico services/paper-finder/libs/chain/ai2i/chain /app/services/paper-finder/libs/chain/ai2i/chain
