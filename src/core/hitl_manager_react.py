@@ -1921,6 +1921,7 @@ class HitlManager:
                 "Error: call_additional_agent is available only while preparing a proposal."
             )
         try:
+            self._require_proposal_preparation_workspace(action)
             self.runtime_state.record_next_autoresearch_action_decision(
                 "prepare_proposal",
                 {
@@ -1961,6 +1962,7 @@ class HitlManager:
         ):
             return "Error: proceed_to_proposal is available only while preparing a proposal."
         try:
+            self._require_proposal_preparation_workspace(action)
             self.runtime_state.record_next_autoresearch_action_decision(
                 "prepare_proposal",
                 {
@@ -1988,6 +1990,24 @@ class HitlManager:
             "Error: premise_idea_id must identify a finalized HITL idea. "
             "Call hitl-view-ideas and retry."
         )
+
+    def _require_proposal_preparation_workspace(
+        self,
+        action: Dict[str, Any],
+    ) -> None:
+        """Validate the live workspace before recording a preparation choice."""
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        approved = str(action.get("workspace_fingerprint", "")).strip()
+        observed = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=action.get("workspace_fingerprint_scope"),
+        )
+        if not approved or observed != approved:
+            raise RuntimeError(
+                "The proposal-preparation workspace differs from its recorded "
+                "boundary. The whole attempt must roll back."
+            )
 
     def _validate_frontier_choice(self, kind: str, node_sha: str) -> List[str]:
         from core.hitl_frontier import HitlFrontierStore
@@ -2125,37 +2145,6 @@ class HitlManager:
                 "Proposal preparation belongs to another physical AutoResearch attempt"
             )
 
-        def require_boundary_workspace(current: Dict[str, Any]) -> None:
-            from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
-
-            approved = str(current.get("workspace_fingerprint", "")).strip()
-            observed = HitlWorkspaceWriteGuard.public_fingerprint(
-                self.work_dir,
-                scope=current.get("workspace_fingerprint_scope"),
-            )
-            if not approved or observed != approved:
-                raise RuntimeError(
-                    "The proposal-preparation workspace differs from its recorded "
-                    "boundary. The whole attempt must roll back."
-                )
-
-        def has_matching_agent_request(decision: Dict[str, Any]) -> bool:
-            pending = self.runtime_state.pending_worker_command()
-            provenance = (
-                dict(pending.get("provenance") or {})
-                if isinstance(pending, dict)
-                else {}
-            )
-            return bool(
-                decision.get("choice") == "call_additional_agent"
-                and decision.get("agent") == "resource_finder"
-                and isinstance(pending, dict)
-                and pending.get("pipeline_stage") == "resource_finder"
-                and pending.get("status") in {"pending", "resolved"}
-                and str(provenance.get("parent_node_id", "")).strip() == parent
-                and str(provenance.get("attempt_id", "")).strip() == attempt
-            )
-
         def complete_recorded() -> Dict[str, Any]:
             current = self.runtime_state.snapshot().get("next_autoresearch_action")
             decision = current.get("decision") if isinstance(current, dict) else None
@@ -2163,8 +2152,8 @@ class HitlManager:
                 raise HitlRuntimeStateError(
                     "Proposal preparation is missing its manager decision"
                 )
-            if not has_matching_agent_request(decision):
-                require_boundary_workspace(current)
+            if decision.get("choice") != "call_additional_agent":
+                self._require_proposal_preparation_workspace(current)
             result = on_decision(dict(decision))
             self.runtime_state.complete_next_autoresearch_action(kind, result)
             return result
@@ -2181,7 +2170,7 @@ class HitlManager:
                 # workspace recovery check runs before this action is discarded.
                 result = on_decision(dict(decision))
             else:
-                require_boundary_workspace(current)
+                self._require_proposal_preparation_workspace(current)
             return result
 
         if action.get("status") == "resolved":
@@ -2189,7 +2178,7 @@ class HitlManager:
         if action.get("status") == "decision_recorded":
             return complete_recorded()
 
-        require_boundary_workspace(action)
+        self._require_proposal_preparation_workspace(action)
         self.notify_runtime(prompt, runtime_action_kind=kind)
         while True:
             from core.hitl_run_control import raise_if_hitl_run_stop_requested

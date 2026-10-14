@@ -117,6 +117,36 @@ def test_manager_records_agent_type_without_an_invocation_identity(tmp_path):
     assert "invocation_id" not in decision
 
 
+def test_manager_refuses_agent_decision_after_preparation_workspace_changes(tmp_path):
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("approved boundary\n", encoding="utf-8")
+    state = HitlRuntimeState(tmp_path)
+    manager = _manager(tmp_path, state)
+    manager._proposal_preparation_premise_error = lambda _premise: ""
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": "parent",
+            "attempt_id": "attempt_1",
+            "additional_agent_ordinal": 1,
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path
+            ),
+        }
+    )
+    artifact.write_text("unverified workspace\n", encoding="utf-8")
+
+    response = manager.call_additional_agent(
+        "resource_finder", "Find a benchmark.", "Evidence is missing.", "I1"
+    )
+
+    assert response.startswith("Error:")
+    assert "differs from its recorded boundary" in response
+    action = state.snapshot()["next_autoresearch_action"]
+    assert action["status"] == "pending"
+    assert "decision" not in action
+
+
 def test_proceed_decision_cannot_borrow_an_unrelated_agent_request(tmp_path):
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("approved boundary\n", encoding="utf-8")
@@ -730,12 +760,13 @@ def test_later_agent_failure_preserves_earlier_preparation_and_retries_choice(tm
                     "workspace_fingerprint_scope"
                 ]
             action = state.begin_next_autoresearch_action(expected)
-            assert action["workspace_fingerprint"] == (
-                HitlWorkspaceWriteGuard.public_fingerprint(
-                    tmp_path,
-                    scope=action.get("workspace_fingerprint_scope"),
+            if action["status"] == "pending":
+                assert action["workspace_fingerprint"] == (
+                    HitlWorkspaceWriteGuard.public_fingerprint(
+                        tmp_path,
+                        scope=action.get("workspace_fingerprint_scope"),
+                    )
                 )
-            )
             if action["status"] == "pending":
                 decision = next(decisions)
                 state.record_next_autoresearch_action_decision(
@@ -822,6 +853,86 @@ def test_later_agent_failure_preserves_earlier_preparation_and_retries_choice(tm
     assert action["status"] == "resolved"
     assert action["result"]["choice"] == "proceed"
     assert action["result"]["proposal_base_sha"] == prepared_sha
+
+
+def test_restored_agent_boundary_relaunches_recorded_decision_without_refresh(
+    tmp_path,
+):
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("frontier\n", encoding="utf-8")
+    checkpoints = CheckpointManager(tmp_path)
+    parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    state = HitlRuntimeState(tmp_path)
+    fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path)
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": parent_sha,
+            "attempt_id": "attempt_1",
+            "additional_agent_ordinal": 1,
+            "workspace_fingerprint": fingerprint,
+            "proposal_base_sha": parent_sha,
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {
+            "choice": "call_additional_agent",
+            "agent": "resource_finder",
+            "objective": "Find supporting evidence.",
+            "reason": "Evidence is missing.",
+            "premise_idea_id": "I1",
+        },
+    )
+    rollback = HitlStageRollback.capture(tmp_path, "resource preparation boundary")
+    state.record_next_autoresearch_action_recovery(
+        "prepare_proposal", rollback.descriptor()
+    )
+    baseline.write_text("partial worker output\n", encoding="utf-8")
+
+    class Runtime:
+        @staticmethod
+        def abandon_pending_worker_request_for_rollback(_reason):
+            pass
+
+        @staticmethod
+        def reload_manager_after_state_restore():
+            pass
+
+        @staticmethod
+        def clear_idea_tool_context():
+            pass
+
+    # This is the exact interruption boundary from the review: public and
+    # private state are restored and the rollback ref is already discarded.
+    rollback.restore(Runtime(), "worker failed", cleanup_label="restored")
+    restored_action = state.snapshot()["next_autoresearch_action"]
+    assert restored_action["status"] == "decision_recorded"
+    assert "recovery" not in restored_action
+    assert not HitlGitStateStore(tmp_path).has_snapshot(rollback.hitl_snapshot.ref)
+    assert restored_action["workspace_fingerprint"] != (
+        HitlWorkspaceWriteGuard.public_fingerprint(tmp_path)
+    )
+
+    replayed = []
+    manager = _manager(tmp_path, state)
+    manager.notify_runtime = lambda *_args, **_kwargs: pytest.fail(
+        "recorded decision asked the manager again"
+    )
+    result = manager.begin_proposal_preparation(
+        "prepare",
+        parent_sha=parent_sha,
+        attempt_id="attempt_1",
+        additional_agent_ordinal=1,
+        workspace_fingerprint=fingerprint,
+        proposal_base_sha=parent_sha,
+        on_decision=lambda decision: replayed.append(decision)
+        or {"choice": "call_additional_agent", "agent": "resource_finder"},
+    )
+
+    assert replayed == [restored_action["decision"]]
+    assert result["choice"] == "call_additional_agent"
+    assert state.snapshot()["next_autoresearch_action"]["status"] == "resolved"
 
 
 def test_budget_exhaustion_rolls_back_unfinished_proposal_preparation(

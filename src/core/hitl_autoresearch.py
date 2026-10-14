@@ -2523,6 +2523,11 @@ class HitlAutoResearchController:
                 if isinstance(recovery, dict):
                     rollback = HitlStageRollback.from_descriptor(self.work_dir, recovery)
                 else:
+                    if self.checkpoints.current_sha() != proposal_base_sha:
+                        raise RuntimeError(
+                            "The admitted additional agent is not at its prepared "
+                            "workspace checkpoint."
+                        )
                     rollback = HitlStageRollback.capture(
                         self.work_dir,
                         "HITL AutoResearch additional-agent preparation boundary",
@@ -2538,26 +2543,6 @@ class HitlAutoResearchController:
                         runtime,
                         reason,
                         cleanup_label="restored",
-                    )
-                    restored_state = HitlRuntimeState(self.work_dir)
-                    restored_action = restored_state.snapshot().get(
-                        "next_autoresearch_action"
-                    )
-                    restored_scope = (
-                        restored_action.get("workspace_fingerprint_scope")
-                        if isinstance(restored_action, dict)
-                        else None
-                    )
-                    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
-
-                    restored_state.refresh_proposal_preparation_after_rollback(
-                        parent_node_sha=parent_sha,
-                        attempt_id=preparation_attempt_id,
-                        additional_agent_ordinal=ordinal,
-                        workspace_fingerprint=HitlWorkspaceWriteGuard.public_fingerprint(
-                            self.work_dir,
-                            scope=restored_scope,
-                        ),
                     )
 
                 try:
