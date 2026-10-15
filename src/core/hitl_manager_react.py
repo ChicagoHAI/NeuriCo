@@ -277,6 +277,28 @@ class HitlManagerToolExecutor:
         return self.manager.finalize_worker_request(dict(payload))
 
 
+def hitl_manager_backend(provider: str, manager_config: Dict[str, Any]) -> Any:
+    """Build a fresh LLM backend for the HITL manager's provider and model."""
+    from interactive.llm_backend import LLMBackend
+
+    provider = str(provider or "claude").strip().lower()
+    if provider == "claude":
+        return LLMBackend(
+            backend="cli",
+            model=manager_config.get("hitl_manager_llm_model")
+            or manager_config.get("llm_model")
+            or None,
+        )
+    if provider != "codex":
+        raise ValueError("HITL manager provider must be codex or claude.")
+    return LLMBackend(
+        backend="codex_cli",
+        model=manager_config.get("hitl_manager_llm_model")
+        or manager_config.get("codex_model")
+        or None,
+    )
+
+
 class HitlManager:
     """One long-running, queued ReAct manager for an HITL workspace."""
 
@@ -363,24 +385,7 @@ class HitlManager:
             register(self.submit_resolution_reply)
 
     def _backend_for_provider(self, provider: str) -> Any:
-        from interactive.llm_backend import LLMBackend
-
-        provider = str(provider or "claude").strip().lower()
-        if provider == "claude":
-            return LLMBackend(
-                backend="cli",
-                model=self._manager_config.get("hitl_manager_llm_model")
-                or self._manager_config.get("llm_model")
-                or None,
-            )
-        if provider != "codex":
-            raise ValueError("HITL manager provider must be codex or claude.")
-        return LLMBackend(
-            backend="codex_cli",
-            model=self._manager_config.get("hitl_manager_llm_model")
-            or self._manager_config.get("codex_model")
-            or None,
-        )
+        return hitl_manager_backend(provider, self._manager_config)
 
     def set_provider(self, provider: str) -> None:
         provider = str(provider or "").strip().lower()
