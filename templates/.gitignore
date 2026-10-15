@@ -133,3 +133,7 @@ Thumbs.db
 # Logs
 # -----------------------------------------------------------------------------
 *.log
+
+# Core dumps (a crashed process writes its memory, including API keys, here)
+core
+core.[0-9]*

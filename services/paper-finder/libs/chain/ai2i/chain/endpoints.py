@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -22,6 +23,8 @@ import httpx
 from google.genai import Client
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import BaseMessage
+from langchain_core.prompt_values import PromptValue
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.runnables.config import get_config_list
 from langchain_core.runnables.utils import gather_with_concurrency
@@ -33,10 +36,13 @@ from tenacity import (
     RetryError,
     after_log,
     retry,
+    retry_if_exception,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_random_exponential,
 )
 from tenacity.asyncio.retry import RetryBaseT as AsyncRetryBaseT
+from tenacity.asyncio.retry import retry_all as async_retry_all
 from tenacity.retry import RetryBaseT
 from tenacity.stop import StopBaseT
 from tenacity.wait import WaitBaseT
@@ -131,10 +137,12 @@ class LangChainModelFactory(Protocol):
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER = "OpenRouter"
+OPENAI = "OpenAI"
 
 
 def _openrouter_key_from_env() -> str | None:
-    return os.environ.get("OPENROUTER_KEY") or os.environ.get("OPENROUTER_API_KEY")
+    return os.environ.get("OPENROUTER_KEY") or os.environ.get("OPENROUTER_API_KEY") or None
 
 
 def _openrouter_model_name(name: str) -> str:
@@ -145,29 +153,154 @@ def _openrouter_model_name(name: str) -> str:
     return f"openai/{re.sub(r'-\d{4}-\d{2}-\d{2}$', '', name)}"
 
 
-def _openai_chat_factory(model: LLMModel, timeout: MaboolTimeout, api_key: SecretStr | None = None) -> BaseChatModel:
-    params = openai_model_params(model.params)
+def _openai_model_name(name: str) -> str:
+    # The reverse mapping: direct OpenAI takes the bare ID ("openai/gpt-4.1" becomes "gpt-4.1").
+    return name.removeprefix("openai/")
 
-    # Route "openai" family models through OpenRouter when its key is
-    # configured, so paper-finder works without a direct OpenAI key.
+
+def _openai_chat_providers(
+    model: LLMModel, timeout: MaboolTimeout, api_key: SecretStr | None = None
+) -> list[tuple[str, BaseChatModel]]:
+    # "openai" family models go through OpenRouter first when its key is
+    # configured, then through direct OpenAI when that key is configured.
+    params = openai_model_params(model.params)
+    providers: list[tuple[str, BaseChatModel]] = []
+
     openrouter_key = _openrouter_key_from_env()
     if openrouter_key is not None:
-        return ChatOpenAI(
-            api_key=SecretStr(openrouter_key),
-            base_url=OPENROUTER_BASE_URL,
-            model=_openrouter_model_name(model.name),
-            model_kwargs={"response_format": {"type": "json_object"}},
-            timeout=timeout.httpx_timeout,
-            **params,
+        providers.append(
+            (
+                OPENROUTER,
+                ChatOpenAI(
+                    api_key=SecretStr(openrouter_key),
+                    base_url=OPENROUTER_BASE_URL,
+                    model=_openrouter_model_name(model.name),
+                    model_kwargs={"response_format": {"type": "json_object"}},
+                    timeout=timeout.httpx_timeout,
+                    **params,
+                ),
+            )
         )
 
-    return ChatOpenAI(
-        api_key=api_key,
-        model=model.name,
-        model_kwargs={"response_format": {"type": "json_object"}},
-        timeout=timeout.httpx_timeout,
-        **params,
-    )
+    if api_key is not None or os.environ.get("OPENAI_API_KEY") or not providers:
+        providers.append(
+            (
+                OPENAI,
+                ChatOpenAI(
+                    api_key=api_key,
+                    model=_openai_model_name(model.name),
+                    model_kwargs={"response_format": {"type": "json_object"}},
+                    timeout=timeout.httpx_timeout,
+                    **params,
+                ),
+            )
+        )
+
+    return providers
+
+
+def _openai_chat_factory(model: LLMModel, timeout: MaboolTimeout, api_key: SecretStr | None = None) -> BaseChatModel:
+    return _openai_chat_providers(model, timeout, api_key)[0][1]
+
+
+# How long a provider is skipped after it failed with a key-level error.
+PROVIDER_COOLDOWN_SECONDS = 600.0
+
+_KEY_ERROR_REASONS = {
+    401: "invalid API key",
+    402: "insufficient credits",
+    403: "key limit exceeded or permission denied",
+}
+
+# provider name -> (monotonic time until which it is skipped, why it was marked down)
+_providers_down: dict[str, tuple[float, str]] = {}
+
+
+class LLMProvidersUnavailableError(RuntimeError):
+    """Every configured LLM provider failed for credential, budget or quota reasons."""
+
+
+def _provider_error(error: BaseException) -> BaseException:
+    # The per-provider retries wrap the last error in a RetryError once they are used up.
+    if isinstance(error, RetryError):
+        return error.last_attempt.exception() or error
+    return error
+
+
+def _is_key_error(error: BaseException) -> bool:
+    # Errors about the key itself; retrying the same provider cannot fix them.
+    status = getattr(error, "status_code", None)
+    return status in _KEY_ERROR_REASONS or (status == 429 and getattr(error, "code", None) == "insufficient_quota")
+
+
+def _should_fall_back(error: BaseException) -> bool:
+    return _is_key_error(error) or getattr(error, "status_code", None) == 429
+
+
+def _describe_provider_error(error: BaseException) -> str:
+    # Short and free of key material: a fixed reason plus the first clause of the provider's message.
+    status = getattr(error, "status_code", None)
+    reason = _KEY_ERROR_REASONS.get(status, "rate limit or quota exhausted")
+    body = getattr(error, "body", None)
+    message = body.get("message") if isinstance(body, dict) else None
+    detail = re.split(r"[.:]\s|[.:]$|https?://|sk-", message)[0].strip()[:80] if isinstance(message, str) else ""
+    return f"{reason} ({status} {type(error).__name__}{': ' + detail if detail else ''})"
+
+
+def _without_key_error_retries(retry_settings: TenacityRetrySettings) -> TenacityRetrySettings:
+    retry_on = retry_settings.get("retry", retry_if_exception_type())
+    return {**retry_settings, "retry": async_retry_all(retry_on, retry_if_exception(lambda e: not _is_key_error(e)))}
+
+
+class ProviderFallback(Runnable[PromptValue, BaseMessage]):
+    """Try each provider in order, moving on when one fails for a reason its own retries cannot fix."""
+
+    _providers: list[tuple[str, ModelRunnable]]
+    _logger: logging.Logger
+
+    def __init__(self, providers: list[tuple[str, ModelRunnable]], logger: logging.Logger | None = None) -> None:
+        self._providers = providers
+        self._logger = logger if logger is not None else default_logger
+        super().__init__()
+
+    async def ainvoke(self, input: PromptValue, config: RunnableConfig | None = None, **kwargs: Any) -> BaseMessage:
+        failures: list[str] = []
+        for i, (name, model) in enumerate(self._providers):
+            down_until, down_reason = _providers_down.get(name, (0.0, ""))
+            if time.monotonic() < down_until:
+                failures.append(f"{name}: {down_reason} (not retried, marked down)")
+                continue
+
+            try:
+                result = await model.ainvoke(input, config, **kwargs)
+            except Exception as e:
+                error = _provider_error(e)
+                if not _should_fall_back(error):
+                    raise
+                description = _describe_provider_error(error)
+                failures.append(f"{name}: {description}")
+                fallback = f", falling back to {self._providers[i + 1][0]}" if i + 1 < len(self._providers) else ""
+                if not _is_key_error(error):
+                    self._logger.warning(f"LLM provider {name} failed with {type(error).__name__}{fallback}")
+                else:
+                    # calls already in flight fail too; only the first one logs
+                    if _providers_down.get(name, (0.0, ""))[0] <= time.monotonic():
+                        self._logger.warning(
+                            f"LLM provider {name} failed with {type(error).__name__},"
+                            f" marked down for {PROVIDER_COOLDOWN_SECONDS:.0f}s{fallback}"
+                        )
+                    _providers_down[name] = (time.monotonic() + PROVIDER_COOLDOWN_SECONDS, description)
+                continue
+
+            _providers_down.pop(name, None)
+            return result
+
+        raise LLMProvidersUnavailableError(
+            "All LLM providers failed; this is a credentials or budget problem, not a bug. " + "; ".join(failures)
+        )
+
+    def invoke(self, input: PromptValue, config: RunnableConfig | None = None, **kwargs: Any) -> BaseMessage:
+        raise NotImplementedError(f"No support for blocking calls in {self.__class__.__name__}")
 
 
 def _anthropic_chat_factory(model: LLMModel, timeout: MaboolTimeout, api_key: SecretStr | None = None) -> BaseChatModel:
@@ -361,6 +494,15 @@ class LLMEndpoint:
 
     def execute(self, computation: ChainComputation[IN, OUT]) -> Execution[IN, OUT]:
         def model_factory() -> ModelRunnable:
+            if self.model_factory is _openai_chat_factory:
+                providers = _openai_chat_providers(self.default_model, self.default_timeout, self.api_key)
+                if len(providers) > 1:
+                    # retries stay per provider; key-level errors skip them and fall back right away
+                    retry_settings = _without_key_error_retries(self.default_retry_settings)
+                    return ProviderFallback(
+                        [(name, RetryWithTenacity(model, retry_settings)) for name, model in providers]
+                    )
+
             model = self.model_factory(self.default_model, self.default_timeout, self.api_key)
             # decorate with retries
             return RetryWithTenacity(model, self.default_retry_settings)
