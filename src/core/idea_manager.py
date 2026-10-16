@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import yaml
-import json
-import hashlib
+from uuid import uuid4
 import sys
 import os
 
@@ -97,6 +96,8 @@ class IdeaManager:
 
         Raises:
             ValueError: If validation fails
+            FileExistsError: If the generated ID is already reserved or stored
+            OSError: If the submission cannot be saved
         """
         if validate:
             validation_result = self.validate_idea(idea_spec)
@@ -115,19 +116,57 @@ class IdeaManager:
         idea_spec['idea']['metadata']['created_at'] = datetime.now().isoformat()
         idea_spec['idea']['metadata']['status'] = 'submitted'
 
-        # Save to submitted directory
+        # Serialize before creating files so serialization errors cannot leave
+        # a partial record. A successful submission owns its ID permanently,
+        # including after its YAML moves to another status directory.
+        yaml_text = yaml.dump(idea_spec, default_flow_style=False, sort_keys=False)
+        host_paths = collect_host_paths(idea_spec.get("idea", {}))
         idea_path = self.submitted_dir / f"{idea_id}.yaml"
-        with open(idea_path, 'w', encoding='utf-8') as f:
-            yaml.dump(idea_spec, f, default_flow_style=False, sort_keys=False)
+        mounts_dir = self.ideas_dir / "mounts"
+        mounts_path = mounts_dir / f"{idea_id}.txt"
+        reservations_dir = self.ideas_dir / ".ids"
+        reservations_dir.mkdir(parents=True, exist_ok=True)
+        reservation_path = reservations_dir / idea_id
+
+        created_paths = []
+        try:
+            # Exclusive creation arbitrates between processes on both Windows
+            # and POSIX. Keep this empty marker after success; a transient lock
+            # would allow an ID to be reissued after its YAML has moved.
+            with open(reservation_path, "x", encoding="utf-8"):
+                created_paths.append(reservation_path)
+
+            # Older records predate reservations. A sidecar alone also occupies
+            # the ID, even when this new submission has no local resources.
+            existing_paths = [
+                directory / f"{idea_id}.yaml"
+                for directory in (self.submitted_dir, self.in_progress_dir, self.completed_dir)
+            ]
+            if any(os.path.lexists(path) for path in [*existing_paths, mounts_path]):
+                raise FileExistsError(f"Idea ID already exists: {idea_id}")
+
+            # Write the mount manifest before exposing the idea to callers.
+            # Exclusive creation remains necessary after the occupancy check:
+            # checking first and then opening with 'w' would still overwrite.
+            artifacts = []
+            if host_paths:
+                mounts_dir.mkdir(parents=True, exist_ok=True)
+                artifacts.append((mounts_path, "\n".join(host_paths) + "\n"))
+            artifacts.append((idea_path, yaml_text))
+            for path, content in artifacts:
+                with open(path, "x", encoding="utf-8") as f:
+                    created_paths.append(path)
+                    f.write(content)
+        except BaseException:
+            # A failed exclusive open never grants ownership. Close files
+            # before unlinking (required on Windows), and release the ID last.
+            for path in reversed(created_paths):
+                path.unlink()
+            raise
 
         # Sidecar for docker/run.sh: host paths this idea depends on, one per
         # line, so cmd_run can mount them (bash cannot parse the idea YAML)
-        host_paths = collect_host_paths(idea_spec.get('idea', {}))
         if host_paths:
-            mounts_dir = self.ideas_dir / "mounts"
-            mounts_dir.mkdir(parents=True, exist_ok=True)
-            (mounts_dir / f"{idea_id}.txt").write_text(
-                "\n".join(host_paths) + "\n", encoding='utf-8')
             print(f"  Local paths recorded for docker mounts: {len(host_paths)}")
 
         print(f"✓ Idea submitted successfully: {idea_id}")
@@ -393,7 +432,8 @@ class IdeaManager:
         """
         Generate a unique ID for an idea.
 
-        Uses a combination of timestamp and title hash for uniqueness.
+        Uses a readable title/timestamp prefix and a random UUID. The timestamp
+        is descriptive only; submit_idea exclusively reserves the generated ID.
 
         Args:
             idea_spec: Idea specification
@@ -402,18 +442,14 @@ class IdeaManager:
             Unique idea ID string
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        title = idea_spec.get('idea', {}).get('title', 'untitled')
-
-        # Create a short hash of the title
-        title_hash = hashlib.md5(title.encode()).hexdigest()[:8]
+        title = idea_spec.get("idea", {}).get("title", "untitled")
 
         # Sanitize title for use in ID
         safe_title = title.lower()
-        safe_title = ''.join(c if c.isalnum() or c.isspace() else '_'
-                            for c in safe_title)
-        safe_title = '_'.join(safe_title.split())[:30]  # Max 30 chars
+        safe_title = "".join(c if c.isalnum() or c.isspace() else "_" for c in safe_title)
+        safe_title = "_".join(safe_title.split())[:30]  # Max 30 chars
 
-        idea_id = f"{safe_title}_{timestamp}_{title_hash}"
+        idea_id = f"{safe_title}_{timestamp}_{uuid4().hex}"
 
         return idea_id
 
