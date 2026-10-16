@@ -895,6 +895,93 @@ class HitlRuntimeState:
             self._save_unlocked()
             return self._copy(action)
 
+    def record_proposal_preparation_recovery(
+        self,
+        *,
+        workspace_fingerprint: str,
+        workspace_fingerprint_scope: Optional[Dict[str, Any]],
+        proposal_base_sha: str,
+        recovery: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Rebase an undecided preparation action onto one durable boundary."""
+        fingerprint = str(workspace_fingerprint).strip()
+        prepared_base = str(proposal_base_sha).strip()
+        if not fingerprint or not prepared_base or not isinstance(recovery, dict) or not recovery:
+            raise HitlRuntimeStateError(
+                "Proposal preparation recovery requires a fingerprint, base, and descriptor"
+            )
+        if workspace_fingerprint_scope is None:
+            fingerprint_scope = None
+        else:
+            from core.hitl_workspace_guard import WorkspaceGuardScope
+
+            fingerprint_scope = WorkspaceGuardScope.from_value(
+                workspace_fingerprint_scope
+            ).to_dict()
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if (
+                not isinstance(action, dict)
+                or action.get("kind") != "prepare_proposal"
+                or action.get("status") not in {"pending", "cancelled"}
+                or isinstance(action.get("decision"), dict)
+            ):
+                raise HitlRuntimeStateError(
+                    "No matching undecided proposal preparation accepts recovery state"
+                )
+            existing = action.get("recovery")
+            if existing is not None:
+                if not isinstance(existing, dict):
+                    raise HitlRuntimeStateError(
+                        "Proposal preparation recovery state is invalid"
+                    )
+                if existing != self._copy(recovery):
+                    raise HitlRuntimeStateError(
+                        "Proposal preparation already has a different recovery descriptor"
+                    )
+            action["workspace_fingerprint"] = fingerprint
+            action["proposal_base_sha"] = prepared_base
+            if fingerprint_scope is None:
+                action.pop("workspace_fingerprint_scope", None)
+            else:
+                action["workspace_fingerprint_scope"] = fingerprint_scope
+            action["recovery"] = self._copy(recovery)
+            action["status"] = "pending"
+            action.pop("cancellation_reason", None)
+            action["updated_at"] = _now()
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(action)
+
+    def release_next_autoresearch_action_recovery(
+        self,
+        kind: str,
+        *,
+        expected: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Detach and return a stage rollback descriptor before discarding it."""
+        normalized_kind = str(kind).strip()
+        if not normalized_kind:
+            raise HitlRuntimeStateError("AutoResearch action recovery requires kind")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if not isinstance(action, dict) or action.get("kind") != normalized_kind:
+                raise HitlRuntimeStateError("No matching AutoResearch action owns recovery state")
+            recovery = action.get("recovery")
+            if recovery is not None and not isinstance(recovery, dict):
+                raise HitlRuntimeStateError("AutoResearch action recovery state is invalid")
+            if expected is not None and recovery != self._copy(expected):
+                raise HitlRuntimeStateError(
+                    "AutoResearch action recovery ownership changed before release"
+                )
+            action.pop("recovery", None)
+            action["updated_at"] = _now()
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(recovery) if isinstance(recovery, dict) else None
+
     def clear_completed_next_autoresearch_action(self, kind: str) -> None:
         with self._locked():
             self._state = self._load_unlocked() or self._default()

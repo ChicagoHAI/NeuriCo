@@ -1917,11 +1917,15 @@ class HitlManager:
             or action.get("kind") != "prepare_proposal"
             or action.get("status") != "pending"
         ):
-            return (
-                "Error: call_additional_agent is available only while preparing a proposal."
-            )
+            return "Error: call_additional_agent is available only while preparing a proposal."
         try:
             self._require_proposal_preparation_workspace(action)
+        except Exception as exc:
+            return (
+                f"Error: runtime could not record the additional-agent request: {exc}. "
+                "The waiting controller will restore the proposal-preparation boundary."
+            )
+        try:
             self.runtime_state.record_next_autoresearch_action_decision(
                 "prepare_proposal",
                 {
@@ -1963,6 +1967,12 @@ class HitlManager:
             return "Error: proceed_to_proposal is available only while preparing a proposal."
         try:
             self._require_proposal_preparation_workspace(action)
+        except Exception as exc:
+            return (
+                f"Error: runtime could not record the proceed decision: {exc}. "
+                "The waiting controller will restore the proposal-preparation boundary."
+            )
+        try:
             self.runtime_state.record_next_autoresearch_action_decision(
                 "prepare_proposal",
                 {
@@ -1999,15 +2009,31 @@ class HitlManager:
         from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
         approved = str(action.get("workspace_fingerprint", "")).strip()
-        observed = HitlWorkspaceWriteGuard.public_fingerprint(
-            self.work_dir,
-            scope=action.get("workspace_fingerprint_scope"),
-        )
+        try:
+            observed = HitlWorkspaceWriteGuard.public_fingerprint(
+                self.work_dir,
+                scope=action.get("workspace_fingerprint_scope"),
+            )
+        except Exception as exc:
+            error = RuntimeError(
+                "The proposal-preparation workspace could not be validated against "
+                "its recorded boundary. The whole attempt must roll back."
+            )
+            self.runtime_state.cancel_next_autoresearch_action(
+                "prepare_proposal",
+                reason=str(error),
+            )
+            raise error from exc
         if not approved or observed != approved:
-            raise RuntimeError(
+            error = RuntimeError(
                 "The proposal-preparation workspace differs from its recorded "
                 "boundary. The whole attempt must roll back."
             )
+            self.runtime_state.cancel_next_autoresearch_action(
+                "prepare_proposal",
+                reason=str(error),
+            )
+            raise error
 
     def _validate_frontier_choice(self, kind: str, node_sha: str) -> List[str]:
         from core.hitl_frontier import HitlFrontierStore

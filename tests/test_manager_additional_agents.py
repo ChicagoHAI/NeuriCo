@@ -25,6 +25,7 @@ from core.hitl_frontier import HitlFrontierStore  # noqa: E402
 from core.hitl_git_state import HitlGitStateStore  # noqa: E402
 from core.hitl_manager_react import HitlManager  # noqa: E402
 from core.hitl_paths import hitl_stop_request_path  # noqa: E402
+from core.hitl_run_control import HitlRunStopRequested  # noqa: E402
 from core.hitl_runtime_state import HitlRuntimeState  # noqa: E402
 from core.hitl_stage_runtime import (  # noqa: E402
     HitlStageRollback,
@@ -142,9 +143,47 @@ def test_manager_refuses_agent_decision_after_preparation_workspace_changes(tmp_
 
     assert response.startswith("Error:")
     assert "differs from its recorded boundary" in response
+    assert "controller will restore" in response
     action = state.snapshot()["next_autoresearch_action"]
-    assert action["status"] == "pending"
+    assert action["status"] == "cancelled"
     assert "decision" not in action
+
+
+def test_manager_cancels_preparation_when_workspace_fingerprint_cannot_be_read(
+    tmp_path, monkeypatch
+):
+    state = HitlRuntimeState(tmp_path)
+    manager = _manager(tmp_path, state)
+    manager._proposal_preparation_premise_error = lambda _premise: ""
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": "parent",
+            "attempt_id": "attempt_1",
+            "additional_agent_ordinal": 1,
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path
+            ),
+        }
+    )
+
+    def fail_fingerprint(*_args, **_kwargs):
+        raise RuntimeError("workspace unavailable")
+
+    monkeypatch.setattr(
+        HitlWorkspaceWriteGuard,
+        "public_fingerprint",
+        fail_fingerprint,
+    )
+
+    response = manager.call_additional_agent(
+        "resource_finder", "Find a benchmark.", "Evidence is missing.", "I1"
+    )
+
+    assert response.startswith("Error:")
+    assert "could not be validated" in response
+    assert "controller will restore" in response
+    assert state.snapshot()["next_autoresearch_action"]["status"] == "cancelled"
 
 
 def test_proceed_decision_cannot_borrow_an_unrelated_agent_request(tmp_path):
@@ -449,10 +488,13 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
     prompts = []
     logged = []
     runs = []
+    manager_calls = 0
     state = HitlRuntimeState(tmp_path)
 
     class FakeManager:
         def begin_proposal_preparation(self, prompt, **kwargs):
+            nonlocal manager_calls
+            manager_calls += 1
             prompts.append(prompt)
             begun.append(
                 (
@@ -467,14 +509,33 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
                 "attempt_id": kwargs["attempt_id"],
                 "additional_agent_ordinal": kwargs["additional_agent_ordinal"],
                 "workspace_fingerprint": kwargs["workspace_fingerprint"],
-                "workspace_fingerprint_scope": kwargs[
-                    "workspace_fingerprint_scope"
-                ],
+                "workspace_fingerprint_scope": kwargs["workspace_fingerprint_scope"],
                 "proposal_base_sha": kwargs["proposal_base_sha"],
             }
-            state.begin_next_autoresearch_action(action)
+            persisted = state.begin_next_autoresearch_action(action)
+            assert persisted["recovery"]["stage"] == "proposal_preparation"
+            assert persisted["workspace_fingerprint"] == (
+                HitlWorkspaceWriteGuard.public_fingerprint(
+                    tmp_path,
+                    scope=persisted.get("workspace_fingerprint_scope"),
+                )
+            )
+            if manager_calls in {1, 3}:
+                (tmp_path / "baseline.txt").write_text(
+                    "changed before decision\n", encoding="utf-8"
+                )
+                (tmp_path / f"pre_decision_{manager_calls}.txt").write_text(
+                    "dirty\n", encoding="utf-8"
+                )
+                state.cancel_next_autoresearch_action(
+                    "prepare_proposal", reason="workspace changed"
+                )
+                raise RuntimeError("workspace changed")
             decision = next(decisions)
             state.record_next_autoresearch_action_decision("prepare_proposal", decision)
+            if decision["choice"] == "call_additional_agent":
+                (tmp_path / "baseline.txt").write_text("unapproved\n", encoding="utf-8")
+                (tmp_path / "unapproved.txt").write_text("dirty\n", encoding="utf-8")
             result = kwargs["on_decision"](decision)
             state.complete_next_autoresearch_action("prepare_proposal", result)
             return result
@@ -487,12 +548,28 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
             logged.append(values)
             return {"idea_id": f"I{len(logged) + 2}"}
 
+        @staticmethod
+        def abandon_pending_worker_request_for_rollback(_reason):
+            pass
+
+        @staticmethod
+        def reload_manager_after_state_restore():
+            pass
+
+        @staticmethod
+        def clear_idea_tool_context():
+            pass
+
     controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
     controller.work_dir = tmp_path
     controller.checkpoints = checkpoints
 
     def run_agent(**kwargs):
         runs.append(kwargs)
+        assert (tmp_path / "baseline.txt").read_text(encoding="utf-8") == "baseline\n"
+        assert not (tmp_path / "pre_decision_1.txt").exists()
+        assert not (tmp_path / "pre_decision_3.txt").exists()
+        assert not (tmp_path / "unapproved.txt").exists()
         logs_dir = kwargs["attempt_dir"] / (
             f"additional_agent_{kwargs['ordinal']:02d}_resource_finder"
         )
@@ -526,15 +603,17 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
         attempt_id="attempt_1",
     )
 
-    assert len(begun) == 2
+    assert len(begun) == 4
     assert begun == [
         (parent_sha, "attempt_1", 1),
+        (parent_sha, "attempt_1", 1),
+        (parent_sha, "attempt_1", 2),
         (parent_sha, "attempt_1", 2),
     ]
     assert "Completed runs: 0" in prompts[0]
     assert "Next run ordinal: 1" in prompts[0]
-    assert "Completed runs: 1" in prompts[1]
-    assert "Next run ordinal: 2" in prompts[1]
+    assert "Completed runs: 1" in prompts[3]
+    assert "Next run ordinal: 2" in prompts[3]
     assert "not claims in plans" in prompts[0]
     assert len(runs) == 1
     assert runs[0]["agent"] == "resource_finder"
@@ -547,6 +626,56 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
     assert final_action["status"] == "resolved"
     assert final_action["result"]["choice"] == "proceed"
     assert final_action["workspace_fingerprint_scope"] == state.workspace_guard_scope()
+    assert (tmp_path / "baseline.txt").read_text(encoding="utf-8") == "baseline\n"
+
+
+def test_controller_propagates_stop_before_cancelled_preparation_recovery(tmp_path):
+    (tmp_path / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+    checkpoints = CheckpointManager(tmp_path)
+    parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    state = HitlRuntimeState(tmp_path)
+
+    class StopManager:
+        @staticmethod
+        def begin_proposal_preparation(_prompt, **_kwargs):
+            state.cancel_next_autoresearch_action(
+                "prepare_proposal", reason="concurrent workspace cancellation"
+            )
+            raise HitlRunStopRequested("stop requested")
+
+    class Runtime:
+        manager = StopManager()
+
+        @staticmethod
+        def abandon_pending_worker_request_for_rollback(_reason):
+            pytest.fail("a stop request must not enter rollback recovery")
+
+        @staticmethod
+        def reload_manager_after_state_restore():
+            pytest.fail("a stop request must not restore manager state")
+
+        @staticmethod
+        def clear_idea_tool_context():
+            pytest.fail("a stop request must not clear manager context")
+
+    controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    controller.checkpoints = checkpoints
+    controller.additional_agent_runner = None
+    controller._proposal_hitl_runtime = lambda: Runtime()
+    attempt_dir = tmp_path / "attempt_1"
+    attempt_dir.mkdir()
+
+    with pytest.raises(HitlRunStopRequested, match="stop requested"):
+        controller._prepare_next_proposal(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            attempt_id="attempt_1",
+        )
+
+    action = state.snapshot()["next_autoresearch_action"]
+    assert action["status"] == "cancelled"
+    assert action["recovery"]["stage"] == "proposal_preparation"
 
 
 def test_candidate_failure_restores_prepared_base_without_rerunning_resource(tmp_path):
@@ -1686,7 +1815,8 @@ def test_recovery_allows_exact_approved_agent_workspace(tmp_path, complete_actio
     assert read_hitl_current_attempt_marker(tmp_path)
 
 
-def test_recovery_rolls_back_exact_preparation_with_changed_workspace(tmp_path):
+@pytest.mark.parametrize("durable_boundary", [False, True])
+def test_recovery_handles_changed_preparation_workspace(tmp_path, durable_boundary):
     artifact = tmp_path / "artifact.txt"
     artifact.write_text("scored root\n", encoding="utf-8")
     checkpoints = CheckpointManager(tmp_path)
@@ -1706,24 +1836,38 @@ def test_recovery_rolls_back_exact_preparation_with_changed_workspace(tmp_path):
     )
     attempt_dir = AttemptHistoryManager(history_root, "idea").next_attempt_dir(root.sha)
     _begin_hitl_autoresearch_attempt_state(tmp_path, attempt_dir)
-    HitlRuntimeState(tmp_path).begin_next_autoresearch_action(
-        {
-            "kind": "prepare_proposal",
-            "parent_node_sha": root.sha,
-            "attempt_id": attempt_dir.name,
-            "additional_agent_ordinal": 1,
-            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(tmp_path),
+    action = {
+        "kind": "prepare_proposal",
+        "parent_node_sha": root.sha,
+        "attempt_id": attempt_dir.name,
+        "additional_agent_ordinal": 1,
+    }
+    rollback = None
+    if durable_boundary:
+        rollback = HitlStageRollback.capture(tmp_path, "proposal preparation boundary")
+        action["recovery"] = {
+            **rollback.descriptor(),
+            "stage": "proposal_preparation",
         }
+    action["workspace_fingerprint"] = HitlWorkspaceWriteGuard.public_fingerprint(
+        tmp_path
     )
+    HitlRuntimeState(tmp_path).begin_next_autoresearch_action(action)
     artifact.write_text("unverified interrupted workspace\n", encoding="utf-8")
 
     recovered = recover_interrupted_hitl_attempt_if_needed(tmp_path)
 
     assert recovered is not None
-    assert recovered.recovery_classification == "complete"
     assert checkpoints.current_sha() == root.sha
-    assert artifact.read_text(encoding="utf-8") == "scored root\n"
-    assert read_hitl_current_attempt_marker(tmp_path) == ""
+    if durable_boundary:
+        assert recovered.recovery_classification == "proposal_preparation_transition"
+        assert artifact.read_text(encoding="utf-8") == "unverified interrupted workspace\n"
+        assert read_hitl_current_attempt_marker(tmp_path)
+        assert HitlGitStateStore(tmp_path).has_snapshot(rollback.hitl_snapshot.ref)
+    else:
+        assert recovered.recovery_classification == "complete"
+        assert artifact.read_text(encoding="utf-8") == "scored root\n"
+        assert read_hitl_current_attempt_marker(tmp_path) == ""
 
 
 def test_recovery_rolls_back_mismatched_preparation_instead_of_adopting_workspace(
