@@ -95,6 +95,35 @@ def plan_slots(ideas: List[Path], methods: List[Method]) -> Dict[str, List[tuple
     return slots
 
 
+def parse_neurico_resumes(specs: List[str], methods: List[Method]) -> Dict[tuple, str]:
+    """`IDEA=IDEA_ID` or `IDEA/METHOD-LABEL=IDEA_ID` -> {(idea stem, method label): idea id}.
+
+    An idea ID names one existing workspace, so it must resume exactly one
+    NeuriCo method: the bare form is accepted only when a single NeuriCo method
+    is selected.
+    """
+    neurico = [m for m in methods if m.method == "neurico"]
+    resumes: Dict[tuple, str] = {}
+    for spec in specs:
+        if "=" not in spec:
+            raise SystemExit(f"--resume-neurico expects IDEA[/METHOD-LABEL]=IDEA_ID, got {spec!r}")
+        target, idea_id = spec.split("=", 1)
+        idea, _, label = target.partition("/")
+        if label:
+            matches = [m for m in neurico if m.label == label]
+            if not matches:
+                raise SystemExit(f"--resume-neurico {spec!r}: no selected NeuriCo method is labelled "
+                                 f"{label!r} (selected: {[m.label for m in neurico]})")
+        elif len(neurico) == 1:
+            matches = neurico
+        else:
+            raise SystemExit(f"--resume-neurico {spec!r} would resume one workspace with "
+                             f"{len(neurico)} NeuriCo methods; name the method as IDEA/METHOD-LABEL=ID "
+                             f"or select one with --only")
+        resumes[(idea, matches[0].label)] = idea_id
+    return resumes
+
+
 def parse_resume(spec: str) -> tuple:
     """`<workspace>` -> (workspace, provider, model), read from the workspace name."""
     match = re.fullmatch(r".+-zeroshot-(claude|codex)-(.+)", spec)
@@ -118,6 +147,7 @@ class Job:
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     resume_workspace: Optional[str] = None
+    resume_mode: Optional[str] = None
     attempts: int = 0
     commands: List[str] = field(default_factory=list)
 
@@ -214,7 +244,8 @@ class Batch:
                    "--provider", m.provider, "--model", m.model,
                    "--timeout", str(self.args.zero_shot_timeout), *self.github_flags()]
         if job.resume_workspace:
-            command += ["--resume-workspace", job.resume_workspace]
+            command += ["--resume-workspace", job.resume_workspace,
+                        "--resume-mode", job.resume_mode or "continue"]
         return command
 
     # -- execution ------------------------------------------------------------
@@ -296,16 +327,30 @@ class Batch:
             code = 0
         return code
 
+    # Exit codes of baseline/zero_shot.py
+    BASELINE_NO_PAPER = 3  # the session ended normally but produced no paper
+
     def run_zero_shot(self, job: Job) -> int:
         while True:
             code = self.call(job, self.baseline_command(job), named=True)
             self.record_outputs(job)
             if code == 0 or not job.workspace:
                 return code
-            # No paper: a fresh session finishes the work in the same workspace.
-            if not self.wait_before_retry(job, "zero-shot run ended without a paper"):
+            if code == self.BASELINE_NO_PAPER:
+                # The agent considered itself finished: a new session only writes up.
+                reason, job.resume_mode = "zero-shot run ended without a paper", "writeup"
+            else:
+                # The session was cut short (crash, auth failure, kill): continue the research.
+                reason, job.resume_mode = f"zero-shot session failed (rc={code})", "continue"
+            if not self.wait_before_retry(job, reason):
                 return code
             job.resume_workspace = Path(job.workspace).name
+
+    def paper_exists(self, job: Job) -> bool:
+        """True when the run's workspace holds a compiled paper (unknown workspace: assume yes)."""
+        if not job.workspace:
+            return True
+        return (workspace_dir() / Path(job.workspace).name / "paper_draft" / "main.pdf").is_file()
 
     def run_job(self, job: Job) -> None:
         if self.stopping:
@@ -322,7 +367,16 @@ class Batch:
             run = self.run_neurico if job.method.method == "neurico" else self.run_zero_shot
             job.return_code = run(job)
             self.record_outputs(job)
-            job.state = "stopped" if self.stopping else ("done" if job.return_code == 0 else "failed")
+            if self.stopping:
+                job.state = "stopped"
+            elif job.return_code != 0:
+                job.state = "no_paper" if job.return_code == self.BASELINE_NO_PAPER else "failed"
+            elif not self.paper_exists(job):
+                # NeuriCo reports success when the research pipeline completed even
+                # if paper generation failed; keep that distinct from a finished paper.
+                job.state = "no_paper"
+            else:
+                job.state = "done"
         except Exception as e:  # keep the rest of the batch going
             job.state = "failed"
             with open(job.log_file, "a") as log:
@@ -370,7 +424,7 @@ class Batch:
         self.jobs = [job for jobs in slots.values() for job in jobs]
         for job in self.jobs:
             if job.method.method == "neurico":
-                job.idea_id = self.args.neurico_idea_ids.get(job.idea_file.stem)
+                job.idea_id = self.args.neurico_idea_ids.get((job.idea_file.stem, job.method.label))
 
         print(f"Batch {self.batch_id}: {len(self.jobs)} run(s) in {len(slots)} concurrent slot(s)")
         for slot, jobs in slots.items():
@@ -460,9 +514,11 @@ def main() -> int:
                         help="Automatic retries per run: a failed NeuriCo run is resumed, and a "
                         "zero-shot run that ended without a paper gets a new session in its workspace")
     parser.add_argument("--retry-wait", type=int, default=300, help="Seconds to wait before a retry")
-    parser.add_argument("--resume-neurico", action="append", default=[], metavar="IDEA=IDEA_ID",
-                        help="For this idea file name (without .yaml), skip submission and resume "
-                        "the NeuriCo run with this existing idea ID in its workspace (repeatable)")
+    parser.add_argument("--resume-neurico", action="append", default=[],
+                        metavar="IDEA[/METHOD-LABEL]=IDEA_ID",
+                        help="Skip submission for this idea file name (without .yaml) and resume the "
+                        "NeuriCo run with this existing idea ID in its workspace; name the method "
+                        "label unless only one NeuriCo method is selected (repeatable)")
     parser.add_argument("--resume-baseline", action="append", default=[], metavar="WORKSPACE",
                         help="Finish an earlier zero-shot run in its existing workspace before "
                         "the slot's other jobs (repeatable). Its idea is read from the workspace")
@@ -485,7 +541,7 @@ def main() -> int:
     stems = [path.stem for path in args.ideas]
     if len(set(stems)) != len(stems):
         raise SystemExit("Idea files must have distinct names (they name the logs).")
-    args.neurico_idea_ids = dict(spec.split("=", 1) for spec in args.resume_neurico)
+    args.neurico_idea_ids = parse_neurico_resumes(args.resume_neurico, select_methods(args.only))
     args.resume_jobs = []
     for spec in args.resume_baseline:
         workspace, provider, model_slug = parse_resume(spec)

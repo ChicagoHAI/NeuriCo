@@ -4,7 +4,7 @@
 # Ends when the loop exits and no batch container is left.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
 OUT=logs/batch_main.out
-E='DONE|FAILED|STOPPED|RETRY|START '
+E='DONE|FAILED|NO_PAPER|STOPPED|RETRY|START '
 P='authentication_error|Please run /login|OAuth token has expired|usage limit reached|insufficient_quota|No space left|model is at capacity'
 n=$(grep -c -E "$E" $OUT); declare -A warned seen
 for f in logs/batch/*/*.log; do warned[e$f]=$(grep -a -c -E "$P" "$f"); done

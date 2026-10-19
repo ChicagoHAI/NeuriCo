@@ -21,7 +21,8 @@ or templates; the agent gets the idea and
 | `--no-github` | Keep the workspace local |
 | `--private` | Create the GitHub repository as private |
 | `--no-hash` | Leave the random hash out of the workspace name |
-| `--resume-workspace <name>` | Start a new session in an existing baseline workspace to finish a run that ended without a paper |
+| `--resume-workspace <name>` | Start a new session in an existing baseline workspace |
+| `--resume-mode continue\|writeup` | With `--resume-workspace`: continue an interrupted session (default), or only write the paper from the existing results |
 
 The idea file is the same YAML that `./neurico submit` takes. It is read
 directly; baselines do not go through `ideas/submitted/`.
@@ -43,9 +44,11 @@ scripts/run_methods.py ideas/a.yaml --only zero-shot --dry-run
 scripts/run_methods.py --resume-baseline my-idea-9c1e-zeroshot-claude-opus-5-5
 ```
 
-`--gpus` gives each run one GPU, the least used at launch. A failed NeuriCo run
-is resumed and a zero-shot run without a paper gets a new session in its
-workspace, up to `--retries` times. Logs and `status.json` go to
+`--gpus` gives each run one GPU, the least used at launch. Up to `--retries`
+times, a failed NeuriCo run is resumed, an interrupted zero-shot session is
+continued in its workspace, and a zero-shot session that ended normally without
+a paper gets a write-up-only session. A run that finishes without a compiled
+paper is recorded as `no_paper`, distinct from `done`. Logs and `status.json` go to
 `logs/batch/<batch_id>/`; `scripts/batch_status.sh` summarizes health and
 `scripts/results_manifest.py` lists every run's outputs. Ctrl-C kills the
 running containers.

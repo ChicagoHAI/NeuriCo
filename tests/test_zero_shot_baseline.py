@@ -13,7 +13,8 @@ from baseline import zero_shot  # noqa: E402
 from core.agent_cli import MODEL_ENV_VAR, build_agent_command, model_slug  # noqa: E402
 from core.github_manager import GitHubManager  # noqa: E402
 from core.security import (  # noqa: E402
-    binary_files_with_secrets, find_secrets, sanitize_files, sanitize_logs_directory, sanitize_text,
+    MAX_SCAN_BYTES, binary_files_with_secrets, find_secrets, sanitize_files, sanitize_logs_directory,
+    sanitize_text,
 )
 
 
@@ -305,6 +306,39 @@ def test_resume_spec_is_read_from_the_workspace_name():
         run_methods.parse_resume("my-idea-6bce-claude-opus-5-5")
 
 
+def test_neurico_resume_must_name_one_method():
+    run_methods = _load_run_methods()
+    methods = [run_methods.Method(*row) for row in run_methods.METHODS]
+    neurico = [m for m in methods if m.method == "neurico"]
+    assert len(neurico) > 1
+    # bare form with several NeuriCo methods selected: refused
+    with pytest.raises(SystemExit):
+        run_methods.parse_neurico_resumes(["my_idea=idea_123"], methods)
+    # explicit method label: applies to that method only
+    label = neurico[1].label
+    assert run_methods.parse_neurico_resumes([f"my_idea/{label}=idea_123"], methods) == {
+        ("my_idea", label): "idea_123"}
+    # bare form with exactly one NeuriCo method selected: fine
+    one = [neurico[0]] + [m for m in methods if m.method != "neurico"]
+    assert run_methods.parse_neurico_resumes(["my_idea=idea_123"], one) == {
+        ("my_idea", neurico[0].label): "idea_123"}
+    with pytest.raises(SystemExit):
+        run_methods.parse_neurico_resumes(["my_idea/not-a-method=idea_123"], methods)
+
+
+def test_every_publishable_file_is_scanned():
+    from core.github_manager import MAX_FILE_SIZE
+
+    # Files the publisher may push are never larger than what the scanners inspect.
+    assert MAX_SCAN_BYTES >= MAX_FILE_SIZE
+
+
+def test_resume_modes_give_distinct_instructions():
+    assert "Do not run new experiments" in zero_shot.RESUME_NOTES["writeup"]
+    assert "Do not start over" in zero_shot.RESUME_NOTES["continue"]
+    assert "Do not run new experiments" not in zero_shot.RESUME_NOTES["continue"]
+
+
 def test_resume_reuses_the_workspace_and_keeps_earlier_logs(tmp_path, monkeypatch):
     workspace = zero_shot.prepare_workspace(
         IDEA, "claude", "claude-opus-5-5", github_manager=None, workspace_parent=tmp_path
@@ -315,7 +349,7 @@ def test_resume_reuses_the_workspace_and_keeps_earlier_logs(tmp_path, monkeypatc
     assert reopened["run_info"]["status"] == "completed"
     with pytest.raises(ValueError):
         zero_shot.open_existing_workspace("not-a-workspace", workspace_parent=tmp_path)
-    assert "Do not run new experiments" in zero_shot.RESUME_NOTE
+    assert set(zero_shot.RESUME_NOTES) == {"writeup", "continue"}
 
 
 def test_no_run_is_cut_off_by_default():

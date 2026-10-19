@@ -17,7 +17,12 @@ import shlex
 from datetime import datetime
 
 from core.agent_cli import model_slug
-from core.security import binary_files_with_secrets, sanitize_files, sanitize_logs_directory
+from core.security import (
+    MAX_PUBLISH_BYTES,
+    binary_files_with_secrets,
+    sanitize_files,
+    sanitize_logs_directory,
+)
 
 try:
     from github import Github, GithubException, Auth
@@ -36,8 +41,8 @@ except ImportError:
 
 from .config_loader import ConfigLoader
 
-# GitHub's file size limit for pushes (100MB)
-MAX_FILE_SIZE = 100 * 1024 * 1024
+# GitHub's per-file size limit; the same boundary bounds the secret scanners.
+MAX_FILE_SIZE = MAX_PUBLISH_BYTES
 
 
 class GitHubManager:

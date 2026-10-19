@@ -10,7 +10,7 @@ import json,sys,collections,glob,os
 jobs=[j for f in sorted(glob.glob(sys.argv[1]+"/*/status.json")) for j in json.load(open(f))["jobs"]]
 print("jobs:", dict(collections.Counter(j["state"] for j in jobs)))
 for j in jobs:
-    if j["state"] in ("failed","stopped","cancelled"):
+    if j["state"] in ("failed","stopped","cancelled","no_paper"):
         print(f"  {j['state'].upper()} {os.path.basename(j['log_file'])} rc={j['return_code']}")
     elif j.get("attempts"):
         print(f"  retried x{j['attempts']}: {os.path.basename(j['log_file'])} ({j['state']})")

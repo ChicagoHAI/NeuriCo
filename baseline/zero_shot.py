@@ -149,7 +149,9 @@ def build_prompt(
     )
 
 
-RESUME_NOTE = """
+RESUME_NOTES = {
+    # The earlier session ended normally without a paper: only the write-up is missing.
+    "writeup": """
 ## Finish the write-up only
 
 A previous session already did the research for this idea in the current
@@ -163,7 +165,19 @@ paper from those results as they are. You may run light analysis over existing
 result files to build tables and figures. If an experiment the earlier session
 planned has no finished results, say so in the paper as a limitation rather
 than filling the gap.
-"""
+""",
+    # The earlier session was cut short: pick up the research where it stopped.
+    "continue": """
+## Continuing an interrupted session
+
+A previous session started this project in the current directory but was
+interrupted before it finished; any background processes it had started were
+killed. Do not start over. Look at what exists (`README.md`, the code under
+`src/`, outputs under `results/`, `paper_draft/`, and the earlier session's
+transcript under `logs/`), work out what is complete and what was cut off,
+finish the remaining work, and complete the deliverables above.
+""",
+}
 
 
 def open_existing_workspace(name: str, workspace_parent: Optional[Path] = None) -> Dict[str, Any]:
@@ -315,8 +329,12 @@ def run_baseline(
     private: bool = False,
     no_hash: bool = False,
     resume_workspace: Optional[str] = None,
+    resume_mode: str = "continue",
 ) -> Dict[str, Any]:
     from core.agent_runner import run_prebuilt_cli_agent
+
+    if resume_mode not in RESUME_NOTES:
+        raise ValueError(f"resume_mode must be one of {sorted(RESUME_NOTES)}, got {resume_mode!r}")
 
     title = idea["idea"]["title"]
     label = method_label(provider)
@@ -352,11 +370,11 @@ def run_baseline(
     if resume_workspace:
         run_info = workspace["run_info"]
         resume_number = len(run_info.get("resumes", [])) + 1
-        prompt = prompt.rstrip() + "\n" + RESUME_NOTE
+        prompt = prompt.rstrip() + "\n" + RESUME_NOTES[resume_mode]
         stem = f"{METHOD}_{provider}_resume{resume_number}"
         (logs_dir / f"{METHOD}_resume{resume_number}_prompt.txt").write_text(prompt, encoding="utf-8")
         run_info.setdefault("resumes", []).append(
-            {"model": model, "command": cmd, "started_at": utc_now()}
+            {"model": model, "command": cmd, "mode": resume_mode, "started_at": utc_now()}
         )
         run_info["status"] = "running"
     else:
@@ -503,6 +521,13 @@ def main() -> None:
         help="Finish an earlier baseline run: start a new session in that existing "
         "workspace (name under the workspace directory) instead of creating one",
     )
+    parser.add_argument(
+        "--resume-mode",
+        choices=sorted(RESUME_NOTES),
+        default="continue",
+        help="With --resume-workspace: 'continue' an interrupted session, or 'writeup' only "
+        "(the research is done and just the paper is missing) (default: continue)",
+    )
     args = parser.parse_args()
 
     try:
@@ -518,6 +543,7 @@ def main() -> None:
             private=args.private,
             no_hash=args.no_hash,
             resume_workspace=args.resume_workspace,
+            resume_mode=args.resume_mode,
         )
     except Exception as e:
         print(f"\n❌ Error: {sanitize_text(str(e))}", file=sys.stderr)

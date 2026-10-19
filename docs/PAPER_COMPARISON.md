@@ -23,9 +23,10 @@ Ideas, in run order (YAMLs in `ideas/arena_candidates/`):
 
 Three jobs run at all times, one per slot (NeuriCo, zero-shot Claude Code,
 zero-shot Codex), with no time limits. Each slot works through the ideas in
-order. A failed NeuriCo run is resumed automatically, and a zero-shot run that
-ends without a paper gets a new session in the same workspace to finish it
-(recorded as `resumed` / `retries` in the manifest). Started 2026-10-02.
+order. A failed NeuriCo run is resumed automatically; an interrupted zero-shot
+session is continued, and one that ended normally without a paper gets a
+write-up-only session in the same workspace (recorded as `resumed` / `retries`
+in the manifest). Started 2026-10-02.
 
 ## Get the list of results
 

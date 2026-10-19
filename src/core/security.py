@@ -174,8 +174,11 @@ def find_secrets(text: str) -> list:
     return found
 
 
-# Text files larger than this are not scanned before publishing.
-MAX_SCAN_BYTES = 50 * 1024 * 1024
+# Largest file the publisher will push (GitHub's per-file limit). Files above it
+# are excluded from publication, so they are also the only ones not scanned:
+# everything that can be published is inspected.
+MAX_PUBLISH_BYTES = 100 * 1024 * 1024
+MAX_SCAN_BYTES = MAX_PUBLISH_BYTES
 
 
 _CORE_DUMP_NAME = re.compile(r'^core(\.\d+)?$')
