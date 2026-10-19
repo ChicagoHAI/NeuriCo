@@ -188,3 +188,29 @@ def test_daemon_commands(kb):
     suite = JobSpec(id="suite-1", kind="suite", title="s", evals=["wmdp-bio"], models=["tiny"], limit=7)
     cmd = daemon.suite_command(suite)
     assert cmd[0] == daemon.config["eval_python"] and "--limit" in cmd and "7" in cmd
+
+
+def test_daemon_passes_venv_root_not_interpreter_home(kb, tmp_path, monkeypatch):
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    home = tmp_path / "python-3.12" / "bin"
+    home.mkdir(parents=True)
+    (home / "python3.12").write_text("")
+    (venv / "bin" / "python").symlink_to(home / "python3.12")
+    daemon = Daemon(kb, config={"eval_python": str(venv / "bin" / "python"), "planner_enabled": False})
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(command, cwd, env, **kwargs):
+        captured.update(env)
+        return FakeProc()
+
+    monkeypatch.setattr("safety.daemon.subprocess.Popen", fake_popen)
+    spec = JobSpec(id="research-v", kind="research", title="v", idea_file="safety_kb/queue/ideas/x.yaml")
+    rt = JobRuntime(id=spec.id, kind=spec.kind, log_file=str(tmp_path / "job.log"), container="neurico-safety-v")
+    daemon.spawn(spec, rt, ["true"], named=True)
+    assert captured["NEURICO_SAFETY_VENV"] == str(venv)
+    assert captured["NEURICO_SAFETY_KB"] == str(kb.root)
+    assert captured["NEURICO_CONTAINER_NAME"] == rt.container

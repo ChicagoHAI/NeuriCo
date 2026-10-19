@@ -199,7 +199,8 @@ class Daemon:
         if self.config.get("hf_cache") and spec.uses_neurico:
             env["NEURICO_HF_CACHE"] = str(self.config["hf_cache"])
         if spec.uses_neurico:
-            env["NEURICO_SAFETY_VENV"] = str(Path(self.config["eval_python"]).resolve().parents[1])
+            # parents[1] of <venv>/bin/python; do not resolve() the symlink or we get the interpreter's home
+            env["NEURICO_SAFETY_VENV"] = str(Path(self.config["eval_python"]).parents[1])
         if named:
             env["NEURICO_CONTAINER_NAME"] = rt.container or ""
         else:
