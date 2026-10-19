@@ -329,8 +329,22 @@ def test_neurico_resume_must_name_one_method():
 def test_every_publishable_file_is_scanned():
     from core.github_manager import MAX_FILE_SIZE
 
-    # Files the publisher may push are never larger than what the scanners inspect.
-    assert MAX_SCAN_BYTES >= MAX_FILE_SIZE
+    # One boundary for both: files up to 50 MiB are scanned and may be pushed,
+    # anything larger is neither scanned nor published.
+    assert MAX_SCAN_BYTES == MAX_FILE_SIZE == 50 * 1024 * 1024
+
+
+def test_large_files_are_skipped_not_scanned(tmp_path):
+    big = tmp_path / "big.bin"
+    with big.open("wb") as fh:
+        fh.seek(MAX_SCAN_BYTES)
+        fh.write(b"sk-" + b"A" * 60)  # secret placed past the boundary
+    small = tmp_path / "small.txt"
+    small.write_text("key sk-" + "A" * 60)
+    assert binary_files_with_secrets(tmp_path, ["big.bin", "small.txt"]) == []  # big skipped, small is text
+    sanitize_files(tmp_path, ["big.bin", "small.txt"])
+    assert "sk-" + "A" * 60 not in small.read_text()
+    assert big.stat().st_size > MAX_SCAN_BYTES  # untouched
 
 
 def test_resume_modes_give_distinct_instructions():

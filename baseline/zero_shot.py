@@ -307,7 +307,7 @@ def publish(
         if redacted:
             print(f"   ✓ Redacted API keys in {len(redacted)} file(s): {', '.join(redacted)}")
         publication["redacted_files"] = redacted
-        # commit_and_push sanitizes logs/ again and skips files over 100MB.
+        # commit_and_push sanitizes logs/ again and skips files over MAX_PUBLISH_BYTES (50 MiB).
         pushed = github_manager.commit_and_push(work_dir, message)
         publication["status"] = "succeeded" if pushed else "unchanged"
     except Exception as e:

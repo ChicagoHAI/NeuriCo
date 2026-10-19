@@ -41,7 +41,7 @@ except ImportError:
 
 from .config_loader import ConfigLoader
 
-# GitHub's per-file size limit; the same boundary bounds the secret scanners.
+# Largest file pushed to GitHub; the same boundary bounds the secret scanners.
 MAX_FILE_SIZE = MAX_PUBLISH_BYTES
 
 
@@ -372,13 +372,13 @@ class GitHubManager:
                 print(f"   ⚠️  Excluded {len(leaking)} binary file(s) containing API keys or core dumps: "
                       f"{', '.join(leaking[:10])}")
 
-            # Unstage files exceeding GitHub's 100MB file size limit
+            # Unstage files over the publish size limit
             large_files = self._unstage_large_files(repo, repo_path)
             if large_files:
                 for lf_path, lf_size in large_files:
                     size_mb = lf_size / (1024 * 1024)
-                    print(f"   ⚠️  Skipped large file ({size_mb:.1f}MB > 100MB limit): {lf_path}")
-                print(f"   ⚠️  {len(large_files)} file(s) excluded from commit due to GitHub's 100MB file size limit.")
+                    print(f"   ⚠️  Skipped large file ({size_mb:.1f}MB > {MAX_FILE_SIZE // (1024 * 1024)}MB limit): {lf_path}")
+                print(f"   ⚠️  {len(large_files)} file(s) excluded from commit due to the {MAX_FILE_SIZE // (1024 * 1024)}MB file size limit.")
                 print(f"      These files remain in your local workspace but are not pushed to GitHub.")
 
             # Check if there are changes to commit. HITL checkpoints may have
@@ -443,7 +443,7 @@ class GitHubManager:
 
     def _unstage_large_files(self, repo: 'Repo', repo_path: Path) -> list:
         """
-        Check staged files and unstage any exceeding GitHub's 100MB limit.
+        Check staged files and unstage any exceeding MAX_FILE_SIZE (50 MiB).
 
         Args:
             repo: GitPython Repo object

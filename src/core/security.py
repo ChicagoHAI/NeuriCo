@@ -174,10 +174,10 @@ def find_secrets(text: str) -> list:
     return found
 
 
-# Largest file the publisher will push (GitHub's per-file limit). Files above it
-# are excluded from publication, so they are also the only ones not scanned:
-# everything that can be published is inspected.
-MAX_PUBLISH_BYTES = 100 * 1024 * 1024
+# Largest file the publisher will push. Files above it are excluded from
+# publication, so they are also the only ones not scanned: everything that can
+# be published is inspected. Kept below GitHub's 100 MiB per-file limit.
+MAX_PUBLISH_BYTES = 50 * 1024 * 1024
 MAX_SCAN_BYTES = MAX_PUBLISH_BYTES
 
 
