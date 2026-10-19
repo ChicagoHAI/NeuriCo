@@ -1193,15 +1193,22 @@ def _restore_prepared_checkpoint(
     prepared_sha: str,
 ) -> str:
     """Restore the exact public and private proposal-preparation boundary."""
-    if prepared_sha == parent_sha:
-        return _restore_selected_checkpoint(work_dir, parent_sha)
     action = HitlRuntimeState(work_dir).snapshot().get("next_autoresearch_action")
-    if (
-        not isinstance(action, dict)
-        or action.get("kind") != "prepare_proposal"
-        or str(action.get("parent_node_sha", "")).strip() != parent_sha
-    ):
+    matches_preparation = bool(
+        isinstance(action, dict)
+        and action.get("kind") == "prepare_proposal"
+        and str(action.get("parent_node_sha", "")).strip() == parent_sha
+    )
+    artifact_snapshot_id = str(
+        action.get("proposal_artifact_snapshot_id", "")
+        if matches_preparation
+        else ""
+    ).strip()
+    if prepared_sha == parent_sha and not artifact_snapshot_id:
+        return _restore_selected_checkpoint(work_dir, parent_sha)
+    if not matches_preparation:
         raise RuntimeError("Prepared workspace has no matching proposal-preparation state.")
+    assert isinstance(action, dict)
     action_sha = str(action.get("proposal_base_sha", "")).strip()
     result = action.get("result")
     result_sha = str(
@@ -1209,9 +1216,6 @@ def _restore_prepared_checkpoint(
     ).strip()
     if action_sha != prepared_sha or (result_sha and result_sha != prepared_sha):
         raise RuntimeError("Prepared workspace checkpoint changed in runtime state.")
-    artifact_snapshot_id = str(
-        action.get("proposal_artifact_snapshot_id", "")
-    ).strip()
     if hitl_artifact_contract_path(work_dir).is_file() and not artifact_snapshot_id:
         raise RuntimeError("Prepared workspace has no evaluator-artifact snapshot.")
     return restore_hitl_checkpoint_with_artifacts(

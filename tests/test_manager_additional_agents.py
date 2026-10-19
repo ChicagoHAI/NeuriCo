@@ -964,6 +964,84 @@ def test_prepared_checkpoint_restores_its_own_artifacts_and_added_gitlink(tmp_pa
     ).exists()
 
 
+def test_prepared_checkpoint_restores_artifacts_when_public_sha_is_unchanged(
+    tmp_path,
+):
+    scoring = tmp_path / "scoring"
+    scoring.mkdir()
+    (scoring / "interface.md").write_text(
+        "# Artifact Protocol\n\n"
+        "## Files to produce\n\n"
+        "| Path | Purpose | Required |\n"
+        "|---|---|---|\n"
+        "| `model.bin` | Candidate model | yes |\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".gitignore").write_text("model.bin\n", encoding="utf-8")
+    model = tmp_path / "model.bin"
+    model.write_text("parent model\n", encoding="utf-8")
+    (tmp_path / "baseline.txt").write_text("frontier\n", encoding="utf-8")
+    persist_hitl_required_artifact_contract(tmp_path)
+
+    checkpoints = CheckpointManager(tmp_path)
+    parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    parent_snapshot_id = "frontier-artifacts"
+    har.capture_hitl_artifact_snapshot(
+        tmp_path,
+        snapshot_id=parent_snapshot_id,
+        source_checkpoint_sha=parent_sha,
+    )
+    HitlFrontierStore(tmp_path).initialize_root(
+        node_sha=parent_sha,
+        plan_text="plan\n",
+        objective_score={"results": {}},
+        reason_for_acceptance="root",
+        artifact_snapshot_id=parent_snapshot_id,
+    )
+
+    model.write_text("prepared model\n", encoding="utf-8")
+    prepared_sha = checkpoints.create_checkpoint("private-only preparation").sha
+    assert prepared_sha == parent_sha
+    prepared_snapshot_id = "proposal-private-only"
+    har.capture_hitl_artifact_snapshot(
+        tmp_path,
+        snapshot_id=prepared_snapshot_id,
+        source_checkpoint_sha=prepared_sha,
+    )
+
+    state = HitlRuntimeState(tmp_path)
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": parent_sha,
+            "attempt_id": "attempt_1",
+            "additional_agent_ordinal": 2,
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path
+            ),
+            "proposal_base_sha": prepared_sha,
+            "proposal_artifact_snapshot_id": prepared_snapshot_id,
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {"choice": "proceed", "reason": "ready", "premise_idea_id": "I1"},
+    )
+    state.complete_next_autoresearch_action(
+        "prepare_proposal",
+        {"choice": "proceed", "proposal_base_sha": prepared_sha},
+    )
+
+    model.write_text("stale model\n", encoding="utf-8")
+
+    assert har._restore_prepared_checkpoint(
+        tmp_path,
+        parent_sha=parent_sha,
+        prepared_sha=prepared_sha,
+    ) == prepared_sha
+    assert model.read_text(encoding="utf-8") == "prepared model\n"
+
+
 def test_crashed_candidate_recovers_to_prepared_base_not_frontier_parent(tmp_path):
     (tmp_path / "baseline.txt").write_text("frontier\n", encoding="utf-8")
     checkpoints = CheckpointManager(tmp_path)
