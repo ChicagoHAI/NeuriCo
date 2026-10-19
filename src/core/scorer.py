@@ -17,6 +17,13 @@ import os
 import sys
 import time
 
+from core.research_environment import (
+    WorkspaceMode,
+    read_workspace_mode,
+    reject_ambiguous_root_venv,
+    research_python_candidates,
+)
+
 
 # Files the scorer reads / writes (relative to <workspace>/scoring/)
 EVAL_SCRIPT_NAME = "eval.py"
@@ -28,19 +35,25 @@ def _resolve_python_executable(work_dir: Path) -> str:
     """
     Pick the Python interpreter to invoke eval.py with.
 
-    The experiment_runner creates <workspace>/.venv during its setup phase
-    and installs all task-specific dependencies there. eval.py typically
-    imports those same dependencies (numpy, torch, sklearn, etc.), so it
-    must run under the workspace's interpreter rather than the
-    orchestrator's. Falls back to sys.executable if the workspace has no
-    .venv yet (e.g., during a scorer-only smoke test).
+    The experiment_runner creates the workspace mode's research environment
+    during setup and installs task-specific dependencies there. eval.py
+    typically imports those same dependencies (numpy, torch, sklearn, etc.),
+    so it must run under the selected research interpreter rather than the
+    orchestrator's. In embedded mode a root .venv is never used because it may
+    belong to the task or verifier.
     """
-    posix = work_dir / ".venv" / "bin" / "python"
+    posix, windows = research_python_candidates(work_dir)
     if posix.exists() and posix.is_file():
         return str(posix)
-    windows = work_dir / ".venv" / "Scripts" / "python.exe"
     if windows.exists() and windows.is_file():
         return str(windows)
+    reject_ambiguous_root_venv(work_dir)
+    if read_workspace_mode(work_dir) is WorkspaceMode.EMBEDDED:
+        raise RuntimeError(
+            "The configured embedded NeuriCo research environment is unavailable. "
+            "No Python interpreter exists under neurico-research-env/.venv. "
+            "Rebuild dependencies under neurico-research-env before scoring."
+        )
     return sys.executable
 
 
@@ -59,8 +72,10 @@ def run_scorer(
                   runner's outputs.
         timeout: Max execution time for eval.py in seconds.
         python_executable: Python binary to use. Defaults to the workspace's
-                  own .venv interpreter (where the runner installed deps),
-                  falling back to sys.executable.
+                  workspace mode's research interpreter (where the runner
+                  installed dependencies). Native workspaces fall back to
+                  sys.executable when no environment exists; embedded
+                  workspaces require their configured environment.
         idea: The trusted submitted idea (held by the orchestrator, outside
                   the worker-visible workspace). Required so the staged-
                   function integrity check always fails closed against it.
@@ -111,9 +126,22 @@ def run_scorer(
                      + "; ".join(mismatches),
         }
 
-    # Clear stale results so we never read leftover values from a prior run
-    if results_path.exists():
-        results_path.unlink()
+    # Clear stale results so we never read leftover values from a prior run.
+    # Malformed paths (for example, a directory left by a failed evaluator)
+    # are scorer failures rather than uncaught pipeline exceptions.
+    try:
+        results_path.unlink(missing_ok=True)
+    except OSError as e:
+        return {
+            'success': False,
+            'return_code': None,
+            'results': None,
+            'results_path': str(results_path),
+            'log_path': str(log_path),
+            'elapsed_time': 0.0,
+            'error': f"could not clear stale results.json: {e}",
+            'stopped': False,
+        }
 
     python_executable = python_executable or _resolve_python_executable(work_dir)
     cmd = [python_executable, str(eval_script)]
@@ -156,12 +184,27 @@ def run_scorer(
     elapsed = time.time() - start_time
 
     results: Optional[Dict[str, Any]] = None
-    if results_path.exists():
+    if not results_path.exists():
+        results_err = f"{RESULTS_FILE_NAME} was not produced"
+        error = f"{error}; {results_err}" if error else results_err
+    else:
         try:
-            results = json.loads(results_path.read_text(encoding='utf-8'))
+            parsed_results = json.loads(results_path.read_text(encoding='utf-8'))
+        except UnicodeDecodeError as e:
+            read_err = f"results.json is not valid UTF-8: {e}"
+            error = f"{error}; {read_err}" if error else read_err
+        except OSError as e:
+            read_err = f"results.json could not be read: {e}"
+            error = f"{error}; {read_err}" if error else read_err
         except json.JSONDecodeError as e:
             json_err = f"results.json is not valid JSON: {e}"
             error = f"{error}; {json_err}" if error else json_err
+        else:
+            if isinstance(parsed_results, dict):
+                results = parsed_results
+            else:
+                json_err = "results.json must contain a JSON object"
+                error = f"{error}; {json_err}" if error else json_err
 
     success = return_code == 0 and results is not None and error is None
 
@@ -193,13 +236,14 @@ def load_scoring_results(work_dir: Path) -> Optional[Dict[str, Any]]:
     only need the score, not the full scorer-run dict.
 
     Returns:
-        Parsed results.json contents, or None if the file is missing or
-        unparseable.
+        Parsed results.json object, or None if the file is missing, invalid,
+        or contains a different JSON type.
     """
     results_path = Path(work_dir) / "scoring" / RESULTS_FILE_NAME
     if not results_path.exists():
         return None
     try:
-        return json.loads(results_path.read_text(encoding='utf-8'))
-    except json.JSONDecodeError:
+        results = json.loads(results_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
+    return results if isinstance(results, dict) else None

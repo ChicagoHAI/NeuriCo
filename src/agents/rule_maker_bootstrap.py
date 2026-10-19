@@ -33,6 +33,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.security import sanitize_text
 from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
+from core.research_environment import (
+    read_workspace_mode,
+    research_environment_template_variables,
+)
 
 # Files the bootstrap rule_maker is responsible for producing (relative to scoring/)
 BOOTSTRAP_OUTPUT_FILES = {
@@ -112,6 +116,9 @@ def generate_bootstrap_rule_maker_prompt(
         "{curated_manifest_json}": json.dumps(curated_manifest, indent=2),
         "{idea_yaml}": _read_idea_yaml(work_dir),
         "{resource_listing}": _summarize_resource_hints(work_dir),
+        "{research_project_path}": research_environment_template_variables(
+            read_workspace_mode(work_dir)
+        )["research_project_path"],
     }
 
     prompt = template
@@ -170,12 +177,16 @@ def generate_managed_baseline_rule_maker_prompt(
             "feedback, preserving the completed experiment and its outputs."
         ),
     }[hitl_phase]
+    research_environment = research_environment_template_variables(
+        read_workspace_mode(work_dir)
+    )
     substitutions = {
         "{workspace}": str(work_dir),
         "{scoring_dir}": str(work_dir / "scoring"),
         "{candidate_manifest_json}": json.dumps(candidate_manifest, indent=2),
         "{idea_yaml}": _read_idea_yaml(work_dir),
         "{resource_listing}": _summarize_resource_hints(work_dir),
+        "{research_python_path}": research_environment["research_python_path"],
     }
     prompt = template_path.read_text(encoding="utf-8")
     for placeholder, value in substitutions.items():

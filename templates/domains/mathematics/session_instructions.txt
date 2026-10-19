@@ -7,22 +7,23 @@ neurico environment or any existing system environment.
 
 REQUIRED STEPS (in order):
 
-1. Check if a virtual environment already exists (the resource finder may have created one):
+1. Check if the dedicated virtual environment already exists (the resource finder may have created one):
 
-   If .venv/ directory exists:
+   If {{ research_venv_dir }}/ directory exists:
    - Skip to step 3 (activate it)
-   - The pyproject.toml should already exist
+   - {{ research_project_path }} should already exist
 
-   If .venv/ does NOT exist:
+   If {{ research_venv_dir }}/ does NOT exist:
    - Create a fresh virtual environment using uv:
-     uv venv
+     mkdir -p {{ research_env_dir }}
+     uv venv {{ research_venv_dir }}
 
 2. Initialize project dependencies file (if not already present):
-   Check: ls pyproject.toml 2>/dev/null || echo "NEED_PYPROJECT"
+   Check: ls {{ research_project_path }} 2>/dev/null || echo "NEED_PYPROJECT"
 
-   If pyproject.toml does NOT exist, create it to manage dependencies in THIS workspace only:
+   If {{ research_project_path }} does NOT exist, create it to manage dependencies in THIS workspace only:
 
-   cat > pyproject.toml << 'EOF'
+   cat > {{ research_project_path }} << 'EOF'
    [project]
    name = "research-workspace"
    version = "0.1.0"
@@ -36,39 +37,35 @@ REQUIRED STEPS (in order):
    and contaminate the neurico environment!
 
 3. Activate the environment:
-   source .venv/bin/activate
+   source {{ research_venv_dir }}/bin/activate
 
 4. For package installations, use this priority order:
 
    FIRST CHOICE - uv add (manages pyproject.toml automatically):
-   uv add <package-name>
+   uv add --project {{ research_env_dir }} <package-name>
 
    Examples:
-   - uv add sympy            # Symbolic mathematics
-   - uv add numpy scipy      # Numerical computation
-   - uv add networkx         # Graph theory
-   - uv add matplotlib       # Visualization
+   - uv add --project {{ research_env_dir }} sympy # Symbolic mathematics
+   - uv add --project {{ research_env_dir }} numpy scipy # Numerical computation
+   - uv add --project {{ research_env_dir }} networkx # Graph theory
+   - uv add --project {{ research_env_dir }} matplotlib # Visualization
 
    SECOND CHOICE - if uv add doesn't work:
-   uv pip install <package-name>
-   pip freeze > requirements.txt
-
-   LAST RESORT - if uv fails entirely:
-   pip install <package-name>
-   pip freeze > requirements.txt
+   uv pip install --python {{ research_python_path }} <package-name>
+   uv pip freeze --python {{ research_python_path }} > {{ research_requirements_path }}
 
    NEVER use conda or conda install!
 
 5. Dependency Management:
-   - Using 'uv add' automatically updates pyproject.toml
-   - Verify dependencies with: cat pyproject.toml
-   - If you used pip, also maintain: pip freeze > requirements.txt
+   - Using 'uv add --project {{ research_env_dir }}' automatically updates {{ research_project_path }}
+   - Verify dependencies with: cat {{ research_project_path }}
+   - If you used uv pip, maintain the requirements snapshot shown above
    - This ensures reproducibility of the research environment
 
 WHY: Using an isolated environment ensures:
 - No pollution of the neurico environment
 - Fast package installation with uv (10-100x faster than pip)
-- Automatic dependency tracking with pyproject.toml
+- Automatic dependency tracking with {{ research_project_path }}
 - Clean, reproducible research setup
 
 ════════════════════════════════════════════════════════════════════════════════
@@ -164,8 +161,8 @@ Phase 1: Proof Strategy Planning (20-40 min)
   → DO NOT WAIT for user confirmation - this is fully automated!
 
 Phase 2: Mathematical Setup (10-20 min)
-  ✓ Set up isolated virtual environment (uv venv) if not already present
-  ✓ Install computation tools if needed (uv add sympy, etc.)
+  ✓ Set up isolated virtual environment under {{ research_venv_dir }}/ if not already present
+  ✓ Install computation tools against {{ research_env_dir }} if needed
   ✓ Establish precise definitions and notation for your work
   ✓ State prerequisite results from gathered resources (with citations)
   ✓ Verify prerequisites hold by testing with specific examples
@@ -269,7 +266,7 @@ MANDATORY VERIFICATION POINTS - Run `pwd` and verify location:
 SAFE PATTERN FOR DIRECTORY CHANGES:
 If you need to cd into a subdirectory, ALWAYS return immediately:
   pwd                              # Verify starting location
-  cd results && python script.py && cd -   # cd back using "cd -"
+  {{ research_python_path }} results/script.py   # stay at the workspace root
   pwd                              # Verify you're back in workspace root
 
 ⚠️  NEVER create files in parent directory (cd .. is dangerous!)

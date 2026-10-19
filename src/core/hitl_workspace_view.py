@@ -1135,6 +1135,7 @@ class HitlWorkspaceView:
         nodes_by_sha: Dict[str, Dict[str, Any]] = {}
         for path in node_paths:
             payload = _read_object(path, "frontier node")
+            payload.pop("artifact_snapshot_id", None)
             node_sha = str(payload.get("node_sha", "")).strip()
             if not node_sha or node_sha != path.stem:
                 raise HitlWorkspaceViewError(f"Invalid node identity in {path}")

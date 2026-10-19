@@ -84,6 +84,12 @@ It is illegal for you to read the contents of files under `data/.test`.
 Before declaring the phase complete, you must run a preflight test to ensure
 that `scoring/eval.py` works as expected with no error or failure.
 
+The selected research dependency project is `{research_env_dir}` and its
+interpreter is `{research_python_path}`. If the approved evaluator requires a
+missing package, add it to that project with
+`uv add --project {research_env_dir} <package-name>`; do not install it into a
+different environment.
+
 WHAT YOU MUST NOT DO:
 
 ✗ Do NOT invent numeric targets. Extract them from the idea's
@@ -346,8 +352,10 @@ neurico pipeline) AFTER the runner produces its artifact. It must:
 ✓ Be self-contained — stdlib + only the libraries the runner already
   needs (no `import neurico`).
 ✓ Use the fixed zero-argument scorer entry point:
-  `python scoring/eval.py`. Resolve approved inputs from workspace-relative
-  paths inside the evaluator.
+  `python scoring/eval.py`. For validation in this workspace, invoke that ABI
+  through the selected research interpreter as
+  `{research_python_path} scoring/eval.py`. Resolve approved inputs from
+  workspace-relative paths inside the evaluator.
 ✓ Load the runner's artifact via importlib (NOT subprocess).
 ✓ Load any private test inputs from `data/.test/` inside eval.py.
 ✓ Compute one scalar per declared property.
@@ -627,12 +635,12 @@ CHECKS (run each from the workspace root):
 
 2. eval.py parses as valid Python (does NOT execute it):
    ```bash
-   python -c "import ast; ast.parse(open('scoring/eval.py').read()); print('eval.py: OK')"
+   {research_python_path} -c "import ast; ast.parse(open('scoring/eval.py').read()); print('eval.py: OK')"
    ```
 
 3. targets.json parses as valid JSON:
    ```bash
-   python -c "import json; json.load(open('scoring/targets.json')); print('targets.json: OK')"
+   {research_python_path} -c "import json; json.load(open('scoring/targets.json')); print('targets.json: OK')"
    ```
 
 4. interface.md is non-empty and references at least one file the runner
@@ -653,13 +661,15 @@ CHECKS (run each from the workspace root):
    grep -q "code/local" scoring/eval.py && echo "eval.py: mandated function referenced"
    ```
 
-7. Run a functional preflight of `python scoring/eval.py`. If the real runner
-   artifact does not exist yet, create a temporary artifact that conforms to
-   `scoring/interface.md`. Confirm that the evaluator exits cleanly, writes a
-   valid `scoring/results.json`, and reports no evaluator or infrastructure
-   failure. Record the successful preflight in `scoring/rule_maker_log.md`,
-   then remove the temporary runner artifact and preflight result so they
-   cannot be mistaken for experiment output. Preserve any pre-existing files.
+7. Run a functional preflight with
+   `{research_python_path} scoring/eval.py`. This is the selected research
+   interpreter used by the scorer. If the real runner artifact does not exist
+   yet, create a temporary artifact that conforms to `scoring/interface.md`.
+   Confirm that the evaluator exits cleanly, writes a valid
+   `scoring/results.json`, and reports no evaluator or infrastructure failure.
+   Record the successful preflight in `scoring/rule_maker_log.md`, then remove
+   the temporary runner artifact and preflight result so they cannot be
+   mistaken for experiment output. Preserve any pre-existing files.
 
 ═══════════════════════════════════════════════════════════════════════════════
                             BEST PRACTICES

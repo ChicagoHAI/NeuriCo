@@ -7,14 +7,15 @@ by Claude (which has native PDF reading capability). This preserves all
 formatting, spacing, and layout perfectly.
 
 Usage:
-    python pdf_chunker.py <pdf_path> [--pages-per-chunk N] [--output-dir DIR]
+    {{ research_python_path }} pdf_chunker.py \
+        <pdf_path> [--pages-per-chunk N] [--output-dir DIR]
 
 Output:
     Creates PDF chunks: <output_dir>/<pdf_name>_chunk_001.pdf, etc.
     Also creates a manifest: <output_dir>/<pdf_name>_manifest.txt
 
 Dependencies:
-    pip install pypdf
+    uv add --project {{ research_env_dir }} pypdf
 """
 
 import argparse
@@ -23,8 +24,8 @@ from pathlib import Path
 try:
     from pypdf import PdfReader, PdfWriter
 except ImportError:
-    print("Error: pypdf is required. Install with: pip install pypdf")
-    print("  or with uv: uv pip install pypdf")
+    print("Error: pypdf is required.")
+    print("Install with: uv add --project {{ research_env_dir }} pypdf")
     exit(1)
 
 

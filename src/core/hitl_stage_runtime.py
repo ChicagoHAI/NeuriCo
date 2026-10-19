@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
-from core.hitl_run_control import HitlRunStopRequested, hitl_run_stop_requested
+from core.hitl_run_control import (
+    HitlRollbackControl,
+    HitlRunStopRequested,
+    hitl_run_stop_requested,
+)
 from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
 
 
@@ -76,6 +80,7 @@ def run_plan_centered_hitl_stage(
     plan_finish_validator: Callable[[], Dict[str, Any]] | None = None,
     allow_scoring_approval: bool = False,
     scoring_handler: Callable[[Dict[str, Any]], None] | None = None,
+    scoring_repair_cleanup: Callable[[], None] | None = None,
     baseline_construction: bool = False,
     baseline_candidate_manifest: Dict[str, Any] | None = None,
     provenance: Optional[Dict[str, Any]] = None,
@@ -126,6 +131,7 @@ def run_plan_centered_hitl_stage(
             worker_prompt_contexts=worker_prompt_contexts,
             allow_scoring_approval=allow_scoring_approval,
             scoring_handler=scoring_handler,
+            scoring_repair_cleanup=scoring_repair_cleanup,
             baseline_construction=baseline_construction,
             baseline_candidate_manifest=baseline_candidate_manifest,
             provenance=provenance,
@@ -153,6 +159,7 @@ def run_plan_centered_hitl_stage(
             worker_prompt_contexts=worker_prompt_contexts,
             allow_scoring_approval=allow_scoring_approval,
             scoring_handler=scoring_handler,
+            scoring_repair_cleanup=scoring_repair_cleanup,
             baseline_construction=baseline_construction,
             baseline_candidate_manifest=baseline_candidate_manifest,
             provenance=provenance,
@@ -172,6 +179,7 @@ def run_plan_centered_hitl_stage(
             worker_prompt_contexts=worker_prompt_contexts,
             allow_scoring_approval=allow_scoring_approval,
             scoring_handler=scoring_handler,
+            scoring_repair_cleanup=scoring_repair_cleanup,
             baseline_construction=baseline_construction,
             baseline_candidate_manifest=baseline_candidate_manifest,
             provenance=provenance,
@@ -205,17 +213,37 @@ class HitlStageRollback:
     checkpoint_sha: str
     state_store: HitlGitStateStore
     hitl_snapshot: HitlGitSnapshot
+    artifact_snapshot_id: str | None = None
 
     def descriptor(self) -> Dict[str, Any]:
-        return {
+        descriptor = {
             "checkpoint_sha": self.checkpoint_sha,
             "hitl_snapshot_ref": self.hitl_snapshot.ref,
             "hitl_snapshot_commit": self.hitl_snapshot.commit_sha,
             "hitl_snapshot_paths": list(self.hitl_snapshot.paths),
         }
+        if self.artifact_snapshot_id:
+            descriptor["artifact_snapshot_id"] = self.artifact_snapshot_id
+        return descriptor
 
     @classmethod
     def from_descriptor(cls, work_dir: Path, record: Dict[str, Any]) -> "HitlStageRollback":
+        rollback = cls.from_capture_descriptor(work_dir, record)
+        if rollback.artifact_snapshot_id:
+            from core.hitl_artifact_snapshots import inspect_hitl_artifact_snapshot
+
+            inspect_hitl_artifact_snapshot(
+                rollback.work_dir,
+                rollback.artifact_snapshot_id,
+                source_checkpoint_sha=rollback.checkpoint_sha,
+            )
+        return rollback
+
+    @classmethod
+    def from_capture_descriptor(
+        cls, work_dir: Path, record: Dict[str, Any]
+    ) -> "HitlStageRollback":
+        """Load a rollback boundary whose artifact capture may still be pending."""
         from core.autoresearch import CheckpointManager
         from core.scoring_seal import SEALED_PATHS
 
@@ -240,7 +268,14 @@ class HitlStageRollback:
         actual = run_git(root, "rev-parse", "--verify", ref).stdout.strip()
         if actual != commit:
             raise RuntimeError("Initial stage private rollback snapshot changed.")
-        return cls(root, checkpoint, store, HitlGitSnapshot(ref, commit, paths))
+        artifact_snapshot_id = str(record.get("artifact_snapshot_id", "")).strip() or None
+        return cls(
+            root,
+            checkpoint,
+            store,
+            HitlGitSnapshot(ref, commit, paths),
+            artifact_snapshot_id,
+        )
 
     @classmethod
     def capture(
@@ -249,7 +284,10 @@ class HitlStageRollback:
         checkpoint_message: str,
         *,
         include_rule_maker_repair_state: bool = False,
+        capture_artifacts: bool = False,
+        defer_artifact_capture: bool = False,
     ) -> "HitlStageRollback":
+        """Create a rollback boundary, optionally reserving capture for its owner."""
         from core.autoresearch import CheckpointManager
 
         root = Path(work_dir)
@@ -260,29 +298,128 @@ class HitlStageRollback:
             if include_rule_maker_repair_state
             else state_store.create_rollback_snapshot()
         )
-        return cls(
+        artifact_snapshot_id = (
+            f"rollback-{hitl_snapshot.ref.rsplit('/', 1)[-1]}"
+            if capture_artifacts
+            else None
+        )
+        rollback = cls(
             work_dir=root,
             checkpoint_sha=checkpoint.sha,
             state_store=state_store,
             hitl_snapshot=hitl_snapshot,
+            artifact_snapshot_id=artifact_snapshot_id,
+        )
+        if defer_artifact_capture:
+            return rollback
+        try:
+            rollback.capture_artifacts()
+        except Exception:
+            rollback.discard(cleanup_label="incomplete")
+            raise
+        return rollback
+
+    def capture_artifacts(self) -> None:
+        """Idempotently finish the artifact half of this rollback boundary."""
+        if not self.artifact_snapshot_id:
+            return
+        from core.hitl_artifact_snapshots import capture_hitl_artifact_snapshot
+
+        capture_hitl_artifact_snapshot(
+            self.work_dir,
+            snapshot_id=self.artifact_snapshot_id,
+            source_checkpoint_sha=self.checkpoint_sha,
         )
 
-    def restore(self, runtime: Any, reason: str, *, cleanup_label: str) -> None:
+    def restore(
+        self,
+        runtime: Any,
+        reason: str,
+        *,
+        cleanup_label: str,
+        post_restore_cleanup: Dict[str, Any] | None = None,
+        cleanup_after_restore: Callable[[Dict[str, Any]], None] | None = None,
+    ) -> None:
         """Restore the boundary in the established public-then-private order."""
-        from core.autoresearch import CheckpointManager
-
         runtime.abandon_pending_worker_request_for_rollback(reason)
-        CheckpointManager(self.work_dir).restore_checkpoint(
-            self.checkpoint_sha,
-            clean_untracked_public=True,
-        )
-        self.state_store.restore(self.hitl_snapshot)
-        runtime.reload_manager_after_state_restore()
         runtime.clear_idea_tool_context()
-        self.discard(cleanup_label=cleanup_label)
+
+        def reload_runtime(_record: Dict[str, Any]) -> None:
+            runtime.reload_manager_after_state_restore()
+            runtime.clear_idea_tool_context()
+
+        HitlRollbackControl(self.work_dir).request(
+            {**self.descriptor(), "stage": getattr(runtime, "pipeline_stage", "")},
+            discard_boundaries=[],
+            post_restore_cleanup=post_restore_cleanup,
+        )
+        self.restore_pending(
+            self.work_dir,
+            after_restore=reload_runtime,
+            cleanup_after_restore=cleanup_after_restore,
+        )
+
+    @classmethod
+    def restore_pending(
+        cls,
+        work_dir: Path,
+        *,
+        after_restore: Callable[[Dict[str, Any]], None],
+        cleanup_after_restore: Callable[[Dict[str, Any]], None] | None = None,
+    ) -> Dict[str, Any] | None:
+        """Replay an unfinished restore, or finish disposal without reading its data."""
+        from core.hitl_artifact_snapshots import (
+            discard_hitl_artifact_snapshot,
+            restore_hitl_checkpoint_with_artifacts,
+        )
+
+        control = HitlRollbackControl(work_dir)
+        record = control.record()
+        if record is None:
+            return None
+        if record["status"] == "restoring":
+            rollback = cls.from_descriptor(work_dir, record["boundary"])
+            restore_hitl_checkpoint_with_artifacts(
+                work_dir,
+                checkpoint_sha=rollback.checkpoint_sha,
+                artifact_snapshot_id=rollback.artifact_snapshot_id,
+            )
+            rollback.state_store.restore(rollback.hitl_snapshot)
+            # No snapshot contents may be removed until replay is no longer needed.
+            control.mark_cleanup_pending(record)
+            record["status"] = "cleanup_pending"
+        after_restore(record)
+        post_restore_cleanup = record.get("post_restore_cleanup")
+        if isinstance(post_restore_cleanup, dict):
+            if cleanup_after_restore is None:
+                raise RuntimeError(
+                    "HITL rollback requires its registered post-restore cleanup handler."
+                )
+            cleanup_after_restore(post_restore_cleanup)
+        store = HitlGitStateStore(work_dir)
+        for boundary in [*record["discard_boundaries"], record["boundary"]]:
+            artifact_id = str(boundary.get("artifact_snapshot_id", "")).strip()
+            if artifact_id:
+                discard_hitl_artifact_snapshot(work_dir, artifact_id)
+            store.discard(boundary["hitl_snapshot_ref"])
+        control.clear()
+        return record
 
     def discard(self, *, cleanup_label: str) -> None:
         try:
             self.state_store.discard(self.hitl_snapshot)
         except Exception as cleanup_error:
             print(f"⚠️  Could not clean {cleanup_label} HITL rollback snapshot: {cleanup_error}")
+        if self.artifact_snapshot_id:
+            try:
+                from core.hitl_artifact_snapshots import discard_hitl_artifact_snapshot
+
+                discard_hitl_artifact_snapshot(
+                    self.work_dir,
+                    self.artifact_snapshot_id,
+                )
+            except Exception as cleanup_error:
+                print(
+                    f"⚠️  Could not clean {cleanup_label} HITL artifact snapshot: "
+                    f"{cleanup_error}"
+                )

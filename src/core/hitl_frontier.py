@@ -196,6 +196,7 @@ class HitlFrontierStore:
         plan_text: str,
         objective_score: Dict[str, Any],
         reason_for_acceptance: str,
+        artifact_snapshot_id: str | None = None,
     ) -> None:
         node_sha = self._require_sha(node_sha, "root node SHA")
         if self.exists():
@@ -213,6 +214,7 @@ class HitlFrontierStore:
                 plan_text=plan_text,
                 objective_score=objective_score,
                 reason_for_acceptance=reason_for_acceptance,
+                artifact_snapshot_id=artifact_snapshot_id,
             )
             self._retain_git_object("frontier", node_sha)
             return
@@ -222,6 +224,7 @@ class HitlFrontierStore:
             plan_text=plan_text,
             objective_score=objective_score,
             reason_for_acceptance=reason_for_acceptance,
+            artifact_snapshot_id=artifact_snapshot_id,
         )
         self._write_state(
             selected=node_sha,
@@ -263,6 +266,7 @@ class HitlFrontierStore:
         plan_text: str,
         objective_score: Dict[str, Any],
         reason_for_acceptance: str,
+        artifact_snapshot_id: str | None = None,
     ) -> None:
         node_sha = self._require_sha(node_sha, "node SHA")
         if parent_node_sha is not None:
@@ -275,15 +279,16 @@ class HitlFrontierStore:
             raise HitlFrontierError("Accepted frontier node requires non-empty experiment plan")
         if not str(reason_for_acceptance).strip():
             raise HitlFrontierError("Accepted frontier node requires reason_for_acceptance")
-        self._write_json(
-            self.paths.node_json(node_sha),
-            {
-                "parent_node_sha": parent_node_sha,
-                "node_sha": node_sha,
-                "objective_score": objective_score,
-                "reason_for_acceptance": str(reason_for_acceptance).strip(),
-            },
-        )
+        payload = {
+            "parent_node_sha": parent_node_sha,
+            "node_sha": node_sha,
+            "objective_score": objective_score,
+            "reason_for_acceptance": str(reason_for_acceptance).strip(),
+        }
+        normalized_snapshot_id = str(artifact_snapshot_id or "").strip()
+        if normalized_snapshot_id:
+            payload["artifact_snapshot_id"] = normalized_snapshot_id
+        self._write_json(self.paths.node_json(node_sha), payload)
         plan_path = self.paths.node_plan(node_sha)
         self._write_text(plan_path, str(plan_text))
 
@@ -299,6 +304,7 @@ class HitlFrontierStore:
         accepted: bool,
         reason: str,
         plan_text: str,
+        artifact_snapshot_id: str | None = None,
     ) -> Dict[str, Any]:
         parent = self._require_sha(parent_node_sha, "parent node SHA")
         candidate = self._require_sha(candidate_node_sha, "candidate node SHA")
@@ -329,6 +335,7 @@ class HitlFrontierStore:
                         plan_text=plan_text,
                         objective_score=objective_score,
                         reason_for_acceptance=str(existing.get("reason_for_acceptance", reason)),
+                        artifact_snapshot_id=artifact_snapshot_id,
                     )
                     active = list(current["active_frontier_node_shas"])
                     if proposal_type == "exploitation":
@@ -363,6 +370,7 @@ class HitlFrontierStore:
                 plan_text=plan_text,
                 objective_score=objective_score,
                 reason_for_acceptance=reason,
+                artifact_snapshot_id=artifact_snapshot_id,
             )
             active = list(current["active_frontier_node_shas"])
             if proposal_type == "exploitation":
@@ -442,6 +450,55 @@ class HitlFrontierStore:
             "reason_for_acceptance": record.get("reason_for_acceptance"),
             "attempt_history": self._direction_attempt_history(node),
         }
+
+    def artifact_snapshot_id(self, node_sha: str) -> str | None:
+        """Return runtime-only artifact state associated with one frontier node."""
+        node = self._require_sha(node_sha, "frontier node SHA")
+        value = str(
+            self._read_json(self.paths.node_json(node)).get("artifact_snapshot_id", "")
+        ).strip()
+        return value or None
+
+    def retained_artifact_snapshot_ids(self) -> set[str]:
+        """Return artifact snapshots owned by every retained accepted node."""
+        if not self.exists():
+            return set()
+        if not self.paths.nodes.is_dir():
+            raise HitlFrontierError("HITL frontier is missing its retained node records")
+
+        retained: set[str] = set()
+        for node_dir in sorted(self.paths.nodes.iterdir(), key=lambda path: path.name):
+            if not node_dir.is_dir():
+                continue
+            node_sha = self._require_sha(node_dir.name, "frontier node SHA")
+            snapshot_id = str(
+                self._read_json(self.paths.node_json(node_sha)).get(
+                    "artifact_snapshot_id",
+                    "",
+                )
+            ).strip()
+            if snapshot_id:
+                retained.add(snapshot_id)
+        return retained
+
+    def inactive_artifact_snapshot_ids(self) -> set[str]:
+        """Return recorded snapshots no longer owned by the active frontier.
+
+        Historical node records remain part of the research audit trail after
+        exploitation replacement or explicit pruning.  Their large artifact
+        snapshots do not need to remain once no active node references them.
+        """
+        recorded = self.retained_artifact_snapshot_ids()
+        if not recorded:
+            return set()
+        active = {
+            snapshot_id
+            for node_sha in self.state(allow_unselected=True)[
+                "active_frontier_node_shas"
+            ]
+            if (snapshot_id := self.artifact_snapshot_id(node_sha))
+        }
+        return recorded - active
 
     def _direction_attempt_history(
         self,

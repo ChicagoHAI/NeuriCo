@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from core.hitl_util import sha256_file
+from core.research_environment import RESEARCH_VENV_RELATIVE_ROOT
 
 _BUILTIN_RUNTIME_PRIVATE_ROOTS = {
     ".claude",
@@ -19,6 +20,7 @@ _BUILTIN_RUNTIME_PRIVATE_ROOTS = {
     ".git",
     ".neurico",
     ".venv",
+    RESEARCH_VENV_RELATIVE_ROOT.as_posix(),
     "__pycache__",
     "logs",
 }

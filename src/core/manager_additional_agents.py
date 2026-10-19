@@ -228,7 +228,7 @@ def _run_resource_finder_agent(
             on_failed=failed,
             provenance=provenance,
             objective=objective,
-            workspace_mode="additive",
+            invocation_mode="additive",
             force_fresh_plan=True,
             logs_dir=run_logs_dir,
             preserve_log_history=True,

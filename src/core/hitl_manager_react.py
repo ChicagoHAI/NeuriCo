@@ -2282,6 +2282,7 @@ class HitlManager:
 
         def selector(node_sha: str, reason: str) -> Dict[str, Any]:
             from core.autoresearch import CheckpointManager
+            from core.hitl_artifact_snapshots import restore_hitl_frontier_node
             from core.hitl_frontier import HitlFrontierStore
 
             store = HitlFrontierStore(self.work_dir)
@@ -2308,7 +2309,7 @@ class HitlManager:
                         "reason": reason,
                     }
                 )
-                checkpoints.restore_checkpoint(node_sha, clean_untracked_public=True)
+                restore_hitl_frontier_node(self.work_dir, node_sha)
                 state = store.select(node_sha)
                 return {
                     **recorded,
@@ -2316,9 +2317,21 @@ class HitlManager:
                     "active_frontier_node_shas": state["active_frontier_node_shas"],
                 }
             except Exception:
-                checkpoints.restore_checkpoint(original_workspace_sha, clean_untracked_public=True)
                 if previous:
+                    restore_hitl_frontier_node(self.work_dir, previous)
                     store.select(previous)
+                elif original_workspace_sha and store.paths.node_json(
+                    original_workspace_sha
+                ).is_file():
+                    restore_hitl_frontier_node(
+                        self.work_dir,
+                        original_workspace_sha,
+                    )
+                else:
+                    checkpoints.restore_checkpoint(
+                        original_workspace_sha,
+                        clean_untracked_public=True,
+                    )
                 raise
 
         return self.begin_frontier_selection(

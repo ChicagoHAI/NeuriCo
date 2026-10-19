@@ -28,12 +28,13 @@ def generate_resource_finder_prompt(
     idea: Dict[str, Any],
     templates_dir: Path,
     *,
+    workspace_mode: str = "native",
     hitl_runtime_completion: bool = False,
     provider: str = "claude",
     hitl_phase: Optional[str] = None,
     scoring_enabled: bool = False,
     objective: str = "",
-    workspace_mode: str = "bootstrap",
+    invocation_mode: str = "bootstrap",
 ) -> str:
     """
     Generate the resource finder prompt by combining the template with idea specification.
@@ -50,8 +51,9 @@ def generate_resource_finder_prompt(
                          required_for_evaluation mandate; ordinary unscored
                          runs omit them.
         objective: Optional focused objective for an inserted invocation.
-        workspace_mode: ``bootstrap`` for the initial pipeline stage or
-                        ``additive`` for an established AutoResearch workspace.
+        workspace_mode: Dependency layout for the research workspace.
+        invocation_mode: ``bootstrap`` for the initial pipeline stage or
+                         ``additive`` for an established AutoResearch workspace.
 
     Returns:
         Complete prompt string for resource finder agent
@@ -59,7 +61,7 @@ def generate_resource_finder_prompt(
     from templates.prompt_generator import PromptGenerator
 
     # templates_dir is typically project_root/templates, so parent is project_root
-    generator = PromptGenerator(templates_dir)
+    generator = PromptGenerator(templates_dir, workspace_mode=workspace_mode)
     return generator.generate_resource_finder_prompt(
         idea,
         hitl_runtime_completion=hitl_runtime_completion,
@@ -67,7 +69,7 @@ def generate_resource_finder_prompt(
         hitl_phase=hitl_phase,
         scoring_enabled=scoring_enabled,
         objective=objective,
-        workspace_mode=workspace_mode,
+        invocation_mode=invocation_mode,
     )
 
 
@@ -143,9 +145,12 @@ def run_resource_finder(
     if prompt_override is not None:
         prompt = prompt_override
     else:
+        from core.research_environment import read_workspace_mode
+
         prompt = generate_resource_finder_prompt(
             idea,
             templates_dir,
+            workspace_mode=read_workspace_mode(work_dir).value,
             hitl_runtime_completion=(completion_mode == "hitl_runtime"),
             provider=provider,
             scoring_enabled=scoring_enabled,

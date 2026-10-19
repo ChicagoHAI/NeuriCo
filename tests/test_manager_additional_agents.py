@@ -452,7 +452,7 @@ def test_additive_resource_prompt_omits_workspace_bootstrap(domain):
         hitl_runtime_completion=True,
         hitl_phase="execution",
         objective="Find the public benchmark split.",
-        workspace_mode="additive",
+        invocation_mode="additive",
     )
 
     assert "Find the public benchmark split." in prompt
@@ -468,6 +468,12 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
     (tmp_path / "baseline.txt").write_text("baseline\n", encoding="utf-8")
     checkpoints = CheckpointManager(tmp_path)
     parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    HitlFrontierStore(tmp_path).initialize_root(
+        node_sha=parent_sha,
+        plan_text="plan\n",
+        objective_score={"results": {}},
+        reason_for_acceptance="root",
+    )
     decisions = iter(
         [
             {
@@ -633,6 +639,12 @@ def test_controller_propagates_stop_before_cancelled_preparation_recovery(tmp_pa
     (tmp_path / "baseline.txt").write_text("baseline\n", encoding="utf-8")
     checkpoints = CheckpointManager(tmp_path)
     parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    HitlFrontierStore(tmp_path).initialize_root(
+        node_sha=parent_sha,
+        plan_text="plan\n",
+        objective_score={"results": {}},
+        reason_for_acceptance="root",
+    )
     state = HitlRuntimeState(tmp_path)
 
     class StopManager:
@@ -844,6 +856,12 @@ def test_later_agent_failure_preserves_earlier_preparation_and_retries_choice(tm
     (tmp_path / "baseline.txt").write_text("frontier\n", encoding="utf-8")
     checkpoints = CheckpointManager(tmp_path)
     parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    HitlFrontierStore(tmp_path).initialize_root(
+        node_sha=parent_sha,
+        plan_text="plan\n",
+        objective_score={"results": {}},
+        reason_for_acceptance="root",
+    )
     history = AttemptHistoryManager(
         tmp_path / "logs" / "experiment-autoresearch", "idea"
     )

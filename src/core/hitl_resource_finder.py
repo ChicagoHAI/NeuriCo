@@ -9,6 +9,7 @@ from agents.resource_finder import generate_resource_finder_prompt, run_resource
 from core.agent_runner import next_attempt_number
 from core.hitl import HitlValidationError, RequiredArtifact, verify_required_artifacts
 from core.hitl_stage_runtime import run_plan_centered_hitl_stage
+from core.research_environment import read_workspace_mode
 
 
 ResumeHook = Callable[
@@ -50,7 +51,7 @@ def run_resource_finder_hitl(
     on_approved: Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]],
     on_failed: Callable[[Dict[str, Any]], Dict[str, Any]],
     objective: str = "",
-    workspace_mode: str = "bootstrap",
+    invocation_mode: str = "bootstrap",
     provenance: Optional[Dict[str, Any]] = None,
     resume_worker: Optional[ResumeHook] = None,
     force_fresh_plan: bool = False,
@@ -66,11 +67,12 @@ def run_resource_finder_hitl(
         phase: generate_resource_finder_prompt(
             idea,
             templates_dir,
+            workspace_mode=read_workspace_mode(root).value,
             hitl_runtime_completion=True,
             provider=provider,
             hitl_phase=phase,
             objective=objective,
-            workspace_mode=workspace_mode,
+            invocation_mode=invocation_mode,
         )
         for phase in ("plan", "execution", "review")
     }

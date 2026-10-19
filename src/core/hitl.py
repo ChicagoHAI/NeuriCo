@@ -932,6 +932,8 @@ class HitlRuntime:
         self._proposal_submit_result: Optional[Dict[str, Any]] = None
         self._raised_idea_results: Dict[str, Dict[str, Any]] = {}
         self._started_scoring_requests: set[str] = set()
+        self._scoring_threads: set[threading.Thread] = set()
+        self._scoring_threads_lock = threading.Lock()
         self._tool_lock = threading.RLock()
         # This only serializes concurrent HTTP command handlers inside this
         # runtime process. Cross-process ownership lives in HitlRuntimeState.
@@ -1203,6 +1205,7 @@ class HitlRuntime:
         plan_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
         phase_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
         scoring_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
+        scoring_repair_cleanup: Optional[Callable[[], None]] = None,
         worker_prompt_contexts: Optional[Dict[str, str]] = None,
         baseline_construction: bool = False,
         baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
@@ -1264,6 +1267,7 @@ class HitlRuntime:
             "supplied_plan_finish_validator": plan_finish_validator,
             "supplied_phase_finish_validator": phase_finish_validator,
             "scoring_handler": scoring_handler,
+            "scoring_repair_cleanup": scoring_repair_cleanup,
             "worker_prompt_contexts": dict(worker_prompt_contexts or {}),
             "baseline_construction": bool(baseline_construction),
             "baseline_candidate_manifest": dict(baseline_candidate_manifest or {}),
@@ -1613,6 +1617,20 @@ class HitlRuntime:
 
     def clear_idea_tool_context(self) -> None:
         self.stop_idea_tool_server()
+        # A stopped worker can unwind before its asynchronous scorer finishes
+        # observing the shared stop request. Keep recovery behind that existing
+        # ownership boundary so no scorer can publish state after rollback.
+        while True:
+            with self._scoring_threads_lock:
+                active = [
+                    thread
+                    for thread in self._scoring_threads
+                    if thread is not threading.current_thread()
+                ]
+            if not active:
+                break
+            for thread in active:
+                thread.join()
         self._tool_context = {}
         self._phase_finish_result = None
         self._phase_finish_request_key = ""
@@ -2879,13 +2897,19 @@ class HitlRuntime:
             if isinstance(pending, dict) and pending.get("status") == "cancelled":
                 return
             try:
+                def finalize_repair(review: Dict[str, Any]) -> Dict[str, Any]:
+                    cleanup = self._tool_context.get("scoring_repair_cleanup")
+                    if callable(cleanup):
+                        cleanup()
+                    return finalize_failure(review)
+
                 self.manager.resume_worker_request(
                     prompt=_load_hitl_template(
                         "manager_runtime_scoring_failure.txt",
                         error=str(exc),
                     ),
                     validate=self._validate_runtime_scoring_failure,
-                    finalize=finalize_failure,
+                    finalize=finalize_repair,
                     manager_review_kind="scoring_failure",
                 )
             except Exception:
@@ -2893,6 +2917,37 @@ class HitlRuntime:
                 if isinstance(pending, dict) and pending.get("status") == "cancelled":
                     return
                 raise
+
+    def _start_protected_scoring_handler(
+        self,
+        handler: Callable[[Dict[str, Any]], None],
+        approval: Dict[str, Any],
+        *,
+        finalize_failure: Callable[[Dict[str, Any]], Dict[str, Any]],
+        name: str,
+    ) -> None:
+        """Start and retain one scorer thread until its runtime writes are done."""
+
+        def run() -> None:
+            try:
+                self._run_protected_scoring_handler(
+                    handler,
+                    approval,
+                    finalize_failure=finalize_failure,
+                )
+            finally:
+                with self._scoring_threads_lock:
+                    self._scoring_threads.discard(threading.current_thread())
+
+        thread = threading.Thread(target=run, daemon=True, name=name)
+        with self._scoring_threads_lock:
+            self._scoring_threads.add(thread)
+        try:
+            thread.start()
+        except Exception:
+            with self._scoring_threads_lock:
+                self._scoring_threads.discard(thread)
+            raise
 
     def _finalize_resumed_scoring_failure(
         self,
@@ -2974,13 +3029,12 @@ class HitlRuntime:
                     pending=pending,
                 )
 
-            threading.Thread(
-                target=self._run_protected_scoring_handler,
-                args=(handler, approval),
-                kwargs={"finalize_failure": finalize_failure},
-                daemon=True,
+            self._start_protected_scoring_handler(
+                handler,
+                approval,
+                finalize_failure=finalize_failure,
                 name="neurico-hitl-resumed-scoring",
-            ).start()
+            )
         return self.manager.wait_for_worker_request(request_key)
 
     def resume_pending_worker_command(self) -> Dict[str, Any]:
@@ -3362,13 +3416,12 @@ class HitlRuntime:
                 finalized["record"] = record
                 payload = {**review, "scoring_review_idea_id": record["idea_id"]}
 
-                threading.Thread(
-                    target=self._run_protected_scoring_handler,
-                    args=(handler, payload),
-                    kwargs={"finalize_failure": persist_phase_review},
-                    daemon=True,
+                self._start_protected_scoring_handler(
+                    handler,
+                    payload,
+                    finalize_failure=persist_phase_review,
                     name="neurico-hitl-scoring",
-                ).start()
+                )
                 self._started_scoring_requests.add(request_key)
                 return payload
 

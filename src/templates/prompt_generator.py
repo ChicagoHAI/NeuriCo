@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import re
 import yaml
-from jinja2 import Environment, FileSystemLoader, Template
+from jinja2 import Environment, FileSystemLoader
 import sys
 
 # Add parent directory to path for imports
@@ -19,6 +19,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.config_loader import ConfigLoader, normalize_domain
 from core.compute_backend import get_runtime_compute_backend
 from core.agent_cli import provider_skill_root
+from core.research_environment import (
+    WorkspaceMode,
+    normalize_workspace_mode,
+    research_environment_template_variables,
+)
 
 # The scoring-only obligation for a required_for_evaluation function, stated
 # once. It binds eval.py in the scoring pipeline, so it must never appear in
@@ -50,13 +55,19 @@ class PromptGenerator:
     structured prompt templates.
     """
 
-    def __init__(self, template_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        template_dir: Optional[Path] = None,
+        *,
+        workspace_mode: WorkspaceMode | str = WorkspaceMode.NATIVE,
+    ):
         """
         Initialize prompt generator.
 
         Args:
             template_dir: Root directory containing template files.
                          Defaults to project_root/templates/
+            workspace_mode: Dependency layout rendered into agent instructions.
         """
         if template_dir is None:
             # Assume we're in src/templates/, go up to project root
@@ -64,6 +75,7 @@ class PromptGenerator:
             template_dir = project_root / "templates"
 
         self.template_dir = Path(template_dir)
+        self.workspace_mode = normalize_workspace_mode(workspace_mode)
 
         # Set up Jinja2 environment
         self.env = Environment(
@@ -77,6 +89,9 @@ class PromptGenerator:
         self.env.filters['upper'] = str.upper
         self.env.filters['lower'] = str.lower
         self.env.filters['title'] = str.title
+        self.env.globals.update(
+            **research_environment_template_variables(self.workspace_mode)
+        )
 
     def _load_template_with_domain_override(self, template_path: str, domain: str) -> str:
         """
@@ -192,7 +207,7 @@ class PromptGenerator:
                 domain_template = self.load_template(default_template_path)
             except FileNotFoundError:
                 # Ultimate fallback: no domain-specific guidance
-                print(f"⚠️  No domain templates available, using base template only")
+                print("⚠️  No domain templates available, using base template only")
                 domain_template = ""
 
         # Prepare variables for template rendering
@@ -410,7 +425,9 @@ Location: {run_dir}
                         desc = repo.get('description', 'Code repository')
                         lines.append(f"- **{desc}**")
                         lines.append(f"  - URL: {repo_url}")
-                        lines.append(f"  - ACTION REQUIRED: Clone this repository and explore its capabilities")
+                        lines.append(
+                            "  - ACTION REQUIRED: Clone this repository and explore its capabilities"
+                        )
                     else:
                         lines.append(f"- {repo}")
                 lines.append("")
@@ -958,7 +975,7 @@ substitutes.
         hitl_phase: Optional[str] = None,
         scoring_enabled: bool = False,
         objective: str = "",
-        workspace_mode: str = "bootstrap",
+        invocation_mode: str = "bootstrap",
     ) -> str:
         """
         Generate resource finder prompt from template.
@@ -973,9 +990,9 @@ substitutes.
             raise ValueError(f"Unsupported HITL resource-finder phase: {hitl_phase}")
         if hitl_phase is not None and not hitl_runtime_completion:
             raise ValueError("HITL resource-finder phases require HITL runtime completion mode.")
-        if workspace_mode not in {"bootstrap", "additive"}:
+        if invocation_mode not in {"bootstrap", "additive"}:
             raise ValueError(
-                "Resource-finder workspace_mode must be 'bootstrap' or 'additive'."
+                "Resource-finder invocation_mode must be 'bootstrap' or 'additive'."
             )
 
         idea_spec = idea.get('idea', {})
@@ -1128,10 +1145,10 @@ RESEARCH DOMAIN:
                 {
                     "hitl_runtime_completion": hitl_runtime_completion,
                     "skill_root": f".{provider}/skills",
-                    "resource_workspace_mode": workspace_mode,
+                    "resource_workspace_mode": invocation_mode,
                 },
             )
-            if workspace_mode == "additive":
+            if invocation_mode == "additive":
                 # Domain templates also contain optional package-install recipes
                 # outside their bootstrap section. An additive invocation must
                 # not mutate the persistent, non-rollbackable environment.
@@ -1157,7 +1174,7 @@ RESEARCH DOMAIN:
             },
         )
         full_prompt = research_context + "\n" + state_contract + "\n" + template
-        if workspace_mode == "additive":
+        if invocation_mode == "additive":
             full_prompt += """
 
 ═══════════════════════════════════════════════════════════════════════════════
