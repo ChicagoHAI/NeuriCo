@@ -123,6 +123,31 @@ def test_experiment_runner_preserves_provider_failure_for_runtime_prompt(tmp_pat
     assert result["return_code"] == 10
 
 
+def test_benchmark_runner_does_not_require_research_report(tmp_path, monkeypatch):
+    completed = _launch_result(failed=False, return_code=0)
+    monkeypatch.setattr(pipeline, "build_agent_command", lambda *args, **kwargs: "worker")
+    monkeypatch.setattr(pipeline, "build_agent_environment", lambda *args, **kwargs: {})
+    monkeypatch.setattr(agent_runner, "run_prebuilt_cli_agent", lambda **kwargs: completed)
+    orchestrator = pipeline.ResearchPipelineOrchestrator(
+        work_dir=tmp_path,
+        templates_dir=Path(__file__).resolve().parents[1] / "templates",
+    )
+
+    result = orchestrator._run_experiment_runner(
+        {},
+        provider="codex",
+        timeout=None,
+        full_permissions=True,
+        benchmark_mode=True,
+        runtime_prompt="benchmark task",
+    )
+
+    assert result["success"] is True
+    stage = orchestrator.state.state["stages"]["experiment_runner"]
+    assert stage["expected_outputs"] == []
+    assert not (tmp_path / "REPORT.md").exists()
+
+
 def test_three_propagated_provider_failures_stop_replacement_loop(tmp_path):
     runtime = HitlRuntime(
         tmp_path,
