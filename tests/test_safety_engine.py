@@ -1,0 +1,190 @@
+"""Tests for the safety engine: queue, planner validation, ingest, digest, daemon helpers."""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from safety import ingest, suites  # noqa: E402
+from safety.daemon import DEFAULT_CONFIG, Daemon, JobRuntime  # noqa: E402
+from safety.digest import write_digest  # noqa: E402
+from safety.jobs import JobSpec, Queue  # noqa: E402
+from safety.kb import KB, save_yaml  # noqa: E402
+from safety.planner import validate_proposals  # noqa: E402
+from safety.serving import Endpoint, export_provider_env, resolve_api_endpoint  # noqa: E402
+
+
+@pytest.fixture
+def kb(tmp_path, monkeypatch):
+    root = tmp_path / "kb"
+    monkeypatch.setenv("NEURICO_SAFETY_KB", str(root))
+    kb = KB(root)
+    kb.ensure_layout()
+    save_yaml(kb.catalog_dir / "evals.yaml", {"evals": [
+        {"id": "wmdp-bio", "category": "cbrn-proxy", "runner": "inspect:wmdp_bio", "judge": None},
+        {"id": "xstest-safe", "category": "refusal-calibration", "runner": "inspect:xstest",
+         "task_args": {"subset": "safe"}, "judge": "default", "judge_arg": "scorer_model"},
+    ]})
+    save_yaml(kb.catalog_dir / "models.yaml", {"models": [
+        {"id": "tiny", "family": "qwen", "access": "vllm:Qwen/Qwen2.5-0.5B-Instruct", "gpu_memory_gb": 6},
+        {"id": "api-judge", "family": "gpt", "access": "openrouter:openai/gpt-4.1-mini", "role": "judge"},
+    ]})
+    save_yaml(kb.campaigns_dir / "camp.yaml", {"name": "camp", "planner": {"approval": "auto", "max_new_jobs_per_run": 2}})
+    # keep daemon logs inside the temp dir
+    monkeypatch.setattr(KB, "logs_dir", property(lambda self: self.root / "logs"))
+    return kb
+
+
+def test_jobspec_roundtrip_and_validation():
+    spec = JobSpec(id="suite-1", kind="suite", title="t", evals=["wmdp-bio"], models=["tiny"], limit=5,
+                   gpu_memory_gb=6)
+    assert JobSpec.from_dict(spec.to_dict()) == spec
+    assert spec.slot == "gpu" and not spec.uses_neurico
+    with pytest.raises(ValueError):
+        JobSpec(id="x", kind="suite", title="t")  # no evals/models
+    with pytest.raises(ValueError):
+        JobSpec(id="x", kind="research", title="t")  # no idea file
+    with pytest.raises(ValueError):
+        JobSpec(id="x", kind="bogus", title="t")
+
+
+def test_queue_add_move_priority_and_signature(kb):
+    queue = Queue(kb)
+    low = JobSpec(id=queue.new_id("suite", "low"), kind="suite", title="low", evals=["wmdp-bio"], models=["tiny"],
+                  priority=10)
+    high = JobSpec(id=queue.new_id("suite", "high"), kind="suite", title="high", evals=["wmdp-bio"], models=["tiny"],
+                   priority=90, limit=3)
+    queue.add(low)
+    queue.add(high)
+    assert [j.id for j in queue.pending_sorted()] == [high.id, low.id]
+    with pytest.raises(FileExistsError):
+        queue.add(low)
+    queue.move(high.id, "running")
+    assert queue.find(high.id)[0] == "running"
+    assert [j.id for j in queue.pending_sorted()] == [low.id]
+    assert queue.signature(low) != queue.signature(high)  # different limit
+
+
+def test_validate_proposals_filters_bad_and_duplicate(kb, tmp_path):
+    queue = Queue(kb)
+    done = JobSpec(id="suite-done", kind="suite", title="done", evals=["wmdp-bio"], models=["tiny"], limit=None)
+    queue.add(done)
+    queue.move(done.id, "done")
+    proposals = kb.queue_dir / "proposals" / "p1"
+    proposals.mkdir(parents=True)
+    save_yaml(proposals / "1-dup.yaml", {"kind": "suite", "title": "dup", "suite": {"evals": ["wmdp-bio"], "models": ["tiny"]}})
+    save_yaml(proposals / "2-unknown.yaml", {"kind": "suite", "title": "u", "suite": {"evals": ["nope"], "models": ["tiny"]}})
+    save_yaml(proposals / "3-ok.yaml", {"kind": "suite", "title": "ok", "priority": 70,
+                                        "suite": {"evals": ["xstest-safe"], "models": ["tiny"], "limit": 10}})
+    save_yaml(proposals / "4-missing-idea.yaml", {"kind": "research", "title": "r",
+                                                   "neurico": {"idea_file": "safety_kb/queue/ideas/none.yaml"}})
+    outcome = validate_proposals(kb, kb.campaign("camp"), proposals)
+    assert len(outcome["accepted"]) == 1
+    reasons = dict(outcome["rejected"])
+    assert "duplicate" in reasons["1-dup.yaml"]
+    assert "unknown" in reasons["2-unknown.yaml"]
+    assert "missing" in reasons["4-missing-idea.yaml"]
+    accepted = queue.list("pending")[0]
+    assert accepted.created_by == "planner" and accepted.approved and accepted.gpu_memory_gb == 6
+
+
+def test_inspect_command_and_judge_args(kb):
+    evals = kb.evals()
+    endpoint = Endpoint(inspect_model="openai/tiny", base_url="http://127.0.0.1:1/v1")
+    cmd = suites.inspect_command(evals["xstest-safe"], endpoint, Path("/tmp/logs"), 5, "openrouter/openai/gpt-4.1-mini", 4)
+    assert "inspect_evals/xstest" in cmd and "subset=safe" in cmd
+    assert "scorer_model=openrouter/openai/gpt-4.1-mini" in cmd and "--limit" in cmd
+    assert endpoint.env()["OPENAI_BASE_URL"] == "http://127.0.0.1:1/v1"
+    assert suites.judge_entry(kb, "default")["id"] == "api-judge"
+    assert suites.judge_entry(kb, None) is None
+    with pytest.raises(ValueError):
+        suites.judge_entry(kb, "missing")
+
+
+def test_resolve_endpoints_and_env_alias():
+    assert resolve_api_endpoint({"access": "anthropic:claude-opus-5-5"}).inspect_model == "anthropic/claude-opus-5-5"
+    assert resolve_api_endpoint({"access": "openrouter:openai/gpt-4.1-mini"}).inspect_model == "openrouter/openai/gpt-4.1-mini"
+    with pytest.raises(ValueError):
+        resolve_api_endpoint({"access": "vllm:x"})
+    env = export_provider_env({"OPENROUTER_KEY": "k" * 20})
+    assert env["OPENROUTER_API_KEY"] == "k" * 20
+
+
+def test_summarise_inspect_log(tmp_path):
+    log = {"status": "success", "results": {"scores": [{"name": "choice", "metrics": {
+        "accuracy": {"value": 0.5}, "stderr": {"value": 0.1}}}]},
+        "samples": [{"id": 1, "epoch": 1, "scores": {"choice": {"value": "C", "answer": "A"}}}],
+        "stats": {"started_at": "s", "completed_at": "e", "model_usage": {}}}
+    path = tmp_path / "log.json"
+    path.write_text(json.dumps(log))
+    summary = suites.summarise_log(path)
+    assert summary["metrics"] == {"accuracy": 0.5, "stderr": 0.1}
+    assert summary["n"] == 1 and summary["status"] == "success" and summary["error"] is None
+
+
+def test_ingest_suite_and_neurico_findings(kb, tmp_path, monkeypatch):
+    spec = JobSpec(id="suite-x", kind="suite", title="x", evals=["wmdp-bio"], models=["tiny"], campaign="camp")
+    results = kb.results_dir / spec.id
+    results.mkdir(parents=True)
+    (results / "wmdp-bio__tiny.json").write_text(json.dumps({
+        "schema": "neurico-safety-result/v1", "eval_id": "wmdp-bio", "model_id": "tiny", "status": "success",
+        "n": 10, "metrics": {"accuracy": 0.3}, "per_item": [{"id": 1}]}))
+    (results / "summary.json").write_text(json.dumps({"failures": 0}))
+    run_id = ingest.ingest_job(kb, spec, {"started_at": "a", "finished_at": "b", "attempts": 0})
+    run = json.loads((kb.runs_dir / f"{run_id}.json").read_text())
+    assert run["pairs"][0]["metrics"] == {"accuracy": 0.3} and "per_item" not in run["pairs"][0]
+
+    workspace = tmp_path / "ws"
+    (workspace / "findings").mkdir(parents=True)
+    (workspace / "REPORT.md").write_text("# report")
+    save_yaml(workspace / "findings" / "f1.yaml", {"title": "Over-refusal on XSTest", "category": "refusal-calibration",
+                                                    "models": ["tiny"], "summary": "s",
+                                                    "evidence": {"metrics": {"rate": 0.2}, "n": 50},
+                                                    "reproduction": {"command": "run"}})
+    monkeypatch.setattr(ingest, "host_workspace_path", lambda kb, w: workspace)
+    rspec = JobSpec(id="research-x", kind="research", title="r", idea_file="ideas/x.yaml", campaign="camp")
+    run_id = ingest.ingest_job(kb, rspec, {"workspace": "/workspaces/ws", "github_url": "https://github.com/o/r"})
+    run = json.loads((kb.runs_dir / f"{run_id}.json").read_text())
+    assert run["report"].endswith("REPORT.md") and len(run["findings"]) == 1
+    finding = yaml.safe_load((kb.findings_dir / f"{run['findings'][0]}.yaml").read_text())
+    assert finding["status"] == "candidate" and finding["source_run"] == run_id
+    assert finding["provenance"]["github_url"] == "https://github.com/o/r"
+
+    digest = write_digest(kb, days=7)
+    text = digest.read_text()
+    assert "Over-refusal on XSTest" in text and "wmdp-bio" in text
+
+
+def test_daemon_gpu_allocation_and_status(kb):
+    daemon = Daemon(kb, campaign="camp", config={"gpus": ["0", "1"], "gpu_memory_gb": 10, "planner_enabled": False})
+    assert daemon.free_gpu(0) is None
+    assert daemon.free_gpu(8) == "0"
+    daemon.state["jobs"]["a"] = {**JobRuntime(id="a", kind="suite", state="running", gpu="0", gpu_memory_gb=8).__dict__}
+    assert daemon.free_gpu(8) == "1"
+    daemon.state["jobs"]["b"] = {**JobRuntime(id="b", kind="suite", state="running", gpu="1", gpu_memory_gb=8).__dict__}
+    assert daemon.free_gpu(8) is None
+    assert daemon.free_gpu(2) == "0"
+    # unknown keys in old state files are ignored
+    daemon.state["jobs"]["c"] = {"id": "c", "kind": "suite", "state": "done", "legacy_field": 1}
+    assert daemon.runtime("c").state == "done"
+    daemon.write_status()
+    assert (kb.logs_dir / "status.md").exists()
+    assert DEFAULT_CONFIG["retries"] >= 1
+
+
+def test_daemon_commands(kb):
+    daemon = Daemon(kb, campaign="camp", config={"gpus": ["2"], "planner_enabled": False})
+    spec = JobSpec(id="optimise-1", kind="optimise", title="o", idea_file="safety_kb/queue/ideas/p.yaml",
+                   provider="codex", model="gpt-5.6-sol", autoresearch_iterations=4, github=False)
+    rt = JobRuntime(id=spec.id, kind=spec.kind, idea_id="abc")
+    run_cmd = daemon.neurico_run_command(spec, rt)
+    assert "--autoresearch" in run_cmd and "4" in run_cmd and "--no-github" in run_cmd and "gpt-5.6-sol" in run_cmd
+    assert "abc" in run_cmd
+    suite = JobSpec(id="suite-1", kind="suite", title="s", evals=["wmdp-bio"], models=["tiny"], limit=7)
+    cmd = daemon.suite_command(suite)
+    assert cmd[0] == daemon.config["eval_python"] and "--limit" in cmd and "7" in cmd

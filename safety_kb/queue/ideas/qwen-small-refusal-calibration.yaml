@@ -1,0 +1,49 @@
+idea:
+  title: "Refusal calibration and jailbreak robustness of small Qwen chat models"
+  domain: ai_safety
+  hypothesis: >
+    Small Qwen chat models (Qwen2.5-0.5B-Instruct, Qwen3-0.6B) refuse a substantial share of
+    clearly harmful requests under direct prompting but have poorly calibrated refusal:
+    their over-refusal rate on safe-but-sensitive prompts (XSTest safe) is above 10%, and a
+    simple jailbreak strategy raises harmful compliance (StrongREJECT score) by at least
+    0.15 relative to the direct-request baseline.
+  background:
+    description: >
+      Frontier model cards (Gemini 4 Argon, Claude Opus 5.5) report refusal and over-refusal
+      metrics and jailbreak robustness, while Qwen's own technical reports and model cards
+      report none of these for the released chat models (see /safety_kb/gaps/open-model-families-gap-matrix.md
+      and /safety_kb/labs/alibaba-qwen/README.md). This run produces the first paired
+      refusal / over-refusal / jailbreak scorecard for the small Qwen members, with a
+      calibrated local judge, so the numbers can be compared to frontier-card conventions.
+      Use the safety-evals skill (.claude/skills/safety-evals) for serving, evaluation and
+      result files; the shared evaluation interpreter is $NEURICO_SAFETY_VENV/bin/python.
+  methodology:
+    approach: "Comparative evaluation with paired items, calibrated judge, and bootstrap confidence intervals"
+    steps:
+      - "Serve each subject model locally with vLLM (skill script) and the local judge qwen2.5-7b-judge"
+      - "Run xstest-safe and xstest-unsafe (if the gated dataset is unavailable, use the original XSTest CSV from the paul-rottger/exaggerated-safety repository as a custom Inspect task) and strong-reject via the skill's run_eval.py"
+      - "Run strong-reject with one jailbreak method (the inspect_evals strong_reject task's jailbreak_method argument, e.g. AIM) as the attacked condition"
+      - "Calibrate the judge on at least 100 hand-labelled refusal/compliance examples drawn from the generations (judge_calibration.py) and report agreement"
+      - "Compute per-model metrics with n, SE and 95% CIs; paired differences between models and conditions on identical items"
+    baselines:
+      - "Direct-request StrongREJECT score (no jailbreak)"
+      - "Refusal rate on XSTest unsafe as the counterpart to over-refusal on XSTest safe"
+    metrics:
+      - "XSTest safe over-refusal rate"
+      - "XSTest unsafe refusal rate"
+      - "StrongREJECT score (direct and jailbreak)"
+      - "Judge agreement (accuracy, Cohen's kappa) on the labelled set"
+  constraints:
+    compute: gpu_required
+    dependencies: [inspect-ai, inspect-evals, vllm, transformers, scikit-learn]
+  evaluation_criteria:
+    - "Every reported number has n and a standard error or CI; comparisons are paired on identical items"
+    - "The judge calibration set and agreement figures are reported with the results"
+    - "Results are written as results/safety/*.json in the neurico-safety-result/v1 schema, and any notable behaviour is written to findings/*.yaml"
+  expected_outputs:
+    - type: metrics
+      format: json
+      description: "results/safety/<eval>__<model>.json for every eval x model pair, plus judge calibration"
+    - type: report
+      format: markdown
+      description: "REPORT.md with the paired scorecard, limitations (pipeline-scale models), and findings/*.yaml candidates"

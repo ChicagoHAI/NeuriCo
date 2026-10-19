@@ -1,0 +1,14 @@
+daemon:
+  gpus: []
+  gpu_memory_gb: 48
+  max_neurico_jobs: 1
+  max_suite_jobs: 1
+  stall_minutes: 45
+  retries: 2
+  poll_seconds: 30
+  min_pending: 2
+  planner_interval_hours: 6
+  planner_provider: claude
+  planner_model: null
+  eval_python: /data/hypogenicai/safety_venv/bin/python
+  hf_cache: /data/hypogenicai/hf_cache

@@ -960,6 +960,23 @@ cmd_run() {
         docker_args+=( -v "$NEURICO_HF_CACHE:/hf_cache" -e HF_HOME=/hf_cache )
         echo -e "${BLUE}Hugging Face cache:${NC} $NEURICO_HF_CACHE -> /hf_cache"
     fi
+    # Safety engine: a shared evaluation venv (inspect_ai, vllm) mounted at the same
+    # absolute path so its interpreter works unchanged, and the knowledge base read-only.
+    if [ -n "${NEURICO_SAFETY_VENV:-}" ] && [ -d "$NEURICO_SAFETY_VENV" ]; then
+        docker_args+=( -v "$NEURICO_SAFETY_VENV:$NEURICO_SAFETY_VENV:ro" -e NEURICO_SAFETY_VENV="$NEURICO_SAFETY_VENV" )
+        # The venv's interpreter lives outside the venv (pyvenv.cfg "home"); mount it too.
+        local venv_home
+        venv_home=$(sed -n 's/^home *= *//p' "$NEURICO_SAFETY_VENV/pyvenv.cfg" 2>/dev/null | head -1)
+        if [ -n "$venv_home" ] && [ -d "$venv_home" ]; then
+            venv_home=$(dirname "$venv_home")
+            docker_args+=( -v "$venv_home:$venv_home:ro" )
+        fi
+        echo -e "${BLUE}Safety eval venv:${NC} $NEURICO_SAFETY_VENV"
+    fi
+    if [ -n "${NEURICO_SAFETY_KB:-}" ] && [ -d "$NEURICO_SAFETY_KB" ]; then
+        docker_args+=( -v "$NEURICO_SAFETY_KB:/safety_kb:ro" -e NEURICO_SAFETY_KB=/safety_kb )
+        echo -e "${BLUE}Safety knowledge base:${NC} $NEURICO_SAFETY_KB -> /safety_kb"
+    fi
 
     echo -e "${BLUE}Running research exploration...${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"

@@ -1,0 +1,41 @@
+# Pipeline-test campaign: exercise every job kind on small Qwen models (GPU 2 on this server).
+name: qwen-small-pipeline-test
+objective: >
+  Validate the end-to-end safety engine (suites, research, optimise, explore, validate)
+  on 0.5B-4B Qwen models before pointing it at full-size open models and API models.
+  Produce complementary safety findings for the Qwen family using evaluations that
+  frontier-lab model cards run but Qwen's own cards do not report.
+target_models:
+  subjects: [qwen2.5-0.5b-instruct, qwen2.5-1.5b-instruct, qwen3-0.6b, qwen3-1.7b]
+  judges: [qwen2.5-7b-judge]
+eval_categories_in_scope:
+  - refusal-calibration
+  - jailbreak-robustness
+  - sycophancy
+  - honesty
+  - hallucination
+  - bias
+  - cbrn-proxy
+  - cyber
+  - deception-scheming
+  - agentic-misuse
+fixed_suites:
+  # Re-run on a cadence to detect drift / regressions and to give the planner baselines.
+  - name: nightly-core
+    evals: [xstest-safe, xstest-unsafe, strong-reject, sycophancy, truthfulqa-mc1, wmdp-bio]
+    models: [qwen2.5-0.5b-instruct, qwen3-0.6b]
+    limit: 100
+    every_hours: 24
+    priority: 40
+budgets:
+  max_concurrent_neurico_jobs: 1
+  max_concurrent_suite_jobs: 1
+  openrouter_usd_per_day: 20
+  gpu_ids: ["2"]
+planner:
+  approval: auto            # auto | human  (explore jobs on API models always need human approval)
+  max_new_jobs_per_run: 3
+  prefer_kinds: [suite, optimise, research]
+  avoid: ["real hazardous content generation", "evals needing >24 GB GPU memory"]
+reporting:
+  digest_every_days: 1

@@ -1,0 +1,87 @@
+# Model registry for the safety engine.
+#
+# access forms:
+#   vllm:<hf_id>         served locally by the safety-evals skill (needs gpu_memory_gb)
+#   openrouter:<slug>    OpenRouter (OPENROUTER_KEY)
+#   anthropic:<id>       Anthropic API (ANTHROPIC_API_KEY)
+#   openai:<id>          OpenAI API (OPENAI_API_KEY)
+# test_tier: true marks small members used to exercise the pipeline on this server.
+models:
+  - id: qwen2.5-0.5b-instruct
+    family: qwen
+    vendor: Alibaba
+    access: vllm:Qwen/Qwen2.5-0.5B-Instruct
+    params_b: 0.5
+    gpu_memory_gb: 6
+    test_tier: true
+    license: Apache-2.0
+  - id: qwen2.5-1.5b-instruct
+    family: qwen
+    vendor: Alibaba
+    access: vllm:Qwen/Qwen2.5-1.5B-Instruct
+    params_b: 1.5
+    gpu_memory_gb: 8
+    test_tier: true
+    license: Apache-2.0
+  - id: qwen2.5-3b-instruct
+    family: qwen
+    vendor: Alibaba
+    access: vllm:Qwen/Qwen2.5-3B-Instruct
+    params_b: 3
+    gpu_memory_gb: 12
+    test_tier: true
+    license: Qwen Research
+  - id: qwen3-0.6b
+    family: qwen
+    vendor: Alibaba
+    access: vllm:Qwen/Qwen3-0.6B
+    params_b: 0.6
+    gpu_memory_gb: 6
+    test_tier: true
+    license: Apache-2.0
+    notes: thinking model; suites disable thinking via chat template kwargs
+  - id: qwen3-1.7b
+    family: qwen
+    vendor: Alibaba
+    access: vllm:Qwen/Qwen3-1.7B
+    params_b: 1.7
+    gpu_memory_gb: 8
+    test_tier: true
+    license: Apache-2.0
+  - id: qwen3-4b
+    family: qwen
+    vendor: Alibaba
+    access: vllm:Qwen/Qwen3-4B
+    params_b: 4
+    gpu_memory_gb: 14
+    test_tier: true
+    license: Apache-2.0
+  # API models (judges and subjects). Fill in exact slugs from catalog research.
+  - id: claude-opus-5-5
+    family: claude
+    vendor: Anthropic
+    access: anthropic:claude-opus-5-5
+    api: true
+  - id: claude-fable-5-1
+    family: claude
+    vendor: Anthropic
+    access: anthropic:claude-fable-5-1
+    api: true
+  - id: gpt-4.1-mini-judge
+    family: gpt
+    vendor: OpenAI
+    access: openrouter:openai/gpt-4.1-mini
+    api: true
+    role: judge-api
+    notes: cheap API judge; select with NEURICO_SAFETY_JUDGE=gpt-4.1-mini-judge
+  - id: qwen2.5-7b-judge
+    family: qwen
+    vendor: Alibaba
+    access: vllm:Qwen/Qwen2.5-7B-Instruct
+    params_b: 7
+    gpu_memory_gb: 20
+    gpu_memory_utilization: 0.42
+    max_model_len: 8192
+    role: judge
+    license: Apache-2.0
+    notes: default local judge (no API spend); calibration numbers live in evals/judge-calibration.md
