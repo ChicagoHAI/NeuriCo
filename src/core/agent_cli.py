@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+import shlex
 from typing import Mapping, Optional
 
 from core.security import remove_github_credentials
@@ -20,11 +22,44 @@ TRANSCRIPT_FLAGS = {
     "gemini": "--output-format stream-json",
 }
 
+# Optional model override. The provider CLI's own default applies when unset.
+MODEL_ENV_VAR = "NEURICO_AGENT_MODEL"
+
+MODEL_FLAGS = {
+    "claude": "--model",
+    "codex": "--model",
+    "gemini": "--model",
+}
+
 PROVIDER_WORKSPACE_ROOTS = {
     "claude": ".claude",
     "codex": ".codex",
     "gemini": ".gemini",
 }
+
+
+def resolve_agent_model(model: Optional[str] = None) -> Optional[str]:
+    """Return the explicit model, else the run-wide override, else None."""
+    selected = (model or os.environ.get(MODEL_ENV_VAR) or "").strip()
+    return selected or None
+
+
+def agent_model_flag(provider: str, model: Optional[str] = None) -> str:
+    """Return the provider's model-selection flag, or "" for the CLI default."""
+    selected = resolve_agent_model(model)
+    flag = MODEL_FLAGS.get(provider)
+    if not selected or not flag:
+        return ""
+    return f"{flag} {shlex.quote(selected)}"
+
+
+def model_slug(provider: str, model: Optional[str]) -> str:
+    """Return a repository-name-safe model label without a repeated provider prefix."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (model or "").lower()).strip("-")
+    prefix = f"{provider}-"
+    if slug.startswith(prefix):
+        slug = slug[len(prefix):]
+    return slug
 
 
 def build_agent_command(
@@ -34,6 +69,7 @@ def build_agent_command(
     use_scribe: bool = False,
     transcript_flags: Optional[Mapping[str, str]] = None,
     gemini_skip_trust: bool = True,
+    model: Optional[str] = None,
 ) -> str:
     """Build a provider command while leaving launch/completion policy to callers."""
     if provider not in CLI_COMMANDS:
@@ -50,6 +86,9 @@ def build_agent_command(
             command += " --yolo"
             if gemini_skip_trust:
                 command += " --skip-trust"
+    model_flag = agent_model_flag(provider, model)
+    if model_flag:
+        command += f" {model_flag}"
     active_transcript_flags = TRANSCRIPT_FLAGS if transcript_flags is None else transcript_flags
     transcript_flag = active_transcript_flags.get(provider, "")
     if transcript_flag:

@@ -190,7 +190,13 @@ get_tty_flag() {
 # -----------------------------------------------------------------------------
 get_gpu_flags() {
     if docker info 2>/dev/null | grep -qi nvidia; then
-        echo "--gpus all"
+        # NEURICO_GPUS pins the container to specific host GPUs (e.g. "0" or
+        # "0,2") so concurrent runs do not compete for the same device.
+        if [ -n "${NEURICO_GPUS:-}" ]; then
+            echo "--gpus '\"device=${NEURICO_GPUS}\"'"
+        else
+            echo "--gpus all"
+        fi
     else
         echo -e "${YELLOW}Note: Running without GPU (nvidia-container-toolkit not configured)${NC}" >&2
         echo -e "      To enable GPU: sudo apt install nvidia-container-toolkit && sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker" >&2
@@ -739,18 +745,25 @@ cmd_submit() {
     # not submit.py flags. Remaining args are passed through to submit.py.
     local do_run=false
     local provider="claude"
+    local provider_given=false
+    local model=""
     local full_permissions=false
     local submit_args=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --run) do_run=true ;;
-            --provider) provider="$2"; shift ;;
-            --provider=*) provider="${1#*=}" ;;
+            --provider) provider="$2"; provider_given=true; shift ;;
+            --provider=*) provider="${1#*=}"; provider_given=true ;;
+            --model) model="$2"; shift ;;
+            --model=*) model="${1#*=}" ;;
             --full-permissions) full_permissions=true ;;
             *) submit_args+=("$1") ;;
         esac
         shift
     done
+    # submit.py uses provider and model only to name the repository/workspace.
+    [ "$provider_given" = true ] && submit_args+=( --provider "$provider" )
+    [ -n "$model" ] && submit_args+=( --model "$model" )
 
     # The idea file always lives on the host. Resolve both relative and
     # absolute inputs before starting Docker, then mount its containing
@@ -816,9 +829,10 @@ cmd_submit() {
         rm -f "$output_file"
         if [ -n "$idea_id" ]; then
             echo ""
-            local run_flags=""
-            [ "$full_permissions" = true ] && run_flags="--full-permissions"
-            cmd_run "$idea_id" --provider "$provider" $run_flags
+            local run_flags=()
+            [ "$full_permissions" = true ] && run_flags+=( --full-permissions )
+            [ -n "$model" ] && run_flags+=( --model "$model" )
+            cmd_run "$idea_id" --provider "$provider" "${run_flags[@]}"
         else
             echo -e "${RED}[ERROR]${NC} Could not extract idea ID from submit output — run manually with: ./neurico run <idea_id>"
         fi
@@ -906,6 +920,7 @@ cmd_run() {
     # contents come from user idea files) are appended only as literal array
     # elements, so spaces and shell metacharacters in paths are inert.
     local docker_args=( run $tty_flag --rm )
+    [ -n "${NEURICO_CONTAINER_NAME:-}" ] && docker_args+=( --name "$NEURICO_CONTAINER_NAME" )
     local helper_args=()
     eval "helper_args=( $gpu_flags $user_flags $credential_mounts $hitl_web_flags )"
     docker_args+=(
@@ -938,10 +953,71 @@ cmd_run() {
         done < "$mounts_file"
     fi
 
+    # NEURICO_HF_CACHE keeps Hugging Face downloads on a host directory instead
+    # of the container's home, which lives on the Docker (root) disk.
+    if [ -n "${NEURICO_HF_CACHE:-}" ]; then
+        mkdir -p "$NEURICO_HF_CACHE" && chmod a+rwX "$NEURICO_HF_CACHE" 2>/dev/null || true
+        docker_args+=( -v "$NEURICO_HF_CACHE:/hf_cache" -e HF_HOME=/hf_cache )
+        echo -e "${BLUE}Hugging Face cache:${NC} $NEURICO_HF_CACHE -> /hf_cache"
+    fi
+
     echo -e "${BLUE}Running research exploration...${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
 
     docker_args+=( -w /app "$IMAGE_NAME" python /app/src/core/runner.py "$@" )
+    docker "${docker_args[@]}"
+}
+
+# -----------------------------------------------------------------------------
+# Run a zero-shot baseline (one agent session, one instruction, idea -> paper)
+# -----------------------------------------------------------------------------
+cmd_baseline() {
+    if [ -z "$1" ]; then
+        echo -e "${RED}Usage: $0 baseline <idea.yaml> --provider claude|codex [--model <model>] [options]${NC}"
+        exit 1
+    fi
+
+    ensure_directories
+    check_env_file
+    warn_if_outdated
+
+    local idea_file="$1"
+    shift
+    if [ ! -f "$idea_file" ]; then
+        echo -e "${RED}Error: idea file not found: $idea_file${NC}"
+        exit 1
+    fi
+    local idea_abs idea_dir idea_name
+    idea_abs=$(cd "$(dirname "$idea_file")" && pwd)/$(basename "$idea_file")
+    idea_dir=$(dirname "$idea_abs")
+    idea_name=$(basename "$idea_abs")
+
+    local gpu_flags=$(get_gpu_flags)
+    local user_flags=$(get_user_flags)
+    local credential_mounts=$(get_cli_credential_mounts)
+    local workspace_dir=$(get_workspace_dir)
+    local tty_flag=$(get_tty_flag)
+
+    local docker_args=( run $tty_flag --rm )
+    [ -n "${NEURICO_CONTAINER_NAME:-}" ] && docker_args+=( --name "$NEURICO_CONTAINER_NAME" )
+    local helper_args=()
+    eval "helper_args=( $gpu_flags $user_flags $credential_mounts )"
+    docker_args+=(
+        "${helper_args[@]}"
+        --env-file "$PROJECT_ROOT/.env"
+        -e NEURICO_WORKSPACE=/workspaces
+        -v "$workspace_dir:/workspaces"
+        -v "$PROJECT_ROOT/logs:/app/logs"
+        -v "$PROJECT_ROOT/config:/app/config:ro"
+        -v "$PROJECT_ROOT/templates:/app/templates:ro"
+        -v "$idea_dir:/input:ro"
+        -w /app
+        "$IMAGE_NAME"
+        python /app/baseline/zero_shot.py "/input/$idea_name" "$@"
+    )
+
+    echo -e "${BLUE}Running zero-shot baseline...${NC}"
+    echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
     docker "${docker_args[@]}"
 }
 
@@ -2373,6 +2449,7 @@ cmd_help() {
     echo "  submit-local <idea.md> [--submit]  Convert a local idea file (markdown/text)"
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
+    echo "  baseline <idea.yaml>      Run a zero-shot baseline (single agent session)"
     echo "  hitl-web [id]             Open the containerized HITL idea portal"
     echo "  hitl-cli <id>             Open the containerized HITL terminal client"
     echo "  hitl-stop <id> [--yes]    Stop HITL research and preserve saved progress"
@@ -2447,6 +2524,9 @@ case "$ACTION" in
         ;;
     run)
         cmd_run "$@"
+        ;;
+    baseline)
+        cmd_baseline "$@"
         ;;
     _run-agent)
         cmd__run_agent "$@"

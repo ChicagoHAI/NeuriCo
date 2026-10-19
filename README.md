@@ -186,8 +186,10 @@ GitHub; `GITHUB_ORG` is optional (uses the personal account if empty)
 <summary>Paper Finder, scoring verifier, and agent API keys</summary>
 
 **Paper Finder and scoring verifier** — `S2_API_KEY` is required for full
-paper-finder, together with `OPENROUTER_KEY` or `OPENAI_API_KEY`. Scoring-contract
-verification uses the same configured OpenRouter or OpenAI API access. The verifier sends the
+paper-finder, together with `OPENROUTER_KEY` or `OPENAI_API_KEY`. With both set,
+paper-finder uses OpenRouter first and falls back to direct OpenAI when the
+OpenRouter key is rejected, over its limit, out of credits, or rate limited. Scoring-contract
+verification uses OpenRouter if its key is set, otherwise OpenAI, with no fallback. The verifier sends the
 declared contract and a bounded allowlist of scorer/function source to the
 configured external API; it never
 launches a coding agent. OpenRouter requests require zero-data-retention and
@@ -202,7 +204,7 @@ and enforces an outer wall-clock deadline over the complete request.
 | Variable | Required | Description |
 | --- | --- | --- |
 | `OPENROUTER_KEY` | Yes, unless `OPENAI_API_KEY` is set | OpenRouter access for paper-finder, IdeaHub conversion, LLM repo naming, and experiments that need it |
-| `OPENAI_API_KEY` | Yes, unless `OPENROUTER_KEY` is set | Direct OpenAI access for paper-finder, IdeaHub conversion, LLM repo naming, and experiments that need it |
+| `OPENAI_API_KEY` | Yes, unless `OPENROUTER_KEY` is set | Direct OpenAI access (paper-finder's fallback when both keys are set) for paper-finder, IdeaHub conversion, LLM repo naming, and experiments that need it |
 | `NEURICO_EVAL_VERIFIER_MODEL` | No | Override the verifier model (`openai/gpt-4.1` through OpenRouter or `gpt-4.1` through OpenAI by default) |
 | `S2_API_KEY` | For paper-finder | Semantic Scholar API key ([get here](https://www.semanticscholar.org/product/api)) |
 | `COHERE_API_KEY` | No | Improves paper-finder ranking (~7% boost) |
@@ -247,6 +249,7 @@ research repository.
 | `--github-org ORG` | Create the repository in a GitHub organization |
 | `--private` | Create a private repository |
 | `--no-hash` | Omit the random hash from the generated repository name |
+| `--provider NAME`, `--model NAME` | Add the provider and model to the repository name, e.g. `{slug}-{hash}-claude-opus-5-5` |
 
 ## Research modes
 
@@ -265,6 +268,7 @@ when you want one complete pass without iterative improvement.
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--provider claude\|codex\|gemini` | `claude` | Select the research worker provider |
+| `--model NAME` | provider CLI default | Select the model every agent stage runs, e.g. `claude-opus-5-5` or `gpt-5.6-sol` |
 | `--compute-backend local\|dsi-slurm\|modal` | `local` | Select where experiments execute |
 | `--timeout SECONDS` | `3600` | Set the experiment-runner timeout |
 | `--no-full-permissions` | full permissions | Restore normal provider permission prompts |
@@ -404,6 +408,18 @@ existing workspace.
 For the manager and human review workflow, scoring decisions, and recovery, see
 the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md).
 
+### Zero-shot baselines
+
+A baseline for comparison with the pipeline: one Claude Code or Codex session
+with full permissions and a single instruction takes the idea to a paper.
+
+```bash
+./neurico baseline ideas/my_idea.yaml --provider codex --model gpt-5.6-sol
+scripts/run_methods.py ideas/my_idea.yaml   # NeuriCo and baselines together
+```
+
+More information is available in the [baseline guide](baseline/README.md).
+
 ## Docker utilities
 
 ```bash
@@ -411,6 +427,9 @@ the [HITL AutoResearch guide](docs/HITL_AUTORESEARCH.md).
 ./neurico shell    # Open a shell in the container
 ./neurico help     # Show all commands
 ```
+
+Set `NEURICO_GPUS` (for example `NEURICO_GPUS=0,2`) to limit a container to
+specific host GPUs; by default it sees all of them.
 
 ## Research outputs
 

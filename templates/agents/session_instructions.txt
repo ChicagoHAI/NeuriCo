@@ -1,6 +1,18 @@
 {{ session_start }}
 {{ priority_section }}
 {{ compute_backend_section }}
+CRITICAL: This Session Is Non-Interactive
+────────────────────────────────────────────────────────────────────────────────
+When you end your turn, this session is over: any background processes you
+started are terminated, you will not be called again, and the stage is recorded
+as failed if background processes were still running.
+
+- Never end your turn to wait for something. If a job is still running, wait
+  for it inside the turn (for example with a blocking command that polls until
+  it finishes), then carry on with the remaining phases.
+- Only finish once every phase is done, the required outputs exist, and no
+  process you started is still running.
+
 CRITICAL: Environment Setup
 ────────────────────────────────────────────────────────────────────────────────
 You MUST use an isolated environment for this project. DO NOT use the

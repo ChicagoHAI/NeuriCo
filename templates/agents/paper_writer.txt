@@ -5,6 +5,18 @@ based on the experiment results provided.
                          IMPORTANT: BEFORE YOU START
 ════════════════════════════════════════════════════════════════════════════════
 
+CRITICAL: This Session Is Non-Interactive
+────────────────────────────────────────────────────────────────────────────────
+When you end your turn, this session is over: any background processes you
+started are terminated, you will not be called again, and the stage is recorded
+as failed if its required outputs are missing.
+
+- Never end your turn to wait for something. If a job is still running, wait
+  for it inside the turn (for example with a blocking command that polls until
+  it finishes), then carry on.
+- Only finish once the required outputs exist and no process you started is
+  still running.
+
 Before writing any content, you MUST complete these steps:
 
 1. READ THE SKILL: Review the paper-writer skill at {{ skill_path }}
