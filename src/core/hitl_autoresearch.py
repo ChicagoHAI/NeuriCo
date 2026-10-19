@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import hashlib
 import inspect
 import json
 import os
@@ -51,6 +52,7 @@ from core.hitl_frontier import (
     resolve_hitl_history_root,
 )
 from core.hitl_artifact_snapshots import (
+    capture_hitl_artifact_snapshot,
     discard_hitl_artifact_snapshot,
     restore_hitl_checkpoint_with_artifacts,
     restore_hitl_frontier_node,
@@ -1190,14 +1192,35 @@ def _restore_prepared_checkpoint(
     parent_sha: str,
     prepared_sha: str,
 ) -> str:
-    """Restore a prepared public checkpoint with its parent's scored artifacts."""
+    """Restore the exact public and private proposal-preparation boundary."""
     if prepared_sha == parent_sha:
         return _restore_selected_checkpoint(work_dir, parent_sha)
-    frontier = HitlFrontierStore(work_dir)
+    action = HitlRuntimeState(work_dir).snapshot().get("next_autoresearch_action")
+    if (
+        not isinstance(action, dict)
+        or action.get("kind") != "prepare_proposal"
+        or str(action.get("parent_node_sha", "")).strip() != parent_sha
+    ):
+        raise RuntimeError("Prepared workspace has no matching proposal-preparation state.")
+    action_sha = str(action.get("proposal_base_sha", "")).strip()
+    result = action.get("result")
+    result_sha = str(
+        result.get("proposal_base_sha", "") if isinstance(result, dict) else ""
+    ).strip()
+    if action_sha != prepared_sha or (result_sha and result_sha != prepared_sha):
+        raise RuntimeError("Prepared workspace checkpoint changed in runtime state.")
+    artifact_snapshot_id = str(
+        action.get("proposal_artifact_snapshot_id", "")
+    ).strip()
+    if hitl_artifact_contract_path(work_dir).is_file() and not artifact_snapshot_id:
+        raise RuntimeError("Prepared workspace has no evaluator-artifact snapshot.")
     return restore_hitl_checkpoint_with_artifacts(
         work_dir,
         checkpoint_sha=prepared_sha,
-        artifact_snapshot_id=frontier.artifact_snapshot_id(parent_sha),
+        artifact_snapshot_id=artifact_snapshot_id or None,
+        artifact_source_checkpoint_sha=(
+            prepared_sha if artifact_snapshot_id else None
+        ),
     )
 
 
@@ -1437,11 +1460,19 @@ def _validate_budget_preparation_cleanup(value: Any) -> Dict[str, Any]:
     parent = str(value.get("parent_node_sha", "")).strip()
     action_status = str(value.get("action_status", "")).strip()
     recovery = value.get("recovery")
+    prepared_artifacts = value.get("proposal_artifact_snapshot_id")
     if (
         status not in _BUDGET_PREPARATION_CLEANUP_STATUSES
         or not parent
         or action_status not in {"pending", "decision_recorded", "resolved", "cancelled"}
         or (recovery is not None and not isinstance(recovery, dict))
+        or (
+            prepared_artifacts is not None
+            and (
+                not isinstance(prepared_artifacts, str)
+                or not prepared_artifacts.strip()
+            )
+        )
     ):
         raise RuntimeError("Budget preparation cleanup state is malformed.")
     return dict(value)
@@ -1482,6 +1513,15 @@ def _begin_budget_preparation_cleanup(
         "status": "prepared",
         "parent_node_sha": parent,
         "action_status": status,
+        **(
+            {
+                "proposal_artifact_snapshot_id": str(
+                    action.get("proposal_artifact_snapshot_id", "")
+                ).strip()
+            }
+            if str(action.get("proposal_artifact_snapshot_id", "")).strip()
+            else {}
+        ),
         **({"recovery": dict(recovery)} if isinstance(recovery, dict) else {}),
     }
     stop[_BUDGET_PREPARATION_CLEANUP_KEY] = cleanup
@@ -1556,6 +1596,11 @@ def _finalize_budget_exhausted_preparation(
 
     if status == "restored":
         _restore_selected_checkpoint(work_dir, selected_sha)
+        prepared_artifacts = str(
+            cleanup.get("proposal_artifact_snapshot_id", "")
+        ).strip()
+        if prepared_artifacts:
+            discard_hitl_artifact_snapshot(work_dir, prepared_artifacts)
         if isinstance(recovery, dict):
             ref = str(recovery.get("hitl_snapshot_ref", "")).strip()
             if not ref.startswith("refs/neurico/hitl-rollback/"):
@@ -2930,20 +2975,93 @@ class HitlAutoResearchController:
             prepared_checkpoint = self.checkpoints.create_checkpoint(
                 "HITL AutoResearch resources prepared for proposal"
             )
-            HitlRuntimeState(self.work_dir).advance_proposal_preparation_after_agent(
-                parent_node_sha=parent_sha,
-                attempt_id=preparation_attempt_id,
-                completed_ordinal=ordinal,
-                workspace_fingerprint=approved_fingerprint,
-                workspace_fingerprint_scope=approved_scope,
-                provenance={
-                    **provenance,
-                    "additional_agent_ordinal": str(ordinal),
-                },
-                agent=completed_agent,
-                pipeline_stage=completed_stage,
-                proposal_base_sha=prepared_checkpoint.sha,
-            )
+            previous_artifact_snapshot_id = str(
+                action.get("proposal_artifact_snapshot_id", "")
+                if isinstance(action, dict)
+                else ""
+            ).strip()
+            prepared_artifact_snapshot_id = ""
+            if hitl_artifact_contract_path(self.work_dir).is_file():
+                snapshot_identity = "\0".join(
+                    (
+                        parent_sha,
+                        preparation_attempt_id,
+                        str(ordinal),
+                        prepared_checkpoint.sha,
+                    )
+                )
+                prepared_artifact_snapshot_id = "proposal-" + hashlib.sha256(
+                    snapshot_identity.encode("utf-8")
+                ).hexdigest()
+                capture_hitl_artifact_snapshot(
+                    self.work_dir,
+                    snapshot_id=prepared_artifact_snapshot_id,
+                    source_checkpoint_sha=prepared_checkpoint.sha,
+                )
+            try:
+                HitlRuntimeState(
+                    self.work_dir
+                ).advance_proposal_preparation_after_agent(
+                    parent_node_sha=parent_sha,
+                    attempt_id=preparation_attempt_id,
+                    completed_ordinal=ordinal,
+                    workspace_fingerprint=approved_fingerprint,
+                    workspace_fingerprint_scope=approved_scope,
+                    provenance={
+                        **provenance,
+                        "additional_agent_ordinal": str(ordinal),
+                    },
+                    agent=completed_agent,
+                    pipeline_stage=completed_stage,
+                    proposal_base_sha=prepared_checkpoint.sha,
+                    proposal_artifact_snapshot_id=(
+                        prepared_artifact_snapshot_id or None
+                    ),
+                )
+            except Exception:
+                # A failed state write can have an uncertain outcome after its
+                # atomic rename. Keep a snapshot if the durable action names it;
+                # otherwise it is safe to discard and retry the capture.
+                try:
+                    current_action = HitlRuntimeState(self.work_dir).snapshot().get(
+                        "next_autoresearch_action"
+                    )
+                except Exception:
+                    current_action = None
+                current_artifact_snapshot_id = str(
+                    current_action.get("proposal_artifact_snapshot_id", "")
+                    if isinstance(current_action, dict)
+                    else ""
+                ).strip()
+                if (
+                    prepared_artifact_snapshot_id
+                    and prepared_artifact_snapshot_id
+                    != previous_artifact_snapshot_id
+                    and current_artifact_snapshot_id
+                    != prepared_artifact_snapshot_id
+                ):
+                    try:
+                        discard_hitl_artifact_snapshot(
+                            self.work_dir,
+                            prepared_artifact_snapshot_id,
+                        )
+                    except OSError:
+                        pass
+                raise
+            if (
+                previous_artifact_snapshot_id
+                and previous_artifact_snapshot_id != prepared_artifact_snapshot_id
+            ):
+                try:
+                    discard_hitl_artifact_snapshot(
+                        self.work_dir,
+                        previous_artifact_snapshot_id,
+                    )
+                except OSError as exc:
+                    print(
+                        "⚠️  Could not clean superseded proposal artifact snapshot "
+                        f"{previous_artifact_snapshot_id}: {exc}"
+                    )
             if rollback is not None:
                 rollback.discard(cleanup_label="completed")
 
@@ -2979,7 +3097,21 @@ class HitlAutoResearchController:
             and str(action.get("parent_node_sha", "")).strip() == parent_sha
             and dict(action.get("result") or {}).get("choice") == "proceed"
         ):
+            artifact_snapshot_id = str(
+                action.get("proposal_artifact_snapshot_id", "")
+            ).strip()
             state.clear_completed_next_autoresearch_action("prepare_proposal")
+            if artifact_snapshot_id:
+                try:
+                    discard_hitl_artifact_snapshot(
+                        self.work_dir,
+                        artifact_snapshot_id,
+                    )
+                except OSError as exc:
+                    print(
+                        "⚠️  Could not clean completed proposal artifact snapshot "
+                        f"{artifact_snapshot_id}: {exc}"
+                    )
 
     def _resume_frontier_boundary_if_needed(self) -> Optional[str]:
         """Resume a persisted pruning or selection boundary after recovery."""

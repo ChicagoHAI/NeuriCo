@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -14,7 +16,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from core import hitl_autoresearch as har  # noqa: E402
 from core.autoresearch import AttemptHistoryManager, CheckpointManager  # noqa: E402
-from core.hitl import HitlIdeaLog, HitlRuntime  # noqa: E402
+from core.hitl import (  # noqa: E402
+    HitlIdeaLog,
+    HitlRuntime,
+    persist_hitl_required_artifact_contract,
+)
 from core.hitl_autoresearch import (  # noqa: E402
     HitlAutoResearchController,
     _archive_failed_hitl_attempt,
@@ -24,7 +30,10 @@ from core.hitl_autoresearch import (  # noqa: E402
 from core.hitl_frontier import HitlFrontierStore  # noqa: E402
 from core.hitl_git_state import HitlGitStateStore  # noqa: E402
 from core.hitl_manager_react import HitlManager  # noqa: E402
-from core.hitl_paths import hitl_stop_request_path  # noqa: E402
+from core.hitl_paths import (  # noqa: E402
+    hitl_artifact_snapshots_dir,
+    hitl_stop_request_path,
+)
 from core.hitl_run_control import HitlRunStopRequested  # noqa: E402
 from core.hitl_runtime_state import HitlRuntimeState  # noqa: E402
 from core.hitl_stage_runtime import (  # noqa: E402
@@ -465,14 +474,34 @@ def test_additive_resource_prompt_omits_workspace_bootstrap(domain):
 
 
 def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
+    scoring = tmp_path / "scoring"
+    scoring.mkdir()
+    (scoring / "interface.md").write_text(
+        "# Artifact Protocol\n\n"
+        "## Files to produce\n\n"
+        "| Path | Purpose | Required |\n"
+        "|---|---|---|\n"
+        "| `model.bin` | Candidate model | yes |\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".gitignore").write_text("model.bin\n", encoding="utf-8")
+    (tmp_path / "model.bin").write_text("selected model\n", encoding="utf-8")
     (tmp_path / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+    persist_hitl_required_artifact_contract(tmp_path)
     checkpoints = CheckpointManager(tmp_path)
     parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    parent_snapshot_id = "frontier-artifacts"
+    har.capture_hitl_artifact_snapshot(
+        tmp_path,
+        snapshot_id=parent_snapshot_id,
+        source_checkpoint_sha=parent_sha,
+    )
     HitlFrontierStore(tmp_path).initialize_root(
         node_sha=parent_sha,
         plan_text="plan\n",
         objective_score={"results": {}},
         reason_for_acceptance="root",
+        artifact_snapshot_id=parent_snapshot_id,
     )
     decisions = iter(
         [
@@ -484,9 +513,16 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
                 "premise_idea_id": "I1",
             },
             {
+                "choice": "call_additional_agent",
+                "agent": "resource_finder",
+                "objective": "Check a second source.",
+                "reason": "Corroboration is still missing.",
+                "premise_idea_id": "I2",
+            },
+            {
                 "choice": "proceed",
                 "reason": "The evidence is now sufficient.",
-                "premise_idea_id": "I2",
+                "premise_idea_id": "I3",
             },
         ]
     )
@@ -494,6 +530,7 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
     prompts = []
     logged = []
     runs = []
+    superseded_snapshot_ids = []
     manager_calls = 0
     state = HitlRuntimeState(tmp_path)
 
@@ -572,6 +609,15 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
 
     def run_agent(**kwargs):
         runs.append(kwargs)
+        current_action = state.snapshot()["next_autoresearch_action"]
+        previous_snapshot_id = str(
+            current_action.get("proposal_artifact_snapshot_id", "")
+        ).strip()
+        if previous_snapshot_id:
+            superseded_snapshot_ids.append(previous_snapshot_id)
+            assert (
+                hitl_artifact_snapshots_dir(tmp_path) / previous_snapshot_id
+            ).is_dir()
         assert (tmp_path / "baseline.txt").read_text(encoding="utf-8") == "baseline\n"
         assert not (tmp_path / "pre_decision_1.txt").exists()
         assert not (tmp_path / "pre_decision_3.txt").exists()
@@ -586,7 +632,7 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
         fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path, scope=scope)
         state.begin_worker_command(
             {
-                "request_key": "resource-request-1",
+                "request_key": f"resource-request-{kwargs['ordinal']}",
                 "pipeline_stage": "resource_finder",
                 "hitl_stage": "review",
                 "kind": "phase_finish",
@@ -595,7 +641,9 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
                 "workspace_fingerprint_scope": scope,
             }
         )
-        state.complete_worker_command("resource-request-1", {"status": "approved"})
+        state.complete_worker_command(
+            f"resource-request-{kwargs['ordinal']}", {"status": "approved"}
+        )
         return {"success": True, "logs_dir": str(logs_dir)}
 
     controller.additional_agent_runner = run_agent
@@ -609,29 +657,48 @@ def test_controller_returns_to_same_boundary_after_each_agent_run(tmp_path):
         attempt_id="attempt_1",
     )
 
-    assert len(begun) == 4
+    assert len(begun) == 5
     assert begun == [
         (parent_sha, "attempt_1", 1),
         (parent_sha, "attempt_1", 1),
         (parent_sha, "attempt_1", 2),
         (parent_sha, "attempt_1", 2),
+        (parent_sha, "attempt_1", 3),
     ]
     assert "Completed runs: 0" in prompts[0]
     assert "Next run ordinal: 1" in prompts[0]
     assert "Completed runs: 1" in prompts[3]
     assert "Next run ordinal: 2" in prompts[3]
+    assert "Completed runs: 2" in prompts[4]
+    assert "Next run ordinal: 3" in prompts[4]
     assert "not claims in plans" in prompts[0]
-    assert len(runs) == 1
+    assert len(runs) == 2
     assert runs[0]["agent"] == "resource_finder"
     assert runs[0]["provenance"] == {
         "parent_node_id": parent_sha,
         "attempt_id": "attempt_1",
         "additional_agent_ordinal": "1",
     }
+    assert runs[1]["provenance"] == {
+        "parent_node_id": parent_sha,
+        "attempt_id": "attempt_1",
+        "additional_agent_ordinal": "2",
+    }
     final_action = state.snapshot()["next_autoresearch_action"]
     assert final_action["status"] == "resolved"
     assert final_action["result"]["choice"] == "proceed"
     assert final_action["workspace_fingerprint_scope"] == state.workspace_guard_scope()
+    proposal_snapshot_id = final_action["proposal_artifact_snapshot_id"]
+    assert len(superseded_snapshot_ids) == 1
+    assert superseded_snapshot_ids[0] != proposal_snapshot_id
+    assert not (
+        hitl_artifact_snapshots_dir(tmp_path) / superseded_snapshot_ids[0]
+    ).exists()
+    har.validate_hitl_artifact_snapshot(
+        tmp_path,
+        proposal_snapshot_id,
+        source_checkpoint_sha=final_action["result"]["proposal_base_sha"],
+    )
     assert (tmp_path / "baseline.txt").read_text(encoding="utf-8") == "baseline\n"
 
 
@@ -788,6 +855,113 @@ def test_candidate_failure_restores_prepared_base_without_rerunning_resource(tmp
         )
         == prepared_sha
     )
+
+
+def test_prepared_checkpoint_restores_its_own_artifacts_and_added_gitlink(tmp_path):
+    scoring = tmp_path / "scoring"
+    scoring.mkdir()
+    (scoring / "interface.md").write_text(
+        "# Artifact Protocol\n\n"
+        "## Files to produce\n\n"
+        "| Path | Purpose | Required |\n"
+        "|---|---|---|\n"
+        "| `model.bin` | Candidate model | yes |\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".gitignore").write_text("model.bin\n", encoding="utf-8")
+    (tmp_path / "model.bin").write_text("selected model\n", encoding="utf-8")
+    (tmp_path / "baseline.txt").write_text("frontier\n", encoding="utf-8")
+    persist_hitl_required_artifact_contract(tmp_path)
+
+    checkpoints = CheckpointManager(tmp_path)
+    parent_sha = checkpoints.create_checkpoint("frontier parent").sha
+    parent_snapshot_id = "frontier-artifacts"
+    har.capture_hitl_artifact_snapshot(
+        tmp_path,
+        snapshot_id=parent_snapshot_id,
+        source_checkpoint_sha=parent_sha,
+    )
+    HitlFrontierStore(tmp_path).initialize_root(
+        node_sha=parent_sha,
+        plan_text="plan\n",
+        objective_score={"results": {}},
+        reason_for_acceptance="root",
+        artifact_snapshot_id=parent_snapshot_id,
+    )
+
+    nested = tmp_path / "code" / "tool"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    subprocess.run(
+        ["git", "-C", str(nested), "config", "user.name", "NeuriCo Test"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(nested),
+            "config",
+            "user.email",
+            "neurico@example.invalid",
+        ],
+        check=True,
+    )
+    (nested / "tool.txt").write_text("approved tool\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(nested), "add", "tool.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(nested), "commit", "-q", "-m", "tool"],
+        check=True,
+    )
+    prepared_sha = checkpoints.create_checkpoint("approved proposal preparation").sha
+    prepared_snapshot_id = f"proposal-{prepared_sha}"
+    har.capture_hitl_artifact_snapshot(
+        tmp_path,
+        snapshot_id=prepared_snapshot_id,
+        source_checkpoint_sha=prepared_sha,
+    )
+
+    state = HitlRuntimeState(tmp_path)
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": parent_sha,
+            "attempt_id": "attempt_1",
+            "additional_agent_ordinal": 2,
+            "workspace_fingerprint": HitlWorkspaceWriteGuard.public_fingerprint(
+                tmp_path
+            ),
+            "proposal_base_sha": prepared_sha,
+            "proposal_artifact_snapshot_id": prepared_snapshot_id,
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {"choice": "proceed", "reason": "ready", "premise_idea_id": "I1"},
+    )
+    state.complete_next_autoresearch_action(
+        "prepare_proposal",
+        {"choice": "proceed", "proposal_base_sha": prepared_sha},
+    )
+
+    (tmp_path / "model.bin").write_text("stale model\n", encoding="utf-8")
+    shutil.rmtree(nested)
+
+    assert har._restore_prepared_checkpoint(
+        tmp_path,
+        parent_sha=parent_sha,
+        prepared_sha=prepared_sha,
+    ) == prepared_sha
+    assert (tmp_path / "model.bin").read_text(encoding="utf-8") == "selected model\n"
+    assert (nested / "tool.txt").read_text(encoding="utf-8") == "approved tool\n"
+
+    controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    controller._clear_completed_proposal_preparation(parent_sha)
+    assert state.snapshot()["next_autoresearch_action"] is None
+    assert not (
+        hitl_artifact_snapshots_dir(tmp_path) / prepared_snapshot_id
+    ).exists()
 
 
 def test_crashed_candidate_recovers_to_prepared_base_not_frontier_parent(tmp_path):
@@ -1128,6 +1302,12 @@ def test_budget_exhaustion_rolls_back_unfinished_proposal_preparation(
 
     state = HitlRuntimeState(tmp_path)
     scope = state.workspace_guard_scope()
+    prepared_snapshot_id = "proposal-budget-test"
+    prepared_snapshot_dir = (
+        hitl_artifact_snapshots_dir(tmp_path) / prepared_snapshot_id
+    )
+    prepared_snapshot_dir.mkdir(parents=True)
+    (prepared_snapshot_dir / "marker").write_text("snapshot\n", encoding="utf-8")
     state.begin_next_autoresearch_action(
         {
             "kind": "prepare_proposal",
@@ -1139,6 +1319,7 @@ def test_budget_exhaustion_rolls_back_unfinished_proposal_preparation(
             ),
             "workspace_fingerprint_scope": scope,
             "proposal_base_sha": parent_sha,
+            "proposal_artifact_snapshot_id": prepared_snapshot_id,
         }
     )
     state.record_next_autoresearch_action_decision(
@@ -1193,8 +1374,11 @@ def test_budget_exhaustion_rolls_back_unfinished_proposal_preparation(
     assert state.pending_worker_command() is None
     assert state.worker_continuation() is None
     assert not HitlGitStateStore(tmp_path).has_snapshot(rollback.hitl_snapshot.ref)
+    assert not prepared_snapshot_dir.exists()
     stop = json.loads(stop_path.read_text(encoding="utf-8"))
-    assert stop[har._BUDGET_PREPARATION_CLEANUP_KEY]["status"] == "completed"
+    cleanup = stop[har._BUDGET_PREPARATION_CLEANUP_KEY]
+    assert cleanup["status"] == "completed"
+    assert cleanup["proposal_artifact_snapshot_id"] == prepared_snapshot_id
 
 
 def test_recovered_approval_uses_its_recorded_workspace_scope(tmp_path):

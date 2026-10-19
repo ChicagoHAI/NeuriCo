@@ -1064,6 +1064,7 @@ class HitlRuntimeState:
         agent: str,
         pipeline_stage: str,
         proposal_base_sha: Optional[str] = None,
+        proposal_artifact_snapshot_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Atomically retire one approved agent call and open the next boundary."""
         parent = str(parent_node_sha).strip()
@@ -1081,6 +1082,11 @@ class HitlRuntimeState:
         agent_name = str(agent).strip()
         stage = str(pipeline_stage).strip()
         prepared_base = str(proposal_base_sha or "").strip()
+        prepared_artifacts = str(proposal_artifact_snapshot_id or "").strip()
+        if prepared_artifacts and not prepared_base:
+            raise HitlRuntimeStateError(
+                "Prepared artifacts require a proposal workspace checkpoint"
+            )
         expected_provenance = {
             str(key): str(value)
             for key, value in dict(provenance or {}).items()
@@ -1169,6 +1175,8 @@ class HitlRuntimeState:
             }
             if prepared_base:
                 next_action["proposal_base_sha"] = prepared_base
+            if prepared_artifacts:
+                next_action["proposal_artifact_snapshot_id"] = prepared_artifacts
             if fingerprint_scope is not None:
                 next_action["workspace_fingerprint_scope"] = fingerprint_scope
             self._state["pending_worker_command"] = None
