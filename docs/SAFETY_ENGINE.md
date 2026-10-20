@@ -104,6 +104,25 @@ Daemon settings (`safety_kb/engine.yaml`, overridable by flags): `gpus`, `gpu_me
 `min_pending`, `planner_interval_hours`, `planner_enabled`, `planner_provider`, `eval_python`,
 `hf_cache`.
 
+## Knowledge-base index, findings lifecycle and ideation
+
+- `./neurico safety kb rebuild` builds `safety_kb/kb.sqlite` from the YAML/JSON records (runs,
+  per-eval results with timestamps, findings with status history, planner rounds, catalogs);
+  `kb timeline` writes `findings/INDEX.md` and `reports/results-timeline.md`; `kb anomalies`
+  lists metrics that moved more than 3 combined standard errors between consecutive observations
+  of the same model x eval; `kb query "<sql>"` runs any read query. The daemon refreshes the index,
+  the timelines and the anomaly inbox after every ingest.
+- Findings are files under `findings/` with a dated `status_history`. `./neurico safety finding
+  <id> --status reproduced|confirmed|refuted|withdrawn --by <who> --note "..."` appends an event;
+  ingest only ever creates `candidate` findings.
+- The planner has two modes chosen per round from the campaign's `planner.modes` mix (for example
+  `{ideate: 0.6, replicate: 0.4}`): `replicate` fills model-card gaps with suites and scorecard
+  runs (`templates/agents/safety_planner.txt`); `ideate` proposes `explore`, `optimise` or
+  `validate` jobs aimed at new findings, each with a novelty argument and a pre-registered
+  finding criterion that travel with the job (`templates/agents/safety_ideator.txt`). It reads
+  the findings, the anomaly inbox, the results timeline and the labs' blind-spot lists.
+  `./neurico safety plan --campaign <name> --mode ideate` runs a round by hand.
+
 ## Monitoring and recovery
 
 - `logs/safety/events.log` is the audit trail (`UP`, `START`, `DONE`, `FAILED`, `RETRY`,
