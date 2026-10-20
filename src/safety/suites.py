@@ -169,8 +169,19 @@ def run_pair(kb: KB, job: str, out_dir: Path, eval_entry: Dict[str, Any], model_
     run_env.update(endpoint.env())
     run_env.update(judge_env)
     print(f"run  {eval_entry['id']} x {model_entry['id']}: {' '.join(cmd)}", flush=True)
-    proc = subprocess.run(cmd, env=run_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    (out_dir / "inspect_logs" / f"{eval_entry['id']}__{model_entry['id']}.stdout.txt").write_text(proc.stdout)
+    stdout_path = out_dir / "inspect_logs" / f"{eval_entry['id']}__{model_entry['id']}.stdout.txt"
+    with stdout_path.open("w", encoding="utf-8") as fh:
+        proc = subprocess.Popen(cmd, env=run_env, stdout=fh, stderr=subprocess.STDOUT, text=True)
+        waited = 0
+        while True:
+            try:
+                proc.wait(timeout=60)
+                break
+            except subprocess.TimeoutExpired:
+                waited += 60
+                # Heartbeat for the daemon's stall watchdog: long evals print nothing here otherwise.
+                print(f"     {eval_entry['id']} x {model_entry['id']} running {waited // 60} min", flush=True)
+    proc_stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
     log_path = newest_log(log_dir, before)
     record: Dict[str, Any] = {
         "schema": SCHEMA, "job": job, "eval_id": eval_entry["id"], "category": eval_entry.get("category"),
@@ -182,7 +193,7 @@ def run_pair(kb: KB, job: str, out_dir: Path, eval_entry: Dict[str, Any], model_
         "error": None,
     }
     if proc.returncode != 0 and not log_path:
-        record["error"] = f"inspect exited {proc.returncode}: {proc.stdout[-2000:]}"
+        record["error"] = f"inspect exited {proc.returncode}: {proc_stdout[-2000:]}"
     elif log_path:
         summary = summarise_log(log_path)
         record.update({k: v for k, v in summary.items() if k != "status"})
@@ -191,7 +202,7 @@ def run_pair(kb: KB, job: str, out_dir: Path, eval_entry: Dict[str, Any], model_
             record["error"] = summary["error"]
         if proc.returncode != 0 and record["status"] == "success":
             record["status"] = "failed"
-            record["error"] = f"inspect exited {proc.returncode}: {proc.stdout[-2000:]}"
+            record["error"] = f"inspect exited {proc.returncode}: {proc_stdout[-2000:]}"
     save_json(result_path, record)
     print(f"{record['status']:7} {result_path.name} metrics={record['metrics']}", flush=True)
     return record
