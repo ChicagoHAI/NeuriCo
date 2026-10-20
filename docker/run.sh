@@ -23,6 +23,13 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
+# --- host mode hook -----------------------------------------------------------
+# NEURICO_MODE=host runs every subcommand natively (no Docker); the whole
+# implementation lives in host.sh, which only defines functions when sourced.
+# shellcheck source=host.sh
+. "$SCRIPT_DIR/host.sh"
+# -----------------------------------------------------------------------------
+
 # macOS BSD sed requires an explicit empty-string backup argument for in-place editing.
 # GNU sed on Linux does not. This wrapper handles both.
 sed_inplace() {
@@ -2558,9 +2565,23 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
     return 0
 fi
 
+# --- host mode hook: `./neurico --host <cmd>` sets NEURICO_MODE=host ---------
+if [ "${1:-}" = "--host" ]; then
+    export NEURICO_MODE=host
+    shift
+fi
+# -----------------------------------------------------------------------------
+
 # Parse command
 ACTION="${1:-help}"
 shift 2>/dev/null || true
+
+# --- host mode hook: everything below is the Docker route --------------------
+if is_host_mode; then
+    host_dispatch "$ACTION" "$@"
+    exit $?
+fi
+# -----------------------------------------------------------------------------
 
 # Check Docker is available (skip for commands that don't need it)
 if [ "$ACTION" != "config" ] && [ "$ACTION" != "help" ] && [ "$ACTION" != "--help" ] && [ "$ACTION" != "-h" ]; then

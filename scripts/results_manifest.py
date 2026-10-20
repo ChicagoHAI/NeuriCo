@@ -45,9 +45,11 @@ def build(batch_dirs: list) -> dict:
             text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
             retries = sorted(batch_dir.glob(f"{stem}.retry*.log"))
             all_text = text + "".join(r.read_text(encoding="utf-8", errors="replace") for r in retries)
+            # "Local:" is /workspaces/<name> in Docker and an absolute host
+            # path in host mode; the workspace name is the last component.
             names = re.findall(
-                r"(?:Generated repo name: |Resuming workspace: |Local: /workspaces/)(\S+)", text)
-            name = names[-1] if names else None
+                r"(?:Generated repo name: |Resuming workspace: |Local: )(\S+)", text)
+            name = Path(names[-1]).name if names else None
             previous = runs.get(key, {})
             if not name and previous.get("workspace"):
                 continue  # nothing newer than what an earlier batch recorded

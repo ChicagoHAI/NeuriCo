@@ -788,8 +788,11 @@ def main():
     work_dir = Path(args.workspace)
 
     if not work_dir.exists():
-        print(f"Error: workspace path does not exist inside the container: {work_dir}")
-        print(f"Expected a path under /workspaces/, e.g. /workspaces/{work_dir.name}")
+        print(f"Error: workspace path does not exist: {work_dir}")
+        if os.environ.get("NEURICO_MODE", "").lower() == "host":
+            print(f"Expected a directory under {os.environ.get('NEURICO_WORKSPACE', 'the workspace parent')}")
+        else:
+            print(f"Expected a path under /workspaces/, e.g. /workspaces/{work_dir.name}")
         sys.exit(1)
 
     # Build kwargs based on agent type

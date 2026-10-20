@@ -40,6 +40,7 @@ run experiments, analyze results, and document the work.
 
 - **Docker:** [Git](https://git-scm.com/) and a running [Docker](https://docs.docker.com/get-docker/) installation
 - **Local `uv`:** Git, Python 3.10+, and [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+- **Host mode:** the same `./neurico` commands without Docker (`./neurico --host <cmd>` or `./neurico-host <cmd>`), for compute servers; see [docs/HOST_MODE.md](docs/HOST_MODE.md)
 
 **Provider access:**
 
@@ -87,6 +88,9 @@ uv sync
 cp .env.example .env
 claude  # or: codex, gemini
 ```
+
+On a server without Docker, `./neurico --host build` replaces `uv sync` and
+every `./neurico` command below works with `--host` (see [docs/HOST_MODE.md](docs/HOST_MODE.md)).
 
 More information about provider authentication, workspace location, and
 optional services is available under [Configuration](#configuration).

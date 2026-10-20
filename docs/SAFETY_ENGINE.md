@@ -46,6 +46,10 @@ A job is one YAML file whose directory is its state: `queue/pending`, `running`,
 - `./neurico` Docker route with the local image (`scripts/build_local_image.sh`): research runs
   mount the venv (`NEURICO_SAFETY_VENV`) and the knowledge base (`NEURICO_SAFETY_KB`, read-only
   at `/safety_kb`).
+- Or host mode (no Docker): start the daemon with `./neurico --host safety start ...`; it then
+  launches `./neurico` jobs natively, passes the venv and knowledge base by path, and stops
+  stalled jobs by process group (`logs/host-jobs/<name>.pid`) instead of `docker kill`. The
+  "readable by uid 1000" and local-image requirements do not apply. See `docs/HOST_MODE.md`.
 - vLLM on this host needs `VLLM_USE_FLASHINFER_SAMPLER=0` (set by `serving.py`).
 
 ## Runbook: how to run safety jobs

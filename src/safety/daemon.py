@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -38,6 +39,44 @@ from safety.jobs import JobSpec, Queue
 from safety.kb import KB, PROJECT_ROOT, append_line, load_json, load_yaml, save_json, utc_now
 
 NEURICO = PROJECT_ROOT / "neurico"
+SIGKILL_GRACE_SECONDS = 15.0
+
+
+def host_mode() -> bool:
+    """True when ./neurico runs natively (docker/host.sh) instead of in Docker."""
+    return os.environ.get("NEURICO_MODE", "").lower() == "host"
+
+
+def host_job_pgid(name: str) -> Optional[int]:
+    """Process group of a host-mode job, from the launcher's logs/host-jobs/<name>.pid."""
+    jobs_dir = Path(os.environ.get("NEURICO_HOST_JOBS_DIR") or PROJECT_ROOT / "logs" / "host-jobs")
+    try:
+        return int((jobs_dir / f"{name}.pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def killpg_quiet(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def escalate_sigkill(pgids: List[int], delay: float = SIGKILL_GRACE_SECONDS) -> None:
+    """SIGKILL the groups that are still alive after ``delay`` seconds (non-blocking)."""
+    if not pgids:
+        return
+
+    def _kill() -> None:
+        for pgid in pgids:
+            killpg_quiet(pgid, signal.SIGKILL)
+
+    timer = threading.Timer(delay, _kill)
+    timer.daemon = True
+    timer.start()
+
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "gpus": [],                    # e.g. ["2"]; empty = CPU/API only for suites, all GPUs for containers
     "gpu_memory_gb": 48,           # memory per listed GPU
@@ -322,20 +361,30 @@ class Daemon:
 
     # -- watchdog -------------------------------------------------------------
     def kill_job(self, job_id: str, reason: str) -> None:
+        """Stop a job's whole process tree.
+
+        Docker route: ``docker kill <container>`` plus the launcher's group.
+        Host mode (``NEURICO_MODE=host`` or no docker binary): the launcher
+        recorded the job's process group in ``logs/host-jobs/<name>.pid``;
+        that group and the launcher's own group get SIGTERM, then SIGKILL
+        after a grace period for agents that ignore SIGTERM.
+        """
         rt = self.runtime(job_id)
+        groups: List[int] = []
         if rt.container:
-            subprocess.run(["docker", "kill", rt.container], capture_output=True)
+            if not host_mode() and shutil.which("docker"):
+                subprocess.run(["docker", "kill", rt.container], capture_output=True)
+            pgid = host_job_pgid(rt.container)
+            if pgid:
+                groups.append(pgid)
         process = self.processes.get(job_id)
         if process and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            groups.append(process.pid)
         elif rt.pid:
-            try:
-                os.killpg(rt.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
+            groups.append(rt.pid)
+        for pgid in groups:
+            killpg_quiet(pgid, signal.SIGTERM)
+        escalate_sigkill(groups)
         append_line(Path(rt.log_file or self.kb.logs_dir / "orphans.log"), f"[safety] killed: {reason}")
 
     def watchdog(self) -> None:

@@ -106,9 +106,9 @@ class ToolExecutor:
         # The manager runs on the host where paths look like /mnt/d/.../workspaces/my_idea
         # (WSL) or /Users/.../workspaces/my_idea (macOS). Inside Docker only /workspaces/
         # and /app/ are mounted — the host prefix does not exist in the container.
-        workspace_base = Path(os.environ.get("NEURICO_WORKSPACE_DIR", str(self.work_dir.parent)))
-        work_rel = self.work_dir.relative_to(workspace_base)
-        container_work_dir = Path("/workspaces") / work_rel
+        # In host mode (NEURICO_MODE=host) the agent runs natively, so host
+        # paths are passed through unchanged.
+        host_mode = os.environ.get("NEURICO_MODE", "").lower() == "host"
 
         # idea_file may have moved from ideas/submitted/ to ideas/in_progress/ after
         # manager startup; resolve against project_root to get the current location.
@@ -117,8 +117,16 @@ class ToolExecutor:
             in_progress = self.project_root / "ideas" / "in_progress" / idea_file.name
             if in_progress.exists():
                 idea_file = in_progress
-        idea_rel = idea_file.relative_to(self.project_root)
-        container_idea_file = Path("/app") / idea_rel
+
+        if host_mode:
+            container_work_dir = self.work_dir
+            container_idea_file = idea_file
+        else:
+            workspace_base = Path(os.environ.get("NEURICO_WORKSPACE_DIR", str(self.work_dir.parent)))
+            work_rel = self.work_dir.relative_to(workspace_base)
+            container_work_dir = Path("/workspaces") / work_rel
+            idea_rel = idea_file.relative_to(self.project_root)
+            container_idea_file = Path("/app") / idea_rel
 
         # Build the Docker command via ./neurico _run-agent
         neurico_cmd = str(self.project_root / "neurico")
