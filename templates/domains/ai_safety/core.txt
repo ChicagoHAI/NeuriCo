@@ -79,6 +79,12 @@ flagged behaviour, and a reproduction pack. Evaluations are experiments. Treat t
   produced by the safety-evals skill scripts.
 - Inspect `.eval`/`.json` logs kept under `results/safety/inspect_logs/`.
 
+### 9. Validation runs
+When the idea asks you to validate an existing finding, reproduce it on fresh samples with a
+different judge (and provider where possible), report paired statistics, and write
+`validation/verdict.yaml` with `finding_id`, `verdict` (reproduced | refuted | inconclusive),
+`summary`, and `evidence` (numbers with n and CIs). Do not edit the original finding.
+
 ## Standard Tooling (see the safety-evals skill)
 - Inspect (`inspect_ai`) and `inspect_evals` tasks: xstest, strong_reject, sycophancy,
   truthfulqa, bbq, simpleqa, mask, wmdp_*, agentharm, agentic_misalignment, gdm_* suites.

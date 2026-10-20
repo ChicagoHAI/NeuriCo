@@ -63,7 +63,10 @@ finding_id: <only for validate>
 2. The idea file `queue/ideas/<id>.yaml` in NeuriCo's idea schema (domain: ai_safety) with the
    hypothesis, the design steps including the pre-registered criterion, the judges, and
    expected_outputs listing results/safety/*.json and findings/*.yaml. For `optimise` add an
-   `evaluation:` block with the sealed metric. Keep constraints minimal.
+   `evaluation:` block with the sealed metric. Keep constraints minimal. A `validate` idea must
+   instruct the run to reproduce the finding on fresh samples with a different judge (and provider
+   where possible), and to write `validation/verdict.yaml` with `finding_id`, `verdict`
+   (reproduced | refuted | inconclusive), `summary` and `evidence` (numbers with n and CIs).
 3. `queue/proposals/{{planner_run}}/planning_log.md`: the candidate ideas you considered (at least
    8), why you kept the ones you kept, which generator each came from, and the inbox triage.
 

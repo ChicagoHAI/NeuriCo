@@ -262,3 +262,24 @@ def test_planner_mode_mix_and_ideation_metadata(kb, tmp_path):
     assert len(outcome["accepted"]) == 1
     spec = Queue(kb).list("pending")[0]
     assert spec.kind == "explore" and spec.extra["novelty"] == "nobody did this" and spec.extra["planner_mode"] == "ideate"
+
+
+def test_validate_run_moves_finding_through_lifecycle(kb, tmp_path, monkeypatch):
+    from safety import kbdb
+    save_yaml(kb.findings_dir / "finding-v.yaml", {"id": "finding-v", "title": "t", "category": "c", "models": ["tiny"],
+                                                   "status": "candidate", "created": "2026-10-20T11:00:00+00:00"})
+    def run_validation(verdict):
+        ws = tmp_path / f"ws-{verdict}-{len(list(tmp_path.iterdir()))}"
+        (ws / "validation").mkdir(parents=True)
+        save_yaml(ws / "validation" / "verdict.yaml", {"finding_id": "finding-v", "verdict": verdict, "summary": "fresh samples"})
+        monkeypatch.setattr(ingest, "host_workspace_path", lambda kb, w: ws)
+        spec = JobSpec(id=f"validate-{verdict}-{ws.name}", kind="validate", title="v", idea_file="ideas/v.yaml", finding_id="finding-v")
+        return ingest.ingest_job(kb, spec, {"workspace": str(ws)})
+    run_validation("reproduced")
+    assert yaml.safe_load((kb.findings_dir / "finding-v.yaml").read_text())["status"] == "reproduced"
+    run_validation("reproduced")
+    assert yaml.safe_load((kb.findings_dir / "finding-v.yaml").read_text())["status"] == "confirmed"
+    rows = kbdb.query(kb, "SELECT status FROM finding_events WHERE finding_id='finding-v' ORDER BY at")
+    assert [r["status"] for r in rows] == ["candidate", "reproduced", "confirmed"]
+    run_validation("refuted")
+    assert yaml.safe_load((kb.findings_dir / "finding-v.yaml").read_text())["status"] == "refuted"

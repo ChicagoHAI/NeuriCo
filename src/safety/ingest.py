@@ -120,8 +120,43 @@ def ingest_neurico(kb: KB, spec: JobSpec, runtime: Dict[str, Any]) -> str:
                 data.setdefault("github_url", runtime.get("github_url"))
                 run["findings"].append(file_finding(kb, data, run_id=run_id, spec=spec, workspace=workspace,
                                                     source_file=path))
+        # A validate run reports its verdict in validation/verdict.yaml:
+        #   finding_id, verdict: reproduced | refuted | inconclusive, summary, evidence
+        verdict = load_yaml(workspace / "validation" / "verdict.yaml") if (workspace / "validation").exists() else None
+        if isinstance(verdict, dict) and verdict.get("finding_id"):
+            run["validation"] = {k: verdict.get(k) for k in ("finding_id", "verdict", "summary")}
+            try:
+                apply_verdict(kb, verdict, run_id=run_id, spec=spec)
+            except Exception as e:  # noqa: BLE001 - never lose the run record over a bad verdict file
+                run["validation"]["error"] = f"{type(e).__name__}: {e}"
     save_json(kb.runs_dir / f"{run_id}.json", run)
     return run_id
+
+
+def apply_verdict(kb: KB, verdict: Dict[str, Any], *, run_id: str, spec: JobSpec) -> None:
+    """Move a finding along its lifecycle from an independent validation run.
+
+    `reproduced` on a candidate -> reproduced; a second agreeing reproduction (different judge or
+    provider, recorded in status_history) -> confirmed; `refuted` -> refuted; `inconclusive` only
+    records an event. Every change is a dated, attributed status event.
+    """
+    from safety.kbdb import set_finding_status
+    finding_id = str(verdict["finding_id"])
+    target = kb.findings_dir / f"{finding_id}.yaml"
+    if not target.exists():
+        raise FileNotFoundError(f"finding {finding_id} not in the knowledge base")
+    outcome = str(verdict.get("verdict", "inconclusive")).lower()
+    note = f"{spec.provider}/{spec.model or '-'} run {run_id}: {str(verdict.get('summary', ''))[:300]}"
+    current = load_yaml(target) or {}
+    history = current.get("status_history") or []
+    if outcome == "reproduced":
+        prior = [e for e in history if e.get("status") == "reproduced"]
+        new_status = "confirmed" if prior else "reproduced"
+    elif outcome == "refuted":
+        new_status = "refuted"
+    else:
+        new_status = current.get("status", "candidate")
+    set_finding_status(kb, finding_id, new_status, by=f"validate:{run_id}", note=f"[{outcome}] {note}")
 
 
 def ingest_job(kb: KB, spec: JobSpec, runtime: Dict[str, Any]) -> str:
