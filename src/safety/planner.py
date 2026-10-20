@@ -172,9 +172,11 @@ def validate_proposals(kb: KB, campaign: Dict[str, Any], proposal_dir: Path, mod
 
 
 def _targets_api_model(spec: JobSpec, models: Dict[str, Any]) -> bool:
+    """True when the idea names an API model as a *subject* (judges do not count)."""
     idea = load_yaml(PROJECT_ROOT / spec.idea_file) if spec.idea_file else None
     text = str(idea).lower() if idea else ""
-    return any(m.get("api") and m["id"].lower() in text for m in models.values())
+    return any(m.get("api") and not str(m.get("role", "")).startswith("judge") and m["id"].lower() in text
+               for m in models.values())
 
 
 def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: Optional[str] = None,
