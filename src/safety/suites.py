@@ -95,9 +95,15 @@ def inspect_command(eval_entry: Dict[str, Any], endpoint: Endpoint, log_dir: Pat
                     judge: Optional[str], max_connections: int) -> List[str]:
     runner = str(eval_entry["runner"])
     kind, _, task = runner.partition(":")
-    if kind != "inspect":
+    if kind == "inspect":
+        target = f"inspect_evals/{task}"
+    elif kind == "inspect-file":
+        # <path relative to the NeuriCo project root>@<task name>
+        path, _, name = task.partition("@")
+        target = f"{Path(__file__).resolve().parents[2] / path}@{name}" if name else str(Path(__file__).resolve().parents[2] / path)
+    else:
         raise ValueError(f"unsupported runner {runner!r}")
-    cmd = [sys.executable, "-m", "inspect_ai", "eval", f"inspect_evals/{task}",
+    cmd = [sys.executable, "-m", "inspect_ai", "eval", target,
            "--model", endpoint.inspect_model, "--log-dir", str(log_dir), "--log-format", "json",
            "--display", "plain", "--max-connections", str(max_connections)]
     if limit:

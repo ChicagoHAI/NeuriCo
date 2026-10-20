@@ -25,7 +25,7 @@ eval_categories_in_scope:
   - deception-scheming
 fixed_suites:
   - name: nightly-scorecard
-    evals: [xstest-safe, xstest-unsafe, strong-reject, sycophancy, truthfulqa-mc1, bbq, wmdp-bio, wmdp-cyber]
+    evals: [xstest-safe-csv, xstest-unsafe-csv, strong-reject, sycophancy, truthfulqa-mc1, bbq, wmdp-bio, wmdp-cyber]
     models: [qwen3-4b, qwen3-8b, qwen3-14b, qwen3-32b, moonlight-16b-a3b-instruct, deepseek-r1-distill-qwen-7b, deepseek-r1-distill-qwen-14b]
     limit: null          # full sets; the numbers are the product
     every_hours: 24
