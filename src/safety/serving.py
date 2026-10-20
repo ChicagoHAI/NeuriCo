@@ -92,8 +92,18 @@ class VLLMServer:
                 "--gpu-memory-utilization", str(self.gpu_memory_utilization),
                 *self.extra_args]
 
-    def start(self, timeout: float = 1200) -> "VLLMServer":
+    def start(self, timeout: Optional[float] = None) -> "VLLMServer":
+        # First start on a network filesystem can take 20+ minutes (weights, torch.compile,
+        # CUDA graphs); later starts reuse the compile cache under VLLM_CACHE_ROOT.
+        if timeout is None:
+            timeout = float(os.environ.get("NEURICO_VLLM_STARTUP_TIMEOUT", 2700))
         env = os.environ.copy()
+        cache_root = os.environ.get("NEURICO_CACHE_ROOT")
+        if cache_root:
+            env.setdefault("VLLM_CACHE_ROOT", os.path.join(cache_root, "vllm"))
+            env.setdefault("TORCHINDUCTOR_CACHE_DIR", os.path.join(cache_root, "torchinductor"))
+            env.setdefault("TRITON_CACHE_DIR", os.path.join(cache_root, "triton"))
+            env.setdefault("XDG_CACHE_HOME", cache_root)
         if self.gpu is not None:
             env["CUDA_VISIBLE_DEVICES"] = str(self.gpu)
         if self.hf_home:

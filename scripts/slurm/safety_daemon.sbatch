@@ -22,6 +22,11 @@ export NEURICO_HF_CACHE="$S/hf_cache" HF_HOME="$S/hf_cache"
 export NEURICO_SAFETY_VENV="$S/safety_venv"
 export NEURICO_SAFETY_KB="$PWD/safety_kb"
 export NEURICO_CODEX_CATALOG_DIR="$S/.codex-catalog"
+# Keep every cache (vLLM compile, torch inductor, triton, HF, uv) on the share, not in /home.
+export NEURICO_CACHE_ROOT="$S/.cache" XDG_CACHE_HOME="$S/.cache"
+export VLLM_CACHE_ROOT="$S/.cache/vllm" TORCHINDUCTOR_CACHE_DIR="$S/.cache/torchinductor" TRITON_CACHE_DIR="$S/.cache/triton"
+export NEURICO_VLLM_STARTUP_TIMEOUT=2700
+mkdir -p "$S/.cache"
 export PATH="$HOME/.local/bin:$PATH"
 # Only one daemon may own the queue: cancel pending siblings, bow out if another is running.
 for sib in $(squeue -u "$USER" -h -n neurico-safety -t PENDING -o %i); do
