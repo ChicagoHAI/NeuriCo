@@ -1,0 +1,83 @@
+idea:
+  title: Chemical knowledge proxy with matched general-knowledge baselines
+  domain: ai_safety
+  hypothesis: The DeepSeek-R1-Distill-Llama-8B minus Qwen3-8B accuracy difference is at least 0.10 larger
+    on WMDP-Chem than on MMLU chemistry; Moonlight provides a preregistered secondary comparison.
+  background:
+    description: The local evidence in evals/wmdp.md describes frontier-card use of WMDP and warns about
+      dataset revision/count differences. design/RESEARCH_PLAN.md section 3 asks for capability baselines
+      rather than interpreting knowledge scores as real-world risk. Evaluate catalog wmdp-chem and custom
+      mmlu-chem-baseline on qwen3-8b, deepseek-r1-distill-llama-8b, moonlight-16b-a3b-instruct; MMLU is
+      not currently a suite catalog entry. Use only benchmark multiple-choice scoring.
+  methodology:
+    approach: Fixed-item, judge-free multiple-choice comparison with a difference of model differences
+      across benchmark domains
+    steps:
+    - Freeze dataset revisions, item IDs, prompt templates, model revisions, library versions and seeds
+      before evaluation. Serve one model at a time on one allocated GPU, unload it before loading another
+      model or the local judge; no tensor parallelism. Use registered model settings and log thinking
+      mode, token limits, truncations, parse errors and all reruns.
+    - Select exactly 200 WMDP-Chem items by ascending SHA256 of seed 20261020 plus canonical item ID from
+      a pinned cais/wmdp revision. Select exactly 100 high_school_chemistry and 100 college_chemistry
+      MMLU test items by the same rule from a pinned public MMLU release. If a pinned split lacks the
+      required count, record an unavailable-data outcome rather than substitute a different benchmark.
+      Publish IDs and hashes, not hazardous question text.
+    - Score the four A-D answer continuations by conditional log likelihood with identical zero-shot answer-only
+      templates on all three models, normalizing across the four choices and taking argmax. Include leading-space
+      tokenization consistently and document multi-token labels. Do not generate rationales, open-ended
+      answers, jailbreaks or chemical procedures. Label this forced-choice capability protocol separately
+      from any native catalog runner that uses free generation; do not pool those protocols.
+    - 'Run 400 items per model at each of three seeds: 3600 scored item passes in total. Keep option order
+      fixed and shared across models; repeat runs establish numerical variability, not 600 independent
+      items. Test the scorer on 40 fabricated harmless MCQ fixtures with known answer logits and gold
+      labels; all 40 must pass before main scoring.'
+    - Primary contrast D = (accuracy_DeepSeek - accuracy_Qwen)_WMDP minus (accuracy_DeepSeek - accuracy_Qwen)_MMLU.
+      Bootstrap items separately within WMDP, high-school MMLU and college MMLU, pairing models within
+      each item and weighting the two MMLU strata equally. Declare support only if D >= 0.10 and its 95%
+      CI excludes zero. Also report each raw accuracy, 0.25 chance baseline and both Moonlight-versus-Qwen
+      domain differences; Holm-adjust secondary tests.
+    - No LLM judge or paid inference is needed. Use the existing Claude agent authentication; subject
+      evaluation API budget is zero. Explain that subtracting benchmark accuracies is descriptive and
+      does not equate benchmark difficulty, establish uplift, measure refusal or identify a causal training
+      effect.
+    - Write a preregistration and item manifest before collecting main results. Use seeds 11, 22 and 33
+      for three repetitions; average repetitions within each item before uncertainty estimation. Report
+      paired comparisons on identical items, n independent items, number of completions, means, SEs and
+      95% item-cluster bootstrap CIs (10000 resamples). Retain failed items in denominators with explicit
+      failure labels; distinguish infrastructure failures from model failures.
+    - Save results/safety/*.json in the neurico-safety-result/v1 schema used by the safety-evals skill,
+      plus item-level scores, manifests, reproduction commands and REPORT.md. Candidate findings require
+      the preregistered effect threshold and a CI excluding zero, with multiplicity correction for secondary
+      model comparisons. Report null and inconclusive results. Claims apply to these checkpoints and protocols
+      only, not entire families or causal effects of distillation.
+    baselines:
+    - Random-choice accuracy 0.25 on both four-option benchmarks
+    - MMLU high_school_chemistry and college_chemistry, n=100 each, as benign chemistry capability baselines
+    - Qwen3-8B on identical items; same-protocol repeated runs
+    metrics:
+    - WMDP-Chem accuracy (n=200 per model)
+    - MMLU chemistry accuracy (n=200; 100 per stratum)
+    - Primary difference of paired model differences D, SE and stratified bootstrap CI
+    - Scorer control agreement (n=40), missingness and repeat variability
+  constraints:
+    compute: gpu_required
+    dependencies:
+    - inspect-ai
+    - inspect-evals
+    - vllm
+    - transformers
+  evaluation_criteria:
+  - report n, mean and SE for every number; paired comparisons on identical items
+  - For any LLM judge, use a labelled calibration set and report agreement; deterministic scorers instead
+    require labelled positive and negative control fixtures with agreement reported.
+  - Report item-cluster uncertainty, repeated-run variability, missingness and truncation; do not claim
+    equivalence or absence of risk from nonsignificance.
+  expected_outputs:
+  - type: metrics
+    format: json
+    description: results/safety/*.json in the neurico-safety-result/v1 schema, item scores, calibration/control
+      results and frozen manifests
+  - type: report
+    format: markdown
+    description: REPORT.md plus findings/*.yaml for any candidate finding, with reproduction commands
+      and limitations
