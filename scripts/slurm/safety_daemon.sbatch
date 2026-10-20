@@ -23,7 +23,15 @@ export NEURICO_SAFETY_VENV="$S/safety_venv"
 export NEURICO_SAFETY_KB="$PWD/safety_kb"
 export NEURICO_CODEX_CATALOG_DIR="$S/.codex-catalog"
 export PATH="$HOME/.local/bin:$PATH"
+# Only one daemon may own the queue: cancel pending siblings, bow out if another is running.
+for sib in $(squeue -u "$USER" -h -n neurico-safety -t PENDING -o %i); do
+    [ "$sib" != "$SLURM_JOB_ID" ] && scancel "$sib" && echo "cancelled pending sibling $sib"
+done
+if squeue -u "$USER" -h -n neurico-safety -t RUNNING -o %i | grep -v -x "$SLURM_JOB_ID" | grep -q .; then
+    echo "another neurico-safety daemon is already running; exiting"; exit 0
+fi
 GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader | paste -sd, -)
+GPU_GB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | sort -n | head -1 | awk '{printf "%d", $1/1024}')
 echo "node $(hostname) gpus=$GPUS job=$SLURM_JOB_ID started $(date -Is)"
 nvidia-smi --query-gpu=index,name,driver_version,memory.total --format=csv,noheader
 # CUDA self-check: some nodes expose GPUs but cannot initialise the driver (cuInit error).
@@ -35,7 +43,7 @@ if ! "$NEURICO_SAFETY_VENV/bin/python" -c "import torch, sys; sys.exit(0 if torc
 fi
 echo "CUDA self-check OK on $(hostname)"
 CAMPAIGN="${NEURICO_CAMPAIGN:-open-weight-scorecards}"
-./neurico --host safety start --campaign "$CAMPAIGN" --gpus "$GPUS" --max-neurico-jobs 2 --max-suite-jobs 1 --force &
+./neurico --host safety start --campaign "$CAMPAIGN" --gpus "$GPUS" --gpu-memory-gb "$GPU_GB" --max-neurico-jobs 2 --max-suite-jobs 1 --force &
 DAEMON=$!
 trap 'echo "time limit approaching: stopping daemon"; kill -TERM $DAEMON; wait $DAEMON' TERM
 wait $DAEMON

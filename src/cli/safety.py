@@ -92,7 +92,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         overrides["planner_enabled"] = False
     if args.gpus is not None:
         overrides["gpus"] = [g.strip() for g in args.gpus.split(",") if g.strip()]
-    for name in ("max_neurico_jobs", "max_suite_jobs", "stall_minutes", "retries", "poll_seconds"):
+    for name in ("gpu_memory_gb", "max_neurico_jobs", "max_suite_jobs", "stall_minutes", "retries", "poll_seconds"):
         value = getattr(args, name, None)
         if value is not None:
             overrides[name] = value
@@ -197,6 +197,7 @@ def main() -> int:
     p = sub.add_parser("start")
     p.add_argument("--campaign")
     p.add_argument("--gpus", help="comma-separated GPU ids the engine may use")
+    p.add_argument("--gpu-memory-gb", type=float, help="memory of each listed GPU (default from engine.yaml)")
     p.add_argument("--max-neurico-jobs", type=int)
     p.add_argument("--max-suite-jobs", type=int)
     p.add_argument("--stall-minutes", type=int)
