@@ -9,8 +9,9 @@ This module generates complete prompts for research agents by:
 
 from pathlib import Path
 from typing import Dict, Any, Optional
+import re
 import yaml
-from jinja2 import Environment, FileSystemLoader, Template
+from jinja2 import Environment, FileSystemLoader
 import sys
 
 # Add parent directory to path for imports
@@ -206,7 +207,7 @@ class PromptGenerator:
                 domain_template = self.load_template(default_template_path)
             except FileNotFoundError:
                 # Ultimate fallback: no domain-specific guidance
-                print(f"⚠️  No domain templates available, using base template only")
+                print("⚠️  No domain templates available, using base template only")
                 domain_template = ""
 
         # Prepare variables for template rendering
@@ -424,7 +425,9 @@ Location: {run_dir}
                         desc = repo.get('description', 'Code repository')
                         lines.append(f"- **{desc}**")
                         lines.append(f"  - URL: {repo_url}")
-                        lines.append(f"  - ACTION REQUIRED: Clone this repository and explore its capabilities")
+                        lines.append(
+                            "  - ACTION REQUIRED: Clone this repository and explore its capabilities"
+                        )
                     else:
                         lines.append(f"- {repo}")
                 lines.append("")
@@ -971,6 +974,8 @@ substitutes.
         provider: str = "claude",
         hitl_phase: Optional[str] = None,
         scoring_enabled: bool = False,
+        objective: str = "",
+        invocation_mode: str = "bootstrap",
     ) -> str:
         """
         Generate resource finder prompt from template.
@@ -985,6 +990,10 @@ substitutes.
             raise ValueError(f"Unsupported HITL resource-finder phase: {hitl_phase}")
         if hitl_phase is not None and not hitl_runtime_completion:
             raise ValueError("HITL resource-finder phases require HITL runtime completion mode.")
+        if invocation_mode not in {"bootstrap", "additive"}:
+            raise ValueError(
+                "Resource-finder invocation_mode must be 'bootstrap' or 'additive'."
+            )
 
         idea_spec = idea.get('idea', {})
         domain = idea_spec.get('domain', 'general')
@@ -1017,6 +1026,12 @@ RESEARCH HYPOTHESIS:
 RESEARCH DOMAIN:
 {domain}
 """
+
+        if objective.strip():
+            research_context += (
+                "\nRESOURCE-FINDING OBJECTIVE FOR THIS INVOCATION:\n"
+                f"{objective.strip()}\n"
+            )
 
         # Add background information if provided
         if background:
@@ -1130,8 +1145,19 @@ RESEARCH DOMAIN:
                 {
                     "hitl_runtime_completion": hitl_runtime_completion,
                     "skill_root": f".{provider}/skills",
+                    "resource_workspace_mode": invocation_mode,
                 },
             )
+            if invocation_mode == "additive":
+                # Domain templates also contain optional package-install recipes
+                # outside their bootstrap section. An additive invocation must
+                # not mutate the persistent, non-rollbackable environment.
+                template = re.sub(
+                    r"(?im)^.*(?:\buv\s+(?:add|pip\s+install|venv)\b|"
+                    r"\bpip\s+install\b).*$",
+                    "",
+                    template,
+                )
 
         # Combine research context with template
         # Insert research context before the main template content
@@ -1148,6 +1174,26 @@ RESEARCH DOMAIN:
             },
         )
         full_prompt = research_context + "\n" + state_contract + "\n" + template
+        if invocation_mode == "additive":
+            full_prompt += """
+
+═══════════════════════════════════════════════════════════════════════════════
+              ADDITIVE INVOCATION — EXISTING WORKSPACE IS AUTHORITATIVE
+═══════════════════════════════════════════════════════════════════════════════
+
+This invocation runs inside an established AutoResearch workspace. Preserve the
+existing project, environment, dependency metadata, and useful resources.
+
+- Do NOT create, recreate, or replace `.venv`.
+- Do NOT create, recreate, or replace `pyproject.toml` or another dependency file.
+- Do NOT install packages or otherwise mutate the persistent environment.
+- If an unavailable dependency would help, document it in `resources.md` for a
+  later experiment worker instead of installing it now.
+- Add or update only the resources needed for the focused objective above.
+
+These additive-invocation rules override any bootstrap or package-installation
+instruction elsewhere in the resource-finder template.
+"""
 
         return full_prompt
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
 from core.hitl_run_control import (
@@ -83,25 +83,38 @@ def run_plan_centered_hitl_stage(
     scoring_repair_cleanup: Callable[[], None] | None = None,
     baseline_construction: bool = False,
     baseline_candidate_manifest: Dict[str, Any] | None = None,
+    provenance: Optional[Dict[str, Any]] = None,
+    force_fresh_plan: bool = False,
 ) -> Dict[str, Any]:
     """Run the shared plan/execution state machine for ordinary HITL stages."""
     # A held request's saved phase takes precedence over plan approval on restart.
     state = HitlRuntimeState(runtime.work_dir)
     pending = state.pending_worker_command()
-    resume_pending = worker_command_requires_resume(pending)
+    pending_response = pending.get("response") if isinstance(pending, dict) else None
+    continuation = state.worker_continuation() or {}
+    resume_approved_plan = bool(
+        isinstance(pending, dict)
+        and pending.get("kind") == "phase_finish"
+        and pending.get("hitl_stage") == "plan"
+        and pending.get("status") == "resolved"
+        and isinstance(pending_response, dict)
+        and pending_response.get("status") == "approved"
+        and continuation.get("hitl_stage") == "execution"
+    )
+    resume_pending = worker_command_requires_resume(pending) or resume_approved_plan
     if resume_pending:
-        continuation = state.worker_continuation() or {}
         saved_phase = str(continuation.get("hitl_stage", "")).strip()
         if (
             pending.get("pipeline_stage") != runtime.pipeline_stage
             or continuation.get("pipeline_stage") != runtime.pipeline_stage
             or continuation.get("actor") != actor
-            or pending.get("provenance")
-            or continuation.get("provenance")
+            or dict(pending.get("provenance") or {}) != dict(provenance or {})
+            or dict(continuation.get("provenance") or {}) != dict(provenance or {})
             or not str(pending.get("request_key") or "").strip()
             or pending.get("kind") not in {"phase_finish", "raised_idea"}
             or saved_phase not in {"plan", "execution", "review"}
             or not str(continuation.get("prompt_block") or "").strip()
+            or (resume_approved_plan and saved_phase != "execution")
             or (
                 pending.get("status") != "resolved"
                 and pending.get("hitl_stage") != saved_phase
@@ -121,11 +134,16 @@ def run_plan_centered_hitl_stage(
             scoring_repair_cleanup=scoring_repair_cleanup,
             baseline_construction=baseline_construction,
             baseline_candidate_manifest=baseline_candidate_manifest,
+            provenance=provenance,
         )
-        prompt = _load_hitl_template("worker_resume_pending_request.txt")
+        prompt = (
+            str(continuation["prompt_block"])
+            if resume_approved_plan
+            else _load_hitl_template("worker_resume_pending_request.txt")
+        )
         log_prefix = plan_log_prefix if saved_phase == "plan" else execution_log_prefix
         phase = "stage"
-    elif not getattr(
+    elif force_fresh_plan or not getattr(
         runtime,
         "plan_has_required_approval",
         runtime.plan_has_human_approval,
@@ -144,6 +162,7 @@ def run_plan_centered_hitl_stage(
             scoring_repair_cleanup=scoring_repair_cleanup,
             baseline_construction=baseline_construction,
             baseline_candidate_manifest=baseline_candidate_manifest,
+            provenance=provenance,
         )
         prompt = runtime.compose_worker_prompt(
             hitl_stage="plan",
@@ -163,6 +182,7 @@ def run_plan_centered_hitl_stage(
             scoring_repair_cleanup=scoring_repair_cleanup,
             baseline_construction=baseline_construction,
             baseline_candidate_manifest=baseline_candidate_manifest,
+            provenance=provenance,
         )
         prompt = runtime.compose_worker_prompt(
             hitl_stage="execution",

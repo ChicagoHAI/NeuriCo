@@ -984,6 +984,7 @@ def restore_hitl_checkpoint_with_artifacts(
     *,
     checkpoint_sha: str,
     artifact_snapshot_id: str | None,
+    artifact_source_checkpoint_sha: str | None = None,
 ) -> str:
     """Restore one composite HITL checkpoint and verify its Git component."""
     from core.autoresearch import CheckpointManager
@@ -999,7 +1000,11 @@ def restore_hitl_checkpoint_with_artifacts(
         # snapshot captured from the pre-scoring source checkpoint.  The
         # persisted pair is the composite restoration identity; exact source
         # matching remains enforced by scoring and stage-rollback callers.
-        inspect_hitl_artifact_snapshot(workspace, snapshot_id)
+        inspect_hitl_artifact_snapshot(
+            workspace,
+            snapshot_id,
+            source_checkpoint_sha=artifact_source_checkpoint_sha,
+        )
         if snapshot_id
         else None
     )
