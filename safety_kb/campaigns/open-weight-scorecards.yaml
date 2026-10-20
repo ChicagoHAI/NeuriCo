@@ -40,6 +40,7 @@ defaults:
   neurico: {provider: codex, model: gpt-6-astra, agent_auth: azure, github: false}
 planner:
   approval: auto
+  modes: {ideate: 0.6, replicate: 0.4}   # share of planner rounds that look for new findings vs fill card gaps
   max_new_jobs_per_run: 3
   prefer_kinds: [research, optimise, suite]
   avoid:

@@ -437,6 +437,7 @@ class Daemon:
                     run_id = ingest_job(self.kb, spec, asdict(rt))
                     rt.run_id = run_id
                     self.put(rt)
+                    self.refresh_index()
                 except Exception as e:  # noqa: BLE001
                     self.event(f"INGEST {spec.id} failed: {type(e).__name__}: {e}")
                 self.queue.move(spec.id, "done")
@@ -448,6 +449,17 @@ class Daemon:
                     self.put(rt)
                 else:
                     self.retry_or_fail(spec, rt)
+
+    def refresh_index(self) -> None:
+        """Rebuild the SQLite index, the timelines and the anomaly inbox after an ingest."""
+        from safety import kbdb
+        try:
+            kbdb.timeline(self.kb)
+            path = kbdb.scan_anomalies(self.kb)
+            if path:
+                self.event(f"ANOMALY result drift written to {path.name}")
+        except Exception as e:  # noqa: BLE001
+            self.event(f"INDEX  rebuild failed: {type(e).__name__}: {e}")
 
     # -- planner --------------------------------------------------------------
     def maybe_plan(self) -> None:

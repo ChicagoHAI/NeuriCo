@@ -27,7 +27,12 @@ from typing import Any, Dict, List, Optional
 from safety.jobs import JobSpec, Queue
 from safety.kb import KB, PROJECT_ROOT, load_yaml, save_yaml, utc_now
 
-TEMPLATE = PROJECT_ROOT / "templates" / "agents" / "safety_planner.txt"
+TEMPLATES = {
+    "replicate": PROJECT_ROOT / "templates" / "agents" / "safety_planner.txt",
+    "ideate": PROJECT_ROOT / "templates" / "agents" / "safety_ideator.txt",
+}
+TEMPLATE = TEMPLATES["replicate"]
+PLANNER_MODES = tuple(TEMPLATES)
 MAX_CHARS = {"campaign": 6000, "catalog_evals": 12000, "catalog_models": 6000, "findings": 8000,
              "runs": 10000, "inbox": 8000, "jobs": 6000, "gaps": 12000}
 
@@ -71,8 +76,26 @@ def build_context(kb: KB, campaign_name: str) -> Dict[str, str]:
     }
 
 
-def render_prompt(kb: KB, campaign_name: str, planner_run: str) -> str:
-    template = TEMPLATE.read_text(encoding="utf-8")
+def choose_mode(kb: KB, campaign: Dict[str, Any]) -> str:
+    """Pick the next planner mode from the campaign's `planner.modes` weights, round-robin.
+
+    The sequence is derived from past rounds (queue/proposals/*/outcome.yaml) so the mix holds
+    over time, e.g. {ideate: 0.6, replicate: 0.4} -> ideate, replicate, ideate, ideate, replicate...
+    """
+    weights = (campaign.get("planner") or {}).get("modes") or {"replicate": 1.0}
+    weights = {m: float(w) for m, w in weights.items() if m in PLANNER_MODES and float(w) > 0} or {"replicate": 1.0}
+    done: Dict[str, int] = {m: 0 for m in weights}
+    for outcome in (kb.queue_dir / "proposals").glob("*/outcome.yaml"):
+        mode = (load_yaml(outcome) or {}).get("mode", "replicate")
+        if mode in done:
+            done[mode] += 1
+    total = sum(done.values()) + 1
+    # the mode furthest below its target share goes next
+    return max(weights, key=lambda m: weights[m] / sum(weights.values()) - done[m] / total)
+
+
+def render_prompt(kb: KB, campaign_name: str, planner_run: str, mode: str = "replicate") -> str:
+    template = TEMPLATES[mode].read_text(encoding="utf-8")
     context = build_context(kb, campaign_name)
     campaign = kb.campaign(campaign_name)
     context.update({"planner_run": planner_run, "kb_root": str(kb.root), "campaign_name": campaign_name,
@@ -83,7 +106,7 @@ def render_prompt(kb: KB, campaign_name: str, planner_run: str) -> str:
     return template
 
 
-def validate_proposals(kb: KB, campaign: Dict[str, Any], proposal_dir: Path) -> Dict[str, Any]:
+def validate_proposals(kb: KB, campaign: Dict[str, Any], proposal_dir: Path, mode: str = "replicate") -> Dict[str, Any]:
     queue = Queue(kb)
     evals, models = kb.evals(), kb.models()
     existing = {queue.signature(spec) for state in ("pending", "running", "done")
@@ -108,6 +131,13 @@ def validate_proposals(kb: KB, campaign: Dict[str, Any], proposal_dir: Path) -> 
                     neurico[key] = value
                 elif key not in neurico:
                     neurico[key] = value
+        # Ideation metadata travels with the job (novelty argument, pre-registered criterion).
+        extra = data.setdefault("extra", {})
+        for key in ("novelty", "finding_criterion", "rationale"):
+            if data.get(key) and key != "rationale":
+                extra[key] = data.pop(key)
+        extra.setdefault("planner_run", proposal_dir.name)
+        extra.setdefault("planner_mode", mode)
         try:
             spec = JobSpec.from_dict(data)
         except Exception as e:  # noqa: BLE001
@@ -148,20 +178,25 @@ def _targets_api_model(spec: JobSpec, models: Dict[str, Any]) -> bool:
 
 
 def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: Optional[str] = None,
-                timeout: Optional[int] = 3600, dry_run: bool = False) -> Dict[str, Any]:
+                timeout: Optional[int] = 3600, dry_run: bool = False, mode: Optional[str] = None) -> Dict[str, Any]:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     from core.agent_cli import build_agent_command, build_agent_environment
     from core.agent_runner import run_prebuilt_cli_agent
 
     kb.ensure_layout()
     campaign = kb.campaign(campaign_name)
-    planner_run = datetime.now(timezone.utc).strftime("plan-%Y%m%d-%H%M%S")
+    mode = mode or choose_mode(kb, campaign)
+    if mode not in PLANNER_MODES:
+        raise ValueError(f"unknown planner mode {mode!r}; expected one of {PLANNER_MODES}")
+    planner_run = datetime.now(timezone.utc).strftime(f"plan-%Y%m%d-%H%M%S-{mode}")
     proposal_dir = kb.queue_dir / "proposals" / planner_run
     proposal_dir.mkdir(parents=True, exist_ok=True)
-    prompt = render_prompt(kb, campaign_name, planner_run)
+    prompt = render_prompt(kb, campaign_name, planner_run, mode)
     (proposal_dir / "prompt.md").write_text(prompt, encoding="utf-8")
     if dry_run:
-        return {"ok": True, "planner_run": planner_run, "prompt": str(proposal_dir / "prompt.md"), "proposed": 0}
+        save_yaml(proposal_dir / "outcome.yaml", {"planner_run": planner_run, "mode": mode, "dry_run": True,
+                                                  "at": utc_now(), "campaign": campaign_name, "proposed": 0})
+        return {"ok": True, "planner_run": planner_run, "mode": mode, "prompt": str(proposal_dir / "prompt.md"), "proposed": 0}
 
     log_dir = kb.logs_dir / "planner"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -172,9 +207,9 @@ def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: 
         log_file=log_dir / f"{planner_run}.log", transcript_file=log_dir / f"{planner_run}_transcript.jsonl",
         env=env, timeout=timeout, provider=provider,
     )
-    outcome = validate_proposals(kb, campaign, proposal_dir)
-    record = {"ok": bool(result.get("success", True)), "planner_run": planner_run,
-              "proposed": len(outcome["accepted"]), "accepted": outcome["accepted"],
+    outcome = validate_proposals(kb, campaign, proposal_dir, mode)
+    record = {"ok": bool(result.get("success", True)), "planner_run": planner_run, "mode": mode, "at": utc_now(),
+              "campaign": campaign_name, "proposed": len(outcome["accepted"]), "accepted": outcome["accepted"],
               "rejected": outcome["rejected"], "log": str(log_dir / f"{planner_run}.log")}
     save_yaml(proposal_dir / "outcome.yaml", record)
     return record

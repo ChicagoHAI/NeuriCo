@@ -144,7 +144,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
 def cmd_plan(args: argparse.Namespace) -> int:
     from safety.planner import run_planner
     kb = KB()
-    result = run_planner(kb, args.campaign, provider=args.provider, model=args.model, dry_run=args.dry_run)
+    result = run_planner(kb, args.campaign, provider=args.provider, model=args.model, dry_run=args.dry_run,
+                         mode=args.mode)
     print(result)
     return 0 if result.get("ok", True) else 1
 
@@ -153,6 +154,32 @@ def cmd_digest(args: argparse.Namespace) -> int:
     from safety.digest import write_digest
     path = write_digest(KB(), days=args.days)
     print(f"wrote {path}")
+    return 0
+
+
+def cmd_kb(args: argparse.Namespace) -> int:
+    from safety import kbdb
+    kb = KB()
+    if args.action == "rebuild":
+        print(kbdb.rebuild(kb))
+    elif args.action == "timeline":
+        print(kbdb.timeline(kb))
+    elif args.action == "anomalies":
+        for a in kbdb.anomalies(kb):
+            print(a)
+    elif args.action == "query":
+        if not args.sql:
+            print("query needs SQL, e.g. \"SELECT id, status, created FROM findings ORDER BY created DESC\"")
+            return 2
+        for row in kbdb.query(kb, args.sql):
+            print(row)
+    return 0
+
+
+def cmd_finding(args: argparse.Namespace) -> int:
+    from safety import kbdb
+    path = kbdb.set_finding_status(KB(), args.finding_id, args.status, by=args.by, note=args.note)
+    print(f"{args.finding_id} -> {args.status} ({path})")
     return 0
 
 
@@ -221,7 +248,20 @@ def main() -> int:
     p.add_argument("--provider", default="claude")
     p.add_argument("--model")
     p.add_argument("--dry-run", action="store_true", help="write the prompt and exit without launching an agent")
+    p.add_argument("--mode", choices=("replicate", "ideate"), help="default: next mode from the campaign's planner.modes mix")
     p.set_defaults(func=cmd_plan)
+
+    p = sub.add_parser("kb", help="knowledge-base index: rebuild | timeline | anomalies | query <sql>")
+    p.add_argument("action", choices=("rebuild", "timeline", "anomalies", "query"))
+    p.add_argument("sql", nargs="?")
+    p.set_defaults(func=cmd_kb)
+
+    p = sub.add_parser("finding", help="change a finding's status with a dated, attributed event")
+    p.add_argument("finding_id")
+    p.add_argument("--status", required=True, choices=("candidate", "reproduced", "confirmed", "refuted", "withdrawn"))
+    p.add_argument("--by", default=os.environ.get("USER", "human"))
+    p.add_argument("--note", default="")
+    p.set_defaults(func=cmd_finding)
 
     p = sub.add_parser("digest")
     p.add_argument("--days", type=int, default=7)

@@ -214,3 +214,51 @@ def test_daemon_passes_venv_root_not_interpreter_home(kb, tmp_path, monkeypatch)
     assert captured["NEURICO_SAFETY_VENV"] == str(venv)
     assert captured["NEURICO_SAFETY_KB"] == str(kb.root)
     assert captured["NEURICO_CONTAINER_NAME"] == rt.container
+
+
+def test_kbdb_rebuild_timeline_and_status_history(kb, tmp_path):
+    from safety import kbdb
+    from safety.kb import save_json
+    save_json(kb.runs_dir / "run-suite-1.json", {"run_id": "run-suite-1", "kind": "suite", "title": "s", "finished": "2026-10-20T10:00:00+00:00",
+        "pairs": [{"eval": "wmdp-bio", "model": "tiny", "status": "success", "n": 50, "metrics": {"accuracy": 0.3, "stderr": 0.02}}]})
+    save_json(kb.runs_dir / "run-suite-2.json", {"run_id": "run-suite-2", "kind": "suite", "title": "s", "finished": "2026-10-21T10:00:00+00:00",
+        "pairs": [{"eval": "wmdp-bio", "model": "tiny", "status": "success", "n": 50, "metrics": {"accuracy": 0.5, "stderr": 0.02}}]})
+    save_yaml(kb.findings_dir / "finding-1.yaml", {"id": "finding-1", "title": "t", "category": "c", "models": ["tiny"],
+                                                   "status": "candidate", "created": "2026-10-20T11:00:00+00:00", "source_run": "run-suite-1"})
+    counts = kbdb.rebuild(kb)
+    assert counts["runs"] == 2 and counts["results"] == 2 and counts["findings"] == 1
+    obs = kbdb.observations(kb, "tiny", "wmdp-bio")
+    assert [o["metrics"]["accuracy"] for o in obs] == [0.3, 0.5]
+    drift = kbdb.anomalies(kb)
+    assert drift and drift[0]["type"] == "drift" and drift[0]["sigma"] > 3
+    assert kbdb.scan_anomalies(kb).exists()
+    kbdb.set_finding_status(kb, "finding-1", "reproduced", by="tester", note="second judge agrees")
+    rows = kbdb.query(kb, "SELECT status, at, by FROM finding_events WHERE finding_id='finding-1' ORDER BY at")
+    assert [r["status"] for r in rows] == ["candidate", "reproduced"] and rows[-1]["by"] == "tester"
+    paths = kbdb.timeline(kb)
+    assert "reproduced (1)" in paths["findings_index"].read_text()
+    assert "tiny x wmdp-bio" in paths["results_timeline"].read_text()
+
+
+def test_planner_mode_mix_and_ideation_metadata(kb, tmp_path):
+    from safety import planner
+    campaign = {"name": "camp", "planner": {"approval": "auto", "max_new_jobs_per_run": 3, "modes": {"ideate": 0.6, "replicate": 0.4}}}
+    assert planner.choose_mode(kb, campaign) == "ideate"
+    for i, mode in enumerate(("ideate", "replicate", "ideate")):
+        d = kb.queue_dir / "proposals" / f"plan-{i}"
+        d.mkdir(parents=True)
+        save_yaml(d / "outcome.yaml", {"mode": mode})
+    # after ideate, replicate, ideate the 0.6/0.4 mix is owed a replicate round
+    assert planner.choose_mode(kb, campaign) == "replicate"
+    # proposals carry novelty metadata into the job's extra block
+    proposals = kb.queue_dir / "proposals" / "plan-x"
+    proposals.mkdir(parents=True)
+    idea = kb.queue_dir / "ideas" / "novel.yaml"
+    save_yaml(idea, {"idea": {"title": "x", "domain": "ai_safety", "hypothesis": "h" * 30}})
+    rel = str(idea.relative_to(planner.PROJECT_ROOT)) if str(idea).startswith(str(planner.PROJECT_ROOT)) else str(idea)
+    save_yaml(proposals / "1-novel.yaml", {"kind": "explore", "title": "novel", "novelty": "nobody did this",
+                                            "finding_criterion": "effect > 0.1", "neurico": {"idea_file": rel}})
+    outcome = planner.validate_proposals(kb, campaign, proposals, mode="ideate")
+    assert len(outcome["accepted"]) == 1
+    spec = Queue(kb).list("pending")[0]
+    assert spec.kind == "explore" and spec.extra["novelty"] == "nobody did this" and spec.extra["planner_mode"] == "ideate"
