@@ -110,9 +110,13 @@ class VLLMServer:
             env["HF_HOME"] = self.hf_home
         # The flashinfer sampler JIT fails on this host's toolchain; the default sampler is fine.
         env.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+        # One fresh file per start: appending to a file a killed server still holds open
+        # stalled the next server in Lustre sync-I/O wait on this cluster.
+        base = self.log_file
+        self.log_file = base.with_name(f"{base.stem}.{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}{base.suffix}")
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
-        log = self.log_file.open("a", encoding="utf-8")
-        log.write(f"\n$ {' '.join(self.command())}\n")
+        log = self.log_file.open("w", encoding="utf-8")
+        log.write(f"$ {' '.join(self.command())}\n")
         log.flush()
         self.process = subprocess.Popen(self.command(), env=env, stdout=log, stderr=subprocess.STDOUT,
                                         stdin=subprocess.DEVNULL, start_new_session=True)
