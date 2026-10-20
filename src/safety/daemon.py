@@ -173,6 +173,8 @@ class Daemon:
                "--paper-timeout", str(self.config["paper_timeout"])]
         if spec.model:
             cmd += ["--model", spec.model]
+        if spec.agent_auth:
+            cmd += ["--agent-auth", spec.agent_auth]
         if not spec.github:
             cmd.append("--no-github")
         if spec.write_paper:

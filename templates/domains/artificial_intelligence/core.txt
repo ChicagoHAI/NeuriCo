@@ -148,6 +148,11 @@ client = openai.OpenAI(
     api_key=os.getenv("OPENROUTER_KEY"),
     base_url="https://openrouter.ai/api/v1",
 )
+# When Azure is active (the azure-models skill is present), GPT-family calls go to the
+# lab's Azure OpenAI deployments instead:
+if os.getenv("AZURE_OPENAI_API_KEY") and os.getenv("AZURE_OPENAI_BASE_URL"):
+    azure_client = openai.OpenAI(api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+                                 base_url=os.getenv("AZURE_OPENAI_BASE_URL"))  # model = deployment name
 
 # Rate limiting and retry logic
 @retry(wait=wait_exponential(min=1, max=60), stop=stop_after_attempt(5))

@@ -75,7 +75,7 @@ def cmd_enqueue_idea(args: argparse.Namespace) -> int:
     title = args.title or idea.stem.replace("_", " ")
     spec = JobSpec(id=queue.new_id(args.kind, title), kind=args.kind, title=title, campaign=args.campaign or "",
                    priority=args.priority, idea_file=rel, provider=args.provider, model=args.model,
-                   autoresearch_iterations=args.iterations, write_paper=args.write_paper,
+                   agent_auth=args.agent_auth, autoresearch_iterations=args.iterations, write_paper=args.write_paper,
                    github=not args.no_github, private=args.private, gpu_memory_gb=args.gpu_gb or 0.0,
                    created_by="human")
     path = queue.add(spec)
@@ -183,6 +183,7 @@ def main() -> int:
     p.add_argument("--kind", choices=("research", "optimise", "explore", "validate"), default="research")
     p.add_argument("--provider", default="claude")
     p.add_argument("--model")
+    p.add_argument("--agent-auth", choices=("oauth", "azure"))
     p.add_argument("--iterations", type=int, default=3)
     p.add_argument("--write-paper", action="store_true")
     p.add_argument("--no-github", action="store_true")

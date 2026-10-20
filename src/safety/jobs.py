@@ -48,6 +48,7 @@ class JobSpec:
     idea_file: Optional[str] = None
     provider: str = "claude"
     model: Optional[str] = None
+    agent_auth: Optional[str] = None   # oauth | azure (None = engine/env default)
     autoresearch_iterations: int = 3
     write_paper: bool = False
     github: bool = True
@@ -88,7 +89,7 @@ class JobSpec:
         else:
             data["neurico"] = {
                 "idea_file": self.idea_file, "provider": self.provider, "model": self.model,
-                "autoresearch_iterations": self.autoresearch_iterations,
+                "agent_auth": self.agent_auth, "autoresearch_iterations": self.autoresearch_iterations,
                 "write_paper": self.write_paper, "github": self.github, "private": self.private,
             }
         if self.finding_id:
@@ -110,7 +111,7 @@ class JobSpec:
             evals=list(suite.get("evals") or []), models=list(suite.get("models") or []),
             limit=suite.get("limit"),
             idea_file=neurico.get("idea_file"), provider=neurico.get("provider", "claude"),
-            model=neurico.get("model"),
+            model=neurico.get("model"), agent_auth=neurico.get("agent_auth"),
             autoresearch_iterations=int(neurico.get("autoresearch_iterations", 3)),
             write_paper=bool(neurico.get("write_paper", False)),
             github=bool(neurico.get("github", True)), private=bool(neurico.get("private", False)),

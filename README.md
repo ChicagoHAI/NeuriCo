@@ -219,6 +219,12 @@ experiments
 | `OPENROUTER_KEY` | OpenRouter multi-model access |
 | `HF_TOKEN` | Hugging Face model/dataset access |
 | `WANDB_API_KEY` | Weights & Biases experiment tracking |
+| `NEURICO_AZURE=1` + `AZURE_OPENAI_API_KEY`, `AZURE_FOUNDRY_RESOURCE` | Azure OpenAI for agents' own API calls (adds the `azure-models` skill); see [`docs/AGENT_AUTH.md`](docs/AGENT_AUTH.md) |
+
+**Agent backbone auth** — which account the agent CLI itself runs on: `NEURICO_AGENT_AUTH=oauth`
+(default, the CLI's login) or `azure` (Codex on the Azure OpenAI deployments; per run
+`./neurico run <idea_id> --provider codex --agent-auth azure --model gpt-6-astra`). Details and
+the allowed combinations are in [`docs/AGENT_AUTH.md`](docs/AGENT_AUTH.md).
 
 </details>
 

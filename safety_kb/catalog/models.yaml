@@ -85,3 +85,26 @@ models:
     role: judge
     license: Apache-2.0
     notes: default local judge (no API spend); calibration numbers live in evals/judge-calibration.md
+  # Azure OpenAI deployments on the lab resource (checked 2026-10-20); need NEURICO_AZURE=1 keys
+  - id: azure-gpt-6-astra
+    family: gpt
+    vendor: OpenAI (Azure)
+    access: azure:gpt-6-astra
+    api: true
+  - id: azure-gpt-5.6-sol
+    family: gpt
+    vendor: OpenAI (Azure)
+    access: azure:gpt-5.6-sol
+    api: true
+  - id: azure-gpt-5.4
+    family: gpt
+    vendor: OpenAI (Azure)
+    access: azure:gpt-5.4
+    api: true
+  - id: azure-gpt-4.1-mini-judge
+    family: gpt
+    vendor: OpenAI (Azure)
+    access: azure:gpt-4.1-mini
+    api: true
+    role: judge-api
+    notes: API judge on Azure; select with NEURICO_SAFETY_JUDGE=azure-gpt-4.1-mini-judge

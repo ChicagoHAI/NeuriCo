@@ -173,6 +173,10 @@ IF your research involves LLM behavior, agents, prompting, or AI capabilities:
     endpoint (base_url https://openrouter.ai/api/v1; model IDs are provider-prefixed).
   - Only call a provider directly (e.g. OPENAI_API_KEY) if OpenRouter cannot serve
     the model you need.
+  - If the `azure-models` skill is present in your skills directory, Azure is active
+    for this run: use the lab's Azure OpenAI deployments (AZURE_OPENAI_BASE_URL +
+    AZURE_OPENAI_API_KEY, model = deployment name) for GPT-family models and judges,
+    and OpenRouter only for models Azure does not serve. Read that skill first.
   - Use actual API calls to test behavior
   - Measure real model outputs, not simulated behavior
   - If you are not sure how to prompt and send API calls, search online.

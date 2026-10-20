@@ -42,6 +42,7 @@ SENSITIVE_ENV_VARS: Set[str] = {
     # Azure
     'AZURE_API_KEY',
     'AZURE_OPENAI_API_KEY',
+    'ANTHROPIC_FOUNDRY_API_KEY',
     # Other common API keys
     'HUGGINGFACE_TOKEN',
     'HF_TOKEN',

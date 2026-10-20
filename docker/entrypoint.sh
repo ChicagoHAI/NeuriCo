@@ -157,6 +157,11 @@ check_gpu() {
 }
 
 # -----------------------------------------------------------------------------
+# Azure (research keys for agents; agent backbone auth)
+if [ "${NEURICO_AZURE:-}" = "1" ] && [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
+    echo -e "  ${GREEN}[OK]${NC} Azure active for agents (resource: ${AZURE_FOUNDRY_RESOURCE:-custom base URL}; agent auth: ${NEURICO_AGENT_AUTH:-oauth})"
+fi
+
 # Start paper-finder service (if S2_API_KEY is configured)
 # -----------------------------------------------------------------------------
 start_paper_finder() {

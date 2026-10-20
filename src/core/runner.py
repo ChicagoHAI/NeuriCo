@@ -40,6 +40,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.config_loader import ConfigLoader
 from core.local_resources import stage_local_resources, staged_immutable_resource_roots
+from core import agent_auth, azure_config
 from core.agent_cli import (
     MODEL_ENV_VAR,
     build_agent_command,
@@ -1779,13 +1780,16 @@ https://github.com/ChicagoHAI/neurico
             provider_workspace_root(provider)
             for provider in ("claude", "gemini", "codex")
         ]
-        compute_skill_names = {"modal-training", "modal-vllm", "dsi-slurm"}
+        compute_skill_names = {"modal-training", "modal-vllm", "dsi-slurm", azure_config.AZURE_SKILL}
         backend_skill_names = {
             "local": set(),
             "modal": {"modal-training", "modal-vllm"},
             "dsi-slurm": {"dsi-slurm"},
         }
-        selected_compute_skills = backend_skill_names[compute_backend]
+        selected_compute_skills = set(backend_skill_names[compute_backend])
+        if azure_config.azure_active():
+            # Research-key layer: agents only see the Azure skill when Azure is active.
+            selected_compute_skills.add(azure_config.AZURE_SKILL)
         workspace_mode = read_workspace_mode(work_dir)
 
         if skills_src.exists():
@@ -2022,6 +2026,13 @@ def main():
         default=None,
         help="Model for the provider CLI (e.g. claude-opus-5-5, gpt-5.6-sol). "
         "Applies to every agent stage; default: the provider CLI's own default.",
+    )
+    parser.add_argument(
+        "--agent-auth",
+        default=None,
+        choices=["oauth", "azure"],
+        help="Account the agent CLI runs on: its OAuth login (default) or Azure "
+        "(Codex on Azure OpenAI; Claude Code on Azure AI Foundry). Overrides NEURICO_AGENT_AUTH.",
     )
     parser.add_argument(
         "--compute-backend",
@@ -2261,6 +2272,15 @@ def main():
         # Every stage builds its provider command from this run-wide override.
         os.environ[MODEL_ENV_VAR] = args.model
         print(f"   Model: {args.model}")
+    if args.agent_auth:
+        os.environ[agent_auth.AGENT_AUTH_ENV_VAR] = args.agent_auth
+    auth_mode = agent_auth.resolve_agent_auth()
+    unsupported = agent_auth.supports(args.provider, auth_mode)
+    if unsupported:
+        print(f"❌ {unsupported}")
+        return 1
+    print(f"   {agent_auth.describe(args.provider, auth_mode, args.model)}")
+    print(f"   {azure_config.describe()}")
     runner = ResearchRunner(use_github=not args.no_github, github_org=args.github_org)
 
     # Handle comment mode separately

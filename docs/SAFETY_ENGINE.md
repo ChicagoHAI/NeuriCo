@@ -48,10 +48,44 @@ A job is one YAML file whose directory is its state: `queue/pending`, `running`,
   at `/safety_kb`).
 - vLLM on this host needs `VLLM_USE_FLASHINFER_SAMPLER=0` (set by `serving.py`).
 
+## Runbook: how to run safety jobs
+
+If you know `./neurico submit` and `./neurico run`, the engine adds one host-side command,
+`./neurico safety <subcommand>`, that wraps everything else. The daemon itself calls
+`./neurico submit` and `./neurico run` for every research job, so those runs look exactly
+like the ones you start by hand (same workspaces, same GitHub repos, same logs).
+
+1. One-time host setup (this server already has it): the shared eval venv, the HF cache,
+   and `./neurico safety init` which creates `safety_kb/engine.yaml` (GPUs, slots, retries).
+2. Queue work. Two ways:
+   - a fixed evaluation suite, no coding agent:
+     `./neurico safety enqueue-suite --evals xstest-safe strong-reject sycophancy --models qwen3-1.7b --limit 200 --campaign qwen-small-pipeline-test`
+   - a NeuriCo research run from an idea YAML (same YAML you would give `./neurico submit`):
+     `./neurico safety enqueue-idea safety_kb/queue/ideas/<idea>.yaml --kind research --provider codex --agent-auth azure --model gpt-6-astra --campaign qwen-small-pipeline-test --gpu-gb 40`
+     Kinds: `research` (Standard run), `optimise` (AutoResearch), `explore`, `validate`.
+   - or let the planner propose jobs: `./neurico safety plan --campaign qwen-small-pipeline-test`
+     (writes proposals, validates them and queues the accepted ones; `--dry-run` only renders the prompt).
+3. Start the daemon and leave it running (it is a foreground process; use `nohup`, `tmux` or a systemd unit):
+   `./neurico safety start --campaign qwen-small-pipeline-test --gpus 2`
+   It launches queued jobs as GPU and concurrency slots allow, watches for stalls, retries,
+   ingests results, and runs the planner when the queue gets short (`--no-plan` disables that).
+4. Watch: `./neurico safety status` (or `cat logs/safety/status.md`, `tail -f logs/safety/events.log`);
+   per-job logs are in `logs/safety/jobs/<job>.log`; the research workspace is the usual
+   NeuriCo workspace printed in that log.
+5. Read results: `./neurico safety digest` writes `safety_kb/reports/latest-digest.md`
+   (runs, new findings, per-model scorecards). Run records are `safety_kb/runs/*.json`,
+   candidate findings `safety_kb/findings/*.yaml`, suite outputs `safety_kb/results/<job>/`.
+6. Stop: `./neurico safety stop` (running containers are killed and their jobs return to pending;
+   restarting the daemon resumes them).
+
+A plain `./neurico run` still works for a safety idea: use `domain: ai_safety` in the YAML and
+the run gets the safety methodology and the `safety-evals` skill, but its results are not
+ingested into the knowledge base unless it went through the daemon.
+
 ## Commands
 
 ```bash
-uv run python src/cli/safety.py init                       # layout + engine.yaml
+./neurico safety init                                      # layout + engine.yaml (same as: uv run python src/cli/safety.py init)
 uv run python src/cli/safety.py enqueue-suite --evals xstest-safe strong-reject --models qwen3-1.7b --limit 200
 uv run python src/cli/safety.py enqueue-idea safety_kb/queue/ideas/<id>.yaml --kind research --provider claude --gpu-gb 40
 uv run python src/cli/safety.py start --campaign qwen-small-pipeline-test --gpus 2     # foreground daemon

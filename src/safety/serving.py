@@ -27,6 +27,7 @@ ENV_ALIASES = {
     # NeuriCo .env name -> name expected by inspect_ai / SDKs
     "OPENROUTER_KEY": "OPENROUTER_API_KEY",
     "GOOGLE_API_KEY": "GOOGLE_API_KEY",
+    "AZURE_OPENAI_API_KEY": "AZURE_API_KEY",
 }
 
 
@@ -46,7 +47,7 @@ class Endpoint:
     extra_env: Optional[Dict[str, str]] = None
 
     def env(self) -> Dict[str, str]:
-        out: Dict[str, str] = dict(self.extra_env or {})
+        out: Dict[str, str] = {k: v for k, v in (self.extra_env or {}).items() if v}
         if self.base_url:
             out["OPENAI_BASE_URL"] = self.base_url
             out.setdefault("OPENAI_API_KEY", "local")
@@ -158,6 +159,15 @@ def resolve_api_endpoint(model_entry: Dict[str, Any]) -> Endpoint:
         return Endpoint(inspect_model=f"openai/{target}", api_key_env="OPENAI_API_KEY")
     if kind == "google":
         return Endpoint(inspect_model=f"google/{target}", api_key_env="GOOGLE_API_KEY")
+    if kind == "azure":
+        # OpenAI-compatible Azure v1 endpoint; inspect's openai-api provider reads
+        # AZURE_BASE_URL / AZURE_API_KEY for the "azure" provider name.
+        base_url = (os.environ.get("AZURE_OPENAI_BASE_URL") or "").rstrip("/")
+        resource = os.environ.get("AZURE_FOUNDRY_RESOURCE")
+        if not base_url and resource:
+            base_url = f"https://{resource}.openai.azure.com/openai/v1"
+        return Endpoint(inspect_model=f"openai-api/azure/{target}", api_key_env="AZURE_API_KEY",
+                        extra_env={"AZURE_BASE_URL": base_url, "AZURE_API_KEY": os.environ.get("AZURE_OPENAI_API_KEY", "")})
     if kind == "vllm":
         raise ValueError("vllm models need a running VLLMServer; use serve()")
     raise ValueError(f"unknown access scheme in {access!r}")

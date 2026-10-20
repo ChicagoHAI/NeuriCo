@@ -7,6 +7,8 @@ import re
 import shlex
 from typing import Mapping, Optional
 
+from core import agent_auth as agent_auth_module
+from core import azure_config
 from core.security import remove_github_credentials
 
 
@@ -70,13 +72,23 @@ def build_agent_command(
     transcript_flags: Optional[Mapping[str, str]] = None,
     gemini_skip_trust: bool = True,
     model: Optional[str] = None,
+    agent_auth: Optional[str] = None,
 ) -> str:
-    """Build a provider command while leaving launch/completion policy to callers."""
+    """Build a provider command while leaving launch/completion policy to callers.
+
+    ``agent_auth`` (or ``NEURICO_AGENT_AUTH``) selects the account the CLI runs on: the
+    provider's OAuth login (default) or Azure (see ``core.agent_auth``).
+    """
     if provider not in CLI_COMMANDS:
         raise ValueError(
             f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}"
         )
+    auth_mode = agent_auth_module.resolve_agent_auth(agent_auth)
+    model = agent_auth_module.agent_model(provider, auth_mode, resolve_agent_model(model))
     command = f"scribe {provider}" if use_scribe else CLI_COMMANDS[provider]
+    auth_args = agent_auth_module.command_args(provider, auth_mode)
+    if auth_args:
+        command += " " + " ".join(shlex.quote(arg) for arg in auth_args)
     if full_permissions:
         if provider == "codex":
             command += " --yolo"
@@ -99,10 +111,17 @@ def build_agent_command(
 def build_agent_environment(
     provider: str,
     env_extra: Optional[Mapping[str, object]] = None,
+    agent_auth: Optional[str] = None,
 ) -> dict[str, str]:
-    """Return the standard provider environment plus caller-owned overrides."""
+    """Return the standard provider environment plus caller-owned overrides.
+
+    Adds the Azure research-key variables when ``NEURICO_AZURE=1`` and the agent-auth
+    deltas when the agent runs on Azure (``core.agent_auth``).
+    """
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    env.update(azure_config.agent_env_overrides(provider, env))
+    env.update(agent_auth_module.environment(provider, agent_auth_module.resolve_agent_auth(agent_auth, env), env))
     if env_extra:
         env.update({str(key): str(value) for key, value in env_extra.items()})
     if provider == "gemini":
