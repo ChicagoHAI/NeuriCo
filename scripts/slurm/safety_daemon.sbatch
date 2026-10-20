@@ -18,15 +18,30 @@ cd "${NEURICO_ROOT:-$SLURM_SUBMIT_DIR}"
 S=$(dirname "$PWD")
 export NEURICO_MODE=host
 export UV_CACHE_DIR="$S/.uv_cache" UV_PYTHON_INSTALL_DIR="$S/.uv_python"
-export NEURICO_HF_CACHE="$S/hf_cache" HF_HOME="$S/hf_cache"
+# Model weights and compile caches on node-local scratch when the node has one: Lustre reads
+# stall vLLM startup (processes sit in cl_sync_io_wait). NEURICO_LOCAL_SCRATCH overrides.
+LOCAL_SCRATCH="${NEURICO_LOCAL_SCRATCH:-}"
+for cand in "$LOCAL_SCRATCH" "${SLURM_TMPDIR:-}" /local/scratch/$USER /local/$USER /scratch/$USER /tmp/$USER; do
+    [ -n "$cand" ] || continue
+    if mkdir -p "$cand" 2>/dev/null && [ -w "$cand" ]; then LOCAL_SCRATCH="$cand"; break; fi
+done
+if [ -n "$LOCAL_SCRATCH" ] && [ "$(df -P "$LOCAL_SCRATCH" | awk 'NR==2{print $4}')" -gt 60000000 ]; then
+    export NEURICO_HF_CACHE="$LOCAL_SCRATCH/hf_cache" HF_HOME="$LOCAL_SCRATCH/hf_cache"
+    export NEURICO_CACHE_ROOT="$LOCAL_SCRATCH/.cache"
+    echo "using node-local scratch $LOCAL_SCRATCH for model weights and compile caches"
+else
+    export NEURICO_HF_CACHE="$S/hf_cache" HF_HOME="$S/hf_cache"
+    export NEURICO_CACHE_ROOT="$S/.cache"
+    echo "no node-local scratch with >60 GB free; caches stay on the share"
+fi
+mkdir -p "$NEURICO_HF_CACHE" "$NEURICO_CACHE_ROOT"
 export NEURICO_SAFETY_VENV="$S/safety_venv"
 export NEURICO_SAFETY_KB="$PWD/safety_kb"
 export NEURICO_CODEX_CATALOG_DIR="$S/.codex-catalog"
-# Keep every cache (vLLM compile, torch inductor, triton, HF, uv) on the share, not in /home.
-export NEURICO_CACHE_ROOT="$S/.cache" XDG_CACHE_HOME="$S/.cache"
-export VLLM_CACHE_ROOT="$S/.cache/vllm" TORCHINDUCTOR_CACHE_DIR="$S/.cache/torchinductor" TRITON_CACHE_DIR="$S/.cache/triton"
+# Keep every other cache off /home.
+export XDG_CACHE_HOME="$NEURICO_CACHE_ROOT"
+export VLLM_CACHE_ROOT="$NEURICO_CACHE_ROOT/vllm" TORCHINDUCTOR_CACHE_DIR="$NEURICO_CACHE_ROOT/torchinductor" TRITON_CACHE_DIR="$NEURICO_CACHE_ROOT/triton"
 export NEURICO_VLLM_STARTUP_TIMEOUT=2700
-mkdir -p "$S/.cache"
 export PATH="$HOME/.local/bin:$PATH"
 # Only one daemon may own the queue: cancel pending siblings, bow out if another is running.
 for sib in $(squeue -u "$USER" -h -n neurico-safety -t PENDING -o %i); do
@@ -48,7 +63,7 @@ if ! "$NEURICO_SAFETY_VENV/bin/python" -c "import torch, sys; sys.exit(0 if torc
 fi
 echo "CUDA self-check OK on $(hostname)"
 CAMPAIGN="${NEURICO_CAMPAIGN:-open-weight-scorecards}"
-./neurico --host safety start --campaign "$CAMPAIGN" --gpus "$GPUS" --gpu-memory-gb "$GPU_GB" --max-neurico-jobs 2 --max-suite-jobs 1 --force &
+./neurico --host safety start --campaign "$CAMPAIGN" --gpus "$GPUS" --gpu-memory-gb "$GPU_GB" --hf-cache "$NEURICO_HF_CACHE" --max-neurico-jobs 2 --max-suite-jobs 1 --force &
 DAEMON=$!
 trap 'echo "time limit approaching: stopping daemon"; kill -TERM $DAEMON; wait $DAEMON' TERM
 wait $DAEMON
