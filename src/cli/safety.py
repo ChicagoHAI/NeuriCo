@@ -52,7 +52,11 @@ def cmd_enqueue_suite(args: argparse.Namespace) -> int:
     models = kb.models()
     gpu_gb = args.gpu_gb
     if gpu_gb is None:
-        gpu_gb = max((float(models.get(m, {}).get("gpu_memory_gb", 0)) for m in args.models), default=0.0)
+        # A suite serves the subject model and, for judged evals, a local judge on the same GPU
+        # with fixed vLLM memory fractions, so it needs the GPU to itself: reserve the whole GPU.
+        engine = (kb.engine_config().get("daemon") or {})
+        subject = max((float(models.get(m, {}).get("gpu_memory_gb", 0)) for m in args.models), default=0.0)
+        gpu_gb = float(engine.get("gpu_memory_gb", 80)) if subject > 0 else 0.0
     spec = JobSpec(id=queue.new_id("suite", title), kind="suite", title=title, campaign=args.campaign or "",
                    priority=args.priority, evals=args.evals, models=args.models, limit=args.limit,
                    gpu_memory_gb=gpu_gb, created_by="human")
