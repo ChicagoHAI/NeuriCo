@@ -33,6 +33,12 @@ contains two small hooks (`--host` parsing and `host_dispatch` before
 | Optional: NVIDIA driver + `nvidia-smi` | GPUs; `NEURICO_GPUS=0,2` exports `CUDA_VISIBLE_DEVICES=0,2` (Docker used `--gpus device=`) | env check lists GPUs |
 | Optional: Python >= 3.12.8 via uv | the paper-finder service venv (`./neurico --host build`) | `./neurico --host paper-finder status` |
 
+Python: NeuriCo's code needs Python 3.11 or newer (the Docker image uses 3.12). Host mode
+builds its venv with `uv sync --frozen --python 3.12`. If the checkout already has a
+`.venv` on an older interpreter (a bare `uv run` on a 3.10 system creates one), host mode
+leaves it alone and builds `.venv-host` instead; `NEURICO_HOST_VENV=<dir>` or
+`NEURICO_HOST_UV_PYTHON=<version>` override the location and version.
+
 Nothing is installed system-wide by host mode.
 
 Setup on a fresh server:

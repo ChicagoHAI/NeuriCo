@@ -20,7 +20,20 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NEURICO = PROJECT_ROOT / "neurico"
 EXAMPLE_IDEA = PROJECT_ROOT / "ideas" / "examples" / "ml_regularization_test.yaml"
-VENV_PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
+
+
+def _host_venv_python() -> Path:
+    """Mirror docker/host.sh: .venv when it is Python >= 3.11, else .venv-host."""
+    default = PROJECT_ROOT / ".venv" / "bin" / "python"
+    if default.exists():
+        probe = subprocess.run([str(default), "-c", "import sys; print(sys.version_info >= (3, 11))"],
+                               capture_output=True, text=True)
+        if probe.stdout.strip() == "True":
+            return default
+    return PROJECT_ROOT / ".venv-host" / "bin" / "python"
+
+
+VENV_PYTHON = _host_venv_python()
 
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))

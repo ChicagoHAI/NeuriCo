@@ -99,30 +99,59 @@ host_load_env() {
 # -----------------------------------------------------------------------------
 
 # Serialised `uv sync --frozen` (several jobs may start at once).
+# The Docker image runs Python 3.12 and the code needs >= 3.11 (enum.StrEnum, ...).
+HOST_MIN_PYTHON="3.11"
+HOST_UV_PYTHON="${NEURICO_HOST_UV_PYTHON:-3.12}"
+
+host_venv_dir() {
+    echo "${NEURICO_HOST_VENV:-$PROJECT_ROOT/.venv}"
+}
+
+# True when the interpreter at $1 satisfies HOST_MIN_PYTHON.
+host_python_ok() {
+    [ -x "$1" ] && "$1" - "$HOST_MIN_PYTHON" <<'PY' 2>/dev/null
+import sys
+major, minor = (int(x) for x in sys.argv[1].split("."))
+sys.exit(0 if sys.version_info >= (major, minor) else 1)
+PY
+}
+
 host_uv_sync() {
     local lock="$PROJECT_ROOT/logs/host-uv-sync.lock"
     mkdir -p "$PROJECT_ROOT/logs"
-    local -a sync=( uv sync --frozen )
-    [ -n "${NEURICO_HOST_UV_PYTHON:-}" ] && sync+=( --python "$NEURICO_HOST_UV_PYTHON" )
+    local -a sync=( uv sync --frozen --python "$HOST_UV_PYTHON" )
     if command -v flock >/dev/null 2>&1; then
-        ( cd "$PROJECT_ROOT" && flock "$lock" "${sync[@]}" )
+        ( cd "$PROJECT_ROOT" && UV_PROJECT_ENVIRONMENT="$(host_venv_dir)" flock "$lock" "${sync[@]}" )
     else
-        ( cd "$PROJECT_ROOT" && "${sync[@]}" )
+        ( cd "$PROJECT_ROOT" && UV_PROJECT_ENVIRONMENT="$(host_venv_dir)" "${sync[@]}" )
     fi
 }
 
 # Resolve HOST_PYTHON: the project venv's interpreter, called directly so that
 # parallel jobs never race on uv's auto-sync. Built once with uv if missing.
+# A pre-existing .venv on an older Python (for example 3.10 from a bare `uv run`)
+# is left alone: host mode then builds and uses .venv-host on Python 3.12.
 host_python() {
-    local venv_python="$PROJECT_ROOT/.venv/bin/python"
+    local venv_python
+    venv_python="$(host_venv_dir)/bin/python"
+    if [ -x "$venv_python" ] && ! host_python_ok "$venv_python" && [ -z "${NEURICO_HOST_VENV:-}" ]; then
+        echo -e "${YELLOW}[WARN]${NC} $(host_venv_dir) runs $("$venv_python" --version 2>&1); NeuriCo needs Python >= $HOST_MIN_PYTHON." >&2
+        echo -e "       Using $PROJECT_ROOT/.venv-host instead (set NEURICO_HOST_VENV to choose another path)." >&2
+        export NEURICO_HOST_VENV="$PROJECT_ROOT/.venv-host"
+        venv_python="$(host_venv_dir)/bin/python"
+    fi
     if [ ! -x "$venv_python" ]; then
         if ! command -v uv >/dev/null 2>&1; then
-            echo -e "${RED}Error: $PROJECT_ROOT/.venv is missing and uv is not installed${NC}" >&2
+            echo -e "${RED}Error: $(host_venv_dir) is missing and uv is not installed${NC}" >&2
             echo "Install uv (https://docs.astral.sh/uv/), then run: ./neurico --host build" >&2
             return 1
         fi
-        echo -e "${BLUE}Creating the project venv (uv sync --frozen)...${NC}" >&2
+        echo -e "${BLUE}Creating the project venv at $(host_venv_dir) (uv sync --frozen --python $HOST_UV_PYTHON)...${NC}" >&2
         host_uv_sync || return 1
+    fi
+    if ! host_python_ok "$venv_python"; then
+        echo -e "${RED}Error: $venv_python is older than Python $HOST_MIN_PYTHON${NC}" >&2
+        return 1
     fi
     HOST_PYTHON="$venv_python"
 }
@@ -750,7 +779,7 @@ host_cmd_safety() {
 # Shell with the job environment loaded (docker: bash in /workspaces).
 host_cmd_shell() {
     host_prepare
-    export PATH="$PROJECT_ROOT/.venv/bin:$PATH"
+    export PATH="$(host_venv_dir)/bin:$PATH"
     echo -e "${BLUE}Starting host-mode shell${NC} (venv on PATH, NEURICO_* exported; exit to leave)"
     echo -e "${BLUE}Workspace:${NC} $NEURICO_WORKSPACE"
     cd "$NEURICO_WORKSPACE" && exec bash
@@ -818,7 +847,7 @@ host_cmd_build() {
     fi
     echo -e "${BLUE}Syncing project venv (uv sync --frozen)...${NC}"
     host_uv_sync
-    echo -e "  ${GREEN}[OK]${NC} $PROJECT_ROOT/.venv"
+    echo -e "  ${GREEN}[OK]${NC} $(host_venv_dir)"
     local pf="$PROJECT_ROOT/services/paper-finder"
     if [ -f "$pf/pyproject.toml" ]; then
         echo -e "${BLUE}Building paper-finder venv (uv sync --all-packages --dev, Python >= 3.12)...${NC}"
@@ -866,8 +895,10 @@ host_cmd_paper_finder() {
 
 host_status() {
     echo -e "  ${BOLD}Status (host mode):${NC}"
-    if [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
-        echo -e "    Python venv ......... ${GREEN}[OK]${NC} $("$PROJECT_ROOT/.venv/bin/python" --version 2>&1)"
+    if host_python_ok "$(host_venv_dir)/bin/python"; then
+        echo -e "    Python venv ......... ${GREEN}[OK]${NC} $("$(host_venv_dir)/bin/python" --version 2>&1) ($(host_venv_dir))"
+    elif [ -x "$PROJECT_ROOT/.venv-host/bin/python" ]; then
+        echo -e "    Python venv ......... ${GREEN}[OK]${NC} $("$PROJECT_ROOT/.venv-host/bin/python" --version 2>&1) (.venv-host)"
     else
         echo -e "    Python venv ......... ${YELLOW}[MISSING]${NC} run: ./neurico --host build"
     fi
