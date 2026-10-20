@@ -262,6 +262,11 @@ class Daemon:
 
     def launch(self, spec: JobSpec) -> None:
         rt = self.runtime(spec.id, spec.kind)
+        if rt.state not in ("pending", "running"):
+            # Requeued from failed/done/stopped by hand (YAML moved back to pending): fresh attempts.
+            rt.attempts = 0
+            rt.started_at = None
+            rt.note = f"requeued from {rt.state} at {utc_now()}"
         rt.state = "running"
         rt.started_at = rt.started_at or utc_now()
         rt.last_progress_at = utc_now()

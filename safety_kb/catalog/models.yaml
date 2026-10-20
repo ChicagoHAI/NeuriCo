@@ -1,119 +1,183 @@
-# Model registry for the safety engine.
-#
-# access forms:
-#   vllm:<hf_id>         served locally by the safety-evals skill (needs gpu_memory_gb)
-#   openrouter:<slug>    OpenRouter (OPENROUTER_KEY)
-#   anthropic:<id>       Anthropic API (ANTHROPIC_API_KEY)
-#   openai:<id>          OpenAI API (OPENAI_API_KEY)
-# test_tier: true marks small members used to exercise the pipeline on this server.
+# Model registry for the safety engine (see catalog header comments in git history for access forms).
 models:
-  - id: qwen2.5-0.5b-instruct
-    family: qwen
-    vendor: Alibaba
-    access: vllm:Qwen/Qwen2.5-0.5B-Instruct
-    params_b: 0.5
-    gpu_memory_gb: 6
-    test_tier: true
-    license: Apache-2.0
-  - id: qwen2.5-1.5b-instruct
-    family: qwen
-    vendor: Alibaba
-    access: vllm:Qwen/Qwen2.5-1.5B-Instruct
-    params_b: 1.5
-    gpu_memory_gb: 8
-    test_tier: true
-    license: Apache-2.0
-  - id: qwen2.5-3b-instruct
-    family: qwen
-    vendor: Alibaba
-    access: vllm:Qwen/Qwen2.5-3B-Instruct
-    params_b: 3
-    gpu_memory_gb: 12
-    test_tier: true
-    license: Qwen Research
-  - id: qwen3-0.6b
-    family: qwen
-    vendor: Alibaba
-    access: vllm:Qwen/Qwen3-0.6B
-    params_b: 0.6
-    gpu_memory_gb: 6
-    test_tier: true
-    license: Apache-2.0
-    notes: thinking model; suites disable thinking via chat template kwargs
-  - id: qwen3-1.7b
-    family: qwen
-    vendor: Alibaba
-    access: vllm:Qwen/Qwen3-1.7B
-    params_b: 1.7
-    gpu_memory_gb: 8
-    test_tier: true
-    license: Apache-2.0
-  - id: qwen3-4b
-    family: qwen
-    vendor: Alibaba
-    access: vllm:Qwen/Qwen3-4B
-    params_b: 4
-    gpu_memory_gb: 14
-    test_tier: true
-    license: Apache-2.0
-  # API models (judges and subjects). Fill in exact slugs from catalog research.
-  - id: claude-opus-5-5
-    family: claude
-    vendor: Anthropic
-    access: anthropic:claude-opus-5-5
-    api: true
-  - id: claude-fable-5-1
-    family: claude
-    vendor: Anthropic
-    access: anthropic:claude-fable-5-1
-    api: true
-  - id: gpt-4.1-mini-judge
-    family: gpt
-    vendor: OpenAI
-    access: openrouter:openai/gpt-4.1-mini
-    api: true
-    role: judge-api
-    notes: cheap API judge; select with NEURICO_SAFETY_JUDGE=gpt-4.1-mini-judge
-  - id: qwen2.5-7b-judge
-    family: qwen
-    vendor: Alibaba
-    access: vllm:Qwen/Qwen2.5-7B-Instruct
-    params_b: 7
-    gpu_memory_gb: 20
-    gpu_memory_utilization: 0.42
-    max_model_len: 8192
-    role: judge
-    license: Apache-2.0
-    notes: default local judge (no API spend); calibration numbers live in evals/judge-calibration.md
-  # Azure OpenAI deployments on the lab resource (checked 2026-10-20); need NEURICO_AZURE=1 keys
-  - id: azure-gpt-6-astra
-    family: gpt
-    vendor: OpenAI (Azure)
-    access: azure:gpt-6-astra
-    api: true
-  - id: azure-gpt-5.6-sol
-    family: gpt
-    vendor: OpenAI (Azure)
-    access: azure:gpt-5.6-sol
-    api: true
-  - id: azure-gpt-5.4
-    family: gpt
-    vendor: OpenAI (Azure)
-    access: azure:gpt-5.4
-    api: true
-  - id: azure-gpt-4.1-mini-judge
-    family: gpt
-    vendor: OpenAI (Azure)
-    access: azure:gpt-4.1-mini
-    api: true
-    role: judge-api
-    notes: API judge on Azure; select with NEURICO_SAFETY_JUDGE=azure-gpt-4.1-mini-judge
-  # Larger open-weight members for the DSI cluster (A100 80GB / H100 / H200), added 2026-10-20
-  - {id: qwen3-8b, family: qwen, vendor: Alibaba, access: "vllm:Qwen/Qwen3-8B", params_b: 8, gpu_memory_gb: 24, gpu_memory_utilization: 0.6, max_model_len: 8192, license: Apache-2.0}
-  - {id: qwen3-14b, family: qwen, vendor: Alibaba, access: "vllm:Qwen/Qwen3-14B", params_b: 14, gpu_memory_gb: 40, gpu_memory_utilization: 0.7, max_model_len: 8192, license: Apache-2.0}
-  - {id: qwen3-32b, family: qwen, vendor: Alibaba, access: "vllm:Qwen/Qwen3-32B", params_b: 32, gpu_memory_gb: 75, gpu_memory_utilization: 0.9, max_model_len: 8192, license: Apache-2.0}
-  - {id: qwen3-30b-a3b, family: qwen, vendor: Alibaba, access: "vllm:Qwen/Qwen3-30B-A3B", params_b: 30, gpu_memory_gb: 70, gpu_memory_utilization: 0.9, max_model_len: 8192, license: Apache-2.0, notes: "MoE, 3B active"}
-  - {id: moonlight-16b-a3b-instruct, family: kimi, vendor: Moonshot AI, access: "vllm:moonshotai/Moonlight-16B-A3B-Instruct", params_b: 16, gpu_memory_gb: 40, gpu_memory_utilization: 0.7, max_model_len: 8192, serve_args: ["--trust-remote-code"], license: MIT, notes: "smallest Kimi-family text model with open weights"}
-  - {id: deepseek-r1-distill-qwen-7b, family: deepseek, vendor: DeepSeek, access: "vllm:deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", params_b: 7, gpu_memory_gb: 24, gpu_memory_utilization: 0.6, max_model_len: 8192, license: MIT}
-  - {id: deepseek-r1-distill-qwen-14b, family: deepseek, vendor: DeepSeek, access: "vllm:deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", params_b: 14, gpu_memory_gb: 40, gpu_memory_utilization: 0.7, max_model_len: 8192, license: MIT}
-  - {id: deepseek-r1-distill-llama-8b, family: deepseek, vendor: DeepSeek, access: "vllm:deepseek-ai/DeepSeek-R1-Distill-Llama-8B", params_b: 8, gpu_memory_gb: 24, gpu_memory_utilization: 0.6, max_model_len: 8192, license: MIT}
+- id: qwen2.5-0.5b-instruct
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen2.5-0.5B-Instruct
+  params_b: 0.5
+  gpu_memory_gb: 6
+  test_tier: true
+  license: Apache-2.0
+  max_model_len: 8192
+- id: qwen2.5-1.5b-instruct
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen2.5-1.5B-Instruct
+  params_b: 1.5
+  gpu_memory_gb: 8
+  test_tier: true
+  license: Apache-2.0
+  max_model_len: 8192
+- id: qwen2.5-3b-instruct
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen2.5-3B-Instruct
+  params_b: 3
+  gpu_memory_gb: 12
+  test_tier: true
+  license: Qwen Research
+  max_model_len: 8192
+- id: qwen3-0.6b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-0.6B
+  params_b: 0.6
+  gpu_memory_gb: 6
+  test_tier: true
+  license: Apache-2.0
+  notes: thinking model; suites disable thinking via chat template kwargs
+  max_model_len: 8192
+- id: qwen3-1.7b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-1.7B
+  params_b: 1.7
+  gpu_memory_gb: 8
+  test_tier: true
+  license: Apache-2.0
+  max_model_len: 8192
+- id: qwen3-4b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-4B
+  params_b: 4
+  gpu_memory_gb: 14
+  test_tier: true
+  license: Apache-2.0
+  max_model_len: 8192
+- id: claude-opus-5-5
+  family: claude
+  vendor: Anthropic
+  access: anthropic:claude-opus-5-5
+  api: true
+- id: claude-fable-5-1
+  family: claude
+  vendor: Anthropic
+  access: anthropic:claude-fable-5-1
+  api: true
+- id: gpt-4.1-mini-judge
+  family: gpt
+  vendor: OpenAI
+  access: openrouter:openai/gpt-4.1-mini
+  api: true
+  role: judge-api
+  notes: cheap API judge; select with NEURICO_SAFETY_JUDGE=gpt-4.1-mini-judge
+- id: qwen2.5-7b-judge
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen2.5-7B-Instruct
+  params_b: 7
+  gpu_memory_gb: 20
+  gpu_memory_utilization: 0.42
+  max_model_len: 8192
+  role: judge
+  license: Apache-2.0
+  notes: default local judge (no API spend); calibration numbers live in evals/judge-calibration.md
+- id: azure-gpt-6-astra
+  family: gpt
+  vendor: OpenAI (Azure)
+  access: azure:gpt-6-astra
+  api: true
+- id: azure-gpt-5.6-sol
+  family: gpt
+  vendor: OpenAI (Azure)
+  access: azure:gpt-5.6-sol
+  api: true
+- id: azure-gpt-5.4
+  family: gpt
+  vendor: OpenAI (Azure)
+  access: azure:gpt-5.4
+  api: true
+- id: azure-gpt-4.1-mini-judge
+  family: gpt
+  vendor: OpenAI (Azure)
+  access: azure:gpt-4.1-mini
+  api: true
+  role: judge-api
+  notes: API judge on Azure; select with NEURICO_SAFETY_JUDGE=azure-gpt-4.1-mini-judge
+- id: qwen3-8b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-8B
+  params_b: 8
+  gpu_memory_gb: 24
+  gpu_memory_utilization: 0.6
+  max_model_len: 8192
+  license: Apache-2.0
+- id: qwen3-14b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-14B
+  params_b: 14
+  gpu_memory_gb: 40
+  gpu_memory_utilization: 0.7
+  max_model_len: 8192
+  license: Apache-2.0
+- id: qwen3-32b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-32B
+  params_b: 32
+  gpu_memory_gb: 75
+  gpu_memory_utilization: 0.9
+  max_model_len: 8192
+  license: Apache-2.0
+- id: qwen3-30b-a3b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-30B-A3B
+  params_b: 30
+  gpu_memory_gb: 70
+  gpu_memory_utilization: 0.9
+  max_model_len: 8192
+  license: Apache-2.0
+  notes: MoE, 3B active
+- id: moonlight-16b-a3b-instruct
+  family: kimi
+  vendor: Moonshot AI
+  access: vllm:moonshotai/Moonlight-16B-A3B-Instruct
+  params_b: 16
+  gpu_memory_gb: 40
+  gpu_memory_utilization: 0.7
+  max_model_len: 8192
+  serve_args:
+  - --trust-remote-code
+  license: MIT
+  notes: smallest Kimi-family text model with open weights
+- id: deepseek-r1-distill-qwen-7b
+  family: deepseek
+  vendor: DeepSeek
+  access: vllm:deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+  params_b: 7
+  gpu_memory_gb: 24
+  gpu_memory_utilization: 0.6
+  max_model_len: 8192
+  license: MIT
+- id: deepseek-r1-distill-qwen-14b
+  family: deepseek
+  vendor: DeepSeek
+  access: vllm:deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+  params_b: 14
+  gpu_memory_gb: 40
+  gpu_memory_utilization: 0.7
+  max_model_len: 8192
+  license: MIT
+- id: deepseek-r1-distill-llama-8b
+  family: deepseek
+  vendor: DeepSeek
+  access: vllm:deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  params_b: 8
+  gpu_memory_gb: 24
+  gpu_memory_utilization: 0.6
+  max_model_len: 8192
+  license: MIT

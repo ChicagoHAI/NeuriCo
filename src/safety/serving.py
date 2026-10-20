@@ -66,7 +66,7 @@ class VLLMServer:
     """Start/stop a vLLM OpenAI-compatible server for one HF model."""
 
     def __init__(self, hf_id: str, served_name: str, *, gpu: Optional[str], python: str,
-                 log_file: Path, gpu_memory_utilization: float = 0.45, max_model_len: int = 4096,
+                 log_file: Path, gpu_memory_utilization: float = 0.45, max_model_len: int = 8192,
                  extra_args: Optional[List[str]] = None, port: Optional[int] = None,
                  hf_home: Optional[str] = None):
         self.hf_id = hf_id
@@ -193,5 +193,5 @@ def serve(model_entry: Dict[str, Any], *, gpu: Optional[str], python: str, log_d
     return VLLMServer(hf_id, model_entry["id"], gpu=gpu, python=python,
                       log_file=Path(log_dir) / f"vllm_{model_entry['id']}.log",
                       gpu_memory_utilization=float(model_entry.get("gpu_memory_utilization", 0.45)),
-                      max_model_len=int(model_entry.get("max_model_len", 4096)),
+                      max_model_len=int(model_entry.get("max_model_len", 8192)),
                       extra_args=serve_args, hf_home=hf_home).start()
