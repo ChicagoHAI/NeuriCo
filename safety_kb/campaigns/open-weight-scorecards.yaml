@@ -36,6 +36,8 @@ budgets:
   openrouter_usd_per_day: 20
   azure_usd_per_day: 50
   gpu_ids: ["0", "1", "2", "3"]   # one Slurm allocation of 4 GPUs (scripts/slurm/safety_daemon.sbatch)
+defaults:
+  neurico: {provider: codex, model: gpt-6-astra, agent_auth: azure, github: false}
 planner:
   approval: auto
   max_new_jobs_per_run: 3

@@ -99,6 +99,15 @@ def validate_proposals(kb: KB, campaign: Dict[str, Any], proposal_dir: Path) -> 
         data.setdefault("id", queue.new_id(data["kind"], data.get("title", path.stem)))
         data["created_by"] = "planner"
         data.setdefault("campaign", campaign.get("name"))
+        # Campaign-level agent defaults (backbone provider/model/auth) apply unless the proposal sets them.
+        defaults = (campaign.get("defaults") or {}).get("neurico") or {}
+        if data.get("kind") != "suite" and defaults:
+            neurico = data.setdefault("neurico", {})
+            for key, value in defaults.items():
+                if neurico.get(key) in (None, "", "claude") and key in ("provider", "model", "agent_auth"):
+                    neurico[key] = value
+                elif key not in neurico:
+                    neurico[key] = value
         try:
             spec = JobSpec.from_dict(data)
         except Exception as e:  # noqa: BLE001
