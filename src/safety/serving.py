@@ -85,11 +85,25 @@ class VLLMServer:
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}/v1"
 
+    def effective_utilization(self) -> float:
+        """vLLM's --gpu-memory-utilization is a fraction of TOTAL memory and the server refuses to
+        start when less than that is free. On a shared GPU, size the request from what is free now
+        (minus 2 GB headroom) so co-located jobs do not kill each other at startup."""
+        try:
+            query = ["nvidia-smi", "--query-gpu=memory.total,memory.free", "--format=csv,noheader,nounits"]
+            if self.gpu is not None:
+                query += ["-i", str(self.gpu).split(",")[0]]
+            total, free = (float(x) for x in subprocess.check_output(query, text=True, timeout=20).strip().splitlines()[0].split(","))
+            available = max(0.0, (free - 2048) / total)
+            return round(min(self.gpu_memory_utilization, available), 2)
+        except Exception:  # noqa: BLE001 - no nvidia-smi: trust the configured fraction
+            return self.gpu_memory_utilization
+
     def command(self) -> List[str]:
         return [self.python, "-m", "vllm.entrypoints.openai.api_server",
                 "--model", self.hf_id, "--served-model-name", self.served_name,
                 "--port", str(self.port), "--max-model-len", str(self.max_model_len),
-                "--gpu-memory-utilization", str(self.gpu_memory_utilization),
+                "--gpu-memory-utilization", str(self.effective_utilization()),
                 *self.extra_args]
 
     def start(self, timeout: Optional[float] = None) -> "VLLMServer":
