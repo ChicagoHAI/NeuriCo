@@ -25,7 +25,15 @@ export NEURICO_CODEX_CATALOG_DIR="$S/.codex-catalog"
 export PATH="$HOME/.local/bin:$PATH"
 GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader | paste -sd, -)
 echo "node $(hostname) gpus=$GPUS job=$SLURM_JOB_ID started $(date -Is)"
-nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+nvidia-smi --query-gpu=index,name,driver_version,memory.total --format=csv,noheader
+# CUDA self-check: some nodes expose GPUs but cannot initialise the driver (cuInit error).
+# Record such a node and exit so ensure_daemon.sh resubmits elsewhere.
+if ! "$NEURICO_SAFETY_VENV/bin/python" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"; then
+    echo "CUDA self-check FAILED on $(hostname): torch.cuda.is_available() is false; excluding this node" >&2
+    mkdir -p logs/slurm && echo "$(hostname)" >> logs/slurm/bad_nodes.txt
+    exit 3
+fi
+echo "CUDA self-check OK on $(hostname)"
 CAMPAIGN="${NEURICO_CAMPAIGN:-open-weight-scorecards}"
 ./neurico --host safety start --campaign "$CAMPAIGN" --gpus "$GPUS" --max-neurico-jobs 2 --max-suite-jobs 1 --force &
 DAEMON=$!
