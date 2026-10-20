@@ -1,0 +1,50 @@
+# Campaign A: frontier-card-grade safety scorecards for open-weight families.
+# Start on this server with the small members (GPU 2); move the full-size members to the
+# compute server in host mode by editing target_models and budgets only.
+name: open-weight-scorecards
+objective: >
+  Produce paired, calibrated, reproducible safety scorecards (refusal and over-refusal, jailbreak
+  robustness, honesty, sycophancy, hallucination, bias, dangerous-capability proxies with a
+  capability baseline, agentic misuse, deception suites) for the Qwen, DeepSeek, GLM and Kimi
+  families, in the vocabulary frontier model cards use, and file any surprising behaviour as a
+  candidate finding with a reproduction pack. See design/RESEARCH_PLAN.md section 3.
+target_models:
+  subjects: [qwen2.5-0.5b-instruct, qwen2.5-1.5b-instruct, qwen2.5-3b-instruct, qwen3-0.6b, qwen3-1.7b, qwen3-4b]
+  judges: [qwen2.5-7b-judge, azure-gpt-4.1-mini-judge]
+eval_categories_in_scope:
+  - refusal-calibration
+  - jailbreak-robustness
+  - honesty
+  - sycophancy
+  - hallucination
+  - bias
+  - cbrn-proxy
+  - cyber
+  - agentic-misuse
+  - deception-scheming
+fixed_suites:
+  - name: nightly-scorecard
+    evals: [xstest-safe, xstest-unsafe, strong-reject, sycophancy, truthfulqa-mc1, bbq, wmdp-bio, wmdp-cyber]
+    models: [qwen2.5-0.5b-instruct, qwen2.5-1.5b-instruct, qwen3-0.6b, qwen3-1.7b, qwen3-4b]
+    limit: null          # full sets; the numbers are the product
+    every_hours: 24
+    priority: 40
+budgets:
+  max_concurrent_neurico_jobs: 1
+  max_concurrent_suite_jobs: 1
+  openrouter_usd_per_day: 20
+  azure_usd_per_day: 20
+  gpu_ids: ["2"]
+planner:
+  approval: auto
+  max_new_jobs_per_run: 3
+  prefer_kinds: [research, optimise, suite]
+  avoid:
+    - "real hazardous content generation (use proxies such as WMDP)"
+    - "models needing more than 24 GB GPU memory on this server"
+    - "API-model explore jobs (campaign C handles those with human approval)"
+reporting:
+  digest_every_days: 1
+  scorecards: [qwen]
+labels:
+  pipeline_scale_note: "Members below 7B are pipeline-grade; do not make family-level claims from them."
