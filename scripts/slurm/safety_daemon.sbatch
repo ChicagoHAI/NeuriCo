@@ -18,26 +18,23 @@ cd "${NEURICO_ROOT:-$SLURM_SUBMIT_DIR}"
 S=$(dirname "$PWD")
 export NEURICO_MODE=host
 export UV_CACHE_DIR="$S/.uv_cache" UV_PYTHON_INSTALL_DIR="$S/.uv_python"
-# Model weights and compile caches on node-local scratch when the node has one: Lustre reads
-# stall vLLM startup (processes sit in cl_sync_io_wait). NEURICO_LOCAL_SCRATCH overrides.
+# Model weights live in the lab's shared models directory (reused across jobs and by agents);
+# only compile caches go to node-local scratch, which is fast and disposable.
+MODELS_DIR="${NEURICO_MODELS_DIR:-/net/spaces/chenhao/chai-lab-models/haokunliu/models}"
+export NEURICO_MODELS_DIR="$MODELS_DIR" NEURICO_HF_CACHE="$MODELS_DIR/hf_cache" HF_HOME="$MODELS_DIR/hf_cache"
 LOCAL_SCRATCH="${NEURICO_LOCAL_SCRATCH:-}"
 for cand in "$LOCAL_SCRATCH" "${SLURM_TMPDIR:-}" /local/scratch/$USER /local/$USER /scratch/$USER /tmp/$USER; do
     [ -n "$cand" ] || continue
     if mkdir -p "$cand" 2>/dev/null && [ -w "$cand" ]; then LOCAL_SCRATCH="$cand"; break; fi
 done
-if [ -n "$LOCAL_SCRATCH" ] && [ "$(df -P "$LOCAL_SCRATCH" | awk 'NR==2{print $4}')" -gt 60000000 ]; then
-    export NEURICO_HF_CACHE="$LOCAL_SCRATCH/hf_cache" HF_HOME="$LOCAL_SCRATCH/hf_cache"
+if [ -n "$LOCAL_SCRATCH" ]; then
     export NEURICO_CACHE_ROOT="$LOCAL_SCRATCH/.cache"
-    echo "using node-local scratch $LOCAL_SCRATCH for model weights and compile caches"
+    echo "compile caches on node-local scratch $LOCAL_SCRATCH; models in $MODELS_DIR"
 else
-    export NEURICO_HF_CACHE="$S/hf_cache" HF_HOME="$S/hf_cache"
     export NEURICO_CACHE_ROOT="$S/.cache"
-    echo "no node-local scratch with >60 GB free; caches stay on the share"
+    echo "no node-local scratch; compile caches on the share; models in $MODELS_DIR"
 fi
 mkdir -p "$NEURICO_HF_CACHE" "$NEURICO_CACHE_ROOT"
-export NEURICO_SAFETY_VENV="$S/safety_venv"
-export NEURICO_SAFETY_KB="$PWD/safety_kb"
-export NEURICO_CODEX_CATALOG_DIR="$S/.codex-catalog"
 # Keep every other cache off /home.
 export XDG_CACHE_HOME="$NEURICO_CACHE_ROOT"
 export VLLM_CACHE_ROOT="$NEURICO_CACHE_ROOT/vllm" TORCHINDUCTOR_CACHE_DIR="$NEURICO_CACHE_ROOT/torchinductor" TRITON_CACHE_DIR="$NEURICO_CACHE_ROOT/triton"

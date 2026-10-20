@@ -31,7 +31,7 @@ def kb(tmp_path, monkeypatch):
          "task_args": {"subset": "safe"}, "judge": "default", "judge_arg": "scorer_model"},
     ]})
     save_yaml(kb.catalog_dir / "models.yaml", {"models": [
-        {"id": "tiny", "family": "qwen", "access": "vllm:Qwen/Qwen2.5-0.5B-Instruct", "gpu_memory_gb": 6},
+        {"id": "tiny", "family": "qwen", "access": "vllm:Qwen/Qwen2.5-0.5B-Instruct", "gpu_memory_gb": 6, "params_b": 0.5},
         {"id": "api-judge", "family": "gpt", "access": "openrouter:openai/gpt-4.1-mini", "role": "judge"},
     ]})
     save_yaml(kb.campaigns_dir / "camp.yaml", {"name": "camp", "planner": {"approval": "auto", "max_new_jobs_per_run": 2}})
@@ -283,3 +283,27 @@ def test_validate_run_moves_finding_through_lifecycle(kb, tmp_path, monkeypatch)
     assert [r["status"] for r in rows] == ["candidate", "reproduced", "confirmed"]
     run_validation("refuted")
     assert yaml.safe_load((kb.findings_dir / "finding-v.yaml").read_text())["status"] == "refuted"
+
+
+def test_models_refresh_adds_newest_and_marks_superseded(kb, monkeypatch):
+    from safety import models_refresh as mr
+    listing = {"Qwen": [{"id": "Qwen/Qwen9.9-4B"}, {"id": "Qwen/Qwen9.9-4B-Base"}, {"id": "Qwen/Qwen9.9-900B"}, {"id": "Qwen/Qwen9.9-VL-4B"}, {"id": "Qwen/SAE-Res-Qwen9.9"}]}
+    infos = {"Qwen/Qwen9.9-4B": {"id": "Qwen/Qwen9.9-4B", "pipeline_tag": "text-generation", "safetensors": {"total": 4.5e9},
+                                 "siblings": [{"rfilename": "a.safetensors", "size": 9e9}], "lastModified": "2026-10-01T00:00:00Z",
+                                 "tags": ["license:apache-2.0"], "downloads": 5},
+             "Qwen/Qwen9.9-900B": {"id": "Qwen/Qwen9.9-900B", "pipeline_tag": "text-generation", "safetensors": {"total": 9e11},
+                                   "siblings": [{"rfilename": "a.safetensors", "size": 1.8e12}], "lastModified": "2026-10-02T00:00:00Z", "tags": []}}
+    def fake_get(url):
+        if "api/models?" in url:
+            author = url.split("author=")[1].split("&")[0]
+            return listing.get(author, [])
+        return infos[url.split("api/models/")[1].split("?")[0]]
+    monkeypatch.setattr(mr, "_get", fake_get)
+    monkeypatch.setattr(mr, "TRACKED_AUTHORS", {"Qwen": "qwen"})
+    out = mr.refresh(kb)
+    assert out["added"] == ["qwen9-9-4b"] and out["newest"]["qwen"] == "qwen9.9"
+    models = kb.models()
+    assert models["qwen9-9-4b"]["access"] == "vllm:Qwen/Qwen9.9-4B" and models["qwen9-9-4b"]["discovered"]
+    assert models["tiny"]["superseded_by"] == "qwen9-9-4b"    # the old 0.5B Qwen2.5 entry, same size class
+    assert (kb.catalog_dir / "models_latest.yaml").exists() and list(kb.inbox_dir.glob("*new-models.md"))
+    assert "newest generation qwen9.9" in mr.latest_models_summary(kb)

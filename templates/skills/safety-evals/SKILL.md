@@ -24,6 +24,11 @@ and resume when interrupted.
 - Knowledge base (read-only): `$NEURICO_SAFETY_KB` (`catalog/evals.yaml`, `catalog/models.yaml`,
   per-eval notes under `evals/`, gap analyses under `gaps/`, lab summaries under `labs/`).
 - GPU: use the GPU(s) in `CUDA_VISIBLE_DEVICES`; do not pick others.
+- Models already on this system: `$HF_HOME` is the lab's shared Hugging Face cache (the same
+  directory for every run) and `$NEURICO_MODELS_DIR` holds other downloaded weights. Before
+  downloading anything run `ls $HF_HOME/hub` (and `huggingface-cli scan-cache`); use what is
+  there, download only what is missing, and always with `HF_HOME` left as set so the next run
+  finds it. Never copy weights into the workspace.
 - Provider keys come from the environment (`OPENROUTER_KEY`, `ANTHROPIC_API_KEY`, `HF_TOKEN`);
   never print or write them.
 

@@ -9,8 +9,7 @@ objective: >
   families, in the vocabulary frontier model cards use, and file any surprising behaviour as a
   candidate finding with a reproduction pack. See design/RESEARCH_PLAN.md section 3.
 target_models:
-  subjects: [qwen3-1.7b, qwen3-4b, qwen3-8b, qwen3-14b, qwen3-32b, qwen3-30b-a3b, moonlight-16b-a3b-instruct,
-             deepseek-r1-distill-qwen-7b, deepseek-r1-distill-qwen-14b, deepseek-r1-distill-llama-8b]
+  subjects: [qwen3-5-0-8b, qwen3-5-2b, qwen3-5-4b, qwen3-5-9b, qwen3-8-27b, deepseek-r1-0528-qwen3-8b, glm-z1-9b-0414, glm-4-9b-0414, moonlight-16b-a3b-instruct]
   judges: [qwen2.5-7b-judge, azure-gpt-4.1-mini-judge]
 eval_categories_in_scope:
   - refusal-calibration
@@ -26,7 +25,7 @@ eval_categories_in_scope:
 fixed_suites:
   - name: nightly-scorecard
     evals: [xstest-safe-csv, xstest-unsafe-csv, strong-reject, sycophancy, truthfulqa-mc1, bbq, wmdp-bio, wmdp-cyber]
-    models: [qwen3-4b, qwen3-8b, qwen3-14b, qwen3-32b, moonlight-16b-a3b-instruct, deepseek-r1-distill-qwen-7b, deepseek-r1-distill-qwen-14b]
+    models: [qwen3-5-4b, qwen3-5-9b, qwen3-8-27b, deepseek-r1-0528-qwen3-8b, glm-4-9b-0414, moonlight-16b-a3b-instruct]
     limit: null          # full sets; the numbers are the product
     every_hours: 24
     priority: 40
@@ -51,5 +50,6 @@ reporting:
   digest_every_days: 1
   scorecards: [qwen]
 labels:
-  pipeline_scale_note: "Members below 7B are pipeline-grade; family-level claims need the 8B+ members."
+  pipeline_scale_note: "Members below 7B are pipeline-grade; family-level claims need the 9B+ members."
+  freshness: "The planner refreshes catalog/models_latest.yaml from Hugging Face before every round and must use the newest generation that fits one GPU; older generations are baselines."
   agent_backbone: "Codex on Azure (gpt-6-astra) by default; agents get the azure-models skill for GPT inference and judging."

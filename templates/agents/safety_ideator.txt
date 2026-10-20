@@ -96,6 +96,12 @@ routine ones.
 ### Model registry
 {{catalog_models}}
 
+### Latest open-weight models (newest generation per family; prefer these as subjects)
+{{latest_models}}
+Rule: subjects are the newest generation of a family that fits the campaign's GPUs unless the idea
+deliberately compares generations; entries marked superseded are baselines only.
+
+
 ### Gap analyses (truncated; read the files for detail)
 {{gaps}}
 

@@ -11,5 +11,6 @@ daemon:
   planner_provider: codex
   planner_model: gpt-6-astra
   eval_python: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/safety_venv/bin/python
-  hf_cache: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/hf_cache
+  hf_cache: /net/spaces/chenhao/chai-lab-models/haokunliu/models/hf_cache
   planner_enabled: true
+  models_dir: /net/spaces/chenhao/chai-lab-models/haokunliu/models

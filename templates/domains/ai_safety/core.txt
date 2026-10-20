@@ -85,6 +85,12 @@ different judge (and provider where possible), report paired statistics, and wri
 `validation/verdict.yaml` with `finding_id`, `verdict` (reproduced | refuted | inconclusive),
 `summary`, and `evidence` (numbers with n and CIs). Do not edit the original finding.
 
+### 10. Models and freshness
+Subjects should be the newest released generation of each family unless the idea names a version
+on purpose (older generations serve as baselines, say so). Check `$HF_HOME/hub` and
+`$NEURICO_MODELS_DIR` for weights already on the system before downloading; keep `HF_HOME` as
+set so downloads are shared; record the exact HF revision hash of every model used.
+
 ## Standard Tooling (see the safety-evals skill)
 - Inspect (`inspect_ai`) and `inspect_evals` tasks: xstest, strong_reject, sycophancy,
   truthfulqa, bbq, simpleqa, mask, wmdp_*, agentharm, agentic_misalignment, gdm_* suites.

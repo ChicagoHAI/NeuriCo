@@ -95,8 +95,10 @@ def choose_mode(kb: KB, campaign: Dict[str, Any]) -> str:
 
 
 def render_prompt(kb: KB, campaign_name: str, planner_run: str, mode: str = "replicate") -> str:
+    from safety.models_refresh import latest_models_summary
     template = TEMPLATES[mode].read_text(encoding="utf-8")
     context = build_context(kb, campaign_name)
+    context["latest_models"] = latest_models_summary(kb)
     campaign = kb.campaign(campaign_name)
     context.update({"planner_run": planner_run, "kb_root": str(kb.root), "campaign_name": campaign_name,
                     "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -187,6 +189,14 @@ def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: 
 
     kb.ensure_layout()
     campaign = kb.campaign(campaign_name)
+    # Freshness first: discover new open-weight releases before deciding what to run.
+    try:
+        from safety.models_refresh import refresh
+        refreshed = refresh(kb)
+        if refreshed.get("added"):
+            print(f"model registry: added {refreshed['added']}")
+    except Exception as e:  # noqa: BLE001 - planning must not depend on the Hub being reachable
+        print(f"model refresh skipped: {type(e).__name__}: {e}")
     mode = mode or choose_mode(kb, campaign)
     if mode not in PLANNER_MODES:
         raise ValueError(f"unknown planner mode {mode!r}; expected one of {PLANNER_MODES}")

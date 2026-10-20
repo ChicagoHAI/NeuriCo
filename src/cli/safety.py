@@ -160,6 +160,10 @@ def cmd_digest(args: argparse.Namespace) -> int:
 def cmd_kb(args: argparse.Namespace) -> int:
     from safety import kbdb
     kb = KB()
+    if args.action == "refresh-models":
+        from safety.models_refresh import refresh
+        print(refresh(kb))
+        return 0
     if args.action == "rebuild":
         print(kbdb.rebuild(kb))
     elif args.action == "timeline":
@@ -252,7 +256,7 @@ def main() -> int:
     p.set_defaults(func=cmd_plan)
 
     p = sub.add_parser("kb", help="knowledge-base index: rebuild | timeline | anomalies | query <sql>")
-    p.add_argument("action", choices=("rebuild", "timeline", "anomalies", "query"))
+    p.add_argument("action", choices=("rebuild", "timeline", "anomalies", "query", "refresh-models"))
     p.add_argument("sql", nargs="?")
     p.set_defaults(func=cmd_kb)
 

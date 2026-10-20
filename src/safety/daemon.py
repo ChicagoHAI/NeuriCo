@@ -234,6 +234,8 @@ class Daemon:
         env = os.environ.copy()
         env["NEURICO_SAFETY_KB"] = str(self.kb.root)
         env["HF_HOME"] = str(self.config["hf_cache"])
+        if self.config.get("models_dir"):
+            env["NEURICO_MODELS_DIR"] = str(self.config["models_dir"])
         if rt.gpu is not None:
             env["NEURICO_GPUS"] = rt.gpu
             env["CUDA_VISIBLE_DEVICES"] = rt.gpu
