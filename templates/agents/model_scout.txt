@@ -48,7 +48,8 @@ families:
 2. `catalog/proposals/models-{{scout_run}}.yaml`: registry additions, in the exact entry format of
    `catalog/models.yaml` (`id`, `family`, `vendor`, `access`, `params_b`, `generation`,
    `gpu_memory_gb`, `gpu_memory_utilization`, `max_model_len`, `license`, `release_date`,
-   `serve_args`, `notes`), one per subject that fits a single GPU and is not already in
+   `serve_args`, `notes`; API entries use `access: openrouter:<slug>` / `azure:<deployment>` /
+   `anthropic:<id>` and need no GPU fields), one per subject that fits a single GPU and is not already in
    `catalog/models.yaml` (match on `access`). For API families propose entries only when a usable
    access route exists (an Azure deployment, an OpenRouter slug, or a provider key named in
    `catalog/models.yaml` notes); otherwise list them in `models_latest.yaml` only.

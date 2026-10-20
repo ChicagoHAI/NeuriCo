@@ -404,3 +404,261 @@ models:
   discovered: '2026-10-20'
   proposed_by: models-scout-20261020-164621
   superseded_by: deepseek-r1-0528-qwen3-8b
+- id: openrouter-claude-sonnet-5-5
+  family: claude
+  vendor: Anthropic
+  access: openrouter:anthropic/claude-sonnet-5.5
+  params_b: null
+  generation: Claude 5.5
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1000000
+  license: Proprietary API terms
+  release_date: '2026-09-28'
+  serve_args: []
+  notes: '1M context, 128K output; adaptive thinking. Full thinking disable rejected; between_tools mode
+    supported. Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources: https://docs.anthropic.com/en/docs/about-claude/models
+    ; https://www.anthropic.com/claude-sonnet-5-5-system-card ; https://platform.claude.com/docs/en/release-notes/overview
+    ; https://www.anthropic.com/system-cards ; https://openrouter.ai/api/v1/models MERGE BLOCKER: current
+    validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication
+    call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-claude-haiku-5-5
+  family: claude
+  vendor: Anthropic
+  access: openrouter:anthropic/claude-haiku-5.5
+  params_b: null
+  generation: Claude 5.5
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1000000
+  license: Proprietary API terms
+  release_date: '2026-10-07'
+  serve_args: []
+  notes: '1M context, 128K output; adaptive thinking. Parameters undisclosed; BF16/GPU fields not applicable
+    to hosted access. Sources: https://docs.anthropic.com/en/docs/about-claude/models ; https://www.anthropic.com/claude-haiku-5-5-system-card
+    ; https://platform.claude.com/docs/en/release-notes/overview ; https://www.anthropic.com/system-cards
+    ; https://openrouter.ai/api/v1/models MERGE BLOCKER: current validate_entry requires numeric params_b
+    and gpu_memory_gb; API-aware schema required. No inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gpt-6-1-sol
+  family: gpt
+  vendor: OpenAI
+  access: openrouter:openai/gpt-6.1-sol
+  params_b: null
+  generation: GPT-6.1
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1050000
+  license: Proprietary API terms
+  release_date: '2026-09-29'
+  serve_args: []
+  notes: '1050000 context, 128000 output; use Responses API for tools. reasoning_effort none/minimal unsupported;
+    Chat Completions supports no tool calls. Parameters undisclosed; BF16/GPU fields not applicable to
+    hosted access. Sources: https://platform.openai.com/docs/models ; https://cdn.openai.com/pdf/38e3efcf-545e-44cd-99ec-2b7eb395f4cc/oai_GPT_6_1_Sol.pdf
+    ; https://developers.openai.com/api/docs/models/gpt-6.1-sol ; https://developers.openai.com/api/docs/changelog
+    ; https://openrouter.ai/api/v1/models MERGE BLOCKER: current validate_entry requires numeric params_b
+    and gpu_memory_gb; API-aware schema required. No inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gpt-6-luna
+  family: gpt
+  vendor: OpenAI
+  access: openrouter:openai/gpt-6-luna
+  params_b: null
+  generation: GPT-6
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1050000
+  license: Proprietary API terms
+  release_date: '2026-09-22'
+  serve_args: []
+  notes: '1050000 context, 128000 output; use Responses API for tools. Chat Completions function calls
+    require reasoning_effort=none; covered by Astra system-card appendix. Parameters undisclosed; BF16/GPU
+    fields not applicable to hosted access. Sources: https://platform.openai.com/docs/models ; https://deploymentsafety.openai.com/gpt-6-astra
+    ; https://developers.openai.com/api/docs/models/gpt-6-luna ; https://developers.openai.com/api/docs/changelog
+    ; https://openrouter.ai/api/v1/models MERGE BLOCKER: current validate_entry requires numeric params_b
+    and gpu_memory_gb; API-aware schema required. No inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gpt-6-sol
+  family: gpt
+  vendor: OpenAI
+  access: openrouter:openai/gpt-6-sol
+  params_b: null
+  generation: GPT-6
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1050000
+  license: Proprietary API terms
+  release_date: '2026-09-22'
+  serve_args: []
+  notes: '1050000 context, 128000 output; use Responses API for tools. Chat Completions function calls
+    require reasoning_effort=none; covered by Astra system-card appendix. Previous Sol version; provider
+    recommends GPT-6.1 Sol. Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources:
+    https://platform.openai.com/docs/models ; https://deploymentsafety.openai.com/gpt-6-astra ; https://developers.openai.com/api/docs/models/gpt-6-sol
+    ; https://developers.openai.com/api/docs/changelog ; https://openrouter.ai/api/v1/models MERGE BLOCKER:
+    current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No
+    inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-4-argon
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-4-argon
+  params_b: null
+  generation: Gemini 4
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-10-13'
+  serve_args: []
+  notes: 'Unified 1048576 input/output context; default synchronous output 65536, long decode up to 1048576;
+    reasoning levels low/medium/high. Parameters undisclosed; BF16/GPU fields not applicable to hosted
+    access. Sources: https://ai.google.dev/gemini-api/docs/models ; https://deepmind.google/models/model-cards/gemini-4-argon/
+    ; https://ai.google.dev/gemini-api/docs/models/gemini-4-argon ; https://ai.google.dev/gemini-api/docs/changelog
+    ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models MERGE BLOCKER:
+    current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No
+    inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-8-flash
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3.8-flash
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-09-02'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider
+    guide. Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources: https://ai.google.dev/gemini-api/docs/models
+    ; https://deepmind.google/models/model-cards/gemini-3-8-flash/ ; https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash
+    ; https://ai.google.dev/gemini-api/docs/changelog ; https://ai.google.dev/gemini-api/docs/thinking
+    ; https://openrouter.ai/api/v1/models MERGE BLOCKER: current validate_entry requires numeric params_b
+    and gpu_memory_gb; API-aware schema required. No inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-6-flash
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3.6-flash
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-07-21'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider
+    guide. Minimal thinking is not a guaranteed off switch. Parameters undisclosed; BF16/GPU fields not
+    applicable to hosted access. Sources: https://ai.google.dev/gemini-api/docs/models ; https://deepmind.google/models/model-cards/gemini-3-6-flash/
+    ; https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash ; https://ai.google.dev/gemini-api/docs/changelog
+    ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models MERGE BLOCKER:
+    current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No
+    inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-5-flash-lite
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3.5-flash-lite
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-07-21'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider
+    guide. Minimal thinking is not a guaranteed off switch. Parameters undisclosed; BF16/GPU fields not
+    applicable to hosted access. Sources: https://ai.google.dev/gemini-api/docs/models ; https://deepmind.google/models/model-cards/gemini-3-5-flash-lite/
+    ; https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite ; https://ai.google.dev/gemini-api/docs/changelog
+    ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models MERGE BLOCKER:
+    current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No
+    inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-1-flash-lite
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3.1-flash-lite
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-05-07'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider
+    guide. Stable endpoint released May 7, 2026; distinguish from the March 3 preview. Minimal thinking
+    is not a guaranteed off switch. Parameters undisclosed; BF16/GPU fields not applicable to hosted access.
+    Sources: https://ai.google.dev/gemini-api/docs/models ; https://deepmind.google/models/model-cards/gemini-3-1-flash-lite/
+    ; https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite ; https://ai.google.dev/gemini-api/docs/changelog
+    ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models MERGE BLOCKER:
+    current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No
+    inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-1-pro-preview
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3.1-pro-preview
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-02-19'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider
+    guide. Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources: https://ai.google.dev/gemini-api/docs/models
+    ; https://deepmind.google/models/model-cards/gemini-3-1-pro/ ; https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview
+    ; https://ai.google.dev/gemini-api/docs/changelog ; https://ai.google.dev/gemini-api/docs/thinking
+    ; https://openrouter.ai/api/v1/models MERGE BLOCKER: current validate_entry requires numeric params_b
+    and gpu_memory_gb; API-aware schema required. No inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-flash-preview
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3-flash-preview
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2025-12-17'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider
+    guide. Minimal thinking is not a guaranteed off switch. Parameters undisclosed; BF16/GPU fields not
+    applicable to hosted access. Sources: https://ai.google.dev/gemini-api/docs/models ; https://deepmind.google/models/model-cards/gemini-3-flash/
+    ; https://ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview ; https://ai.google.dev/gemini-api/docs/changelog
+    ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models MERGE BLOCKER:
+    current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No
+    inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged

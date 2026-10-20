@@ -77,8 +77,6 @@ def validate_entry(entry: Any, registry_access: set) -> Optional[str]:
             float(entry["params_b"]); float(entry["gpu_memory_gb"])
         except (TypeError, ValueError):
             return "params_b and gpu_memory_gb must be numbers"
-    elif not entry.get("api"):
-        return "API entries must set api: true"
     return None
 
 
@@ -101,6 +99,8 @@ def merge_proposals(kb: KB, proposal_file: Optional[Path] = None) -> Dict[str, A
                 rejected.append((path.name, entry.get("id") if isinstance(entry, dict) else str(entry)[:40], reason))
                 continue
             entry = dict(entry)
+            if not str(entry["access"]).startswith("vllm:"):
+                entry["api"] = True  # served by a provider, not by us
             entry.setdefault("discovered", today)
             entry.setdefault("proposed_by", path.stem)
             catalog["models"].append(entry)
