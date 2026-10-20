@@ -95,7 +95,7 @@ def choose_mode(kb: KB, campaign: Dict[str, Any]) -> str:
 
 
 def render_prompt(kb: KB, campaign_name: str, planner_run: str, mode: str = "replicate") -> str:
-    from safety.models_refresh import latest_models_summary
+    from safety.model_scout import latest_models_summary
     template = TEMPLATES[mode].read_text(encoding="utf-8")
     context = build_context(kb, campaign_name)
     context["latest_models"] = latest_models_summary(kb)
@@ -189,14 +189,14 @@ def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: 
 
     kb.ensure_layout()
     campaign = kb.campaign(campaign_name)
-    # Freshness first: discover new open-weight releases before deciding what to run.
-    try:
-        from safety.models_refresh import refresh
-        refreshed = refresh(kb)
-        if refreshed.get("added"):
-            print(f"model registry: added {refreshed['added']}")
-    except Exception as e:  # noqa: BLE001 - planning must not depend on the Hub being reachable
-        print(f"model refresh skipped: {type(e).__name__}: {e}")
+    # Freshness first: when the scout's picture is stale, run the model scout agent before planning.
+    from safety.model_scout import is_stale, run_scout
+    if is_stale(kb) and not dry_run:
+        try:
+            scouted = run_scout(kb, provider=provider, model=model)
+            print(f"model scout: refreshed {scouted.get('refreshed')}, added {scouted.get('accepted')}")
+        except Exception as e:  # noqa: BLE001 - planning must not depend on the scout succeeding
+            print(f"model scout skipped: {type(e).__name__}: {e}")
     mode = mode or choose_mode(kb, campaign)
     if mode not in PLANNER_MODES:
         raise ValueError(f"unknown planner mode {mode!r}; expected one of {PLANNER_MODES}")

@@ -14,7 +14,7 @@ from safety import ingest, suites  # noqa: E402
 from safety.daemon import DEFAULT_CONFIG, Daemon, JobRuntime  # noqa: E402
 from safety.digest import write_digest  # noqa: E402
 from safety.jobs import JobSpec, Queue  # noqa: E402
-from safety.kb import KB, save_yaml  # noqa: E402
+from safety.kb import KB, load_yaml, save_yaml  # noqa: E402
 from safety.planner import validate_proposals  # noqa: E402
 from safety.serving import Endpoint, export_provider_env, resolve_api_endpoint  # noqa: E402
 
@@ -285,25 +285,31 @@ def test_validate_run_moves_finding_through_lifecycle(kb, tmp_path, monkeypatch)
     assert yaml.safe_load((kb.findings_dir / "finding-v.yaml").read_text())["status"] == "refuted"
 
 
-def test_models_refresh_adds_newest_and_marks_superseded(kb, monkeypatch):
-    from safety import models_refresh as mr
-    listing = {"Qwen": [{"id": "Qwen/Qwen9.9-4B"}, {"id": "Qwen/Qwen9.9-4B-Base"}, {"id": "Qwen/Qwen9.9-900B"}, {"id": "Qwen/Qwen9.9-VL-4B"}, {"id": "Qwen/SAE-Res-Qwen9.9"}]}
-    infos = {"Qwen/Qwen9.9-4B": {"id": "Qwen/Qwen9.9-4B", "pipeline_tag": "text-generation", "safetensors": {"total": 4.5e9},
-                                 "siblings": [{"rfilename": "a.safetensors", "size": 9e9}], "lastModified": "2026-10-01T00:00:00Z",
-                                 "tags": ["license:apache-2.0"], "downloads": 5},
-             "Qwen/Qwen9.9-900B": {"id": "Qwen/Qwen9.9-900B", "pipeline_tag": "text-generation", "safetensors": {"total": 9e11},
-                                   "siblings": [{"rfilename": "a.safetensors", "size": 1.8e12}], "lastModified": "2026-10-02T00:00:00Z", "tags": []}}
-    def fake_get(url):
-        if "api/models?" in url:
-            author = url.split("author=")[1].split("&")[0]
-            return listing.get(author, [])
-        return infos[url.split("api/models/")[1].split("?")[0]]
-    monkeypatch.setattr(mr, "_get", fake_get)
-    monkeypatch.setattr(mr, "TRACKED_AUTHORS", {"Qwen": "qwen"})
-    out = mr.refresh(kb)
-    assert out["added"] == ["qwen9-9-4b"] and out["newest"]["qwen"] == "qwen9.9"
+def test_model_scout_merge_validates_and_supersedes(kb):
+    from safety import model_scout
+    save_yaml(kb.catalog_dir / "families.yaml", {"families": [{"id": "qwen", "role": "open-weight"}],
+                                                 "policy": {"size_class_ratio": 2.5, "stale_after_hours": 24}})
+    assert model_scout.is_stale(kb)
+    # the registry's existing entry gets a release date so supersession can be computed
+    cat = load_yaml(kb.catalog_dir / "models.yaml")
+    cat["models"][0].update({"release_date": "2025-01-01"})
+    save_yaml(kb.catalog_dir / "models.yaml", cat)
+    proposals = kb.catalog_dir / "proposals"
+    proposals.mkdir(parents=True, exist_ok=True)
+    save_yaml(proposals / "models-scout-x.yaml", {"models": [
+        {"id": "new-small", "family": "qwen", "vendor": "v", "access": "vllm:Org/New-0.7B", "params_b": 0.7,
+         "generation": "New9", "gpu_memory_gb": 8, "release_date": "2026-10-01"},
+        {"id": "dup", "family": "qwen", "access": "vllm:Qwen/Qwen2.5-0.5B-Instruct", "params_b": 0.5, "generation": "x", "gpu_memory_gb": 6},
+        {"id": "broken", "family": "qwen", "access": "nocolon", "params_b": 1, "generation": "x", "gpu_memory_gb": 6},
+    ]})
+    out = model_scout.merge_proposals(kb)
+    assert out["accepted"] == ["new-small"] and len(out["rejected"]) == 2
     models = kb.models()
-    assert models["qwen9-9-4b"]["access"] == "vllm:Qwen/Qwen9.9-4B" and models["qwen9-9-4b"]["discovered"]
-    assert models["tiny"]["superseded_by"] == "qwen9-9-4b"    # the old 0.5B Qwen2.5 entry, same size class
-    assert (kb.catalog_dir / "models_latest.yaml").exists() and list(kb.inbox_dir.glob("*new-models.md"))
-    assert "newest generation qwen9.9" in mr.latest_models_summary(kb)
+    assert models["new-small"]["discovered"] and models["tiny"]["superseded_by"] == "new-small"
+    assert not list(proposals.glob("models-scout-x.yaml")) and list(proposals.glob("*.merged.yaml"))
+    save_yaml(kb.catalog_dir / "models_latest.yaml", {"refreshed": __import__("safety.kb", fromlist=["utc_now"]).utc_now(),
+                                                      "families": {"qwen": {"newest_generation": "New9", "released": "2026-10-01"}}})
+    assert not model_scout.is_stale(kb)
+    assert "newest generation New9" in model_scout.latest_models_summary(kb)
+    prompt = model_scout.render_prompt(kb, "scout-test")
+    assert "catalog/families.yaml" in prompt and "{{" not in prompt
