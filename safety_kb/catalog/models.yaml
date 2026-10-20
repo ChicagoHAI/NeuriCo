@@ -286,6 +286,7 @@ models:
   discovered: '2026-10-20'
   serve_args:
   - --trust-remote-code
+  superseded_by: glm-z1-9b-0414
 - id: deepseek-r1-0528-qwen3-8b
   family: deepseek
   vendor: deepseek-ai
@@ -300,7 +301,6 @@ models:
   discovered: '2026-10-20'
   serve_args:
   - --trust-remote-code
-  superseded_by: deepseek-v2-lite
 - id: qwen3-5-0-8b
   family: qwen
   vendor: Qwen
@@ -381,3 +381,26 @@ models:
   discovered: '2026-10-20'
   serve_args:
   - --trust-remote-code
+  superseded_by: deepseek-r1-0528-qwen3-8b
+- id: deepseek-v2-lite-chat
+  family: deepseek
+  vendor: DeepSeek
+  access: vllm:deepseek-ai/DeepSeek-V2-Lite-Chat
+  params_b: 15.706484224
+  generation: DeepSeek-V2
+  gpu_memory_gb: 42
+  gpu_memory_utilization: 0.53
+  max_model_len: 8192
+  license: deepseek
+  release_date: '2024-05-16'
+  serve_args:
+  - --trust-remote-code
+  - --enforce-eager
+  notes: 'Older small chat baseline, not a new release or successor to R1; card specifies 32K context
+    although config max_position_embeddings is 163840; vLLM example uses trust_remote_code=True and enforce_eager=True;
+    use bundled User/Assistant template. Sources: https://huggingface.co/api/models/deepseek-ai/DeepSeek-V2-Lite-Chat?blobs=true
+    ; https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/blob/main/README.md ; https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/blob/main/config.json
+    ; https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/blob/main/tokenizer_config.json'
+  discovered: '2026-10-20'
+  proposed_by: models-scout-20261020-164621
+  superseded_by: deepseek-r1-0528-qwen3-8b

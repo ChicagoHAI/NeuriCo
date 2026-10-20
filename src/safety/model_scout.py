@@ -62,18 +62,23 @@ def validate_entry(entry: Any, registry_access: set) -> Optional[str]:
     """Return a reason the proposal entry is rejected, or None."""
     if not isinstance(entry, dict):
         return "not a mapping"
-    missing = [k for k in REQUIRED_ENTRY_KEYS if entry.get(k) in (None, "")]
-    if missing:
-        return f"missing {missing}"
-    access = str(entry["access"])
+    access = str(entry.get("access") or "")
     if ":" not in access:
         return "access must be <scheme>:<target>"
+    local = access.startswith("vllm:")
+    required = REQUIRED_ENTRY_KEYS if local else ("id", "family", "access", "generation")
+    missing = [k for k in required if entry.get(k) in (None, "")]
+    if missing:
+        return f"missing {missing}"
     if access in registry_access:
         return "already in the registry"
-    try:
-        float(entry["params_b"]); float(entry["gpu_memory_gb"])
-    except (TypeError, ValueError):
-        return "params_b and gpu_memory_gb must be numbers"
+    if local:
+        try:
+            float(entry["params_b"]); float(entry["gpu_memory_gb"])
+        except (TypeError, ValueError):
+            return "params_b and gpu_memory_gb must be numbers"
+    elif not entry.get("api"):
+        return "API entries must set api: true"
     return None
 
 
