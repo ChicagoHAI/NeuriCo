@@ -108,3 +108,12 @@ models:
     api: true
     role: judge-api
     notes: API judge on Azure; select with NEURICO_SAFETY_JUDGE=azure-gpt-4.1-mini-judge
+  # Larger open-weight members for the DSI cluster (A100 80GB / H100 / H200), added 2026-10-20
+  - {id: qwen3-8b, family: qwen, vendor: Alibaba, access: "vllm:Qwen/Qwen3-8B", params_b: 8, gpu_memory_gb: 24, gpu_memory_utilization: 0.6, max_model_len: 8192, license: Apache-2.0}
+  - {id: qwen3-14b, family: qwen, vendor: Alibaba, access: "vllm:Qwen/Qwen3-14B", params_b: 14, gpu_memory_gb: 40, gpu_memory_utilization: 0.7, max_model_len: 8192, license: Apache-2.0}
+  - {id: qwen3-32b, family: qwen, vendor: Alibaba, access: "vllm:Qwen/Qwen3-32B", params_b: 32, gpu_memory_gb: 75, gpu_memory_utilization: 0.9, max_model_len: 8192, license: Apache-2.0}
+  - {id: qwen3-30b-a3b, family: qwen, vendor: Alibaba, access: "vllm:Qwen/Qwen3-30B-A3B", params_b: 30, gpu_memory_gb: 70, gpu_memory_utilization: 0.9, max_model_len: 8192, license: Apache-2.0, notes: "MoE, 3B active"}
+  - {id: moonlight-16b-a3b-instruct, family: kimi, vendor: Moonshot AI, access: "vllm:moonshotai/Moonlight-16B-A3B-Instruct", params_b: 16, gpu_memory_gb: 40, gpu_memory_utilization: 0.7, max_model_len: 8192, serve_args: ["--trust-remote-code"], license: MIT, notes: "smallest Kimi-family text model with open weights"}
+  - {id: deepseek-r1-distill-qwen-7b, family: deepseek, vendor: DeepSeek, access: "vllm:deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", params_b: 7, gpu_memory_gb: 24, gpu_memory_utilization: 0.6, max_model_len: 8192, license: MIT}
+  - {id: deepseek-r1-distill-qwen-14b, family: deepseek, vendor: DeepSeek, access: "vllm:deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", params_b: 14, gpu_memory_gb: 40, gpu_memory_utilization: 0.7, max_model_len: 8192, license: MIT}
+  - {id: deepseek-r1-distill-llama-8b, family: deepseek, vendor: DeepSeek, access: "vllm:deepseek-ai/DeepSeek-R1-Distill-Llama-8B", params_b: 8, gpu_memory_gb: 24, gpu_memory_utilization: 0.6, max_model_len: 8192, license: MIT}

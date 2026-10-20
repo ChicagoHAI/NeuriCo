@@ -1,14 +1,15 @@
 daemon:
   gpus: []
-  gpu_memory_gb: 48
-  max_neurico_jobs: 1
+  gpu_memory_gb: 80
+  max_neurico_jobs: 2
   max_suite_jobs: 1
-  stall_minutes: 45
+  stall_minutes: 60
   retries: 2
   poll_seconds: 30
   min_pending: 2
   planner_interval_hours: 6
-  planner_provider: claude
-  planner_model: null
-  eval_python: /data/hypogenicai/safety_venv/bin/python
-  hf_cache: /data/hypogenicai/hf_cache
+  planner_provider: codex
+  planner_model: gpt-6-astra
+  eval_python: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/safety_venv/bin/python
+  hf_cache: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/hf_cache
+  planner_enabled: true
