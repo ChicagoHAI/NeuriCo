@@ -9,7 +9,7 @@
 # output, extra_outputs, retry, transcript, reasoning_effort, system_prompt,
 # mcp_config, use_scribe, skills, env_allowlist, isolate_home, extra_args,
 # env_extra, tags, defer_provider_failure_to_runtime. Any other key (template,
-# routes, params, kind, mcp, codex, backend) is kept on AgentSpec.extras for
+# routes, params, model_env, kind, mcp, codex, backend) is kept on AgentSpec.extras for
 # the readers that own it (prompt registry, LLMClient, manager).
 #
 # `validator` / `check` values are "module:function" references resolved only
@@ -90,22 +90,43 @@ roles:
     provider: codex
     budget: {timeout_s: 2400}
     template: agents/model_scout.txt
-  judge:                            # direct API roles (LLMClient, step 5), not CLI sessions
+  # -- direct API roles (core.llm_client.LLMClient, step 5), not CLI sessions -------------------
+  # `routes` is the fallback order; a route is used when its key is set (openrouter:
+  # OPENROUTER_KEY / OPENROUTER_API_KEY, openai: OPENAI_API_KEY, anthropic: ANTHROPIC_API_KEY,
+  # azure_openai / azure_foundry: NEURICO_AZURE=1 + the core.azure_config variables). A rejected
+  # key, no credits or a key limit marks the route down for 600 s; a 429 moves on at once.
+  # `privacy` is sent with every request: OpenRouter's `provider` object (zero data retention,
+  # no data collection), direct OpenAI's `store: false`. `model_env` names the per-role model
+  # override; `model: null` on azure_openai means the configured deployment
+  # (NEURICO_AZURE_CODEX_MODEL, else AZURE_OPENAI_DEPLOYMENTS[0]).
+  judge:
     kind: api
     routes:
       - {name: openrouter, model: openai/gpt-4.1, privacy: {zdr: true, data_collection: deny}}
       - {name: openai,     model: gpt-4.1,        privacy: {store: false}}
     params: {temperature: 0, max_tokens: 4096, timeout_s: 180, response_format: json_object}
-  eval_verifier: {extends: judge}
-  idea_converter:
+  eval_verifier:                    # agents/eval_verifier.py; messages from agents/eval_verifier.txt
     extends: judge
-    params: {temperature: 0.1, max_tokens: 2000, timeout_s: 60}
-  manager_api:                      # llm_backend anthropic_api / openrouter backends
-    kind: api
+    model_env: NEURICO_EVAL_VERIFIER_MODEL
+  idea_converter:                   # cli/submit_local.py and cli/fetch_from_ideahub.py (YAML out, template fallback)
+    extends: judge
+    model_env: NEURICO_IDEA_CONVERTER_MODEL
+    params: {temperature: 0.1, max_tokens: 2000, timeout_s: 60, response_format: null}
+  interactive_manager_api:          # interactive/llm_backend.py anthropic_api / openrouter backends
+    kind: api                       # the backend name picks the route; both share these defaults
+    model_env: NEURICO_MANAGER_MODEL
     routes:
-      - {name: anthropic, model: claude-sonnet-4-6}
+      - {name: anthropic,  model: claude-sonnet-4-6}
       - {name: openrouter, model: anthropic/claude-sonnet-4}
-    params: {max_tokens: 4096}
+    params: {max_tokens: 4096, timeout_s: 120}
+  # repo_namer: none. core/github_manager.py names repositories mechanically from the idea
+  # text (no API call), so the role the assessment lists has no call site.
+  #
+  # services/paper-finder keeps its own LangChain stack (assessment 4.4 site 30). Its
+  # environment is the `judge` routes above: OPENROUTER_KEY / OPENROUTER_API_KEY then
+  # OPENAI_API_KEY, model openai/gpt-4.1 (its conf/config.toml spells it
+  # `openai:gpt-4.1-2025-04-14` and rewrites it per provider). docker/host.sh and
+  # docker/run.sh pass those variables through; nothing is generated from this file yet.
 
   ideation.problem:                 # the three stages ported in IDEATION_INTEGRATION.md 4.2
     extends: ideator

@@ -13,11 +13,14 @@ import sys
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import agents.eval_verifier as ev  # noqa: E402
+from core.llm_client import LLMClient  # noqa: E402
+from core.run_ledger import RunLedger  # noqa: E402
 from agents.eval_verifier import (  # noqa: E402
     build_eval_verifier_evidence,
     extract_eval_contract,
@@ -291,91 +294,82 @@ def test_persisted_and_returned_verdict_drop_all_remote_prose(tmp_path, monkeypa
         assert marker not in serialized_result
 
 
-def test_api_call_has_no_tool_or_function_capabilities(monkeypatch):
+def _fake_verifier_client(monkeypatch, *, key_env, status=200, body=None, transport=None):
+    """An eval_verifier LLMClient whose HTTP layer is a fake; records the one request made."""
+    for name in ('OPENROUTER_KEY', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(key_env, 'shared-key')
     captured = {}
 
-    class Completions:
-        async def create(self, **kwargs):
-            captured.update(kwargs)
-            message = type('Message', (), {'content': '{"pass": true}'})()
-            choice = type('Choice', (), {'message': message})()
-            return type('Response', (), {'choices': [choice]})()
+    def handle(request):
+        captured['url'] = str(request.url)
+        captured['headers'] = dict(request.headers)
+        captured['body'] = json.loads(request.content)
+        reply = body if body is not None else {
+            'choices': [{'message': {'content': '{"pass": true}'}}],
+            'usage': {'prompt_tokens': 1, 'completion_tokens': 1}}
+        return httpx.Response(status, json=reply)
 
-    class Client:
-        chat = type('Chat', (), {'completions': Completions()})()
+    def build(timeout):
+        return LLMClient.for_role('eval_verifier', timeout_s=timeout, ledger=RunLedger(enabled=False),
+                                  transport=transport or httpx.MockTransport(handle))
 
-        async def close(self):
-            pass
+    monkeypatch.setattr(ev, '_verifier_client', build)
+    return captured
 
-    client = Client()
-    monkeypatch.setattr(
-        ev, '_verifier_api_client',
-        lambda timeout: (client, 'test-model', 'openrouter'))
+
+def test_api_call_has_no_tool_or_function_capabilities(monkeypatch):
+    captured = _fake_verifier_client(monkeypatch, key_env='OPENROUTER_KEY')
 
     content, backend, model = ev._call_verifier_api(
         [{'role': 'user', 'content': 'evidence'}], timeout=17)
 
     assert content == '{"pass": true}'
-    assert backend == 'openrouter' and model == 'test-model'
-    assert captured['response_format'] == {'type': 'json_object'}
-    assert captured['extra_body'] == {
-        'provider': {'zdr': True, 'data_collection': 'deny'}
-    }
-    assert 'tools' not in captured
-    assert 'functions' not in captured
-    assert 'tool_choice' not in captured
+    assert backend == 'openrouter' and model == 'openai/gpt-4.1'
+    body = captured['body']
+    assert body['response_format'] == {'type': 'json_object'}
+    assert body['provider'] == {'zdr': True, 'data_collection': 'deny'}
+    assert body['temperature'] == 0 and body['max_tokens'] == 4096
+    assert 'tools' not in body
+    assert 'functions' not in body
+    assert 'tool_choice' not in body
+    assert captured['headers']['authorization'] == 'Bearer shared-key'
 
 
 def test_direct_openai_request_explicitly_disables_storage(monkeypatch):
-    captured = {}
+    captured = _fake_verifier_client(monkeypatch, key_env='OPENAI_API_KEY')
 
-    class Completions:
-        async def create(self, **kwargs):
-            captured.update(kwargs)
-            message = type('Message', (), {'content': '{"pass": true}'})()
-            choice = type('Choice', (), {'message': message})()
-            return type('Response', (), {'choices': [choice]})()
+    _content, backend, model = ev._call_verifier_api(
+        [{'role': 'user', 'content': 'evidence'}], timeout=17)
 
-    class Client:
-        chat = type('Chat', (), {'completions': Completions()})()
+    assert backend == 'openai' and model == 'gpt-4.1'
+    assert captured['body']['store'] is False
+    assert 'provider' not in captured['body']
 
-        async def close(self):
-            pass
 
-    client = Client()
-    monkeypatch.setattr(
-        ev, '_verifier_api_client',
-        lambda timeout: (client, 'test-model', 'openai'))
-
-    ev._call_verifier_api([{'role': 'user', 'content': 'evidence'}], timeout=17)
-
-    assert captured['store'] is False
-    assert 'extra_body' not in captured
+def test_empty_api_reply_is_an_invalid_response(monkeypatch):
+    _fake_verifier_client(monkeypatch, key_env='OPENAI_API_KEY',
+                          body={'choices': [{'message': {'content': '  '}}]})
+    with pytest.raises(ev.VerifierResponseInvalidError):
+        ev._call_verifier_api([{'role': 'user', 'content': 'evidence'}], timeout=17)
 
 
 def test_api_call_has_end_to_end_wall_clock_deadline(monkeypatch):
-    cancelled = False
-    closed = False
+    state = {'cancelled': False, 'closed': False}
 
-    class Completions:
-        async def create(self, **kwargs):
-            nonlocal cancelled
+    class SlowTransport(httpx.MockTransport):
+        async def handle_async_request(self, request):
             try:
                 await asyncio.sleep(10)
             except asyncio.CancelledError:
-                cancelled = True
+                state['cancelled'] = True
                 raise
 
-    class Client:
-        chat = type('Chat', (), {'completions': Completions()})()
+        async def aclose(self):
+            state['closed'] = True
 
-        async def close(self):
-            nonlocal closed
-            closed = True
-
-    monkeypatch.setattr(
-        ev, '_verifier_api_client',
-        lambda timeout: (Client(), 'test-model', 'openai'))
+    _fake_verifier_client(monkeypatch, key_env='OPENAI_API_KEY',
+                          transport=SlowTransport(lambda request: None))
 
     started = time.monotonic()
     with pytest.raises(TimeoutError):
@@ -383,25 +377,28 @@ def test_api_call_has_end_to_end_wall_clock_deadline(monkeypatch):
             [{'role': 'user', 'content': 'evidence'}], timeout=0.02)
 
     assert time.monotonic() - started < 1
-    assert cancelled is True
-    assert closed is True
+    assert state['cancelled'] is True
+    assert state['closed'] is True
 
 
-def test_missing_api_key_has_no_cli_fallback(monkeypatch):
+def test_missing_api_key_has_no_cli_fallback(monkeypatch, tmp_path):
     for name in ('OPENROUTER_KEY', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY'):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv('NEURICO_AGENT_LEDGER', str(tmp_path / 'ledger.jsonl'))
+    client = ev._verifier_client(timeout=1)
+    assert client.routes == []
     with pytest.raises(RuntimeError, match='OPENROUTER_KEY'):
-        ev._verifier_api_client(timeout=1)
+        ev._call_verifier_api([{'role': 'user', 'content': 'evidence'}], timeout=1)
 
 
 @pytest.mark.parametrize(
     'env_name, expected_backend, expected_model, expected_base_url',
     [
-        ('OPENROUTER_KEY', 'openrouter', ev.DEFAULT_OPENROUTER_MODEL,
+        ('OPENROUTER_KEY', 'openrouter', 'openai/gpt-4.1',
          'https://openrouter.ai/api/v1'),
-        ('OPENROUTER_API_KEY', 'openrouter', ev.DEFAULT_OPENROUTER_MODEL,
+        ('OPENROUTER_API_KEY', 'openrouter', 'openai/gpt-4.1',
          'https://openrouter.ai/api/v1'),
-        ('OPENAI_API_KEY', 'openai', ev.DEFAULT_OPENAI_MODEL, None),
+        ('OPENAI_API_KEY', 'openai', 'gpt-4.1', 'https://api.openai.com/v1'),
     ],
 )
 def test_verifier_accepts_repository_api_keys(
@@ -410,23 +407,24 @@ def test_verifier_accepts_repository_api_keys(
     for name in ('OPENROUTER_KEY', 'OPENROUTER_API_KEY', 'OPENAI_API_KEY'):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(env_name, 'shared-key')
-    captured = {}
 
-    class FakeAsyncOpenAI:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+    client = ev._verifier_client(timeout=17)
 
-    fake_module = type('OpenAIModule', (), {'AsyncOpenAI': FakeAsyncOpenAI})
-    monkeypatch.setitem(sys.modules, 'openai', fake_module)
+    route = client.routes[0]
+    assert route.name == expected_backend
+    assert route.model == expected_model
+    assert route.api_key_env == env_name
+    assert route.base_url == expected_base_url
+    assert client.params['timeout_s'] == 17
+    assert 'shared-key' not in client.describe()
 
-    _client, model, backend = ev._verifier_api_client(timeout=17)
 
-    assert backend == expected_backend
-    assert model == expected_model
-    assert captured['api_key'] == 'shared-key'
-    assert captured['timeout'] == 17
-    assert captured['max_retries'] == 0
-    assert captured.get('base_url') == expected_base_url
+def test_verifier_model_override_applies_to_every_route(monkeypatch):
+    monkeypatch.setenv('OPENROUTER_KEY', 'k')
+    monkeypatch.setenv('OPENAI_API_KEY', 'k')
+    monkeypatch.setenv('NEURICO_EVAL_VERIFIER_MODEL', 'gpt-4.1-mini')
+    assert [r.model for r in ev._verifier_client(timeout=1).routes] == [
+        'openai/gpt-4.1-mini', 'gpt-4.1-mini']
 
 
 def test_advisory_api_call_writes_nothing_to_workspace(tmp_path, monkeypatch):
