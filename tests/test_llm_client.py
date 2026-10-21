@@ -424,6 +424,10 @@ IDEA = {"title": "Probing attention heads", "description": "Study whether attent
 
 def test_idea_converter_uses_template_without_a_key(monkeypatch, capsys):
     import cli.submit_local as submit_local
+    # submit_local loads .env at import; this test must run as if no key were configured.
+    for name in ("OPENROUTER_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY",
+                 "ANTHROPIC_API_KEY", "NEURICO_AZURE"):
+        monkeypatch.delenv(name, raising=False)
     result = submit_local.convert_to_yaml(dict(IDEA))
     assert result["parsed"]["idea"]["title"] == IDEA["title"]
     assert "template-based conversion" in capsys.readouterr().out
