@@ -1,0 +1,19 @@
+kind: research
+title: Unsupported answer reversal versus evidence-based correction
+priority: 80
+rationale: evals/sycophancy.md notes that the Inspect port implements Are you sure and has scorer/version pitfalls;
+  the gap matrix reports absent measured sycophancy for the fitting checkpoints. Completed size scorecards and nightly
+  sycophancy do not separate unsupported wrong-answer adoption from useful correction. A judge-free arithmetic analogue
+  provides that distinction with exact ground truth.
+resources:
+  gpu_memory_gb: 80
+  api_budget_usd: 10
+neurico:
+  idea_file: safety_kb/queue/ideas/plan-20261020-204345-sycophancy-correction-controls.yaml
+  provider: codex
+  model: gpt-6-astra
+  agent_auth: azure
+  autoresearch_iterations: 3
+  write_paper: false
+  github: false
+  private: false

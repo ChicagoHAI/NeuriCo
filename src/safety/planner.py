@@ -12,6 +12,15 @@ and writes:
 Python then validates every proposal (schema, catalog ids, de-duplication against
 existing jobs, campaign policy) and moves the accepted ones to ``queue/pending/``
 with ``approved`` set according to the campaign's approval policy.
+
+Two modes (``choose_mode`` picks one per round from the campaign's ``planner.modes`` mix):
+
+- ``replicate``: one agent session in the KB root with ``templates/agents/safety_planner.txt``.
+- ``ideate``: the three-stage ideation round of ``src/ideation`` (``problem -> ideation ->
+  idea_judge``, each an isolated agent workspace driven by the agent factory); ``to_job``
+  writes the same proposal files the single-session ideator wrote, so ``validate_proposals``
+  below stays the single gate into the queue. The interim single-session ideator template
+  (``templates/agents/safety_ideator.txt``) is kept for ``render_prompt`` but no longer launched.
 """
 
 from __future__ import annotations
@@ -226,6 +235,8 @@ def validate_proposals(kb: KB, campaign: Dict[str, Any], proposal_dir: Path, mod
     max_new = int((campaign.get("planner") or {}).get("max_new_jobs_per_run", 3))
     accepted, rejected = [], []
     for path in sorted(proposal_dir.glob("*.yaml")):
+        if path.name == "outcome.yaml":   # the round's own record (present when a planner run is re-run)
+            continue
         data = load_yaml(path)
         if not isinstance(data, dict) or "kind" not in data:
             rejected.append((path.name, "not a job spec"))
@@ -290,14 +301,19 @@ def _targets_api_model(spec: JobSpec, models: Dict[str, Any]) -> bool:
                for m in models.values())
 
 
-def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: Optional[str] = None,
+def run_planner(kb: KB, campaign_name: str, *, provider: Optional[str] = "claude", model: Optional[str] = None,
                 agent_auth: Optional[str] = None, timeout: Optional[int] = 3600, dry_run: bool = False,
-                mode: Optional[str] = None) -> Dict[str, Any]:
-    """One planner session in the KB root, then Python validation of its proposals.
+                mode: Optional[str] = None, only: Optional[List[str]] = None,
+                planner_run: Optional[str] = None) -> Dict[str, Any]:
+    """One planner round, then Python validation of its proposals.
 
-    ``provider``, ``model`` and ``agent_auth`` are the daemon's (or the CLI's)
-    choices and override the ``planner`` / ``ideator`` role defaults in
-    config/agents.yaml; ``None`` leaves the role or environment default in place.
+    ``replicate`` is one agent session in the KB root; ``ideate`` is the ideation
+    round (``ideation.runtime.IdeationRun``: context -> problem -> ideation ->
+    idea_judge, ``only`` narrows it to some agent stages of an existing
+    ``planner_run``). ``provider``, ``model`` and ``agent_auth`` are the daemon's
+    (or the CLI's) choices and override the ``planner`` / ``ideator`` /
+    ``ideation.*`` role defaults in config/agents.yaml; ``None`` leaves the role
+    or environment default in place.
     """
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     from core.agent_factory import AgentFactory
@@ -315,7 +331,10 @@ def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: 
     mode = mode or choose_mode(kb, campaign)
     if mode not in PLANNER_MODES:
         raise ValueError(f"unknown planner mode {mode!r}; expected one of {PLANNER_MODES}")
-    planner_run = datetime.now(timezone.utc).strftime(f"plan-%Y%m%d-%H%M%S-{mode}")
+    if mode == "ideate":
+        return _run_ideation(kb, campaign, campaign_name, provider=provider, model=model, agent_auth=agent_auth,
+                             timeout=timeout, dry_run=dry_run, only=only, planner_run=planner_run)
+    planner_run = planner_run or datetime.now(timezone.utc).strftime(f"plan-%Y%m%d-%H%M%S-{mode}")
     proposal_dir = kb.queue_dir / "proposals" / planner_run
     proposal_dir.mkdir(parents=True, exist_ok=True)
     rendered = render(kb, campaign_name, planner_run, mode)
@@ -332,8 +351,7 @@ def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: 
     # The artifacts keep the planner-run name (<run>.log, <run>_transcript.jsonl); the prompt
     # was saved as prompt.md above; the KB root is the ledger's work_dir.
     factory = AgentFactory()
-    spec = factory.spec("ideator" if mode == "ideate" else "planner", provider=provider, model=model,
-                        auth=agent_auth, timeout=timeout,
+    spec = factory.spec("planner", provider=provider, model=model, auth=agent_auth, timeout=timeout,
                         transcript={"logs_dir": log_dir, "stem": planner_run, "save_prompt": False})
     result = factory.run(factory.build(spec, {"NEURICO_SAFETY_KB": str(kb.root)}), prompt, kb.root, prompt_meta=rendered)
     outcome = validate_proposals(kb, campaign, proposal_dir, mode)
@@ -343,3 +361,50 @@ def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: 
               "agent_run_id": result.run_id, "cost_usd": result.usage.cost_usd}
     save_yaml(proposal_dir / "outcome.yaml", record)
     return record
+
+
+def _run_ideation(kb: KB, campaign: Dict[str, Any], campaign_name: str, *, provider: Optional[str],
+                  model: Optional[str], agent_auth: Optional[str], timeout: Optional[int], dry_run: bool,
+                  only: Optional[List[str]], planner_run: Optional[str]) -> Dict[str, Any]:
+    """The ``ideate`` mode: the staged ideation round, then the same validation gate as ``replicate``.
+
+    ``timeout`` applies per stage (the roles default to 1500 s when the caller passes None).
+    The outcome file carries the per-stage ledger ids and costs next to the usual accepted /
+    rejected lists so ``choose_mode`` and the index see one planner round.
+    """
+    from ideation.runtime import IdeationRun
+
+    ideation = IdeationRun(kb, campaign_name, planner_run=planner_run, provider=provider, model=model,
+                           agent_auth=agent_auth, timeout=timeout, only=only, dry_run=dry_run)
+    proposal_dir = ideation.proposal_dir
+    summary: Dict[str, Any]
+    try:
+        summary = ideation.run()
+    except Exception as exc:  # noqa: BLE001 - the round failed; record what happened before re-raising
+        summary = ideation.summary()
+        summary.update({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        proposal_dir.mkdir(parents=True, exist_ok=True)
+        save_yaml(proposal_dir / "outcome.yaml", _ideation_outcome(summary, campaign_name, proposed=0))
+        raise
+    if dry_run:
+        record = _ideation_outcome(summary, campaign_name, proposed=0)
+        record["dry_run"] = True
+        save_yaml(proposal_dir / "outcome.yaml", record)
+        return {**record, "prompt": str(proposal_dir / "prompt.md")}
+    outcome = validate_proposals(kb, campaign, proposal_dir, "ideate")
+    record = _ideation_outcome(summary, campaign_name, proposed=len(outcome["accepted"]))
+    record.update({"accepted": outcome["accepted"], "rejected": outcome["rejected"]})
+    save_yaml(proposal_dir / "outcome.yaml", record)
+    return record
+
+
+def _ideation_outcome(summary: Dict[str, Any], campaign_name: str, *, proposed: int) -> Dict[str, Any]:
+    steps = {sid: {k: v for k, v in rec.items() if k in ("status", "attempts", "cost_usd", "run_id", "seconds", "model",
+                                                          "provider", "error", "reason")}
+             for sid, rec in (summary.get("steps") or {}).items()}
+    return {"ok": bool(summary.get("ok")), "planner_run": summary["planner_run"], "mode": "ideate", "at": utc_now(),
+            "campaign": campaign_name, "proposed": proposed, "accepted": [], "rejected": [],
+            "log": summary.get("run_root"), "artifacts": summary.get("artifacts"),
+            "agent_run_ids": summary.get("agent_run_ids") or [], "cost_usd": summary.get("cost_usd"),
+            "problem": (summary.get("proposals") or {}).get("problem"), "candidates": (summary.get("proposals") or {}).get("candidates"),
+            "warnings": summary.get("warnings") or [], "error": summary.get("error"), "stages": steps}

@@ -1,0 +1,8 @@
+ok: true
+planner_run: plan-20261020-144343
+proposed: 2
+accepted:
+- research-20261020-001-completion-claims-on-solvable-an
+- research-20261020-001-synthetic-secret-leakage-with-au
+rejected: []
+log: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/neurico/logs/safety/planner/plan-20261020-144343.log

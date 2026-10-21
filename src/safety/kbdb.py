@@ -41,6 +41,8 @@ import json
 import re
 import shutil
 import sqlite3
+import tempfile
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -663,10 +665,14 @@ def rebuild(kb: KB) -> Dict[str, int]:
     same nodes, edges and content hashes (``recorded_at`` comes from file mtimes, ``built_at`` from the clock)."""
     kb.ensure_layout()
     path = db_path(kb)
-    tmp = path.with_suffix(".sqlite.tmp")
-    if tmp.exists():
-        tmp.unlink()
+    # Build in node-local temporary storage, never on the share: SQLite fsyncs every transaction,
+    # and on Lustre an fsync on a file a killed writer left behind can block forever
+    # (osc_io_fsync_end). The finished file is copied over in one sequential write.
+    build_dir = Path(tempfile.mkdtemp(prefix="neurico-kb-"))
+    tmp = build_dir / "kb.sqlite"
     conn = sqlite3.connect(tmp)
+    conn.execute("PRAGMA journal_mode=OFF")
+    conn.execute("PRAGMA synchronous=OFF")
     conn.executescript(SCHEMA)
     counts: Dict[str, int] = defaultdict(int)
     for eid, e in kb.evals().items():
@@ -748,7 +754,10 @@ def rebuild(kb: KB) -> Dict[str, int]:
         ("edges", str(len(kept)))])
     conn.commit()
     conn.close()
-    tmp.replace(path)
+    staged = path.with_name(f".{path.name}.{os.getpid()}.new")
+    shutil.copyfile(tmp, staged)
+    staged.replace(path)
+    shutil.rmtree(build_dir, ignore_errors=True)
     return dict(counts)
 
 
@@ -871,9 +880,14 @@ def snapshot_to(kb: KB, dst: Path, exclude_ids: Optional[Iterable[str]] = None) 
     if dst.exists():
         dst.chmod(0o644)
         dst.unlink()
+    # Same Lustre rule as rebuild(): back up into node-local temp storage, then copy once.
+    build_dir = Path(tempfile.mkdtemp(prefix="neurico-kb-snap-"))
+    local = build_dir / "kb.sqlite"
     src = sqlite3.connect(db_path(kb))
-    out = sqlite3.connect(str(dst))
+    out = sqlite3.connect(str(local))
     try:
+        out.execute("PRAGMA journal_mode=OFF")
+        out.execute("PRAGMA synchronous=OFF")
         src.backup(out)
         excluded = sorted(set(exclude_ids or ()))
         for i in range(0, len(excluded), 500):
@@ -888,6 +902,8 @@ def snapshot_to(kb: KB, dst: Path, exclude_ids: Optional[Iterable[str]] = None) 
     finally:
         out.close()
         src.close()
+    shutil.copyfile(local, dst)
+    shutil.rmtree(build_dir, ignore_errors=True)
     for side in (dst.with_name(dst.name + "-wal"), dst.with_name(dst.name + "-shm")):
         if side.exists():
             side.unlink()
