@@ -274,3 +274,47 @@ def test_hitl_search_timeout_and_manager_turn_cap_are_opt_in():
     assert hitl_workspace_inspection._SEARCH_TIMEOUT_SECONDS is None
     manager = yaml.safe_load((PROJECT_ROOT / "config" / "manager.yaml").read_text(encoding="utf-8"))["manager"]
     assert manager["hitl_manager_max_turns"] is None
+
+
+def test_hitl_bridge_and_tool_client_have_no_client_side_deadline_by_default(monkeypatch):
+    import importlib
+
+    from core import hitl_manager_mcp, hitl_tool_client
+
+    for name in ("NEURICO_HITL_MANAGER_REQUEST_TIMEOUT_SECONDS", "NEURICO_HITL_TOOL_TIMEOUT_SECONDS"):
+        monkeypatch.delenv(name, raising=False)
+    assert importlib.reload(hitl_manager_mcp)._REQUEST_TIMEOUT_SECONDS is None
+    assert importlib.reload(hitl_tool_client)._READ_ONLY_TIMEOUT_SECONDS is None
+    monkeypatch.setenv("NEURICO_HITL_MANAGER_REQUEST_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("NEURICO_HITL_TOOL_TIMEOUT_SECONDS", "15")
+    assert importlib.reload(hitl_manager_mcp)._REQUEST_TIMEOUT_SECONDS == 30.0   # opt-in still works
+    assert importlib.reload(hitl_tool_client)._READ_ONLY_TIMEOUT_SECONDS == 15.0
+    monkeypatch.delenv("NEURICO_HITL_MANAGER_REQUEST_TIMEOUT_SECONDS")
+    monkeypatch.delenv("NEURICO_HITL_TOOL_TIMEOUT_SECONDS")
+    importlib.reload(hitl_manager_mcp)
+    importlib.reload(hitl_tool_client)
+
+
+def test_codex_catalog_probe_waits_unless_configured(monkeypatch, tmp_path):
+    import subprocess
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        raise subprocess.CalledProcessError(1, cmd)   # soft fail: the launch proceeds without the patch
+
+    monkeypatch.setattr(agent_auth.shutil, "which", lambda name: "/usr/bin/codex")
+    monkeypatch.setattr(agent_auth.subprocess, "run", fake_run)
+    monkeypatch.setattr(agent_auth, "_catalog_cache", {})
+    monkeypatch.setenv(agent_auth.CODEX_CATALOG_DIR_ENV_VAR, str(tmp_path / "catalog"))
+    monkeypatch.delenv("NEURICO_CODEX_PROBE_TIMEOUT_S", raising=False)
+    assert agent_auth.patched_codex_catalog() is None and seen["timeout"] is None
+    monkeypatch.setattr(agent_auth, "_catalog_cache", {})
+    monkeypatch.setenv("NEURICO_CODEX_PROBE_TIMEOUT_S", "60")
+    assert agent_auth.patched_codex_catalog() is None and seen["timeout"] == 60.0
+
+
+def test_manager_provider_turn_cap_is_opt_in():
+    manager = yaml.safe_load((PROJECT_ROOT / "config" / "manager.yaml").read_text(encoding="utf-8"))["manager"]
+    assert manager["hitl_manager_max_request_provider_turns"] is None

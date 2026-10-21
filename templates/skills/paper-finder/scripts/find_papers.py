@@ -33,8 +33,12 @@ def find_papers(query: str, mode: str = "fast", url: str = "http://localhost:800
             "fallback": True,
         }
 
+    # No deadline by default: a diligent search can run for many minutes and must not be
+    # cut short. NEURICO_PAPER_FINDER_TIMEOUT=<seconds> opts in; a service that is not
+    # running still fails at once (connection refused).
+    timeout = float(os.environ.get("NEURICO_PAPER_FINDER_TIMEOUT") or 0) or None
     try:
-        with httpx.Client(timeout=300.0) as client:
+        with httpx.Client(timeout=timeout) as client:
             response = client.post(url, json={
                 "paper_description": query,
                 "operation_mode": mode,

@@ -10,6 +10,11 @@ import urllib.request
 from typing import Any, Dict, List
 
 
+_READ_ONLY_ENDPOINTS = {"/idea/view", "/frontier/current", "/worker/resume", "/time-budget"}
+# Opt-in deadline (seconds) for the read-only endpoints; unset or 0 = none (the default).
+_READ_ONLY_TIMEOUT_SECONDS = float(os.environ.get("NEURICO_HITL_TOOL_TIMEOUT_SECONDS") or 0) or None
+
+
 class HitlToolClientError(RuntimeError):
     """Raised when a worker-facing HITL command cannot reach runtime."""
 
@@ -97,10 +102,12 @@ def post_to_runtime(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         },
         method="POST",
     )
-    # Read-only helpers must fail promptly if a stale runtime endpoint is left
-    # behind. Commands that deliberately wait for manager/human resolution keep
-    # their blocking protocol and therefore have no client-side deadline.
-    timeout = 15 if endpoint in {"/idea/view", "/frontier/current", "/worker/resume", "/time-budget"} else None
+    # No client-side deadline by default: commands that wait for manager/human
+    # resolution keep their blocking protocol, and a read-only helper is never
+    # failed on elapsed time either (a stale endpoint with nothing listening
+    # still fails promptly with a connection error). To make the read-only
+    # helpers give up after N seconds, set NEURICO_HITL_TOOL_TIMEOUT_SECONDS.
+    timeout = _READ_ONLY_TIMEOUT_SECONDS if endpoint in _READ_ONLY_ENDPOINTS else None
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read().decode("utf-8")

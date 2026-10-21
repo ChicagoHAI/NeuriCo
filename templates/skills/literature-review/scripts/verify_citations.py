@@ -11,11 +11,35 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import sys
 import urllib.request
 import urllib.error
 from typing import List, Dict, Tuple, Optional
+import time
+
+# Per-attempt HTTP deadline (NEURICO_HTTP_TIMEOUT, seconds; 0 = none). A deadline is only
+# acceptable because the call is retried: a slow or flaky resolver gets three attempts with
+# backoff before a citation is reported unverified.
+_HTTP_TIMEOUT = float(os.environ.get("NEURICO_HTTP_TIMEOUT") or 0) or None
+_HTTP_ATTEMPTS = 3
+
+
+def _urlopen_retrying(request: urllib.request.Request):
+    """Open the URL; retry timeouts, connection errors and 429/5xx with backoff. 4xx raises at once."""
+    delay = 2.0
+    for attempt in range(1, _HTTP_ATTEMPTS + 1):
+        try:
+            return urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (429, 500, 502, 503, 504) or attempt == _HTTP_ATTEMPTS:
+                raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt == _HTTP_ATTEMPTS:
+                raise
+        time.sleep(delay)
+        delay *= 2
 
 
 def extract_citations(content: str) -> List[Dict]:
@@ -82,7 +106,7 @@ def verify_doi(doi: str) -> Tuple[bool, Optional[str]]:
 
     try:
         request = urllib.request.Request(url)
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with _urlopen_retrying(request) as response:
             return True, None
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -98,7 +122,7 @@ def verify_arxiv(arxiv_id: str) -> Tuple[bool, Optional[str]]:
 
     try:
         request = urllib.request.Request(url)
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with _urlopen_retrying(request) as response:
             content = response.read().decode()
             if '<entry>' in content:
                 return True, None

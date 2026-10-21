@@ -168,7 +168,7 @@ built `.venv-host` on 3.12), Claude Code logged in, no texlive.
 | `./neurico --host help` | status block: venv, uv, CLIs, GPU list, keys by name |
 | `./neurico-host submit ideas/examples/ml_regularization_test.yaml --no-github` | idea submitted natively (absolute path, no `/input` mount) |
 | `NEURICO_DRY_RUN=1 ./neurico --host run <id> ...` | prints the exact native command (`.venv-host/bin/python src/core/runner.py <id> --provider claude ...`) and exits |
-| `./neurico --host run <id> --provider claude --no-github --full-permissions --skip-resource-finder --timeout 900 --paper-timeout 60` on a tiny simulation idea | pipeline completed: `results/metrics.json`, 115-line `REPORT.md`, files owned by the user; paper stage timed out at the 60 s limit set for the test (no texlive on this host anyway) |
+| `./neurico --host run <id> --provider claude --no-github --full-permissions --skip-resource-finder --timeout 900 --paper-timeout 60` on a tiny simulation idea | pipeline completed: `results/metrics.json`, 115-line `REPORT.md`, files owned by the user; paper stage timed out at the 60 s limit set explicitly for the test (the flags opt in; without them no stage has a wall clock; no texlive on this host anyway) |
 | `uv run pytest tests/test_host_mode.py` | 20 passed (dry-run forwarding, env exports, group kill, daemon and batch kill guards) |
 
 Not exercised here: HITL web/CLI natively, the paper-finder service (its venv needs
