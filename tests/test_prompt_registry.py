@@ -125,6 +125,23 @@ def test_scout_prompt_matches_golden(kb):
     assert rendered.template_sha == _sha(model_scout.TEMPLATE.read_text(encoding="utf-8"))
 
 
+def test_ideation_stage_prompt_matches_golden():
+    """The ideation stage prompt (formerly single-brace ``str.replace``) renders through the registry
+    byte for byte as before and carries provenance; the golden was rendered by the pre-registry code."""
+    from ideation.runtime import STAGE_PROMPT_ID, STAGE_PROMPT_PATH, render_stage_prompt, stage_prompt
+    from ideation.stages import STAGE_BY_ID
+
+    stage = STAGE_BY_ID["ideation"]
+    rendered = render_stage_prompt(stage, planner_run="plan-20261020-120000-ideate", campaign_name="camp", date="2026-10-20")
+    assert "{{" not in rendered.text and "{" not in rendered.text.replace("{skill}", "")
+    assert_golden("ideation_stage_prompt", rendered.text)
+    assert stage_prompt(stage, planner_run="plan-20261020-120000-ideate", campaign_name="camp", date="2026-10-20") == rendered.text
+    variables = {"skill": "ideation", "stage": "ideation", "planner_run": "plan-20261020-120000-ideate", "campaign": "camp",
+                 "date": "2026-10-20", "output": "output/ideas.json", "schema": "ideas.schema.json"}
+    assert_provenance(rendered, STAGE_PROMPT_ID, variables)
+    assert rendered.template_sha == _sha(STAGE_PROMPT_PATH.read_text(encoding="utf-8"))
+
+
 # -- Jinja2 keeps str.replace's behaviour ------------------------------------------------------------------
 def test_missing_key_stays_literal_and_is_reported(kb):
     """A key without a value renders as ``{{key}}``, exactly as str.replace left it, and is listed."""
