@@ -25,7 +25,7 @@ config, two auth layers (OAuth vs Azure), structured output contracts and a run 
 | Of which docs (`docs/*.md`) | 7 files, +2,219 |
 | Of which tests | 14 files, +3,985 / -78 |
 | Tests on `main` | 573 passed (1 pre-existing failure, deselected) |
-| Tests on `safety-engine` | 662 passed, 1 deselected, 88 s (measured 2026-10-21) |
+| Tests on `safety-engine` | 701 passed, 1 skipped (ripgrep absent on some nodes), 1 deselected, 49 s on a compute node (measured 2026-10-21 after steps 6, 7 and the no-default-limits audit) |
 
 Test command used: `.venv/bin/python -m pytest tests -q --deselect tests/test_hitl_timeout_recovery.py::test_run_worker_does_not_translate_sigterm_into_user_stop`.
 
