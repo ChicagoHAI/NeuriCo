@@ -230,6 +230,17 @@ experiments
 `./neurico run <idea_id> --provider codex --agent-auth azure --model gpt-6-astra`). Details and
 the allowed combinations are in [`docs/AGENT_AUTH.md`](docs/AGENT_AUTH.md).
 
+**Engine and mode switches** — no limits apply by default; these opt in or select a route:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `NEURICO_MODE=host` | Docker | Run natively without Docker (`./neurico --host ...`); see [`docs/HOST_MODE.md`](docs/HOST_MODE.md) |
+| `NEURICO_AGENT_AUTH` | `oauth` | Agent backbone lane for every role in `config/agents.yaml`, including the safety planner, ideation stages and model scout |
+| `NEURICO_MANAGER_FACTORY=1` | off | HITL / interactive manager turns through `AgentFactory.session()` (Azure lane, per-turn ledger line); default flips next release |
+| `NEURICO_AGENT_MODEL` | provider CLI default | Model for every agent stage (same as `--model`) |
+| `NEURICO_SAFETY_KB` | `safety_kb/` | Knowledge base root for the safety engine ([`docs/SAFETY_ENGINE.md`](docs/SAFETY_ENGINE.md)); `./neurico safety ...` commands |
+| `NEURICO_AGENT_LEDGER` | `logs/agent_runs.jsonl` | Global run ledger (tokens, cost, prompt provenance) every agent launch and API call appends to |
+
 </details>
 
 ## Idea submission
@@ -527,6 +538,9 @@ image.
 | [HITL AutoResearch](docs/HITL_AUTORESEARCH.md) | Web and terminal interfaces, human review, and recovery |
 | [Architecture and roadmap](docs/ARCHITECTURE_AND_ROADMAP.md) | System architecture, template design, and planned directions |
 | [GitHub integration](docs/GITHUB_INTEGRATION.md) | Optional repository creation and publishing |
+| [Host mode](docs/HOST_MODE.md) | Running every command natively without Docker; Slurm daemon and test scripts |
+| [Agent accounts and research keys](docs/AGENT_AUTH.md) | OAuth vs Azure backbone lane, research-key layer, API roles, manager turns |
+| [Safety engine](docs/SAFETY_ENGINE.md) | The 24/7 evaluation loop: daemon, suites, planner and ideation, crawler, budgets, knowledge base |
 | [ClawHub skill](clawskill/SKILL.md) | ClawHub discovery and onboarding package |
 
 ClawHub provides installation and onboarding metadata. Run NeuriCo with Docker

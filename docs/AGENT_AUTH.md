@@ -8,8 +8,11 @@ NeuriCo has two independent settings that are easy to confuse:
 | **Research keys** | Which API keys and skills does the agent get for the API calls *inside* its research (judges, subjects, data generation)? | `OPENROUTER_KEY`, `ANTHROPIC_API_KEY`, ... and `NEURICO_AZURE=1` with the `AZURE_*` variables | `src/core/azure_config.py` |
 
 Both are read at one choke point, `build_agent_command` and `build_agent_environment` in
-`src/core/agent_cli.py`, so every agent launch (resource finder, rule maker, experiment
-runner, paper writer, HITL workers, baselines, safety planner) sees the same configuration.
+`src/core/agent_cli.py`, which `core.agent_factory.AgentFactory` wraps for every role in
+`config/agents.yaml`, so every agent launch (resource finder, rule maker, experiment runner,
+paper writer, HITL workers, baselines, safety planner, ideation stages, model scout, manager
+turns under `NEURICO_MANAGER_FACTORY=1`) sees the same configuration. The provider check is
+likewise one function, `agent_cli.require_supported_provider`.
 
 ## Combinations
 
@@ -141,8 +144,12 @@ Flip plan: this release ships with the flag off and the legacy path as the
 default; `tests/test_hitl_manager_factory.py` pins argv parity on both lanes
 and the bridge start-up with a fake `claude` that spawns the MCP adapter. The
 next release flips the default (`NEURICO_MANAGER_FACTORY=0` opts back out for
-one more release), and the one after removes `_send_cli` / `_send_codex_cli`
-(assessment step 9).
+one more release), and the one after removes `_send_cli` / `_send_codex_cli`.
+The assessment's step 9 cleanup (2026-10-21) deliberately left those two
+bodies in place because the default still uses them; it removed only code no
+path used (the per-agent provider checks) and the legacy helpers that remain
+are thin delegations to the factory's `validated_mcp_startup_timeout`,
+`mcp_server_names` and `codex_mcp_config_args`.
 
 ## Safety engine
 

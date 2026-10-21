@@ -5,6 +5,10 @@ with the same Python entrypoints, the same argument forwarding and (as far as a
 process can imitate a container) the same environment as the Docker route. It is
 meant for compute servers where Docker is unavailable or undesirable, and for
 batch tools (the safety daemon, `scripts/run_methods.py`) that launch many jobs.
+On a Slurm cluster the safety daemon runs in host mode inside an allocation
+(`scripts/slurm/safety_daemon.sbatch`, kept alive by `scripts/slurm/ensure_daemon.sh`;
+see `docs/SAFETY_ENGINE.md` "Monitoring and recovery"), and the test suite runs on a
+compute node with `scripts/slurm/pytest_node.sh`.
 
 ## Switching it on
 
@@ -61,7 +65,7 @@ git clone https://github.com/ChicagoHAI/neurico.git && cd neurico
 | `baseline` | `baseline/zero_shot.py <abs idea> "$@"` |
 | `hitl-web`, `hitl-cli`, `hitl-stop` | `src/cli/hitl_web.py` / `hitl_cli.py` / `hitl_stop.py`; the web client binds loopback as before, workers are spawned natively (no Docker handoff watcher). |
 | `interactive`, `_run-agent` | manager and `agent_runner.py` natively; `/workspaces/...` and `/app/...` paths are mapped to host paths, and `src/interactive/tools.py` skips the container-path translation. |
-| `safety ...` | `src/cli/safety.py` with the venv interpreter; the daemon inherits `NEURICO_MODE=host` and launches its `./neurico` jobs natively. |
+| `safety ...` | `src/cli/safety.py` with the venv interpreter; the daemon inherits `NEURICO_MODE=host` and launches its `./neurico` jobs natively; the planner, ideation stages and model scout launch through `config/agents.yaml` roles on the same lane as every other agent (`NEURICO_AGENT_AUTH`). |
 | `shell` | `bash` in the workspace directory with `.venv/bin` on `PATH` and every `NEURICO_*` variable exported. |
 | `login [provider]` | runs the CLI's own login flow (`claude`, `codex login`, `gemini`). |
 | `config`, `bump-version` | already Docker-free; unchanged. |
@@ -169,7 +173,7 @@ built `.venv-host` on 3.12), Claude Code logged in, no texlive.
 | `./neurico-host submit ideas/examples/ml_regularization_test.yaml --no-github` | idea submitted natively (absolute path, no `/input` mount) |
 | `NEURICO_DRY_RUN=1 ./neurico --host run <id> ...` | prints the exact native command (`.venv-host/bin/python src/core/runner.py <id> --provider claude ...`) and exits |
 | `./neurico --host run <id> --provider claude --no-github --full-permissions --skip-resource-finder --timeout 900 --paper-timeout 60` on a tiny simulation idea | pipeline completed: `results/metrics.json`, 115-line `REPORT.md`, files owned by the user; paper stage timed out at the 60 s limit set explicitly for the test (the flags opt in; without them no stage has a wall clock; no texlive on this host anyway) |
-| `uv run pytest tests/test_host_mode.py` | 20 passed (dry-run forwarding, env exports, group kill, daemon and batch kill guards) |
+| `uv run pytest tests/test_host_mode.py` | 20 passed (dry-run forwarding, env exports, group kill, daemon and batch kill guards); on the cluster run the whole suite with `scripts/slurm/pytest_node.sh` (the login node's disk stalls fsync-heavy tests) |
 
 Not exercised here: HITL web/CLI natively, the paper-finder service (its venv needs
 Python 3.12; `./neurico --host build` creates it), Codex/Gemini natively.
