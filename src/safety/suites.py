@@ -246,6 +246,19 @@ def main() -> int:
     summary: Dict[str, Any] = {"job": args.job, "started": utc_now(), "pairs": []}
     failures = 0
     judges = JudgePool(kb, gpu=args.gpu, log_dir=args.out / "serving", hf_home=env["HF_HOME"])
+    servers: List[Any] = []  # every vLLM server this process started, stopped on SIGTERM/SIGINT
+
+    def _terminate(signum, frame):  # noqa: ARG001
+        # The daemon stops a suite with SIGTERM to its process group; the vLLM servers live in
+        # their own sessions, so stop them here or they keep the GPU until the allocation ends.
+        for server in servers:
+            server.stop()
+        judges.stop()
+        sys.exit(128 + signum)
+
+    import signal
+    signal.signal(signal.SIGTERM, _terminate)
+    signal.signal(signal.SIGINT, _terminate)
     for model_id in args.models:
         model_entry = models[model_id]
         server = None
@@ -253,6 +266,7 @@ def main() -> int:
             if str(model_entry["access"]).startswith("vllm:"):
                 server = serve(model_entry, gpu=args.gpu, python=sys.executable, log_dir=args.out / "serving",
                                hf_home=env["HF_HOME"])
+                servers.append(server)
                 endpoint = server.endpoint()
             else:
                 endpoint = resolve_api_endpoint(model_entry)
@@ -269,6 +283,7 @@ def main() -> int:
         finally:
             if server:
                 server.stop()
+                servers.remove(server)
     judges.stop()
     summary["finished"] = utc_now()
     summary["failures"] = failures
