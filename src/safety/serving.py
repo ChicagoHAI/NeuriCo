@@ -144,6 +144,14 @@ class VLLMServer:
         deadline = None if not timeout else time.time() + timeout
         while deadline is None or time.time() < deadline:
             if self.process.poll() is not None:
+                hint = self._retry_hint()
+                if hint and not self._retried:
+                    # vLLM names the bound it needs (hybrid Mamba models: "lower max_num_seqs to at
+                    # most N"); restart once with that value instead of failing the suite.
+                    self._retried = True
+                    self.extra_args = list(self.extra_args or []) + hint
+                    self.log_file = Path(str(self.log_file))  # start() derives a fresh name again
+                    return self.start(timeout=timeout)
                 raise RuntimeError(f"vLLM exited with code {self.process.returncode}; see {self.log_file}")
             if self.max_concurrency is None:
                 self.max_concurrency = self._reported_concurrency()
@@ -156,6 +164,22 @@ class VLLMServer:
         raise TimeoutError(f"vLLM did not become ready within {timeout}s; see {self.log_file}")
 
     _CONCURRENCY_RE = re.compile(r"Maximum concurrency for [\d,]+ tokens per request: ([\d.]+)x")
+    _retried = False
+    _HINTS = (
+        (re.compile(r"lower max_num_seqs to at most (\d+)"), lambda m: ["--max-num-seqs", m.group(1)]),
+    )
+
+    def _retry_hint(self) -> Optional[List[str]]:
+        """Extra server arguments vLLM itself asks for in its failure message, or None."""
+        try:
+            text = self.log_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        for pattern, build in self._HINTS:
+            m = pattern.search(text)
+            if m:
+                return build(m)
+        return None
 
     def _reported_concurrency(self) -> Optional[int]:
         """The server's own estimate of concurrent full-length requests, from its log; None until printed."""

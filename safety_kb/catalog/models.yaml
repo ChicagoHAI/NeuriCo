@@ -238,7 +238,11 @@ models:
   license: apache-2.0
   release_date: '2026-08-14'
   discovered: '2026-10-20'
-  serve_args: []
+  serve_args:
+  - --max-num-seqs
+  - '256'
+  notes: ' Hybrid Mamba layers: vLLM 0.32 default max_num_seqs 1024 exceeds the Mamba cache blocks (586 on 94 GB at 8k ctx);
+    256 is inside the bound and above any client concurrency we use (2026-10-21).'
 - id: qwen3-5-27b
   family: qwen
   vendor: Qwen
@@ -251,8 +255,12 @@ models:
   license: apache-2.0
   release_date: '2026-04-24'
   discovered: '2026-10-20'
-  serve_args: []
+  serve_args:
+  - --max-num-seqs
+  - '256'
   superseded_by: qwen3-8-27b
+  notes: ' Hybrid Mamba layers: vLLM 0.32 default max_num_seqs 1024 exceeds the Mamba cache blocks (586 on 94 GB at 8k ctx);
+    256 is inside the bound and above any client concurrency we use (2026-10-21).'
 - id: qwen3-6-27b
   family: qwen
   vendor: Qwen
@@ -322,7 +330,11 @@ models:
   license: apache-2.0
   release_date: '2026-03-02'
   discovered: '2026-10-20'
-  serve_args: []
+  serve_args:
+  - --max-num-seqs
+  - '256'
+  notes: ' Hybrid Mamba layers: vLLM 0.32 default max_num_seqs 1024 exceeds the Mamba cache blocks (586 on 94 GB at 8k ctx);
+    256 is inside the bound and above any client concurrency we use (2026-10-21).'
 - id: qwen3-5-2b
   family: qwen
   vendor: Qwen
@@ -335,7 +347,11 @@ models:
   license: apache-2.0
   release_date: '2026-03-02'
   discovered: '2026-10-20'
-  serve_args: []
+  serve_args:
+  - --max-num-seqs
+  - '256'
+  notes: ' Hybrid Mamba layers: vLLM 0.32 default max_num_seqs 1024 exceeds the Mamba cache blocks (586 on 94 GB at 8k ctx);
+    256 is inside the bound and above any client concurrency we use (2026-10-21).'
 - id: qwen3-5-4b
   family: qwen
   vendor: Qwen
@@ -348,7 +364,11 @@ models:
   license: apache-2.0
   release_date: '2026-03-02'
   discovered: '2026-10-20'
-  serve_args: []
+  serve_args:
+  - --max-num-seqs
+  - '256'
+  notes: ' Hybrid Mamba layers: vLLM 0.32 default max_num_seqs 1024 exceeds the Mamba cache blocks (586 on 94 GB at 8k ctx);
+    256 is inside the bound and above any client concurrency we use (2026-10-21).'
 - id: qwen3-5-9b
   family: qwen
   vendor: Qwen
@@ -361,7 +381,11 @@ models:
   license: apache-2.0
   release_date: '2026-03-02'
   discovered: '2026-10-20'
-  serve_args: []
+  serve_args:
+  - --max-num-seqs
+  - '256'
+  notes: ' Hybrid Mamba layers: vLLM 0.32 default max_num_seqs 1024 exceeds the Mamba cache blocks (586 on 94 GB at 8k ctx);
+    256 is inside the bound and above any client concurrency we use (2026-10-21).'
 - id: deepseek-r1-distill-qwen-1-5b
   family: deepseek
   vendor: deepseek-ai
@@ -792,4 +816,9 @@ models:
   release_date: '2026-03-02'
   notes: 'Local judge replacing qwen2.5-7b-judge (2026-10-21): four explore runs found the 2.5-7B judge failing calibration
     gates (83/100 positives, 600/600 false alarms on a truncated prefix) while the Azure judge was stable; newest Qwen generation
-    that fits beside a subject. Calibrate before trusting (safety-evals judge_calibration).'
+    that fits beside a subject. Calibrate before trusting (safety-evals judge_calibration). Hybrid Mamba layers: vLLM 0.32
+    default max_num_seqs 1024 exceeds the Mamba cache blocks (586 on 94 GB at 8k ctx); 256 is inside the bound and above any
+    client concurrency we use (2026-10-21).'
+  serve_args:
+  - --max-num-seqs
+  - '256'
