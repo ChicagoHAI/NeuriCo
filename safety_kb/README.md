@@ -27,7 +27,9 @@ describes the rules (fetch, cite, mark UNVERIFIED, no secrets).
 ```
 catalog/        evals.yaml (runnable evaluation catalog), models.yaml (model registry),
                 families.yaml (tracked families), models_latest.yaml (scout snapshot),
-                sources.yaml (what the crawler reads: arXiv queries, HF authors, feeds)
+                sources.yaml (what the crawler reads: arXiv queries, HF authors, feeds),
+                external_indexes.yaml (registries another process maintains: lab-reported
+                evaluations, curated rerunnable environments, datasets, report tables/figures)
 campaigns/      what the engine is working on (objective, models, budgets, planner policy)
 queue/          pending/ running/ done/ failed/ job specs; ideas/ NeuriCo idea YAMLs;
                 proposals/ planner output; state.json runtime state (git-ignored)
@@ -65,7 +67,7 @@ uv run python src/cli/safety.py plan --campaign qwen-small-pipeline-test   # run
 uv run python src/cli/safety.py digest      # reports/latest-digest.md
 uv run python src/cli/safety.py crawl [--dry-run] [--source arxiv|huggingface|feeds|<feed id>]   # new papers, releases, posts -> inbox/
 uv run python src/cli/safety.py kb search "sycophancy qwen3 judge" --kind finding,run --since 30d
-uv run python src/cli/safety.py kb show <id> | related <id> | check-idea "<hypothesis>" | stats | rebuild
+uv run python src/cli/safety.py kb show <id> | related <id> | check-idea "<hypothesis>" | stats | envs | rebuild
 ```
 
 (`./neurico safety <subcommand>` is the same thing.) Agents working in a research workspace have the

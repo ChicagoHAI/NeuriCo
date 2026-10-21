@@ -4,7 +4,9 @@ One record of everything the engine knows and finds about AI safety, growing con
 labs run and report (`labs/`, `evals/`, `third_party/`, `perspectives/`, `gaps/`), what we ran and
 observed (`runs/`, `results/`), what we claim and how far it has been validated (`findings/`), what we
 are about to try (`queue/ideas`, `queue/proposals`, `queue/*`), what the catalogs say (`catalog/`),
-and what arrived from outside today (`inbox/`). This page is the reference for how that record is
+what arrived from outside today (`inbox/`), and what other processes curate for us (the external
+registries named in `catalog/external_indexes.yaml`: lab-reported evaluations, the environments that
+rerun them, their datasets, report tables and figures). This page is the reference for how that record is
 stored, indexed, queried and fed; `safety_kb/README.md` is the reader's entry point and
 `docs/SAFETY_ENGINE.md` the operator's.
 
@@ -26,7 +28,7 @@ log goes to a JSONL file, not to the database.
 Rebuild time on the live knowledge base (823 nodes, 1,220 edges, 641 files, 2026-10-20): about 3 s;
 the index is 7 MB. `./neurico safety kb rebuild` prints the counts and the time.
 
-## 2. Schema (`kb.sqlite`, schema version 2)
+## 2. Schema (`kb.sqlite`, schema version 4)
 
 Legacy tables, unchanged, used by the digest, the anomaly scan and `kb query`: `runs`, `results`,
 `findings`, `finding_events`, `planner_rounds`, `evals`, `models` (`kbdb.py` module docstring).
@@ -70,6 +72,83 @@ Legacy tables, unchanged, used by the digest, the anomaly scan and `kb query`: `
 | `eval_note` | `evals/*.md` | `eval_note:<stem>` |
 | `lab`, `lab_note` | `labs/<lab>/README.md`, `labs/<lab>/*.md` | `lab:<lab>`, `lab_note:<lab>/<stem>` |
 | `third_party`, `perspective`, `gap`, `design`, `report` | `third_party/`, `perspectives/`, `gaps/`, `design/`, `reports/` (not the generated `results-timeline.md`) | `<kind>:<stem>` |
+| `reported_eval` | `index/evals.yaml` of an external registry: one evaluation as a lab reported it (numbers in `meta.reported_results`, lab and model names in tags) | `reported_eval:<registry>/<id>` |
+| `environment` | `index/environments.yaml`: one built, rerunnable environment | `environment:<registry>/<id>` |
+| `dataset` | `index/datasets.yaml`: one dataset an environment downloads | `dataset:<registry>/<id>` |
+| `report_table`, `report_figure` | `index/tables.yaml`, `index/figures.yaml`: every numeric table and figure of the report | `report_table:<registry>/<id>`, `report_figure:<registry>/<id>` |
+
+### External registries (`catalog/external_indexes.yaml`)
+
+Another process (today: the orchestrator building the Gemini 4 Argon environments under
+`/net/spaces/chenhao/chai-lab-models/haokunliu/safety-gemini-argon-envs`) maintains machine-readable
+registries of what a lab reported and what we can rerun. The index reads them at every rebuild so
+`kb search`, `kb show`, `kb related`, `kb stats`, `kb envs`, the agent tool and the planner context
+see them next to findings, runs and evals. Nothing about that folder is in Python: the pointer is
+data.
+
+```yaml
+# safety_kb/catalog/external_indexes.yaml
+context:
+  max_entries: 12          # entries the planner's "Curated environments" block lists
+indexes:
+- name: gemini-argon-envs  # becomes the id prefix: environment:gemini-argon-envs/<id>
+  path: /net/spaces/chenhao/chai-lab-models/haokunliu/safety-gemini-argon-envs
+  lab: google              # labs/<lab>/ -> reported_eval -reported_by-> lab:google
+  report: Gemini 4 Argon Safety & Security Report and Model Card (October 2026)
+  report_date: '2026-10'   # created/date of the reported_eval, report_table, report_figure nodes
+  files:                   # kind -> file relative to path; a missing file is silent
+    reported_eval: index/evals.yaml
+    environment: index/environments.yaml
+    dataset: index/datasets.yaml
+    report_table: index/tables.yaml
+    report_figure: index/figures.yaml
+```
+
+`engine.yaml` may override a path without editing the catalog: `external_indexes: {gemini-argon-envs:
+{path: /elsewhere}}` (a bare string works too). A missing folder is not an error (one info line, no
+nodes); `ensure_index` watches the registry files' mtimes like the knowledge base's own.
+
+**Validation.** The files are data written by another process. Each file holds a list under a key
+named after the file stem (`evals:`, `environments:`, `datasets:`, `tables:`, `figures:`), or
+`entries:`, or is a bare list. An entry is indexed when it is a mapping with a non-empty, unique
+`id` (a `reported_eval` also needs a `name`); anything else is skipped with a reason that goes to the
+`safety.kbdb` logger, to `kb_meta.external_skipped`, to the `external_skipped` count `kb rebuild`
+prints and to the tail of `kb envs`. A file that is not valid YAML, or whose top level is not a list,
+is one skip record; the other files of the registry still index. Within a file the first entry with
+an id wins. Field names vary slightly between registries, so the collector takes the first present
+of a few spellings (listed below); everything else in the entry is kept in the node body (YAML) and
+in `meta`.
+
+**Expected schema** (what the orchestrator should write; `*` = used for columns, tags or edges):
+
+| file | fields |
+|---|---|
+| `index/evals.yaml` (`reported_eval`) | `id`\*, `name`\* (or `title`), `report_section`, `pages` (list), `report_row`\* (the row number tables/figures cite), `category`\*, `measures`\* (or `description`), `metric`\*, `reported_results`\* (list of `{model, value, ci, n, note}`), `n`, `who_ran`, `checkpoint`, `public_availability`\* (open-source \| partially-public \| internal-only), `reproducibility`\* (exact \| proxy \| not-reproducible; the node's `status`), `reproducibility_reason`, `data_sources`\* (URLs), `closest_public_proxy`, `priority`\* (1-5) |
+| `index/environments.yaml` (`environment`) | `id`\*, `name`, `path`, `status`\* (built \| verified \| confirmed \| not-reproducible), `implements`\* (reported eval id or list; also `reported_eval(s)`, `eval`, `eval_id`, `evals`), `datasets`\* (ids, or `{id: ...}` dicts), `run_command`\* (or `run`, `command`), `cost_estimate`\* (or `cost`), `last_verified`\* (or `verified`; the node's `observed`), `models_run`\* (or `models`; names, matched to catalog ids), `priority` and `category` (default: inherited from the first implemented eval), `description` |
+| `index/datasets.yaml` (`dataset`) | `id`\*, `name`, `source_url`\* (or `source`, `url`), `license`\*, `size`, `hash`, `local_path`, `used_by`\* (environment ids), `status`, `description` |
+| `index/tables.yaml` (`report_table`), `index/figures.yaml` (`report_figure`) | `id`\*, `page`\*, `caption`\* (or `title`), `section`, `shows`\* (or `description`), `eval_rows`\* (the `report_row`s it belongs to; or `evals` with eval ids), `models`\*, `metric`\*, `values` (list of `{series, x, value, unit, source}`), `value_source_summary`, `notes` |
+
+**What becomes searchable.** Title = name/caption; summary = measures + metric + the first reported
+numbers (eval), status/implements/priority/cost/last verified/models run/run command (environment),
+license/size/local path/used by (dataset), shows + metric + page (table/figure); body = the YAML entry;
+tags = `registry:<name>`, `lab:<lab>`, `category:<c>`, `reproducibility:<r>`, `availability:<a>`,
+`priority:<n>`, `model:<catalog id or slug of the reported name>` (so `--model claude-fable-5-1` and
+`--model gemini-4-argon` both work), the environment status, `implements:<eval id>`, `license:<l>`,
+`used-by:<env>`, `page:<n>`. The filter columns are `category`, `lab` and `status`
+(reproducibility for evals, build status for environments, `report` for tables and figures). None
+of these kinds has a recency half-life.
+
+**Model matching.** A reported model name links to a catalog model (`reports_on`, `evaluates`) only
+when its slug equals the slug of a catalog id, access tail (`azure:gpt-6-astra`, `vllm:Qwen/Qwen3-8B`),
+`name` or `aliases` entry, a parenthesised qualifier ignored (`Gemini 4 Argon (with safeguards)`).
+`meta.models_matched` records the matches; unmatched names stay as tags only.
+
+**Our runs in an environment.** A run record (`runs/<run>.json`) that reran a curated environment
+carries `environment: <env id>` (the registry's native id, `<registry>/<id>`, or a full node id; a
+list is allowed). The run and every observation of it get a `ran_in` edge to the environment; an
+observation (`results[]` / `pairs[]` item) may name its own `environment` to override the run's.
+`kb envs` counts those runs per environment. Suite and research jobs that want this link put the id
+in their result records; `ingest.py` copies run-level fields verbatim.
 
 ### `edges`: the links that already exist in the files
 
@@ -95,9 +174,17 @@ field it came from.
 | `used_by` | eval_note -> lab / third_party | the note's `Used by: <org>` lines (word match on the lab directory, whole-word prefix match on the third-party file) |
 | `catalogued_as` | eval_note -> eval | the note's stem equals, or prefixes, a catalog id |
 | `cites` | inbox -> run | run ids mentioned in the note |
+| `implements` | environment -> reported_eval | `environment.implements` |
+| `uses` | environment -> dataset | `environment.datasets`, `dataset.used_by` |
+| `reports_on` | reported_eval -> model | a `reported_results[].model` name matching a catalog model |
+| `reported_by` | reported_eval -> lab | the registry's `lab` |
+| `evaluates` | environment -> model | `environment.models_run` names matching catalog models |
+| `shows` | report_table / report_figure -> reported_eval | `eval_rows` (report rows) or `evals` |
+| `ran_in` | run / result -> environment | `run.environment`, `results[].environment` |
 
 So the chains the owner asked for are walkable: finding -> run -> results -> models/evals,
-proposal -> idea -> job -> run, finding -> validation events -> validating run, eval note -> labs.
+proposal -> idea -> job -> run, finding -> validation events -> validating run, eval note -> labs,
+report figure -> reported eval -> environment -> our runs in it -> results.
 
 ### `nodes_fts`
 
@@ -123,6 +210,9 @@ skill). The SQL lives once, in the tool; `kbdb.py` imports it.
 ./neurico safety kb related run:<id> [--rel produced,for_job] [--hops 2]   # neighbourhood + lexical neighbours
 ./neurico safety kb check-idea "<hypothesis>" [--title "..."] [--sources model:qwen3-8b,finding:<id>] [--json]
 ./neurico safety kb stats                                  # counts per kind, status and relation; built_at
+./neurico safety kb envs [--status verified] [--min-priority 4] [--reproducibility exact] [--no-evals] [--json]
+                                                           # curated environments (status, priority, cost, last verified, models run,
+                                                           # our runs in them) and the lab-reported evaluations by priority; skipped entries
 ./neurico safety kb rebuild | timeline | anomalies | query "<sql>"
 python3 safety_kb/tools/kb.py search "..."                 # from inside the knowledge base (agents: see the skill)
 ```
@@ -170,6 +260,13 @@ placeholders (`campaign`, `catalog_evals`, `catalog_models`, `findings`, `runs`,
   campaign objective, categories in scope and target models.
 - `catalog_evals` / `catalog_models`: one line per catalog entry (category, runner, judge; family,
   size, GPU, access, supersession) instead of the YAML text.
+- `environments` ("Curated environments", `planner.environments_block`): the counts (environments by
+  status, reported evaluations by reproducibility, how many have an environment), then the top
+  `context.max_entries` of `catalog/external_indexes.yaml` (default `LIMITS["environments"]`):
+  environments first (confirmed, verified, built; priority), one line each with cost, last verified,
+  models run, our runs in it and the reported evals it implements, then reproducible (exact/proxy)
+  reported evaluations that have no environment yet, by priority; a trailing "... N more" line points
+  at `kb envs`. The ideation stages get the same block in `context/catalog.md`. Capped at 4,000 chars.
 - `jobs`: the queue listing as before.
 
 Every record carries an id the agent expands with `python3 tools/kb.py show <id>` (the planner
@@ -261,4 +358,8 @@ Read: `docs/kb-schema.md`, `docs/kb-design-research.md`, `docs/digest.md` ("The 
 - `src/safety/crawler.py`, `safety_kb/catalog/sources.yaml`: the crawler and its sources.
 - `src/safety/planner.py:build_context`: the index-fed planner context.
 - `src/cli/safety.py`: `kb search|show|related|check-idea|stats|rebuild|...`, `crawl`.
-- `tests/test_safety_kb_nodes.py`, `tests/test_safety_crawler.py`.
+- `safety_kb/catalog/external_indexes.yaml`: the external registries to index (data, not code).
+- `tests/test_safety_kb_nodes.py`, `tests/test_safety_crawler.py`, `tests/test_safety_kb_external.py`
+  (on the fixture registries under `tests/fixtures/external_index/`: nodes and edges, search by the
+  eval's name, malformed entries skipped with a reason, idempotent rebuild, missing folder, path
+  override, `kb envs`, the planner block, the agent tool).

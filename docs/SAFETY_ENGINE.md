@@ -105,7 +105,7 @@ uv run python src/cli/safety.py stop
 uv run python src/cli/safety.py plan --campaign <name> [--dry-run] [--mode replicate|ideate]
 uv run python src/cli/safety.py ideate --campaign <name> [--only problem|ideation|idea_judge] [--planner-run <run>] [--dry-run]
 uv run python src/cli/safety.py crawl                      # feeds in catalog/sources.yaml -> inbox/ (no LLM)
-uv run python src/cli/safety.py kb rebuild|search <text>|show <id>|related <id>|check-idea "<hypothesis>"|timeline|anomalies|query "<sql>"
+uv run python src/cli/safety.py kb rebuild|search <text>|show <id>|related <id>|check-idea "<hypothesis>"|stats|envs|timeline|anomalies|query "<sql>"
 uv run python src/cli/safety.py finding <id> --status reproduced|confirmed|refuted|withdrawn --by <who> --note "..."
 uv run python src/cli/safety.py digest --days 7
 ```
@@ -218,6 +218,16 @@ The vLLM startup wait in `src/safety/serving.py` is likewise unlimited unless
   more than 3 combined standard errors between consecutive observations of the same model x eval;
   `kb query "<sql>"` runs any read query. The daemon refreshes the index, the timelines and the
   anomaly inbox after every ingest (about 3 s on the live knowledge base).
+- External registries (`safety_kb/catalog/external_indexes.yaml`, data not code): folders another
+  process maintains, today the Gemini 4 Argon environment orchestrator, whose `index/{evals,
+  environments,datasets,tables,figures}.yaml` become `reported_eval`, `environment`, `dataset`,
+  `report_table` and `report_figure` nodes at every rebuild, linked to our catalog models, the lab
+  note and our runs (a run record names the environment it reran in `environment:`). `./neurico
+  safety kb envs [--status verified] [--min-priority 4] [--reproducibility exact] [--no-evals]
+  [--json]` lists the environments (status, priority, cost, last verified, models run, our runs in
+  them), the reported evaluations by priority and the registry entries skipped as malformed; the
+  planner and ideation rounds get the same data as the compact "Curated environments" block. Schema
+  and validation rules: `docs/KNOWLEDGE_BASE.md`.
 - `./neurico safety crawl` (daemon: every `crawl_interval_hours`, default 24) fetches new arXiv
   papers, Hugging Face releases of the tracked families and lab/evaluator posts from the feeds in
   `safety_kb/catalog/sources.yaml` into `safety_kb/inbox/` as dated notes with front matter, skipping

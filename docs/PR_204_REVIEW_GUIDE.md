@@ -92,9 +92,9 @@ Sizes are lines added in the diff (`+added/-removed` where a file was modified).
 
 | Path | What it does | Size | Status | Key entry points |
 | --- | --- | --- | --- | --- |
-| `src/safety/kbdb.py` | SQLite projection of the KB: legacy tables, `nodes`/`edges`/FTS5, snapshot, anomaly scan, timelines | 1,060 | new | `rebuild`, `ensure_index`, `search`, `show`, `related`, `check_idea`, `snapshot_to`, `scan_anomalies` |
+| `src/safety/kbdb.py` | SQLite projection of the KB: legacy tables, `nodes`/`edges`/FTS5, snapshot, anomaly scan, timelines; external registries (`catalog/external_indexes.yaml`) as `reported_eval` / `environment` / `dataset` / `report_table` / `report_figure` nodes with validation and skip reasons | 1,460 | new | `rebuild`, `ensure_index`, `search`, `show`, `related`, `check_idea`, `envs`, `format_envs`, `external_indexes`, `snapshot_to`, `scan_anomalies` |
 | `src/safety/daemon.py` | Scheduler loop: GPU and concurrency slots, stall watchdog, retries, adopt after restart, ingest, planner and crawler triggers, host-mode process-group kills | 676 | new | `Daemon`, `JobRuntime`, `host_mode`, `escalate_sigkill` |
-| `src/safety/planner.py` | Index-fed planner context, replicate/ideate mode choice, proposal validation and queueing | 407 | new | `build_context`, `choose_mode`, `validate_proposals`, `run_planner`, `_run_ideation` |
+| `src/safety/planner.py` | Index-fed planner context (incl. the "Curated environments" block), replicate/ideate mode choice, proposal validation and queueing | 460 | new | `build_context`, `environments_block`, `choose_mode`, `validate_proposals`, `run_planner`, `_run_ideation` |
 | `src/safety/crawler.py` | Credential-free arXiv / Hugging Face / RSS crawler into `inbox/` with a hash ledger | 401 | new | `main`, per-source fetchers |
 | `src/safety/suites.py` | Runs `inspect_evals` tasks per (eval, model), judge pool, resumable, `neurico-safety-result/v1` JSON | 304 | new | `main`, `run_pair`, `JudgePool`, `inspect_command` |
 | `src/safety/serving.py` | vLLM OpenAI-compatible servers in their own process group, API endpoint resolution, memory sizing | 238 | new | `VLLMServer`, `serve`, `resolve_api_endpoint` |
@@ -109,7 +109,7 @@ Sizes are lines added in the diff (`+added/-removed` where a file was modified).
 
 | Path | What it does | Size | Status | Key entry points |
 | --- | --- | --- | --- | --- |
-| `src/cli/safety.py` | `./neurico safety <cmd>`: `init`, `enqueue-suite`, `enqueue-idea`, `start`, `status`, `stop`, `plan`, `ideate`, `kb ...`, `crawl`, `finding`, `digest` | 402 | new | `main`, one `cmd_*` per subcommand |
+| `src/cli/safety.py` | `./neurico safety <cmd>`: `init`, `enqueue-suite`, `enqueue-idea`, `start`, `status`, `stop`, `plan`, `ideate`, `kb ...` (incl. `kb envs`), `crawl`, `finding`, `digest` | 420 | new | `main`, one `cmd_*` per subcommand |
 | `src/cli/submit_local.py`, `src/cli/fetch_from_ideahub.py` | Idea converters now call `LLMClient` role `idea_converter` instead of a private OpenAI client | +32/-36 each | migrated | `convert_*` |
 
 ### Agent factory and auth: `src/core/` (10 files, +2,418 / -172) and `config/agents.yaml`
@@ -149,7 +149,7 @@ Sizes are lines added in the diff (`+added/-removed` where a file was modified).
 
 | Path | What it is | Files / lines | Data or state |
 | --- | --- | --- | --- |
-| `safety_kb/catalog/` | `evals.yaml` (17 runnable evals), `models.yaml` (54 entries), `families.yaml` (7 tracked families), `sources.yaml` (crawler feeds), `models_latest.yaml` (scout snapshot), `chat_templates/qwen3-nothink.jinja`, `proposals/` (scout merge) | 8 / 3,098 | data, committed |
+| `safety_kb/catalog/` | `evals.yaml` (17 runnable evals), `models.yaml` (54 entries), `families.yaml` (7 tracked families), `sources.yaml` (crawler feeds), `models_latest.yaml` (scout snapshot), `external_indexes.yaml` (external registries to index: the Gemini 4 Argon envs folder), `chat_templates/qwen3-nothink.jinja`, `proposals/` (scout merge) | 9 / 3,130 | data, committed |
 | `safety_kb/campaigns/` | `open-weight-scorecards.yaml` (active), `qwen-small-pipeline-test.yaml` | 2 / 96 | data, committed |
 | `safety_kb/queue/ideas/` | NeuriCo idea YAMLs written by hand and by planner rounds | 13 / 1,278 | data, committed |
 | `safety_kb/design/` | `RESEARCH_PLAN.md`, architecture, best practices, quick-start evals | 4 / 786 | data, committed |
@@ -193,6 +193,7 @@ Sizes are lines added in the diff (`+added/-removed` where a file was modified).
 | `tests/test_host_mode.py` | `NEURICO_DRY_RUN` forwarding, dotenv precedence, group kill, daemon and batch kill guards, never calls `docker` | 20 | new |
 | `tests/test_safety_engine.py` | Queue, planner validation, ingest, digest, daemon helpers | 14 | new |
 | `tests/test_safety_kb_nodes.py`, `tests/test_safety_crawler.py` | Nodes, edges, FTS, dedup gate, planner context, agent tool; crawler sources and hash ledger | 10 + 5 | new |
+| `tests/test_safety_kb_external.py`, `tests/fixtures/external_index/` | External registries: nodes and edges from the fixture `index/*.yaml`, search by the eval's name, malformed entries skipped with a reason, idempotent rebuild, missing folder, `engine.yaml` path override, `kb envs`, the planner block, the agent tool | 7 | new |
 | `tests/test_ideation.py` | Context stage on a fixture KB, runner seam through the real factory, schema and cross-checks, retry feedback, `to_job` round trip, dedup, scholar backoff | 18 | new |
 | `tests/test_eval_verifier.py`, `tests/test_zero_shot_baseline.py` | Rewritten for `LLMClient`; factory role for the baseline | +76/-78, +3 | modified |
 
@@ -307,6 +308,7 @@ All commands from `docs/SAFETY_ENGINE.md`; `./neurico safety <cmd>` equals `uv r
 | Claude Code on Azure Foundry | `docs/AGENT_AUTH.md` | no Claude deployment on the lab resource as of 2026-10-20; Claude stays on OAuth |
 | XSTest gated dataset | `docs/SAFETY_ENGINE.md` pipeline test | replaced by the ungated CSV task (`xstest-safe-csv`, `xstest-unsafe-csv`) |
 | Crawler feeds that returned 404 or HTML | `docs/KNOWLEDGE_BASE.md` section 5 | kept with `enabled: false` for the owner to fix |
+| Curated environments in the index (`catalog/external_indexes.yaml`, `kb envs`, "Curated environments" block) | `docs/KNOWLEDGE_BASE.md` "External registries" | done (2026-10-21, branch `kb-envs-index`): the Gemini 4 Argon envs folder indexes as 108 `reported_eval`, 25 `report_table`, 86 `report_figure` nodes today; `index/environments.yaml` and `index/datasets.yaml` are pending on the orchestrator side (silent until written); the schema the orchestrator must conform to is documented; runs link to environments through `environment:` in the run record (no writer sets it yet) |
 | Stale text in `docs/SAFETY_ENGINE.md` "Limits" | said the crawler was not implemented | fixed in step 9 (2026-10-21): the Limits, Pieces, Commands, settings and Monitoring sections now describe the crawler, the scout, spend, the Slurm route and the event kinds the daemon writes |
 | Pre-existing failing test | `tests/test_hitl_timeout_recovery.py::test_run_worker_does_not_translate_sigterm_into_user_stop` | fails on `main` too; deselected in the count above |
 | Not exercised natively | `docs/HOST_MODE.md` "Verified" | HITL web/CLI, paper-finder service, Codex/Gemini on the dev host |
