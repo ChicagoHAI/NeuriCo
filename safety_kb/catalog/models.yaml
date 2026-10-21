@@ -101,7 +101,9 @@ models:
   max_model_len: 8192
   role: judge
   license: Apache-2.0
-  notes: default local judge (no API spend); calibration numbers live in evals/judge-calibration.md
+  notes: default local judge (no API spend); calibration numbers live in evals/judge-calibration.md Superseded 2026-10-21
+    by qwen3-5-9b-judge after repeated calibration failures (findings 20261021-001-*).
+  superseded_by: qwen3-5-9b-judge
 - id: azure-gpt-6-astra
   family: gpt
   vendor: OpenAI (Azure)
@@ -779,3 +781,15 @@ models:
   - safety_kb/catalog/chat_templates/qwen3-nothink.jinja
   variant_of: qwen3-30b-a3b
   thinking: disabled
+- id: qwen3-5-9b-judge
+  family: qwen
+  vendor: Qwen
+  access: vllm:Qwen/Qwen3.5-9B
+  params_b: 9.7
+  gpu_memory_gb: 29
+  max_model_len: 8192
+  role: judge
+  release_date: '2026-03-02'
+  notes: 'Local judge replacing qwen2.5-7b-judge (2026-10-21): four explore runs found the 2.5-7B judge failing calibration
+    gates (83/100 positives, 600/600 false alarms on a truncated prefix) while the Azure judge was stable; newest Qwen generation
+    that fits beside a subject. Calibrate before trusting (safety-evals judge_calibration).'
