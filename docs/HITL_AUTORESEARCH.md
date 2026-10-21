@@ -332,7 +332,7 @@ and provider output is kept out of the conversation and written to
 | Command | Purpose |
 | --- | --- |
 | `/run` | Configure and start a run. The client detects whether the workspace needs a fresh or continuing HITL AutoResearch run. |
-| `/status` | Show the current research stage, phase, timer, and next step. |
+| `/status` | Explain in plain words what the agent currently concludes, what changed its thinking, and what it is checking next, plus the current stage, phase, timer, and next step. |
 | `/activity` | Show recent durable phase transitions, ideas, and resolved reviews. |
 | `/idea <ID>` | Show the complete record for a specific idea, such as `I7`. |
 | `/reply <number>` | Select one of the options shown with the active human request. |

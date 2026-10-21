@@ -15,10 +15,22 @@ from pathlib import Path
 import queue
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 
 from core.security import remove_github_credentials
+
+# Codex has no single "no tools" switch. With an empty CODEX_HOME (no user MCP
+# servers, plugins or skills), these remove every remaining built-in tool.
+_CODEX_NO_TOOLS_FEATURES = (
+    "shell_tool", "unified_exec", "multi_agent", "code_mode_host", "sleep_tool",
+    "image_generation", "view_image", "goals", "apps", "plugins", "browser_use",
+    "computer_use",
+)
+_CODEX_NO_TOOLS_ARGS = ["-c", 'web_search="disabled"'] + [
+    arg for feature in _CODEX_NO_TOOLS_FEATURES for arg in ("--disable", feature)
+]
 
 
 @dataclass
@@ -96,6 +108,7 @@ class LLMBackend:
         allowed_mcp_tools: Optional[List[str]] = None,
         mcp_startup_timeout_seconds: Optional[float] = None,
         use_dedicated_system_prompt: bool = False,
+        no_tools: bool = False,
     ) -> LLMResponse:
         """
         Send messages to the LLM and return the response.
@@ -108,6 +121,8 @@ class LLMBackend:
                 backend default.
             disable_native_tools: Disable the Claude CLI's built-in tools. This
                 is used by the HITL manager, whose tools are runtime-mediated.
+            no_tools: Give the CLI provider no tools at all (built-in, MCP or web),
+                for plain text-in, text-out calls.
 
         Returns:
             LLMResponse with text content and any tool calls
@@ -122,6 +137,7 @@ class LLMBackend:
                 allowed_mcp_tools=allowed_mcp_tools,
                 mcp_startup_timeout_seconds=mcp_startup_timeout_seconds,
                 use_dedicated_system_prompt=use_dedicated_system_prompt,
+                no_tools=no_tools,
             )
         elif self.backend in {"codex", "codex_cli"}:
             return self._send_codex_cli(
@@ -131,6 +147,7 @@ class LLMBackend:
                 mcp_config_path=mcp_config_path,
                 allowed_mcp_tools=allowed_mcp_tools,
                 mcp_startup_timeout_seconds=mcp_startup_timeout_seconds,
+                no_tools=no_tools,
             )
         elif self.backend == "anthropic_api":
             return self._send_anthropic_api(messages, tools, timeout_seconds=timeout_seconds)
@@ -148,6 +165,7 @@ class LLMBackend:
         mcp_config_path: Optional[str] = None,
         allowed_mcp_tools: Optional[List[str]] = None,
         mcp_startup_timeout_seconds: Optional[float] = None,
+        no_tools: bool = False,
     ) -> LLMResponse:
         """Send a manager turn through `codex exec`."""
         prompt = self._messages_to_prompt(messages, None if mcp_config_path else tools)
@@ -170,6 +188,15 @@ class LLMBackend:
                 allowed_mcp_tools=allowed_mcp_tools,
                 startup_timeout_seconds=mcp_startup_timeout_seconds,
             )
+        env = self._manager_process_environment()
+        isolated_home = None
+        if no_tools:
+            cmd[2:2] = _CODEX_NO_TOOLS_ARGS
+            isolated_home = tempfile.TemporaryDirectory()
+            auth = Path(env.get("CODEX_HOME") or Path.home() / ".codex") / "auth.json"
+            if auth.exists():
+                os.symlink(auth, Path(isolated_home.name) / "auth.json")
+            env["CODEX_HOME"] = isolated_home.name
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -177,7 +204,8 @@ class LLMBackend:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            env=self._manager_process_environment(),
+            env=env,
+            cwd=isolated_home.name if isolated_home else None,
             start_new_session=(os.name == "posix"),
         )
         self._set_active_process(process)
@@ -192,6 +220,8 @@ class LLMBackend:
                 ) from exc
         finally:
             self._clear_active_process(process)
+            if isolated_home is not None:
+                isolated_home.cleanup()
         if process.returncode != 0:
             error_msg = stderr.strip() if stderr else f"codex exec exited with code {process.returncode}"
             if mcp_config_path and self._codex_required_mcp_startup_failed(
@@ -337,6 +367,7 @@ class LLMBackend:
         allowed_mcp_tools: Optional[List[str]] = None,
         mcp_startup_timeout_seconds: Optional[float] = None,
         use_dedicated_system_prompt: bool = False,
+        no_tools: bool = False,
     ) -> LLMResponse:
         """
         Send via `claude -p` CLI. Constructs a single prompt from all messages
@@ -392,6 +423,13 @@ class LLMBackend:
                 process_env["MCP_CONNECTION_NONBLOCKING"] = "0"
                 process_env["MCP_CONNECT_TIMEOUT_MS"] = str(startup_timeout_ms)
                 process_env["MCP_TIMEOUT"] = str(startup_timeout_ms)
+        elif no_tools:
+            # Flags supported by older Claude Code too: no built-in tools, no
+            # MCP servers, no settings or hooks; the empty cwd keeps project
+            # instructions and repository files out of scope. Extended thinking
+            # roughly doubles latency for these short text-only calls.
+            cmd.extend(["--tools", "", "--strict-mcp-config", "--setting-sources", ""])
+            process_env = {**self._manager_process_environment(), "MAX_THINKING_TOKENS": "0"}
         elif disable_native_tools:
             # HITL manager tools are parsed and executed by the runtime. Do
             # not let the CLI agent gain a second, unmanaged tool surface.
@@ -399,6 +437,7 @@ class LLMBackend:
             # while preserving OAuth/keychain authentication for Claude Code.
             cmd.extend(["--safe-mode", "--tools", ""])
 
+        isolated_cwd = tempfile.TemporaryDirectory() if no_tools else None
         if process_env is None:
             process_env = self._manager_process_environment()
         else:
@@ -412,9 +451,12 @@ class LLMBackend:
             text=True,
             bufsize=1,
             env=process_env,
+            cwd=isolated_cwd.name if isolated_cwd else None,
             # Only HITL manager calls request cancellation semantics. Keep
             # ordinary interactive-manager launch behavior unchanged.
-            start_new_session=((disable_native_tools or bool(mcp_config_path)) and os.name == "posix"),
+            start_new_session=(
+                (disable_native_tools or no_tools or bool(mcp_config_path)) and os.name == "posix"
+            ),
         )
         self._set_active_process(process)
 
@@ -439,6 +481,8 @@ class LLMBackend:
                     ) from exc
         finally:
             self._clear_active_process(process)
+            if isolated_cwd is not None:
+                isolated_cwd.cleanup()
 
         if process.returncode != 0:
             error_msg = self._claude_cli_error_message(
