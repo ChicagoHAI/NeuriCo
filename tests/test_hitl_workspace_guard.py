@@ -11,6 +11,7 @@ Run: python -m pytest tests/test_hitl_workspace_guard.py
 """
 
 import os
+import time
 import sys
 from pathlib import Path
 
@@ -96,6 +97,17 @@ def test_public_guard_detects_same_size_write_with_restored_mtime(tmp_path):
     target = work_dir / "README.md"
     original = target.stat()
     guard = HitlWorkspaceWriteGuard.capture_public(work_dir)
+
+    # The guard detects the rewrite through st_ctime, which the writer cannot restore. On a fast
+    # node the rewrite can land in the same filesystem timestamp tick as the file's creation, so
+    # wait (outside the workspace) until the clock has moved past that tick.
+    probe = tmp_path / ".tick"
+    while True:
+        probe.write_text("x")
+        if probe.stat().st_ctime_ns > original.st_ctime_ns:
+            break
+        time.sleep(0.001)
+    probe.unlink()
 
     target.write_text("READM3\n")
     os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
