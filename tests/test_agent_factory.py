@@ -160,7 +160,7 @@ def test_optional_fields_only_add_flags(oauth):
     assert list(trimmer.argv) == ["codex", "exec", "--yolo"]  # plain-text mode, no --json
     codex = factory.build(factory.spec("hitl_manager", provider="codex", reasoning_effort="high"))
     assert list(codex.argv) == ["codex", "exec", "--json", "-c", 'approval_policy="never"', "--sandbox", "read-only",
-                                "-c", 'model_reasoning_effort="high"']
+                                "--skip-git-repo-check", "-c", 'model_reasoning_effort="high"']
 
 
 def test_claude_budget_flag_and_ledger_tags_from_env(oauth, monkeypatch):

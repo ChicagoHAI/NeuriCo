@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -60,7 +61,7 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "agents.yaml"
 Provider = Literal["claude", "codex", "gemini"]
 AuthLane = Literal["oauth", "azure"]
 PROVIDERS: Tuple[str, ...] = ("claude", "codex", "gemini")
-PERMISSION_MODES: Tuple[str, ...] = ("bypass", "inherit", "workspace", "read_only", "mcp_only")
+PERMISSION_MODES: Tuple[str, ...] = ("bypass", "inherit", "workspace", "read_only", "mcp_only", "no_tools")
 OUTPUT_KINDS: Tuple[str, ...] = ("return_code", "marker", "files", "validator", "json_stdout",
                                  "json_schema", "json_file", "runtime")
 Status = Literal["ok", "contract_failed", "timeout", "max_turns", "budget_exceeded",
@@ -88,7 +89,10 @@ class Permissions:
 
     ``bypass`` is today's ``full_permissions=True``; ``inherit`` is today's
     ``full_permissions=False`` (the CLI's own default, no flag added). The other
-    modes add provider flags and are for the HITL manager (step 8).
+    modes add provider flags: ``mcp_only`` is the HITL manager's bridged turn
+    (Claude: ``--tools ToolSearch --allowedTools ToolSearch,<allowed_tools>`` plus
+    ``--dangerously-skip-permissions``; Codex: read-only sandbox, approvals off),
+    ``no_tools`` its tool-less turn (Claude: ``--safe-mode --tools ""``).
     """
 
     mode: str = "bypass"
@@ -157,6 +161,8 @@ class TranscriptPolicy:
     save_prompt: bool = True
     tracker_run_id: Optional[str] = None
     stream_json: bool = True  # False: plain-text output (manifest trimmer)
+    echo: bool = True  # False: the stream is parsed, never printed (manager turns)
+    separate_stderr: Optional[bool] = None  # None = provider default (Codex yes, others merged into the transcript)
 
 
 @dataclass(frozen=True)
@@ -185,6 +191,7 @@ class AgentSpec:
     env_extra: Mapping[str, str] = field(default_factory=dict)
     tags: Mapping[str, Any] = field(default_factory=dict)
     defer_provider_failure_to_runtime: bool = False
+    hitl_budget_context: bool = True  # append the active HITL run's budget prompt (run_prebuilt_cli_agent)
     extras: Mapping[str, Any] = field(default_factory=dict)  # role keys the factory does not interpret
 
     @property
@@ -237,6 +244,7 @@ class AgentResult:
     background_processes_terminated: bool = False
     provider_process_failed: bool = False
     final_text: Optional[str] = None
+    stderr_file: Optional[Path] = None  # set when the transcript policy keeps stderr apart
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def legacy_dict(self) -> Dict[str, Any]:
@@ -374,8 +382,15 @@ class ClaudeCodeAdapter(ProviderAdapter):
         elif p.mode == "read_only":
             args += ["--permission-mode", "dontAsk"]
         elif p.mode == "mcp_only":
-            args += ["--tools", "ToolSearch"]
-        if p.allowed_tools:
+            # ToolSearch is the only built-in the bridged manager turn keeps; the MCP tools
+            # are allow-listed by their global names (today's llm_backend._send_cli flags).
+            allowed = list(dict.fromkeys(["ToolSearch", *(str(name) for name in p.allowed_tools)]))
+            args += ["--tools", "ToolSearch", "--allowedTools", ",".join(allowed)]
+        elif p.mode == "no_tools":
+            # Safe mode also suppresses local hooks and project instructions while keeping
+            # the CLI's own login; the manager's tools are parsed by the runtime, not the CLI.
+            args += ["--safe-mode", "--tools", ""]
+        if p.allowed_tools and p.mode != "mcp_only":
             args += ["--allowedTools", ",".join(p.allowed_tools)]
         if p.disallowed_tools:
             args += ["--disallowedTools", ",".join(p.disallowed_tools)]
@@ -384,6 +399,17 @@ class ClaudeCodeAdapter(ProviderAdapter):
         if spec.mcp_config is not None:
             args += ["--mcp-config", str(spec.mcp_config), "--strict-mcp-config"]
         return args
+
+    def env(self, spec: AgentSpec, env_extra: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+        env = super().env(spec, env_extra)
+        if spec.mcp_config is not None and spec.mcp_startup_timeout_s:
+            # Claude Code's own MCP startup window, in blocking mode so the init event
+            # reports the servers' real status (the manager's readiness gate reads it).
+            startup_ms = max(1, int(validated_mcp_startup_timeout(spec.mcp_startup_timeout_s) * 1000))
+            env["MCP_CONNECTION_NONBLOCKING"] = "0"
+            env["MCP_CONNECT_TIMEOUT_MS"] = str(startup_ms)
+            env["MCP_TIMEOUT"] = str(startup_ms)
+        return env
 
     def budget_args(self, spec: AgentSpec) -> List[str]:
         args: List[str] = []
@@ -443,15 +469,31 @@ class CodexAdapter(ProviderAdapter):
 
     def permission_args(self, spec: AgentSpec) -> List[str]:
         p = spec.permissions
+        codex = spec.extras.get("codex") or {}
         args: List[str] = []
         if p.mode == "workspace":
             args += ["--sandbox", "workspace-write"]
-        elif p.mode in ("read_only", "mcp_only"):
+        elif p.mode in ("read_only", "mcp_only", "no_tools"):
             args += ["-c", 'approval_policy="never"', "--sandbox", "read-only"]
+        elif p.mode == "inherit":
+            # The role's `codex` block may still pin a sandbox (the interactive manager's
+            # read-only turns); `bypass` is --yolo and ignores it.
+            if codex.get("approval_policy"):
+                args += ["-c", f'approval_policy="{codex["approval_policy"]}"']
+            if codex.get("sandbox"):
+                args += ["--sandbox", str(codex["sandbox"])]
+        if codex.get("skip_git_repo_check"):
+            args.append("--skip-git-repo-check")
         if p.bare:
             args.append("--ignore-user-config")
         if spec.mcp_config is not None:
-            raise AgentConfigError("mcp_config is wired for Claude only until the manager migrates (step 8)")
+            # Codex has no --mcp-config: the servers become -c mcp_servers.<name>.* overrides,
+            # with the allow-listed tools and the startup window per server.
+            args += codex_mcp_config_args(
+                spec.mcp_config,
+                allowed_mcp_tools=list(p.allowed_tools) if p.mode == "mcp_only" else None,
+                startup_timeout_seconds=spec.mcp_startup_timeout_s,
+            )
         return args
 
     def budget_args(self, spec: AgentSpec) -> List[str]:
@@ -521,6 +563,72 @@ ADAPTERS: Dict[str, ProviderAdapter] = {
     "codex": CodexAdapter(),
     "gemini": GeminiAdapter(),
 }
+
+
+# -- MCP helpers (shared with interactive.llm_backend's legacy path) ---------------------------------------
+
+def validated_mcp_startup_timeout(value: Any) -> float:
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("MCP startup timeout must be a positive finite number")
+    return timeout
+
+
+def mcp_server_names(mcp_config_path: Path) -> List[str]:
+    payload = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
+    servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
+    if not isinstance(servers, dict) or not servers:
+        raise ValueError("MCP configuration must define at least one server")
+    return [str(name) for name in servers]
+
+
+def _codex_config_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def codex_mcp_config_args(mcp_config_path: Path, *, allowed_mcp_tools: Optional[Sequence[str]] = None,
+                          startup_timeout_seconds: Optional[float] = None) -> List[str]:
+    """Claude-style ``mcpServers`` JSON -> ``codex exec -c mcp_servers.<name>.<key>=...`` overrides.
+
+    Every server is required; ``allowed_mcp_tools`` (global ``mcp__<server>__<tool>`` names)
+    becomes the server's ``enabled_tools`` when given; ``startup_timeout_seconds`` is the
+    per-server ``startup_timeout_sec``.
+    """
+    payload = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
+    servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
+    if not isinstance(servers, dict) or not servers:
+        raise ValueError("Codex MCP configuration must define at least one server")
+    args: List[str] = []
+    for name, server in servers.items():
+        if not isinstance(server, dict):
+            raise ValueError(f"Codex MCP server {name!r} must be an object")
+        prefix = f"mcp_servers.{name}"
+        for key in ("command", "args", "cwd", "url", "enabled"):
+            if key in server:
+                args.extend(["-c", f"{prefix}.{key}={_codex_config_value(server[key])}"])
+        approval = server.get("default_tools_approval_mode", "approve")
+        args.extend(["-c", f"{prefix}.default_tools_approval_mode={_codex_config_value(approval)}"])
+        env = server.get("env")
+        if isinstance(env, dict):
+            for env_key, env_value in env.items():
+                args.extend(["-c", f"{prefix}.env.{env_key}={_codex_config_value(str(env_value))}"])
+        if "enabled" not in server:
+            args.extend(["-c", f"{prefix}.enabled=true"])
+        allowed_prefix = f"mcp__{name}__"
+        enabled_tools = [
+            tool_name[len(allowed_prefix):]
+            for raw_name in allowed_mcp_tools or []
+            if (tool_name := str(raw_name).strip()).startswith(allowed_prefix)
+        ]
+        if allowed_mcp_tools is not None:
+            args.extend(["-c", f"{prefix}.enabled_tools={_codex_config_value(enabled_tools)}"])
+        args.extend(["-c", f"{prefix}.required=true"])
+        if startup_timeout_seconds is not None:
+            timeout = validated_mcp_startup_timeout(startup_timeout_seconds)
+            args.extend(["-c", f"{prefix}.startup_timeout_sec={timeout:g}"])
+    return args
 
 
 # -- pricing -----------------------------------------------------------------------------------------------
@@ -890,14 +998,16 @@ class AgentFactory:
     # -- run ---------------------------------------------------------------------------------------------
     def run(self, handle: AgentHandle, prompt: str, work_dir: Path, env_extra: Optional[Mapping[str, str]] = None,
             *, run_id: Optional[str] = None, prompt_meta: Any = None,
-            on_start: Optional[Callable[[int], None]] = None, ledger_dir: Optional[Path] = None) -> AgentResult:
+            on_start: Optional[Callable[[int], None]] = None, ledger_dir: Optional[Path] = None,
+            on_line: Optional[Callable[[str], None]] = None) -> AgentResult:
         """1. prompt-size check  2. stage skills / isolation  3. attempts loop over
         ``run_prebuilt_cli_agent``  4. parse transcript  5. evaluate contracts
         6. ledger  7. return.
 
         ``ledger_dir`` is the per-idea ledger root when it differs from the process
         cwd (the AutoResearch proposer runs in an attempt directory but belongs to
-        the workspace); ``on_start`` receives the pid as today's RunTracker does."""
+        the workspace); ``on_start`` receives the pid as today's RunTracker does;
+        ``on_line`` sees each transcript line as it streams (the manager's MCP gate)."""
         spec = handle.spec
         work_dir = Path(work_dir)
         run_id = run_id or new_run_id(spec.role)
@@ -910,7 +1020,7 @@ class AgentFactory:
         base_prompt = prompt_text
         while True:
             attempt += 1
-            result = self._launch_once(handle, prompt_text, work_dir, env, run_id, attempt, on_start)
+            result = self._launch_once(handle, prompt_text, work_dir, env, run_id, attempt, on_start, on_line)
             decision = self._retry_decision(spec, result, attempt, invalid_outputs)
             if decision is None:
                 break
@@ -927,8 +1037,8 @@ class AgentFactory:
             raise BudgetExceeded(f"{spec.role}: cost {result.usage.cost_usd} exceeds {spec.budget.max_cost_usd} USD")
         return result
 
-    def session(self, handle: AgentHandle, work_dir: Path) -> "AgentSession":
-        return AgentSession(self, handle, Path(work_dir))
+    def session(self, handle: AgentHandle, work_dir: Path, *, resume: bool = True) -> "AgentSession":
+        return AgentSession(self, handle, Path(work_dir), resume=resume)
 
     # -- run internals --------------------------------------------------------------------------------------
     @staticmethod
@@ -976,15 +1086,17 @@ class AgentFactory:
             suffix = f"_attempt{attempt}" if attempt > 1 else ""
         stem = f"{base}{suffix}"
         prompt_stem = t.stem or prefix
+        separate_stderr = spec.provider == "codex" if t.separate_stderr is None else bool(t.separate_stderr)
         return _ArtifactNames(
             prompt=(logs_dir / f"{prompt_stem}_prompt{suffix}.txt") if t.save_prompt else None,
             log=logs_dir / f"{stem}.log",
             transcript=logs_dir / f"{stem}_transcript.jsonl",
-            stderr=(logs_dir / f"{stem}_stderr.log") if spec.provider == "codex" else None,
+            stderr=(logs_dir / f"{stem}_stderr.log") if separate_stderr else None,
         )
 
     def _launch_once(self, handle: AgentHandle, prompt: str, work_dir: Path, env: Dict[str, str], run_id: str,
-                     attempt: int, on_start: Optional[Callable[[int], None]]) -> AgentResult:
+                     attempt: int, on_start: Optional[Callable[[int], None]],
+                     on_line: Optional[Callable[[str], None]] = None) -> AgentResult:
         spec = handle.spec
         names = self._artifact_names(spec, work_dir, attempt)
         if names.prompt is not None:
@@ -996,7 +1108,8 @@ class AgentFactory:
             command_argv=list(handle.argv), prompt=prompt, work_dir=work_dir, log_file=names.log,
             transcript_file=names.transcript, env=env, timeout=spec.budget.timeout_s or None, tracker=tracker,
             provider=spec.provider, defer_provider_failure_to_runtime=spec.defer_provider_failure_to_runtime,
-            stderr_file=names.stderr,
+            stderr_file=names.stderr, on_line=on_line, echo_output=spec.transcript.echo,
+            append_budget_prompt=spec.hitl_budget_context,
         )
         result = self._interpret(spec, handle.adapter, launch, names, work_dir)
         result.run_id = run_id
@@ -1022,6 +1135,7 @@ class AgentFactory:
             timed_out=bool(launch.get("timed_out")), stopped=bool(launch.get("stopped")),
             background_processes_terminated=bool(launch.get("background_processes_terminated")),
             provider_process_failed=bool(launch.get("provider_process_failed")), final_text=final_text,
+            stderr_file=names.stderr,
         )
         launch_ok = bool(launch.get("success")) or (
             spec.output.tolerate_nonzero and result.return_code is not None
@@ -1108,32 +1222,46 @@ def _looks_rate_limited(log_file: Path) -> bool:
 
 
 class AgentSession:
-    """Multi-turn use of one handle: each ``send`` is a launch that resumes the
-    provider session when the previous turn reported one. ``cancel`` terminates
-    the live process group; the HITL manager (step 8) builds on this."""
+    """Multi-turn use of one handle: each ``send`` is a launch that, with
+    ``resume=True``, resumes the provider session the previous turn reported.
+    The HITL and interactive managers (``interactive.llm_backend.LLMBackend``)
+    run with ``resume=False`` because every turn already carries the whole
+    conversation in its prompt; ``session_id`` is still recorded per turn.
+    ``cancel`` terminates the live process group. ``handle`` may be replaced
+    between turns (the manager's allow-list and system prompt change per turn)."""
 
-    def __init__(self, factory: AgentFactory, handle: AgentHandle, work_dir: Path) -> None:
+    def __init__(self, factory: AgentFactory, handle: AgentHandle, work_dir: Path, *, resume: bool = True) -> None:
         self.factory = factory
         self.handle = handle
         self.work_dir = work_dir
+        self.resume = resume
         self.session_id: Optional[str] = None
         self.turns: List[AgentResult] = []
         self._live_pid: Optional[int] = None
         self._cancelled = False
 
+    @property
+    def live_pid(self) -> Optional[int]:
+        """Pid of the turn in flight (its process group id), or None between turns."""
+        return self._live_pid
+
     def _turn_handle(self) -> AgentHandle:
-        if self.session_id is None:
+        if self.session_id is None or not self.resume:
             return self.handle
         argv = self.handle.adapter.resume_args(self.handle.argv, self.session_id)
         return replace(self.handle, argv=tuple(argv))
 
-    def send(self, prompt: str, env_extra: Optional[Mapping[str, str]] = None) -> AgentResult:
+    def send(self, prompt: str, env_extra: Optional[Mapping[str, str]] = None, *,
+             on_line: Optional[Callable[[str], None]] = None,
+             tags: Optional[Mapping[str, Any]] = None) -> AgentResult:
         self._cancelled = False
         handle = self._turn_handle()
         # every turn gets its own numbered log/transcript so earlier turns are not overwritten
         turn_spec = replace(handle.spec, transcript=replace(handle.spec.transcript, attempt_numbered=True))
+        if tags:
+            turn_spec = replace(turn_spec, tags=_deep_merge(turn_spec.tags, tags))
         handle = replace(handle, spec=turn_spec)
-        result = self.factory.run(handle, prompt, self.work_dir, env_extra, on_start=self._on_start)
+        result = self.factory.run(handle, prompt, self.work_dir, env_extra, on_start=self._on_start, on_line=on_line)
         self._live_pid = None
         if self._cancelled:
             result.status, result.success, result.stopped = "stopped", False, True

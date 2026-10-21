@@ -33,11 +33,20 @@ manager:
   # No code reads this key today; it is kept as the documented opt-in name.
   hitl_manager_max_request_provider_turns: null
 
-  # HITL only: MCP server readiness window per manager turn (seconds), grown by
-  # the increment on each readiness retry. This is the CLI's own MCP startup
-  # limit, retried, not a cap on the manager's work.
+  # HITL only: provider retry policy and MCP startup window. These now live in
+  # config/agents.yaml under roles.hitl_manager (retry.max_attempts 3,
+  # retry.backoff_s 1.0, mcp.startup_timeout_s 30, mcp.startup_increment_s 15).
+  # The keys below still override them when set, for configurations written
+  # before the move:
+  # hitl_manager_backend_retries: 3
+  # hitl_manager_retry_delay_seconds: 1.0
   # hitl_manager_mcp_startup_timeout_seconds: 30
   # hitl_manager_mcp_startup_timeout_increment_seconds: 15
+  #
+  # HITL and interactive: NEURICO_MANAGER_FACTORY=1 runs CLI manager turns
+  # through the agent factory (roles hitl_manager / interactive_manager in
+  # config/agents.yaml: Azure lane, per-turn ledger line). Default off this
+  # release; see docs/AGENT_AUTH.md "Manager turns".
 
   # HITL only: ReAct turns (provider call + tool calls) per manager reply.
   # Unset/null = no cap, the loop ends when the provider stops calling tools.

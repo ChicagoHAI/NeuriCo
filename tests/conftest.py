@@ -23,7 +23,8 @@ FAKE_CLI = Path(__file__).resolve().parent / "fixtures" / "bin" / "fake_cli.py"
 FAKE_CLI_NAMES = ("claude", "codex", "gemini", "scribe")
 CONTROL_VARS = ("NEURICO_FAKE_CLI_EXIT", "NEURICO_FAKE_CLI_SLEEP", "NEURICO_FAKE_CLI_FILES",
                 "NEURICO_FAKE_CLI_TOUCH", "NEURICO_FAKE_CLI_SPAWN_CHILD",
-                "NEURICO_FAKE_CLI_RESULT_TEXT", "NEURICO_FAKE_CLI_STRUCTURED")
+                "NEURICO_FAKE_CLI_RESULT_TEXT", "NEURICO_FAKE_CLI_STRUCTURED",
+                "NEURICO_FAKE_CLI_STDERR", "NEURICO_FAKE_CLI_INIT_DELAY", "NEURICO_FAKE_CLI_MCP_STATUS")
 
 
 @dataclass

@@ -246,7 +246,7 @@ class InteractiveManager:
         # The manager's world model — what makes it reason like a PI rather than
         # a tool dispatcher. Threaded into the executor so tools read/write it.
         self.research = ResearchState(workspace)
-        self.backend = create_backend(config)
+        self.backend = create_backend(config, work_dir=workspace)
         self.tools = ToolExecutor(workspace, self.session, idea_file, provider,
                                   PROJECT_ROOT, channel=self.channel,
                                   research=self.research)

@@ -70,15 +70,33 @@ roles:
   zero_shot:                        # baseline/zero_shot.py
     output: {kind: return_code}     # today's verdict is the launch; paper_exists is reported separately
     transcript: {prefix: zeroshot}
-  hitl_manager:                     # multi-turn through AgentFactory.session(); no call site launches it yet
+  # -- manager turns (interactive/llm_backend.LLMBackend over AgentFactory.session()) ----------------
+  # Used when NEURICO_MANAGER_FACTORY=1 (default off this release; docs/AGENT_AUTH.md "Manager
+  # turns"). The permission mode is chosen per turn by the backend: `mcp_only` for a bridged HITL
+  # turn (claude --tools ToolSearch --allowedTools ... --mcp-config ... --strict-mcp-config), `no_tools`
+  # for a tool-less one (claude --safe-mode --tools ""); Codex gets a read-only sandbox either way.
+  hitl_manager:
     permissions: {mode: mcp_only}
-    # Opt in to one provider turn per launch with `budget: {max_turns: 1}`; the default is unlimited.
+    # retry: provider attempts per manager turn and the delay between them. Consumed by
+    # core.hitl_manager_react.HitlManager._send on both paths (config/manager.yaml
+    # hitl_manager_backend_retries / hitl_manager_retry_delay_seconds override when set);
+    # the factory itself runs each turn once.
     retry: {max_attempts: 3, backoff_s: 1.0}
+    # mcp: the CLI's own MCP startup window per turn, grown by the increment on each readiness
+    # retry (manager.yaml hitl_manager_mcp_startup_timeout_seconds / _increment_seconds override).
+    # It bounds server startup, never the manager's work.
     mcp: {startup_timeout_s: 30, startup_increment_s: 15}
-    codex: {sandbox: read-only}
-  interactive_manager:
+    codex: {sandbox: read-only, skip_git_repo_check: true}
+    transcript: {echo: false, separate_stderr: true}   # the stream is parsed, not shown; stderr kept out of it
+    hitl_budget_context: false      # the manager adds the run's budget context as a system message itself
+    session: {resume: false}        # every turn carries the whole transcript; `true` adds --resume / codex resume
+    # Opt in to one provider turn per launch with `budget: {max_turns: 1}`; the default is unlimited.
+  interactive_manager:              # ./neurico interactive (interactive/manager.py), the same backend
     backend: cli                    # cli | anthropic_api | openrouter (today's manager.llm_backend)
-    permissions: {mode: read_only}
+    permissions: {mode: inherit}    # today's plain `claude -p` (no permission flag); tools are described in the prompt
+    codex: {sandbox: read-only, approval_policy: never, skip_git_repo_check: true}
+    transcript: {echo: false, separate_stderr: true}
+    session: {resume: false}
   safety_planner:
     # validate_proposals needs the kb, campaign and mode, so safety.planner runs it after the launch
     output: {kind: return_code}

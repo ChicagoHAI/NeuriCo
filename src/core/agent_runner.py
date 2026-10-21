@@ -25,7 +25,7 @@ below is the primitive the factory runs on.
 """
 
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional
 import argparse
 import contextlib
 import json
@@ -203,6 +203,9 @@ def run_prebuilt_cli_agent(
     provider: Optional[str] = None,
     defer_provider_failure_to_runtime: bool = False,
     stderr_file: Optional[Path] = None,
+    on_line: Optional[Callable[[str], None]] = None,
+    echo_output: bool = True,
+    append_budget_prompt: bool = True,
 ) -> Dict[str, Any]:
     """
     Execute a caller-constructed CLI command with streaming capture.
@@ -214,10 +217,17 @@ def run_prebuilt_cli_agent(
     stderr is merged into stdout (and so into the log and transcript) unless
     ``stderr_file`` is given; the agent factory routes Codex stderr there so
     the ``--json`` transcript stays a clean JSONL stream for usage parsing.
+
+    ``on_line`` sees every sanitized stdout line as it is written (the HITL
+    manager's MCP readiness gate watches for Claude's ``system/init`` event);
+    it must not raise. ``echo_output=False`` keeps the stream off this
+    process's stdout (manager turns are parsed, not shown).
+    ``append_budget_prompt=False`` skips the active HITL run's budget context,
+    for callers that already put it in the prompt themselves.
     """
     from core.hitl_run_control import current_hitl_run_budget_prompt
 
-    budget_context = current_hitl_run_budget_prompt(work_dir)
+    budget_context = current_hitl_run_budget_prompt(work_dir) if append_budget_prompt else ""
     if budget_context:
         # Apply after restoring/composing saved prompts; do not rewrite the
         # continuation record or let its previous budget govern a new Start.
@@ -299,9 +309,17 @@ def run_prebuilt_cli_agent(
                     return
                 if line is None:
                     continue
-                print(line, end="")
+                if echo_output:
+                    print(line, end="")
                 log_f.write(line)
                 transcript_f.write(line)
+                if on_line is not None:
+                    try:
+                        on_line(line)
+                    except Exception:
+                        # An observer must never leave the child unreaped; the
+                        # caller inspects its own state after the run returns.
+                        pass
 
         reader = threading.Thread(target=_drain_output, daemon=True)
         reader.start()

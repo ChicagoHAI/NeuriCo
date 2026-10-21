@@ -18,6 +18,10 @@ Behaviour is driven by environment variables so launch code needs no test hooks:
     NEURICO_FAKE_CLI_SPAWN_CHILD  "1": spawn a sleeping child (process-group tests)
     NEURICO_FAKE_CLI_RESULT_TEXT  final assistant text in the canned transcript
     NEURICO_FAKE_CLI_STRUCTURED   JSON for Claude's ``structured_output``
+    NEURICO_FAKE_CLI_STDERR       stderr text (default "fake-cli: stderr noise")
+    NEURICO_FAKE_CLI_INIT_DELAY   seconds to sleep before Claude's ``system/init`` line
+    NEURICO_FAKE_CLI_MCP_STATUS   status reported for every MCP server in that line
+                                  (default: what the server handshake gave)
 
 The transcript emitted on stdout mirrors each provider's real stream format
 closely enough for NeuriCo's parsers: Claude ``stream-json`` ending in a
@@ -25,6 +29,12 @@ closely enough for NeuriCo's parsers: Claude ``stream-json`` ending in a
 (``thread.started`` ... ``turn.completed`` with usage) and Gemini
 ``stream-json``. One line of stderr noise is always emitted so tests can check
 whether stderr is kept out of a provider's JSONL transcript.
+
+With ``--mcp-config <file>`` the fake ``claude`` does what the real one does at
+startup: it spawns each configured stdio server, sends ``initialize`` and
+``tools/list``, and reports the servers and their tools (as
+``mcp__<server>__<tool>``) in the ``system/init`` event. This is how the HITL
+manager's MCP bridge (``core.hitl_manager_mcp``) is proven to come up.
 """
 
 import json
@@ -72,7 +82,41 @@ def _write_requested_files() -> None:
         Path(rel).touch()
 
 
-def _record(prompt: str, child_pid) -> None:
+def _mcp_init_fields() -> dict:
+    """Spawn the servers of ``--mcp-config`` over stdio and list their tools, as the real CLI does."""
+    if "--mcp-config" not in sys.argv:
+        return {}
+    config_path = Path(sys.argv[sys.argv.index("--mcp-config") + 1])
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    forced_status = os.environ.get("NEURICO_FAKE_CLI_MCP_STATUS") or ""
+    servers, tools = [], ["ToolSearch"]
+    for name, server in (config.get("mcpServers") or {}).items():
+        env = dict(os.environ)
+        env.update({str(k): str(v) for k, v in (server.get("env") or {}).items()})
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        ]
+        status = "failed"
+        try:
+            proc = subprocess.Popen([server["command"], *server.get("args", [])], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
+            out, _ = proc.communicate("\n".join(json.dumps(r) for r in requests) + "\n", timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            out = ""
+        for line in out.splitlines():
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if message.get("id") == 2 and isinstance(message.get("result"), dict):
+                status = "connected"
+                tools += [f"mcp__{name}__{tool['name']}" for tool in message["result"].get("tools", [])]
+        servers.append({"name": name, "status": forced_status or status})
+    return {"mcp_servers": servers, "tools": tools}
+
+
+def _record(prompt: str, child_pid, mcp: dict) -> None:
     capture = os.environ.get("NEURICO_FAKE_CLI_CAPTURE")
     if not capture:
         return
@@ -88,6 +132,8 @@ def _record(prompt: str, child_pid) -> None:
         "blank_keys": sorted(k for k, v in env.items() if v == ""),
         "pid": os.getpid(),
         "child_pid": child_pid,
+        "mcp_servers": mcp.get("mcp_servers", []),
+        "mcp_tools": [t for t in mcp.get("tools", []) if t.startswith("mcp__")],
     }
     with open(capture, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
@@ -103,7 +149,7 @@ def _streaming_requested() -> bool:
     return "--json" in sys.argv or "stream-json" in sys.argv
 
 
-def _transcript(provider: str, text: str) -> None:
+def _transcript(provider: str, text: str, mcp: dict) -> None:
     structured = os.environ.get("NEURICO_FAKE_CLI_STRUCTURED")
     sleep = float(os.environ.get("NEURICO_FAKE_CLI_SLEEP") or 0)
     if not _streaming_requested():
@@ -111,8 +157,10 @@ def _transcript(provider: str, text: str) -> None:
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
     elif provider == "claude":
+        time.sleep(float(os.environ.get("NEURICO_FAKE_CLI_INIT_DELAY") or 0))
         _emit({"type": "system", "subtype": "init", "session_id": "fake-session-1234",
-               "model": "claude-sonnet-4-6", "tools": [], "cwd": os.getcwd()})
+               "model": "claude-sonnet-4-6", "tools": mcp.get("tools", []), "cwd": os.getcwd(),
+               **({"mcp_servers": mcp["mcp_servers"]} if mcp else {})})
         _emit({"type": "assistant", "message": {"role": "assistant",
                "content": [{"type": "text", "text": text}]}, "session_id": "fake-session-1234"})
         time.sleep(sleep)
@@ -151,10 +199,11 @@ def main() -> int:
     if os.environ.get("NEURICO_FAKE_CLI_SPAWN_CHILD") == "1":
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
         child_pid = child.pid
-    _record(prompt, child_pid)
-    sys.stderr.write("fake-cli: stderr noise\n")
+    mcp = _mcp_init_fields() if _provider() == "claude" else {}
+    _record(prompt, child_pid, mcp)
+    sys.stderr.write((os.environ.get("NEURICO_FAKE_CLI_STDERR") or "fake-cli: stderr noise") + "\n")
     sys.stderr.flush()
-    _transcript(_provider(), os.environ.get("NEURICO_FAKE_CLI_RESULT_TEXT") or "fake agent reply")
+    _transcript(_provider(), os.environ.get("NEURICO_FAKE_CLI_RESULT_TEXT") or "fake agent reply", mcp)
     return exit_code
 
 
