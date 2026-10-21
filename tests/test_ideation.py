@@ -8,6 +8,7 @@ src/ideation/NOTICE.md). Everything is offline."""
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -398,6 +399,11 @@ def test_round_through_run_planner_queues_jobs(kb, fake_cli, tmp_path):
     ledger = RunLedger.read(kb.root / ".neurico" / "agent_runs.jsonl")
     assert [e["gen_ai.agent.name"] for e in ledger] == ["ideation.problem", "ideation.ideation", "ideation.idea_judge"]
     assert all(e["status"] == "ok" and e["gen_ai.usage.input_tokens"] == 200 for e in ledger)
+    # the stage prompt's provenance reaches the ledger like the planner's (prompt registry)
+    stage_template = PROJECT_ROOT / "templates" / "ideation" / "stage_prompt.md"
+    assert all(e["template_id"] == "ideation/stage_prompt.md" for e in ledger)
+    assert all(e["template_sha"] == hashlib.sha256(stage_template.read_bytes()).hexdigest() for e in ledger)
+    assert len({e["variables_sha"] for e in ledger}) == 3  # one set of variables per stage
     # logs by stage name under logs/safety/ideation/<run>/
     logs = kb.logs_dir / "ideation" / record["planner_run"] / "logs"
     assert {"problem_prompt.txt", "problem.log", "problem_transcript.jsonl", "idea_judge.log"} <= {p.name for p in logs.iterdir()}

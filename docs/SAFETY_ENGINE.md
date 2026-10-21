@@ -14,7 +14,10 @@ Read `safety_kb/README.md` for the knowledge base itself and
 | Piece | Where | Role |
 | --- | --- | --- |
 | Knowledge base | `safety_kb/` | catalogs (`catalog/evals.yaml`, `catalog/models.yaml`), campaigns, queue, runs, findings, reports, research notes |
-| Daemon | `src/safety/daemon.py`, `src/cli/safety.py start` | scheduler loop: GPU and concurrency slots, watchdog for stalled jobs, retries with resume, adoption of running jobs after a restart, ingest, status files, planner trigger |
+| Daemon | `src/safety/daemon.py`, `src/cli/safety.py start` | scheduler loop: GPU and concurrency slots, liveness watchdog (stalls are warned, not killed, by default), retries with resume, adoption of running jobs after a restart, ingest, index refresh, status files, budget checks, crawler and planner triggers; on the cluster it runs as a Slurm job (`scripts/slurm/safety_daemon.sbatch`, resubmitted by `scripts/slurm/ensure_daemon.sh`) |
+| Crawler | `src/safety/crawler.py`, `safety.py crawl`, `safety_kb/catalog/sources.yaml` | no-LLM sweep of arXiv, Hugging Face and lab feeds into `safety_kb/inbox/` as dated notes; hash ledger skips anything already seen |
+| Model scout | `src/safety/model_scout.py`, `templates/agents/model_scout.txt` | an agent session that refreshes `catalog/models_latest.yaml` and proposes registry entries; Python validates and merges them, recomputes `superseded_by` and writes the dated change table `inbox/<date>-model-scout.md` |
+| Spend | `src/safety/spend.py`, `core/run_ledger.py` | one reader of the run ledgers for `status`, `digest`, the `spend` table and the daemon's per-job budget and daily-cap checks |
 | Suite runner | `src/safety/suites.py` | runs `inspect_evals` tasks against served or API models, serves local judges, writes `neurico-safety-result/v1` JSON per (eval, model), resumable |
 | Serving | `src/safety/serving.py` | vLLM OpenAI-compatible servers in their own process group; API endpoint resolution; key-name aliasing |
 | Planner | `src/safety/planner.py`, `templates/agents/safety_planner.txt` | a Claude Code / Codex session that reads the knowledge base and writes job proposals and NeuriCo idea YAMLs; Python validates, de-duplicates and queues them |
@@ -72,8 +75,11 @@ like the ones you start by hand (same workspaces, same GitHub repos, same logs).
      (writes proposals, validates them and queues the accepted ones; `--dry-run` only renders the prompt).
 3. Start the daemon and leave it running (it is a foreground process; use `nohup`, `tmux` or a systemd unit):
    `./neurico safety start --campaign qwen-small-pipeline-test --gpus 2`
-   It launches queued jobs as GPU and concurrency slots allow, watches for stalls, retries,
-   ingests results, and runs the planner when the queue gets short (`--no-plan` disables that).
+   It launches queued jobs as GPU and concurrency slots allow, warns about stalls, retries lost
+   jobs, ingests results, sweeps the crawler feeds once a day, and runs the planner when the queue
+   gets short (`--no-plan` disables that). On the DSI cluster use `scripts/slurm/ensure_daemon.sh`
+   instead: it submits `scripts/slurm/safety_daemon.sbatch` (4 GPUs, host mode) when no daemon
+   job is pending or running, and the daemon re-adopts its jobs after each 12-hour allocation.
 4. Watch: `./neurico safety status` (or `cat logs/safety/status.md`, `tail -f logs/safety/events.log`);
    per-job logs are in `logs/safety/jobs/<job>.log`; the research workspace is the usual
    NeuriCo workspace printed in that log.
@@ -98,19 +104,26 @@ uv run python src/cli/safety.py status                     # logs/safety/status.
 uv run python src/cli/safety.py stop
 uv run python src/cli/safety.py plan --campaign <name> [--dry-run] [--mode replicate|ideate]
 uv run python src/cli/safety.py ideate --campaign <name> [--only problem|ideation|idea_judge] [--planner-run <run>] [--dry-run]
+uv run python src/cli/safety.py crawl                      # feeds in catalog/sources.yaml -> inbox/ (no LLM)
+uv run python src/cli/safety.py kb rebuild|search <text>|show <id>|related <id>|check-idea "<hypothesis>"|timeline|anomalies|query "<sql>"
+uv run python src/cli/safety.py finding <id> --status reproduced|confirmed|refuted|withdrawn --by <who> --note "..."
 uv run python src/cli/safety.py digest --days 7
 ```
 
-Daemon settings (`safety_kb/engine.yaml`, overridable by flags): `gpus`, `gpu_memory_gb`,
-`max_neurico_jobs`, `max_suite_jobs`, `stall_minutes`, `stall_action`, `retries`, `poll_seconds`,
-`min_pending`, `planner_interval_hours`, `planner_enabled`, `planner_provider`, `planner_model`,
+Daemon settings (`safety_kb/engine.yaml`, overridable by flags; defaults in
+`daemon.py: DEFAULT_CONFIG`): `gpus`, `gpu_memory_gb`, `max_neurico_jobs`, `max_suite_jobs`,
+`stall_minutes` (45), `stall_action` (`warn`), `retries` (2), `retry_wait_seconds`,
+`poll_seconds` (30), `min_pending`, `planner_interval_hours`, `planner_enabled`,
+`crawler_enabled`, `crawl_interval_hours` (24), `planner_provider`, `planner_model`,
 `planner_agent_auth`, `planner_timeout`, `resource_finder_timeout`, `experiment_timeout`,
-`paper_timeout`, `eval_python`, `hf_cache`, `openrouter_daily_cap_usd`, `azure_daily_cap_usd`.
+`paper_timeout` (all four unset = no limit), `eval_python`, `hf_cache`,
+`openrouter_daily_cap_usd`, `azure_daily_cap_usd` (unset = no cap).
 The planner, the ideation stages and the model scout launch through `config/agents.yaml` roles (`planner`,
 `ideation.problem` / `ideation.ideation` / `ideation.idea_judge`, `model_scout`), and every
 session is recorded in `safety_kb/.neurico/agent_runs.jsonl` (each line names the prompt's
 `template_id`, `template_sha` and `variables_sha` from `core.prompt_registry`, so a template or
-context change is visible in the ledger). The daemon's `planner_provider`,
+context change is visible in the ledger; the ideation stage prompt
+`templates/ideation/stage_prompt.md` renders through the same registry). The daemon's `planner_provider`,
 `planner_model`, `planner_agent_auth` and `planner_timeout` apply to the ideation stages too
 (the timeout per stage).
 
@@ -315,20 +328,23 @@ the queue.
 ## Monitoring and recovery
 
 - `logs/safety/events.log` is the audit trail (`UP`, `START`, `DONE`, `FAILED`, `RETRY`,
-  `STALL`, `LOST`, `ADOPT`, `PLAN`, `INGEST`, `BUDGET`, `STOP`); `status.md`/`status.json` are
-  rewritten every tick; per-job logs are under `logs/safety/jobs/`.
-- A job whose log stops growing for `stall_minutes` is killed and requeued; NeuriCo runs
-  resume after their last completed stage, suites skip finished (eval, model) pairs.
-
-  `STALL`, `LOST`, `ADOPT`, `PLAN`, `INGEST`, `STOP`); `status.md`/`status.json` are rewritten
-  every tick; per-job logs are under `logs/safety/jobs/`.
+  `GAVEUP`, `STALL`, `LOST`, `ADOPT`, `PLAN`, `CRAWL`, `INGEST`, `INDEX`, `ANOMALY`, `BUDGET`,
+  `LEDGER`, `STOP`, `DOWN`); `status.md`/`status.json` are rewritten every tick (`write_status`);
+  per-job logs are under `logs/safety/jobs/`.
 - A job whose log stops growing for `stall_minutes` is logged as `STALL` once per episode and
   left running (`stall_action: warn`, the default); with `stall_action: kill` it is killed and
   requeued, and NeuriCo runs then resume after their last completed stage, suites skip
   finished (eval, model) pairs. A job whose process is gone always fails and retries.
 - On restart the daemon re-attaches to jobs whose process is still alive and fails the rest,
-  which then retry. Retries are counted per job (`retries`).
+  which then retry. Retries are counted per job (`retries`, default 2; `GAVEUP` after that).
 - `stop` sends SIGTERM: running containers are killed, jobs return to `pending`.
+- On the cluster the daemon's Slurm allocation (`scripts/slurm/safety_daemon.sbatch`, 12 h, the
+  partition's requirement rather than a NeuriCo limit) ends with SIGTERM ten minutes before the
+  limit; `scripts/slurm/ensure_daemon.sh` submits the successor, which adopts the surviving jobs.
+  A single-daemon guard in the sbatch cancels pending siblings and exits if another daemon job
+  is running; nodes that fail the CUDA self-check are recorded in `logs/slurm/bad_nodes.txt`
+  and excluded next time. `docs/MONITOR_DESIGN.md` proposes the in-repo monitor that would
+  watch all of this without an operator.
 - Judges follow the `judges.prefer` lane order in `engine.yaml` (see "Judges"): the Azure judge
   deployment when its key and resource are configured, else the local open-weight judge
   (`role: judge`), so API outages or spend caps do not stop suites; `NEURICO_SAFETY_JUDGE=<model id>`
@@ -348,8 +364,12 @@ into `safety_kb/runs/`. XSTest needs the Hugging Face account to accept the gate
 - Findings validation (`validate` jobs) runs through the same NeuriCo path; the verdict logic
   (two agreeing independent reproductions) is recorded in the finding file by the validating
   run and not yet automated end to end.
-- The crawler (arXiv, Hugging Face, lab blogs) is specified in the architecture document and
-  not implemented yet; the planner reads `safety_kb/inbox/` when files are present.
+- The crawler covers the feeds listed in `safety_kb/catalog/sources.yaml`; feeds that returned
+  404 or HTML at bring-up are kept with `enabled: false` (see `docs/KNOWLEDGE_BASE.md` section 5)
+  and nothing fetches full paper text, only metadata and summaries.
+- Nothing watches the daemon itself: a lost Slurm allocation, an idle GPU with a pending queue
+  or a stale digest is visible in `status.md` and `events.log` but reported to nobody
+  (`docs/MONITOR_DESIGN.md`).
 - Spend figures cover agent launches and API roles that write the run ledger; Inspect calls made
   by suites are not priced, so an OpenRouter or Azure subject model's suite spend is only guarded
   by the key's own limits.

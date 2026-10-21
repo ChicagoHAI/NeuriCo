@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent_factory import AgentFactory
 from core.agent_runner import run_prebuilt_cli_agent
-from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
+from core.agent_cli import build_agent_command, build_agent_environment, require_supported_provider
 
 
 def generate_resource_finder_prompt(
@@ -112,10 +112,7 @@ def run_resource_finder(
         ValueError: If provider not supported
         FileNotFoundError: If completion marker not created
     """
-    if provider not in CLI_COMMANDS:
-        raise ValueError(
-            f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}"
-        )
+    require_supported_provider(provider)
 
     # Auto-detect templates directory if not provided
     if templates_dir is None:

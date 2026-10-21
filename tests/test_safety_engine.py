@@ -314,6 +314,47 @@ def test_model_scout_merge_validates_and_supersedes(kb):
     assert "newest generation New9" in model_scout.latest_models_summary(kb)
     prompt = model_scout.render_prompt(kb, "scout-test")
     assert "catalog/families.yaml" in prompt and "{{" not in prompt
+    assert "inbox/" in prompt and "Do not write anything under `inbox/`" in prompt  # Python writes the inbox note
+
+
+def test_model_scout_inbox_note_is_a_table_of_registry_changes(kb):
+    """The scout's inbox item is data (dated tables of what the merge changed), never instructions:
+    every ideation stage reads the inbox and flags instruction-like text."""
+    import re
+    from safety import model_scout
+    before = model_scout.registry_snapshot(kb)
+    assert "tiny" in before
+    proposals = kb.catalog_dir / "proposals"
+    proposals.mkdir(parents=True, exist_ok=True)
+    cat = load_yaml(kb.catalog_dir / "models.yaml")
+    cat["models"][0].update({"release_date": "2025-01-01"})
+    save_yaml(kb.catalog_dir / "models.yaml", cat)
+    save_yaml(proposals / "models-scout-y.yaml", {"models": [
+        {"id": "new-small", "family": "qwen", "vendor": "v", "access": "vllm:Org/New-0.7B", "params_b": 0.7,
+         "generation": "New9", "gpu_memory_gb": 8, "release_date": "2026-10-01"},
+        {"id": "broken", "family": "qwen", "access": "nocolon", "params_b": 1, "generation": "x", "gpu_memory_gb": 6},
+    ]})
+    out = model_scout.merge_proposals(kb)
+    latest = {"refreshed": "2026-10-21T00:00:00+00:00", "families": {"qwen": {"newest_generation": "New9", "released": "2026-10-01"}}}
+    path = model_scout.write_scout_note(kb, "scout-20261021-000000", before=before, after=model_scout.registry_snapshot(kb),
+                                        rejected=out["rejected"], previous_latest={"families": {"qwen": {"newest_generation": "Old8"}}},
+                                        latest=latest, date="2026-10-21")
+    assert path == kb.inbox_dir / "2026-10-21-model-scout.md"
+    text = path.read_text()
+    assert text.startswith("---\nsource: model-scout\nkind: registry-changes\nscout_run: scout-20261021-000000\n")
+    assert "| added | `new-small` | qwen | New9 | 2026-10-01 | access `vllm:Org/New-0.7B`, 0.7B, 8 GB |" in text
+    assert "| superseded | `tiny` | qwen |" in text and "superseded_by `new-small`" in text
+    assert "| newest generation | - | qwen | New9 | 2026-10-01 | previously `Old8` |" in text
+    assert "| models-scout-y.yaml | `broken` | access is not <scheme>:<target> |" in text
+    # every content line is front matter, a heading or a table row: no sentences, nothing imperative
+    body = [l for l in text.splitlines() if l.strip() and not l.startswith(("---", "#", "|")) and ":" not in l]
+    assert body == []
+    assert not re.search(r"\b(prefer|should|must|use|do not|please)\b", text.lower().replace("do not write", ""))
+    # nothing to report -> no inbox item
+    same = model_scout.registry_snapshot(kb)
+    assert model_scout.write_scout_note(kb, "scout-x", before=same, after=same, rejected=[], previous_latest=latest,
+                                        latest=latest, date="2026-10-22") is None
+    assert not (kb.inbox_dir / "2026-10-22-model-scout.md").exists()
 
 
 # -- ledger-backed budgets (agent-factory migration step 7) ----------------------------------------------------

@@ -29,7 +29,7 @@ import sys
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.agent_cli import CLI_COMMANDS
+from core.agent_cli import require_supported_provider
 from core.agent_factory import AgentFactory
 from core.research_environment import (
     read_workspace_mode,
@@ -207,10 +207,7 @@ def run_bootstrap_rule_maker(
     Returns a dict with success, return_code, elapsed_time, transcript_file,
     prompt_file, and a per-output-file existence summary.
     """
-    if provider not in CLI_COMMANDS:
-        raise ValueError(
-            f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}"
-        )
+    require_supported_provider(provider)
 
     if templates_dir is None:
         templates_dir = Path(__file__).parent.parent.parent / "templates"

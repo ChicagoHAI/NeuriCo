@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from core.prompt_registry import PromptRegistry, RenderedPrompt
 from safety.kb import KB, PROJECT_ROOT
 from safety import kbdb
 
@@ -48,6 +49,7 @@ SCHEMAS_DIR = PKG / "schemas"
 TEMPLATES_DIR = PROJECT_ROOT / "templates" / "ideation"
 SKILLS_DIR = TEMPLATES_DIR / "skills"
 AGENTS_MD_PATH = TEMPLATES_DIR / "AGENTS.md"
+STAGE_PROMPT_ID = "ideation/stage_prompt.md"   # under templates/; rendered through core.prompt_registry
 STAGE_PROMPT_PATH = TEMPLATES_DIR / "stage_prompt.md"
 SCHOLAR_TOOL_PATH = PROJECT_ROOT / "templates" / "skills" / "safety-kb" / "scripts" / "scholar_search.py"
 KB_QUERIES_FILE = "output/kb_queries.jsonl"
@@ -78,16 +80,23 @@ def skill_path(skill: str) -> Path:
     return SKILLS_DIR / f"{skill}.md"
 
 
-def stage_prompt(stage: Stage, *, planner_run: str, campaign_name: str, date: Optional[str] = None) -> str:
-    """The task prompt for one stage; a validation retry gets the factory's rejection appended."""
-    text = STAGE_PROMPT_PATH.read_text(encoding="utf-8")
+def render_stage_prompt(stage: Stage, *, planner_run: str, campaign_name: str,
+                        date: Optional[str] = None) -> RenderedPrompt:
+    """The task prompt for one stage, rendered through the prompt registry so the ledger line
+    carries its ``template_id`` / ``template_sha`` / ``variables_sha`` like the planner's.
+    The text is what the former ``str.replace`` rendering produced (golden in
+    ``tests/fixtures/prompts/golden/ideation_stage_prompt.txt``); a validation retry gets the
+    factory's rejection appended by the factory."""
     fields = {"skill": stage.skill, "stage": stage.id, "planner_run": planner_run, "campaign": campaign_name,
               "date": date or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
               "output": stage.outputs[0][0] if stage.outputs else "output/",
               "schema": stage.outputs[0][1] if stage.outputs and stage.outputs[0][1] else ""}
-    for key, value in fields.items():
-        text = text.replace("{" + key + "}", str(value))
-    return text
+    return PromptRegistry(TEMPLATES_DIR.parent).render(STAGE_PROMPT_ID, fields)
+
+
+def stage_prompt(stage: Stage, *, planner_run: str, campaign_name: str, date: Optional[str] = None) -> str:
+    """The rendered text of ``render_stage_prompt``."""
+    return render_stage_prompt(stage, planner_run=planner_run, campaign_name=campaign_name, date=date).text
 
 
 def prompt_version(skill: str) -> str:
@@ -287,10 +296,10 @@ class IdeationRun:
         env_extra = {"NEURICO_SAFETY_KB": str(workspace / "input"),
                      "NEURICO_KB_QUERY_LOG": str(workspace / KB_QUERIES_FILE)}
         handle = self.factory.build(spec, env_extra)
-        prompt = stage_prompt(stage, planner_run=self.planner_run, campaign_name=self.campaign_name)
+        rendered = render_stage_prompt(stage, planner_run=self.planner_run, campaign_name=self.campaign_name)
         actor = self._actor(spec)
         try:
-            result = self.factory.run(handle, prompt, workspace, ledger_dir=self.kb.root)
+            result = self.factory.run(handle, rendered.text, workspace, ledger_dir=self.kb.root, prompt_meta=rendered)
         except FactoryBudgetExceeded as exc:
             raise BudgetExceeded(stage.id, str(exc)) from exc
         usage = result.usage.as_dict() if hasattr(result.usage, "as_dict") else dict(result.usage or {})

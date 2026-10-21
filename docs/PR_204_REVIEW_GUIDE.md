@@ -25,7 +25,7 @@ config, two auth layers (OAuth vs Azure), structured output contracts and a run 
 | Of which docs (`docs/*.md`) | 7 files, +2,219 |
 | Of which tests | 14 files, +3,985 / -78 |
 | Tests on `main` | 573 passed (1 pre-existing failure, deselected) |
-| Tests on `safety-engine` | 718 passed, 1 deselected, 45 s on a compute node (measured 2026-10-21 after step 8; one test skips when ripgrep is absent on the node) |
+| Tests on `safety-engine` | 719 passed, 1 skipped, 1 deselected, 52 s on a compute node (measured 2026-10-21 after step 9 with `scripts/slurm/pytest_node.sh`; the skipped test needs ripgrep on the node) |
 
 Test command used: `.venv/bin/python -m pytest tests -q --deselect tests/test_hitl_timeout_recovery.py::test_run_worker_does_not_translate_sigterm_into_user_stop`.
 
@@ -277,7 +277,7 @@ All commands from `docs/SAFETY_ENGINE.md`; `./neurico safety <cmd>` equals `uv r
 | Host mode | `tests/test_host_mode.py` | `.venv/bin/python -m pytest tests/test_host_mode.py -q` |
 | Safety engine and KB | `tests/test_safety_engine.py`, `tests/test_safety_kb_nodes.py`, `tests/test_safety_crawler.py` | `.venv/bin/python -m pytest tests/test_safety_engine.py tests/test_safety_kb_nodes.py tests/test_safety_crawler.py -q` |
 | Ideation | `tests/test_ideation.py` | `.venv/bin/python -m pytest tests/test_ideation.py -q` |
-| Everything | `tests/` | the command in section 1 (662 passed, 88 s; all offline, fake CLIs on PATH) |
+| Everything | `tests/` | `scripts/slurm/pytest_node.sh` on a compute node, or the command in section 1 (719 passed, 1 skipped, 1 deselected, 52 s; all offline, fake CLIs on PATH) |
 
 ### What can be skipped
 
@@ -293,12 +293,13 @@ All commands from `docs/SAFETY_ENGINE.md`; `./neurico safety <cmd>` equals `uv r
 
 | Item | Where stated | State |
 | --- | --- | --- |
-| Prompt registry (`prompt_registry.py`, Jinja rendering, `template_sha` in the ledger) | `docs/AGENT_FACTORY_ASSESSMENT.md` step 6 | done (2026-10-21): planner, ideator and scout templates render through `PromptRegistry.render` (same `{{key}}` files, missing keys stay literal as before), research roles through `render_role` over the unchanged `PromptGenerator`; every ledger line carries `template_id`, `template_sha`, `variables_sha`; goldens in `tests/fixtures/prompts/golden/`. The ideation stage prompt (`src/ideation/runtime.py: stage_prompt`, `{key}` syntax) keeps its own `prompt_version` hash and is not routed through the registry yet |
+| Prompt registry (`prompt_registry.py`, Jinja rendering, `template_sha` in the ledger) | `docs/AGENT_FACTORY_ASSESSMENT.md` step 6 | done (2026-10-21): planner, ideator and scout templates render through `PromptRegistry.render` (same `{{key}}` files, missing keys stay literal as before), research roles through `render_role` over the unchanged `PromptGenerator`; every ledger line carries `template_id`, `template_sha`, `variables_sha`; goldens in `tests/fixtures/prompts/golden/`. The ideation stage prompt (`src/ideation/runtime.py: render_stage_prompt`, `templates/ideation/stage_prompt.md` now `{{key}}`) renders through the registry too since step 9 (golden `ideation_stage_prompt.txt`, provenance asserted on the stage ledger lines); `prompt_version` keeps its skill+workspace hash for `outcome.yaml` |
 | Ledger-backed budgets: spend in `status` and `digest`, daemon enforces `api_budget_usd` / daily caps, `--max-budget-usd` for Claude roles | step 7; `docs/SAFETY_ENGINE.md` "Budgets and spend" | done (2026-10-21): `safety.spend` reads the ledgers, over-budget jobs stay pending with a `BUDGET` event, caps are opt-in `engine.yaml` data (default none); a campaign-level cap is still open |
 | Judge preference (pairwise judging of ideas) | `docs/IDEATION_INTEGRATION.md` status table, risk 6 | open |
 | Timeout removal (no default limits as policy) | owner direction (2026-10-21); `agents.yaml` carries explicit `timeout_s` per role today | in progress (subagent branch): defaults become no limit, limits opt-in, watchdog warns instead of killing |
-| HITL / interactive manager turns through `factory.session()` | step 8; `docs/AGENT_AUTH.md` "Manager turns" | done behind a flag (2026-10-21): `LLMBackend` routes CLI turns through `AgentFactory.session()` on the `hitl_manager` / `interactive_manager` roles when `NEURICO_MANAGER_FACTORY=1` (default off this release, flip next release); argv parity on both lanes, the MCP bridge coming up through a fake `claude` that spawns the adapter, `set_provider`, cancellation, the opt-in deadline and the per-turn ledger line are pinned in `tests/test_hitl_manager_factory.py`; `manager.yaml`'s retry keys moved to `agents.yaml: roles.hitl_manager.retry` / `.mcp` with the old keys still overriding. The legacy `_send_cli` / `_send_codex_cli` bodies are deleted in step 9 |
-| Cleanup of duplicate provider checks and doc refresh | step 9 | not started |
+| HITL / interactive manager turns through `factory.session()` | step 8; `docs/AGENT_AUTH.md` "Manager turns" | done behind a flag (2026-10-21): `LLMBackend` routes CLI turns through `AgentFactory.session()` on the `hitl_manager` / `interactive_manager` roles when `NEURICO_MANAGER_FACTORY=1` (default off this release, flip next release); argv parity on both lanes, the MCP bridge coming up through a fake `claude` that spawns the adapter, `set_provider`, cancellation, the opt-in deadline and the per-turn ledger line are pinned in `tests/test_hitl_manager_factory.py`; `manager.yaml`'s retry keys moved to `agents.yaml: roles.hitl_manager.retry` / `.mcp` with the old keys still overriding. Step 8 done; the legacy `_send_cli` / `_send_codex_cli` bodies stay until the default flips (they are the default path), then one release later they go |
+| Cleanup of duplicate provider checks and doc refresh | step 9 | done (2026-10-21): the six per-agent `provider not in CLI_COMMANDS` copies became one `agent_cli.require_supported_provider`; `paper_writer.CLI_COMMANDS` and the `runner.py` raw loop were already gone, `agent_runner._run_cli_agent` stays as the thin factory wrapper its three callers share, `run_prebuilt_cli_agent` stays public; `docs/AGENT_AUTH.md`, `docs/HOST_MODE.md`, `docs/SAFETY_ENGINE.md` and the README tables refreshed; plus two follow-ups: the ideation stage prompt through the prompt registry and the model scout's inbox note as a Python-written change table |
+| Self-monitoring (`./neurico safety monitor`) | `docs/MONITOR_DESIGN.md` | design only (2026-10-21): allocation health and successor submission, progress-based stuck detection, log-pattern alerts, GPU idleness, spend, KB consistency, digest freshness, notifications; nothing built |
 | Cost pricing for Azure and Codex models | `config/prices.yaml` (format documented in the file) | present for the GPT-4.1 family and the Claude API routes; `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.4` are null (unpriced) until their list prices are confirmed |
 | `env_allowlist` for the ideation roles (Azure lane variables must be enumerated first) | `docs/IDEATION_INTEGRATION.md` status table | open |
 | Validation verdict end to end (two agreeing reproductions) | `docs/SAFETY_ENGINE.md` "Limits" | recorded by the validating run, not automated |
@@ -306,7 +307,7 @@ All commands from `docs/SAFETY_ENGINE.md`; `./neurico safety <cmd>` equals `uv r
 | Claude Code on Azure Foundry | `docs/AGENT_AUTH.md` | no Claude deployment on the lab resource as of 2026-10-20; Claude stays on OAuth |
 | XSTest gated dataset | `docs/SAFETY_ENGINE.md` pipeline test | replaced by the ungated CSV task (`xstest-safe-csv`, `xstest-unsafe-csv`) |
 | Crawler feeds that returned 404 or HTML | `docs/KNOWLEDGE_BASE.md` section 5 | kept with `enabled: false` for the owner to fix |
-| Stale text in `docs/SAFETY_ENGINE.md` "Limits" | says the crawler is not implemented; `src/safety/crawler.py` and the `crawl` command exist | doc needs a refresh in step 9 |
+| Stale text in `docs/SAFETY_ENGINE.md` "Limits" | said the crawler was not implemented | fixed in step 9 (2026-10-21): the Limits, Pieces, Commands, settings and Monitoring sections now describe the crawler, the scout, spend, the Slurm route and the event kinds the daemon writes |
 | Pre-existing failing test | `tests/test_hitl_timeout_recovery.py::test_run_worker_does_not_translate_sigterm_into_user_stop` | fails on `main` too; deselected in the count above |
 | Not exercised natively | `docs/HOST_MODE.md` "Verified" | HITL web/CLI, paper-finder service, Codex/Gemini on the dev host |
 

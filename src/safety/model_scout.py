@@ -6,11 +6,14 @@ against Hugging Face and vendor docs, and writes:
 
     catalog/models_latest.yaml            the current picture per family
     catalog/proposals/models-<run>.yaml   registry entries to add
-    inbox/<date>-model-scout.md           what changed, for the planner and for humans
 
-Python here does only two things with no family-specific knowledge: validate proposal entries
-against the registry schema and merge them, and compute `superseded_by` from release dates and
-parameter counts under the policy in families.yaml.
+Python here does three things with no family-specific knowledge: validate proposal entries
+against the registry schema and merge them, compute `superseded_by` from release dates and
+parameter counts under the policy in families.yaml, and write `inbox/<date>-model-scout.md`,
+a dated table of what the merge changed in the registry (``write_scout_note``). The note is
+data for the planner and for humans: registry ids, families, generations and dates, no prose
+and no instructions, so an ideation stage never has to classify it as instruction-like text
+(the newest-generation rule lives in the campaign context and the skills, not in the inbox).
 """
 
 from __future__ import annotations
@@ -67,7 +70,7 @@ def validate_entry(entry: Any, registry_access: set) -> Optional[str]:
         return "not a mapping"
     access = str(entry.get("access") or "")
     if ":" not in access:
-        return "access must be <scheme>:<target>"
+        return "access is not <scheme>:<target>"
     local = access.startswith("vllm:")
     required = REQUIRED_ENTRY_KEYS if local else ("id", "family", "access", "generation")
     missing = [k for k in required if entry.get(k) in (None, "")]
@@ -79,7 +82,7 @@ def validate_entry(entry: Any, registry_access: set) -> Optional[str]:
         try:
             float(entry["params_b"]); float(entry["gpu_memory_gb"])
         except (TypeError, ValueError):
-            return "params_b and gpu_memory_gb must be numbers"
+            return "params_b or gpu_memory_gb is not a number"
     return None
 
 
@@ -166,11 +169,99 @@ def run_scout(kb: KB, *, provider: str = "codex", model: Optional[str] = None, a
     factory = AgentFactory()
     spec = factory.spec("model_scout", provider=provider, model=model, auth=agent_auth, timeout=timeout,
                         transcript={"logs_dir": log_dir, "stem": scout_run, "save_prompt": False})
+    before = registry_snapshot(kb)
+    previous_latest = load_yaml(kb.catalog_dir / "models_latest.yaml") or {}
     result = factory.run(factory.build(spec, {"NEURICO_SAFETY_KB": str(kb.root)}), prompt, kb.root, prompt_meta=rendered)
     outcome = merge_proposals(kb)
     latest = load_yaml(kb.catalog_dir / "models_latest.yaml") or {}
+    note = write_scout_note(kb, scout_run, before=before, after=registry_snapshot(kb), rejected=outcome["rejected"],
+                            previous_latest=previous_latest, latest=latest)
     record = {"ok": result.success, "scout_run": scout_run, "at": utc_now(),
               "refreshed": latest.get("refreshed"), "accepted": outcome["accepted"], "rejected": outcome["rejected"],
+              "inbox_note": str(note) if note else None,
               "log": str(result.log_file), "agent_run_id": result.run_id, "cost_usd": result.usage.cost_usd}
     save_yaml(log_dir / f"{scout_run}_outcome.yaml", record)
     return record
+
+
+# -- the inbox note: a dated table of registry changes, no prose -------------------------------------------
+
+def registry_snapshot(kb: KB) -> Dict[str, Dict[str, Any]]:
+    """``id -> entry`` of catalog/models.yaml, for diffing a merge."""
+    catalog = load_yaml(kb.catalog_dir / "models.yaml") or {}
+    return {str(m.get("id")): dict(m) for m in (catalog.get("models") or []) if isinstance(m, dict) and m.get("id")}
+
+
+def registry_changes(before: Dict[str, Dict[str, Any]], after: Dict[str, Dict[str, Any]],
+                     previous_latest: Dict[str, Any], latest: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Rows of ``{change, id, family, generation, release_date, detail}``: entries added to or removed
+    from the registry, ``superseded_by`` set / cleared / changed, and the newest generation per family
+    in ``models_latest.yaml`` changing between two scout runs."""
+    rows: List[Dict[str, Any]] = []
+
+    def row(change: str, entry: Dict[str, Any], detail: str = "") -> Dict[str, Any]:
+        return {"change": change, "id": str(entry.get("id") or ""), "family": str(entry.get("family") or ""),
+                "generation": str(entry.get("generation") or ""), "release_date": str(entry.get("release_date") or ""),
+                "detail": detail}
+
+    for mid in sorted(set(after) - set(before)):
+        e = after[mid]
+        rows.append(row("added", e, f"access `{e.get('access', '')}`"
+                        + (f", {e.get('params_b')}B, {e.get('gpu_memory_gb')} GB" if e.get("params_b") else "")))
+    for mid in sorted(set(before) - set(after)):
+        rows.append(row("removed", before[mid]))
+    for mid in sorted(set(before) & set(after)):
+        old, new = before[mid].get("superseded_by"), after[mid].get("superseded_by")
+        if old != new:
+            if new and not old:
+                rows.append(row("superseded", after[mid], f"superseded_by `{new}`"))
+            elif old and not new:
+                rows.append(row("current again", after[mid], f"superseded_by `{old}` cleared"))
+            else:
+                rows.append(row("superseded", after[mid], f"superseded_by `{old}` -> `{new}`"))
+    prev_fams = (previous_latest or {}).get("families") or {}
+    for fam, info in sorted(((latest or {}).get("families") or {}).items()):
+        new_gen, old_gen = (info or {}).get("newest_generation"), (prev_fams.get(fam) or {}).get("newest_generation")
+        if new_gen and new_gen != old_gen:
+            rows.append({"change": "newest generation", "id": "", "family": str(fam), "generation": str(new_gen),
+                         "release_date": str((info or {}).get("released") or ""),
+                         "detail": f"previously `{old_gen}`" if old_gen else "first scout record"})
+    return rows
+
+
+def _cell(value: Any) -> str:
+    return str(value if value not in (None, "") else "-").replace("|", "\\|").replace("\n", " ")
+
+
+def write_scout_note(kb: KB, scout_run: str, *, before: Dict[str, Dict[str, Any]], after: Dict[str, Dict[str, Any]],
+                     rejected: List[Any], previous_latest: Dict[str, Any], latest: Dict[str, Any],
+                     date: Optional[str] = None) -> Optional[Path]:
+    """Write ``inbox/<date>-model-scout.md`` when the merge changed something (or rejected a proposal);
+    return its path, or None when there is nothing to report. Front matter plus two tables, no sentences."""
+    rows = registry_changes(before, after, previous_latest, latest)
+    if not rows and not rejected:
+        return None
+    date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    lines = ["---", "source: model-scout", "kind: registry-changes", f"scout_run: {scout_run}", f"fetched: {date}",
+             f"refreshed: {(latest or {}).get('refreshed') or '-'}",
+             f"title: Model registry changes {date}", "---", "", f"# Model registry changes {date}", "",
+             "| scout run | registry entries before | after | added | superseded | rejected proposals |",
+             "| --- | --- | --- | --- | --- | --- |",
+             f"| `{scout_run}` | {len(before)} | {len(after)} | {sum(r['change'] == 'added' for r in rows)} | "
+             f"{sum(r['change'] == 'superseded' for r in rows)} | {len(rejected)} |", ""]
+    if rows:
+        lines += ["## Registry (catalog/models.yaml, catalog/models_latest.yaml)", "",
+                  "| change | id | family | generation | release date | detail |", "| --- | --- | --- | --- | --- | --- |"]
+        lines += [f"| {_cell(r['change'])} | {('`' + r['id'] + '`') if r['id'] else '-'} | {_cell(r['family'])} | "
+                  f"{_cell(r['generation'])} | {_cell(r['release_date'])} | {_cell(r['detail'])} |" for r in rows]
+        lines.append("")
+    if rejected:
+        lines += ["## Proposals not merged (validate_entry)", "", "| proposal file | id | reason |", "| --- | --- | --- |"]
+        for item in rejected:
+            fname, mid, reason = (list(item) + ["", "", ""])[:3]
+            lines.append(f"| {_cell(fname)} | {('`' + str(mid) + '`') if mid else '-'} | {_cell(reason)} |")
+        lines.append("")
+    kb.inbox_dir.mkdir(parents=True, exist_ok=True)
+    path = kb.inbox_dir / f"{date}-model-scout.md"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
