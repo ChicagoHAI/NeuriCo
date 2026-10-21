@@ -465,8 +465,9 @@ def test_legacy_runner_path(fake_cli, tmp_path, lane, provider, monkeypatch):
     record = fake_cli.last()
     assert_launch(fake_cli, record, provider, lane, cwd=work)
     assert record["prompt"] == (work / "logs" / "session_instructions.txt").read_text(encoding="utf-8")
-    # .log only; this path writes no transcript
-    assert logs_written(work / "logs") == {"research_prompt.txt", "session_instructions.txt", f"execution_{provider}.log"}
+    # step 2: this path used to write the .log only; through the factory it also gets the transcript
+    assert logs_written(work / "logs") == {"research_prompt.txt", "session_instructions.txt"} | \
+        factory_artifacts("execution", provider, prompt=False)
     assert result == {"work_dir": work, "github_url": None, "success": True}
 
 
@@ -480,17 +481,14 @@ def test_agent_runner_run_resource_finder(fake_cli, tmp_path, lane, provider, mo
     work = tmp_path / "ws"
     work.mkdir()
     tracker = agent_runner.RunTracker(work, "rf_001", "resource_finder")
-    if lane == "azure":
-        # build_agent_environment is called with provider "" on this path, which the Azure lane rejects
-        with pytest.raises(RuntimeError):
-            agent_runner.run_resource_finder({}, work, provider, tracker)
-        return
+    # step 2: this path used to build its environment with provider "", which the Azure lane
+    # rejected; through the factory `_run-agent` works on both lanes
     result = agent_runner.run_resource_finder({}, work, provider, tracker)
     record = fake_cli.last()
     assert_launch(fake_cli, record, provider, lane, cwd=work, prompt="rf prompt")
-    assert logs_written(work / "logs") == {"resource_finder_prompt.txt", f"resource_finder_{provider}.log",
-                                           f"resource_finder_{provider}_transcript.jsonl"}
-    assert set(result) == {"success", "return_code", "elapsed_time", "log_file", "transcript_file", "outputs"}
+    assert logs_written(work / "logs") == factory_artifacts("resource_finder", provider)
+    assert set(result) == LAUNCH_KEYS | {"outputs"}  # legacy_dict() plus the outputs listing
+    assert result["success"] is True  # exit code, not the marker: the manager inspects the workspace itself
     status = json.loads((work / ".neurico" / "runs" / "rf_001" / "status.json").read_text(encoding="utf-8"))
     assert status["status"] == "running" and status["pid"] == record["pid"]
 

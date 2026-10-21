@@ -129,3 +129,43 @@ def test_autoresearch_proposer_times_out(hanging_cli, tmp_path, oauth, monkeypat
     assert_reaped(hanging_cli.last()["child_pid"])
     # the proposer runs in the attempt dir; the ledger line belongs to the workspace
     assert ledger_entry(work, "autoresearch_proposer")["status"] == "timeout"
+
+
+# -- 9 legacy monolithic runner -------------------------------------------------------------------------------------
+
+def test_legacy_runner_times_out(hanging_cli, tmp_path, oauth, monkeypatch):
+    import yaml
+    from core.runner import ResearchRunner
+
+    monkeypatch.setenv("NEURICO_IDEAS", str(tmp_path / "ideas"))
+    monkeypatch.setenv("NEURICO_WORKSPACE", str(tmp_path / "workspaces"))
+    (tmp_path / "ideas" / "submitted").mkdir(parents=True)
+    (tmp_path / "ideas" / "submitted" / "slow-idea.yaml").write_text(yaml.safe_dump({"idea": {
+        "id": "slow-idea", "title": "Slow", "domain": "artificial_intelligence",
+        "hypothesis": "A testable hypothesis for the legacy path.", "status": "submitted"}}), encoding="utf-8")
+    started = time.time()
+    result = ResearchRunner(use_github=False).run_research("slow-idea", provider="claude", multi_agent=False,
+                                                           write_paper=False, timeout=TIMEOUT_S)
+    assert time.time() - started < MAX_WALL_S
+    assert result["success"] is False
+    assert_reaped(hanging_cli.last()["child_pid"])
+    assert ledger_entry(Path(result["work_dir"]), "experiment_runner")["status"] == "timeout"
+
+
+# -- 10 standalone agent runner (`neurico _run-agent`) ---------------------------------------------------------------
+
+def test_agent_runner_times_out_and_marks_the_run_failed(hanging_cli, tmp_path, oauth, monkeypatch):
+    import json
+    from core import agent_runner
+    import agents.resource_finder as resource_finder
+
+    monkeypatch.setattr(resource_finder, "generate_resource_finder_prompt", lambda *a, **kw: "p")
+    work = workspace(tmp_path)
+    started = time.time()
+    result = agent_runner.run_agent("resource_finder", {}, work, "codex", "rf_slow", timeout=TIMEOUT_S)
+    assert time.time() - started < MAX_WALL_S
+    assert result["success"] is False and result["timed_out"] is True
+    assert_reaped(hanging_cli.last()["child_pid"])
+    status = json.loads((work / ".neurico" / "runs" / "rf_slow" / "status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "failed" and status["pid"] == hanging_cli.last()["pid"]
+    assert ledger_entry(work, "resource_finder")["status"] == "timeout"
