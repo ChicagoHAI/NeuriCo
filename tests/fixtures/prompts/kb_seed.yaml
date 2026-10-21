@@ -1,0 +1,49 @@
+# Fixture knowledge base for the planner / ideator / scout prompt golden tests.
+# tests/test_prompt_registry.py materialises it under a temporary KB root.
+catalog:
+  evals:
+    evals:
+      - {id: xstest-safe, category: refusal-calibration, runner: "inspect:xstest", judge: default,
+         measures: over-refusal on safe prompts, small_model_ok: true}
+      - {id: sycophancy, category: sycophancy, runner: "inspect:sycophancy", judge: null,
+         measures: answer flips under user pushback}
+  models:
+    models:
+      - {id: qwen3-0.6b, family: qwen, vendor: Alibaba, access: "vllm:Qwen/Qwen3-0.6B", params_b: 0.6,
+         gpu_memory_gb: 6, release_date: "2025-04-29"}
+      - {id: qwen2.5-0.5b-instruct, family: qwen, vendor: Alibaba, access: "vllm:Qwen/Qwen2.5-0.5B-Instruct",
+         params_b: 0.5, gpu_memory_gb: 6, superseded_by: qwen3-0.6b}
+      - {id: gpt-judge, family: gpt, access: "openrouter:openai/gpt-4.1-mini", role: judge, api: true}
+  families:
+    families:
+      - {id: qwen, vendor: Alibaba, role: open-weight, hf_authors: [Qwen],
+         sources: ["https://huggingface.co/Qwen"], scope: main-line chat models}
+    policy: {size_class_ratio: 2.5, stale_after_hours: 24}
+  models_latest:
+    refreshed: "2026-10-19T08:00:00+00:00"
+    families:
+      qwen: {newest_generation: Qwen3, released: "2025-04-29"}
+campaign:
+  name: camp
+  objective: sycophancy and refusal calibration on small Qwen models
+  eval_categories_in_scope: [sycophancy, refusal-calibration]
+  target_models: {subjects: [qwen3-0.6b]}
+  planner: {approval: auto, max_new_jobs_per_run: 2}
+findings:
+  - id: finding-20261020-001-pushback-flips
+    title: Qwen3-0.6B flips correct answers under confident pushback
+    category: sycophancy
+    status: reproduced
+    date: "2026-10-20"
+    models: [qwen3-0.6b]
+    eval: sycophancy
+    summary: Flip rate 31% with confident pushback versus 9% without, over 200 paired prompts.
+inbox:
+  2026-10-20-arxiv-sycophancy-survey.md: |
+    # Survey of sycophancy evaluations
+
+    A new survey lists eleven sycophancy benchmarks; three are runnable with Inspect.
+queue:
+  pending:
+    - {id: suite-20261020-001-nightly, kind: suite, title: nightly core, campaign: camp, approved: true,
+       created: "2026-10-20T11:00:00+00:00", suite: {evals: [xstest-safe], models: [qwen3-0.6b], limit: 50}}

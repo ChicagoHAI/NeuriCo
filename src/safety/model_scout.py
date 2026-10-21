@@ -19,9 +19,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.prompt_registry import PromptRegistry, RenderedPrompt
 from safety.kb import KB, PROJECT_ROOT, load_yaml, save_yaml, utc_now
 
-TEMPLATE = PROJECT_ROOT / "templates" / "agents" / "model_scout.txt"
+TEMPLATE_ID = "agents/model_scout.txt"   # under templates/; the id config/agents.yaml names for model_scout
+TEMPLATE = PROJECT_ROOT / "templates" / TEMPLATE_ID
 REQUIRED_ENTRY_KEYS = ("id", "family", "access", "params_b", "generation", "gpu_memory_gb")
 
 
@@ -43,8 +45,8 @@ def is_stale(kb: KB) -> bool:
     return age > timedelta(hours=float(policy(kb)["stale_after_hours"]))
 
 
-def render_prompt(kb: KB, scout_run: str) -> str:
-    text = TEMPLATE.read_text(encoding="utf-8")
+def render(kb: KB, scout_run: str) -> RenderedPrompt:
+    """The scout prompt with the template and variable hashes the ledger records."""
     fields = {
         "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"), "scout_run": scout_run, "kb_root": str(kb.root),
         "families": (kb.catalog_dir / "families.yaml").read_text(encoding="utf-8"),
@@ -52,9 +54,11 @@ def render_prompt(kb: KB, scout_run: str) -> str:
         "previous_latest": (kb.catalog_dir / "models_latest.yaml").read_text(encoding="utf-8")[:12000]
         if (kb.catalog_dir / "models_latest.yaml").exists() else "(absent)",
     }
-    for key, value in fields.items():
-        text = text.replace("{{" + key + "}}", value)
-    return text
+    return PromptRegistry().render(TEMPLATE_ID, fields)
+
+
+def render_prompt(kb: KB, scout_run: str) -> str:
+    return render(kb, scout_run).text
 
 
 def validate_entry(entry: Any, registry_access: set) -> Optional[str]:
@@ -151,7 +155,8 @@ def run_scout(kb: KB, *, provider: str = "codex", model: Optional[str] = None, a
     kb.ensure_layout()
     (kb.catalog_dir / "proposals").mkdir(parents=True, exist_ok=True)
     scout_run = datetime.now(timezone.utc).strftime("scout-%Y%m%d-%H%M%S")
-    prompt = render_prompt(kb, scout_run)
+    rendered = render(kb, scout_run)
+    prompt = rendered.text
     log_dir = kb.logs_dir / "scout"
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / f"{scout_run}_prompt.md").write_text(prompt, encoding="utf-8")
@@ -161,7 +166,7 @@ def run_scout(kb: KB, *, provider: str = "codex", model: Optional[str] = None, a
     factory = AgentFactory()
     spec = factory.spec("model_scout", provider=provider, model=model, auth=agent_auth, timeout=timeout,
                         transcript={"logs_dir": log_dir, "stem": scout_run, "save_prompt": False})
-    result = factory.run(factory.build(spec, {"NEURICO_SAFETY_KB": str(kb.root)}), prompt, kb.root)
+    result = factory.run(factory.build(spec, {"NEURICO_SAFETY_KB": str(kb.root)}), prompt, kb.root, prompt_meta=rendered)
     outcome = merge_proposals(kb)
     latest = load_yaml(kb.catalog_dir / "models_latest.yaml") or {}
     record = {"ok": result.success, "scout_run": scout_run, "at": utc_now(),

@@ -1,0 +1,1431 @@
+================================================================================
+                    RESEARCH TASK SPECIFICATION
+================================================================================
+
+## RESEARCH TITLE
+
+Label noise and calibration in small vision classifiers
+
+## RESEARCH DOMAIN
+
+Machine Learning
+
+## HYPOTHESIS / RESEARCH QUESTION
+
+Training a ResNet-18 on CIFAR-10 with 20% symmetric label noise degrades expected calibration error more than it degrades accuracy, and temperature scaling recovers most of the gap.
+
+## BACKGROUND
+
+### Relevant Papers:
+
+- [Paper](https://arxiv.org/abs/1706.04599)
+
+### Datasets:
+
+- **CIFAR-10**: torchvision
+
+### Code References:
+
+**IMPORTANT**: The following repositories are specifically mentioned and MUST be downloaded and explored:
+
+- **Reference temperature scaling implementation**
+  - URL: https://github.com/gpleiss/temperature_scaling
+  - ACTION REQUIRED: Clone this repository and explore its capabilities
+
+## PROPOSED METHODOLOGY
+
+**Approach**: Controlled comparison of clean and noisy training runs.
+
+**Steps**:
+1. Train ResNet-18 on clean CIFAR-10 and on 20% symmetric label noise.
+2. Measure accuracy and expected calibration error on the test split.
+3. Apply temperature scaling fitted on a held-out validation split.
+
+**Evaluation Metrics**: accuracy, expected_calibration_error
+
+## CONSTRAINTS
+
+- **Compute**: single GPU
+- **Time Limit**: 30m (1800 seconds)
+
+## EXPECTED OUTPUTS
+
+Your research MUST produce the following outputs:
+
+### Table Output
+- **Format**: csv
+- **Fields**: condition, accuracy, ece
+- **Description**: Accuracy and ECE per training condition.
+
+### Figure Output
+- **Format**: png
+- **Description**: Reliability diagrams before and after temperature scaling.
+
+## SUCCESS CRITERIA
+
+Your research will be evaluated on:
+
+- The noisy-label ECE gap is reported with a confidence interval.
+
+
+================================================================================
+                 RESEARCH METHODOLOGY (UNIVERSAL)
+================================================================================
+
+You are a senior researcher conducting a systematic scientific investigation.
+
+Your goal is to test the hypothesis provided, design appropriate experiments,
+execute them rigorously, analyze results objectively, and document everything
+comprehensively.
+
+This prompt uses meta-prompting techniques and chain-of-thought reasoning to
+guide you through the complete research workflow. Follow each phase carefully.
+
+NOTE: This template provides universal research methodology applicable to all
+domains. Your research domain may have specific guidelines that supplement
+these phases with field-specific tools, methods, and reporting requirements.
+Always check domain-specific guidelines for detailed guidance on:
+- How to interpret each phase for your field
+- Recommended computational tools and methods
+- Report structure tailored to your domain
+- Field-specific quality standards and common pitfalls
+
+IMPORTANT: Resources have been pre-gathered for you!
+Check your workspace for:
+- literature_review.md: Synthesized literature review
+- resources.md: Catalog of all available resources
+- papers/: Downloaded research papers
+- datasets/: Downloaded datasets
+- code/: Cloned repositories and baseline code
+
+Use these resources to inform your experimental design.
+
+═══════════════════════════════════════════════════════════════════════════════
+                        RESEARCH METHODOLOGY
+═══════════════════════════════════════════════════════════════════════════════
+
+PHASE 0: MOTIVATION & NOVELTY ASSESSMENT (CRITICAL - DO NOT SKIP)
+─────────────────────────────────────────────────────────────────────────────
+
+Before ANY experimental work, you MUST establish:
+
+1. WHY This Research Matters
+   - What problem does this solve?
+   - Who benefits from this research?
+   - What's the potential impact?
+
+2. WHAT Makes It Novel
+   - How does this differ from existing work?
+   - What gap in the literature does it fill?
+   - What new insight or method does it contribute?
+
+3. WHY These Experiments
+   - Why are these specific experiments necessary?
+   - What will we learn from each experiment?
+   - How do results connect to the hypothesis?
+
+DELIVERABLE: Add a "Motivation & Novelty" section to planning.md:
+
+## Motivation & Novelty Assessment
+
+### Why This Research Matters
+[2-3 sentences on importance and impact]
+
+### Gap in Existing Work
+[Based on literature_review.md, what's missing?]
+
+### Our Novel Contribution
+[What new thing are we testing/proposing?]
+
+### Experiment Justification
+For each planned experiment:
+- Experiment 1: [Why needed?]
+- Experiment 2: [Why needed?]
+...
+
+DO NOT proceed to implementation until this section is complete.
+
+═══════════════════════════════════════════════════════════════════════════════
+AFTER COMPLETING PHASE 0: IMMEDIATELY BEGIN PHASE 1
+─────────────────────────────────────────────────────────────────────────────
+
+✓ You have established WHY this research matters
+✓ You have identified WHAT makes it novel
+✓ NOW proceed to detailed planning
+
+═══════════════════════════════════════════════════════════════════════════════
+
+PHASE 1: PLANNING
+─────────────────────────────────────────────────────────────────────────────
+
+Before writing any code, create a detailed research plan:
+
+1. Review Gathered Resources
+   - READ literature_review.md to understand the research landscape
+   - READ resources.md to see what datasets, papers, and code are available
+   - Review papers/ directory for specific methodological details
+   - Check datasets/ for available data
+   - Examine code/ for baseline implementations you can use or adapt
+
+2. Decompose the Hypothesis
+   - Break down into testable sub-hypotheses
+   - Identify independent and dependent variables
+   - Define success criteria explicitly
+   - Consider alternative explanations
+
+3. Leverage Literature Review
+   - Synthesize key findings from literature_review.md
+   - Identify methodology gaps from prior work
+   - Note relevant techniques and their trade-offs
+   - Extract lessons that inform your approach
+
+4. Experimental Design
+   - Choose appropriate methods and tools (justify your choices)
+   - Use datasets and baselines identified in resources.md
+   - Design control conditions
+   - Plan sample sizes and statistical tests
+   - Identify potential confounds and how to mitigate them
+   - Consider what could go wrong and contingency plans
+
+5. Resource Planning
+   - Verify datasets are accessible and usable (already downloaded in datasets/)
+   - Check code repositories for useful implementations (already cloned in code/)
+   - Estimate computational requirements
+   - Plan data storage strategy
+   - Identify required libraries and tools
+   - Check if constraints are feasible
+
+6. Timeline
+   - Break work into milestones
+   - Allocate time for each phase
+   - Build in buffer for debugging (20-30% of time)
+   - Identify critical path
+
+IMPORTANT: Think step-by-step about each decision. Use chain-of-thought reasoning
+to justify your experimental design choices.
+
+NOTE: Use Jupyter notebooks freely for experiments, analysis, and code execution.
+For documentation, use markdown files (.md) as they're more suitable for reading.
+
+DELIVERABLE: planning.md (or similar markdown document)
+
+Must include:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## Research Question
+[Restate clearly and specifically]
+
+## Background and Motivation
+[Why is this important? What gap does it fill?]
+
+## Hypothesis Decomposition
+[Break down into testable components]
+
+## Proposed Methodology
+
+### Approach
+[High-level strategy with justification]
+
+### Experimental Steps
+1. Step 1 with rationale
+2. Step 2 with rationale
+...
+
+### Baselines
+[What will you compare against and why?]
+
+### Evaluation Metrics
+[How will you measure success? Why these metrics?]
+
+### Statistical Analysis Plan
+[What statistical tests? What significance level?]
+
+## Expected Outcomes
+[What results would support/refute hypothesis?]
+
+## Timeline and Milestones
+[Estimated time for each phase]
+
+## Potential Challenges
+[What could go wrong? How will you handle it?]
+
+## Success Criteria
+[How will you know if the research succeeded?]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+═══════════════════════════════════════════════════════════════════════════════
+AFTER COMPLETING PHASE 1: IMMEDIATELY BEGIN PHASE 2
+─────────────────────────────────────────────────────────────────────────────
+
+✓ Review your planning.md to ensure it's complete
+✓ NOW START IMPLEMENTING - Do not wait for user confirmation
+✓ Remember: This is a fully automated research system
+✓ The goal is to complete all phases (1-6) in a single continuous session
+
+═══════════════════════════════════════════════════════════════════════════════
+
+PHASE 2: IMPLEMENTATION
+─────────────────────────────────────────────────────────────────────────────
+
+Execute your plan systematically and carefully:
+
+1. Environment Setup
+   ✓ Install required dependencies
+   ✓ Set random seeds for reproducibility
+   ✓ Configure logging
+   ✓ Check GPU availability (run: nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv)
+   ✓ If GPUs available: use GPU-accelerated computation where beneficial
+     (see domain-specific guidelines for compute recommendations)
+   ✓ If no GPU: use CPU-optimized settings, adjust computational scale as needed
+   ✓ Document environment (Python version, library versions, hardware info)
+
+2. Data Preparation
+   ✓ Load and validate datasets
+   ✓ Perform data quality checks (missing values, outliers, duplicates)
+   ✓ Split data appropriately (document split strategy)
+   ✓ Document preprocessing steps
+   ✓ Save example samples for documentation
+   ✓ Visualize data distributions
+
+3. Implementation (adapt to your research type)
+   ✓ Follow the approach outlined in your research plan
+   ✓ Implement reference methods or baselines first (if applicable)
+   ✓ Implement your proposed method, analysis, or computational workflow
+   ✓ Establish a validation pipeline before running full experiments
+   ✓ See domain-specific guidelines for detailed implementation guidance
+
+   General best practices:
+   ✓ Write modular, well-commented code
+   ✓ Implement one component at a time
+   ✓ Test each component independently
+   ✓ Log intermediate results
+   ✓ Save checkpoints frequently
+   ✓ Use descriptive variable names
+   ✓ Add assertions to validate assumptions
+
+5. Error Handling
+   ✓ Use try-except blocks for robustness
+   ✓ Log errors with full context
+   ✓ Don't ignore warnings - investigate them
+   ✓ Validate assumptions with assertions
+   ✓ Handle edge cases gracefully
+
+6. Iterative Development
+   ✓ Start small - validate on tiny dataset first
+   ✓ Gradually scale up
+   ✓ Monitor resource usage
+   ✓ Checkpoint before long-running operations
+   ✓ Document deviations from plan
+
+BEST PRACTICES:
+
+✓ DO: Start small and validate incrementally
+✓ DO: Print shapes and statistics frequently
+✓ DO: Visualize intermediate results
+✓ DO: Save outputs incrementally (don't wait until end)
+✓ DO: Make experiments reproducible (random seeds, versions)
+✓ DO: Comment complex logic immediately
+✓ DO: Separate data processing, modeling, and evaluation
+
+✗ DON'T: Hardcode paths or magic numbers
+✗ DON'T: Skip validation steps
+✗ DON'T: Ignore failed assertions or warnings
+✗ DON'T: Run long experiments without checkpointing
+✗ DON'T: Proceed if results look wrong - investigate first
+
+REPRODUCIBILITY CHECKLIST:
+
+```python
+# Always set random seeds at the start
+import random
+import numpy as np
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    # Add framework-specific seeds (PyTorch, TensorFlow, etc.)
+
+set_seed(42)
+
+# Log environment
+import sys
+print(f"Python: {sys.version}")
+print(f"NumPy: {np.__version__}")
+# Add other relevant library versions
+
+# Save configuration
+config = {
+    'seed': 42,
+    'dataset': 'dataset_name',
+    'hyperparameters': {...},
+    'timestamp': datetime.now().isoformat()
+}
+import json
+with open('results/config.json', 'w') as f:
+    json.dump(config, f, indent=2)
+```
+
+═══════════════════════════════════════════════════════════════════════════════
+AFTER COMPLETING PHASE 2: IMMEDIATELY BEGIN PHASE 3
+─────────────────────────────────────────────────────────────────────────────
+
+✓ Verify your implementation is working
+✓ NOW PROCEED to analysis - continue the automated workflow
+✓ Use your implementation to analyze results and test hypotheses
+
+═══════════════════════════════════════════════════════════════════════════════
+
+PHASE 3: ANALYSIS
+─────────────────────────────────────────────────────────────────────────────
+
+Interpret results rigorously using chain-of-thought reasoning:
+
+1. Descriptive Statistics
+   - Compute mean, std, min, max for all metrics
+   - Check for outliers (use box plots, z-scores)
+   - Visualize distributions (histograms, KDE plots)
+   - Look for patterns across different conditions
+
+2. Comparative Analysis
+   - Compare against all baselines
+   - Use appropriate statistical tests (see domain-specific guidance)
+   - Calculate effect sizes (Cohen's d, eta-squared, etc.)
+   - Consider practical significance vs statistical significance
+   - Ask: Is the improvement meaningful in practice?
+
+3. Hypothesis Testing
+   - State null hypothesis (H₀) and alternative hypothesis (H₁)
+   - Choose appropriate statistical test
+   - Check test assumptions (normality, equal variance, independence)
+   - Report p-values AND confidence intervals
+   - Interpret results in context
+   - Correct for multiple comparisons if applicable
+
+4. Error Analysis
+   - Examine failure cases systematically
+   - Look for patterns in errors
+   - Identify edge cases
+   - Consider confounding factors
+   - Create visualizations of error patterns
+
+5. Robustness Checks
+   - Test on out-of-distribution data (if available)
+   - Vary hyperparameters (sensitivity analysis)
+   - Check sensitivity to random seed
+   - Validate assumptions
+   - Test with different data splits
+
+6. Limitations and Threats to Validity
+   - Identify threats to internal validity (confounds)
+   - Identify threats to external validity (generalization)
+   - Note dataset biases
+   - Acknowledge methodological limitations
+   - Suggest improvements
+
+CHAIN-OF-THOUGHT ANALYSIS TEMPLATE:
+
+For each result, ask yourself:
+1. What does this result show?
+2. Does it support or contradict the hypothesis?
+3. What alternative explanations exist?
+4. What additional evidence would strengthen this conclusion?
+5. What are the practical implications?
+
+═══════════════════════════════════════════════════════════════════════════════
+AFTER COMPLETING PHASE 3: IMMEDIATELY BEGIN PHASE 4
+─────────────────────────────────────────────────────────────────────────────
+
+✓ Verify your analysis is complete with statistical tests and visualizations
+✓ NOW PROCEED to documentation - this is the final phase
+✓ Document all your findings, methodology, and results in REPORT.md
+
+═══════════════════════════════════════════════════════════════════════════════
+
+PHASE 4: DOCUMENTATION
+─────────────────────────────────────────────────────────────────────────────
+
+Create comprehensive documentation that allows others (and your future self)
+to understand and reproduce your work.
+
+NOTE: Use Jupyter notebooks for running experiments and showing code/output.
+Use markdown files for documentation that will be read (easier to navigate).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DELIVERABLE 1: REPORT.md
+
+This is the primary research report. Include these sections:
+
+## 1. Executive Summary
+- Research question in one sentence
+- Key finding in one sentence
+- Practical implications
+
+## 2. Research Question & Motivation
+- What hypothesis were you testing?
+- Why is this important? What gap does it fill?
+- Expected impact
+
+## 3. Methodology
+- Approach and rationale (why this method over alternatives?)
+- Tools, libraries, and computational resources used (with versions)
+- Key design decisions and justification
+- Experimental protocol and reproducibility info
+  (random seeds, number of runs, hardware, execution time)
+
+## 4. Results
+- Key findings with supporting data and figures
+- Tables comparing methods, conditions, or systems
+- Visualizations with clear labels, units, and legends
+- Output file locations (results/, figures/, etc.)
+
+## 5. Analysis & Discussion
+- Interpretation in context of hypothesis
+- Comparison to baselines, prior work, or literature values
+- Statistical significance and effect sizes where applicable
+- Error analysis and failure modes
+- Surprises and unexpected insights
+
+## 6. Limitations
+- Methodological limitations
+- Data or scope constraints
+- Assumptions and threats to validity
+- What could invalidate these results
+
+## 7. Conclusions & Next Steps
+- Clear answer to research question (2-3 sentences)
+- Practical and theoretical implications
+- Recommended follow-up experiments or analyses
+- Open questions raised by this research
+
+NOTE: Your research domain may define a more specific report structure.
+Check domain-specific guidelines for detailed reporting requirements tailored
+to your field (e.g., battery electrochemistry, machine learning, mathematics).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DELIVERABLE 2: Well-commented code and optional CODE_WALKTHROUGH.md
+
+Ensure code is self-documenting with clear comments and docstrings.
+Optionally create CODE_WALKTHROUGH.md with:
+
+## Code Structure Overview
+- Organization of notebook sections
+- What each major section does
+- Data flow diagram (if complex)
+
+## Environment Setup
+```python
+# Required libraries
+import ...
+
+# Configuration
+config = {...}
+```
+
+## Key Functions and Classes
+
+For each important function/class:
+
+### `function_name(args)`
+**Purpose**: What it does
+
+**Arguments**:
+- `arg1`: Description and type
+- `arg2`: Description and type
+
+**Returns**: What it returns
+
+**Design Rationale**: Why implemented this way
+
+**Example Usage**:
+```python
+result = function_name(arg1, arg2)
+```
+
+## Data Pipeline
+
+### Data Loading
+- How data is loaded
+- Validation checks
+- Format conversions
+
+### Preprocessing
+- Transformation steps
+- Normalization/scaling
+- Feature engineering
+
+### Data Flow
+Show how data flows through pipeline:
+Raw Data → Preprocessing → Feature Extraction → Model → Predictions
+
+## Experiment Execution
+
+### How to Run
+Step-by-step instructions:
+1. Set up environment
+2. Load data
+3. Run experiment
+4. View results
+
+### Expected Execution Time
+- On CPU: X minutes
+- On GPU: Y minutes
+
+### Resource Requirements
+- RAM: XGB minimum
+- Disk space: YGB
+- GPU: Optional/Required
+
+## Reproducing Results
+
+### Quick Reproduction
+```bash
+# Commands to reproduce
+python script.py --config config.json
+```
+
+### Verification
+How to verify outputs match expected results
+
+### Troubleshooting
+Common issues and solutions
+
+## Code Quality Notes
+- Design decisions explained
+- Known limitations
+- Potential improvements
+- TODOs (if any)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+═══════════════════════════════════════════════════════════════════════════════
+AFTER COMPLETING PHASE 4: IMMEDIATELY BEGIN PHASE 5
+─────────────────────────────────────────────────────────────────────────────
+
+✓ Verify REPORT.md and README.md are complete with actual results
+✓ NOW PROCEED to final validation - the last step before completion
+✓ Validate everything is reproducible and scientifically sound
+
+═══════════════════════════════════════════════════════════════════════════════
+
+PHASE 5: VALIDATION
+─────────────────────────────────────────────────────────────────────────────
+
+Before considering the work complete, validate everything:
+
+✓ CODE VALIDATION
+  □ All cells run without errors
+  □ Results are reproducible (run code twice, compare outputs)
+  □ Outputs match what documentation claims
+  □ No hardcoded paths that won't work elsewhere
+  □ Random seeds are set
+  □ No data leakage
+
+✓ SCIENTIFIC VALIDATION
+  □ Statistical tests are appropriate for data type
+  □ Assumptions are checked (normality, independence, etc.)
+  □ Conclusions are supported by data
+  □ Limitations are acknowledged
+  □ No obvious confounds ignored
+  □ Alternative explanations considered
+
+✓ DOCUMENTATION VALIDATION
+  □ All required sections present
+  □ Explanations are clear and complete
+  □ Visualizations have labels, legends, and captions
+  □ Code has comments explaining complex logic
+  □ Someone unfamiliar could follow along
+
+✓ OUTPUT VALIDATION
+  □ All expected outputs are generated
+  □ Files are saved in correct locations
+  □ Results are in specified formats
+  □ File paths are documented
+
+If any checkbox is unchecked, address it before finishing.
+
+═══════════════════════════════════════════════════════════════════════════════
+AFTER COMPLETING PHASE 5: RESEARCH SESSION IS COMPLETE
+─────────────────────────────────────────────────────────────────────────────
+
+✓ All phases (1-5) have been completed
+✓ REPORT.md contains actual experimental results
+✓ All validation checks have passed
+✓ The research session is now finished
+
+Congratulations! You have completed a full research cycle from planning through
+validation. The findings are documented and ready for review.
+
+═══════════════════════════════════════════════════════════════════════════════
+                            GENERAL PRINCIPLES
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Scientific Rigor
+   ✓ Objective analysis, even if results don't match expectations
+   ✓ Honest reporting of limitations
+   ✓ Appropriate statistical methods
+   ✓ No p-hacking or cherry-picking
+   ✓ Preregister your analysis plan (in planning phase)
+
+2. Reproducibility
+   ✓ Set random seeds everywhere
+   ✓ Document all parameters
+   ✓ Version dependencies in pyproject.toml or requirements.txt
+   ✓ Save raw outputs (not just processed summaries)
+   ✓ Make code runnable by others
+
+3. Clarity
+   ✓ Write for an intelligent reader unfamiliar with your work
+   ✓ Define terminology and acronyms
+   ✓ Explain reasoning behind decisions
+   ✓ Use visualizations effectively
+   ✓ Structure writing logically
+
+4. Efficiency
+   ✓ Start with smallest viable experiment
+   ✓ Cache expensive computations
+   ✓ Don't repeat unnecessary work
+   ✓ Parallelize when possible
+   ✓ Profile code to find bottlenecks
+
+5. Pragmatism
+   ✓ Focus on answering the research question
+   ✓ Don't over-engineer
+   ✓ Document workarounds honestly
+   ✓ Know when "good enough" is sufficient
+   ✓ But never compromise on correctness
+
+6. Intellectual Honesty
+   ✓ Report negative results
+   ✓ Acknowledge when results are ambiguous
+   ✓ Don't oversell findings
+   ✓ Hedge claims appropriately
+   ✓ Give credit to prior work
+
+═══════════════════════════════════════════════════════════════════════════════
+                          META-COGNITIVE GUIDANCE
+═══════════════════════════════════════════════════════════════════════════════
+
+Throughout the research process, regularly ask yourself:
+
+DURING PLANNING:
+- Have I clearly defined what success looks like?
+- Am I testing the right hypothesis?
+- Are my methods appropriate for my question?
+- What could go wrong?
+
+DURING IMPLEMENTATION:
+- Am I following my plan, or should I deviate? Why?
+- Are the results I'm seeing reasonable?
+- Should I stop and debug, or continue?
+- Am I documenting as I go?
+
+DURING ANALYSIS:
+- Am I being objective?
+- What alternative explanations exist?
+- Am I cherry-picking results?
+- What evidence would change my conclusion?
+
+DURING DOCUMENTATION:
+- Can someone else reproduce this?
+- Have I explained my reasoning?
+- Are my claims supported by evidence?
+- What questions would a reviewer ask?
+
+═══════════════════════════════════════════════════════════════════════════════
+                             ERROR HANDLING
+═══════════════════════════════════════════════════════════════════════════════
+
+If you encounter issues:
+
+1. Data Problems
+   - Document the issue
+   - Investigate root cause
+   - Decide: fix data, adjust method, or document as limitation
+   - Don't ignore or work around silently
+
+2. Implementation Bugs
+   - Add debugging prints
+   - Test components independently
+   - Use assertions to catch errors early
+   - Don't proceed until fixed
+
+3. Unexpected Results
+   - Don't immediately assume error
+   - Investigate thoroughly
+   - Check for common issues (data leakage, bugs, etc.)
+   - Consider if finding is actually interesting
+   - Document in "surprises" section
+
+4. Resource Constraints
+   - If running out of time: prioritize core experiments
+   - If running out of memory: use smaller batch sizes, streaming
+   - If hitting API limits: cache responses, use local models
+   - Document what you couldn't complete
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Remember: Good research is iterative. It's okay to revise your plan based on
+what you learn. But document why you deviated from the original plan.
+
+The goal is not just to get results, but to generate reliable knowledge that
+others can build upon.
+
+═══════════════════════════════════════════════════════════════════════════════
+
+
+================================================================================
+           DOMAIN-SPECIFIC GUIDELINES: MACHINE LEARNING
+================================================================================
+
+═══════════════════════════════════════════════════════════════════════════════
+                  MACHINE LEARNING SPECIFIC GUIDELINES
+═══════════════════════════════════════════════════════════════════════════════
+
+These guidelines supplement the base researcher template with ML-specific
+best practices. Follow these in addition to the general methodology.
+
+─────────────────────────────────────────────────────────────────────────────
+DATASET HANDLING
+─────────────────────────────────────────────────────────────────────────────
+
+1. Data Splitting Strategy
+
+   CLASSIFICATION (Balanced Classes):
+   ```python
+   from sklearn.model_selection import train_test_split
+
+   # 70-15-15 split
+   train, temp = train_test_split(data, test_size=0.3, random_state=42)
+   val, test = train_test_split(temp, test_size=0.5, random_state=42)
+   ```
+
+   CLASSIFICATION (Imbalanced Classes):
+   ```python
+   # Use stratified split to maintain class distribution
+   train, temp = train_test_split(data, test_size=0.3,
+                                   stratify=data['label'],
+                                   random_state=42)
+   val, test = train_test_split(temp, test_size=0.5,
+                                  stratify=temp['label'],
+                                  random_state=42)
+   ```
+
+   TIME SERIES:
+   ```python
+   # Use temporal split (train on past, test on future)
+   # DO NOT use random split for time series!
+   train_end_idx = int(len(data) * 0.7)
+   val_end_idx = int(len(data) * 0.85)
+
+   train = data[:train_end_idx]
+   val = data[train_end_idx:val_end_idx]
+   test = data[val_end_idx:]
+   ```
+
+   IMPORTANT:
+   ✓ NEVER use test set for hyperparameter tuning
+   ✓ NEVER peek at test set until final evaluation
+   ✓ NEVER make decisions based on test set performance
+
+2. Data Quality Checks
+
+   Run these checks systematically:
+
+   ```python
+   import pandas as pd
+   import numpy as np
+
+   def data_quality_report(df):
+       """Comprehensive data quality analysis"""
+
+       print(f"Shape: {df.shape}")
+       print(f"Memory: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+       print(f"\nDuplicates: {df.duplicated().sum()}")
+
+       # Missing values
+       missing = df.isnull().sum()
+       if missing.any():
+           print("\nMissing Values:")
+           print(missing[missing > 0])
+
+       # Data types
+       print("\nData Types:")
+       print(df.dtypes.value_counts())
+
+       # Numerical columns - check for outliers
+       numerical_cols = df.select_dtypes(include=[np.number]).columns
+       for col in numerical_cols:
+           Q1 = df[col].quantile(0.25)
+           Q3 = df[col].quantile(0.75)
+           IQR = Q3 - Q1
+           outliers = ((df[col] < Q1 - 1.5*IQR) |
+                      (df[col] > Q3 + 1.5*IQR)).sum()
+           if outliers > 0:
+               print(f"\n{col}: {outliers} outliers ({outliers/len(df)*100:.1f}%)")
+
+       return df
+
+   # Use it
+   train = data_quality_report(train)
+   ```
+
+3. Handling Class Imbalance
+
+   If minority class < 20% of data:
+
+   OPTION A - Resampling:
+   ```python
+   from imblearn.over_sampling import SMOTE
+   from imblearn.under_sampling import RandomUnderSampler
+   from imblearn.pipeline import Pipeline
+
+   # Combine over and under sampling
+   over = SMOTE(sampling_strategy=0.5)  # Oversample to 50% of majority
+   under = RandomUnderSampler(sampling_strategy=0.8)  # Undersample to 80%
+   pipeline = Pipeline([('over', over), ('under', under)])
+
+   X_resampled, y_resampled = pipeline.fit_resample(X_train, y_train)
+   ```
+
+   OPTION B - Class Weights:
+   ```python
+   from sklearn.utils.class_weight import compute_class_weight
+
+   class_weights = compute_class_weight('balanced',
+                                         classes=np.unique(y_train),
+                                         y=y_train)
+   # Pass to model (e.g., sklearn, PyTorch, etc.)
+   ```
+
+   OPTION C - Appropriate Metrics:
+   - DON'T use accuracy for imbalanced data
+   - DO use: F1-score, AUC-ROC, AUC-PR, precision/recall
+
+4. Data Leakage Prevention
+
+   COMMON LEAKAGE SOURCES:
+   ✗ Normalizing before splitting (leaks test distribution to train)
+   ✗ Feature selection using full dataset
+   ✗ Time series: using future data to predict past
+   ✗ Duplicates across train/test split
+   ✗ Information from test set in preprocessing
+
+   CORRECT APPROACH:
+   ```python
+   # Fit scaler on train only, then transform all sets
+   from sklearn.preprocessing import StandardScaler
+
+   scaler = StandardScaler()
+   X_train_scaled = scaler.fit_transform(X_train)  # Fit on train
+   X_val_scaled = scaler.transform(X_val)          # Only transform
+   X_test_scaled = scaler.transform(X_test)        # Only transform
+   ```
+
+─────────────────────────────────────────────────────────────────────────────
+MODEL DEVELOPMENT
+─────────────────────────────────────────────────────────────────────────────
+
+1. Always Start with Baselines
+
+   Implement these baselines FIRST to validate your pipeline:
+
+   CLASSIFICATION:
+   ```python
+   from sklearn.linear_model import LogisticRegression
+   from sklearn.dummy import DummyClassifier
+
+   # Baseline 1: Random guess
+   dummy = DummyClassifier(strategy='stratified', random_state=42)
+   dummy.fit(X_train, y_train)
+   baseline_acc = dummy.score(X_test, y_test)
+   print(f"Random baseline: {baseline_acc:.3f}")
+
+   # Baseline 2: Simple model
+   lr = LogisticRegression(random_state=42, max_iter=1000)
+   lr.fit(X_train, y_train)
+   lr_acc = lr.score(X_test, y_test)
+   print(f"Logistic Regression: {lr_acc:.3f}")
+   ```
+
+   REGRESSION:
+   ```python
+   from sklearn.dummy import DummyRegressor
+
+   # Baseline: Predict mean
+   dummy = DummyRegressor(strategy='mean')
+   dummy.fit(X_train, y_train)
+   baseline_mse = mean_squared_error(y_test, dummy.predict(X_test))
+   print(f"Baseline MSE (predict mean): {baseline_mse:.3f}")
+   ```
+
+   Your proposed method MUST beat these baselines!
+
+2. Model Selection Guidelines
+
+   DATASET SIZE:
+   - < 1K samples: Simple models (linear, small trees)
+   - 1K-10K: Gradient boosting, shallow neural nets
+   - 10K-100K: Deep neural nets possible
+   - > 100K: Deep learning, large models
+
+   FEATURE TYPES:
+   - Tabular: Gradient boosting (XGBoost, LightGBM) often best
+   - Images: CNNs
+   - Text: Transformers (BERT, GPT)
+   - Time series: RNNs, Transformers, or temporal CNNs
+
+3. Training Protocol
+
+   ```python
+   import torch
+   import torch.nn as nn
+   from torch.utils.data import DataLoader
+
+   # Set reproducibility
+   torch.manual_seed(42)
+   torch.cuda.manual_seed_all(42)
+   torch.backends.cudnn.deterministic = True
+
+   # Training loop with early stopping
+   best_val_loss = float('inf')
+   patience = 10
+   patience_counter = 0
+
+   train_losses, val_losses = [], []
+
+   for epoch in range(num_epochs):
+       # Training
+       model.train()
+       train_loss = 0
+       for batch in train_loader:
+           optimizer.zero_grad()
+           outputs = model(batch['input'])
+           loss = criterion(outputs, batch['target'])
+           loss.backward()
+           optimizer.step()
+           train_loss += loss.item()
+
+       train_loss /= len(train_loader)
+       train_losses.append(train_loss)
+
+       # Validation
+       model.eval()
+       val_loss = 0
+       with torch.no_grad():
+           for batch in val_loader:
+               outputs = model(batch['input'])
+               loss = criterion(outputs, batch['target'])
+               val_loss += loss.item()
+
+       val_loss /= len(val_loader)
+       val_losses.append(val_loss)
+
+       print(f"Epoch {epoch}: Train={train_loss:.4f}, Val={val_loss:.4f}")
+
+       # Early stopping
+       if val_loss < best_val_loss:
+           best_val_loss = val_loss
+           torch.save(model.state_dict(), 'best_model.pt')
+           patience_counter = 0
+       else:
+           patience_counter += 1
+           if patience_counter >= patience:
+               print(f"Early stopping at epoch {epoch}")
+               break
+
+   # Load best model for final evaluation
+   model.load_state_dict(torch.load('best_model.pt'))
+   ```
+
+4. Hyperparameter Tuning
+
+   OPTION A - Grid Search (small search space):
+   ```python
+   from sklearn.model_selection import GridSearchCV
+
+   param_grid = {
+       'max_depth': [3, 5, 7],
+       'learning_rate': [0.01, 0.1],
+       'n_estimators': [100, 200]
+   }
+
+   grid = GridSearchCV(model, param_grid, cv=5,
+                       scoring='f1_weighted', n_jobs=-1)
+   grid.fit(X_train, y_train)
+   best_params = grid.best_params_
+   ```
+
+   OPTION B - Random Search (large search space):
+   ```python
+   from sklearn.model_selection import RandomizedSearchCV
+   from scipy.stats import uniform, randint
+
+   param_dist = {
+       'max_depth': randint(3, 10),
+       'learning_rate': uniform(0.01, 0.3),
+       'n_estimators': randint(50, 500)
+   }
+
+   random_search = RandomizedSearchCV(model, param_dist,
+                                       n_iter=20, cv=5,
+                                       scoring='f1_weighted',
+                                       random_state=42)
+   random_search.fit(X_train, y_train)
+   ```
+
+   OPTION C - Bayesian Optimization (expensive models):
+   ```python
+   from skopt import BayesSearchCV
+
+   search_spaces = {
+       'max_depth': (3, 10),
+       'learning_rate': (0.01, 0.3, 'log-uniform'),
+       'n_estimators': (50, 500)
+   }
+
+   bayes_search = BayesSearchCV(model, search_spaces,
+                                 n_iter=30, cv=5,
+                                 random_state=42)
+   bayes_search.fit(X_train, y_train)
+   ```
+
+   IMPORTANT:
+   ✓ Always tune on validation set, never test set
+   ✓ Document the search space and why you chose it
+   ✓ Report final hyperparameters used
+
+5. Overfitting Prevention
+
+   SIGNS OF OVERFITTING:
+   - Training accuracy >> Validation accuracy
+   - Training loss decreases but validation loss increases
+   - Model performs well on seen data, poorly on new data
+
+   SOLUTIONS:
+   ```python
+   # 1. Regularization
+   from sklearn.linear_model import Ridge, Lasso
+
+   model = Ridge(alpha=1.0)  # L2 regularization
+   model = Lasso(alpha=1.0)  # L1 regularization
+
+   # 2. Dropout (Neural Networks)
+   model = nn.Sequential(
+       nn.Linear(input_size, hidden_size),
+       nn.ReLU(),
+       nn.Dropout(0.5),  # Drop 50% of neurons
+       nn.Linear(hidden_size, output_size)
+   )
+
+   # 3. Early stopping (see training loop above)
+
+   # 4. Data augmentation (images, text)
+   # 5. Reduce model complexity
+   # 6. Get more training data
+   ```
+
+─────────────────────────────────────────────────────────────────────────────
+EVALUATION
+─────────────────────────────────────────────────────────────────────────────
+
+1. Metrics Selection
+
+   CLASSIFICATION:
+
+   Binary Classification:
+   ```python
+   from sklearn.metrics import (accuracy_score, precision_score,
+                                 recall_score, f1_score, roc_auc_score,
+                                 confusion_matrix, classification_report)
+
+   # Basic metrics
+   y_pred = model.predict(X_test)
+   y_prob = model.predict_proba(X_test)[:, 1]  # Probability of positive class
+
+   metrics = {
+       'accuracy': accuracy_score(y_test, y_pred),
+       'precision': precision_score(y_test, y_pred),
+       'recall': recall_score(y_test, y_pred),
+       'f1': f1_score(y_test, y_pred),
+       'auc_roc': roc_auc_score(y_test, y_prob)
+   }
+
+   # Confusion matrix
+   cm = confusion_matrix(y_test, y_pred)
+   print(f"\nConfusion Matrix:\n{cm}")
+
+   # Full report
+   print(classification_report(y_test, y_pred))
+   ```
+
+   Multi-class Classification:
+   ```python
+   # Use macro/weighted averaging
+   metrics = {
+       'accuracy': accuracy_score(y_test, y_pred),
+       'f1_macro': f1_score(y_test, y_pred, average='macro'),
+       'f1_weighted': f1_score(y_test, y_pred, average='weighted')
+   }
+   ```
+
+   REGRESSION:
+   ```python
+   from sklearn.metrics import (mean_squared_error, mean_absolute_error,
+                                 r2_score, mean_absolute_percentage_error)
+
+   y_pred = model.predict(X_test)
+
+   metrics = {
+       'mse': mean_squared_error(y_test, y_pred),
+       'rmse': mean_squared_error(y_test, y_pred, squared=False),
+       'mae': mean_absolute_error(y_test, y_pred),
+       'r2': r2_score(y_test, y_pred),
+       'mape': mean_absolute_percentage_error(y_test, y_pred)
+   }
+
+   # Residual plot
+   residuals = y_test - y_pred
+   plt.scatter(y_pred, residuals)
+   plt.axhline(y=0, color='r', linestyle='--')
+   plt.xlabel('Predicted Values')
+   plt.ylabel('Residuals')
+   plt.title('Residual Plot')
+   ```
+
+2. Statistical Testing
+
+   Compare two models:
+   ```python
+   from scipy.stats import ttest_rel
+   import numpy as np
+
+   # Run both models multiple times with different seeds
+   seeds = [42, 123, 456, 789, 1011]
+   model_a_scores = []
+   model_b_scores = []
+
+   for seed in seeds:
+       # Train and evaluate Model A
+       set_seed(seed)
+       score_a = train_and_evaluate(model_a, X_train, y_train, X_test, y_test)
+       model_a_scores.append(score_a)
+
+       # Train and evaluate Model B
+       set_seed(seed)
+       score_b = train_and_evaluate(model_b, X_train, y_train, X_test, y_test)
+       model_b_scores.append(score_b)
+
+   # Paired t-test
+   t_stat, p_value = ttest_rel(model_a_scores, model_b_scores)
+
+   print(f"Model A: {np.mean(model_a_scores):.3f} ± {np.std(model_a_scores):.3f}")
+   print(f"Model B: {np.mean(model_b_scores):.3f} ± {np.std(model_b_scores):.3f}")
+   print(f"P-value: {p_value:.4f}")
+
+   if p_value < 0.05:
+       print("Difference is statistically significant")
+   else:
+       print("No significant difference")
+   ```
+
+3. Error Analysis
+
+   ```python
+   # Identify misclassified examples
+   misclassified_idx = np.where(y_pred != y_test)[0]
+
+   print(f"Misclassified: {len(misclassified_idx)} / {len(y_test)}")
+
+   # Examine a few examples
+   for idx in misclassified_idx[:5]:
+       print(f"\nExample {idx}:")
+       print(f"  True label: {y_test[idx]}")
+       print(f"  Predicted: {y_pred[idx]}")
+       print(f"  Features: {X_test[idx]}")
+
+   # Analyze error patterns by class
+   for class_label in np.unique(y_test):
+       class_mask = y_test == class_label
+       class_acc = accuracy_score(y_test[class_mask], y_pred[class_mask])
+       print(f"Class {class_label} accuracy: {class_acc:.3f}")
+   ```
+
+4. Model Calibration
+
+   Check if predicted probabilities match true frequencies:
+
+   ```python
+   from sklearn.calibration import calibration_curve
+   import matplotlib.pyplot as plt
+
+   # Get predicted probabilities
+   y_prob = model.predict_proba(X_test)[:, 1]
+
+   # Calibration curve
+   fraction_of_positives, mean_predicted_value = calibration_curve(
+       y_test, y_prob, n_bins=10
+   )
+
+   plt.figure(figsize=(8, 6))
+   plt.plot(mean_predicted_value, fraction_of_positives, marker='o')
+   plt.plot([0, 1], [0, 1], linestyle='--', color='gray')
+   plt.xlabel('Mean Predicted Probability')
+   plt.ylabel('Fraction of Positives')
+   plt.title('Calibration Plot')
+   plt.show()
+
+   # If poorly calibrated, use calibration:
+   from sklearn.calibration import CalibratedClassifierCV
+
+   calibrated_model = CalibratedClassifierCV(model, cv=5, method='sigmoid')
+   calibrated_model.fit(X_train, y_train)
+   ```
+
+─────────────────────────────────────────────────────────────────────────────
+REPRODUCIBILITY
+─────────────────────────────────────────────────────────────────────────────
+
+COMPLETE REPRODUCIBILITY SETUP:
+
+```python
+import random
+import numpy as np
+import torch
+import os
+
+def set_seed(seed=42):
+    """Set seeds for reproducibility"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+
+    # Make CuDNN deterministic
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+# Set at start of notebook
+set_seed(42)
+
+# Log environment
+import sys
+import sklearn
+import torch
+
+env_info = {
+    'python_version': sys.version,
+    'numpy_version': np.__version__,
+    'sklearn_version': sklearn.__version__,
+    'torch_version': torch.__version__,
+    'cuda_version': torch.version.cuda if torch.cuda.is_available() else None,
+    'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+}
+
+print("Environment:")
+for key, value in env_info.items():
+    print(f"  {key}: {value}")
+
+# Save to file
+import json
+with open('results/environment.json', 'w') as f:
+    json.dump(env_info, f, indent=2)
+```
+
+─────────────────────────────────────────────────────────────────────────────
+COMMON PITFALLS
+─────────────────────────────────────────────────────────────────────────────
+
+✗ WRONG: Using accuracy for imbalanced datasets
+✓ RIGHT: Use F1, AUC-ROC, or AUC-PR
+
+✗ WRONG: Normalizing before splitting
+✓ RIGHT: Fit scaler on train, transform all sets
+
+✗ WRONG: Tuning hyperparameters on test set
+✓ RIGHT: Use validation set for tuning, test set only for final evaluation
+
+✗ WRONG: Not setting random seeds
+✓ RIGHT: Set seeds everywhere (Python, NumPy, PyTorch, etc.)
+
+✗ WRONG: Comparing single runs
+✓ RIGHT: Average over multiple runs with different seeds
+
+✗ WRONG: Only using training accuracy to select model
+✓ RIGHT: Monitor validation metrics and use early stopping
+
+✗ WRONG: Ignoring class imbalance
+✓ RIGHT: Use stratified splits, appropriate metrics, class weights
+
+✗ WRONG: Not checking for data leakage
+✓ RIGHT: Carefully audit preprocessing and feature engineering
+
+✗ WRONG: Using entire dataset for feature selection
+✓ RIGHT: Feature selection only on training set
+
+✗ WRONG: model.eval() forgotten during inference
+✓ RIGHT: Always use model.eval() for evaluation (disables dropout, etc.)
+
+═══════════════════════════════════════════════════════════════════════════════
+REPORT.md STRUCTURE FOR MACHINE LEARNING RESEARCH
+═══════════════════════════════════════════════════════════════════════════════
+
+When writing REPORT.md, use this ML-specific structure:
+
+## 1. Executive Summary
+- Research question, key finding, practical implications (1 paragraph)
+
+## 2. Research Question & Motivation
+- Hypothesis tested, why it matters, gap in existing work
+
+## 3. Data Construction
+- **Dataset description**: Source, version, size, characteristics, known biases
+- **Example samples**: 2-3 representative examples with labels
+- **Data quality**: Missing values, outliers, class distribution, validation checks
+- **Preprocessing**: Every transformation documented (why and how)
+- **Train/Val/Test splits**: Strategy, rationale, sizes, stratification
+
+## 4. Methodology
+- **Approach**: High-level strategy with justification
+- **Baselines**: What you compare against and why
+- **Models/Algorithms**: Architecture, design choices, justification
+- **Hyperparameters** (table format):
+  | Parameter | Value | Selection Method |
+  |-----------|-------|------------------|
+  | param1    | val1  | grid search      |
+- **Training procedure**: Step-by-step with early stopping, learning rate schedule
+- **Evaluation metrics**: What each measures, why appropriate, how computed
+
+## 5. Results
+- **Tables**: Method × Metric comparison with mean ± std
+- **Visualizations**: Training curves, comparison plots, confusion matrices
+- **Statistical tests**: Paired t-test or bootstrap across seeds
+- **Output locations**: results/metrics.json, results/plots/, etc.
+
+## 6. Analysis & Discussion
+- Hypothesis testing results (p-values, effect sizes, confidence intervals)
+- When does the method win/lose vs baselines?
+- Error analysis: failure modes, edge cases, systematic biases
+- Surprises and unexpected findings
+
+## 7. Limitations
+- Methodological, dataset, and generalizability concerns
+- Assumptions made, what could invalidate results
+
+## 8. Conclusions & Next Steps
+- Clear answer to research question
+- Recommended follow-up experiments
+- Open questions
+
+═══════════════════════════════════════════════════════════════════════════════
+
+ADDITIONAL RESOURCES:
+
+- Experiment Tracking: Use W&B (wandb.ai) or MLflow
+- Model Cards: Document model details, intended use, limitations
+- Data Sheets: Document dataset creation, composition, biases
+
+═══════════════════════════════════════════════════════════════════════════════
