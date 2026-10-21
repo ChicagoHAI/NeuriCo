@@ -18,6 +18,7 @@ Read `safety_kb/README.md` for the knowledge base itself and
 | Suite runner | `src/safety/suites.py` | runs `inspect_evals` tasks against served or API models, serves local judges, writes `neurico-safety-result/v1` JSON per (eval, model), resumable |
 | Serving | `src/safety/serving.py` | vLLM OpenAI-compatible servers in their own process group; API endpoint resolution; key-name aliasing |
 | Planner | `src/safety/planner.py`, `templates/agents/safety_planner.txt` | a Claude Code / Codex session that reads the knowledge base and writes job proposals and NeuriCo idea YAMLs; Python validates, de-duplicates and queues them |
+| Ideation | `src/ideation/`, `templates/ideation/`, `config/agents.yaml` roles `ideation.*` | the planner's `ideate` mode: three isolated agent stages (problem -> ideation -> idea_judge) over a snapshot of the knowledge base, schema-validated and cross-checked, projected onto `explore` / `optimise` / `validate` jobs through the same `validate_proposals` gate |
 | Ingest | `src/safety/ingest.py` | run records (`runs/`), candidate findings (`findings/`) from suite outputs and workspaces |
 | Digest | `src/safety/digest.py`, `safety.py digest` | periodic markdown digest and per-family scorecards |
 | Research-side skill | `templates/skills/safety-evals/` | `run_eval.py`, `serve_model.py`, `probe.py`, `judge_calibration.py`, `check_finding.py`; copied into every workspace |
@@ -95,16 +96,20 @@ uv run python src/cli/safety.py enqueue-idea safety_kb/queue/ideas/<id>.yaml --k
 uv run python src/cli/safety.py start --campaign qwen-small-pipeline-test --gpus 2     # foreground daemon
 uv run python src/cli/safety.py status                     # logs/safety/status.md
 uv run python src/cli/safety.py stop
-uv run python src/cli/safety.py plan --campaign <name> [--dry-run]
+uv run python src/cli/safety.py plan --campaign <name> [--dry-run] [--mode replicate|ideate]
+uv run python src/cli/safety.py ideate --campaign <name> [--only problem|ideation|idea_judge] [--planner-run <run>] [--dry-run]
 uv run python src/cli/safety.py digest --days 7
 ```
 
 Daemon settings (`safety_kb/engine.yaml`, overridable by flags): `gpus`, `gpu_memory_gb`,
 `max_neurico_jobs`, `max_suite_jobs`, `stall_minutes`, `retries`, `poll_seconds`,
 `min_pending`, `planner_interval_hours`, `planner_enabled`, `planner_provider`, `planner_model`,
-`planner_agent_auth`, `planner_timeout`, `eval_python`, `hf_cache`. The planner, ideator and model
-scout launch through `config/agents.yaml` roles (`planner`, `ideator`, `model_scout`), and every
-session is recorded in `safety_kb/.neurico/agent_runs.jsonl`.
+`planner_agent_auth`, `planner_timeout`, `eval_python`, `hf_cache`. The planner, the ideation
+stages and the model scout launch through `config/agents.yaml` roles (`planner`,
+`ideation.problem` / `ideation.ideation` / `ideation.idea_judge`, `model_scout`), and every
+session is recorded in `safety_kb/.neurico/agent_runs.jsonl`. The daemon's `planner_provider`,
+`planner_model`, `planner_agent_auth` and `planner_timeout` apply to the ideation stages too
+(the timeout per stage).
 
 ## Knowledge-base index, findings lifecycle and ideation
 
@@ -133,11 +138,97 @@ session is recorded in `safety_kb/.neurico/agent_runs.jsonl`.
   ingest only ever creates `candidate` findings.
 - The planner has two modes chosen per round from the campaign's `planner.modes` mix (for example
   `{ideate: 0.6, replicate: 0.4}`): `replicate` fills model-card gaps with suites and scorecard
-  runs (`templates/agents/safety_planner.txt`); `ideate` proposes `explore`, `optimise` or
-  `validate` jobs aimed at new findings, each with a novelty argument and a pre-registered
-  finding criterion that travel with the job (`templates/agents/safety_ideator.txt`). It reads
-  the findings, the anomaly inbox, the results timeline and the labs' blind-spot lists.
-  `./neurico safety plan --campaign <name> --mode ideate` runs a round by hand.
+  runs (`templates/agents/safety_planner.txt`); `ideate` is the staged ideation round described
+  in the next section, which proposes `explore`, `optimise` or `validate` jobs aimed at new
+  findings, each with a novelty argument and a pre-registered finding criterion that travel with
+  the job. `./neurico safety plan --campaign <name> --mode ideate` or `./neurico safety ideate
+  --campaign <name>` runs a round by hand.
+
+## Ideation (`./neurico safety ideate`)
+
+The `ideate` mode is a port of sai-review's digest ideation (problem -> ideation -> idea_judge;
+`docs/IDEATION_INTEGRATION.md`, `src/ideation/NOTICE.md`) on top of the agent factory and the
+unified knowledge base. The interim single-session ideator (`templates/agents/safety_ideator.txt`)
+is kept but no longer launched.
+
+**Stages.** One round `plan-<date>-<time>-ideate` runs four stages in order:
+
+1. `context` (code, `src/ideation/context.py`): from the index (`kbdb`) and the planner's
+   `build_context` blocks it writes the feed `findings.json` (open inbox items with anomaly notes
+   first, findings by recency of status change, recent runs, the gap documents, the labs'
+   blind-spot lists, live result drift as `drift:<model>/<eval>/<metric>`), the
+   `registry_snapshot.json` (ideas, jobs and rounds of the last 30 days plus everything in
+   flight), `dedup_candidates.json` (canonical-key / title / source-id collisions between the feed
+   and the knowledge base, `src/ideation/dedup.py`) and `context/{campaign,catalog,knowledge-base}.md`
+   (the campaign with the newest-generation rule, one line per catalog eval and model, the ranked
+   knowledge-base excerpts).
+2. `problem` (agent, role `ideation.problem`, skill `templates/ideation/skills/problem.md`): commits
+   to ONE open problem with `evidence_ids` from the feed. It never sees ideas.
+3. `ideation` (agent, role `ideation.ideation`): at least 8 ideas for that problem across at least
+   3 axes (`evals`, `interpretability`, `control_oversight`, `security_injection`,
+   `training_time_fixes`), each with a hypothesis (<= 50 words, effect size and statistic), 3-7
+   method steps, a method (<= 250 words), a pre-registered `expected_result` ("If yes ...; if no ..."),
+   `builds_on` feed ids, `closest_prior_work`, and a `neurico` block (domain `ai_safety`,
+   `job_kind`, catalog `models` / `evals`, methodology, constraints, `evaluation` for optimise jobs,
+   `finding_id` for validate jobs).
+4. `idea_judge` (agent, role `ideation.idea_judge`): scores every idea 1-5 on `novelty`,
+   `feasibility` (one GPU, catalog models, about a day), `safety_impact`, `replicability` and
+   `duplication_risk` (lower is better), records reject codes (`restates_paper`,
+   `extension_authors_could_do`, `uninformative_either_way`, `dodges_headline_claim`,
+   `infeasible_compute`, `stale_frontier_assumption`, `duplicates_registry`, `duplicates_sibling`
+   with `sibling_of`, `not_safety`), a `distinctness` line per idea, and a `top` of at most 5.
+
+Each agent stage is one `core.agent_factory` launch in a throw-away workspace under
+`logs/safety/ideation/<run>/workspaces/<stage>/`: read-only `input/` (the artifacts above plus
+`kb.sqlite`, a snapshot of the index that hides the round's own ids), `schemas/`, `tools/kb.py`
+(the knowledge-base tool; `NEURICO_SAFETY_KB` points at the snapshot and every query is logged to
+`output/kb_queries.jsonl`), `tools/scholar_search.py` (Semantic Scholar + arXiv), `AGENTS.md` /
+`CLAUDE.md` (`templates/ideation/AGENTS.md`: untrusted-data rule, writing rules, the standards every
+idea must meet) and the stage skill. The roles default to Codex with `isolate_home`, a 1500 s
+stage timeout, a hard 40 USD budget and three attempts; an artifact that fails the JSON schema or
+the cross-checks (`src/ideation/runtime.py`: feed ids, axes, method overlap, writing caps,
+sibling / reject-code consistency) is retried once with the validator's message appended to the
+prompt. `output/notes.md` content outside a "Knowledge base" heading and a stage that ran no
+knowledge-base query are recorded as warnings in the outcome.
+
+**Where outputs land.**
+
+| Path | Content |
+| --- | --- |
+| `safety_kb/queue/proposals/<run>/ideation/` | `findings.json`, `registry_snapshot.json`, `dedup_candidates.json`, `context/*.md`, `problem.json`, `ideas.json`, `ideas_ranked.json`, `<stage>.notes.md`, `<stage>.kb_queries.jsonl`, `summary.json` |
+| `safety_kb/queue/proposals/<run>/<n>-<slug>.yaml` | one job spec per top idea (at most `planner.max_new_jobs_per_run`), in the format `validate_proposals` accepts: `kind`, `title`, `priority`, `novelty`, `finding_criterion`, `rationale`, `resources`, `neurico` (idea file + the campaign's `defaults.neurico`), `finding_id`, `extra` (scores, distinctness, `builds_on`, canonical keys) |
+| `safety_kb/queue/proposals/<run>/planning_log.md` | the problem, every candidate with its scores and reject codes, the ranking, the judge's notes |
+| `safety_kb/queue/proposals/<run>/outcome.yaml` | the planner round: accepted / rejected, per-stage status, attempts, ledger `run_id`s and cost, warnings |
+| `safety_kb/queue/ideas/<run>-<slug>.yaml` | the NeuriCo idea files (schema v1.2, domain `ai_safety`; the judge's scores, rank and the feed ids under `metadata`) |
+| `logs/safety/ideation/<run>/` | `workspaces/<stage>/`, `logs/<stage>{_prompt.txt,.log,_transcript.jsonl}` (attempts numbered), `events.jsonl` |
+| `safety_kb/.neurico/agent_runs.jsonl`, `logs/agent_runs.jsonl` | one ledger line per stage launch (`gen_ai.agent.name` = `ideation.<stage>`) |
+
+**From ranking to the queue.** `src/ideation/to_job.py` takes `ideas_ranked.top` in rank order. The
+job kind is the idea's `neurico.job_kind` (`validate` needs `finding_id`, `optimise` needs the
+sealed `evaluation`, otherwise `explore`). Priority is `90 - 6 x (rank - 1) + 2 x (safety_impact - 3)`,
+clamped to 10..90, so rank 1 with impact 5 is 90, rank 2 with impact 3 is 84, rank 3 is 78: the
+judge's order is the queue's order within a round and a round never outranks a human's 90+.
+`finding_criterion` is the idea's pre-registered `expected_result`; `novelty` is
+`closest_prior_work` plus the judge's novelty and duplication-risk scores and the distinctness
+line; `resources.gpu_memory_gb` is the largest catalog `gpu_memory_gb` among the idea's
+`neurico.models` (else the campaign's subjects, else 40; 0 for cpu-only). Then the unchanged
+`validate_proposals` runs (schema, catalog ids, idea file, signature de-duplication, `max_new_jobs`,
+approval policy) and `choose_mode` counts the round as an `ideate` round.
+
+**Running it.**
+
+```bash
+./neurico safety ideate --campaign open-weight-scorecards                 # a full round, Codex (the ideation.* roles)
+./neurico safety ideate --campaign open-weight-scorecards --dry-run       # context + the staged problem workspace, no agent
+./neurico safety ideate --campaign open-weight-scorecards --provider claude --agent-auth azure --timeout 1800
+./neurico safety ideate --campaign open-weight-scorecards --planner-run plan-20261021-120000-ideate --only idea_judge
+./neurico safety plan --campaign open-weight-scorecards --mode ideate     # the same round through the planner
+```
+
+`--only` re-runs some agent stages of an existing round (`--planner-run`), re-using the upstream
+artifacts; the daemon runs the round whenever `choose_mode` picks `ideate`. A round that fails
+after its retries raises; `outcome.yaml` records which stage failed and why, and nothing reaches
+the queue.
 
 ## Monitoring and recovery
 
