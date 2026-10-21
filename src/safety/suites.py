@@ -226,7 +226,7 @@ def main() -> int:
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--gpu", default=os.environ.get("CUDA_VISIBLE_DEVICES") or None)
-    parser.add_argument("--max-connections", type=int, default=16)
+    parser.add_argument("--max-connections", type=int, default=48)  # a served 8B model handles ~50 concurrent requests; 16 left the GPU idle
     parser.add_argument("--env-file", type=Path, default=Path(__file__).resolve().parents[2] / ".env")
     args = parser.parse_args()
 
