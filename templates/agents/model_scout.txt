@@ -53,9 +53,11 @@ families:
    `catalog/models.yaml` (match on `access`). For API families propose entries only when a usable
    access route exists (an Azure deployment, an OpenRouter slug, or a provider key named in
    `catalog/models.yaml` notes); otherwise list them in `models_latest.yaml` only.
-3. `inbox/{{date}}-model-scout.md`: a short human-readable note: what is new since the last
-   `catalog/models_latest.yaml`, what was deprecated or renamed, and anything that needs a human
-   (gated weights, multi-GPU-only flagships, licence changes).
+
+Anything a human should know (gated weights, multi-GPU-only flagships, licence changes,
+deprecations, renames) goes in the per-family `notes` field of `models_latest.yaml` as observed
+facts. Do not write anything under `inbox/`: Python writes `inbox/{{date}}-model-scout.md` from
+the merge as a table of registry changes.
 
 Rules: verify every id against the Hub or the provider's docs (no guessed names); put only
 observed facts in the files; cite `source_urls`; do not download weights; do not edit
