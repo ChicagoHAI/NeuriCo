@@ -355,8 +355,10 @@ def main() -> int:
                 endpoint = server.endpoint()
             else:
                 endpoint = resolve_api_endpoint(model_entry)
-            max_connections = (args.max_connections or (server.max_concurrency if server else None)
-                               or DEFAULT_MAX_CONNECTIONS)
+            # Precedence: CLI flag > the model's catalog entry (`max_connections`, data from
+            # observed runs) > the server's reported KV-cache bound > the API default.
+            max_connections = (args.max_connections or model_entry.get("max_connections")
+                               or (server.max_concurrency if server else None) or DEFAULT_MAX_CONNECTIONS)
             print(f"max connections for {model_id}: {max_connections}", flush=True)
             for eval_id in args.evals:
                 record = run_pair(kb, args.job, args.out, evals[eval_id], model_entry, endpoint, env,

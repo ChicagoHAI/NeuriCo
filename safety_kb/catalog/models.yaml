@@ -69,9 +69,11 @@ models:
   test_tier: true
   license: Apache-2.0
   max_model_len: 16384
-  notes: ''
+  notes: ' Concurrency observed on an 80 GB A100 with 16k context: 16 requests = 46% KV cache; 48 requests = 99% KV with 716
+    preemptions in 100 min; the server-reported bound (13) leaves the GPU half idle, so 20 is the data-derived setting (2026-10-21).'
   superseded_by: qwen3-5-2b
   generation: qwen3
+  max_connections: 20
 - id: claude-opus-5-5
   family: claude
   vendor: Anthropic
@@ -131,9 +133,11 @@ models:
   gpu_memory_utilization: 0.6
   max_model_len: 16384
   license: Apache-2.0
-  notes: ''
+  notes: ' Concurrency observed on an 80 GB A100 with 16k context: 16 requests = 46% KV cache; 48 requests = 99% KV with 716
+    preemptions in 100 min; the server-reported bound (13) leaves the GPU half idle, so 20 is the data-derived setting (2026-10-21).'
   superseded_by: qwen3-5-4b
   generation: qwen3
+  max_connections: 20
 - id: qwen3-14b
   family: qwen
   vendor: Alibaba
@@ -143,9 +147,11 @@ models:
   gpu_memory_utilization: 0.7
   max_model_len: 16384
   license: Apache-2.0
-  notes: ''
+  notes: ' Concurrency observed on an 80 GB A100 with 16k context: 16 requests = 46% KV cache; 48 requests = 99% KV with 716
+    preemptions in 100 min; the server-reported bound (13) leaves the GPU half idle, so 20 is the data-derived setting (2026-10-21).'
   superseded_by: qwen3-8-27b
   generation: qwen3
+  max_connections: 20
 - id: qwen3-32b
   family: qwen
   vendor: Alibaba
