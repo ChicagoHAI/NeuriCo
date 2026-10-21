@@ -64,7 +64,7 @@ roles:
     template: agents/comment_handler.txt
   paper_writer:
     budget: {timeout_s: 3600}
-    output: {kind: files, required_files: [paper_draft/main.tex]}
+    output: {kind: return_code}     # today's verdict is the launch; the pipeline looks for the PDF itself
     template: agents/paper_writer.txt
   zero_shot_baseline:
     budget: {timeout_s: null}

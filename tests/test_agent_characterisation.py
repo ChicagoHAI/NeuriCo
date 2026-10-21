@@ -10,9 +10,9 @@ the factory migration must preserve:
   3. the prompt / log / transcript files the site writes, and the result shape.
 
 Quirks are recorded as they are, not as they should be (the comment handler
-counting a non-zero exit as success, the paper writer ignoring the Azure lane,
-``_run-agent`` failing on the Azure lane). Later steps change those on purpose
-and update the pin here in the same commit.
+counting a non-zero exit as success). Later steps change those on purpose and
+update the pin here in the same commit: step 2 gave ``_run-agent`` the Azure
+lane and step 3 gave the paper writer both lanes (see those tests).
 """
 
 from __future__ import annotations
@@ -390,7 +390,14 @@ def test_hitl_comment_handler_launch_descriptor(fake_cli, tmp_path, lane, provid
 
 # -- 7 paper writer ---------------------------------------------------------------------------------------------
 
-def test_paper_writer_bypasses_auth_lanes(fake_cli, tmp_path, lane, provider, monkeypatch):
+def test_paper_writer_uses_auth_lanes(fake_cli, tmp_path, lane, provider, monkeypatch):
+    """Step 3 changed this on purpose. The paper writer used to keep a private copy of
+    CLI_COMMANDS, assemble its own flags and launch with os.environ.copy(), so
+    NEURICO_AGENT_AUTH=azure was silently ignored: no Codex ``-c`` overrides, no Foundry
+    environment, no Azure research-key layer (the old pin asserted the OAuth argv on both
+    lanes). Through factory.spec("paper_writer") it launches like every other agent:
+    the same argv as before on the OAuth lane, the Azure lane's flags and environment on
+    Azure, and GitHub credentials stripped as always."""
     from agents import paper_writer
 
     monkeypatch.setattr(paper_writer, "generate_paper_writer_prompt", lambda *a, **kw: "paper prompt")
@@ -400,14 +407,8 @@ def test_paper_writer_bypasses_auth_lanes(fake_cli, tmp_path, lane, provider, mo
     work = tmp_path / "ws"
     work.mkdir()
     result = paper_writer.run_paper_writer(work, provider=provider, timeout=30)
-    record = fake_cli.last()
-    # private flag assembly: the OAuth argv on both lanes, no Azure overrides, no Foundry env
-    assert record["argv"] == ARGV[(provider, "oauth")]
-    assert fake_cli.added_env_keys(record) == {"PYTHONUNBUFFERED"}
-    assert "GITHUB_TOKEN" in fake_cli.removed_env_keys(record)  # stripped by run_prebuilt_cli_agent
-    assert record["cwd"] == str(work) and record["prompt"] == "paper prompt"
-    assert logs_written(work / "logs") == {"paper_writer_prompt.txt", f"paper_writer_{provider}.log",
-                                           f"paper_writer_{provider}_transcript.jsonl"}
+    assert_launch(fake_cli, fake_cli.last(), provider, lane, cwd=work, prompt="paper prompt")
+    assert logs_written(work / "logs") == factory_artifacts("paper_writer", provider)
     assert result == {"success": True, "draft_dir": str(work / "paper_draft"),
                       "log_file": str(work / "logs" / f"paper_writer_{provider}.log"), "return_code": 0, "stopped": False}
 

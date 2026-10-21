@@ -8,8 +8,6 @@ Style files are copied from templates/paper_styles/ to the workspace.
 
 from pathlib import Path
 from typing import Dict, Any, Optional
-import shlex
-import os
 import sys
 
 # Force UTF-8 stdout on Windows so print() can handle Unicode from the Claude CLI.
@@ -17,12 +15,6 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-
-CLI_COMMANDS = {
-    'claude': 'claude -p',
-    'codex': 'codex exec',
-    'gemini': 'gemini'
-}
 
 
 def _load_style_config(style: str) -> Dict[str, Any]:
@@ -241,54 +233,20 @@ def run_paper_writer(
     # Generate prompt
     prompt = generate_paper_writer_prompt(work_dir, style, provider=provider, domain=domain)
 
-    # Save prompt for debugging
+    # The paper_writer role (config/agents.yaml) owns the launch: provider flags on
+    # both auth lanes, the research-key environment, logs/paper_writer_prompt.txt,
+    # logs/paper_writer_<provider>.log and the transcript. This module used to
+    # keep its own command table and os.environ copy, which silently ignored
+    # NEURICO_AGENT_AUTH=azure and the Azure research keys.
     logs_dir = work_dir / "logs"
-    logs_dir.mkdir(exist_ok=True)
-    (logs_dir / "paper_writer_prompt.txt").write_text(prompt, encoding='utf-8')
-
-    # Build command
-    cmd = CLI_COMMANDS.get(provider, 'claude -p')
-    if full_permissions:
-        if provider == "codex":
-            cmd += " --yolo"
-        elif provider == "claude":
-            cmd += " --dangerously-skip-permissions"
-        elif provider == "gemini":
-            cmd += " --yolo --skip-trust"
-
-    from core.agent_cli import agent_model_flag
-
-    model_flag = agent_model_flag(provider)
-    if model_flag:
-        cmd += f" {model_flag}"
-
-    # Add streaming JSON output flags for detailed logging
-    if provider == "claude":
-        cmd += " --verbose --output-format stream-json"
-    elif provider == "codex":
-        cmd += " --json"
-    elif provider == "gemini":
-        cmd += " --output-format stream-json"
-
-    # Execute
-    env = os.environ.copy()
-    env['PYTHONUNBUFFERED'] = '1'
-
     log_file = logs_dir / f"paper_writer_{provider}.log"
 
     try:
-        from core.agent_runner import run_prebuilt_cli_agent
+        from core.agent_factory import AgentFactory
 
-        launch = run_prebuilt_cli_agent(
-            command_argv=shlex.split(cmd),
-            prompt=prompt,
-            work_dir=work_dir,
-            log_file=log_file,
-            transcript_file=logs_dir / f"paper_writer_{provider}_transcript.jsonl",
-            env=env,
-            timeout=timeout,
-            provider=provider,
-        )
+        factory = AgentFactory()
+        spec = factory.spec("paper_writer", provider=provider, full_permissions=full_permissions, timeout=timeout)
+        launch = factory.run(factory.build(spec), prompt, work_dir).legacy_dict()
         return_code = launch.get("return_code")
         success = bool(launch.get("success"))
         if success:
