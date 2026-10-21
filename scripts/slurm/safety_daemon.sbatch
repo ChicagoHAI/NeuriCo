@@ -3,6 +3,7 @@
 #SBATCH --partition=general,complementary-ai
 #SBATCH --gres=gpu:4
 #SBATCH --constraint="a100|h100|h200"
+#SBATCH --prefer="h200|h100"
 #SBATCH --time=12:00:00
 # --time is the partition's requirement, not a NeuriCo limit: ensure_daemon.sh re-submits
 # the daemon, which re-adopts running jobs on restart, so no job is cut short by it.

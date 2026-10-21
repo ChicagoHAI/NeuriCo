@@ -1,0 +1,66 @@
+kind: explore
+title: Does splitting reasoning create false harmful labels?
+priority: 80
+novelty: 'Qwen3GuardTest covers reasoning and streaming moderation; CARE, a guard-triggered rewrite method,
+  runs on Qwen3-4B. The DeepSeek audit did not isolate segmentation errors against independent guidance
+  labels. We would test rejection-clause boundaries and repeated-judgment controls on current Qwen traces.
+
+
+  The attack-score candidate measured response scores, rather than errors against known guidance labels
+  (finding:finding-20261020-001-provisional-paired-strong-reject).
+
+
+  The XSTest candidate compared refusal rates without establishing the rejected-plan boundary (finding:finding-20261020-001-provisional-paired-xstest-unsafe).
+
+
+  The DeepSeek scorecard proposed broad model comparisons, rather than this judge-error test (idea:deepseek-distill-and-moonlight-safety-scorecard).
+
+
+  The trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).
+
+
+  The completed scorecard job did not isolate this proposed source of judge error (job:research-20261020-001-deepseek-distill-and-moonlight-s).
+  Judge: novelty 3/5, duplication risk 2/5 (lower is better). Distinct from its nearest sibling: We split
+  unchanged traces and restore governing context; the naming study changes words while keeping each trace
+  whole.'
+finding_criterion: If yes, a 10-point rise with a positive 95% lower bound would implicate splitting;
+  if no, this window scheme would not explain errors.
+rationale: Rank 3 for the problem 'Do safety judges mistake rejected plans for harmful assistance?'. We
+  rank the window test third for replicability because restored context and neutral controls test separate
+  causes of false alarms. The main risk is that short traces do not represent long reasoning.
+resources:
+  gpu_memory_gb: 76.0
+  api_budget_usd: 25.0
+neurico:
+  idea_file: safety_kb/queue/ideas/plan-20261021-045451-ideate-does-splitting-reasoning-create-false-ha.yaml
+  provider: codex
+  model: gpt-6-astra
+  agent_auth: azure
+  github: false
+extra:
+  idea_id: idea_7
+  axis: evals
+  scores:
+    novelty: 3
+    feasibility: 4
+    safety_impact: 4
+    replicability: 4
+    duplication_risk: 2
+  distinctness: We split unchanged traces and restore governing context; the naming study changes words
+    while keeping each trace whole.
+  reject_reasons:
+  - none
+  builds_on:
+  - finding:finding-20261020-001-judge-dependent-harmful-reasonin
+  - run:run-research-20261020-005
+  - gap:open-model-families-gap-matrix
+  canonical_keys:
+  - arxiv:2510.14276
+  - url:https://arxiv.org/abs/2510.14276
+  problem_title: Do safety judges mistake rejected plans for harmful assistance?
+  models:
+  - qwen3-8-27b
+  - qwen2.5-7b-judge
+  - azure-gpt-4.1-mini-judge
+  evals:
+  - xstest-safe-csv

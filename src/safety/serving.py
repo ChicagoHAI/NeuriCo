@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -137,15 +138,33 @@ class VLLMServer:
         self.process = subprocess.Popen(self.command(), env=env, stdout=log, stderr=subprocess.STDOUT,
                                         stdin=subprocess.DEVNULL, start_new_session=True)
         log.close()
+        # vLLM prints how many requests of max_model_len tokens fit in the KV cache; clients that
+        # send more than that make it preempt and recompute instead of finishing requests.
+        self.max_concurrency: Optional[int] = None
         deadline = None if not timeout else time.time() + timeout
         while deadline is None or time.time() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError(f"vLLM exited with code {self.process.returncode}; see {self.log_file}")
+            if self.max_concurrency is None:
+                self.max_concurrency = self._reported_concurrency()
             if self.is_ready():
+                if self.max_concurrency is None:
+                    self.max_concurrency = self._reported_concurrency()
                 return self
             time.sleep(5)
         self.stop()
         raise TimeoutError(f"vLLM did not become ready within {timeout}s; see {self.log_file}")
+
+    _CONCURRENCY_RE = re.compile(r"Maximum concurrency for [\d,]+ tokens per request: ([\d.]+)x")
+
+    def _reported_concurrency(self) -> Optional[int]:
+        """The server's own estimate of concurrent full-length requests, from its log; None until printed."""
+        try:
+            text = self.log_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        m = self._CONCURRENCY_RE.search(text)
+        return max(1, int(float(m.group(1)))) if m else None
 
     def is_ready(self) -> bool:
         try:

@@ -1,0 +1,53 @@
+ok: true
+planner_run: plan-20261021-045451-ideate
+mode: ideate
+at: '2026-10-21T05:25:01+00:00'
+campaign: open-weight-scorecards
+proposed: 3
+accepted:
+- explore-20261021-001-do-alarming-words-turn-rejected
+- explore-20261021-001-do-judges-miss-useful-clues-insi
+- explore-20261021-001-does-splitting-reasoning-create
+rejected: []
+log: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/neurico/logs/safety/ideation/plan-20261021-045451-ideate
+artifacts: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/neurico/safety_kb/queue/proposals/plan-20261021-045451-ideate/ideation
+agent_run_ids:
+- ideation.problem_20261021T045503Z_2008
+- ideation.ideation_20261021T045919Z_ce97
+- ideation.idea_judge_20261021T052105Z_96fa
+cost_usd: null
+problem: Do safety judges mistake rejected plans for harmful assistance?
+candidates: 8
+warnings:
+- stage problem reported suspicious input in queue/proposals/plan-20261021-045451-ideate/ideation/problem.notes.md
+- stage ideation reported suspicious input in queue/proposals/plan-20261021-045451-ideate/ideation/ideation.notes.md
+- stage idea_judge reported suspicious input in queue/proposals/plan-20261021-045451-ideate/ideation/idea_judge.notes.md
+error: null
+stages:
+  context:
+    status: ok
+    seconds: 5.8
+  problem:
+    status: ok
+    seconds: 260.5
+    attempts: 1
+    run_id: ideation.problem_20261021T045503Z_2008
+    cost_usd: null
+    model: gpt-6-astra
+    provider: codex
+  ideation:
+    status: ok
+    seconds: 1189.8
+    attempts: 1
+    run_id: ideation.ideation_20261021T045919Z_ce97
+    cost_usd: null
+    model: gpt-6-astra
+    provider: codex
+  idea_judge:
+    status: ok
+    seconds: 352.6
+    attempts: 1
+    run_id: ideation.idea_judge_20261021T052105Z_96fa
+    cost_usd: null
+    model: gpt-6-astra
+    provider: codex

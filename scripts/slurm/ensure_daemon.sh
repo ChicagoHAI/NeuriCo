@@ -18,6 +18,7 @@ fi
 EXTRA=()
 [ -n "$EXCLUDE" ] && EXTRA+=( --exclude="$EXCLUDE" )
 [ -n "${NEURICO_SLURM_CONSTRAINT:-}" ] && EXTRA+=( --constraint="$NEURICO_SLURM_CONSTRAINT" )
+[ -n "${NEURICO_SLURM_PREFER:-}" ] && EXTRA+=( --prefer="$NEURICO_SLURM_PREFER" )
 JOB=$(NEURICO_CAMPAIGN="$CAMPAIGN" sbatch --parsable --export=ALL,NEURICO_CAMPAIGN="$CAMPAIGN" "${EXTRA[@]}" scripts/slurm/safety_daemon.sbatch)
 [ -n "$EXCLUDE" ] && echo "excluded nodes: $EXCLUDE"
 echo "submitted daemon job $JOB for campaign $CAMPAIGN"
