@@ -176,7 +176,10 @@ class VLLMServer:
         self.stop()
 
 
-def resolve_api_endpoint(model_entry: Dict[str, Any]) -> Endpoint:
+def resolve_api_endpoint(model_entry: Dict[str, Any], env: Optional[Dict[str, str]] = None) -> Endpoint:
+    """``env`` is where the Azure settings are read from (default: the process environment;
+    the suite runner passes its merged os.environ + .env so a judge works with either)."""
+    env = os.environ if env is None else env
     access = str(model_entry["access"])
     kind, _, target = access.partition(":")
     if kind == "openrouter":
@@ -190,12 +193,12 @@ def resolve_api_endpoint(model_entry: Dict[str, Any]) -> Endpoint:
     if kind == "azure":
         # OpenAI-compatible Azure v1 endpoint; inspect's openai-api provider reads
         # AZURE_BASE_URL / AZURE_API_KEY for the "azure" provider name.
-        base_url = (os.environ.get("AZURE_OPENAI_BASE_URL") or "").rstrip("/")
-        resource = os.environ.get("AZURE_FOUNDRY_RESOURCE")
+        base_url = (env.get("AZURE_OPENAI_BASE_URL") or "").rstrip("/")
+        resource = env.get("AZURE_FOUNDRY_RESOURCE")
         if not base_url and resource:
             base_url = f"https://{resource}.openai.azure.com/openai/v1"
         return Endpoint(inspect_model=f"openai-api/azure/{target}", api_key_env="AZURE_API_KEY",
-                        extra_env={"AZURE_BASE_URL": base_url, "AZURE_API_KEY": os.environ.get("AZURE_OPENAI_API_KEY", "")})
+                        extra_env={"AZURE_BASE_URL": base_url, "AZURE_API_KEY": env.get("AZURE_OPENAI_API_KEY", "")})
     if kind == "vllm":
         raise ValueError("vllm models need a running VLLMServer; use serve()")
     raise ValueError(f"unknown access scheme in {access!r}")

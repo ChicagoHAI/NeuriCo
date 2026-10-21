@@ -162,6 +162,23 @@ def test_optional_fields_only_add_flags(oauth):
                                 "-c", 'model_reasoning_effort="high"']
 
 
+def test_claude_budget_flag_and_ledger_tags_from_env(oauth, monkeypatch):
+    factory = AgentFactory()
+    # budget.max_cost_usd (config/agents.yaml or an override) becomes claude --max-budget-usd; absent = no flag
+    plain = list(factory.build(factory.spec("resource_finder", provider="claude")).argv)
+    assert "--max-budget-usd" not in plain
+    capped = list(factory.build(factory.spec("resource_finder", provider="claude", budget={"max_cost_usd": 2.5})).argv)
+    assert capped[capped.index("--max-budget-usd") + 1] == "2.5"
+    codex = list(factory.build(factory.spec("resource_finder", provider="codex", budget={"max_cost_usd": 2.5})).argv)
+    assert "--max-budget-usd" not in codex  # codex has no such flag; the ledger check applies
+    # NEURICO_AGENT_TAGS (set by the safety daemon on the job's environment) lands under the caller's tags
+    monkeypatch.setenv("NEURICO_AGENT_TAGS", "job_id=research-7,campaign=camp")
+    spec = AgentFactory().spec("resource_finder", tags={"stage": "rf", "campaign": "override"})
+    assert spec.tags == {"job_id": "research-7", "campaign": "override", "stage": "rf"}
+    monkeypatch.setenv("NEURICO_AGENT_TAGS", '{"job_id": "j"}')
+    assert AgentFactory().spec("resource_finder").tags["job_id"] == "j"
+
+
 # -- running against the fake CLI ----------------------------------------------------------------------------------
 
 def test_run_marker_contract_parses_claude_usage_and_writes_ledger(fake_cli, factory, tmp_path, oauth):

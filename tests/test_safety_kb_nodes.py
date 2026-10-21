@@ -29,6 +29,7 @@ def kb(tmp_path, monkeypatch):
     """A small knowledge base with one record of every file type the index covers."""
     root = tmp_path / "kb"
     monkeypatch.setenv("NEURICO_SAFETY_KB", str(root))
+    monkeypatch.setenv("NEURICO_AGENT_LEDGER", str(tmp_path / "global-ledger.jsonl"))  # the spend table reads it
     kb = KB(root)
     kb.ensure_layout()
     monkeypatch.setattr(KB, "logs_dir", property(lambda self: self.root / "logs"))
@@ -137,7 +138,7 @@ def test_rebuild_builds_every_kind_and_is_idempotent(kb):
     assert first == second and kbdb.query(kb, "SELECT src_id, rel, dst_id FROM edges ORDER BY 1, 2, 3") == edges1
     assert (kb.root / "tools" / "kb.py").read_bytes() == TOOL.read_bytes()  # agent tool installed next to the data
     meta = {r["key"]: r["value"] for r in kbdb.query(kb, "SELECT key, value FROM kb_meta")}
-    assert meta["schema_version"] == "2" and meta["nodes"] == str(counts["nodes"])
+    assert meta["schema_version"] == "3" and meta["nodes"] == str(counts["nodes"])  # 3: spend table (step 7)
 
 
 def test_nodes_are_temporal_and_point_at_files(kb):

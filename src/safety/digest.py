@@ -69,10 +69,23 @@ def write_digest(kb: KB, days: int = 7) -> Path:
             for eval_id, entry in sorted(per_eval.items()):
                 lines.append(f"    - {eval_id}: {_fmt_metrics(entry.get('metrics'))} (n={entry.get('n')}, {entry['run']})")
         lines.append("")
+    lines += [f"## Spend (run ledgers, last {days} day(s))", ""] + spend_lines(kb, days) + [""]
     path = kb.reports_dir / f"digest-{datetime.now(timezone.utc).strftime('%Y%m%d')}.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     (kb.reports_dir / "latest-digest.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def spend_lines(kb: KB, days: int) -> List[str]:
+    """Agent spend from the ledgers (safety.spend); the daemon's state names the job workspaces."""
+    from safety import spend
+    from safety.kb import load_json
+    try:
+        state = load_json(kb.state_file) or {}
+        campaign = (state.get("daemon") or {}).get("campaign")
+        return spend.format_report(spend.report(kb, campaign, state, days=days))
+    except Exception as e:  # noqa: BLE001 - the digest must not fail on a broken ledger
+        return [f"- unavailable: {type(e).__name__}: {e}"]
 
 
 def _fmt_metrics(metrics: Any) -> str:

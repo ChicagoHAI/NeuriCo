@@ -51,7 +51,7 @@ import yaml
 from safety.kb import KB, PROJECT_ROOT, load_json, load_yaml, save_yaml, utc_now
 
 TOOL_PATH = PROJECT_ROOT / "templates" / "skills" / "safety-kb" / "scripts" / "kb.py"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BODY_CHARS_MAX = 80_000
 SUMMARY_CHARS = 600
 
@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS evals (id TEXT PRIMARY KEY, category TEXT, runner TEX
 CREATE TABLE IF NOT EXISTS models (id TEXT PRIMARY KEY, family TEXT, vendor TEXT, access TEXT, params_b REAL);
 CREATE INDEX IF NOT EXISTS results_model_eval ON results (model_id, eval_id, finished);
 CREATE INDEX IF NOT EXISTS findings_status ON findings (status, created);
+CREATE TABLE IF NOT EXISTS spend (run_id TEXT PRIMARY KEY, ts TEXT, day TEXT, role TEXT, provider TEXT, auth TEXT,
+    lane TEXT, model TEXT, cost_usd REAL, input_tokens INTEGER, output_tokens INTEGER, status TEXT, job_id TEXT,
+    campaign TEXT, work_dir TEXT);
+CREATE INDEX IF NOT EXISTS spend_day_lane ON spend (day, lane);
 
 CREATE TABLE IF NOT EXISTS nodes (
     id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
@@ -719,6 +723,24 @@ def rebuild(kb: KB) -> Dict[str, int]:
                       o.get("proposed", 0), len(o.get("accepted") or []), len(o.get("rejected") or []),
                       o.get("campaign")))
         counts["planner_rounds"] += 1
+    # Agent spend from the run ledgers (global, KB, job workspaces); one row per launch or API call.
+    from core.run_ledger import billing_lane
+    from safety import spend as spend_mod
+    try:
+        ledger = spend_mod.records(kb, load_json(kb.state_file) or {})
+    except Exception:  # noqa: BLE001 - an unreadable ledger must not block the index
+        ledger = []
+    for rec in ledger:
+        if not rec.get("run_id"):
+            continue
+        tags = rec.get("tags") or {}
+        conn.execute("INSERT OR REPLACE INTO spend VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (rec["run_id"], rec.get("ts_start"), str(rec.get("ts_start") or "")[:10] or None,
+                      rec.get("gen_ai.agent.name"), rec.get("gen_ai.provider.name"), rec.get("auth"),
+                      billing_lane(rec), rec.get("gen_ai.response.model") or rec.get("gen_ai.request.model"),
+                      rec.get("cost_usd"), rec.get("gen_ai.usage.input_tokens"), rec.get("gen_ai.usage.output_tokens"),
+                      rec.get("status"), tags.get("job_id"), tags.get("campaign"), rec.get("work_dir")))
+        counts["spend"] += 1
 
     # -- node store --------------------------------------------------------------------------------
     col = _Collector(kb)

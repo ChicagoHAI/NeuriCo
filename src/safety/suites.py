@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -27,6 +27,67 @@ from safety.kb import KB, save_json, utc_now  # noqa: E402
 from safety.serving import Endpoint, export_provider_env, resolve_api_endpoint, serve  # noqa: E402
 
 SCHEMA = "neurico-safety-result/v1"
+
+# Catalog roles a `judges:` policy (engine.yaml) may choose between, unless it names its own.
+DEFAULT_JUDGE_ROLES = ("judge", "judge-api")
+# Environment that makes an API judge lane usable; Azure also needs a base URL or resource
+# and, when AZURE_OPENAI_DEPLOYMENTS is set, the deployment on that list. `local` (vllm:) is
+# always usable. Lanes are the access schemes of catalog/models.yaml, nothing model-specific.
+JUDGE_LANE_KEYS = {
+    "azure": ("AZURE_OPENAI_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER_KEY"),
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "google": ("GOOGLE_API_KEY",),
+}
+
+
+def judge_lane(entry: Mapping[str, Any]) -> str:
+    """The policy name of an entry's access scheme: ``local`` for vllm:, else the scheme."""
+    scheme = str(entry.get("access") or "").partition(":")[0]
+    return "local" if scheme == "vllm" else scheme
+
+
+def judge_lane_available(lane: str, target: str, env: Mapping[str, str]) -> bool:
+    if lane == "local":
+        return True
+    if not any(env.get(name) for name in JUDGE_LANE_KEYS.get(lane, ())):
+        return False
+    if lane == "azure":
+        if not (env.get("AZURE_OPENAI_BASE_URL") or env.get("AZURE_FOUNDRY_RESOURCE")):
+            return False
+        allowed = [d.strip() for d in (env.get("AZURE_OPENAI_DEPLOYMENTS") or "").split(",") if d.strip()]
+        return not allowed or target in allowed
+    return True
+
+
+def preferred_judge_entry(kb: KB, policy: Mapping[str, Any],
+                          env: Optional[Mapping[str, str]] = None) -> Optional[Dict[str, Any]]:
+    """The first catalog judge whose lane is usable, in the policy's ``prefer`` order.
+
+    ``policy`` is the ``judges:`` block of ``safety_kb/engine.yaml``::
+
+        judges:
+          prefer: [azure, local]        # access schemes; `local` = vllm:
+          roles: [judge, judge-api]     # optional: catalog roles that count as judges
+
+    Returns None when the policy names no lane that is both in the catalog and
+    usable, so the caller falls back to the plain ``role: judge`` default.
+    """
+    env = os.environ if env is None else env
+    prefer = [str(lane) for lane in (policy.get("prefer") or [])]
+    if not prefer:
+        return None
+    roles = tuple(policy.get("roles") or DEFAULT_JUDGE_ROLES)
+    candidates = [m for m in kb.models().values() if m.get("role") in roles and m.get("access")]
+    for lane in prefer:
+        for entry in candidates:
+            if judge_lane(entry) != lane:
+                continue
+            target = str(entry["access"]).partition(":")[2]
+            if judge_lane_available(lane, target, env):
+                return entry
+    return None
 
 
 def load_env_file(path: Path) -> Dict[str, str]:
@@ -69,16 +130,35 @@ class JudgePool:
     model's ``OPENAI_BASE_URL``.
     """
 
-    def __init__(self, kb: KB, *, gpu: Optional[str], log_dir: Path, hf_home: str):
+    def __init__(self, kb: KB, *, gpu: Optional[str], log_dir: Path, hf_home: str,
+                 env: Optional[Mapping[str, str]] = None, policy: Optional[Mapping[str, Any]] = None):
         self.kb, self.gpu, self.log_dir, self.hf_home = kb, gpu, log_dir, hf_home
+        self.env: Mapping[str, str] = os.environ if env is None else env
+        # `judges:` in engine.yaml (lane preference); absent = today's role: judge default
+        self.policy: Mapping[str, Any] = dict(policy if policy is not None else (kb.engine_config().get("judges") or {}))
         self.servers: Dict[str, Any] = {}
+        self.chosen: Dict[str, str] = {}
+
+    def entry_for(self, judge: Any) -> Optional[Dict[str, Any]]:
+        """``default`` follows NEURICO_SAFETY_JUDGE, then the ``judges.prefer`` policy, then role: judge."""
+        if judge == "default" and not self.env.get("NEURICO_SAFETY_JUDGE"):
+            entry = preferred_judge_entry(self.kb, self.policy, self.env)
+            if entry is not None:
+                return entry
+        return judge_entry(self.kb, judge)
 
     def resolve(self, judge: Any) -> tuple[Optional[str], Dict[str, str]]:
-        entry = judge_entry(self.kb, judge)
+        entry = self.entry_for(judge)
         if entry is None:
             return None, {}
+        if self.chosen.get(str(judge)) != entry["id"]:
+            self.chosen[str(judge)] = entry["id"]
+            print(f"judge {judge!r} -> {entry['id']} ({judge_lane(entry)})", flush=True)
         if not str(entry["access"]).startswith("vllm:"):
-            return resolve_api_endpoint(entry).inspect_model, {}
+            # API judges need no server; an Azure judge also needs AZURE_BASE_URL / AZURE_API_KEY
+            # in inspect's environment (its endpoint env; empty for the key-only providers).
+            endpoint = resolve_api_endpoint(entry, dict(self.env))
+            return endpoint.inspect_model, endpoint.env()
         server = self.servers.get(entry["id"])
         if server is None:
             server = serve(entry, gpu=self.gpu, python=sys.executable, log_dir=self.log_dir, hf_home=self.hf_home)
@@ -245,7 +325,7 @@ def main() -> int:
 
     summary: Dict[str, Any] = {"job": args.job, "started": utc_now(), "pairs": []}
     failures = 0
-    judges = JudgePool(kb, gpu=args.gpu, log_dir=args.out / "serving", hf_home=env["HF_HOME"])
+    judges = JudgePool(kb, gpu=args.gpu, log_dir=args.out / "serving", hf_home=env["HF_HOME"], env=env)
     servers: List[Any] = []  # every vLLM server this process started, stopped on SIGTERM/SIGINT
 
     def _terminate(signum, frame):  # noqa: ARG001

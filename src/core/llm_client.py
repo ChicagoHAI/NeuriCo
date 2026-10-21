@@ -63,7 +63,7 @@ from core.agent_factory import (
     DEFAULT_CONFIG_PATH, AgentConfigError, Usage, load_agents_config, new_run_id, price_usage,
     resolve_role_config, validate_against_schema,
 )
-from core.run_ledger import RunLedger, build_entry
+from core.run_ledger import RunLedger, build_entry, tags_from_env
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -483,6 +483,7 @@ class LLMClient:
         merged.update({k: v for k, v in params.items() if v is not None})
         if ledger is None:
             ledger = RunLedger.from_config(config.get("ledger"), env)
+        tags = {**tags_from_env(env), **dict(tags or {})}  # NEURICO_AGENT_TAGS under the caller's tags
         return cls(role, routes, merged, skipped=skipped, ledger=ledger, work_dir=work_dir, transport=transport, tags=tags)
 
     # -- introspection ---------------------------------------------------------------------------------------
