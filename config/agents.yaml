@@ -34,6 +34,18 @@ default:
   output: {kind: return_code}
 
 roles:
+  argon_env_builder:
+    # One Codex agent per Gemini-Argon evaluation, building a rerunnable environment under
+    # safety-gemini-argon-envs/envs/<id>/ (tools/codex_env_loop.py in that folder drives it).
+    # Codex on Azure (GPT-6-Astra) with full permissions; the loop owns restarts, so one attempt here.
+    provider: codex
+    model: gpt-6-astra
+    auth: azure
+    permissions: {mode: bypass}
+    output: {kind: files, required_files: [BUILD_REPORT.md]}
+    retry: {max_attempts: 1}
+    transcript: {stem: build, save_prompt: true}
+    tags: {project: gemini-argon-envs}
   resource_finder:
     # tolerate_nonzero: today's verdict is "the marker exists", whatever the exit code
     output: {kind: marker, marker: .resource_finder_complete, tolerate_nonzero: true}
