@@ -107,7 +107,9 @@ Daemon settings (`safety_kb/engine.yaml`, overridable by flags): `gpus`, `gpu_me
 `planner_agent_auth`, `planner_timeout`, `eval_python`, `hf_cache`. The planner, the ideation
 stages and the model scout launch through `config/agents.yaml` roles (`planner`,
 `ideation.problem` / `ideation.ideation` / `ideation.idea_judge`, `model_scout`), and every
-session is recorded in `safety_kb/.neurico/agent_runs.jsonl`. The daemon's `planner_provider`,
+session is recorded in `safety_kb/.neurico/agent_runs.jsonl` (each line names the prompt's
+`template_id`, `template_sha` and `variables_sha` from `core.prompt_registry`, so a template or
+context change is visible in the ledger). The daemon's `planner_provider`,
 `planner_model`, `planner_agent_auth` and `planner_timeout` apply to the ideation stages too
 (the timeout per stage).
 

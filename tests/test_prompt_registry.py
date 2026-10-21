@@ -136,6 +136,18 @@ def test_missing_key_stays_literal_and_is_reported(kb):
     assert "{{latest_models}}" in rendered.text and rendered.missing == ("latest_models",)
 
 
+def test_values_are_inserted_verbatim(tmp_path):
+    """A value is never re-parsed: ``{{other}}``, ``{% ... %}`` and ``{# ... #}`` inside it stay literal.
+
+    ``str.replace`` walking the keys in order would have expanded the ``{{b}}``
+    that ``a``'s value introduced; nothing relied on that and the registry does not
+    reproduce it (a KB finding quoting a template must not be able to rewrite the prompt).
+    """
+    (tmp_path / "t.txt").write_text("{{a}}|{{b}}", encoding="utf-8")
+    rendered = PromptRegistry(tmp_path).render("t.txt", {"a": "x {{b}} {% if %} {# c #}", "b": "y"})
+    assert rendered.text == "x {{b}} {% if %} {# c #}|y" and rendered.missing == ()
+
+
 def test_render_keeps_trailing_newline_and_whitespace(tmp_path):
     (tmp_path / "t.txt").write_text("a={{a}} b={{b}}\n\n  tail\n", encoding="utf-8")
     rendered = PromptRegistry(tmp_path).render("t.txt", {"a": "1", "b": "2"})

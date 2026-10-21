@@ -293,7 +293,7 @@ All commands from `docs/SAFETY_ENGINE.md`; `./neurico safety <cmd>` equals `uv r
 
 | Item | Where stated | State |
 | --- | --- | --- |
-| Prompt registry (`prompt_registry.py`, Jinja rendering, `template_sha` in the ledger) | `docs/AGENT_FACTORY_ASSESSMENT.md` step 6 | in progress (subagent branch, 2026-10-21) |
+| Prompt registry (`prompt_registry.py`, Jinja rendering, `template_sha` in the ledger) | `docs/AGENT_FACTORY_ASSESSMENT.md` step 6 | done (2026-10-21): planner, ideator and scout templates render through `PromptRegistry.render` (same `{{key}}` files, missing keys stay literal as before), research roles through `render_role` over the unchanged `PromptGenerator`; every ledger line carries `template_id`, `template_sha`, `variables_sha`; goldens in `tests/fixtures/prompts/golden/`. The ideation stage prompt (`src/ideation/runtime.py: stage_prompt`, `{key}` syntax) keeps its own `prompt_version` hash and is not routed through the registry yet |
 | Ledger-backed budgets: spend in `status` and `digest`, daemon enforces `api_budget_usd` / daily caps, `--max-budget-usd` for Claude roles; campaign-level spend cap | step 7; `docs/IDEATION_INTEGRATION.md` status table and risk 7 | in progress (subagent branch, 2026-10-21); `JobSpec.api_budget_usd` is not enforced yet |
 | Judge preference (pairwise judging of ideas) | `docs/IDEATION_INTEGRATION.md` status table, risk 6 | open |
 | Timeout removal (no default limits as policy) | owner direction (2026-10-21); `agents.yaml` carries explicit `timeout_s` per role today | in progress (subagent branch): defaults become no limit, limits opt-in, watchdog warns instead of killing |

@@ -16,8 +16,11 @@ Undefined placeholders: ``str.replace`` left a key with no value in the text as
 ``{{key}}``. Jinja2 would silently render it as an empty string, so the
 registry's environment renders an undefined name back to ``{{name}}`` and lists
 it in ``RenderedPrompt.missing``; the text is identical to today's and the gap
-is visible to the caller. Prompt text never lives in Python: templates stay
-under ``templates/``.
+is visible to the caller. Values are inserted verbatim and never re-parsed: a
+``{{other}}`` inside a value stays literal (``str.replace``, walking the keys in
+order, would have expanded a placeholder an earlier value introduced; no
+template or KB value relied on that). Prompt text never lives in Python:
+templates stay under ``templates/``.
 """
 
 from __future__ import annotations
