@@ -10,7 +10,7 @@ daemon:
   retries: 2
   poll_seconds: 30
   min_pending: 2
-  planner_interval_hours: 6
+  planner_interval_hours: 1   # floor between rounds; a round also needs an empty queue and a free GPU
   planner_provider: codex
   planner_model: gpt-6-astra
   eval_python: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/safety_venv/bin/python
