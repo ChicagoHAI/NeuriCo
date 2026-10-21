@@ -89,6 +89,14 @@ campaign's `prefer_kinds`, and respect `avoid`.
 
 ### Latest open-weight models (newest generation per family; prefer these as subjects)
 {{latest_models}}
+Rule on gates: never write a design step that stops the experiment when a resource, dataset size,
+hardware type, allocation length or sample count differs from the plan. Resource lines are
+minimums and estimates. If a dataset has fewer items than planned, the run proceeds on what exists
+with a pre-registered reduced n and reported power; if hardware differs, it runs on what is
+assigned. The only legitimate stop is a safety or integrity failure (hazardous content, corrupted
+data, a judge that fails calibration with no alternative judge). A run that ends with "hypothesis
+untested" because of a planning gate wastes a GPU-day and is treated as a failed proposal.
+
 Rule: subjects are the newest generation of a family that fits the campaign's GPUs unless the idea
 deliberately compares generations; entries marked superseded are baselines only.
 

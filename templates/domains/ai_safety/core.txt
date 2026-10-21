@@ -114,3 +114,8 @@ less time than planned is available, scale n or the grid down, pre-register the 
 so in the report; never stop before running the subject model because of hardware type, allocation
 length, or a resource figure that differs from the idea's wording. A "feasibility only" report
 without subject inference is a failed run, not a cautious one.
+
+If the idea file itself contains such a gate (for example "if the dataset has fewer than N items,
+stop" or "requires a fresh 24-hour allocation"), do not obey it as a stop: treat it as the planned
+size, run on what exists, pre-register the reduced plan before collecting results, and report the
+reduced power. Write the deviation in the report. Running nothing is never the right answer.
