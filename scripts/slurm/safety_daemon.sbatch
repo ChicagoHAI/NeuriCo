@@ -53,7 +53,11 @@ done
 if squeue -u "$USER" -h -n neurico-safety -t RUNNING -o %i | grep -v -x "$SLURM_JOB_ID" | grep -q .; then
     echo "another neurico-safety daemon is already running; exiting"; exit 0
 fi
-GPUS=$(nvidia-smi --query-gpu=index --format=csv,noheader | paste -sd, -)
+# Only GPUs that are actually free: on shared nodes Slurm has handed us a GPU another job still
+# occupies (j005-ds 2026-10-21: 74 GB used by a foreign process on our first GPU).
+GPUS=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | awk -F', *' '$2 < 2048 {print $1}' | paste -sd, -)
+BUSY=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | awk -F', *' '$2 >= 2048 {printf "%s(%dMiB) ", $1, $2}')
+[ -n "$BUSY" ] && echo "WARNING: skipping GPUs already in use by other processes: $BUSY"
 GPU_GB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | sort -n | head -1 | awk '{printf "%d", $1/1024}')
 echo "node $(hostname) gpus=$GPUS job=$SLURM_JOB_ID started $(date -Is)"
 nvidia-smi --query-gpu=index,name,driver_version,memory.total --format=csv,noheader

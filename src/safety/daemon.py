@@ -195,10 +195,31 @@ class Daemon:
         for data in self.state["jobs"].values():
             if data.get("state") == "running" and data.get("gpu") in used:
                 used[data["gpu"]] += float(data.get("gpu_memory_gb") or 0)
+        # Memory held by processes that are not ours (a foreign job sharing the physical GPU, a
+        # server a killed job left behind) counts as load too; the accounting above only knows
+        # our own launches.
+        for gpu, actual in self.actual_used_gb().items():
+            if gpu in used and actual > used[gpu] + 2.0:
+                used[gpu] = actual
         for gpu, load in sorted(used.items(), key=lambda kv: kv[1]):
             if load + needed_gb <= float(self.config["gpu_memory_gb"]):
                 return gpu
         return None
+
+    @staticmethod
+    def actual_used_gb() -> Dict[str, float]:
+        """GPU index -> memory in use right now (GB) from nvidia-smi; empty when unavailable."""
+        try:
+            out = subprocess.check_output(["nvidia-smi", "--query-gpu=index,memory.used",
+                                           "--format=csv,noheader,nounits"], text=True, timeout=20)
+        except Exception:  # noqa: BLE001 - no nvidia-smi (tests, CPU hosts): nothing to add
+            return {}
+        result: Dict[str, float] = {}
+        for line in out.strip().splitlines():
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) == 2 and parts[1].replace(".", "", 1).isdigit():
+                result[parts[0]] = float(parts[1]) / 1024.0
+        return result
 
     def slot_available(self, spec: JobSpec) -> bool:
         if spec.uses_neurico:
