@@ -78,9 +78,13 @@ _spec.loader.exec_module(base)  # type: ignore[union-attr]
 ENDPOINT_REL = Path(".neurico") / "modal_endpoint.json"
 
 
-def _run(cmd: List[str], timeout: int = 120) -> subprocess.CompletedProcess:
+# Wall clock for Modal CLI calls: unset/0 (the default) = none; NEURICO_MODAL_CLI_TIMEOUT opts in.
+_CLI_TIMEOUT = int(os.environ.get("NEURICO_MODAL_CLI_TIMEOUT") or 0) or None
+
+
+def _run(cmd: List[str], timeout: Optional[int] = None) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True,
-                          timeout=timeout, check=False)
+                          timeout=timeout or _CLI_TIMEOUT, check=False)
 
 
 # register / capture / pull / teardown

@@ -88,7 +88,8 @@ def test_routes_follow_config_order_and_key_names(monkeypatch):
     c = client()
     assert [(r.name, r.model, r.api_key_env) for r in c.routes] == [
         ("openrouter", "openai/gpt-4.1", "OPENROUTER_KEY"), ("openai", "gpt-4.1", "OPENAI_API_KEY")]
-    assert c.params == {"temperature": 0, "max_tokens": 4096, "timeout_s": 180, "response_format": "json_object"}
+    assert c.params == {"temperature": 0, "max_tokens": 4096, "timeout_s": None, "response_format": "json_object"}
+    assert c.timeout_s is None  # no outer deadline unless a role opts in
     assert "or-key" not in c.describe() and "OPENROUTER_KEY" in c.describe()
 
 
@@ -117,7 +118,7 @@ def test_model_override_precedence_per_route(monkeypatch):
 def test_role_params_override_and_non_api_roles_rejected(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     c = client("idea_converter", timeout_s=None, max_tokens=99)
-    assert c.params["timeout_s"] == 60 and c.params["max_tokens"] == 99 and c.params["temperature"] == 0.1
+    assert c.params["timeout_s"] is None and c.params["max_tokens"] == 99 and c.params["temperature"] == 0.1
     assert c.params["response_format"] is None
     with pytest.raises(AgentConfigError, match="not an API role"):
         client("resource_finder")

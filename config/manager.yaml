@@ -32,5 +32,10 @@ manager:
   # provider turns across reminder rounds. Human response time is not counted.
   hitl_manager_max_request_provider_turns: 48
 
+  # HITL only: ReAct turns (provider call + tool calls) per manager reply.
+  # Unset/null = no cap, the loop ends when the provider stops calling tools.
+  # Opt in with e.g. `hitl_manager_max_turns: 12`.
+  hitl_manager_max_turns: null
+
   # Default AI provider for research agents
   default_provider: claude

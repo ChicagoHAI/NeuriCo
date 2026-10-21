@@ -89,8 +89,8 @@ def test_every_configured_role_resolves_to_a_spec(oauth):
 
 def test_spec_precedence_default_role_env_override(oauth, monkeypatch):
     factory = AgentFactory()
-    assert factory.spec("unknown_role").budget.timeout_s == 3600  # default block
-    assert factory.spec("resource_finder").budget.timeout_s == 2700  # role block
+    assert factory.spec("unknown_role").budget == Budget(timeout_s=0)  # default block: no limits
+    assert factory.spec("resource_finder").budget.timeout_s == 0  # no per-role wall clock either
     assert factory.spec("model_scout").provider == "codex"
     assert factory.spec("ideation.ideation").output.path == "output/ideas.json"  # extends chain
     assert factory.spec("ideation.ideation").retry == RetryPolicy(max_attempts=3, max_invalid_outputs=1,
@@ -102,7 +102,7 @@ def test_spec_precedence_default_role_env_override(oauth, monkeypatch):
     cli_spec = AgentFactory().spec("resource_finder", model="cli-model", provider=None, budget={"timeout_s": 5},
                                    full_permissions=False)
     assert cli_spec.model == "cli-model" and cli_spec.provider == "codex"  # None override is ignored
-    assert cli_spec.budget == Budget(timeout_s=5, max_prompt_chars=400000)
+    assert cli_spec.budget == Budget(timeout_s=5)
     assert cli_spec.permissions.mode == "inherit"
     assert AgentFactory().spec("resource_finder", budget=Budget(timeout_s=9)).budget.timeout_s == 9
     assert factory.spec("hitl_manager").extras["mcp"]["startup_timeout_s"] == 30
@@ -149,8 +149,9 @@ def test_azure_codex_model_mapping_and_gemini_rejection(lane):
 
 def test_optional_fields_only_add_flags(oauth):
     factory = AgentFactory()
+    # max_turns is opt-in (no role sets it by default); passing it proves the flag is still wired.
     spec = factory.spec("hitl_manager", provider="claude", system_prompt="be brief", mcp_config=Path("/tmp/mcp.json"),
-                        permissions={"allowed_tools": ["mcp__x__*"]})
+                        permissions={"allowed_tools": ["mcp__x__*"]}, budget={"max_turns": 1})
     argv = list(factory.build(spec).argv)
     assert argv[:3] == ["claude", "-p", "--dangerously-skip-permissions"]
     for flag in ("--tools", "--allowedTools", "--mcp-config", "--strict-mcp-config", "--max-turns", "--append-system-prompt"):

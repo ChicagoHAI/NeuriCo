@@ -159,7 +159,7 @@ def run_comment_handler(
     work_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: int = 1800,  # 30 minutes default
+    timeout: Optional[int] = None,  # None = the role's config (no limit unless set), 0 = no limit
     full_permissions: bool = True
 ) -> Dict[str, Any]:
     """
@@ -170,7 +170,7 @@ def run_comment_handler(
         work_dir: Working directory (existing workspace)
         provider: AI provider (claude, codex, gemini)
         templates_dir: Path to templates directory (auto-detected if None)
-        timeout: Maximum execution time in seconds (default: 30 min)
+        timeout: Wall-clock limit in seconds (None = config/agents.yaml, 0 = no limit)
         full_permissions: Allow full permissions to CLI agents (default: True)
 
     Returns:
@@ -204,7 +204,7 @@ def run_comment_handler(
     print(f"   Title: {title}")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
-    print(f"   Timeout: {timeout}s ({timeout//60} minutes)")
+    print(f"   Timeout: {'role budget (config/agents.yaml)' if timeout is None else ('disabled' if not timeout else f'{timeout}s ({timeout // 60} minutes)')}")
     print()
     print("User Comments:")
     print("-" * 40)
@@ -235,7 +235,7 @@ def _run_comment_handler_with_remote_workspace(
     work_dir: Path,
     provider: str,
     templates_dir: Path,
-    timeout: int,
+    timeout: Optional[int],
     full_permissions: bool,
     dsi_remote_info: Optional[Dict[str, str]],
 ) -> Dict[str, Any]:

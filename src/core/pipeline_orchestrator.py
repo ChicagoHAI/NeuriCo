@@ -113,6 +113,13 @@ from core.research_environment import normalize_workspace_mode, read_workspace_m
 from templates.research_agent_instructions import generate_instructions
 
 
+def _timeout_label(timeout: Optional[int]) -> str:
+    """'none (role budget ...)' for None, 'none' for 0, else '<n>s'."""
+    if timeout is None:
+        return "none (role budget from config/agents.yaml)"
+    return "none" if timeout <= 0 else f"{timeout}s"
+
+
 class PipelineState:
     """Tracks pipeline execution state."""
 
@@ -934,15 +941,15 @@ class ResearchPipelineOrchestrator:
         provider: str = "claude",
         pause_after_resources: bool = False,
         skip_resource_finder: bool = False,
-        resource_finder_timeout: Optional[int] = 2700,  # 45 min
-        experiment_runner_timeout: Optional[int] = 10800,  # 3 hours
+        resource_finder_timeout: Optional[int] = None,  # None = config/agents.yaml (no limit), 0 = no limit
+        experiment_runner_timeout: Optional[int] = None,
         full_permissions: bool = True,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
-        rule_maker_timeout: Optional[int] = 1800,  # 30 min
-        scorer_timeout: Optional[int] = 600,  # 10 min
+        rule_maker_timeout: Optional[int] = None,
+        scorer_timeout: Optional[int] = None,
         bootstrap_mode: bool = False,
-        manifest_trimmer_timeout: int = 300,  # 5 min
+        manifest_trimmer_timeout: Optional[int] = None,
         hitl_enabled: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -953,8 +960,9 @@ class ResearchPipelineOrchestrator:
             provider: AI provider (claude, codex, gemini)
             pause_after_resources: If True, pause for human review after resource finding
             skip_resource_finder: If True, skip resource finding stage (resources already gathered)
-            resource_finder_timeout: Timeout for resource finder in seconds
-            experiment_runner_timeout: Timeout for experiment runner in seconds
+            resource_finder_timeout: Timeout for resource finder in seconds (None = the role's
+                             budget in config/agents.yaml, no limit unless set; 0 = no limit)
+            experiment_runner_timeout: Timeout for experiment runner in seconds (same convention)
             full_permissions: Allow full permissions to agents
             use_scribe: If True, use scribe for notebook integration (default: False, raw CLI)
             scoring_enabled: If True, run in rule_maker (scored) mode. Adds two stages
@@ -1577,8 +1585,7 @@ class ResearchPipelineOrchestrator:
         try:
             subprocess.run(
                 [sys.executable, str(sweep_script), "--workspace", str(self.work_dir)],
-                timeout=180,
-                check=False,
+                check=False,  # no wall clock: a slow teardown is finished, not killed
             )
         except Exception as exc:
             # Never raise from finally — the workspace still needs its results
@@ -1586,7 +1593,7 @@ class ResearchPipelineOrchestrator:
             print(f"⚠️  Modal sweep encountered an error: {exc}")
 
     def _run_resource_finder(
-        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool,
+        self, idea: Dict[str, Any], provider: str, timeout: Optional[int], full_permissions: bool,
         scoring_enabled: bool = False
     ) -> Dict[str, Any]:
         """Run resource finder stage."""
@@ -2092,7 +2099,7 @@ class ResearchPipelineOrchestrator:
         full_permissions: bool,
         use_scribe: bool = False,
         scoring_enabled: bool = False,
-        scorer_timeout: Optional[int] = 600,
+        scorer_timeout: Optional[int] = None,
         sealed_dir: Optional[Path] = None,
     ) -> Dict[str, Any]:
         """Run experiment_runner through the plan-centered HITL workflow."""
@@ -2516,7 +2523,7 @@ class ResearchPipelineOrchestrator:
     # legacy two-stage flow.
 
     def _run_rule_maker(
-        self, idea: Dict[str, Any], provider: str, timeout: int, full_permissions: bool
+        self, idea: Dict[str, Any], provider: str, timeout: Optional[int], full_permissions: bool
     ) -> Dict[str, Any]:
         """Run the rule_maker stage (scoring mode only)."""
         print()
@@ -3064,7 +3071,7 @@ class ResearchPipelineOrchestrator:
         idea: Dict[str, Any],
         provider: str,
         full_permissions: bool,
-        manifest_trimmer_timeout: int,
+        manifest_trimmer_timeout: Optional[int],
         rule_maker_timeout: Optional[int],
         scorer_timeout: Optional[int],
     ) -> Dict[str, Any]:
@@ -3465,9 +3472,9 @@ class ResearchPipelineOrchestrator:
         idea: Dict[str, Any],
         provider: str,
         full_permissions: bool,
-        manifest_trimmer_timeout: int,
-        rule_maker_timeout: int,
-        scorer_timeout: int,
+        manifest_trimmer_timeout: Optional[int],
+        rule_maker_timeout: Optional[int],
+        scorer_timeout: Optional[int],
     ) -> Dict[str, Any]:
         """Top-level driver for bootstrap_mode pipelines."""
         print()
@@ -3476,9 +3483,9 @@ class ResearchPipelineOrchestrator:
         print("=" * 80)
         print(f"Work directory: {self.work_dir}")
         print(f"Provider: {provider}")
-        print(f"Manifest trimmer timeout: {manifest_trimmer_timeout}s")
-        print(f"Rule maker timeout: {rule_maker_timeout}s")
-        print(f"Scorer timeout: {scorer_timeout}s")
+        print(f"Manifest trimmer timeout: {_timeout_label(manifest_trimmer_timeout)}")
+        print(f"Rule maker timeout: {_timeout_label(rule_maker_timeout)}")
+        print(f"Scorer timeout: {_timeout_label(scorer_timeout)}")
         print("=" * 80)
 
         results: Dict[str, Any] = {
@@ -3540,7 +3547,7 @@ class ResearchPipelineOrchestrator:
         self,
         provider: str,
         full_permissions: bool,
-        manifest_trimmer_timeout: int,
+        manifest_trimmer_timeout: Optional[int],
     ) -> Dict[str, Any]:
         """
         Run Pass 1 (mechanical) + Pass 2 (manifest_trimmer agent) and persist

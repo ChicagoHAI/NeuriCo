@@ -31,7 +31,10 @@ from core.agent_cli import (
 )
 
 
-MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS = 900_000
+# Prompt-size cap: None = no check. The value comes from the autoresearch_proposer role's
+# ``budget.max_prompt_chars`` in config/agents.yaml (opt-in, for a provider's real context
+# limit); this module attribute is an override hook for tests.
+MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS: Optional[int] = None
 MAX_RESULTS_SUMMARY_DEPTH = 3
 MAX_RESULTS_SUMMARY_ENTRIES = 1_000
 MAX_RESULTS_SUMMARY_CHARS = 100_000
@@ -57,6 +60,19 @@ _CONTEXT_DIRECTORY_NAMES_TO_PRUNE = frozenset(
 
 class AutoResearchProposerPromptTooLargeError(RuntimeError):
     """Raised before provider launch when a proposer prompt is not safely bounded."""
+
+
+def _prompt_char_limit() -> Optional[int]:
+    """The opt-in prompt-size cap: the module override, else the role's ``budget.max_prompt_chars``."""
+    if MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS:
+        return int(MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS)
+    try:
+        from core.agent_factory import load_agents_config, resolve_role_config
+        budget = resolve_role_config(load_agents_config(), "autoresearch_proposer").get("budget") or {}
+    except Exception:  # noqa: BLE001 - a broken config must not block the proposer; the factory reports it
+        return None
+    value = budget.get("max_prompt_chars")
+    return int(value) if value else None
 
 
 def _generate_compute_backend_section(idea_spec: Dict[str, Any], provider: str = "claude") -> str:
@@ -196,7 +212,8 @@ def generate_autoresearch_proposal_prompt(
         whiteboard_active_tips_md=whiteboard_active_tips_md,
         compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
     )
-    if len(prompt) > MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS:
+    limit = _prompt_char_limit()
+    if limit and len(prompt) > limit:
         field_sizes = {
             key: len(json.dumps(value, ensure_ascii=False, default=str))
             for key, value in context.items()
@@ -206,7 +223,7 @@ def generate_autoresearch_proposal_prompt(
         details = ", ".join(f"{name}={size}" for name, size in largest)
         raise AutoResearchProposerPromptTooLargeError(
             "AutoResearch proposer prompt exceeds NeuriCo's safe internal limit "
-            f"({len(prompt)} > {MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS} characters). "
+            f"({len(prompt)} > {limit} characters). "
             f"Largest context fields: {details}."
         )
     return prompt
@@ -269,7 +286,7 @@ def run_autoresearch_proposer(
     attempt_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: Optional[int] = 900,
+    timeout: Optional[int] = None,  # None = the role's config (no limit unless set), 0 = no limit
     full_permissions: bool = True,
     attempt_history: Optional[list[Dict[str, Any]]] = None,
     prompt_suffix: str = "",
@@ -301,7 +318,7 @@ def run_autoresearch_proposer(
     print(f"   Work dir: {work_dir}")
     print(f"   Parent node: {parent_sha}")
     print(f"   Attempt dir: {attempt_dir}")
-    timeout_label = "disabled" if timeout is None else f"{timeout}s ({timeout // 60} minutes)"
+    timeout_label = "role budget (config/agents.yaml)" if timeout is None else ("disabled" if not timeout else f"{timeout}s ({timeout // 60} minutes)")
     print(f"   Timeout: {timeout_label}")
     print("=" * 80)
 
@@ -321,11 +338,12 @@ def run_autoresearch_proposer(
         hitl_mode=str((env_extra or {}).get("NEURICO_HITL_MODE", "full")),
     )
     prompt = append_prompt_block(prompt, prompt_suffix)
-    if len(prompt) > MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS:
+    limit = _prompt_char_limit()
+    if limit and len(prompt) > limit:
         raise AutoResearchProposerPromptTooLargeError(
             "AutoResearch proposer prompt exceeds NeuriCo's safe internal limit after "
             f"runtime continuation context was added ({len(prompt)} > "
-            f"{MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS} characters; "
+            f"{limit} characters; "
             f"continuation={len(prompt_suffix)} characters)."
         )
 

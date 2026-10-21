@@ -373,7 +373,7 @@ def run_rule_maker(
     work_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: Optional[int] = 1800,  # 30 min
+    timeout: Optional[int] = None,  # None = the role's config (no limit unless set), 0 = no limit
     full_permissions: bool = True,
     prompt_suffix: str = "",
     completion_mode: str = "outputs",
@@ -411,7 +411,7 @@ def run_rule_maker(
     print("📐 Starting Rule Maker Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
-    timeout_label = "disabled" if timeout is None else f"{timeout}s ({timeout // 60} minutes)"
+    timeout_label = "role budget (config/agents.yaml)" if timeout is None else ("disabled" if not timeout else f"{timeout}s ({timeout // 60} minutes)")
     print(f"   Timeout: {timeout_label}")
     print("=" * 80)
 

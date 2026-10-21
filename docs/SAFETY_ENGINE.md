@@ -102,14 +102,25 @@ uv run python src/cli/safety.py digest --days 7
 ```
 
 Daemon settings (`safety_kb/engine.yaml`, overridable by flags): `gpus`, `gpu_memory_gb`,
-`max_neurico_jobs`, `max_suite_jobs`, `stall_minutes`, `retries`, `poll_seconds`,
+`max_neurico_jobs`, `max_suite_jobs`, `stall_minutes`, `stall_action`, `retries`, `poll_seconds`,
 `min_pending`, `planner_interval_hours`, `planner_enabled`, `planner_provider`, `planner_model`,
-`planner_agent_auth`, `planner_timeout`, `eval_python`, `hf_cache`. The planner, the ideation
+`planner_agent_auth`, `planner_timeout`, `resource_finder_timeout`, `experiment_timeout`,
+`paper_timeout`, `eval_python`, `hf_cache`. The planner, the ideation
 stages and the model scout launch through `config/agents.yaml` roles (`planner`,
 `ideation.problem` / `ideation.ideation` / `ideation.idea_judge`, `model_scout`), and every
 session is recorded in `safety_kb/.neurico/agent_runs.jsonl`. The daemon's `planner_provider`,
 `planner_model`, `planner_agent_auth` and `planner_timeout` apply to the ideation stages too
 (the timeout per stage).
+
+**No limits by default.** Completion is the priority, so nothing is cut short on elapsed
+time or spend unless you opt in: `planner_timeout`, `resource_finder_timeout`,
+`experiment_timeout` and `paper_timeout` are unset (the roles' `budget` blocks in
+`config/agents.yaml` apply, and those are `timeout_s: 0` = no limit, no cost cap, no turn cap);
+set seconds to opt in (0 = explicitly no limit). The watchdog kills a job only when its process
+is gone; a log that stops growing for `stall_minutes` is logged once as `STALL` and left running
+(`stall_action: warn`), and `stall_action: kill` opts in to the old kill-and-requeue behaviour.
+The vLLM startup wait in `src/safety/serving.py` is likewise unlimited unless
+`NEURICO_VLLM_STARTUP_TIMEOUT` is set (the server exiting is still detected).
 
 ## Knowledge-base index, findings lifecycle and ideation
 
@@ -184,8 +195,10 @@ Each agent stage is one `core.agent_factory` launch in a throw-away workspace un
 (the knowledge-base tool; `NEURICO_SAFETY_KB` points at the snapshot and every query is logged to
 `output/kb_queries.jsonl`), `tools/scholar_search.py` (Semantic Scholar + arXiv), `AGENTS.md` /
 `CLAUDE.md` (`templates/ideation/AGENTS.md`: untrusted-data rule, writing rules, the standards every
-idea must meet) and the stage skill. The roles default to Codex with `isolate_home`, a 1500 s
-stage timeout, a hard 40 USD budget and three attempts; an artifact that fails the JSON schema or
+idea must meet) and the stage skill. The roles default to Codex with `isolate_home` and three
+attempts, with no stage timeout and no cost cap unless `config/agents.yaml` opts in (the digest's
+old caps are `budget: {timeout_s: 1500, max_cost_usd: 40, hard: true}` on `ideation.problem`);
+an artifact that fails the JSON schema or
 the cross-checks (`src/ideation/runtime.py`: feed ids, axes, method overlap, writing caps,
 sibling / reject-code consistency) is retried once with the validator's message appended to the
 prompt. `output/notes.md` content outside a "Knowledge base" heading and a stage that ran no
@@ -235,8 +248,10 @@ the queue.
 - `logs/safety/events.log` is the audit trail (`UP`, `START`, `DONE`, `FAILED`, `RETRY`,
   `STALL`, `LOST`, `ADOPT`, `PLAN`, `INGEST`, `STOP`); `status.md`/`status.json` are rewritten
   every tick; per-job logs are under `logs/safety/jobs/`.
-- A job whose log stops growing for `stall_minutes` is killed and requeued; NeuriCo runs
-  resume after their last completed stage, suites skip finished (eval, model) pairs.
+- A job whose log stops growing for `stall_minutes` is logged as `STALL` once per episode and
+  left running (`stall_action: warn`, the default); with `stall_action: kill` it is killed and
+  requeued, and NeuriCo runs then resume after their last completed stage, suites skip
+  finished (eval, model) pairs. A job whose process is gone always fails and retries.
 - On restart the daemon re-attaches to jobs whose process is still alive and fails the rest,
   which then retry. Retries are counted per job (`retries`).
 - `stop` sends SIGTERM: running containers are killed, jobs return to `pending`.

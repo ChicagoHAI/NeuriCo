@@ -4,6 +4,8 @@
 #SBATCH --gres=gpu:4
 #SBATCH --constraint="a100|h100|h200"
 #SBATCH --time=12:00:00
+# --time is the partition's requirement, not a NeuriCo limit: ensure_daemon.sh re-submits
+# the daemon, which re-adopts running jobs on restart, so no job is cut short by it.
 #SBATCH --mem=200G
 #SBATCH --cpus-per-task=16
 #SBATCH --output=logs/slurm/safety-daemon-%j.out

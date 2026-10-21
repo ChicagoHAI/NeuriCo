@@ -99,7 +99,14 @@ class Permissions:
 
 @dataclass(frozen=True)
 class Budget:
-    """Limits on one run. ``timeout_s`` 0 or None means no wall-clock limit."""
+    """Limits on one run; every field is opt-in (config/agents.yaml ``budget`` or a caller override).
+
+    The defaults impose nothing: ``timeout_s`` 0 or None means no wall-clock limit,
+    ``max_turns`` / ``max_cost_usd`` / ``max_prompt_chars`` None means no cap, and
+    ``hard`` False means an overrun is recorded (status ``budget_exceeded``) but never
+    raised. Call sites use the convention ``timeout=None`` -> "use the role's config"
+    and ``timeout=0`` -> "no limit" (``AgentFactory._apply_overrides``).
+    """
 
     timeout_s: Optional[int] = None
     max_turns: Optional[int] = None
@@ -834,9 +841,11 @@ class AgentFactory:
     def _apply_overrides(cfg: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
         for key, value in overrides.items():
             if key == "timeout":
-                # Today's call-site parameter: None means "no limit" at every site, so it must
-                # not fall through to the role default the way other None overrides do.
-                cfg["budget"] = _deep_merge(cfg.get("budget") or {}, {"timeout_s": 0 if value is None else int(value)})
+                # Call-site convention: None = use the role's configured budget (which is
+                # "no limit" unless config/agents.yaml opts in), 0 = explicitly no limit.
+                if value is None:
+                    continue
+                cfg["budget"] = _deep_merge(cfg.get("budget") or {}, {"timeout_s": int(value)})
                 continue
             if value is None:
                 continue
@@ -918,6 +927,8 @@ class AgentFactory:
     # -- run internals --------------------------------------------------------------------------------------
     @staticmethod
     def _check_prompt_size(spec: AgentSpec, prompt: str) -> None:
+        # Only when the role opts in (budget.max_prompt_chars): meant for a provider's real
+        # context limit, where launching would fail anyway after the spend.
         limit = spec.budget.max_prompt_chars
         if limit and len(prompt) > limit:
             raise ValueError(f"{spec.role}: prompt is {len(prompt)} chars, over the {limit} limit")

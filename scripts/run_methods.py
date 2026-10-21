@@ -87,12 +87,13 @@ METHODS = [
     ("zero-shot", "codex",  "gpt-6-astra"),
 ]
 
-# Wall-clock limits in seconds; 0 means no limit. Completing the research is
-# the priority, so nothing is cut off by default.
-RESOURCE_FINDER_TIMEOUT = 0
-EXPERIMENT_TIMEOUT = 0
-PAPER_TIMEOUT = 0
-ZERO_SHOT_TIMEOUT = 0
+# Wall-clock limits in seconds: None = the flag is not passed, so the roles' budgets in
+# config/agents.yaml apply (no limit unless set there); 0 = no limit. Completing the
+# research is the priority, so nothing is cut off by default.
+RESOURCE_FINDER_TIMEOUT = None
+EXPERIMENT_TIMEOUT = None
+PAPER_TIMEOUT = None
+ZERO_SHOT_TIMEOUT = None
 
 
 @dataclass(frozen=True)
@@ -263,10 +264,12 @@ class Batch:
     def neurico_run_command(self, job: Job) -> List[str]:
         m = job.method
         command = [str(NEURICO), "run", job.idea_id or "<idea_id>",
-                   "--provider", m.provider, "--model", m.model, "--full-permissions",
-                   "--resource-finder-timeout", str(self.args.resource_finder_timeout),
-                   "--timeout", str(self.args.experiment_timeout),
-                   "--paper-timeout", str(self.args.paper_timeout)]
+                   "--provider", m.provider, "--model", m.model, "--full-permissions"]
+        for flag, value in (("--resource-finder-timeout", self.args.resource_finder_timeout),
+                            ("--timeout", self.args.experiment_timeout),
+                            ("--paper-timeout", self.args.paper_timeout)):
+            if value is not None:
+                command += [flag, str(value)]
         if self.args.no_github:
             command.append("--no-github")
         return command
@@ -274,8 +277,9 @@ class Batch:
     def baseline_command(self, job: Job) -> List[str]:
         m = job.method
         command = [str(NEURICO), "baseline", str(job.idea_file),
-                   "--provider", m.provider, "--model", m.model,
-                   "--timeout", str(self.args.zero_shot_timeout), *self.github_flags()]
+                   "--provider", m.provider, "--model", m.model, *self.github_flags()]
+        if self.args.zero_shot_timeout is not None:
+            command += ["--timeout", str(self.args.zero_shot_timeout)]
         if job.resume_workspace:
             command += ["--resume-workspace", job.resume_workspace,
                         "--resume-mode", job.resume_mode or "continue"]
@@ -543,7 +547,7 @@ def select_methods(only: Optional[str]) -> List[Method]:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run ideas through NeuriCo and the zero-shot baselines "
-                    "(timeouts are in seconds; 0 = no limit)",
+                    "(timeouts are in seconds; unset = the roles' config/agents.yaml budgets, 0 = no limit)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("ideas", nargs="*", type=Path, help="Idea YAML file(s)")

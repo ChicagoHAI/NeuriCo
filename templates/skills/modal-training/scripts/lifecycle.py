@@ -44,9 +44,12 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 SENTINEL_REL = Path(".neurico") / "modal_resources.json"
 SENTINEL_LOCK_REL = Path(".neurico") / "modal_resources.lock"
 
-# Large multi-GB artifact pulls (e.g. a full SFT checkpoint dir) can exceed
-# the 600s default. Override via env var when you know the artifact is big.
-_PULL_TIMEOUT = int(os.environ.get("NEURICO_MODAL_PULL_TIMEOUT", "600"))
+# Wall clocks for Modal CLI calls are opt-in: unset or 0 (the default) means a
+# pull or a CLI command is never killed on elapsed time (a multi-GB checkpoint
+# pull simply takes as long as it takes). NEURICO_MODAL_PULL_TIMEOUT and
+# NEURICO_MODAL_CLI_TIMEOUT (seconds) opt in.
+_PULL_TIMEOUT = int(os.environ.get("NEURICO_MODAL_PULL_TIMEOUT") or 0) or None
+_CLI_TIMEOUT = int(os.environ.get("NEURICO_MODAL_CLI_TIMEOUT") or 0) or None
 
 # Manifest entries declared by each template's register() call. Lifecycle has
 # no knowledge of what artifacts a run produces — that's the template's
@@ -162,10 +165,10 @@ def now_iso() -> str:
 
 # Modal CLI wrappers
 
-def _run(cmd: List[str], timeout: int = 120,
+def _run(cmd: List[str], timeout: Optional[int] = None,
          check: bool = False) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True,
-                          timeout=timeout, check=check)
+                          timeout=timeout or _CLI_TIMEOUT, check=check)
 
 
 def env_name_for(exp_id: str) -> str:
@@ -213,7 +216,7 @@ def delete_environment(env_name: str) -> None:
     and secrets it owns. Raises RuntimeError on failure so teardown() can
     record the error in the sentinel before re-raising.
     """
-    r = _run(["modal", "environment", "delete", env_name, "-y"], timeout=180)
+    r = _run(["modal", "environment", "delete", env_name, "-y"])
     if r.returncode != 0:
         raise RuntimeError(
             f"failed to delete environment {env_name!r}: "
@@ -303,8 +306,7 @@ def app_stop(env_name: str, app_name: str) -> None:
     Stop a deployed Modal app. Tolerates "not found" / "already stopped"
     because env delete cascades to apps and may race with explicit stops.
     """
-    r = _run(["modal", "app", "stop", f"--env={env_name}", "-y", app_name],
-             timeout=120)
+    r = _run(["modal", "app", "stop", f"--env={env_name}", "-y", app_name])
     if r.returncode != 0:
         msg = (r.stderr or r.stdout).strip().lower()
         if "not found" in msg or "already" in msg:
@@ -346,7 +348,7 @@ def _ensure_secret(env_name: str, secret_name: str,
     ]
     for name in env_var_names:
         cmd.append(f"{name}={os.environ[name]}")
-    r = _run(cmd, timeout=60)
+    r = _run(cmd)
     if r.returncode != 0:
         msg = (r.stderr or r.stdout).lower()
         if "already" in msg or "exists" in msg:

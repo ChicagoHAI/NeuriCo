@@ -300,7 +300,7 @@ def _targets_api_model(spec: JobSpec, models: Dict[str, Any]) -> bool:
 
 
 def run_planner(kb: KB, campaign_name: str, *, provider: Optional[str] = "claude", model: Optional[str] = None,
-                agent_auth: Optional[str] = None, timeout: Optional[int] = 3600, dry_run: bool = False,
+                agent_auth: Optional[str] = None, timeout: Optional[int] = None, dry_run: bool = False,
                 mode: Optional[str] = None, only: Optional[List[str]] = None,
                 planner_run: Optional[str] = None) -> Dict[str, Any]:
     """One planner round, then Python validation of its proposals.
@@ -365,7 +365,8 @@ def _run_ideation(kb: KB, campaign: Dict[str, Any], campaign_name: str, *, provi
                   only: Optional[List[str]], planner_run: Optional[str]) -> Dict[str, Any]:
     """The ``ideate`` mode: the staged ideation round, then the same validation gate as ``replicate``.
 
-    ``timeout`` applies per stage (the roles default to 1500 s when the caller passes None).
+    ``timeout`` applies per stage (None = the ideation.* roles' budget in config/agents.yaml, which
+    is no limit unless opted in there; 0 = no limit).
     The outcome file carries the per-stage ledger ids and costs next to the usual accepted /
     rejected lists so ``choose_mode`` and the index see one planner round.
     """

@@ -563,8 +563,8 @@ def main():
     parser.add_argument(
         "--paper-timeout",
         type=int,
-        default=3600,
-        help="Timeout for paper writing in seconds (default: 3600)"
+        default=None,
+        help="Timeout for paper writing in seconds (default: the role's budget in config/agents.yaml, no limit unless set there; 0 = no limit)"
     )
 
     args = parser.parse_args()
@@ -713,7 +713,7 @@ def main():
                 result = runner.run_research(
                     idea_id=idea_id,
                     provider=provider,
-                    timeout=3600,
+                    timeout=None,  # the experiment_runner role's budget (no limit unless config opts in)
                     full_permissions=args.full_permissions,
                     multi_agent=True,
                     write_paper=args.write_paper,

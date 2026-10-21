@@ -117,7 +117,7 @@ scoring stages).
 | `--no-full-permissions` | Run agents without full permissions (default: on) |
 | `--no-write-paper` | Skip the paper draft after experiments (default: on) |
 | `--paper-style neurips\|icml\|acl\|ams` | Paper format (default: auto-detect from domain) |
-| `--paper-timeout SECONDS` | Timeout for paper writing (default: 3600) |
+| `--paper-timeout SECONDS` | Timeout for paper writing (default: none, the `paper_writer` budget in `config/agents.yaml`; 0 = no limit) |
 
 ## Outputs
 

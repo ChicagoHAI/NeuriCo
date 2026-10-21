@@ -197,7 +197,7 @@ def run_bootstrap_rule_maker(
     work_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: int = 1800,
+    timeout: Optional[int] = None,  # None = the role's config (no limit unless set), 0 = no limit
     full_permissions: bool = True,
     log_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -242,7 +242,7 @@ def run_bootstrap_rule_maker(
     print(f"   Workspace: {work_dir}")
     print(f"   Scoring dir: {scoring_dir}")
     print(f"   Prompt length: {len(prompt)} chars")
-    print(f"   Timeout: {timeout}s")
+    print(f"   Timeout: {'role budget (config/agents.yaml)' if timeout is None else timeout}")
 
     # The role's validator contract (bootstrap_output_contract) is the hard
     # structural gate: a return_code=0 with all four files written can still

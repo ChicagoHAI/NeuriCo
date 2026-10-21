@@ -27,9 +27,13 @@ WORKSPACE_FREE_GB_HARD = 1
 ENV_QUOTA_WARN = 40           # Modal default is 50 envs/workspace
 
 
-def _run(cmd: List[str], timeout: int = 30) -> subprocess.CompletedProcess:
+# Wall clock for Modal CLI calls: unset/0 (the default) = none; NEURICO_MODAL_CLI_TIMEOUT opts in.
+_CLI_TIMEOUT = int(os.environ.get("NEURICO_MODAL_CLI_TIMEOUT") or 0) or None
+
+
+def _run(cmd: List[str], timeout: Optional[int] = None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, check=False
+        cmd, capture_output=True, text=True, timeout=timeout or _CLI_TIMEOUT, check=False
     )
 
 
@@ -217,7 +221,7 @@ def probe_roundtrip() -> Dict[str, Any]:
     steps: List[Dict[str, Any]] = []
 
     def step(name: str, cmd: List[str]) -> bool:
-        r = _run(cmd, timeout=60)
+        r = _run(cmd)
         ok = r.returncode == 0
         steps.append({"name": name, "ok": ok, "cmd": " ".join(cmd),
                       "stderr": r.stderr.strip()[:200] if not ok else None})

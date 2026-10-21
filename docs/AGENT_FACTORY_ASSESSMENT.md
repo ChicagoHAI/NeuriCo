@@ -384,6 +384,14 @@ class LLMClient:
 
 ### 4.3 `config/agents.yaml`
 
+> **Budgets are opt-in (current policy).** The sample below is the original design sketch; the
+> shipped `config/agents.yaml` sets `default.budget` to
+> `{timeout_s: 0, max_turns: null, max_cost_usd: null, max_prompt_chars: null, hard: false}`
+> and no role overrides it, so no agent is cut short on elapsed time, turns, spend or prompt
+> size unless a role block, a CLI flag or a JobSpec field sets a value. `timeout=None` at a call
+> site means "the role's config"; `timeout=0` means "no limit". API roles' `params.timeout_s`
+> is likewise `null` (no outer deadline) unless set.
+
 ```yaml
 # Per-role defaults. Precedence: CLI flag > NEURICO_* env > role block > `default` block.
 version: 1

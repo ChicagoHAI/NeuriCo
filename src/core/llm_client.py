@@ -6,7 +6,7 @@ preference, default-model literal, timeout and privacy flags, and none of them
 recorded usage or cost. ``LLMClient`` replaces them with one object built from
 the ``kind: api`` roles in ``config/agents.yaml``::
 
-    client = LLMClient.for_role("eval_verifier", timeout_s=180)
+    client = LLMClient.for_role("eval_verifier", timeout_s=180)   # timeout_s: opt-in deadline, default none
     response = client.chat(messages, response_schema=VERDICT_SCHEMA)
     response.text, response.parsed, response.usage, response.cost_usd, response.route
 
@@ -22,10 +22,14 @@ Design choices, each deliberate:
   anthropic SDK is not even installed. Speaking ``/chat/completions`` and
   ``/v1/messages`` through ``httpx`` keeps "one call, one request" true by
   construction and lets tests inject an ``httpx.MockTransport``.
-* **Outer wall-clock deadline.** ``achat`` runs the whole route loop under
-  ``asyncio.wait_for``; the per-request HTTP timeout is whatever remains, so a
-  slow provider cannot push the call past ``timeout_s`` (the verifier's
-  semantics, now shared by every caller).
+* **Outer wall-clock deadline, opt-in.** With ``params.timeout_s`` set (per role
+  in config/agents.yaml, or ``timeout_s=`` on the call) ``achat`` runs the whole
+  route loop under ``asyncio.wait_for`` and the per-request HTTP timeout is
+  whatever remains, so a slow provider cannot push the call past it. Unset, null
+  or 0 (the default) means no deadline at all: the HTTP client waits for the
+  reply however long it takes, because a deadline here is not retried and would
+  fail the caller's work, and a slow judge or verifier is better late than
+  failed. A dead connection is still reported by the OS (connection reset).
 * **Fallback lifted from paper-finder's ``ProviderFallback``.** A rejected key
   (401), no credits (402), a key limit (403) or an ``insufficient_quota`` 429
   cannot be fixed by retrying that provider, so the route is marked down for a
@@ -491,8 +495,10 @@ class LLMClient:
         return bool(self.routes)
 
     @property
-    def timeout_s(self) -> float:
-        return float(self.params.get("timeout_s") or 180)
+    def timeout_s(self) -> Optional[float]:
+        """The configured outer deadline in seconds; None = no deadline (the default)."""
+        value = self.params.get("timeout_s")
+        return float(value) if value else None
 
     def describe(self) -> str:
         """One line for logs: route names, models and key *names*; skipped routes with their reason."""
@@ -514,21 +520,23 @@ class LLMClient:
     async def achat(self, messages: Sequence[Mapping[str, Any]], *, max_tokens: Optional[int] = None,
                     temperature: Optional[float] = None, response_schema: Optional[Mapping[str, Any]] = None,
                     tools: Optional[Sequence[Mapping[str, Any]]] = None, timeout_s: Optional[float] = None) -> LLMResponse:
-        """One call: try routes in order under one deadline, record one ledger line."""
-        timeout = float(timeout_s if timeout_s is not None else self.timeout_s)
+        """One call: try routes in order (under one deadline when configured), record one ledger line."""
+        timeout = float(timeout_s) if timeout_s else (self.timeout_s if timeout_s is None else None)
         started, ts_start = time.monotonic(), _utc_now()
         outcome: Dict[str, Any] = {"route": None, "attempts": 0, "fallbacks": []}
         try:
+            # timeout None: no outer deadline (the default); wait_for(..., None) never cancels.
             response = await asyncio.wait_for(
-                self._try_routes(messages, outcome, deadline=started + timeout, max_tokens=max_tokens,
-                                 temperature=temperature, response_schema=response_schema, tools=tools), timeout)
+                self._try_routes(messages, outcome, deadline=None if timeout is None else started + timeout,
+                                 max_tokens=max_tokens, temperature=temperature, response_schema=response_schema,
+                                 tools=tools), timeout)
         except BaseException as exc:
             self._record(outcome, None, ts_start, time.monotonic() - started, error=exc)
             raise
         self._record(outcome, response, ts_start, time.monotonic() - started)
         return response
 
-    async def _try_routes(self, messages, outcome: Dict[str, Any], *, deadline: float, max_tokens, temperature,
+    async def _try_routes(self, messages, outcome: Dict[str, Any], *, deadline: Optional[float], max_tokens, temperature,
                           response_schema, tools) -> LLMResponse:
         """paper-finder's ``ProviderFallback.ainvoke``, over ``ProviderRoute`` and HTTP status codes."""
         if not self.routes:
@@ -565,7 +573,7 @@ class LLMClient:
     def _next_route(self, index: int) -> str:
         return f", falling back to {self.routes[index + 1].name}" if index + 1 < len(self.routes) else ""
 
-    async def _request(self, route: ProviderRoute, messages, *, deadline: float, max_tokens, temperature,
+    async def _request(self, route: ProviderRoute, messages, *, deadline: Optional[float], max_tokens, temperature,
                        response_schema, tools) -> LLMResponse:
         """Exactly one HTTP request; the client is closed before control returns so a
         cancelled call (deadline or HITL stop) never leaves a connection behind."""
@@ -575,7 +583,8 @@ class LLMClient:
         json_mode = bool(response_schema) or self.params.get("response_format") == "json_object"
         url, headers, body = build_request(route, messages, max_tokens=max_tokens, temperature=temperature,
                                            json_mode=json_mode and route.wire == WIRE_CHAT_COMPLETIONS, tools=tools)
-        remaining = max(deadline - time.monotonic(), 0.001)
+        # No deadline (the default) = no HTTP timeout: the request is never cut short on elapsed time.
+        remaining = None if deadline is None else max(deadline - time.monotonic(), 0.001)
         async with httpx.AsyncClient(transport=self.transport, timeout=httpx.Timeout(remaining)) as http:
             reply = await http.post(url, headers=headers, json=body)
         try:

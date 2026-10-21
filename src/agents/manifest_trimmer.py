@@ -94,7 +94,7 @@ def run_manifest_trimmer(
     work_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: int = 300,
+    timeout: Optional[int] = None,  # None = the role's config (no limit unless set), 0 = no limit
     full_permissions: bool = True,
     prior_error: Optional[str] = None,
     log_dir: Optional[Path] = None,
@@ -202,7 +202,7 @@ def _extract_json_object(text: str) -> Dict[str, Any]:
 def make_trimmer_callable(
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: int = 300,
+    timeout: Optional[int] = None,  # None = the role's config (no limit unless set), 0 = no limit
     full_permissions: bool = True,
     log_dir: Optional[Path] = None,
 ) -> Callable[[Dict[str, Any], Path, Optional[str]], Dict[str, Any]]:
