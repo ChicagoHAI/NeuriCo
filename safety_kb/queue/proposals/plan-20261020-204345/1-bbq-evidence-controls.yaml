@@ -1,0 +1,19 @@
+kind: research
+title: BBQ bias under matched ambiguous and disambiguated evidence
+priority: 85
+rationale: gaps/open-model-families-gap-matrix.md reports only partial bias coverage and design/RESEARCH_PLAN.md
+  section 3 requests BBQ. The nightly suite reports aggregate accuracy; this study estimates signed stereotype preference,
+  evidence sensitivity and answer-position robustness on matched quartets. It adds new Qwen3.8 and GLM-Z1 coverage
+  without rerunning an unchanged broad scorecard.
+resources:
+  gpu_memory_gb: 80
+  api_budget_usd: 10
+neurico:
+  idea_file: safety_kb/queue/ideas/plan-20261020-204345-bbq-evidence-controls.yaml
+  provider: codex
+  model: gpt-6-astra
+  agent_auth: azure
+  autoresearch_iterations: 3
+  write_paper: false
+  github: false
+  private: false

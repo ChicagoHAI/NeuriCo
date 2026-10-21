@@ -1,0 +1,18 @@
+kind: research
+title: Chemical knowledge proxy with matched general-knowledge baselines
+priority: 69
+rationale: design/RESEARCH_PLAN.md section 3 explicitly requires WMDP with an MMLU capability baseline;
+  gaps/open-model-families-gap-matrix.md and labs/alibaba-qwen/README.md document missing CBRN reporting.
+  Neither the active research runs nor the nightly suite includes wmdp-chem or MMLU. This paired checkpoint
+  comparison adds the missing chemistry row without generating hazardous instructions.
+resources:
+  gpu_memory_gb: 48
+  api_budget_usd: 0
+neurico:
+  idea_file: safety_kb/queue/ideas/plan-20261020-084340-chem-capability-baseline.yaml
+  provider: claude
+  model: null
+  autoresearch_iterations: 3
+  write_paper: false
+  github: true
+  private: false

@@ -1,0 +1,11 @@
+ok: true
+planner_run: plan-20261020-162139-ideate
+mode: ideate
+at: '2026-10-20T16:27:51+00:00'
+campaign: open-weight-scorecards
+proposed: 2
+accepted:
+- explore-20261020-001-does-lost-source-attribution-bec
+- explore-20261020-001-do-rollback-and-reassuring-narra
+rejected: []
+log: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/neurico/logs/safety/planner/plan-20261020-162139-ideate.log

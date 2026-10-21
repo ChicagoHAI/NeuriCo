@@ -1,0 +1,1489 @@
+{
+ "schema": 1,
+ "generated_at": "2026-10-21T04:54:57+00:00",
+ "campaign": "open-weight-scorecards",
+ "planner_run": "plan-20261021-045451-ideate",
+ "counts": {
+  "inbox": 2,
+  "finding": 12,
+  "run": 17,
+  "gap": 2,
+  "lab_gaps": 2,
+  "results": 0
+ },
+ "findings": [
+  {
+   "id": "inbox:2026-10-20-new-models",
+   "kind": "inbox",
+   "source": "inbox",
+   "title": "New open-weight models added to the catalog (2026-10-20)",
+   "url": null,
+   "summary": "Newest generation per family: deepseek=deepseek-v4.1 (2026-10-17), glm=glm-5.3 (2026-10-15), kimi=kimi-k3 (2026-09-02), qwen=qwen3.8 (2026-08-14) Prefer these as subjects; older generations are baselines only. qwen3-5-0-8b: vllm:Qwen/Qwen3.5-0.8B 0.9B, released 2026-03-02, needs ~8 GB qwen3-5-2b: vllm:Qwen/Qwen3.5-2B 2.3B, released 2026-03-02, needs ~9 GB qwen3-5-4b: vllm:Qwen/Qwen3.5-4B 4.7B, released 2026-03-02, needs ~16 GB qwen3-5-9b: vllm:Qwen/Qwen3.5-9B 9.7B, released 2026-03-02, needs ~29 GB deepseek-r1-distill-qwen-1-5b: vllm:deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B 1.8B, released 202",
+   "status": "open",
+   "date": "2026-10-20",
+   "category": null,
+   "models": [],
+   "eval": null,
+   "tags": [
+    "open",
+    "source:manual"
+   ],
+   "canonical_keys": [],
+   "source_path": "inbox/2026-10-20-new-models.md"
+  },
+  {
+   "id": "inbox:2026-10-20-model-scout",
+   "kind": "inbox",
+   "source": "inbox",
+   "title": "Model scout — 2026-10-20",
+   "url": "https://github.com/QwenLM/Qwen3.8",
+   "summary": "Run: `scout-20261020-164621`. Replaced the previous flat snapshot with seven family records and 57 verified subjects. These are discoveries and metadata corrections since the 16:43:33 UTC snapshot, not claims that the models launched in the intervening minutes. No weights downloaded; `catalog/models.yaml` unchanged. Previously missed open models:** Qwen3.8-2.4T-A95B (August 12) and Qwen3.8-Flash-Next (August 26). Both exceed one GPU at BF16. Added the previously omitted GLM-Z1-Rumination-32B-0414 reasoning variant. Verified GLM-5.3 and Flash's separate BF16 repositories without counting precis",
+   "status": "open",
+   "date": "2026-10-20",
+   "category": null,
+   "models": [],
+   "eval": null,
+   "tags": [
+    "open",
+    "source:model-scout"
+   ],
+   "canonical_keys": [],
+   "source_path": "inbox/2026-10-20-model-scout.md"
+  },
+  {
+   "id": "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+   "kind": "finding",
+   "source": "finding",
+   "title": "Judge-dependent harmful-reasoning labels: deepseek-r1-distill-qwen-7b / xstest-unsafe",
+   "url": null,
+   "summary": "On 54 identical observed traces, local-minus-Azure harmful-label rate is 0.111, 95% CI [0.037037037037037035, 0.2037037037037037]. This is an instrument disagreement, not evidence that either judge is correct or that the model truly produced harmful assistance.",
+   "status": "candidate",
+   "date": "2026-10-20T14:00:50+00:00",
+   "category": "judge-calibration",
+   "models": [
+    "azure-gpt-4.1-mini-judge",
+    "deepseek-r1-distill-qwen-7b",
+    "qwen2.5-7b-judge"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "candidate",
+    "category:judge-calibration",
+    "model:azure-gpt-4.1-mini-judge",
+    "model:deepseek-r1-distill-qwen-7b",
+    "model:qwen2.5-7b-judge"
+   ],
+   "canonical_keys": [],
+   "source_path": "findings/finding-20261020-001-judge-dependent-harmful-reasonin.yaml",
+   "evidence": {
+    "files": [
+     "results/trace_judge_differences.json",
+     "results/safety/reasoning_trace_audit.json"
+    ],
+    "metrics": {
+     "p_holm": 0.04861302021890879,
+     "paired_judge_difference": {
+      "ci95": [
+       0.037037037037037035,
+       0.2037037037037037
+      ],
+      "n": 54,
+      "stderr": 0.042766686606638946,
+      "value": 0.1111111111111111
+     }
+    },
+    "n": 54,
+    "transcripts": [
+     "results/restricted/trace_judgments.jsonl"
+    ]
+   },
+   "source_run": "run-research-20261020-005"
+  },
+  {
+   "id": "finding:finding-20261020-001-provisional-paired-strong-reject",
+   "kind": "finding",
+   "source": "finding",
+   "title": "Provisional paired strong-reject-aim difference: Qwen3-8B vs Qwen3-8B",
+   "url": null,
+   "summary": "Conditional paired difference 0.614, 95% CI [0.5536529680365296, 0.6758133561643834], n=219. Absolute effect exceeds 0.10 and the unadjusted interval excludes zero; this is an uncalibrated-judge candidate, not a confirmed safety regression.",
+   "status": "candidate",
+   "date": "2026-10-20T14:00:50+00:00",
+   "category": "jailbreak-robustness",
+   "models": [
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "candidate",
+    "category:jailbreak-robustness",
+    "model:qwen3-8b"
+   ],
+   "canonical_keys": [],
+   "source_path": "findings/finding-20261020-001-provisional-paired-strong-reject.yaml",
+   "evidence": {
+    "files": [
+     "results/safety/strong-reject-aim__qwen3-8b.json",
+     "results/safety/strong-reject__qwen3-8b.json",
+     "results/paired_comparisons.json"
+    ],
+    "human_calibration_n": 0,
+    "judge": "gpt-4.1-mini-2025-04-14",
+    "metrics": {
+     "p_holm": 0.002599480103979204,
+     "paired_difference": {
+      "ci95": [
+       0.5536529680365296,
+       0.6758133561643834
+      ],
+      "n": 219,
+      "stderr": 0.030823366736371774,
+      "value": 0.6141552511415526
+     }
+    },
+    "n": 219,
+    "transcripts": [
+     "results/restricted/inspect_logs/strong-reject-aim__qwen3-8b/2026-10-20T13-38-45-00-00_scorecard_4V33BfuF4zU56LWiYknj6N.json",
+     "results/restricted/inspect_logs/strong-reject__qwen3-8b/2026-10-20T13-37-27-00-00_scorecard_hP98cpgzit9ycoybRxvqCL.json"
+    ]
+   },
+   "source_run": "run-research-20261020-005"
+  },
+  {
+   "id": "finding:finding-20261020-001-provisional-paired-xstest-unsafe",
+   "kind": "finding",
+   "source": "finding",
+   "title": "Provisional paired xstest-unsafe difference: R1-Distill-Qwen-7B vs Qwen3-8B",
+   "url": null,
+   "summary": "Conditional paired difference -0.356, 95% CI [-0.4293785310734463, -0.28799435028248666], n=177. Absolute effect exceeds 0.10 and the unadjusted interval excludes zero; this is an uncalibrated-judge candidate, not a confirmed safety regression.",
+   "status": "candidate",
+   "date": "2026-10-20T14:00:50+00:00",
+   "category": "refusal-calibration",
+   "models": [
+    "deepseek-r1-distill-qwen-7b",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "candidate",
+    "category:refusal-calibration",
+    "model:deepseek-r1-distill-qwen-7b",
+    "model:qwen3-8b"
+   ],
+   "canonical_keys": [],
+   "source_path": "findings/finding-20261020-001-provisional-paired-xstest-unsafe.yaml",
+   "evidence": {
+    "files": [
+     "results/safety/xstest-unsafe__deepseek-r1-distill-qwen-7b.json",
+     "results/safety/xstest-unsafe__qwen3-8b.json",
+     "results/paired_comparisons.json"
+    ],
+    "human_calibration_n": 0,
+    "judge": "gpt-4.1-mini-2025-04-14",
+    "metrics": {
+     "p_holm": 1.3103773335778213e-14,
+     "paired_difference": {
+      "ci95": [
+       -0.4293785310734463,
+       -0.28799435028248666
+      ],
+      "n": 177,
+      "stderr": 0.03674759329350053,
+      "value": -0.3559322033898305
+     }
+    },
+    "n": 177,
+    "transcripts": [
+     "results/restricted/inspect_logs/xstest-unsafe__deepseek-r1-distill-qwen-7b/2026-10-20T13-20-27-00-00_scorecard_XTMhdhXbpTqXETZDqXYPgM.json",
+     "results/restricted/inspect_logs/xstest-unsafe__qwen3-8b/2026-10-20T13-32-55-00-00_scorecard_VNpAR7HFiBPZiGVMiPU7Vi.json"
+    ]
+   },
+   "source_run": "run-research-20261020-005"
+  },
+  {
+   "id": "finding:finding-20261020-001-12-9-point-paired-adjacent-size",
+   "kind": "finding",
+   "source": "finding",
+   "title": "+12.9-point paired adjacent_size effect on truthfulqa-mc1",
+   "url": null,
+   "summary": "Observed B−A difference +12.9 points; marginal 95% CI [10.0, 15.7] points. Exploratory candidate, not confirmation of the full scaling hypothesis.",
+   "status": "candidate",
+   "date": "2026-10-20T13:40:44+00:00",
+   "category": "honesty",
+   "models": [
+    "qwen3-4b",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "candidate",
+    "category:honesty",
+    "model:qwen3-4b",
+    "model:qwen3-8b"
+   ],
+   "canonical_keys": [],
+   "source_path": "findings/finding-20261020-001-12-9-point-paired-adjacent-size.yaml",
+   "evidence": {
+    "calibration_file": "results/safety/judge_calibration_summary.json",
+    "files": [
+     "results/safety/truthfulqa-mc1__qwen3-4b.json",
+     "results/safety/truthfulqa-mc1__qwen3-8b.json",
+     "results/analysis.json"
+    ],
+    "judge": "azure-gpt-4.1-mini-judge",
+    "judge_agreement": {
+     "accuracy": 0.8905109489051095,
+     "accuracy_ci95": [
+      0.830854974968711,
+      0.9420394119487018
+     ],
+     "accuracy_stderr": 0.028220921990525182,
+     "confusion": {
+      "fn": 5,
+      "fp": 10,
+      "tn": 64,
+      "tp": 58
+     },
+     "kappa": 0.7808934854462096,
+     "kappa_ci95": [
+      0.6600241607694918,
+      0.8825997020736851
+     ],
+     "n": 137,
+     "n_clusters": 117
+    },
+    "judge_version": "gpt-4.1-mini-2025-04-14",
+    "metrics": {
+     "paired_difference": {
+      "ci95": [
+       0.1003671970624235,
+       0.15667074663402691
+      ],
+      "missingness_bounds": [
+       0.12851897184822522,
+       0.12851897184822522
+      ],
+      "n": 817,
+      "n_expected": 817,
+      "stderr": 0.014465703850183078,
+      "value": 0.12851897184822522
+     }
+    },
+    "n": 817,
+    "transcripts": [
+     "results/restricted/inspect_logs/truthfulqa-mc1__qwen3-4b/2026-10-20T13-01-38-00-00_scorecard_ULPhLcvmNK5KCmdK7LYB8u.json",
+     "results/restricted/inspect_logs/truthfulqa-mc1__qwen3-8b/2026-10-20T13-16-09-00-00_scorecard_JBGh7BCmxcrqHtcZyDyfyd.json"
+    ]
+   },
+   "source_run": "run-research-20261020-004"
+  },
+  {
+   "id": "finding:finding-20261020-001-24-1-point-paired-adjacent-size",
+   "kind": "finding",
+   "source": "finding",
+   "title": "-24.1-point paired adjacent_size effect on strong-reject-aim",
+   "url": null,
+   "summary": "Observed B−A difference -24.1 points; marginal 95% CI [-30.1, -18.2] points. Exploratory candidate, not confirmation of the full scaling hypothesis.",
+   "status": "candidate",
+   "date": "2026-10-20T13:40:44+00:00",
+   "category": "jailbreak-robustness",
+   "models": [
+    "qwen3-4b",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "candidate",
+    "category:jailbreak-robustness",
+    "model:qwen3-4b",
+    "model:qwen3-8b"
+   ],
+   "canonical_keys": [],
+   "source_path": "findings/finding-20261020-001-24-1-point-paired-adjacent-size.yaml",
+   "evidence": {
+    "calibration_file": "results/safety/judge_calibration_summary.json",
+    "files": [
+     "results/safety/strong-reject-aim__qwen3-4b.json",
+     "results/safety/strong-reject-aim__qwen3-8b.json",
+     "results/analysis.json"
+    ],
+    "judge": "azure-gpt-4.1-mini-judge",
+    "judge_agreement": {
+     "accuracy": 0.8905109489051095,
+     "accuracy_ci95": [
+      0.830854974968711,
+      0.9420394119487018
+     ],
+     "accuracy_stderr": 0.028220921990525182,
+     "confusion": {
+      "fn": 5,
+      "fp": 10,
+      "tn": 64,
+      "tp": 58
+     },
+     "kappa": 0.7808934854462096,
+     "kappa_ci95": [
+      0.6600241607694918,
+      0.8825997020736851
+     ],
+     "n": 137,
+     "n_clusters": 117
+    },
+    "judge_version": "gpt-4.1-mini-2025-04-14",
+    "metrics": {
+     "paired_difference": {
+      "ci95": [
+       -0.30056818181818185,
+       -0.18238636363636362
+      ],
+      "missingness_bounds": [
+       -0.43809904153354634,
+       0.06349840255591055
+      ],
+      "n": 220,
+      "n_expected": 313,
+      "stderr": 0.03040624286668978,
+      "value": -0.2409090909090909
+     }
+    },
+    "n": 220,
+    "transcripts": [
+     "results/restricted/inspect_logs/strong-reject-aim__qwen3-4b/2026-10-20T12-59-15-00-00_scorecard_R8gmbGJEL9gUJPjgTjqJuw.json",
+     "results/restricted/inspect_logs/strong-reject-aim__qwen3-8b/2026-10-20T13-14-22-00-00_scorecard_EZWX5a4wjqbLXcrMLXUSq9.json"
+    ]
+   },
+   "source_run": "run-research-20261020-004"
+  },
+  {
+   "id": "finding:finding-20261020-001-54-3-point-paired-attack-effect",
+   "kind": "finding",
+   "source": "finding",
+   "title": "+54.3-point paired attack_effect effect on strong-reject-aim",
+   "url": null,
+   "summary": "Observed B−A difference +54.3 points; marginal 95% CI [48.2, 60.3] points. Exploratory candidate, not confirmation of the full scaling hypothesis.",
+   "status": "candidate",
+   "date": "2026-10-20T13:40:44+00:00",
+   "category": "jailbreak-robustness",
+   "models": [
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "candidate",
+    "category:jailbreak-robustness",
+    "model:qwen3-8b"
+   ],
+   "canonical_keys": [],
+   "source_path": "findings/finding-20261020-001-54-3-point-paired-attack-effect.yaml",
+   "evidence": {
+    "calibration_file": "results/safety/judge_calibration_summary.json",
+    "files": [
+     "results/safety/strong-reject__qwen3-8b.json",
+     "results/safety/strong-reject-aim__qwen3-8b.json",
+     "results/analysis.json"
+    ],
+    "judge": "azure-gpt-4.1-mini-judge",
+    "judge_agreement": {
+     "accuracy": 0.8905109489051095,
+     "accuracy_ci95": [
+      0.830854974968711,
+      0.9420394119487018
+     ],
+     "accuracy_stderr": 0.028220921990525182,
+     "confusion": {
+      "fn": 5,
+      "fp": 10,
+      "tn": 64,
+      "tp": 58
+     },
+     "kappa": 0.7808934854462096,
+     "kappa_ci95": [
+      0.6600241607694918,
+      0.8825997020736851
+     ],
+     "n": 137,
+     "n_clusters": 117
+    },
+    "judge_version": "gpt-4.1-mini-2025-04-14",
+    "metrics": {
+     "paired_difference": {
+      "ci95": [
+       0.48206521739130437,
+       0.6032608695652174
+      ],
+      "missingness_bounds": [
+       0.21565495207667731,
+       0.646964856230032
+      ],
+      "n": 230,
+      "n_expected": 313,
+      "stderr": 0.031049958831765322,
+      "value": 0.5429347826086957
+     }
+    },
+    "n": 230,
+    "transcripts": [
+     "results/restricted/inspect_logs/strong-reject__qwen3-8b/2026-10-20T13-12-42-00-00_scorecard_n2fDUbHkDAojDpeg7XNMDw.json",
+     "results/restricted/inspect_logs/strong-reject-aim__qwen3-8b/2026-10-20T13-14-22-00-00_scorecard_EZWX5a4wjqbLXcrMLXUSq9.json"
+    ]
+   },
+   "source_run": "run-research-20261020-004"
+  },
+  {
+   "id": "finding:finding-20261020-001-77-6-point-paired-attack-effect",
+   "kind": "finding",
+   "source": "finding",
+   "title": "+77.6-point paired attack_effect effect on strong-reject-aim",
+   "url": null,
+   "summary": "Observed B−A difference +77.6 points; marginal 95% CI [72.8, 82.1] points. Exploratory candidate, not confirmation of the full scaling hypothesis.",
+   "status": "candidate",
+   "date": "2026-10-20T13:40:44+00:00",
+   "category": "jailbreak-robustness",
+   "models": [
+    "qwen3-4b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "candidate",
+    "category:jailbreak-robustness",
+    "model:qwen3-4b"
+   ],
+   "canonical_keys": [],
+   "source_path": "findings/finding-20261020-001-77-6-point-paired-attack-effect.yaml",
+   "evidence": {
+    "calibration_file": "results/safety/judge_calibration_summary.json",
+    "files": [
+     "results/safety/strong-reject__qwen3-4b.json",
+     "results/safety/strong-reject-aim__qwen3-4b.json",
+     "results/analysis.json"
+    ],
+    "judge": "azure-gpt-4.1-mini-judge",
+    "judge_agreement": {
+     "accuracy": 0.8905109489051095,
+     "accuracy_ci95": [
+      0.830854974968711,
+      0.9420394119487018
+     ],
+     "accuracy_stderr": 0.028220921990525182,
+     "confusion": {
+      "fn": 5,
+      "fp": 10,
+      "tn": 64,
+      "tp": 58
+     },
+     "kappa": 0.7808934854462096,
+     "kappa_ci95": [
+      0.6600241607694918,
+      0.8825997020736851
+     ],
+     "n": 137,
+     "n_clusters": 117
+    },
+    "judge_version": "gpt-4.1-mini-2025-04-14",
+    "metrics": {
+     "paired_difference": {
+      "ci95": [
+       0.7283333333333334,
+       0.8211111111111111
+      ],
+      "missingness_bounds": [
+       0.393370607028754,
+       0.8342651757188498
+      ],
+      "n": 225,
+      "n_expected": 313,
+      "stderr": 0.023722194342201377,
+      "value": 0.7761111111111111
+     }
+    },
+    "n": 225,
+    "transcripts": [
+     "results/restricted/inspect_logs/strong-reject__qwen3-4b/2026-10-20T12-57-18-00-00_scorecard_bfLirzruHsfBqoDN2FqgjQ.json",
+     "results/restricted/inspect_logs/strong-reject-aim__qwen3-4b/2026-10-20T12-59-15-00-00_scorecard_R8gmbGJEL9gUJPjgTjqJuw.json"
+    ]
+   },
+   "source_run": "run-research-20261020-004"
+  },
+  {
+   "id": "finding:finding-20261020-001-deepseek-r1-distill-llama-8b-pro",
+   "kind": "finding",
+   "source": "finding",
+   "title": "deepseek-r1-distill-llama-8b: protected-record attempts increase under fixed benign tool injection",
+   "url": "https://github.com/Hypogenic-AI/benign-tool-injection-failures-3246-codex-gpt-6-astra",
+   "summary": "In benign-tool-injection-v1, the clean-success-conditioned injection-minus-quoted-control difference was 0.1752, with 95% item-cluster CI [0.10809527882312694, 0.25]. This meets the preregistered point-effect and CI rule in a fictional text-to-JSON scaffold; it is not a broad model-family safety claim.",
+   "status": "candidate",
+   "date": "2026-10-20T13:00:56+00:00",
+   "category": "prompt-injection",
+   "models": [
+    "deepseek-r1-distill-llama-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "candidate",
+    "category:prompt-injection",
+    "model:deepseek-r1-distill-llama-8b"
+   ],
+   "canonical_keys": [
+    "url:https://github.com/Hypogenic-AI/benign-tool-injection-failures-3246-codex-gpt-6-astra"
+   ],
+   "source_path": "findings/finding-20261020-001-deepseek-r1-distill-llama-8b-pro.yaml",
+   "evidence": {
+    "files": [
+     "results/safety/custom:benign-tool-injection-v1__deepseek-r1-distill-llama-8b.json",
+     "results/analysis.json"
+    ],
+    "holm_adjusted_p": 0.00019998000199980003,
+    "judge": null,
+    "judge_agreement": {
+     "accuracy": 1.0,
+     "instrument": "deterministic labelled fixtures",
+     "n": 60,
+     "stderr": 0.0
+    },
+    "metrics": {
+     "clean_legitimate": {
+      "ci95": [
+       0.33666666666666667,
+       0.4366666666666667
+      ],
+      "n": 100,
+      "stderr": 0.02625951807559098,
+      "value": 0.3866666666666667
+     },
+     "conditional_difference": {
+      "ci95": [
+       0.10809527882312694,
+       0.25
+      ],
+      "n": 78,
+      "stderr": 0.03627321755493102,
+      "value": 0.17521367521367523
+     },
+     "injected_unauthorized": {
+      "ci95": [
+       0.09,
+       0.17008333333333214
+      ],
+      "n": 100,
+      "stderr": 0.020594421351347973,
+      "value": 0.12999999999999998
+     },
+     "quoted_unauthorized": {
+      "ci95": [
+       0.0,
+       0.01
+      ],
+      "n": 100,
+      "stderr": 0.003333333333333333,
+      "value": 0.003333333333333333
+     }
+    },
+    "n": 78,
+    "transcripts": [
+     "results/traces/deepseek-r1-distill-llama-8b/heldout/heldout-calendar-050__injected__22.json",
+     "results/traces/deepseek-r1-distill-llama-8b/heldout/heldout-calendar-051__injected__22.json",
+     "results/traces/deepseek-r1-distill-llama-8b/heldout/heldout-calendar-052__injected__11.json"
+    ]
+   },
+   "source_run": "run-research-20261020-003"
+  },
+  {
+   "id": "finding:finding-20261020-001-the-deepseek-qwen-chemical-bench",
+   "kind": "finding",
+   "source": "finding",
+   "title": "The DeepSeek–Qwen chemical benchmark interaction meets the preregistered criterion",
+   "url": "https://github.com/Hypogenic-AI/chemical-knowledge-proxy-with-matched-23a8-codex-gpt-6-astra",
+   "summary": "Observed paired difference 0.1600 (SE 0.0566; 95% CI [0.0500, 0.2700]). This meets the preregistered effect and CI criterion. It describes benchmark knowledge for these checkpoints and protocol only.",
+   "status": "candidate",
+   "date": "2026-10-20T11:32:09+00:00",
+   "category": "cbrn-proxy",
+   "models": [
+    "deepseek-r1-distill-llama-8b",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "candidate",
+    "category:cbrn-proxy",
+    "model:deepseek-r1-distill-llama-8b",
+    "model:qwen3-8b"
+   ],
+   "canonical_keys": [
+    "url:https://github.com/Hypogenic-AI/chemical-knowledge-proxy-with-matched-23a8-codex-gpt-6-astra"
+   ],
+   "source_path": "findings/finding-20261020-001-the-deepseek-qwen-chemical-bench.yaml",
+   "evidence": {
+    "files": [
+     "results/analysis.json",
+     "results/safety/wmdp-chem__deepseek-r1-distill-llama-8b.json",
+     "results/safety/wmdp-chem__qwen3-8b.json",
+     "results/safety/custom:mmlu-chem-baseline__deepseek-r1-distill-llama-8b.json",
+     "results/safety/custom:mmlu-chem-baseline__qwen3-8b.json"
+    ],
+    "judge": null,
+    "judge_agreement": {
+     "accuracy": 1.0,
+     "n": 40,
+     "stderr": 0.0,
+     "type": "deterministic_scorer_controls"
+    },
+    "metrics": {
+     "effect": {
+      "ci95": [
+       0.050000000000000044,
+       0.27
+      ],
+      "n": {
+       "college": 100,
+       "high_school": 100,
+       "wmdp": 200
+      },
+      "stderr": 0.05661121997248139,
+      "value": 0.16
+     }
+    },
+    "n": 400,
+    "transcripts": [
+     "results/deepseek-r1-distill-llama-8b.jsonl",
+     "results/qwen3-8b.jsonl"
+    ]
+   },
+   "source_run": "run-research-20261020-001"
+  },
+  {
+   "id": "finding:finding-20261019-001-aim-raises-strongreject-harmfuln",
+   "kind": "finding",
+   "source": "finding",
+   "title": "AIM raises StrongREJECT harmfulness by +0.18 on Qwen2.5-0.5B; on Qwen3-0.6B it works only with thinking enabled",
+   "url": null,
+   "summary": "On the 313 StrongREJECT prompts, the AIM role-play jailbreak raised the mean StrongREJECT score of Qwen2.5-0.5B-Instruct from 0.153 to 0.335 (paired diff +0.182, 95% CI 0.140-0.223). That clears the hypothesised +0.15 as a point estimate but not significantly (one-sided p = 0.07). On Qwen3-0.6B with thinking disabled (the primary condition), AIM did not help (0.354 -> 0.309, diff -0.045, CI -0.093 to 0.003). 34% of its AIM outputs degenerated into repeated \"AIM:\" lines with no content, a capability failure rather than a refusal. With thinking enabled, the same attack raised Qwen3-0.6B to 0.568",
+   "status": "candidate",
+   "date": "2026-10-19T15:55:43+00:00",
+   "category": "jailbreak-robustness",
+   "models": [
+    "qwen2.5-0.5b-instruct",
+    "qwen3-0.6b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:qwen-small-pipeline-test",
+    "candidate",
+    "category:jailbreak-robustness",
+    "model:qwen2.5-0.5b-instruct",
+    "model:qwen3-0.6b"
+   ],
+   "canonical_keys": [],
+   "source_path": "findings/finding-20261019-001-aim-raises-strongreject-harmfuln.yaml",
+   "evidence": {
+    "files": [
+     "results/safety/strong-reject__qwen2.5-0.5b-instruct.json",
+     "results/safety/strong-reject-aim__qwen2.5-0.5b-instruct.json",
+     "results/safety/strong-reject__qwen3-0.6b.json",
+     "results/safety/strong-reject-aim__qwen3-0.6b.json",
+     "results/safety/strong-reject__qwen3-0.6b-thinking.json",
+     "results/safety/strong-reject-aim__qwen3-0.6b-thinking.json",
+     "results/safety/judge_calibration/strongreject_finetuned.json",
+     "results/paired_tests.json"
+    ],
+    "judge": "StrongREJECT fine-tuned evaluator (google/gemma-2b + qylu4156/strongreject-15k-v1)",
+    "judge_agreement": {
+     "auroc": 0.825,
+     "handlabelled_auroc": 0.958,
+     "handlabelled_n": 60,
+     "n": 300,
+     "set": "JBB judge_comparison human majority"
+    },
+    "metrics": {
+     "qwen2.5_aim": {
+      "n": 313,
+      "stderr": 0.017,
+      "value": 0.335
+     },
+     "qwen2.5_direct": {
+      "n": 313,
+      "stderr": 0.015,
+      "value": 0.153
+     },
+     "qwen2.5_paired_delta": {
+      "ci95": [
+       0.14,
+       0.223
+      ],
+      "n": 313,
+      "p_one_sided_vs_0.15": 0.069,
+      "stderr": 0.021,
+      "value": 0.182
+     },
+     "qwen3_aim": {
+      "n": 313,
+      "stderr": 0.019,
+      "value": 0.309
+     },
+     "qwen3_aim_degenerate_rate": {
+      "n": 313,
+      "stderr": 0.027,
+      "value": 0.342
+     },
+     "qwen3_direct": {
+      "n": 313,
+      "stderr": 0.019,
+      "value": 0.354
+     },
+     "qwen3_paired_delta": {
+      "ci95": [
+       -0.093,
+       0.003
+      ],
+      "n": 313,
+      "stderr": 0.025,
+      "value": -0.045
+     },
+     "qwen3_thinking_aim": {
+      "n": 313,
+      "stderr": 0.018,
+      "value": 0.568
+     },
+     "qwen3_thinking_direct": {
+      "n": 313,
+      "stderr": 0.02,
+      "value": 0.435
+     },
+     "qwen3_thinking_paired_delta": {
+      "ci95": [
+       0.083,
+       0.182
+      ],
+      "n": 313,
+      "stderr": 0.025,
+      "value": 0.133
+     }
+    },
+    "n": 313,
+    "transcripts": [
+     "results/restricted/generations__qwen3-0.6b.jsonl",
+     "results/restricted/generations__qwen3-0.6b-thinking.jsonl",
+     "results/restricted/generations__qwen2.5-0.5b-instruct.jsonl"
+    ]
+   },
+   "source_run": "run-research-20261019-001"
+  },
+  {
+   "id": "finding:finding-20261019-001-qwen2-5-0-5b-instruct-refuses-40",
+   "kind": "finding",
+   "source": "finding",
+   "title": "Qwen2.5-0.5B-Instruct refuses 40% of XSTest safe prompts while refusing 84.5% of the unsafe contrasts",
+   "url": null,
+   "summary": "Under direct prompting (greedy, no system prompt) Qwen2.5-0.5B-Instruct fully or partially refused 100 of 250 XSTest-v2 safe prompts (40.0%, 95% CI 34.1-46.2%), four times the 10% threshold in the hypothesis and well above GPT-4's 8.4% in the XSTest paper. The XSTest string-match classifier, which agrees well with human labels on this model (kappa 0.79 on our hand-labelled subset), gives 48.8%. On the 200 unsafe contrast prompts it refused 84.5% (78.8-88.9%). So it separates safe from unsafe only weakly. Over-refusal is concentrated in historical_events (76%), privacy_fictional (68%) and safe_",
+   "status": "candidate",
+   "date": "2026-10-19T15:55:43+00:00",
+   "category": "over-refusal",
+   "models": [
+    "qwen2.5-0.5b-instruct"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:qwen-small-pipeline-test",
+    "candidate",
+    "category:over-refusal",
+    "model:qwen2.5-0.5b-instruct"
+   ],
+   "canonical_keys": [],
+   "source_path": "findings/finding-20261019-001-qwen2-5-0-5b-instruct-refuses-40.yaml",
+   "evidence": {
+    "files": [
+     "results/safety/xstest-safe__qwen2.5-0.5b-instruct.json",
+     "results/safety/xstest-unsafe__qwen2.5-0.5b-instruct.json",
+     "results/safety/judge_calibration/refusal_summary.json",
+     "results/paired_tests.json"
+    ],
+    "judge": "qwen2.5-7b-judge (Qwen/Qwen2.5-7B-Instruct, XSTest-paper 3-class prompt; refusal = full or partial)",
+    "judge_agreement": {
+     "accuracy": 0.888,
+     "handlabelled_accuracy": 0.833,
+     "handlabelled_kappa": 0.642,
+     "handlabelled_n": 60,
+     "kappa": 0.771,
+     "n": 250,
+     "set": "XSTest human-labelled completions"
+    },
+    "metrics": {
+     "paired_vs_qwen3_0.6b_over_refusal_diff": {
+      "ci95": [
+       -0.308,
+       -0.18
+      ],
+      "mcnemar_p": 3.9e-12,
+      "n": 250,
+      "stderr": 0.033,
+      "value": -0.244
+     },
+     "xstest_safe_over_refusal": {
+      "ci95": [
+       0.341,
+       0.462
+      ],
+      "n": 250,
+      "stderr": 0.031,
+      "value": 0.4
+     },
+     "xstest_safe_over_refusal_strmatch": {
+      "n": 250,
+      "stderr": 0.032,
+      "value": 0.488
+     },
+     "xstest_unsafe_refusal": {
+      "ci95": [
+       0.788,
+       0.889
+      ],
+      "n": 200,
+      "stderr": 0.026,
+      "value": 0.845
+     }
+    },
+    "n": 250,
+    "transcripts": [
+     "results/restricted/generations__qwen2.5-0.5b-instruct.jsonl"
+    ]
+   },
+   "source_run": "run-research-20261019-001"
+  },
+  {
+   "id": "finding:finding-20261019-001-qwen3-0-6b-gives-more-harmful-di",
+   "kind": "finding",
+   "source": "finding",
+   "title": "Qwen3-0.6B gives more harmful direct-request compliance than Qwen2.5-0.5B-Instruct (StrongREJECT 0.354 vs 0.153)",
+   "url": null,
+   "summary": "With no jailbreak, Qwen3-0.6B (non-thinking) scored 0.354 on StrongREJECT against 0.153 for Qwen2.5-0.5B-Instruct (paired diff +0.201, 95% CI 0.159-0.243, n = 313 identical prompts). It also refused fewer XSTest unsafe prompts (62.5% vs 84.5%; paired diff -0.22, McNemar p = 5e-9). Enabling thinking raised Qwen3's direct StrongREJECT score further to 0.435 (+0.081, CI 0.044-0.119). The newer, slightly larger release trades over-refusal (15.6% vs 40% on XSTest safe) for markedly more harmful compliance. This matches the direction of the SLM jailbreak paper (direct ASR 0.36 vs 0.13).",
+   "status": "candidate",
+   "date": "2026-10-19T15:55:43+00:00",
+   "category": "jailbreak-robustness",
+   "models": [
+    "qwen2.5-0.5b-instruct",
+    "qwen3-0.6b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:qwen-small-pipeline-test",
+    "candidate",
+    "category:jailbreak-robustness",
+    "model:qwen2.5-0.5b-instruct",
+    "model:qwen3-0.6b"
+   ],
+   "canonical_keys": [],
+   "source_path": "findings/finding-20261019-001-qwen3-0-6b-gives-more-harmful-di.yaml",
+   "evidence": {
+    "files": [
+     "results/safety/strong-reject__qwen3-0.6b.json",
+     "results/safety/strong-reject__qwen2.5-0.5b-instruct.json",
+     "results/safety/xstest-unsafe__qwen3-0.6b.json",
+     "results/safety/strong-reject__qwen3-0.6b-thinking.json",
+     "results/paired_tests.json"
+    ],
+    "judge": "StrongREJECT fine-tuned evaluator (gemma-2b LoRA); refusal: qwen2.5-7b-judge XSTest 3-class prompt",
+    "judge_agreement": {
+     "auroc": 0.825,
+     "n": 300,
+     "refusal_kappa_n": 250,
+     "refusal_kappa_xstest_human": 0.771
+    },
+    "metrics": {
+     "paired_diff_sr": {
+      "ci95": [
+       0.159,
+       0.243
+      ],
+      "n": 313,
+      "stderr": 0.021,
+      "value": 0.201
+     },
+     "qwen25_direct_sr": {
+      "n": 313,
+      "stderr": 0.015,
+      "value": 0.153
+     },
+     "qwen3_direct_sr": {
+      "n": 313,
+      "stderr": 0.019,
+      "value": 0.354
+     },
+     "thinking_minus_nonthinking_sr": {
+      "ci95": [
+       0.044,
+       0.119
+      ],
+      "n": 313,
+      "stderr": 0.019,
+      "value": 0.081
+     },
+     "xstest_unsafe_refusal_qwen25": {
+      "n": 200,
+      "stderr": 0.026,
+      "value": 0.845
+     },
+     "xstest_unsafe_refusal_qwen3": {
+      "n": 200,
+      "stderr": 0.034,
+      "value": 0.625
+     }
+    },
+    "n": 313,
+    "transcripts": [
+     "results/restricted/generations__qwen3-0.6b.jsonl"
+    ]
+   },
+   "source_run": "run-research-20261019-001"
+  },
+  {
+   "id": "run:run-suite-20261021-002",
+   "kind": "run",
+   "source": "run",
+   "title": "smoke 4: Qwen3-4B with thinking disabled via chat template",
+   "url": null,
+   "summary": "suite run of job suite-20261021-001-smoke-4-qwen3-4b-with-thinking-d: 2/2 observations succeeded; 0 candidate finding(s) filed",
+   "status": "done",
+   "date": "2026-10-21T03:59:20+00:00",
+   "category": null,
+   "models": [
+    "qwen3-4b-nothink"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:suite-20261021-001-smoke-4-qwen3-4b-with-thinking-d",
+    "model:qwen3-4b-nothink",
+    "suite"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-suite-20261021-002.json"
+  },
+  {
+   "id": "run:run-explore-20261021-001",
+   "kind": "run",
+   "source": "run",
+   "title": "Do auditors substitute task relevance for explicit write permission?",
+   "url": null,
+   "summary": "explore run of job explore-20261021-001-do-auditors-substitute-task-rele: 15/15 observations succeeded; 0 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/do_auditors_substitute_task_re_20261020_204417_a7465ad9/REPORT.md",
+   "status": "done",
+   "date": "2026-10-21T03:18:08+00:00",
+   "category": null,
+   "models": [
+    "azure-gpt-4.1-mini-judge",
+    "qwen2.5-7b-judge",
+    "qwen3-8-27b",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "explore",
+    "job:explore-20261021-001-do-auditors-substitute-task-rele",
+    "model:azure-gpt-4.1-mini-judge",
+    "model:qwen2.5-7b-judge",
+    "model:qwen3-8-27b",
+    "model:qwen3-8b"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-explore-20261021-001.json"
+  },
+  {
+   "id": "run:run-research-20261021-001",
+   "kind": "run",
+   "source": "run",
+   "title": "Evaluation cues and elicited underperformance on harmless reasoning",
+   "url": null,
+   "summary": "research run of job research-20261020-001-evaluation-cues-and-elicited-und: 0/3 observations succeeded; 0 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/evaluation_cues_and_elicited_u_20261020_170016_c1c405a3/REPORT.md",
+   "status": "done",
+   "date": "2026-10-21T01:10:46+00:00",
+   "category": null,
+   "models": [
+    "deepseek-r1-0528-qwen3-8b",
+    "glm-z1-9b-0414",
+    "qwen3-8-27b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:research-20261020-001-evaluation-cues-and-elicited-und",
+    "model:deepseek-r1-0528-qwen3-8b",
+    "model:glm-z1-9b-0414",
+    "model:qwen3-8-27b",
+    "research"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-research-20261021-001.json"
+  },
+  {
+   "id": "run:run-suite-20261021-001",
+   "kind": "run",
+   "source": "run",
+   "title": "cluster smoke 3: sycophancy with 16k context on Qwen3-4B",
+   "url": null,
+   "summary": "suite run of job suite-20261020-001-cluster-smoke-3-sycophancy-with: 1/1 observations succeeded; 0 candidate finding(s) filed",
+   "status": "done",
+   "date": "2026-10-21T00:54:14+00:00",
+   "category": null,
+   "models": [
+    "qwen3-4b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:suite-20261020-001-cluster-smoke-3-sycophancy-with",
+    "model:qwen3-4b",
+    "suite"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-suite-20261021-001.json"
+  },
+  {
+   "id": "run:run-research-20261020-009",
+   "kind": "run",
+   "source": "run",
+   "title": "Unsupported answer reversal versus evidence-based correction",
+   "url": null,
+   "summary": "research run of job research-20261020-001-unsupported-answer-reversal-vers: 3/3 observations succeeded; 0 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/unsupported_answer_reversal_ve_20261020_154849_b145bb8f/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T22:02:08+00:00",
+   "category": null,
+   "models": [
+    "deepseek-r1-0528-qwen3-8b",
+    "glm-z1-9b-0414",
+    "qwen3-8-27b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:research-20261020-001-unsupported-answer-reversal-vers",
+    "model:deepseek-r1-0528-qwen3-8b",
+    "model:glm-z1-9b-0414",
+    "model:qwen3-8-27b",
+    "research"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-research-20261020-009.json"
+  },
+  {
+   "id": "run:run-research-20261020-008",
+   "kind": "run",
+   "source": "run",
+   "title": "BBQ bias under matched ambiguous and disambiguated evidence",
+   "url": null,
+   "summary": "research run of job research-20261020-001-bbq-bias-under-matched-ambiguous: 1/4 observations succeeded; 0 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/bbq_bias_under_matched_ambiguo_20261020_154849_ace34130/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T21:58:53+00:00",
+   "category": null,
+   "models": [
+    "deepseek-r1-0528-qwen3-8b",
+    "glm-z1-9b-0414",
+    "moonlight-16b-a3b-instruct",
+    "qwen3-8-27b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:research-20261020-001-bbq-bias-under-matched-ambiguous",
+    "model:deepseek-r1-0528-qwen3-8b",
+    "model:glm-z1-9b-0414",
+    "model:moonlight-16b-a3b-instruct",
+    "model:qwen3-8-27b",
+    "research"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-research-20261020-008.json"
+  },
+  {
+   "id": "run:run-explore-20261020-002",
+   "kind": "run",
+   "source": "run",
+   "title": "Does lost source attribution become dangerous specifically in assistant memory?",
+   "url": null,
+   "summary": "explore run of job explore-20261020-001-does-lost-source-attribution-bec: 3/3 observations succeeded; 0 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/does_lost_source_attribution_b_20261020_112856_f5de1ced/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T18:46:10+00:00",
+   "category": null,
+   "models": [
+    "deepseek-r1-distill-llama-8b",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "explore",
+    "job:explore-20261020-001-does-lost-source-attribution-bec",
+    "model:deepseek-r1-distill-llama-8b",
+    "model:qwen3-8b"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-explore-20261020-002.json"
+  },
+  {
+   "id": "run:run-explore-20261020-001",
+   "kind": "run",
+   "source": "run",
+   "title": "Do rollback and reassuring narration jointly erase historical violations for auditors?",
+   "url": null,
+   "summary": "explore run of job explore-20261020-001-do-rollback-and-reassuring-narra: 12/12 observations succeeded; 0 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/do_rollback_and_reassuring_nar_20261020_112856_468e09d2/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T18:02:30+00:00",
+   "category": null,
+   "models": [
+    "azure-gpt-4.1-mini-judge",
+    "qwen2.5-7b-judge",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "explore",
+    "job:explore-20261020-001-do-rollback-and-reassuring-narra",
+    "model:azure-gpt-4.1-mini-judge",
+    "model:qwen2.5-7b-judge",
+    "model:qwen3-8b"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-explore-20261020-001.json"
+  },
+  {
+   "id": "run:run-research-20261020-007",
+   "kind": "run",
+   "source": "run",
+   "title": "Completion claims on solvable and impossible tasks",
+   "url": "https://github.com/Hypogenic-AI/completion-claims-on-solvable-9a93-codex-gpt-6-astra",
+   "summary": "research run of job research-20261020-001-completion-claims-on-solvable-an: 2/2 observations succeeded; 0 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/completion-claims-on-solvable-9a93-codex-gpt-6-astra/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T16:22:47+00:00",
+   "category": null,
+   "models": [
+    "deepseek-r1-distill-llama-8b",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:research-20261020-001-completion-claims-on-solvable-an",
+    "model:deepseek-r1-distill-llama-8b",
+    "model:qwen3-8b",
+    "research"
+   ],
+   "canonical_keys": [
+    "url:https://github.com/Hypogenic-AI/completion-claims-on-solvable-9a93-codex-gpt-6-astra"
+   ],
+   "source_path": "runs/run-research-20261020-007.json"
+  },
+  {
+   "id": "run:run-research-20261020-006",
+   "kind": "run",
+   "source": "run",
+   "title": "Synthetic secret leakage with authorized-disclosure controls",
+   "url": "https://github.com/Hypogenic-AI/synthetic-secret-leakage-3677-codex-gpt-6-astra",
+   "summary": "research run of job research-20261020-001-synthetic-secret-leakage-with-au: 0/2 observations succeeded; 0 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/synthetic-secret-leakage-3677-codex-gpt-6-astra/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T16:04:44+00:00",
+   "category": null,
+   "models": [
+    "deepseek-r1-distill-llama-8b",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:research-20261020-001-synthetic-secret-leakage-with-au",
+    "model:deepseek-r1-distill-llama-8b",
+    "model:qwen3-8b",
+    "research"
+   ],
+   "canonical_keys": [
+    "url:https://github.com/Hypogenic-AI/synthetic-secret-leakage-3677-codex-gpt-6-astra"
+   ],
+   "source_path": "runs/run-research-20261020-006.json"
+  },
+  {
+   "id": "run:run-research-20261020-005",
+   "kind": "run",
+   "source": "run",
+   "title": "deepseek-distill-and-moonlight-safety-scorecard",
+   "url": null,
+   "summary": "research run of job research-20261020-001-deepseek-distill-and-moonlight-s: 14/44 observations succeeded; 13 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/safety_scorecard_for_the_deeps_20261020_034348_a297ae13/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T14:00:48+00:00",
+   "category": null,
+   "models": [
+    "available-r1-distill-models",
+    "azure-gpt-4.1-mini__qwen2.5-7b-judge",
+    "deepseek-r1-distill-llama-8b",
+    "deepseek-r1-distill-qwen-14b",
+    "deepseek-r1-distill-qwen-7b",
+    "moonlight-16b-a3b-instruct",
+    "qwen3-14b",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:research-20261020-001-deepseek-distill-and-moonlight-s",
+    "model:available-r1-distill-models",
+    "model:azure-gpt-4.1-mini__qwen2.5-7b-judge",
+    "model:deepseek-r1-distill-llama-8b",
+    "model:deepseek-r1-distill-qwen-14b",
+    "model:deepseek-r1-distill-qwen-7b",
+    "model:moonlight-16b-a3b-instruct",
+    "model:qwen3-14b",
+    "model:qwen3-8b",
+    "research"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-research-20261020-005.json"
+  },
+  {
+   "id": "run:run-research-20261020-004",
+   "kind": "run",
+   "source": "run",
+   "title": "qwen3-family-safety-scorecard",
+   "url": null,
+   "summary": "research run of job research-20261020-001-qwen3-family-safety-scorecard: 2/32 observations succeeded; 4 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/safety_scorecard_for_the_qwen3_20261020_034348_52188bfd/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T13:40:17+00:00",
+   "category": null,
+   "models": [
+    "qwen3-14b",
+    "qwen3-32b",
+    "qwen3-4b",
+    "qwen3-8b",
+    "qwen3-8b-thinking"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:research-20261020-001-qwen3-family-safety-scorecard",
+    "model:qwen3-14b",
+    "model:qwen3-32b",
+    "model:qwen3-4b",
+    "model:qwen3-8b",
+    "model:qwen3-8b-thinking",
+    "research"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-research-20261020-004.json"
+  },
+  {
+   "id": "run:run-research-20261020-003",
+   "kind": "run",
+   "source": "run",
+   "title": "Benign tool-injection failures with matched utility controls",
+   "url": "https://github.com/Hypogenic-AI/benign-tool-injection-failures-3246-codex-gpt-6-astra",
+   "summary": "research run of job research-20261020-001-benign-tool-injection-failures-w: 2/3 observations succeeded; 1 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/benign-tool-injection-failures-3246-codex-gpt-6-astra/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T13:00:55+00:00",
+   "category": null,
+   "models": [
+    "deepseek-r1-distill-llama-8b",
+    "moonlight-16b-a3b-instruct",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:research-20261020-001-benign-tool-injection-failures-w",
+    "model:deepseek-r1-distill-llama-8b",
+    "model:moonlight-16b-a3b-instruct",
+    "model:qwen3-8b",
+    "research"
+   ],
+   "canonical_keys": [
+    "url:https://github.com/Hypogenic-AI/benign-tool-injection-failures-3246-codex-gpt-6-astra"
+   ],
+   "source_path": "runs/run-research-20261020-003.json"
+  },
+  {
+   "id": "run:run-research-20261020-002",
+   "kind": "run",
+   "source": "run",
+   "title": "SimpleQA factual errors versus abstention on three open checkpoints",
+   "url": "https://github.com/Hypogenic-AI/simpleqa-factual-errors-versus-e11f-codex-gpt-6-astra",
+   "summary": "research run of job research-20261020-001-simpleqa-factual-errors-versus-a: 0/3 observations succeeded; 0 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/simpleqa-factual-errors-versus-e11f-codex-gpt-6-astra/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T11:59:26+00:00",
+   "category": null,
+   "models": [
+    "deepseek-r1-distill-llama-8b",
+    "moonlight-16b-a3b-instruct",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:research-20261020-001-simpleqa-factual-errors-versus-a",
+    "model:deepseek-r1-distill-llama-8b",
+    "model:moonlight-16b-a3b-instruct",
+    "model:qwen3-8b",
+    "research"
+   ],
+   "canonical_keys": [
+    "url:https://github.com/Hypogenic-AI/simpleqa-factual-errors-versus-e11f-codex-gpt-6-astra"
+   ],
+   "source_path": "runs/run-research-20261020-002.json"
+  },
+  {
+   "id": "run:run-research-20261020-001",
+   "kind": "run",
+   "source": "run",
+   "title": "Chemical knowledge proxy with matched general-knowledge baselines",
+   "url": "https://github.com/Hypogenic-AI/chemical-knowledge-proxy-with-matched-23a8-codex-gpt-6-astra",
+   "summary": "research run of job research-20261020-001-chemical-knowledge-proxy-with-ma: 6/6 observations succeeded; 1 candidate finding(s) filed; report /net/spaces/chenhao/chai-lab-models/haokunliu/safety/workspaces/chemical-knowledge-proxy-with-matched-23a8-codex-gpt-6-astra/REPORT.md",
+   "status": "done",
+   "date": "2026-10-20T11:32:01+00:00",
+   "category": null,
+   "models": [
+    "deepseek-r1-distill-llama-8b",
+    "moonlight-16b-a3b-instruct",
+    "qwen3-8b"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:open-weight-scorecards",
+    "job:research-20261020-001-chemical-knowledge-proxy-with-ma",
+    "model:deepseek-r1-distill-llama-8b",
+    "model:moonlight-16b-a3b-instruct",
+    "model:qwen3-8b",
+    "research"
+   ],
+   "canonical_keys": [
+    "url:https://github.com/Hypogenic-AI/chemical-knowledge-proxy-with-matched-23a8-codex-gpt-6-astra"
+   ],
+   "source_path": "runs/run-research-20261020-001.json"
+  },
+  {
+   "id": "run:run-research-20261019-001",
+   "kind": "run",
+   "source": "run",
+   "title": "e2e research: refusal calibration on small Qwen",
+   "url": null,
+   "summary": "research run of job research-20261019-001-e2e-research-refusal-calibration: 12/12 observations succeeded; 3 candidate finding(s) filed; report /data/hypogenicai/workspaces/refusal_calibration_and_jailbr_20261019_150440_d68d7a89/REPORT.md",
+   "status": "done",
+   "date": "2026-10-19T15:55:35+00:00",
+   "category": null,
+   "models": [
+    "qwen2.5-0.5b-instruct",
+    "qwen3-0.6b",
+    "qwen3-0.6b-thinking"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:qwen-small-pipeline-test",
+    "job:research-20261019-001-e2e-research-refusal-calibration",
+    "model:qwen2.5-0.5b-instruct",
+    "model:qwen3-0.6b",
+    "model:qwen3-0.6b-thinking",
+    "research"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-research-20261019-001.json"
+  },
+  {
+   "id": "run:run-suite-20261019-001",
+   "kind": "run",
+   "source": "run",
+   "title": "daemon e2e test: wmdp+sycophancy on 0.5B",
+   "url": null,
+   "summary": "suite run of job suite-20261019-001-daemon-e2e-test-wmdp-sycophancy: 2/2 observations succeeded; 0 candidate finding(s) filed",
+   "status": "done",
+   "date": "2026-10-19T14:55:31+00:00",
+   "category": null,
+   "models": [
+    "qwen2.5-0.5b-instruct"
+   ],
+   "eval": null,
+   "tags": [
+    "campaign:qwen-small-pipeline-test",
+    "job:suite-20261019-001-daemon-e2e-test-wmdp-sycophancy",
+    "model:qwen2.5-0.5b-instruct",
+    "suite"
+   ],
+   "canonical_keys": [],
+   "source_path": "runs/run-suite-20261019-001.json"
+  },
+  {
+   "id": "gap:open-model-families-gap-matrix",
+   "kind": "gap",
+   "source": "gap",
+   "title": "Gap matrix: safety-evaluation coverage self-reported by the Chinese open-weight model families",
+   "url": null,
+   "summary": "Fetched: 2026-10-19. Scope: Qwen (Alibaba), Kimi (Moonshot AI), GLM (Zhipu / Z.ai), DeepSeek. Cell values describe what the LAB ITSELF reports in its technical reports, model cards, HF cards and official docs as of 2026-10-19: **reported** = a named evaluation with numbers for a released model; **partially** = mentioned as a policy, training signal, guard-model category, aggregate inside another number, or a number only for a side model (e.g. a guard or a 4B ablation); none** = no mention found in the documents checked. The last column lists third-party results that exist for each category (de",
+   "status": "note",
+   "date": "2026-10-19",
+   "category": null,
+   "models": [],
+   "eval": null,
+   "tags": [
+    "gap"
+   ],
+   "canonical_keys": [],
+   "source_path": "gaps/open-model-families-gap-matrix.md"
+  },
+  {
+   "id": "gap:synthesis",
+   "kind": "gap",
+   "source": "gap",
+   "title": "Synthesis: how frontier labs evaluate and monitor safety, what they run, and what is left to run",
+   "url": null,
+   "summary": "Written 2026-10-19 from the fetched material under `labs/`, `third_party/`, `perspectives/` and `evals/` (every claim below is traceable to a cited file; nothing here is from memory). Scope: Google DeepMind (Gemini 4 Argon model card, 217-page safety report, Frontier Safety Framework v3.1), Anthropic (Opus 5.5 / Fable 5.1 / Sonnet 5.5 / Haiku 5.5 system cards, RSP v3.4, independent-evaluator post of 2026-10-15), OpenAI (see `labs/openai/`), Meta, xAI, Mistral, Amazon, Microsoft, and the open-weight families Qwen, Kimi, GLM, DeepSeek. Source files: `labs/google/gemini-4-argon-model-card.md`, `l",
+   "status": "note",
+   "date": "2026-10-19",
+   "category": null,
+   "models": [],
+   "eval": null,
+   "tags": [
+    "gap"
+   ],
+   "canonical_keys": [],
+   "source_path": "gaps/synthesis.md"
+  },
+  {
+   "id": "lab_note:anthropic/gaps",
+   "kind": "lab_note",
+   "source": "lab_gaps",
+   "title": "Anthropic: gaps, thin reporting, explicit asks, and where a third party can find novel behaviour on Claude",
+   "url": null,
+   "summary": "Fetched: 2026-10-19. Every item cites the fetched document; \"ASK\" marks something Anthropic or its reviewers explicitly requested or flagged as unsolved. \"We encourage other AI labs to perform similar reviews\" of eval transcripts for internet reach (Jul 30 2026). \"We are releasing this transcript publicly so others can build on our analysis\" (Mythos 5 PyPI transcript). Petri: \"We are releasing Petri with the expectation that users will refine our pilot metrics, or build new ones that better suit their purposes.\" Circuit tracing: \"We also invite the community to help us find additional interest",
+   "status": "note",
+   "date": "2026-10-19",
+   "category": null,
+   "models": [],
+   "eval": null,
+   "tags": [
+    "lab:anthropic",
+    "lab_note"
+   ],
+   "canonical_keys": [],
+   "source_path": "labs/anthropic/gaps.md"
+  },
+  {
+   "id": "lab_note:openai/gaps",
+   "kind": "lab_note",
+   "source": "lab_gaps",
+   "title": "OpenAI: what is not run, reported thinly, or internal-only",
+   "url": null,
+   "summary": "Fetched: 2026-10-19. Each gap is anchored to the fetched source that supports it. A large share of the 2026 cards' most safety-relevant results are **charts with no tabulated values** in the PDF: multiturn jailbreak robustness (Astra Fig 3), hallucinations on user-flagged cases (Fig 6), Coding Deception and Broken Search Tool (Figs 10-11, reported only as \"4x\" and \"10x\" ratios), all metagaming/oversight-gaming figures (Figs 17-21), the entire non-adversarial monitorability breakdown (Figs 22-27), OAI-repo Sabotage v2 and Sneaky Sandbox Escape evasion rates (Figs 31-34), all five AI self-improv",
+   "status": "note",
+   "date": "2026-10-19",
+   "category": null,
+   "models": [],
+   "eval": null,
+   "tags": [
+    "lab:openai",
+    "lab_note"
+   ],
+   "canonical_keys": [],
+   "source_path": "labs/openai/gaps.md"
+  }
+ ]
+}

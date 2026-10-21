@@ -90,6 +90,9 @@ def preferred_judge_entry(kb: KB, policy: Mapping[str, Any],
     return None
 
 
+# Concurrency for API-served subjects (local servers report their own KV-cache bound).
+DEFAULT_MAX_CONNECTIONS = 16
+
 def load_env_file(path: Path) -> Dict[str, str]:
     """Read KEY=value lines from NeuriCo's .env (values are never logged)."""
     out: Dict[str, str] = {}
@@ -306,7 +309,9 @@ def main() -> int:
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--gpu", default=os.environ.get("CUDA_VISIBLE_DEVICES") or None)
-    parser.add_argument("--max-connections", type=int, default=48)  # a served 8B model handles ~50 concurrent requests; 16 left the GPU idle
+    parser.add_argument("--max-connections", type=int, default=None,
+                        help="concurrent requests per eval; default: what the served model reports it can hold "
+                             f"(KV-cache bound), else {DEFAULT_MAX_CONNECTIONS} for API models")
     parser.add_argument("--env-file", type=Path, default=Path(__file__).resolve().parents[2] / ".env")
     args = parser.parse_args()
 
@@ -350,9 +355,12 @@ def main() -> int:
                 endpoint = server.endpoint()
             else:
                 endpoint = resolve_api_endpoint(model_entry)
+            max_connections = (args.max_connections or (server.max_concurrency if server else None)
+                               or DEFAULT_MAX_CONNECTIONS)
+            print(f"max connections for {model_id}: {max_connections}", flush=True)
             for eval_id in args.evals:
                 record = run_pair(kb, args.job, args.out, evals[eval_id], model_entry, endpoint, env,
-                                  args.limit, args.max_connections, judges)
+                                  args.limit, max_connections, judges)
                 summary["pairs"].append({"eval": eval_id, "model": model_id, "status": record["status"],
                                          "metrics": record["metrics"], "duration_s": record["duration_s"]})
                 failures += record["status"] != "success"

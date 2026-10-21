@@ -6,6 +6,25 @@ NeuriCo branch `safety-engine` (`/net/spaces/chenhao/chai-lab-models/haokunliu/s
 Paths below are relative to those two roots unless absolute; `S:` = sai-review, `N:` = NeuriCo.
 No secrets were read; `.env`/`.env.azure` were not opened.
 
+## Status (2026-10-21)
+
+Steps 1-5 of section 4.6 are done on branch `safety-engine`; the prompts and schemas were copied
+and adapted with the owner's approval (`src/ideation/NOTICE.md` lists every derived file).
+
+| Piece | Status |
+| --- | --- |
+| `src/core/agent_factory.py` + `config/agents.yaml` roles `ideation.problem` / `ideation.ideation` / `ideation.idea_judge` (step 1) | merged earlier; the roles carry `json_file` contracts with the ported schemas and `ideation.runtime:_check_*` cross-checks, `RetryPolicy(3, 1)`, `isolate_home`, the `safety-kb` skill, a hard 40 USD budget |
+| unified knowledge base: `nodes` / `nodes_fts` / `edges`, `kbdb.snapshot_to`, `templates/skills/safety-kb/scripts/kb.py` (step 3) | merged earlier (`docs/KNOWLEDGE_BASE.md`); the ideation stages use it as `input/kb.sqlite` + `tools/kb.py`, no second KB |
+| `src/ideation/stages.py`, `runtime.py`, `writing_rules.py`, `dedup.py`, `context.py`, `events.py`, `schemas/` (step 4) | ported: `context` code stage + three agent stages; workspace staging (read-only `input/`, `schemas/`, `tools/`, `AGENTS.md`, skill), schema + cross-check validation with one retry carrying the validator message (through the factory), commit of outputs, `events.jsonl`; schemas verbatim except the `neurico` block gaining `job_kind`, `finding_id`, `evaluation`, `models`, `evals` and an optional idea `category` |
+| `templates/ideation/AGENTS.md`, `stage_prompt.md`, `skills/{problem,ideation,idea-judge}.md` (step 4) | rewritten for the NeuriCo vocabulary (findings / runs / evals / models / gaps / inbox / drift), one GPU + catalog models, the newest-generation rule, the interim ideator's generators and standards |
+| `templates/skills/safety-kb/scripts/scholar_search.py` | ported verbatim (lock-file name changed) |
+| `src/ideation/to_job.py` + planner `ideate` mode + `./neurico safety ideate` (step 5) | done: ranked ideas -> `queue/ideas/<run>-<slug>.yaml` + `queue/proposals/<run>/<n>-<slug>.yaml` + `planning_log.md`; `run_planner(mode="ideate")` runs `IdeationRun` then the unchanged `validate_proposals`; `replicate` untouched; the interim `safety_ideator.txt` is kept but not launched |
+| tests (`tests/test_ideation.py`) | the runner-seam pattern (the fake provider CLI writes canned stage outputs through the real factory), schema and cross-check tests, retry-with-feedback, `to_job` round trip through `validate_proposals`, dedup, context dry run against a fixture KB, CLI dry run, scholar-search backoff |
+| not ported (section 4.1 Drop list) | scrape / sync / living-run / editor / preview / assemble / publish, the Docker runner, the sai-review KB schema, `web_search.py`, `sai_ideator` and its heuristics, the OpenRouter lane |
+| open (section 4.6 steps 6-7, section 6) | `env_allowlist` for the ideation roles (the Azure lane's variables must be enumerated first); pairwise judging; a campaign-level spend cap fed from the ledger; the research agents' migration to the factory |
+
+See `docs/SAFETY_ENGINE.md` ("Ideation") for how to run a round and where its outputs land.
+
 ## Summary
 
 | Question | Short answer |

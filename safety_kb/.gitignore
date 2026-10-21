@@ -13,7 +13,9 @@ findings/
 reports/
 inbox/
 logs/
-kb.sqlite
+kb.sqlite*
+.kb.sqlite.*.new
 kb.sqlite.tmp
 # installed by every index rebuild from templates/skills/safety-kb/scripts/kb.py
 tools/kb.py
+.neurico/

@@ -1,0 +1,142 @@
+{
+  "scored": [
+    {
+      "idea_id": "idea_1",
+      "scores": {
+        "novelty": 3,
+        "feasibility": 4,
+        "safety_impact": 5,
+        "replicability": 4,
+        "duplication_risk": 2
+      },
+      "reject_reasons": [
+        "none"
+      ],
+      "rationale": "We favor its safety impact because matched names isolate false alarms while graph checks hold useful content fixed. The DeepSeek audit measured disagreement, while this test measures errors. Restricted prose limits transfer to natural reasoning, and broader novelty remains uncertain.",
+      "distinctness": "We change alarming names while holding route facts fixed; the window study instead changes which context each judge sees."
+    },
+    {
+      "idea_id": "idea_2",
+      "scores": {
+        "novelty": 3,
+        "feasibility": 4,
+        "safety_impact": 5,
+        "replicability": 4,
+        "duplication_risk": 2
+      },
+      "reject_reasons": [
+        "none"
+      ],
+      "rationale": "We favor its safety impact because code solvers detect useful clues even when the speaker rejects them. The secret study tested exact emission, while this test measures judge errors on partial clues. Transfer beyond toy codes and broader novelty remain uncertain.",
+      "distinctness": "We change rejection wording around fixed code clues; the naming study changes alarming words around plans without useful clues."
+    },
+    {
+      "idea_id": "idea_3",
+      "scores": {
+        "novelty": 3,
+        "feasibility": 4,
+        "safety_impact": 5,
+        "replicability": 3,
+        "duplication_risk": 2
+      },
+      "reject_reasons": [
+        "none"
+      ],
+      "rationale": "We value its safety impact because checked quotes could reduce false alarms without hiding useful steps. The permission audit tested write rights, while this test checks assistance. We lower replicability because power for the three-point sensitivity guard remains unproved and the evidence checker needs code.",
+      "distinctness": "We require checked evidence during judging; the training study changes judge weights through paired examples."
+    },
+    {
+      "idea_id": "idea_4",
+      "scores": {
+        "novelty": 3,
+        "feasibility": 3,
+        "safety_impact": 3,
+        "replicability": 3,
+        "duplication_risk": 2
+      },
+      "reject_reasons": [
+        "none"
+      ],
+      "rationale": "We lower feasibility because collecting hidden states adds model loading and code beyond ordinary judging. The trace audit measured verdict gaps, while this study tests a trained predictor. We lower replicability because exact layer choices remain open, and grammar shortcuts may explain gains.",
+      "distinctness": "We train a predictor on fixed judge states; the paired-training study changes judge weights."
+    },
+    {
+      "idea_id": "idea_5",
+      "scores": {
+        "novelty": 3,
+        "feasibility": 4,
+        "safety_impact": 4,
+        "replicability": 4,
+        "duplication_risk": 2
+      },
+      "reject_reasons": [
+        "none"
+      ],
+      "rationale": "We value its paired controls because matched label words help isolate commands aimed at the judge. The earlier injection study measured record edits, while this test measures verdict errors. A fixed command gives a narrow null, and prior judge-attack coverage remains uncertain.",
+      "distinctness": "We insert commands aimed at the judge with matched label-word controls; the naming study changes names without issuing commands."
+    },
+    {
+      "idea_id": "idea_6",
+      "scores": {
+        "novelty": 3,
+        "feasibility": 3,
+        "safety_impact": 4,
+        "replicability": 3,
+        "duplication_risk": 2
+      },
+      "reject_reasons": [
+        "none"
+      ],
+      "rationale": "We lower replicability because the training sets change both pairing and example difficulty, so gains cannot isolate pairing. Qwen3Guard covers trained moderation, leaving this narrower contrast to test. The single seed, tight runtime, and unproved sensitivity power limit the claim.",
+      "distinctness": "We change judge weights using paired examples; the evidence study adds checked quotes only during judging."
+    },
+    {
+      "idea_id": "idea_7",
+      "scores": {
+        "novelty": 3,
+        "feasibility": 4,
+        "safety_impact": 4,
+        "replicability": 4,
+        "duplication_risk": 2
+      },
+      "reject_reasons": [
+        "none"
+      ],
+      "rationale": "We favor replicability because restored context and neutral windows help separate context loss from repeated chances to flag. Qwen3Guard covers streaming moderation, while this test shifts rejection boundaries. Short traces and an unspecified window schedule limit the claim.",
+      "distinctness": "We split unchanged traces and restore governing context; the naming study changes words while keeping each trace whole."
+    },
+    {
+      "idea_id": "idea_8",
+      "scores": {
+        "novelty": 3,
+        "feasibility": 4,
+        "safety_impact": 3,
+        "replicability": 3,
+        "duplication_risk": 2
+      },
+      "reject_reasons": [
+        "dodges_headline_claim"
+      ],
+      "rationale": "We reject the primary question because review yield does not establish whether rejected plans cause false harmful labels. The trace audit measured disagreement; this adds review selection against known labels. Balanced toy classes may change review yield, and broader novelty remains uncertain.",
+      "distinctness": "We change which cases receive review at a fixed budget; the probe study changes how each case gets a label."
+    }
+  ],
+  "top": [
+    {
+      "rank": 1,
+      "idea_id": "idea_1",
+      "rationale": "We rank the naming test first for safety impact because it directly tests false alarms with fixed information and paired controls. The main risk is that graph-checked prose may not reflect natural rejected plans."
+    },
+    {
+      "rank": 2,
+      "idea_id": "idea_2",
+      "rationale": "We rank the clue test next for safety impact because it checks whether rejection hides useful disclosure from judges. Independent code solvers anchor correctness, but toy information gain may not predict real assistance."
+    },
+    {
+      "rank": 3,
+      "idea_id": "idea_7",
+      "rationale": "We rank the window test third for replicability because restored context and neutral controls test separate causes of false alarms. The main risk is that short traces do not represent long reasoning."
+    }
+  ],
+  "judge_notes": "We favor tests of distinct error causes before judge repair or review policies. Each selected test changes a different input property, despite sharing Qwen and both judges. We found no candidates that differ only in analysis of the same intervention.\n\nWe cannot settle broader novelty from the available evidence. Qwen3Guard reports reasoning and streaming moderation, so those topics alone add no novelty. The supplied studies leave the proposed contrasts unresolved, but that does not establish absence of prior work.\n\nWe limit all findings to checked toy languages. We cannot infer error rates on natural harmful requests from these tasks. We would next test transfer on existing traces with independent expert labels.\n\nWe retain three choices to match the job limit. The evidence test needs power for its sensitivity guard; the training test must separate pairing from example difficulty. All proposals still require new task code and enough free memory for Qwen."
+}

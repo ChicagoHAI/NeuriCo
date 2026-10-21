@@ -1,0 +1,522 @@
+{
+ "schema": 1,
+ "candidates": [
+  {
+   "finding_id": "finding:finding-20261020-001-deepseek-r1-distill-llama-8b-pro",
+   "matches": [
+    {
+     "kind": "run",
+     "id": "run:run-research-20261020-003",
+     "title": "Benign tool-injection failures with matched utility controls",
+     "status": "done",
+     "date": "2026-10-20T13:00:55+00:00",
+     "via": [
+      "key:url:https://github.com/Hypogenic-AI/benign-tool-injection-failures-3246-codex-gpt-6-astra"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "finding:finding-20261020-001-the-deepseek-qwen-chemical-bench",
+   "matches": [
+    {
+     "kind": "run",
+     "id": "run:run-research-20261020-001",
+     "title": "Chemical knowledge proxy with matched general-knowledge baselines",
+     "status": "done",
+     "date": "2026-10-20T11:32:01+00:00",
+     "via": [
+      "key:url:https://github.com/Hypogenic-AI/chemical-knowledge-proxy-with-matched-23a8-codex-gpt-6-astra"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-suite-20261021-002",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:suite-20261021-001-smoke-4-qwen3-4b-with-thinking-d",
+     "title": "smoke 4: Qwen3-4B with thinking disabled via chat template",
+     "status": "done",
+     "date": "2026-10-21T02:48:17+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-explore-20261021-001",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:explore-20261021-001-do-auditors-substitute-task-rele",
+     "title": "Do auditors substitute task relevance for explicit write permission?",
+     "status": "done",
+     "date": "2026-10-21T01:42:57+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261021-013804-goal-permission-substitution",
+     "title": "Do auditors substitute task relevance for explicit write permission?",
+     "status": "done",
+     "date": "2026-10-21T01:42:39+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261021-001",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:research-20261020-001-evaluation-cues-and-elicited-und",
+     "title": "Evaluation cues and elicited underperformance on harmless reasoning",
+     "status": "done",
+     "date": "2026-10-20T20:47:40+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261020-204345-evaluation-cue-performance",
+     "title": "Evaluation cues and elicited underperformance on harmless reasoning",
+     "status": "done",
+     "date": "2026-10-20T20:46:54+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-suite-20261021-001",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:suite-20261020-001-cluster-smoke-3-sycophancy-with",
+     "title": "cluster smoke 3: sycophancy with 16k context on Qwen3-4B",
+     "status": "done",
+     "date": "2026-10-20T15:38:30+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261020-009",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:research-20261020-001-unsupported-answer-reversal-vers",
+     "title": "Unsupported answer reversal versus evidence-based correction",
+     "status": "done",
+     "date": "2026-10-20T20:47:40+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261020-204345-sycophancy-correction-controls",
+     "title": "Unsupported answer reversal versus evidence-based correction",
+     "status": "done",
+     "date": "2026-10-20T20:46:54+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261020-008",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:research-20261020-001-bbq-bias-under-matched-ambiguous",
+     "title": "BBQ bias under matched ambiguous and disambiguated evidence",
+     "status": "done",
+     "date": "2026-10-20T20:47:40+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261020-204345-bbq-evidence-controls",
+     "title": "BBQ bias under matched ambiguous and disambiguated evidence",
+     "status": "done",
+     "date": "2026-10-20T20:47:24+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-explore-20261020-002",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:explore-20261020-001-does-lost-source-attribution-bec",
+     "title": "Does lost source attribution become dangerous specifically in assistant memory?",
+     "status": "done",
+     "date": "2026-10-20T16:27:51+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261020-162139-summary-provenance-role",
+     "title": "Does lost source attribution become dangerous specifically in assistant memory?",
+     "status": "done",
+     "date": "2026-10-20T16:27:47+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-explore-20261020-001",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:explore-20261020-001-do-rollback-and-reassuring-narra",
+     "title": "Do rollback and reassuring narration jointly erase historical violations for auditors?",
+     "status": "done",
+     "date": "2026-10-20T16:27:51+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261020-162139-rollback-narration-audit",
+     "title": "Do rollback and reassuring narration jointly erase historical violations for auditors?",
+     "status": "done",
+     "date": "2026-10-20T16:27:47+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261020-007",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:research-20261020-001-completion-claims-on-solvable-an",
+     "title": "Completion claims on solvable and impossible tasks",
+     "status": "done",
+     "date": "2026-10-20T14:47:23+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261020-144343-impossible-task-honesty",
+     "title": "Completion claims on solvable and impossible tasks",
+     "status": "done",
+     "date": "2026-10-20T14:47:17+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261020-006",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:research-20261020-001-synthetic-secret-leakage-with-au",
+     "title": "Synthetic secret leakage with authorized-disclosure controls",
+     "status": "done",
+     "date": "2026-10-20T14:47:24+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261020-144343-synthetic-secret-boundaries",
+     "title": "Synthetic secret leakage with authorized-disclosure controls",
+     "status": "done",
+     "date": "2026-10-20T14:46:19+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261020-005",
+   "matches": [
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261020-001-provisional-paired-xstest-unsafe",
+     "title": "Provisional paired xstest-unsafe difference: R1-Distill-Qwen-7B vs Qwen3-8B",
+     "status": "candidate",
+     "date": "2026-10-20T14:00:50+00:00",
+     "via": [
+      "source_id"
+     ]
+    },
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261020-001-provisional-paired-strong-reject",
+     "title": "Provisional paired strong-reject-aim difference: Qwen3-8B vs Qwen3-8B",
+     "status": "candidate",
+     "date": "2026-10-20T14:00:50+00:00",
+     "via": [
+      "source_id"
+     ]
+    },
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+     "title": "Judge-dependent harmful-reasoning labels: deepseek-r1-distill-qwen-7b / xstest-unsafe",
+     "status": "candidate",
+     "date": "2026-10-20T14:00:50+00:00",
+     "via": [
+      "source_id"
+     ]
+    },
+    {
+     "kind": "job",
+     "id": "job:research-20261020-001-deepseek-distill-and-moonlight-s",
+     "title": "deepseek-distill-and-moonlight-safety-scorecard",
+     "status": "done",
+     "date": "2026-10-20T08:42:46+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261020-004",
+   "matches": [
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261020-001-77-6-point-paired-attack-effect",
+     "title": "+77.6-point paired attack_effect effect on strong-reject-aim",
+     "status": "candidate",
+     "date": "2026-10-20T13:40:44+00:00",
+     "via": [
+      "source_id"
+     ]
+    },
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261020-001-54-3-point-paired-attack-effect",
+     "title": "+54.3-point paired attack_effect effect on strong-reject-aim",
+     "status": "candidate",
+     "date": "2026-10-20T13:40:44+00:00",
+     "via": [
+      "source_id"
+     ]
+    },
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261020-001-24-1-point-paired-adjacent-size",
+     "title": "-24.1-point paired adjacent_size effect on strong-reject-aim",
+     "status": "candidate",
+     "date": "2026-10-20T13:40:44+00:00",
+     "via": [
+      "source_id"
+     ]
+    },
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261020-001-12-9-point-paired-adjacent-size",
+     "title": "+12.9-point paired adjacent_size effect on truthfulqa-mc1",
+     "status": "candidate",
+     "date": "2026-10-20T13:40:44+00:00",
+     "via": [
+      "source_id"
+     ]
+    },
+    {
+     "kind": "job",
+     "id": "job:research-20261020-001-qwen3-family-safety-scorecard",
+     "title": "qwen3-family-safety-scorecard",
+     "status": "done",
+     "date": "2026-10-20T08:42:46+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261020-003",
+   "matches": [
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261020-001-deepseek-r1-distill-llama-8b-pro",
+     "title": "deepseek-r1-distill-llama-8b: protected-record attempts increase under fixed benign tool injection",
+     "status": "candidate",
+     "date": "2026-10-20T13:00:56+00:00",
+     "via": [
+      "key:url:https://github.com/Hypogenic-AI/benign-tool-injection-failures-3246-codex-gpt-6-astra",
+      "source_id"
+     ]
+    },
+    {
+     "kind": "job",
+     "id": "job:research-20261020-001-benign-tool-injection-failures-w",
+     "title": "Benign tool-injection failures with matched utility controls",
+     "status": "done",
+     "date": "2026-10-20T08:47:30+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261020-084340-benign-tool-injection",
+     "title": "Benign tool-injection failures with matched utility controls",
+     "status": "done",
+     "date": "2026-10-20T08:46:23+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261020-002",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:research-20261020-001-simpleqa-factual-errors-versus-a",
+     "title": "SimpleQA factual errors versus abstention on three open checkpoints",
+     "status": "done",
+     "date": "2026-10-20T08:47:30+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261020-084340-simpleqa-abstention",
+     "title": "SimpleQA factual errors versus abstention on three open checkpoints",
+     "status": "done",
+     "date": "2026-10-20T08:46:23+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261020-001",
+   "matches": [
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261020-001-the-deepseek-qwen-chemical-bench",
+     "title": "The DeepSeek–Qwen chemical benchmark interaction meets the preregistered criterion",
+     "status": "candidate",
+     "date": "2026-10-20T11:32:09+00:00",
+     "via": [
+      "key:url:https://github.com/Hypogenic-AI/chemical-knowledge-proxy-with-matched-23a8-codex-gpt-6-astra",
+      "source_id"
+     ]
+    },
+    {
+     "kind": "job",
+     "id": "job:research-20261020-001-chemical-knowledge-proxy-with-ma",
+     "title": "Chemical knowledge proxy with matched general-knowledge baselines",
+     "status": "done",
+     "date": "2026-10-20T08:47:30+00:00",
+     "via": [
+      "title"
+     ]
+    },
+    {
+     "kind": "idea",
+     "id": "idea:plan-20261020-084340-chem-capability-baseline",
+     "title": "Chemical knowledge proxy with matched general-knowledge baselines",
+     "status": "done",
+     "date": "2026-10-20T08:46:23+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-research-20261019-001",
+   "matches": [
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261019-001-qwen3-0-6b-gives-more-harmful-di",
+     "title": "Qwen3-0.6B gives more harmful direct-request compliance than Qwen2.5-0.5B-Instruct (StrongREJECT 0.354 vs 0.153)",
+     "status": "candidate",
+     "date": "2026-10-19T15:55:43+00:00",
+     "via": [
+      "source_id"
+     ]
+    },
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261019-001-qwen2-5-0-5b-instruct-refuses-40",
+     "title": "Qwen2.5-0.5B-Instruct refuses 40% of XSTest safe prompts while refusing 84.5% of the unsafe contrasts",
+     "status": "candidate",
+     "date": "2026-10-19T15:55:43+00:00",
+     "via": [
+      "source_id"
+     ]
+    },
+    {
+     "kind": "finding",
+     "id": "finding:finding-20261019-001-aim-raises-strongreject-harmfuln",
+     "title": "AIM raises StrongREJECT harmfulness by +0.18 on Qwen2.5-0.5B; on Qwen3-0.6B it works only with thinking enabled",
+     "status": "candidate",
+     "date": "2026-10-19T15:55:43+00:00",
+     "via": [
+      "source_id"
+     ]
+    },
+    {
+     "kind": "job",
+     "id": "job:research-20261019-001-e2e-research-refusal-calibration",
+     "title": "e2e research: refusal calibration on small Qwen",
+     "status": "done",
+     "date": "2026-10-19T15:03:31+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  },
+  {
+   "finding_id": "run:run-suite-20261019-001",
+   "matches": [
+    {
+     "kind": "job",
+     "id": "job:suite-20261019-001-daemon-e2e-test-wmdp-sycophancy",
+     "title": "daemon e2e test: wmdp+sycophancy on 0.5B",
+     "status": "done",
+     "date": "2026-10-19T14:52:03+00:00",
+     "via": [
+      "title"
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -32,7 +32,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--out", type=Path, default=None, help="default: <workspace>/results/safety")
     parser.add_argument("--job", default=None, help="label stored in the results (default: workspace name)")
-    parser.add_argument("--max-connections", type=int, default=16)
+    parser.add_argument("--max-connections", type=int, default=None,
+                        help="concurrent requests; default: the served model's own KV-cache bound")
     parser.add_argument("--from-log", type=Path, help="convert an Inspect JSON log instead of running")
     parser.add_argument("--eval-id")
     parser.add_argument("--model-id")
@@ -61,7 +62,8 @@ def main() -> int:
     if not (args.evals and args.models):
         parser.error("--evals and --models are required (or use --from-log)")
     cmd = [sys.executable, str(SRC / "safety" / "suites.py"), "--job", job, "--out", str(out),
-           "--evals", *args.evals, "--models", *args.models, "--max-connections", str(args.max_connections)]
+           "--evals", *args.evals, "--models", *args.models,
+           *(["--max-connections", str(args.max_connections)] if args.max_connections else [])]
     if args.limit:
         cmd += ["--limit", str(args.limit)]
     gpu = os.environ.get("CUDA_VISIBLE_DEVICES")
