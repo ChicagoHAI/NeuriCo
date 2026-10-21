@@ -3,6 +3,7 @@
 #SBATCH --partition=general,complementary-ai
 #SBATCH --gres=gpu:4
 #SBATCH --constraint="a100|h100|h200"
+#SBATCH --prefer="h200|h100"
 #SBATCH --time=12:00:00
 #SBATCH --mem=200G
 #SBATCH --cpus-per-task=16
