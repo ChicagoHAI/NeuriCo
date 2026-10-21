@@ -8,6 +8,7 @@
     uv run python src/cli/safety.py status
     uv run python src/cli/safety.py stop
     uv run python src/cli/safety.py plan --campaign qwen-small-pipeline-test
+    uv run python src/cli/safety.py ideate --campaign open-weight-scorecards [--only problem] [--dry-run]
     uv run python src/cli/safety.py digest
 """
 
@@ -147,6 +148,29 @@ def cmd_plan(args: argparse.Namespace) -> int:
     result = run_planner(kb, args.campaign, provider=args.provider, model=args.model, agent_auth=args.agent_auth,
                          dry_run=args.dry_run, mode=args.mode)
     print(result)
+    return 0 if result.get("ok", True) else 1
+
+
+def cmd_ideate(args: argparse.Namespace) -> int:
+    """One ideation round (problem -> ideation -> idea_judge) through the planner's ideate mode."""
+    from safety.planner import run_planner
+    kb = KB()
+    timeout = None if args.timeout is None else int(args.timeout)
+    result = run_planner(kb, args.campaign, provider=args.provider, model=args.model, agent_auth=args.agent_auth,
+                         timeout=timeout, dry_run=args.dry_run, mode="ideate", only=args.only or None,
+                         planner_run=args.planner_run)
+    stages = result.get("stages") or {}
+    print(f"planner run {result.get('planner_run')} ({'dry run' if result.get('dry_run') else 'ideate'})")
+    for sid, rec in stages.items():
+        cost = rec.get("cost_usd")
+        print(f"  {sid:<11} {rec.get('status'):<9} attempts={rec.get('attempts', '-')} "
+              f"cost={'?' if cost is None else f'${cost:.2f}'} {rec.get('error') or rec.get('reason') or ''}")
+    if result.get("problem"):
+        print(f"  problem: {result['problem']} ({result.get('candidates')} candidate ideas)")
+    print(f"  accepted {result.get('accepted') or []}; rejected {result.get('rejected') or []}")
+    for w in result.get("warnings") or []:
+        print(f"  warning: {w}")
+    print(f"  artifacts: {result.get('artifacts')}; logs: {result.get('log')}")
     return 0 if result.get("ok", True) else 1
 
 
@@ -314,6 +338,18 @@ def main() -> int:
     p.add_argument("--dry-run", action="store_true", help="write the prompt and exit without launching an agent")
     p.add_argument("--mode", choices=("replicate", "ideate"), help="default: next mode from the campaign's planner.modes mix")
     p.set_defaults(func=cmd_plan)
+
+    p = sub.add_parser("ideate", help="one ideation round: context -> problem -> ideation -> idea_judge -> jobs")
+    p.add_argument("--campaign", required=True)
+    p.add_argument("--only", action="append", choices=("problem", "ideation", "idea_judge"),
+                   help="run only these agent stages (repeatable); needs --planner-run for upstream artifacts")
+    p.add_argument("--planner-run", help="reuse an existing round directory (queue/proposals/<run>) instead of a new one")
+    p.add_argument("--dry-run", action="store_true", help="build the context and stage the first workspace; launch nothing")
+    p.add_argument("--provider", help="claude | codex | gemini (default: the ideation.* role, Codex)")
+    p.add_argument("--model")
+    p.add_argument("--agent-auth", choices=("oauth", "azure"))
+    p.add_argument("--timeout", type=int, help="seconds per stage (default: the role's 1500; 0 = no limit)")
+    p.set_defaults(func=cmd_ideate)
 
     p = sub.add_parser("kb", help="knowledge base: rebuild | search <text> | show <id> | related <id> | "
                                   "check-idea <hypothesis> | stats | timeline | anomalies | query <sql> | scout | merge-models")
