@@ -11,7 +11,6 @@ and produces structured outputs for the next phase of research.
 
 from pathlib import Path
 from typing import Optional, Dict, Any
-import subprocess
 import shlex
 import sys
 import time
@@ -19,7 +18,7 @@ import time
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.security import sanitize_text
+from core.agent_factory import AgentFactory
 from core.agent_runner import run_prebuilt_cli_agent
 from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
 
@@ -156,27 +155,6 @@ def run_resource_finder(
     print(f"   Prompt length: {len(prompt)} characters")
     print()
 
-    # Prepare command
-    cmd = build_agent_command(provider, full_permissions=full_permissions)
-
-    log_file = logs_dir / f"{log_prefix}_{provider}.log"
-    transcript_file = logs_dir / f"{log_prefix}_{provider}_transcript.jsonl"
-
-    print(f"▶️  Launching {provider} CLI agent...")
-    print(f"   Command: {cmd}")
-    print(f"   Log file: {log_file}")
-    print(f"   Transcript: {transcript_file}")
-    print()
-    print("=" * 80)
-    print("RESOURCE FINDER OUTPUT (streaming)")
-    print("=" * 80)
-    print()
-
-    # Set environment variables
-    env = build_agent_environment(provider, env_extra)
-
-    # Execute agent
-    success = False
     completion_marker = work_dir / completion_marker_name
     start_time = time.time()
 
@@ -184,54 +162,19 @@ def run_resource_finder(
         if completion_mode == "hitl_runtime":
             # HITL workers can remain active while emitting output, so use the
             # shared deadline-aware runner instead of waiting on stdout EOF.
-            launch = run_prebuilt_cli_agent(
-                command_argv=shlex.split(cmd),
-                prompt=prompt,
-                work_dir=work_dir,
-                log_file=log_file,
-                transcript_file=transcript_file,
-                env=env,
-                timeout=timeout,
-                provider=provider,
-                defer_provider_failure_to_runtime=True,
+            launch = _launch_hitl_runtime(
+                prompt, work_dir, provider, full_permissions=full_permissions, timeout=timeout,
+                log_prefix=log_prefix, env_extra=env_extra,
             )
-            return_code = launch["return_code"]
-            if launch["timed_out"]:
-                print(f"\n⏱️  Resource finder timed out after {timeout} seconds")
         else:
-            with (
-                open(log_file, "w", encoding="utf-8") as log_f,
-                open(transcript_file, "w", encoding="utf-8") as transcript_f,
-            ):
-                # Start process in workspace directory
-                process = subprocess.Popen(
-                    shlex.split(cmd),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    text=True,
-                    encoding="utf-8",
-                    bufsize=1,
-                    cwd=str(work_dir),
-                )
-
-                # Send prompt
-                process.stdin.write(prompt)
-                process.stdin.close()
-
-                # Stream output to both log file and transcript file (sanitized for security)
-                # For Claude/Codex with JSON flags, the output IS the transcript
-                # For Gemini, the output is regular text but sessions are saved separately
-                for line in iter(process.stdout.readline, ""):
-                    if line:
-                        sanitized_line = sanitize_text(line)
-                        print(sanitized_line, end="")
-                        log_f.write(sanitized_line)
-                        transcript_f.write(sanitized_line)
-
-                # Wait for completion
-                return_code = process.wait(timeout=timeout)
+            launch = _launch_marker_mode(
+                prompt, work_dir, provider, full_permissions=full_permissions, timeout=timeout,
+                completion_marker_name=completion_marker_name, log_prefix=log_prefix, env_extra=env_extra,
+            )
+        return_code = launch["return_code"]
+        log_file, transcript_file = Path(launch["log_file"]), Path(launch["transcript_file"])
+        if launch["timed_out"]:
+            print(f"\n⏱️  Resource finder timed out after {timeout} seconds")
 
         print()
         print("=" * 80)
@@ -245,26 +188,18 @@ def run_resource_finder(
             print(f"⚠️  Agent execution finished with return code: {return_code}")
 
         if completion_mode == "hitl_runtime":
-            success = bool(launch.get("success"))
             print("ℹ️  HITL runtime completion mode; orchestrator will review finish state.")
+        elif completion_marker.exists():
+            print(f"✅ Completion marker found: {completion_marker}")
         else:
-            # Check for completion marker
-            if completion_marker.exists():
-                print(f"✅ Completion marker found: {completion_marker}")
-                success = True
-            else:
-                print(f"⚠️  Completion marker NOT found: {completion_marker}")
-                print("   Agent may not have finished all tasks.")
-                success = False
-
-    except subprocess.TimeoutExpired:
-        print(f"\n⏱️  Resource finder timed out after {timeout} seconds")
-        process.kill()
-        success = False
+            print(f"⚠️  Completion marker NOT found: {completion_marker}")
+            print("   Agent may not have finished all tasks.")
+        # Marker mode: the role's marker contract decides (a non-zero exit is tolerated,
+        # as today); HITL mode: the launch verdict, which the orchestrator reviews.
+        success = bool(launch.get("success"))
 
     except Exception as e:
         print(f"\n❌ Error during resource finding: {e}")
-        success = False
         raise
 
     # Verify outputs
@@ -320,6 +255,78 @@ def run_resource_finder(
             launch.get("provider_process_failed")
         )
     return result
+
+
+def _print_launch_banner(provider: str, command: str, log_file: Path, transcript_file: Path) -> None:
+    print(f"▶️  Launching {provider} CLI agent...")
+    print(f"   Command: {command}")
+    print(f"   Log file: {log_file}")
+    print(f"   Transcript: {transcript_file}")
+    print()
+    print("=" * 80)
+    print("RESOURCE FINDER OUTPUT (streaming)")
+    print("=" * 80)
+    print()
+
+
+def _launch_marker_mode(
+    prompt: str,
+    work_dir: Path,
+    provider: str,
+    *,
+    full_permissions: bool,
+    timeout: Optional[int],
+    completion_marker_name: str,
+    log_prefix: str,
+    env_extra: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
+    """Ordinary resource finding through the agent factory.
+
+    The factory gives this path what the old read-to-EOF loop lacked: a deadline
+    that fires while the agent streams, process-group cleanup and a ledger line.
+    The ``resource_finder`` role's marker contract keeps today's verdict: success
+    means the completion marker exists, whatever the exit code.
+    """
+    factory = AgentFactory()
+    spec = factory.spec(
+        "resource_finder", provider=provider, full_permissions=full_permissions, timeout=timeout,
+        output={"marker": completion_marker_name},
+        transcript={"logs_dir": work_dir / "logs", "prefix": log_prefix},
+    )
+    handle = factory.build(spec, env_extra)
+    logs_dir = work_dir / "logs"
+    _print_launch_banner(provider, shlex.join(handle.argv), logs_dir / f"{log_prefix}_{provider}.log",
+                         logs_dir / f"{log_prefix}_{provider}_transcript.jsonl")
+    return factory.run(handle, prompt, work_dir).legacy_dict()
+
+
+def _launch_hitl_runtime(
+    prompt: str,
+    work_dir: Path,
+    provider: str,
+    *,
+    full_permissions: bool,
+    timeout: Optional[int],
+    log_prefix: str,
+    env_extra: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
+    """HITL resource finding on the shared runner; provider failures are deferred to the runtime."""
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
+    logs_dir = work_dir / "logs"
+    log_file = logs_dir / f"{log_prefix}_{provider}.log"
+    transcript_file = logs_dir / f"{log_prefix}_{provider}_transcript.jsonl"
+    _print_launch_banner(provider, cmd, log_file, transcript_file)
+    return run_prebuilt_cli_agent(
+        command_argv=shlex.split(cmd),
+        prompt=prompt,
+        work_dir=work_dir,
+        log_file=log_file,
+        transcript_file=transcript_file,
+        env=build_agent_environment(provider, env_extra),
+        timeout=timeout,
+        provider=provider,
+        defer_provider_failure_to_runtime=True,
+    )
 
 
 def wait_for_completion(work_dir: Path, timeout: int = 3600, check_interval: int = 5) -> bool:

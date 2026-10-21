@@ -29,7 +29,8 @@ default:
 roles:
   resource_finder:
     budget: {timeout_s: 2700}
-    output: {kind: marker, marker: .resource_finder_complete}
+    # tolerate_nonzero: today's verdict is "the marker exists", whatever the exit code
+    output: {kind: marker, marker: .resource_finder_complete, tolerate_nonzero: true}
     template: agents/resource_finder.txt
   rule_maker:
     budget: {timeout_s: 1800}
@@ -39,7 +40,7 @@ roles:
     template: agents/rule_maker.txt
   rule_maker_bootstrap:
     budget: {timeout_s: 1800}
-    output: {kind: validator, validator: agents.rule_maker_bootstrap:validate_bootstrap_outputs}
+    output: {kind: validator, validator: agents.rule_maker_bootstrap:bootstrap_output_contract}
     template: agents/rule_maker_bootstrap.txt
   manifest_trimmer:
     budget: {timeout_s: 300}

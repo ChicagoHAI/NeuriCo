@@ -136,6 +136,18 @@ def logs_written(directory: Path) -> set:
     return {p.name for p in Path(directory).iterdir()}
 
 
+def factory_artifacts(prefix: str, provider: str, *, prompt: bool = True) -> set:
+    """Files one AgentFactory launch writes: today's prompt/log/transcript names unchanged,
+    plus the Codex stderr file step 1 introduced so the ``--json`` transcript stays a clean
+    JSONL stream for usage parsing."""
+    names = {f"{prefix}_{provider}.log", f"{prefix}_{provider}_transcript.jsonl"}
+    if prompt:
+        names.add(f"{prefix}_prompt.txt")
+    if provider == "codex":
+        names.add(f"{prefix}_codex_stderr.log")
+    return names
+
+
 # -- build_agent_command itself ------------------------------------------------------------------------
 
 def test_build_agent_command_snapshots(lane):
@@ -170,8 +182,7 @@ def test_resource_finder_marker_mode(fake_cli, tmp_path, lane, provider):
     result = resource_finder.run_resource_finder({}, work, provider=provider, prompt_override="rf prompt", timeout=30)
     record = fake_cli.last()
     assert_launch(fake_cli, record, provider, lane, cwd=work, prompt="rf prompt")
-    assert logs_written(work / "logs") == {"resource_finder_prompt.txt", f"resource_finder_{provider}.log",
-                                           f"resource_finder_{provider}_transcript.jsonl"}
+    assert logs_written(work / "logs") == factory_artifacts("resource_finder", provider)
     assert result["success"] is True
     assert set(result) == {"success", "completion_marker", "outputs", "log_file", "transcript_file", "elapsed_time",
                            "background_processes_terminated"}
@@ -259,9 +270,10 @@ def test_rule_maker_bootstrap(fake_cli, tmp_path, lane, provider, monkeypatch):
     log_dir = tmp_path / "bootstrap-logs"
     result = rule_maker_bootstrap.run_bootstrap_rule_maker({}, work, provider=provider, timeout=30, log_dir=log_dir)
     assert_launch(fake_cli, fake_cli.last(), provider, lane, cwd=work, prompt="bootstrap prompt")
-    # transcript only: no .log file on this path
-    assert logs_written(log_dir) == {"bootstrap_rule_maker_prompt.txt", f"bootstrap_rule_maker_{provider}_transcript.jsonl"}
+    # step 2: this path used to write the transcript only; through the factory it also gets a .log
+    assert logs_written(log_dir) == factory_artifacts("bootstrap_rule_maker", provider)
     assert result["success"] is False and result["return_code"] == 0
+    assert result["validation"] == {} and not any(result["outputs_exist"].values())
     assert {"success", "return_code", "elapsed_time"} <= set(result)
 
 
