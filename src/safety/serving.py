@@ -207,7 +207,11 @@ def serve(model_entry: Dict[str, Any], *, gpu: Optional[str], python: str, log_d
     kind, _, hf_id = access.partition(":")
     if kind != "vllm":
         raise ValueError(f"not a vllm model: {access}")
-    serve_args = list(model_entry.get("serve_args") or [])
+    # Catalog paths (chat templates, lora adapters) are relative to the project root; servers may
+    # be started from a workspace, so resolve them here.
+    project_root = Path(__file__).resolve().parents[2]
+    serve_args = [str(project_root / a) if (project_root / str(a)).is_file() else str(a)
+                  for a in (model_entry.get("serve_args") or [])]
     return VLLMServer(hf_id, model_entry["id"], gpu=gpu, python=python,
                       log_file=Path(log_dir) / f"vllm_{model_entry['id']}.log",
                       gpu_memory_utilization=float(model_entry.get("gpu_memory_utilization", 0.45)),
