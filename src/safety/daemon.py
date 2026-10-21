@@ -89,6 +89,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "min_pending": 2,              # schedule the planner when fewer approved jobs are pending
     "planner_interval_hours": 6,   # never run the planner more often than this
     "planner_enabled": True,
+    "crawler_enabled": True,       # sweep catalog/sources.yaml into inbox/ (needs that file to exist)
+    "crawl_interval_hours": 24,
     "planner_provider": "claude",
     "planner_model": None,
     "eval_python": "/data/hypogenicai/safety_venv/bin/python",
@@ -463,6 +465,36 @@ class Daemon:
         except Exception as e:  # noqa: BLE001
             self.event(f"INDEX  rebuild failed: {type(e).__name__}: {e}")
 
+    # -- crawler --------------------------------------------------------------
+    def maybe_crawl(self) -> None:
+        """Run the crawler (no LLM; arXiv, Hugging Face, feeds -> inbox/) once per ``crawl_interval_hours``."""
+        if not self.config.get("crawler_enabled", True) or not (self.kb.catalog_dir / "sources.yaml").exists():
+            return
+        state = self.state.setdefault("crawler", {})
+        last = state.get("last_run_at")
+        if last:
+            age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() / 3600
+            if age_h < float(self.config.get("crawl_interval_hours", 24)):
+                return
+        if state.get("running"):
+            return
+        state.update({"running": True, "last_run_at": utc_now()})
+        self.save()
+
+        def _run():
+            try:
+                from safety.crawler import crawl
+                result = crawl(self.kb)
+                self.event(f"CRAWL  {result.get('new', 0)} new inbox item(s), {result.get('skipped', 0)} seen, "
+                           f"{len(result.get('errors') or [])} source error(s)")
+            except Exception as e:  # noqa: BLE001
+                self.event(f"CRAWL  failed: {type(e).__name__}: {e}")
+            finally:
+                self.state.setdefault("crawler", {})["running"] = False
+                self.save()
+
+        threading.Thread(target=_run, daemon=True).start()
+
     # -- planner --------------------------------------------------------------
     def maybe_plan(self) -> None:
         if not self.campaign or not self.config.get("planner_enabled", True):
@@ -579,6 +611,7 @@ class Daemon:
             if spec.gpu_memory_gb > 0 and self.free_gpu(spec.gpu_memory_gb) is None:
                 continue
             self.launch(spec)
+        self.maybe_crawl()
         self.maybe_plan()
         self.write_status()
         self.save()
