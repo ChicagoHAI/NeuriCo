@@ -23,6 +23,7 @@ from safety.serving import Endpoint, export_provider_env, resolve_api_endpoint  
 def kb(tmp_path, monkeypatch):
     root = tmp_path / "kb"
     monkeypatch.setenv("NEURICO_SAFETY_KB", str(root))
+    monkeypatch.setenv("NEURICO_AGENT_LEDGER", str(tmp_path / "global-ledger.jsonl"))  # spend reads stay in tmp
     kb = KB(root)
     kb.ensure_layout()
     save_yaml(kb.catalog_dir / "evals.yaml", {"evals": [
@@ -313,3 +314,177 @@ def test_model_scout_merge_validates_and_supersedes(kb):
     assert "newest generation New9" in model_scout.latest_models_summary(kb)
     prompt = model_scout.render_prompt(kb, "scout-test")
     assert "catalog/families.yaml" in prompt and "{{" not in prompt
+
+
+# -- ledger-backed budgets (agent-factory migration step 7) ----------------------------------------------------
+
+def _ledger_line(run_id, cost, *, provider="claude", auth="oauth", role="experiment_runner", day=None, **tags):
+    from safety.spend import today
+    return json.dumps({"run_id": run_id, "ts_start": f"{day or today()}T01:00:00+00:00", "gen_ai.agent.name": role,
+                       "gen_ai.provider.name": provider, "auth": auth, "cost_usd": cost, "tags": tags})
+
+
+def test_daemon_once_skips_job_over_budget_with_logged_reason(kb, tmp_path, monkeypatch):
+    queue = Queue(kb)
+    over = JobSpec(id="research-over", kind="research", title="over", idea_file="safety_kb/queue/ideas/o.yaml",
+                   campaign="camp", priority=90, api_budget_usd=1.0, github=False)
+    under = JobSpec(id="research-under", kind="research", title="under", idea_file="safety_kb/queue/ideas/u.yaml",
+                    campaign="camp", priority=10, api_budget_usd=5.0, github=False)
+    queue.add(over)
+    queue.add(under)
+    # the job's earlier attempt (tagged by job id) already cost more than its budget
+    (tmp_path / "global-ledger.jsonl").write_text(
+        _ledger_line("r1", 0.75, job_id="research-over", campaign="camp") + "\n"
+        + _ledger_line("r2", 0.75, provider="codex", auth="azure", job_id="research-over", campaign="camp") + "\n"
+        + _ledger_line("r3", 0.10, job_id="research-under", campaign="camp") + "\n")
+    launched = []
+
+    class FakeProc:
+        pid = 4343
+
+        def wait(self, timeout=None):
+            return 1  # submit "fails": the job thread ends at once
+
+        def poll(self):
+            return 1
+
+    def fake_popen(command, cwd, env, **kwargs):
+        launched.append((command, env))
+        return FakeProc()
+
+    def wait_for(predicate, seconds=5.0):
+        import time
+        deadline = time.time() + seconds
+        while not predicate() and time.time() < deadline:
+            time.sleep(0.05)
+        assert predicate()
+
+    monkeypatch.setattr("safety.daemon.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("safety.daemon._make_readable", lambda path: None)
+    monkeypatch.setattr("safety.daemon.signal.signal", lambda *a: None)  # keep pytest's handlers
+    daemon = Daemon(kb, campaign="camp", config={"planner_enabled": False, "crawler_enabled": False,
+                                                 "max_neurico_jobs": 2, "retries": 0})
+    assert daemon.run(once=True) == 0
+    wait_for(lambda: len(launched) == 1 and not daemon.processes)
+    events = (kb.logs_dir / "events.log").read_text()
+    assert "BUDGET research-over skipped: job budget: spent $1.50 of $1.00 (resources.api_budget_usd)" in events
+    assert queue.find("research-over")[0] == "pending"  # skipped, not failed
+    assert daemon.state["budget_skips"]["research-over"].startswith("job budget")
+    assert [env["NEURICO_AGENT_TAGS"] for _, env in launched] == ["job_id=research-under,job_kind=research,campaign=camp"]
+    status = (kb.logs_dir / "status.md").read_text()
+    assert "research-over [research, p90] over skipped: job budget: spent $1.50 of $1.00" in status
+    assert "## spend" in status and "campaign camp: $1.60" in status and "today (" in status
+    status_json = json.loads((kb.logs_dir / "status.json").read_text())
+    assert status_json["spend"]["campaign"]["cost_usd"] == 1.6 and status_json["budget_skips"]["research-over"]
+    # the reason is logged once, not on every tick
+    daemon.tick()
+    assert events.count("BUDGET research-over") == 1 and (kb.logs_dir / "events.log").read_text().count("BUDGET research-over") == 1
+    # a raised budget lets the job through on the next tick (slot free: the first launch already ended)
+    launched.clear()
+    data = load_yaml(queue.find("research-over")[1])
+    data["resources"]["api_budget_usd"] = 10.0
+    save_yaml(queue.find("research-over")[1], data)
+    daemon.tick()
+    wait_for(lambda: any("research-over" in env["NEURICO_AGENT_TAGS"] for _, env in launched))
+    assert "research-over" not in daemon.state["budget_skips"]
+
+
+def test_daemon_daily_cap_skips_only_jobs_on_that_lane(kb, tmp_path, monkeypatch):
+    queue = Queue(kb)
+    queue.add(JobSpec(id="suite-api", kind="suite", title="api judge", evals=["xstest-safe"], models=["tiny"],
+                      gpu_memory_gb=0))  # xstest-safe judges with api-judge (openrouter)
+    queue.add(JobSpec(id="suite-local", kind="suite", title="local", evals=["wmdp-bio"], models=["tiny"], gpu_memory_gb=0))
+    queue.add(JobSpec(id="research-az", kind="research", title="az", idea_file="safety_kb/queue/ideas/a.yaml",
+                      provider="codex", agent_auth="azure"))
+    (tmp_path / "global-ledger.jsonl").write_text(_ledger_line("r1", 2.0, provider="openrouter", role="eval_verifier") + "\n")
+    monkeypatch.setattr("safety.daemon.subprocess.Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("launched")))
+    daemon = Daemon(kb, campaign="camp", config={"planner_enabled": False, "crawler_enabled": False,
+                                                 "openrouter_daily_cap_usd": 1.5, "max_suite_jobs": 0,
+                                                 "max_neurico_jobs": 0})
+    daemon.tick()  # slots are closed so nothing launches; only the budget verdicts matter
+    skips = daemon.state["budget_skips"]
+    assert skips["suite-api"].startswith("daily cap: openrouter spent $2.00 of $1.50")
+    assert skips["research-az"].startswith("daily cap: openrouter")  # NeuriCo jobs bill OpenRouter through API roles
+    assert "suite-local" not in skips
+    events = (kb.logs_dir / "events.log").read_text()
+    assert "BUDGET suite-api skipped: daily cap: openrouter" in events and "BUDGET suite-local" not in events
+    assert "daily caps: openrouter $1.50" in (kb.logs_dir / "status.md").read_text()
+
+
+def test_digest_has_spend_section(kb, tmp_path):
+    (tmp_path / "global-ledger.jsonl").write_text(_ledger_line("r1", 1.25, role="planner", provider="codex", auth="azure") + "\n")
+    text = write_digest(kb, days=7).read_text()
+    assert "## Spend (run ledgers, last 7 day(s))" in text and "azure $1.25" in text and "planner $1.25" in text
+
+
+def test_kbdb_spend_table_from_ledgers(kb, tmp_path):
+    from safety import kbdb
+    (tmp_path / "global-ledger.jsonl").write_text(_ledger_line("r1", 1.25, provider="openrouter", job_id="j1", campaign="camp")
+                                                  + "\n" + _ledger_line("r2", None, provider="codex") + "\n")
+    counts = kbdb.rebuild(kb)
+    assert counts["spend"] == 2
+    rows = kbdb.query(kb, "SELECT run_id, lane, cost_usd, job_id, campaign FROM spend ORDER BY run_id")
+    assert rows[0] == {"run_id": "r1", "lane": "openrouter", "cost_usd": 1.25, "job_id": "j1", "campaign": "camp"}
+    assert rows[1]["cost_usd"] is None and rows[1]["lane"] == "codex"
+
+
+# -- judge preference as configuration --------------------------------------------------------------------------
+
+@pytest.fixture
+def judge_kb(kb):
+    save_yaml(kb.catalog_dir / "models.yaml", {"models": [
+        {"id": "tiny", "family": "qwen", "access": "vllm:Qwen/Qwen2.5-0.5B-Instruct", "gpu_memory_gb": 6},
+        {"id": "api-judge", "family": "gpt", "access": "openrouter:openai/gpt-4.1-mini", "role": "judge-api"},
+        {"id": "local-judge", "family": "qwen", "access": "vllm:Qwen/Qwen2.5-7B-Instruct", "role": "judge"},
+        {"id": "az-judge", "family": "gpt", "access": "azure:gpt-4.1-mini", "role": "judge-api"},
+    ]})
+    return kb
+
+
+class _FakeServer:
+    base_url = "http://127.0.0.1:8401/v1"
+
+    def stop(self):
+        pass
+
+
+def _pool(kb, monkeypatch, env, policy, served):
+    monkeypatch.setattr(suites, "serve", lambda entry, **kw: served.append(entry["id"]) or _FakeServer())
+    return suites.JudgePool(kb, gpu=None, log_dir=kb.root / "serving", hf_home="/tmp/hf", env=env, policy=policy)
+
+
+def test_judge_policy_prefers_azure_when_available_and_falls_back_to_local(judge_kb, monkeypatch):
+    azure_env = {"AZURE_OPENAI_API_KEY": "k" * 32, "AZURE_FOUNDRY_RESOURCE": "labres"}
+    policy = {"prefer": ["azure", "local"]}
+    served = []
+    pool = _pool(judge_kb, monkeypatch, azure_env, policy, served)
+    model, env = pool.resolve("default")
+    assert model == "openai-api/azure/gpt-4.1-mini" and served == []  # no local server started
+    assert env == {"AZURE_BASE_URL": "https://labres.openai.azure.com/openai/v1", "AZURE_API_KEY": "k" * 32}
+    assert pool.resolve(None) == (None, {}) and pool.resolve("api-judge")[0] == "openrouter/openai/gpt-4.1-mini"
+    # no Azure key -> the local judge is served instead
+    pool = _pool(judge_kb, monkeypatch, {}, policy, served)
+    model, env = pool.resolve("default")
+    assert model == "openai-api/judge/local-judge" and env["JUDGE_BASE_URL"] == _FakeServer.base_url and served == ["local-judge"]
+    assert pool.resolve("default")[0] == model and served == ["local-judge"]  # served once per job
+    # a deployment allow-list that excludes the judge deployment also falls back
+    pool = _pool(judge_kb, monkeypatch, {**azure_env, "AZURE_OPENAI_DEPLOYMENTS": "gpt-6-astra"}, policy, served)
+    assert pool.resolve("default")[0] == "openai-api/judge/local-judge"
+    # the policy may name any lane; a lane with no catalog judge is skipped
+    pool = _pool(judge_kb, monkeypatch, {"OPENROUTER_KEY": "x"}, {"prefer": ["anthropic", "openrouter", "local"]}, served)
+    assert pool.resolve("default")[0] == "openrouter/openai/gpt-4.1-mini"
+    # NEURICO_SAFETY_JUDGE wins over the policy
+    monkeypatch.setenv("NEURICO_SAFETY_JUDGE", "api-judge")
+    pool = _pool(judge_kb, monkeypatch, {**azure_env, "NEURICO_SAFETY_JUDGE": "api-judge"}, policy, served)
+    assert pool.resolve("default")[0] == "openrouter/openai/gpt-4.1-mini"
+
+
+def test_judge_policy_absent_keeps_role_judge_default(judge_kb, monkeypatch):
+    served = []
+    azure_env = {"AZURE_OPENAI_API_KEY": "k" * 32, "AZURE_FOUNDRY_RESOURCE": "labres"}
+    pool = _pool(judge_kb, monkeypatch, azure_env, None, served)  # engine.yaml has no judges: block
+    assert pool.policy == {} and pool.resolve("default")[0] == "openai-api/judge/local-judge"
+    assert suites.preferred_judge_entry(judge_kb, {}, azure_env) is None
+    save_yaml(judge_kb.engine_config_file, {"daemon": {}, "judges": {"prefer": ["azure", "local"]}})
+    pool = _pool(judge_kb, monkeypatch, azure_env, None, [])  # policy read from engine.yaml
+    assert pool.resolve("default")[0] == "openai-api/azure/gpt-4.1-mini"

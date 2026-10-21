@@ -104,14 +104,82 @@ uv run python src/cli/safety.py digest --days 7
 Daemon settings (`safety_kb/engine.yaml`, overridable by flags): `gpus`, `gpu_memory_gb`,
 `max_neurico_jobs`, `max_suite_jobs`, `stall_minutes`, `retries`, `poll_seconds`,
 `min_pending`, `planner_interval_hours`, `planner_enabled`, `planner_provider`, `planner_model`,
-`planner_agent_auth`, `planner_timeout`, `eval_python`, `hf_cache`. The planner, the ideation
-stages and the model scout launch through `config/agents.yaml` roles (`planner`,
+`planner_agent_auth`, `planner_timeout`, `eval_python`, `hf_cache`, `openrouter_daily_cap_usd`,
+`azure_daily_cap_usd`. The planner, the ideation stages and the model scout
+launch through `config/agents.yaml` roles (`planner`,
 `ideation.problem` / `ideation.ideation` / `ideation.idea_judge`, `model_scout`), and every
 session is recorded in `safety_kb/.neurico/agent_runs.jsonl` (each line names the prompt's
 `template_id`, `template_sha` and `variables_sha` from `core.prompt_registry`, so a template or
 context change is visible in the ledger). The daemon's `planner_provider`,
 `planner_model`, `planner_agent_auth` and `planner_timeout` apply to the ideation stages too
 (the timeout per stage).
+
+## Budgets and spend
+
+Every agent launch through `core.agent_factory` and every `core.llm_client` call writes one line
+with its usage and cost to the run ledgers (`core.run_ledger`): the global
+`logs/agent_runs.jsonl` (the `logs` mount makes it the same file inside containers), the
+workspace's `.neurico/agent_runs.jsonl`, and `safety_kb/.neurico/agent_runs.jsonl` for the
+planner, ideator and scout. The daemon sets `NEURICO_AGENT_TAGS=job_id=<id>,job_kind=<kind>,campaign=<name>`
+on every process it starts (`docker/run.sh` forwards it into the container), so each line carries
+the job it belongs to. `src/safety/spend.py` is the one reader: `run_ledger.spend(records, day=,
+since=, job_id=, campaign=, role=, lane=)` aggregates `cost_usd` by day, role, provider, model,
+auth lane, billing lane (`openrouter`, `azure`, or the provider on OAuth) and job; records
+without a price count as `unpriced` and never as a guess.
+
+- `./neurico safety status` prints today's, the campaign's, the last 7 days' and the all-time
+  spend per lane, by role and by job (live from the ledgers; `status.md`/`status.json` carry the
+  daemon's copy from its last tick under `## spend`). `./neurico safety digest` has the same
+  section; `./neurico safety kb rebuild` loads the lines into a `spend` table
+  (`kb query "SELECT day, lane, SUM(cost_usd) FROM spend GROUP BY 1, 2"`).
+- Per-job budget: a job's `resources.api_budget_usd` (planner proposals carry it) is compared with
+  every ledger line tagged with the job id before each launch, retries and continuations
+  included. Over budget, the job stays `pending` (it is not failed) with a `BUDGET <id> skipped:
+  job budget: spent $X of $Y` event, logged once per change, and the reason next to the job in
+  `status.md`. Raise the budget in the job YAML and the next tick launches it.
+- Daily caps: `openrouter_daily_cap_usd` and `azure_daily_cap_usd` in `engine.yaml` (default
+  none; any `<lane>_daily_cap_usd` key works) compare today's ledger spend on a lane with the
+  cap before launching a job that bills that lane. NeuriCo jobs bill their agent lane (`azure`
+  or the provider) and OpenRouter (the `judge`-style API roles of `config/agents.yaml` route
+  there first); suites bill the access schemes of their models and judges, so an all-local suite
+  is never capped. Capped jobs are skipped with a `BUDGET ... daily cap:` reason and run again
+  the next day or after the cap is raised.
+- Claude roles get `--max-budget-usd` on the command line when `budget.max_cost_usd` is set in
+  `config/agents.yaml` (per role or in `default`); Codex and Gemini have no such flag, so their
+  caps are the ledger checks above. `budget.hard: true` makes the factory raise instead of
+  recording (ideation stages).
+- Prices are data: `config/prices.yaml` maps a model name as it appears in the ledger (an
+  Azure deployment such as `gpt-4.1-mini`, an OpenRouter slug such as `openai/gpt-4.1-mini`, a
+  direct API model id such as `claude-sonnet-4-6`) to USD per million `input`, `output`,
+  `cache_read` and `cache_write` tokens; `agent_factory.price_usage` applies it to every run
+  whose provider reports no cost itself (the Claude CLI and OpenRouter report their own). A
+  model mapped to `null` or missing from the table is "unpriced": the ledger line gets
+  `cost_usd: null`, the spend figures count it under `unpriced` and the budget checks add
+  nothing for it, so a missing price is visible rather than a guess. The Azure deployments
+  `gpt-6-astra`, `gpt-5.6-sol` and `gpt-5.4` are null until their list prices are confirmed.
+- Suites run Inspect directly; their model usage is in the result files (`model_usage`) but not
+  priced, so it is not in the spend figures.
+
+## Judges
+
+Evals with `judge: default` take their judge from `catalog/models.yaml` entries with `role:
+judge` (local vLLM) or `role: judge-api` (API). The `judges:` block of `safety_kb/engine.yaml`
+orders the access schemes to try:
+
+```yaml
+judges:
+  prefer: [azure, local]      # access schemes of models.yaml; `local` = vllm:
+  # roles: [judge, judge-api] # optional: which catalog roles count as judges
+```
+
+`JudgePool` uses the first catalog judge whose lane is usable: `azure` needs
+`AZURE_OPENAI_API_KEY` plus `AZURE_OPENAI_BASE_URL` or `AZURE_FOUNDRY_RESOURCE`, and the
+deployment on `AZURE_OPENAI_DEPLOYMENTS` when that allow-list is set; `openrouter` / `openai` /
+`anthropic` / `google` need their key; `local` is always usable and is served once per suite
+job. With the lane order above an Azure judge deployment is used when it is available and the
+local judge is the fallback, without any model name in code. `NEURICO_SAFETY_JUDGE=<model id>`
+overrides the policy for a run; without a `judges:` block the behaviour is unchanged (the first
+`role: judge` entry).
 
 ## Knowledge-base index, findings lifecycle and ideation
 
@@ -235,15 +303,17 @@ the queue.
 ## Monitoring and recovery
 
 - `logs/safety/events.log` is the audit trail (`UP`, `START`, `DONE`, `FAILED`, `RETRY`,
-  `STALL`, `LOST`, `ADOPT`, `PLAN`, `INGEST`, `STOP`); `status.md`/`status.json` are rewritten
-  every tick; per-job logs are under `logs/safety/jobs/`.
+  `STALL`, `LOST`, `ADOPT`, `PLAN`, `INGEST`, `BUDGET`, `STOP`); `status.md`/`status.json` are
+  rewritten every tick; per-job logs are under `logs/safety/jobs/`.
 - A job whose log stops growing for `stall_minutes` is killed and requeued; NeuriCo runs
   resume after their last completed stage, suites skip finished (eval, model) pairs.
 - On restart the daemon re-attaches to jobs whose process is still alive and fails the rest,
   which then retry. Retries are counted per job (`retries`).
 - `stop` sends SIGTERM: running containers are killed, jobs return to `pending`.
-- Judges default to a local open-weight model (`qwen2.5-7b-judge`) so API outages or spend caps
-  do not stop suites; select an API judge with `NEURICO_SAFETY_JUDGE=<model id>`.
+- Judges follow the `judges.prefer` lane order in `engine.yaml` (see "Judges"): the Azure judge
+  deployment when its key and resource are configured, else the local open-weight judge
+  (`role: judge`), so API outages or spend caps do not stop suites; `NEURICO_SAFETY_JUDGE=<model id>`
+  pins one for a run.
 
 ## Pipeline test on this server (2026-10-19)
 
@@ -261,4 +331,6 @@ into `safety_kb/runs/`. XSTest needs the Hugging Face account to accept the gate
   run and not yet automated end to end.
 - The crawler (arXiv, Hugging Face, lab blogs) is specified in the architecture document and
   not implemented yet; the planner reads `safety_kb/inbox/` when files are present.
-- OpenRouter spend guards rely on the key's daily limit; the daemon reports nothing about spend.
+- Spend figures cover agent launches and API roles that write the run ledger; Inspect calls made
+  by suites are not priced, so an OpenRouter or Azure subject model's suite spend is only guarded
+  by the key's own limits.

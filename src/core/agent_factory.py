@@ -52,7 +52,7 @@ import yaml
 from core import agent_auth, azure_config
 from core.agent_cli import build_agent_command, build_agent_environment, provider_skill_root
 from core.agent_runner import RunTracker, next_attempt_number, run_prebuilt_cli_agent
-from core.run_ledger import RunLedger, build_entry
+from core.run_ledger import RunLedger, build_entry, tags_from_env
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "agents.yaml"
@@ -521,12 +521,15 @@ ADAPTERS: Dict[str, ProviderAdapter] = {
 PRICES_PATH = PROJECT_ROOT / "config" / "prices.yaml"
 
 
-def price_usage(usage: Usage, model: Optional[str], prices_path: Path = PRICES_PATH) -> Optional[float]:
+def price_usage(usage: Usage, model: Optional[str], prices_path: Optional[Path] = None) -> Optional[float]:
     """USD for ``usage`` from ``config/prices.yaml`` (per-million-token rates), else None.
 
-    The file is optional and absent by default; an unknown model yields None so
-    a missing price is visible in the ledger instead of looking free.
+    The file documents its own format; it is optional, and a model that is missing
+    or mapped to null yields None so a missing price is visible in the ledger
+    (``unpriced_runs``) instead of looking free. ``prices_path`` defaults to
+    ``PRICES_PATH`` at call time (tests point it elsewhere).
     """
+    prices_path = Path(prices_path) if prices_path is not None else PRICES_PATH
     if not model or not prices_path.exists():
         return None
     try:
@@ -828,6 +831,9 @@ class AgentFactory:
             if value:
                 cfg[key] = value
         cfg["auth"] = agent_auth.resolve_agent_auth(cfg.get("auth"), env)
+        env_tags = tags_from_env(env)
+        if env_tags:  # NEURICO_AGENT_TAGS (job_id, campaign ...) under the role's own tags and overrides
+            cfg["tags"] = _deep_merge(env_tags, cfg.get("tags") or {})
         return cfg
 
     @staticmethod

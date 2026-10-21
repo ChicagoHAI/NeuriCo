@@ -32,6 +32,7 @@ ENGINE_TEMPLATE = {
         "planner_interval_hours": 6, "planner_provider": "claude", "planner_model": None,
         "eval_python": "/data/hypogenicai/safety_venv/bin/python",
         "hf_cache": "/data/hypogenicai/hf_cache",
+        "openrouter_daily_cap_usd": None, "azure_daily_cap_usd": None,
     }
 }
 
@@ -111,6 +112,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    from safety import spend
     kb = KB()
     status = kb.logs_dir / "status.md"
     if status.exists():
@@ -124,6 +126,14 @@ def cmd_status(args: argparse.Namespace) -> int:
                 print(f"  {spec.id} [{spec.kind}, p{spec.priority}] {spec.title}")
     state = load_json(kb.state_file) or {}
     daemon = state.get("daemon") or {}
+    # Live spend from the ledgers (status.md carries the daemon's copy from its last tick).
+    print("spend (live, from the run ledgers):")
+    try:
+        campaign = getattr(args, "campaign", None) or daemon.get("campaign")
+        for line in spend.format_report(spend.report(kb, campaign, state)):
+            print(f"  {line[2:] if line.startswith('- ') else line}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  unavailable: {type(e).__name__}: {e}")
     if daemon.get("pid"):
         alive = _alive(daemon["pid"])
         print(f"daemon pid {daemon['pid']} ({'alive' if alive else 'not running'}), heartbeat {daemon.get('heartbeat')}")
@@ -327,7 +337,9 @@ def main() -> int:
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_start)
 
-    sub.add_parser("status").set_defaults(func=cmd_status)
+    p = sub.add_parser("status")
+    p.add_argument("--campaign", help="campaign for the spend summary (default: the daemon's)")
+    p.set_defaults(func=cmd_status)
     sub.add_parser("stop").set_defaults(func=cmd_stop)
 
     p = sub.add_parser("plan")

@@ -1,0 +1,70 @@
+# Token prices in USD per million tokens, read by core.agent_factory.price_usage for every
+# agent launch and core.llm_client call whose provider does not report a cost itself (the
+# Claude CLI reports total_cost_usd and OpenRouter responses carry usage.cost; Codex, Azure
+# OpenAI deployments and direct OpenAI / Anthropic API routes do not).
+#
+# Format
+#   models:
+#     <model name as it appears in the ledger>:        # gen_ai.response.model, else the request model
+#       input: <usd per 1M uncached input tokens>
+#       output: <usd per 1M output tokens>
+#       cache_read: <usd per 1M cached input tokens>     # optional; 0 when absent
+#       cache_write: <usd per 1M cache-creation tokens>  # optional; 0 when absent
+#
+# A model whose value is null (or that is missing) is "unpriced": its ledger line gets
+# cost_usd: null, it is counted in unpriced_runs by core.run_ledger.spend, and it adds
+# nothing to the budget checks. Never put a guess here: an unknown price is null, a wrong
+# one silently under- or over-counts spend. Names must match the ledger exactly; an
+# OpenRouter route is keyed by its slug (openai/gpt-4.1-mini), an Azure OpenAI run by its
+# deployment name (gpt-4.1-mini), a direct API route by the provider's model id.
+#
+# Sources: Anthropic list prices (platform.claude.com pricing, as cached 2026-10-06) and
+# OpenAI list prices for the GPT-4.1 family, which Azure OpenAI global-standard deployments
+# match. Entries marked "unsure" are null until someone checks the invoice or the portal.
+
+models:
+  # -- Anthropic API routes (config/agents.yaml `anthropic` routes; the Claude CLI prices its own runs)
+  claude-sonnet-4-6:
+    input: 3.00
+    output: 15.00
+    cache_read: 0.30      # 5-minute cache, 0.1x input
+    cache_write: 3.75     # 5-minute cache, 1.25x input
+  claude-opus-5-5:
+    input: 4.00
+    output: 20.00
+    cache_read: 0.20
+    cache_write: null     # unsure: not in the cached price table
+  claude-fable-5-1:
+    input: 10.00
+    output: 50.00
+    cache_read: 0.25
+    cache_write: null     # unsure: not in the cached price table
+
+  # -- OpenRouter routes (keyed by slug; OpenRouter reports its own cost, this is the fallback)
+  anthropic/claude-sonnet-4:
+    input: 3.00
+    output: 15.00
+    cache_read: 0.30
+    cache_write: 3.75
+  openai/gpt-4.1:
+    input: 2.00
+    output: 8.00
+    cache_read: 0.50
+  openai/gpt-4.1-mini:
+    input: 0.40
+    output: 1.60
+    cache_read: 0.10
+
+  # -- OpenAI direct and Azure OpenAI deployments (keyed by deployment name; Codex on Azure
+  #    records the deployment it was mapped to)
+  gpt-4.1:
+    input: 2.00
+    output: 8.00
+    cache_read: 0.50
+  gpt-4.1-mini:
+    input: 0.40
+    output: 1.60
+    cache_read: 0.10
+  gpt-6-astra: null       # unsure: Azure deployment, list price unknown to the author of this file
+  gpt-5.6-sol: null       # unsure: Azure deployment, list price unknown
+  gpt-5.4: null           # unsure: Azure deployment, list price unknown

@@ -696,6 +696,9 @@ cmd_submit_local() {
         docker_args+=( -v "$PWD:$PWD:ro" )
     fi
     docker_args+=( -e NEURICO_HOST_CWD="$PWD" -e NEURICO_IN_DOCKER=1 )
+    if [ -n "${NEURICO_AGENT_TAGS:-}" ]; then
+        docker_args+=( -e NEURICO_AGENT_TAGS="$NEURICO_AGENT_TAGS" )  # ledger tags from the safety daemon
+    fi
 
     docker_args+=( -w /app "$IMAGE_NAME"
                    python /app/src/cli/submit_local.py "$idea_path"
@@ -983,6 +986,10 @@ cmd_run() {
     if [ -n "${NEURICO_SAFETY_KB:-}" ] && [ -d "$NEURICO_SAFETY_KB" ]; then
         docker_args+=( -v "$NEURICO_SAFETY_KB:/safety_kb:ro" -e NEURICO_SAFETY_KB=/safety_kb )
         echo -e "${BLUE}Safety knowledge base:${NC} $NEURICO_SAFETY_KB -> /safety_kb"
+    fi
+    # Ledger tags (job_id, campaign) the safety daemon sets; every agent launch records them.
+    if [ -n "${NEURICO_AGENT_TAGS:-}" ]; then
+        docker_args+=( -e NEURICO_AGENT_TAGS="$NEURICO_AGENT_TAGS" )
     fi
 
     echo -e "${BLUE}Running research exploration...${NC}"

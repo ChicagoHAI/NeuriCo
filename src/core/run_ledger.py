@@ -31,8 +31,48 @@ from core.security import sanitize_text
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 LEDGER_ENV_VAR = "NEURICO_AGENT_LEDGER"
+TAGS_ENV_VAR = "NEURICO_AGENT_TAGS"
 DEFAULT_RELATIVE_PATH = Path(".neurico") / "agent_runs.jsonl"
 DEFAULT_GLOBAL_PATH = PROJECT_ROOT / "logs" / "agent_runs.jsonl"
+
+# Providers whose records bill a lane of their own, whatever the auth field says.
+_LANE_PROVIDERS = {"openrouter": "openrouter", "azure_openai": "azure", "azure_foundry": "azure"}
+
+
+def tags_from_env(env: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+    """Tags every launch in this process should carry, from ``NEURICO_AGENT_TAGS``.
+
+    The safety daemon sets ``job_id=<id>,campaign=<name>`` on the environment of
+    the ``./neurico`` processes it starts so the records their agents write can be
+    found again per job. The value is ``key=value`` pairs separated by commas, or
+    a JSON object; keys without a value and malformed input are ignored.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get(TAGS_ENV_VAR) or "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    out: Dict[str, str] = {}
+    for part in raw.split(","):
+        key, sep, value = part.partition("=")
+        if sep and key.strip():
+            out[key.strip()] = value.strip()
+    return out
+
+
+def billing_lane(record: Mapping[str, Any]) -> str:
+    """Which bill a record lands on: ``openrouter``, ``azure`` or the provider name (oauth lanes)."""
+    provider = str(record.get("gen_ai.provider.name") or "unknown")
+    if provider in _LANE_PROVIDERS:
+        return _LANE_PROVIDERS[provider]
+    if str(record.get("auth") or "") == "azure":
+        return "azure"
+    return provider
 
 
 def build_entry(
@@ -184,6 +224,21 @@ class RunLedger:
         return records
 
     @classmethod
+    def collect(cls, paths: Iterable[Path]) -> List[Dict[str, Any]]:
+        """Records from several ledger files, each run once (``run_id`` de-duplicates
+        the per-work-dir copy against the global one)."""
+        seen: set = set()
+        out: List[Dict[str, Any]] = []
+        for path in paths:
+            for rec in cls.read(Path(path)):
+                key = rec.get("run_id") or json.dumps(rec, sort_keys=True, default=str)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(rec)
+        return out
+
+    @classmethod
     def summary(cls, source: Path | Iterable[Mapping[str, Any]]) -> Dict[str, Any]:
         """Spend per role, provider and day; what ``safety status`` and the daemon read."""
         records = cls.read(source) if isinstance(source, (str, Path)) else list(source)
@@ -208,3 +263,57 @@ class RunLedger:
             total += float(cost)
         return {"runs": len(records), "cost_usd": round(total, 6), "per_role": dict(per_role),
                 "per_provider": dict(per_provider), "per_day": dict(per_day)}
+
+
+def spend(source: Path | Iterable[Mapping[str, Any]], *, day: Optional[str] = None, since: Optional[str] = None,
+          until: Optional[str] = None, job_id: Optional[str] = None, campaign: Optional[str] = None,
+          role: Optional[str] = None, lane: Optional[str] = None) -> Dict[str, Any]:
+    """Cost aggregated by day, role, provider, model, auth lane, billing lane and job.
+
+    ``source`` is a ledger path or records (``RunLedger.collect`` for several files).
+    Filters are inclusive ISO dates (``day`` = that date only, ``since``/``until`` a
+    range on ``ts_start``) and exact matches on ``tags.job_id``, ``tags.campaign``,
+    the role and the billing lane. Records without a cost count in ``runs`` and
+    ``unpriced_runs`` but add nothing: a missing price is never a guess.
+    """
+    records = RunLedger.read(source) if isinstance(source, (str, Path)) else list(source)
+    groups: Dict[str, Dict[str, float]] = {k: defaultdict(float) for k in
+                                           ("day", "role", "provider", "model", "auth", "lane", "job")}
+    total = runs = unpriced = 0.0
+    for rec in records:
+        stamp = str(rec.get("ts_start") or "")[:10]
+        tags = rec.get("tags") or {}
+        if day and stamp != day:
+            continue
+        if since and stamp < since:
+            continue
+        if until and stamp > until:
+            continue
+        if job_id and str(tags.get("job_id") or "") != job_id:
+            continue
+        if campaign and str(tags.get("campaign") or "") != campaign:
+            continue
+        rec_role = str(rec.get("gen_ai.agent.name") or "unknown")
+        rec_lane = billing_lane(rec)
+        if role and rec_role != role:
+            continue
+        if lane and rec_lane != lane:
+            continue
+        runs += 1
+        cost = rec.get("cost_usd")
+        if cost is None:
+            unpriced += 1
+            continue
+        cost = float(cost)
+        total += cost
+        groups["day"][stamp or "unknown"] += cost
+        groups["role"][rec_role] += cost
+        groups["provider"][str(rec.get("gen_ai.provider.name") or "unknown")] += cost
+        groups["model"][str(rec.get("gen_ai.response.model") or rec.get("gen_ai.request.model") or "unknown")] += cost
+        groups["auth"][str(rec.get("auth") or "unknown")] += cost
+        groups["lane"][rec_lane] += cost
+        groups["job"][str(tags.get("job_id") or "-")] += cost
+    return {
+        "cost_usd": round(total, 6), "runs": int(runs), "unpriced_runs": int(unpriced),
+        **{f"by_{name}": {k: round(v, 6) for k, v in sorted(bucket.items())} for name, bucket in groups.items()},
+    }

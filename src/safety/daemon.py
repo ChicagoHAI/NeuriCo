@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.run_ledger import TAGS_ENV_VAR
+from safety import spend as spend_mod
 from safety.jobs import JobSpec, Queue
 from safety.kb import KB, PROJECT_ROOT, append_line, load_json, load_yaml, save_json, utc_now
 
@@ -101,7 +103,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "resource_finder_timeout": 0,
     "experiment_timeout": 0,
     "paper_timeout": 0,
+    # Spend caps per billing lane, read from the run ledgers before every launch (None = no cap).
+    # Any `<lane>_daily_cap_usd` key works; lanes are core.run_ledger.billing_lane names.
     "openrouter_daily_cap_usd": None,
+    "azure_daily_cap_usd": None,
 }
 
 
@@ -252,6 +257,12 @@ class Daemon:
             env["NEURICO_CONTAINER_NAME"] = rt.container or ""
         else:
             env.pop("NEURICO_CONTAINER_NAME", None)
+        # Every agent launch and API call in the job records these tags in its ledger line
+        # (core.run_ledger); the budget checks and `safety status` group spend by them.
+        tags = {"job_id": spec.id, "job_kind": spec.kind}
+        if spec.campaign or self.campaign:
+            tags["campaign"] = spec.campaign or self.campaign or ""
+        env[TAGS_ENV_VAR] = ",".join(f"{k}={v}" for k, v in tags.items())
         log_path = Path(rt.log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         rt.commands.append(" ".join(shlex.quote(c) for c in command))
@@ -533,8 +544,29 @@ class Daemon:
 
         threading.Thread(target=_run, daemon=True).start()
 
+    # -- budgets --------------------------------------------------------------
+    def ledger_records(self) -> List[Dict[str, Any]]:
+        """Every ledger line the engine's jobs could have written (global, KB, job workspaces)."""
+        try:
+            return spend_mod.records(self.kb, self.state)
+        except Exception as e:  # noqa: BLE001 - a broken ledger must not stop scheduling
+            self.event(f"LEDGER read failed: {type(e).__name__}: {e}")
+            return []
+
+    def budget_block(self, spec: JobSpec, ledger: List[Dict[str, Any]]) -> Optional[str]:
+        """The reason ``spec`` is over its budget or a daily cap, or None (safety.spend.budget_block)."""
+        return spend_mod.budget_block(spec, ledger, self.config, self.kb)
+
+    def skip_for_budget(self, spec: JobSpec, reason: str) -> None:
+        """Leave the job pending; log the reason once per change so events.log is not flooded every tick."""
+        skips = self.state.setdefault("budget_skips", {})
+        if skips.get(spec.id) != reason:
+            skips[spec.id] = reason
+            self.event(f"BUDGET {spec.id} skipped: {reason}")
+
     # -- status ---------------------------------------------------------------
-    def write_status(self) -> None:
+    def write_status(self, ledger: Optional[List[Dict[str, Any]]] = None) -> None:
+        skips = self.state.get("budget_skips") or {}
         lines = [f"# Safety engine status ({utc_now()})", "",
                  f"campaign: {self.campaign or '-'}  daemon pid: {os.getpid()}", ""]
         for state in ("running", "pending", "done", "failed"):
@@ -547,14 +579,28 @@ class Daemon:
                     extra = f" gpu={rt.gpu or '-'} since {rt.started_at} progress {rt.last_progress_at}"
                 elif state in ("done", "failed"):
                     extra = f" rc={rt.return_code} {rt.github_url or rt.workspace or ''}"
+                elif state == "pending" and spec.id in skips:
+                    extra = f" skipped: {skips[spec.id]}"
                 lines.append(f"- {spec.id} [{spec.kind}, p{spec.priority}] {spec.title}{extra}")
+            lines.append("")
+        try:
+            report = spend_mod.report(self.kb, self.campaign, self.state,
+                                      ledger=self.ledger_records() if ledger is None else ledger)
+        except Exception as e:  # noqa: BLE001
+            report = None
+            lines += ["## spend", "", f"- unavailable: {type(e).__name__}: {e}", ""]
+        else:
+            caps = spend_mod.daily_caps(self.config)
+            lines += ["## spend", ""] + spend_mod.format_report(report)
+            if caps:
+                lines.append("- daily caps: " + ", ".join(f"{lane} ${cap:.2f}" for lane, cap in sorted(caps.items())))
             lines.append("")
         text = "\n".join(lines)
         (self.kb.logs_dir / "status.md").write_text(text, encoding="utf-8")
         save_json(self.kb.logs_dir / "status.json", {
             "generated": utc_now(), "campaign": self.campaign,
             "counts": {s: len(self.queue.list(s)) for s in ("pending", "running", "done", "failed")},
-            "jobs": self.state["jobs"],
+            "jobs": self.state["jobs"], "budget_skips": skips, "spend": report,
         })
 
     # -- main loop ------------------------------------------------------------
@@ -609,17 +655,27 @@ class Daemon:
     def tick(self) -> None:
         self.watchdog()
         self.ingest_finished()
+        ledger: Optional[List[Dict[str, Any]]] = None
         for spec in self.queue.pending_sorted():
             if self.stopping:
                 break
+            if ledger is None:
+                ledger = self.ledger_records()
+            reason = self.budget_block(spec, ledger)
+            if reason:
+                # Over budget is not a failure: the job stays pending (a raised budget or a new
+                # day lets it through) and the reason is in events.log and status.md.
+                self.skip_for_budget(spec, reason)
+                continue
             if not self.slot_available(spec):
                 continue
             if spec.gpu_memory_gb > 0 and self.free_gpu(spec.gpu_memory_gb) is None:
                 continue
+            (self.state.get("budget_skips") or {}).pop(spec.id, None)
             self.launch(spec)
         self.maybe_crawl()
         self.maybe_plan()
-        self.write_status()
+        self.write_status(ledger)
         self.save()
 
     def stop(self, *_: object) -> None:

@@ -14,3 +14,15 @@ daemon:
   hf_cache: /net/spaces/chenhao/chai-lab-models/haokunliu/models/hf_cache
   planner_enabled: true
   models_dir: /net/spaces/chenhao/chai-lab-models/haokunliu/models
+  # Daily spend caps per billing lane, checked against the run ledgers before every launch
+  # (null = no cap; any <lane>_daily_cap_usd key works). A job over a cap stays pending with
+  # the reason in events.log and status.md; per-job budgets are resources.api_budget_usd.
+  openrouter_daily_cap_usd: null
+  azure_daily_cap_usd: null
+judges:
+  # Lane order for evals with `judge: default`: the first catalog entry with role judge /
+  # judge-api whose access scheme is listed and usable (azure: AZURE_OPENAI_API_KEY plus a base
+  # URL or AZURE_FOUNDRY_RESOURCE, and the deployment on AZURE_OPENAI_DEPLOYMENTS when that is
+  # set; local = vllm:, always usable). NEURICO_SAFETY_JUDGE=<id> overrides the policy; without
+  # this block the role: judge entry is used as before.
+  prefer: [azure, local]
