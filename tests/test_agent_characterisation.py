@@ -573,10 +573,21 @@ def test_safety_planner(fake_cli, kb, lane, provider, monkeypatch):
     assert logs_written(kb.logs_dir / "planner") == stem_artifacts(run, provider)
     assert logs_written(kb.queue_dir / "proposals" / run) == {"prompt.md", "outcome.yaml"}
     assert record_out["ok"] is True and record_out["log"] == str(kb.logs_dir / "planner" / f"{run}.log")
-    # step 4: every safety run is in the KB's ledger, attributed per mode (planner / ideator)
+    # step 4: every safety run is in the KB's ledger, attributed per mode (planner / ideation stages)
     assert ledger_roles(kb.root) == ["planner"] and record_out["agent_run_id"].startswith("planner_")
-    ideate = planner.run_planner(kb, "camp", provider=provider, model="m-1", timeout=30, mode="ideate")
-    assert ledger_roles(kb.root) == ["planner", "ideator"] and ideate["mode"] == "ideate"
+    # ideate mode is the staged ideation round (src/ideation): the first launch is the `problem` stage in
+    # its own workspace, the kb tool pointed at the snapshot; with no output written the stage fails
+    # after its validation retry and nothing reaches the queue (tests/test_ideation.py covers the round).
+    from ideation.runtime import StageFailure
+
+    with pytest.raises(StageFailure, match="stage problem"):
+        planner.run_planner(kb, "camp", provider=provider, model="m-1", timeout=30, mode="ideate")
+    record = fake_cli.last()
+    assert Path(record["cwd"]).name == "problem" and record["env"]["NEURICO_SAFETY_KB"] == str(Path(record["cwd"]) / "input")
+    assert record["argv"][0] == provider and "m-1" in record["argv"]
+    assert ledger_roles(kb.root) == ["planner", "ideation.problem"]  # one ledger line per launch (two attempts)
+    ideate_runs = list((kb.queue_dir / "proposals").glob("*-ideate"))
+    assert len(ideate_runs) == 1 and (ideate_runs[0] / "outcome.yaml").exists()
 
 
 # -- 14 model scout ---------------------------------------------------------------------------------------------------
