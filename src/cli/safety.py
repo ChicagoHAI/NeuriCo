@@ -144,8 +144,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
 def cmd_plan(args: argparse.Namespace) -> int:
     from safety.planner import run_planner
     kb = KB()
-    result = run_planner(kb, args.campaign, provider=args.provider, model=args.model, dry_run=args.dry_run,
-                         mode=args.mode)
+    result = run_planner(kb, args.campaign, provider=args.provider, model=args.model, agent_auth=args.agent_auth,
+                         dry_run=args.dry_run, mode=args.mode)
     print(result)
     return 0 if result.get("ok", True) else 1
 
@@ -162,7 +162,7 @@ def cmd_kb(args: argparse.Namespace) -> int:
     kb = KB()
     if args.action == "scout":
         from safety.model_scout import run_scout
-        print(run_scout(kb, provider=args.provider, model=args.model, dry_run=args.dry_run))
+        print(run_scout(kb, provider=args.provider, model=args.model, agent_auth=args.agent_auth, dry_run=args.dry_run))
         return 0
     if args.action == "merge-models":
         from safety.model_scout import merge_proposals
@@ -255,6 +255,7 @@ def main() -> int:
     p.add_argument("--campaign", required=True)
     p.add_argument("--provider", default="claude")
     p.add_argument("--model")
+    p.add_argument("--agent-auth", choices=("oauth", "azure"))
     p.add_argument("--dry-run", action="store_true", help="write the prompt and exit without launching an agent")
     p.add_argument("--mode", choices=("replicate", "ideate"), help="default: next mode from the campaign's planner.modes mix")
     p.set_defaults(func=cmd_plan)
@@ -263,6 +264,7 @@ def main() -> int:
     p.add_argument("action", choices=("rebuild", "timeline", "anomalies", "query", "scout", "merge-models"))
     p.add_argument("--provider", default="codex")
     p.add_argument("--model")
+    p.add_argument("--agent-auth", choices=("oauth", "azure"))
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("sql", nargs="?")
     p.set_defaults(func=cmd_kb)

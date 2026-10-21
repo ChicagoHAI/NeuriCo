@@ -101,8 +101,10 @@ uv run python src/cli/safety.py digest --days 7
 
 Daemon settings (`safety_kb/engine.yaml`, overridable by flags): `gpus`, `gpu_memory_gb`,
 `max_neurico_jobs`, `max_suite_jobs`, `stall_minutes`, `retries`, `poll_seconds`,
-`min_pending`, `planner_interval_hours`, `planner_enabled`, `planner_provider`, `eval_python`,
-`hf_cache`.
+`min_pending`, `planner_interval_hours`, `planner_enabled`, `planner_provider`, `planner_model`,
+`planner_agent_auth`, `planner_timeout`, `eval_python`, `hf_cache`. The planner, ideator and model
+scout launch through `config/agents.yaml` roles (`planner`, `ideator`, `model_scout`), and every
+session is recorded in `safety_kb/.neurico/agent_runs.jsonl`.
 
 ## Knowledge-base index, findings lifecycle and ideation
 

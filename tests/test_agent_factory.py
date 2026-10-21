@@ -130,7 +130,7 @@ def test_argv_and_env_match_characterisation_snapshots(lane, provider, tmp_path,
     assert "agent auth" in handle.description and "key" not in handle.description.lower().replace("api key", "")
     scribe = factory.build(factory.spec("experiment_runner", provider=provider, use_scribe=True))
     assert list(scribe.argv) == ["scribe", provider] + ARGV[(provider, lane)][2:]
-    model = factory.build(factory.spec("zero_shot_baseline", provider=provider, model="m-1"))
+    model = factory.build(factory.spec("zero_shot", provider=provider, model="m-1"))
     assert "--model" in model.argv and model.argv[model.argv.index("--model") + 1] == "m-1"
 
 

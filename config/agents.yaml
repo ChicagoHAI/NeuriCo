@@ -66,9 +66,9 @@ roles:
     budget: {timeout_s: 3600}
     output: {kind: return_code}     # today's verdict is the launch; the pipeline looks for the PDF itself
     template: agents/paper_writer.txt
-  zero_shot_baseline:
+  zero_shot:                        # baseline/zero_shot.py
     budget: {timeout_s: null}
-    output: {kind: files, required_files: [paper_draft/main.pdf]}
+    output: {kind: return_code}     # today's verdict is the launch; paper_exists is reported separately
     transcript: {prefix: zeroshot}
   hitl_manager:                     # one ReAct turn per launch; multi-turn through AgentFactory.session()
     permissions: {mode: mcp_only}
@@ -81,7 +81,8 @@ roles:
     permissions: {mode: read_only}
   safety_planner:
     budget: {timeout_s: 3600}
-    output: {kind: validator, validator: safety.planner:validate_proposals}
+    # validate_proposals needs the kb, campaign and mode, so safety.planner runs it after the launch
+    output: {kind: return_code}
     templates: {replicate: agents/safety_planner.txt, ideate: agents/safety_ideator.txt}
   planner: {extends: safety_planner}
   ideator:                          # alias for safety_planner in ideate mode; separate so its model can differ

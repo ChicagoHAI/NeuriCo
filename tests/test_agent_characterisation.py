@@ -33,6 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from core import agent_auth  # noqa: E402
 from core.agent_cli import build_agent_command  # noqa: E402
 from core.agent_runner import run_prebuilt_cli_agent  # noqa: E402
+from core.run_ledger import RunLedger  # noqa: E402
 
 TEMPLATES = PROJECT_ROOT / "templates"
 AZURE_BASE = "https://labres.openai.azure.com/openai/v1"
@@ -146,6 +147,18 @@ def factory_artifacts(prefix: str, provider: str, *, prompt: bool = True) -> set
     if provider == "codex":
         names.add(f"{prefix}_codex_stderr.log")
     return names
+
+
+def stem_artifacts(stem: str, provider: str) -> set:
+    """Same, for sites that name artifacts by run id (``<stem>.log``) rather than by provider."""
+    names = {f"{stem}.log", f"{stem}_transcript.jsonl"}
+    if provider == "codex":
+        names.add(f"{stem}_stderr.log")
+    return names
+
+
+def ledger_roles(work_dir: Path) -> list:
+    return [e["gen_ai.agent.name"] for e in RunLedger.read(work_dir / ".neurico" / "agent_runs.jsonl")]
 
 
 # -- build_agent_command itself ------------------------------------------------------------------------
@@ -523,9 +536,12 @@ def test_zero_shot_baseline(fake_cli, tmp_path, lane, provider, monkeypatch):
     result = zero_shot.run_baseline(idea, provider, model="m-1", timeout=30, use_github=False)
     record = fake_cli.last()
     assert_launch(fake_cli, record, provider, lane, argv=with_model(ARGV[(provider, lane)], "m-1"), cwd=work)
-    assert logs_written(work / "logs") == {"zeroshot_prompt.txt", f"zeroshot_{provider}.log",
-                                           f"zeroshot_{provider}_transcript.jsonl"}
+    assert logs_written(work / "logs") == {"zeroshot_prompt.txt"} | stem_artifacts(f"zeroshot_{provider}", provider)
     assert result["success"] is True and result["paper_exists"] is True
+    # step 4: the ledger line and its usage travel with the baseline metadata
+    assert ledger_roles(work) == ["zero_shot"]
+    run_info = json.loads((work / zero_shot.METADATA_DIR / "run.json").read_text(encoding="utf-8"))
+    assert run_info["agent_run_id"].startswith("zero_shot_") and "cost_usd" in run_info["usage"]
 
 
 # -- 13 safety planner ---------------------------------------------------------------------------------------------
@@ -554,9 +570,13 @@ def test_safety_planner(fake_cli, kb, lane, provider, monkeypatch):
                   extra_env=["NEURICO_SAFETY_KB"], cwd=kb.root, prompt="planner prompt")
     assert record["env"]["NEURICO_SAFETY_KB"] == str(kb.root)
     run = record_out["planner_run"]
-    assert logs_written(kb.logs_dir / "planner") == {f"{run}.log", f"{run}_transcript.jsonl"}
+    assert logs_written(kb.logs_dir / "planner") == stem_artifacts(run, provider)
     assert logs_written(kb.queue_dir / "proposals" / run) == {"prompt.md", "outcome.yaml"}
     assert record_out["ok"] is True and record_out["log"] == str(kb.logs_dir / "planner" / f"{run}.log")
+    # step 4: every safety run is in the KB's ledger, attributed per mode (planner / ideator)
+    assert ledger_roles(kb.root) == ["planner"] and record_out["agent_run_id"].startswith("planner_")
+    ideate = planner.run_planner(kb, "camp", provider=provider, model="m-1", timeout=30, mode="ideate")
+    assert ledger_roles(kb.root) == ["planner", "ideator"] and ideate["mode"] == "ideate"
 
 
 # -- 14 model scout ---------------------------------------------------------------------------------------------------
@@ -571,9 +591,8 @@ def test_model_scout(fake_cli, kb, lane, provider, monkeypatch):
     assert_launch(fake_cli, record, provider, lane, extra_env=["NEURICO_SAFETY_KB"], cwd=kb.root, prompt="scout prompt")
     assert record["env"]["NEURICO_SAFETY_KB"] == str(kb.root)
     run = record_out["scout_run"]
-    assert logs_written(kb.logs_dir / "scout") == {f"{run}_prompt.md", f"{run}.log", f"{run}_transcript.jsonl",
-                                                   f"{run}_outcome.yaml"}
-    assert record_out["ok"] is True
+    assert logs_written(kb.logs_dir / "scout") == {f"{run}_prompt.md", f"{run}_outcome.yaml"} | stem_artifacts(run, provider)
+    assert record_out["ok"] is True and ledger_roles(kb.root) == ["model_scout"]
 
 
 def test_model_scout_defaults_to_codex(fake_cli, kb, monkeypatch):

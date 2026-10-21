@@ -91,6 +91,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "planner_enabled": True,
     "planner_provider": "claude",
     "planner_model": None,
+    "planner_agent_auth": None,    # oauth | azure (None = NEURICO_AGENT_AUTH / role default)
+    "planner_timeout": 3600,       # seconds for one planner session (0 = no limit)
     "eval_python": "/data/hypogenicai/safety_venv/bin/python",
     "hf_cache": "/data/hypogenicai/hf_cache",
     "workspace_dir": None,         # defaults to config/workspace.yaml
@@ -484,8 +486,12 @@ class Daemon:
         def _run():
             from safety.planner import run_planner
             try:
+                # The engine's planner settings pass straight into factory.spec("planner" | "ideator");
+                # NeuriCo jobs keep carrying their JobSpec provider/model/agent_auth through ./neurico run.
                 result = run_planner(self.kb, self.campaign, provider=self.config["planner_provider"],
-                                     model=self.config["planner_model"])
+                                     model=self.config["planner_model"],
+                                     agent_auth=self.config.get("planner_agent_auth"),
+                                     timeout=self.config.get("planner_timeout", 3600))
                 self.event(f"PLAN   planner proposed {result.get('proposed', 0)} job(s)")
             except Exception as e:  # noqa: BLE001
                 self.event(f"PLAN   planner failed: {type(e).__name__}: {e}")
