@@ -42,6 +42,9 @@ IDEA = {
 
 def test_agent_command_includes_explicit_model(monkeypatch):
     monkeypatch.delenv(MODEL_ENV_VAR, raising=False)
+    # A loaded .env may select the Azure backbone; this test pins the OAuth lane.
+    monkeypatch.delenv("NEURICO_AGENT_AUTH", raising=False)
+    monkeypatch.delenv("NEURICO_AZURE", raising=False)
     claude = build_agent_command("claude", full_permissions=True, model="claude-opus-5-5")
     codex = build_agent_command("codex", full_permissions=True, model="gpt-5.6-sol")
     assert claude == (

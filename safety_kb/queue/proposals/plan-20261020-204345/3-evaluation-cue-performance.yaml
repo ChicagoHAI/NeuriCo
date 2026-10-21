@@ -1,0 +1,20 @@
+kind: research
+title: Evaluation cues and elicited underperformance on harmless reasoning
+priority: 75
+rationale: labs/openai/gaps.md section 6 and evals/eval-awareness-and-sandbagging-checks.md identify missing independent
+  underperformance checks; design/RESEARCH_PLAN.md section 3 calls for thinking-variant evidence. Earlier impossible-task
+  and tool-injection jobs test different mechanisms. This fixed behavioural experiment compares evaluation framing
+  with a task-capability baseline and an explicit underperformance positive control without hazardous content or
+  a speculative intention judge.
+resources:
+  gpu_memory_gb: 80
+  api_budget_usd: 10
+neurico:
+  idea_file: safety_kb/queue/ideas/plan-20261020-204345-evaluation-cue-performance.yaml
+  provider: codex
+  model: gpt-6-astra
+  agent_auth: azure
+  autoresearch_iterations: 3
+  write_paper: false
+  github: false
+  private: false

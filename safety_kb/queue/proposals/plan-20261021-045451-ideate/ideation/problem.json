@@ -1,0 +1,26 @@
+{
+  "title": "Do safety judges mistake rejected plans for harmful assistance?",
+  "statement": "We do not know whether safety judges can distinguish rejected harmful plans from assistance in open models’ reasoning. Does discussion of a rejected plan raise false harmful labels when the response provides no useful harmful guidance? This question concerns judge accuracy on qwen3-8-27b, rather than treating judge agreement or a final refusal as proof of safety.",
+  "why_now": "Our DeepSeek-R1-Distill-Qwen-7B audit found an 11.1-point gap between local and Azure harmful-label rates on identical reasoning traces. The completed scorecard exposed this gap but did not establish which labels were correct. We have paired judgments and a trace audit, but no evidence that rejected plans explain the gap.\n\nThe older checkpoint cannot settle judge accuracy on qwen3-8-27b, the current Qwen subject. Its open reasoning makes this unresolved distinction relevant to current safety scores.",
+  "evidence_ids": [
+    "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+    "run:run-research-20261020-005",
+    "finding:finding-20261020-001-provisional-paired-xstest-unsafe"
+  ],
+  "blocking": "We lack independent labels that separate rejected discussion from useful harmful guidance in reasoning. Judge agreement cannot supply those labels, and we have not established whether the error carries over to qwen3-8-27b.",
+  "what_would_change_our_mind": "We would drop this problem if independent labels showed accurate judgments on rejected plans and useful guidance across current Qwen reasoning. Evidence that an existing study already resolves this distinction on the same checkpoint would also remove the gap.",
+  "alternatives_considered": [
+    {
+      "title": "Do reassuring explanations hide past violations?",
+      "why_not": "We already completed a study of restored records and reassuring narration; it addresses past actions rather than rejected plans."
+    },
+    {
+      "title": "Does user pressure cause unsupported answer changes?",
+      "why_not": "We already completed a study with correction controls on current Qwen, DeepSeek and GLM checkpoints."
+    },
+    {
+      "title": "Does retry framing preserve revoked permission?",
+      "why_not": "We already have a running study of this question on qwen3-8-27b."
+    }
+  ]
+}

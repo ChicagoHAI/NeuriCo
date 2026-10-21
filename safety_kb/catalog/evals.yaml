@@ -1,0 +1,163 @@
+evals:
+- id: wmdp-bio
+  category: cbrn-proxy
+  runner: inspect:wmdp_bio
+  measures: hazardous bio knowledge (MC proxy; higher = more hazardous knowledge)
+  metric: accuracy
+  judge: null
+  cost: low
+  small_model_ok: true
+  source: https://github.com/UKGovernmentBEIS/inspect_evals
+- id: wmdp-chem
+  category: cbrn-proxy
+  runner: inspect:wmdp_chem
+  measures: hazardous chem knowledge (MC proxy)
+  metric: accuracy
+  judge: null
+  cost: low
+  small_model_ok: true
+- id: wmdp-cyber
+  category: cyber
+  runner: inspect:wmdp_cyber
+  measures: offensive-cyber knowledge (MC proxy)
+  metric: accuracy
+  judge: null
+  cost: low
+  small_model_ok: true
+- id: xstest-safe
+  category: refusal-calibration
+  runner: inspect:xstest
+  task_args:
+    subset: safe
+  judge: default
+  judge_arg: scorer_model
+  measures: over-refusal on safe prompts that look unsafe (lower refusal = better)
+  metric: refusal_rate
+  cost: low
+  small_model_ok: true
+  gated_dataset: walledai/XSTest
+- id: xstest-unsafe
+  category: refusal-calibration
+  runner: inspect:xstest
+  task_args:
+    subset: unsafe
+  judge: default
+  judge_arg: scorer_model
+  measures: compliance on clearly unsafe prompts (higher refusal = better)
+  metric: refusal_rate
+  cost: low
+  small_model_ok: true
+  gated_dataset: walledai/XSTest
+- id: strong-reject
+  category: jailbreak-robustness
+  runner: inspect:strong_reject
+  judge: default
+  judge_arg: judge_llm
+  measures: harmful compliance score on forbidden prompts (lower = better)
+  metric: strong_reject_score
+  cost: low
+  small_model_ok: true
+- id: sycophancy
+  category: sycophancy
+  runner: inspect:sycophancy
+  judge: null
+  measures: answer flipping under user pushback (Sharma et al. style)
+  metric: confidence_shift
+  cost: low
+  small_model_ok: true
+- id: truthfulqa-mc1
+  category: honesty
+  runner: inspect:truthfulqa
+  task_args:
+    target: mc1
+  judge: null
+  measures: imitative falsehoods (MC1)
+  metric: accuracy
+  cost: low
+  small_model_ok: true
+- id: bbq
+  category: bias
+  runner: inspect:bbq
+  judge: null
+  measures: social bias in ambiguous QA
+  metric: accuracy
+  cost: low
+  small_model_ok: true
+- id: mask
+  category: honesty
+  runner: inspect:mask
+  judge: default
+  judge_arg: binary_judge_model
+  measures: honesty under pressure vs stated beliefs
+  metric: honesty_score
+  cost: medium
+  small_model_ok: true
+- id: simpleqa
+  category: hallucination
+  runner: inspect:simpleqa
+  judge: default
+  judge_arg: grader_model
+  measures: short-fact accuracy / hallucination rate
+  metric: f_score
+  cost: medium
+  small_model_ok: true
+- id: agentharm
+  category: agentic-misuse
+  runner: inspect:agentharm
+  judge: default
+  judge_arg: refusal_judge
+  measures: harmful tool use by agents (public test split)
+  metric: avg_score
+  cost: medium
+  small_model_ok: limited
+- id: agentic-misalignment-blackmail
+  category: deception-scheming
+  runner: inspect:agentic_misalignment
+  task_args:
+    scenario: blackmail
+  judge: default
+  judge_arg: grader_model
+  measures: harmful agentic behaviour under goal conflict (Anthropic scenario)
+  metric: harmful_rate
+  cost: medium
+  small_model_ok: limited
+- id: gdm-stealth
+  category: deception-scheming
+  runner: inspect:gdm_stealth
+  judge: null
+  measures: covert sabotage capability (GDM stealth suite, FSF TCL)
+  metric: success_rate
+  cost: high
+  small_model_ok: false
+- id: gdm-self-reasoning
+  category: situational-awareness
+  runner: inspect:gdm_self_reasoning
+  judge: null
+  measures: situational awareness / self-reasoning (GDM suite)
+  metric: success_rate
+  cost: high
+  small_model_ok: false
+- id: xstest-safe-csv
+  category: refusal-calibration
+  runner: inspect-file:src/safety/evals/xstest_csv.py@xstest_csv
+  task_args:
+    subset: safe
+  judge: default
+  judge_arg: scorer_model
+  measures: over-refusal on safe prompts that look unsafe (lower = better); ungated copy of XSTest from the authors CSV
+  metric: refusal_rate
+  cost: low
+  small_model_ok: true
+  source: https://github.com/paul-rottger/xstest
+- id: xstest-unsafe-csv
+  category: refusal-calibration
+  runner: inspect-file:src/safety/evals/xstest_csv.py@xstest_csv
+  task_args:
+    subset: unsafe
+  judge: default
+  judge_arg: scorer_model
+  measures: refusal on clearly unsafe prompts (higher = better); ungated copy of XSTest from the authors CSV
+  metric: refusal_rate
+  cost: low
+  small_model_ok: true
+  source: https://github.com/paul-rottger/xstest

@@ -21,18 +21,16 @@ auditable-citation discipline.
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import json
 import shlex
-import subprocess
 import sys
-import time
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.security import sanitize_text
-from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
+from core.agent_cli import CLI_COMMANDS
+from core.agent_factory import AgentFactory
 from core.research_environment import (
     read_workspace_mode,
     research_environment_template_variables,
@@ -227,128 +225,93 @@ def run_bootstrap_rule_maker(
         templates_dir=Path(templates_dir),
     )
 
-    if log_dir is not None:
-        log_dir = Path(log_dir)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        (log_dir / "bootstrap_rule_maker_prompt.txt").write_text(prompt, encoding="utf-8")
+    # The factory needs somewhere for its log and transcript; without a caller-owned
+    # log_dir they go where every other agent's artifacts go.
+    log_dir = Path(log_dir) if log_dir is not None else work_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = build_agent_command(provider, full_permissions=full_permissions)
+    factory = AgentFactory()
+    spec = factory.spec(
+        "rule_maker_bootstrap", provider=provider, full_permissions=full_permissions, timeout=timeout,
+        transcript={"logs_dir": log_dir, "prefix": "bootstrap_rule_maker"},
+    )
+    handle = factory.build(spec)
 
     print(f"📐 Launching Bootstrap Rule Maker ({provider})")
-    print(f"   Command: {cmd}")
+    print(f"   Command: {shlex.join(handle.argv)}")
     print(f"   Workspace: {work_dir}")
     print(f"   Scoring dir: {scoring_dir}")
     print(f"   Prompt length: {len(prompt)} chars")
     print(f"   Timeout: {timeout}s")
 
-    transcript_path: Optional[Path] = None
-    if log_dir is not None:
-        transcript_path = log_dir / f"bootstrap_rule_maker_{provider}_transcript.jsonl"
-
-    env = build_agent_environment(provider)
-
-    start_time = time.time()
-    return_code: Optional[int] = None
+    # The role's validator contract (bootstrap_output_contract) is the hard
+    # structural gate: a return_code=0 with all four files written can still
+    # produce malformed scoring artifacts (eval.py SyntaxError, targets.json with
+    # invalid directions), and those must fail the stage, not crash the scorer.
+    result = factory.run(handle, prompt, work_dir)
     error: Optional[str] = None
-
-    try:
-        process = subprocess.Popen(
-            shlex.split(cmd),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
-            cwd=str(work_dir),
-        )
-
-        transcript_file = transcript_path.open("w", encoding="utf-8") if transcript_path else None
-        try:
-            process.stdin.write(prompt)
-            process.stdin.close()
-
-            for line in iter(process.stdout.readline, ""):
-                if not line:
-                    continue
-                clean = sanitize_text(line)
-                if transcript_file is not None:
-                    transcript_file.write(clean)
-
-            return_code = process.wait(timeout=timeout)
-        finally:
-            if transcript_file is not None:
-                transcript_file.close()
-    except subprocess.TimeoutExpired:
-        process.kill()
+    if result.timed_out:
         error = f"bootstrap rule_maker timed out after {timeout}s"
         print(f"⏱️  {error}")
-    except Exception as e:
-        error = f"bootstrap rule_maker error: {e}"
-        print(f"❌ {error}")
-        raise
-
-    elapsed = time.time() - start_time
 
     outputs_exist = {
         key: (scoring_dir / fname).exists()
         for key, fname in BOOTSTRAP_OUTPUT_FILES.items()
     }
-    all_outputs_present = all(outputs_exist.values())
-
-    # Hard structural gate: a return_code=0 with all four files written can still
-    # produce malformed scoring artifacts (eval.py SyntaxError, targets.json with
-    # invalid directions). Gate success on the validator so downstream scorer
-    # crashes turn into bootstrap-stage failures, not silent passes.
     validation: Dict[str, Any] = {}
-    hard_checks_ok = False
-    if all_outputs_present and return_code == 0 and error is None:
+    if all(outputs_exist.values()) and result.return_code == 0 and error is None:
         validation = validate_bootstrap_outputs(work_dir)
-        checks = validation.get("checks", {})
-        hard_checks_ok = (
-            checks.get("eval_parses_as_python") is True
-            and checks.get("targets_parses_as_json") is True
-            and checks.get("targets_has_properties") is True
-            and checks.get("targets_all_directions_valid") is True
-        )
 
-    success = (
-        return_code == 0
-        and all_outputs_present
-        and (error is None)
-        and hard_checks_ok
-    )
-
-    if success:
-        print(f"✅ Bootstrap rule_maker completed in {elapsed:.1f}s")
+    if result.success:
+        print(f"✅ Bootstrap rule_maker completed in {result.elapsed_s:.1f}s")
     else:
         missing = [k for k, present in outputs_exist.items() if not present]
-        failed_hard_checks = [
-            k for k in (
-                "eval_parses_as_python",
-                "targets_parses_as_json",
-                "targets_has_properties",
-                "targets_all_directions_valid",
-            )
-            if validation.get("checks", {}).get(k) is False
-        ]
+        failed_hard_checks = [k for k in HARD_CHECKS if validation.get("checks", {}).get(k) is False]
         print(
             f"⚠️  Bootstrap rule_maker finished with issues "
-            f"(return_code={return_code}, missing={missing}, "
+            f"(return_code={result.return_code}, missing={missing}, "
             f"failed_checks={failed_hard_checks}, error={error})"
         )
 
     return {
-        "success": success,
-        "return_code": return_code,
-        "elapsed_time": elapsed,
+        "success": result.success,
+        "return_code": result.return_code,
+        "elapsed_time": result.elapsed_s,
         "outputs_exist": outputs_exist,
         "validation": validation,
-        "transcript_file": str(transcript_path) if transcript_path else None,
-        "prompt_file": str(log_dir / "bootstrap_rule_maker_prompt.txt") if log_dir else None,
+        "transcript_file": str(result.transcript_file),
+        "prompt_file": str(result.prompt_file),
         "error": error,
     }
+
+
+HARD_CHECKS = (
+    "eval_parses_as_python",
+    "targets_parses_as_json",
+    "targets_has_properties",
+    "targets_all_directions_valid",
+)
+
+
+def bootstrap_output_contract(work_dir: Path) -> Dict[str, Any]:
+    """OutputContract validator for the ``rule_maker_bootstrap`` role.
+
+    Success needs all four scoring files and the hard checks that keep a
+    malformed harness (unparseable eval.py, invalid target directions) from
+    reaching the scorer. Returns the ``{valid, issues, found}`` shape the factory
+    evaluates; ``validation`` carries the full check report for callers.
+    """
+    scoring_dir = Path(work_dir) / "scoring"
+    found = {key: str(scoring_dir / fname) for key, fname in BOOTSTRAP_OUTPUT_FILES.items()
+             if (scoring_dir / fname).exists()}
+    issues: List[str] = [f"missing scoring/{fname}" for key, fname in BOOTSTRAP_OUTPUT_FILES.items()
+                         if key not in found]
+    validation: Dict[str, Any] = {}
+    if not issues:
+        validation = validate_bootstrap_outputs(work_dir)
+        checks = validation.get("checks", {})
+        issues = [f"hard check failed: {name}" for name in HARD_CHECKS if checks.get(name) is not True]
+    return {"valid": not issues, "issues": issues, "found": found, "validation": validation}
 
 
 def _parse_primary_output_table(interface_path: Path) -> list[str]:

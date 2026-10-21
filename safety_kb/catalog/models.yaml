@@ -1,0 +1,775 @@
+# Model registry for the safety engine (access forms: vllm:<hf_id>, openrouter:<slug>, anthropic:<id>, openai:<id>, azure:<deployment>).
+models:
+- id: qwen2.5-0.5b-instruct
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen2.5-0.5B-Instruct
+  params_b: 0.5
+  gpu_memory_gb: 6
+  test_tier: true
+  license: Apache-2.0
+  max_model_len: 16384
+  notes: ''
+  superseded_by: qwen3-5-0-8b
+  generation: qwen2.5
+- id: qwen2.5-1.5b-instruct
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen2.5-1.5B-Instruct
+  params_b: 1.5
+  gpu_memory_gb: 8
+  test_tier: true
+  license: Apache-2.0
+  max_model_len: 16384
+  notes: ''
+  superseded_by: qwen3-5-0-8b
+  generation: qwen2.5
+- id: qwen2.5-3b-instruct
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen2.5-3B-Instruct
+  params_b: 3
+  gpu_memory_gb: 12
+  test_tier: true
+  license: Qwen Research
+  max_model_len: 16384
+  notes: ''
+  superseded_by: qwen3-5-2b
+  generation: qwen2.5
+- id: qwen3-0.6b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-0.6B
+  params_b: 0.6
+  gpu_memory_gb: 6
+  test_tier: true
+  license: Apache-2.0
+  notes: thinking model; suites disable thinking via chat template kwargs
+  max_model_len: 16384
+  superseded_by: qwen3-5-0-8b
+  generation: qwen3
+- id: qwen3-1.7b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-1.7B
+  params_b: 1.7
+  gpu_memory_gb: 8
+  test_tier: true
+  license: Apache-2.0
+  max_model_len: 16384
+  notes: ''
+  superseded_by: qwen3-5-0-8b
+  generation: qwen3
+- id: qwen3-4b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-4B
+  params_b: 4
+  gpu_memory_gb: 14
+  test_tier: true
+  license: Apache-2.0
+  max_model_len: 16384
+  notes: ''
+  superseded_by: qwen3-5-2b
+  generation: qwen3
+- id: claude-opus-5-5
+  family: claude
+  vendor: Anthropic
+  access: anthropic:claude-opus-5-5
+  api: true
+- id: claude-fable-5-1
+  family: claude
+  vendor: Anthropic
+  access: anthropic:claude-fable-5-1
+  api: true
+- id: gpt-4.1-mini-judge
+  family: gpt
+  vendor: OpenAI
+  access: openrouter:openai/gpt-4.1-mini
+  api: true
+  role: judge-api
+  notes: cheap API judge; select with NEURICO_SAFETY_JUDGE=gpt-4.1-mini-judge
+- id: qwen2.5-7b-judge
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen2.5-7B-Instruct
+  params_b: 7
+  gpu_memory_gb: 20
+  gpu_memory_utilization: 0.42
+  max_model_len: 8192
+  role: judge
+  license: Apache-2.0
+  notes: default local judge (no API spend); calibration numbers live in evals/judge-calibration.md
+- id: azure-gpt-6-astra
+  family: gpt
+  vendor: OpenAI (Azure)
+  access: azure:gpt-6-astra
+  api: true
+- id: azure-gpt-5.6-sol
+  family: gpt
+  vendor: OpenAI (Azure)
+  access: azure:gpt-5.6-sol
+  api: true
+- id: azure-gpt-5.4
+  family: gpt
+  vendor: OpenAI (Azure)
+  access: azure:gpt-5.4
+  api: true
+- id: azure-gpt-4.1-mini-judge
+  family: gpt
+  vendor: OpenAI (Azure)
+  access: azure:gpt-4.1-mini
+  api: true
+  role: judge-api
+  notes: API judge on Azure; select with NEURICO_SAFETY_JUDGE=azure-gpt-4.1-mini-judge
+- id: qwen3-8b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-8B
+  params_b: 8
+  gpu_memory_gb: 24
+  gpu_memory_utilization: 0.6
+  max_model_len: 16384
+  license: Apache-2.0
+  notes: ''
+  superseded_by: qwen3-5-4b
+  generation: qwen3
+- id: qwen3-14b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-14B
+  params_b: 14
+  gpu_memory_gb: 40
+  gpu_memory_utilization: 0.7
+  max_model_len: 16384
+  license: Apache-2.0
+  notes: ''
+  superseded_by: qwen3-8-27b
+  generation: qwen3
+- id: qwen3-32b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-32B
+  params_b: 32
+  gpu_memory_gb: 75
+  gpu_memory_utilization: 0.9
+  max_model_len: 8192
+  license: Apache-2.0
+  superseded_by: qwen3-8-27b
+  generation: qwen3
+- id: qwen3-30b-a3b
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-30B-A3B
+  params_b: 30
+  gpu_memory_gb: 70
+  gpu_memory_utilization: 0.9
+  max_model_len: 8192
+  license: Apache-2.0
+  notes: MoE, 3B active
+  superseded_by: qwen3-8-27b
+  generation: qwen3
+- id: moonlight-16b-a3b-instruct
+  family: kimi
+  vendor: Moonshot AI
+  access: vllm:moonshotai/Moonlight-16B-A3B-Instruct
+  params_b: 16
+  gpu_memory_gb: 40
+  gpu_memory_utilization: 0.7
+  max_model_len: 8192
+  serve_args:
+  - --trust-remote-code
+  license: MIT
+  notes: smallest Kimi-family text model with open weights
+  generation: moonlight16
+- id: deepseek-r1-distill-qwen-7b
+  family: deepseek
+  vendor: DeepSeek
+  access: vllm:deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+  params_b: 7
+  gpu_memory_gb: 24
+  gpu_memory_utilization: 0.6
+  max_model_len: 16384
+  license: MIT
+  notes: ''
+  superseded_by: deepseek-v2-lite
+  generation: deepseek-r1-distill-qwen-7b
+- id: deepseek-r1-distill-qwen-14b
+  family: deepseek
+  vendor: DeepSeek
+  access: vllm:deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+  params_b: 14
+  gpu_memory_gb: 40
+  gpu_memory_utilization: 0.7
+  max_model_len: 16384
+  license: MIT
+  notes: ''
+  superseded_by: deepseek-v2-lite
+  generation: deepseek-r1-distill-qwen-14b
+- id: deepseek-r1-distill-llama-8b
+  family: deepseek
+  vendor: DeepSeek
+  access: vllm:deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  params_b: 8
+  gpu_memory_gb: 24
+  gpu_memory_utilization: 0.6
+  max_model_len: 16384
+  license: MIT
+  notes: ''
+  superseded_by: deepseek-v2-lite
+  generation: deepseek-r1-distill-llama-8b
+- id: qwen3-8-27b
+  family: qwen
+  vendor: Qwen
+  access: vllm:Qwen/Qwen3.8-27B
+  params_b: 27.8
+  generation: qwen3.8
+  gpu_memory_gb: 76
+  gpu_memory_utilization: 0.9
+  max_model_len: 8192
+  license: apache-2.0
+  release_date: '2026-08-14'
+  discovered: '2026-10-20'
+  serve_args: []
+- id: qwen3-5-27b
+  family: qwen
+  vendor: Qwen
+  access: vllm:Qwen/Qwen3.5-27B
+  params_b: 27.8
+  generation: qwen3.5
+  gpu_memory_gb: 76
+  gpu_memory_utilization: 0.9
+  max_model_len: 8192
+  license: apache-2.0
+  release_date: '2026-04-24'
+  discovered: '2026-10-20'
+  serve_args: []
+  superseded_by: qwen3-8-27b
+- id: qwen3-6-27b
+  family: qwen
+  vendor: Qwen
+  access: vllm:Qwen/Qwen3.6-27B
+  params_b: 27.8
+  generation: qwen3.6
+  gpu_memory_gb: 76
+  gpu_memory_utilization: 0.9
+  max_model_len: 8192
+  license: apache-2.0
+  release_date: '2026-04-24'
+  discovered: '2026-10-20'
+  serve_args: []
+  superseded_by: qwen3-8-27b
+- id: glm-z1-9b-0414
+  family: glm
+  vendor: zai-org
+  access: vllm:zai-org/GLM-Z1-9B-0414
+  params_b: 9.4
+  generation: glm-z1-9b-0414
+  gpu_memory_gb: 28
+  gpu_memory_utilization: 0.36
+  max_model_len: 16384
+  license: mit
+  release_date: '2025-04-28'
+  discovered: '2026-10-20'
+  serve_args:
+  - --trust-remote-code
+- id: glm-4-9b-0414
+  family: glm
+  vendor: zai-org
+  access: vllm:zai-org/GLM-4-9B-0414
+  params_b: 9.4
+  generation: glm4
+  gpu_memory_gb: 28
+  gpu_memory_utilization: 0.36
+  max_model_len: 16384
+  license: mit
+  release_date: '2025-04-14'
+  discovered: '2026-10-20'
+  serve_args:
+  - --trust-remote-code
+  superseded_by: glm-z1-9b-0414
+- id: deepseek-r1-0528-qwen3-8b
+  family: deepseek
+  vendor: deepseek-ai
+  access: vllm:deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+  params_b: 8.2
+  generation: deepseek-r1-0528-qwen3-8b
+  gpu_memory_gb: 25
+  gpu_memory_utilization: 0.32
+  max_model_len: 16384
+  license: mit
+  release_date: '2025-05-29'
+  discovered: '2026-10-20'
+  serve_args:
+  - --trust-remote-code
+- id: qwen3-5-0-8b
+  family: qwen
+  vendor: Qwen
+  access: vllm:Qwen/Qwen3.5-0.8B
+  params_b: 0.9
+  generation: qwen3.5
+  gpu_memory_gb: 8
+  gpu_memory_utilization: 0.3
+  max_model_len: 16384
+  license: apache-2.0
+  release_date: '2026-03-02'
+  discovered: '2026-10-20'
+  serve_args: []
+- id: qwen3-5-2b
+  family: qwen
+  vendor: Qwen
+  access: vllm:Qwen/Qwen3.5-2B
+  params_b: 2.3
+  generation: qwen3.5
+  gpu_memory_gb: 9
+  gpu_memory_utilization: 0.3
+  max_model_len: 16384
+  license: apache-2.0
+  release_date: '2026-03-02'
+  discovered: '2026-10-20'
+  serve_args: []
+- id: qwen3-5-4b
+  family: qwen
+  vendor: Qwen
+  access: vllm:Qwen/Qwen3.5-4B
+  params_b: 4.7
+  generation: qwen3.5
+  gpu_memory_gb: 16
+  gpu_memory_utilization: 0.3
+  max_model_len: 16384
+  license: apache-2.0
+  release_date: '2026-03-02'
+  discovered: '2026-10-20'
+  serve_args: []
+- id: qwen3-5-9b
+  family: qwen
+  vendor: Qwen
+  access: vllm:Qwen/Qwen3.5-9B
+  params_b: 9.7
+  generation: qwen3.5
+  gpu_memory_gb: 29
+  gpu_memory_utilization: 0.36
+  max_model_len: 16384
+  license: apache-2.0
+  release_date: '2026-03-02'
+  discovered: '2026-10-20'
+  serve_args: []
+- id: deepseek-r1-distill-qwen-1-5b
+  family: deepseek
+  vendor: deepseek-ai
+  access: vllm:deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+  params_b: 1.8
+  generation: deepseek-r1
+  gpu_memory_gb: 8
+  gpu_memory_utilization: 0.3
+  max_model_len: 16384
+  license: mit
+  release_date: '2025-02-24'
+  discovered: '2026-10-20'
+  serve_args:
+  - --trust-remote-code
+- id: deepseek-v2-lite
+  family: deepseek
+  vendor: deepseek-ai
+  access: vllm:deepseek-ai/DeepSeek-V2-Lite
+  params_b: 15.7
+  generation: deepseek-v2
+  gpu_memory_gb: 44
+  gpu_memory_utilization: 0.56
+  max_model_len: 8192
+  license: other
+  release_date: '2024-06-25'
+  discovered: '2026-10-20'
+  serve_args:
+  - --trust-remote-code
+  superseded_by: deepseek-r1-0528-qwen3-8b
+- id: deepseek-v2-lite-chat
+  family: deepseek
+  vendor: DeepSeek
+  access: vllm:deepseek-ai/DeepSeek-V2-Lite-Chat
+  params_b: 15.706484224
+  generation: DeepSeek-V2
+  gpu_memory_gb: 42
+  gpu_memory_utilization: 0.53
+  max_model_len: 8192
+  license: deepseek
+  release_date: '2024-05-16'
+  serve_args:
+  - --trust-remote-code
+  - --enforce-eager
+  notes: 'Older small chat baseline, not a new release or successor to R1; card specifies 32K context although config max_position_embeddings
+    is 163840; vLLM example uses trust_remote_code=True and enforce_eager=True; use bundled User/Assistant template. Sources:
+    https://huggingface.co/api/models/deepseek-ai/DeepSeek-V2-Lite-Chat?blobs=true ; https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/blob/main/README.md
+    ; https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/blob/main/config.json ; https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/blob/main/tokenizer_config.json'
+  discovered: '2026-10-20'
+  proposed_by: models-scout-20261020-164621
+  superseded_by: deepseek-r1-0528-qwen3-8b
+- id: openrouter-claude-sonnet-5-5
+  family: claude
+  vendor: Anthropic
+  access: openrouter:anthropic/claude-sonnet-5.5
+  params_b: null
+  generation: Claude 5.5
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1000000
+  license: Proprietary API terms
+  release_date: '2026-09-28'
+  serve_args: []
+  notes: '1M context, 128K output; adaptive thinking. Full thinking disable rejected; between_tools mode supported. Parameters
+    undisclosed; BF16/GPU fields not applicable to hosted access. Sources: https://docs.anthropic.com/en/docs/about-claude/models
+    ; https://www.anthropic.com/claude-sonnet-5-5-system-card ; https://platform.claude.com/docs/en/release-notes/overview
+    ; https://www.anthropic.com/system-cards ; https://openrouter.ai/api/v1/models MERGE BLOCKER: current validate_entry requires
+    numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-claude-haiku-5-5
+  family: claude
+  vendor: Anthropic
+  access: openrouter:anthropic/claude-haiku-5.5
+  params_b: null
+  generation: Claude 5.5
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1000000
+  license: Proprietary API terms
+  release_date: '2026-10-07'
+  serve_args: []
+  notes: '1M context, 128K output; adaptive thinking. Parameters undisclosed; BF16/GPU fields not applicable to hosted access.
+    Sources: https://docs.anthropic.com/en/docs/about-claude/models ; https://www.anthropic.com/claude-haiku-5-5-system-card
+    ; https://platform.claude.com/docs/en/release-notes/overview ; https://www.anthropic.com/system-cards ; https://openrouter.ai/api/v1/models
+    MERGE BLOCKER: current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication
+    call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gpt-6-1-sol
+  family: gpt
+  vendor: OpenAI
+  access: openrouter:openai/gpt-6.1-sol
+  params_b: null
+  generation: GPT-6.1
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1050000
+  license: Proprietary API terms
+  release_date: '2026-09-29'
+  serve_args: []
+  notes: '1050000 context, 128000 output; use Responses API for tools. reasoning_effort none/minimal unsupported; Chat Completions
+    supports no tool calls. Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources: https://platform.openai.com/docs/models
+    ; https://cdn.openai.com/pdf/38e3efcf-545e-44cd-99ec-2b7eb395f4cc/oai_GPT_6_1_Sol.pdf ; https://developers.openai.com/api/docs/models/gpt-6.1-sol
+    ; https://developers.openai.com/api/docs/changelog ; https://openrouter.ai/api/v1/models MERGE BLOCKER: current validate_entry
+    requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gpt-6-luna
+  family: gpt
+  vendor: OpenAI
+  access: openrouter:openai/gpt-6-luna
+  params_b: null
+  generation: GPT-6
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1050000
+  license: Proprietary API terms
+  release_date: '2026-09-22'
+  serve_args: []
+  notes: '1050000 context, 128000 output; use Responses API for tools. Chat Completions function calls require reasoning_effort=none;
+    covered by Astra system-card appendix. Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources:
+    https://platform.openai.com/docs/models ; https://deploymentsafety.openai.com/gpt-6-astra ; https://developers.openai.com/api/docs/models/gpt-6-luna
+    ; https://developers.openai.com/api/docs/changelog ; https://openrouter.ai/api/v1/models MERGE BLOCKER: current validate_entry
+    requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gpt-6-sol
+  family: gpt
+  vendor: OpenAI
+  access: openrouter:openai/gpt-6-sol
+  params_b: null
+  generation: GPT-6
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1050000
+  license: Proprietary API terms
+  release_date: '2026-09-22'
+  serve_args: []
+  notes: '1050000 context, 128000 output; use Responses API for tools. Chat Completions function calls require reasoning_effort=none;
+    covered by Astra system-card appendix. Previous Sol version; provider recommends GPT-6.1 Sol. Parameters undisclosed;
+    BF16/GPU fields not applicable to hosted access. Sources: https://platform.openai.com/docs/models ; https://deploymentsafety.openai.com/gpt-6-astra
+    ; https://developers.openai.com/api/docs/models/gpt-6-sol ; https://developers.openai.com/api/docs/changelog ; https://openrouter.ai/api/v1/models
+    MERGE BLOCKER: current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication
+    call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-4-argon
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-4-argon
+  params_b: null
+  generation: Gemini 4
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-10-13'
+  serve_args: []
+  notes: 'Unified 1048576 input/output context; default synchronous output 65536, long decode up to 1048576; reasoning levels
+    low/medium/high. Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources: https://ai.google.dev/gemini-api/docs/models
+    ; https://deepmind.google/models/model-cards/gemini-4-argon/ ; https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+    ; https://ai.google.dev/gemini-api/docs/changelog ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models
+    MERGE BLOCKER: current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication
+    call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-8-flash
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3.8-flash
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-09-02'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Parameters
+    undisclosed; BF16/GPU fields not applicable to hosted access. Sources: https://ai.google.dev/gemini-api/docs/models ;
+    https://deepmind.google/models/model-cards/gemini-3-8-flash/ ; https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash
+    ; https://ai.google.dev/gemini-api/docs/changelog ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models
+    MERGE BLOCKER: current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication
+    call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-6-flash
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3.6-flash
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-07-21'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Minimal
+    thinking is not a guaranteed off switch. Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources:
+    https://ai.google.dev/gemini-api/docs/models ; https://deepmind.google/models/model-cards/gemini-3-6-flash/ ; https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash
+    ; https://ai.google.dev/gemini-api/docs/changelog ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models
+    MERGE BLOCKER: current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication
+    call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-5-flash-lite
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3.5-flash-lite
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-07-21'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Minimal
+    thinking is not a guaranteed off switch. Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources:
+    https://ai.google.dev/gemini-api/docs/models ; https://deepmind.google/models/model-cards/gemini-3-5-flash-lite/ ; https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite
+    ; https://ai.google.dev/gemini-api/docs/changelog ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models
+    MERGE BLOCKER: current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication
+    call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-1-flash-lite
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3.1-flash-lite
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-05-07'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Stable
+    endpoint released May 7, 2026; distinguish from the March 3 preview. Minimal thinking is not a guaranteed off switch.
+    Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources: https://ai.google.dev/gemini-api/docs/models
+    ; https://deepmind.google/models/model-cards/gemini-3-1-flash-lite/ ; https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite
+    ; https://ai.google.dev/gemini-api/docs/changelog ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models
+    MERGE BLOCKER: current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication
+    call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-1-pro-preview
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3.1-pro-preview
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2026-02-19'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Parameters
+    undisclosed; BF16/GPU fields not applicable to hosted access. Sources: https://ai.google.dev/gemini-api/docs/models ;
+    https://deepmind.google/models/model-cards/gemini-3-1-pro/ ; https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview
+    ; https://ai.google.dev/gemini-api/docs/changelog ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models
+    MERGE BLOCKER: current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication
+    call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: openrouter-gemini-3-flash-preview
+  family: gemini
+  vendor: Google DeepMind
+  access: openrouter:google/gemini-3-flash-preview
+  params_b: null
+  generation: Gemini 3
+  gpu_memory_gb: null
+  gpu_memory_utilization: null
+  max_model_len: 1048576
+  license: Proprietary API terms
+  release_date: '2025-12-17'
+  serve_args: []
+  notes: 'Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Minimal
+    thinking is not a guaranteed off switch. Parameters undisclosed; BF16/GPU fields not applicable to hosted access. Sources:
+    https://ai.google.dev/gemini-api/docs/models ; https://deepmind.google/models/model-cards/gemini-3-flash/ ; https://ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview
+    ; https://ai.google.dev/gemini-api/docs/changelog ; https://ai.google.dev/gemini-api/docs/thinking ; https://openrouter.ai/api/v1/models
+    MERGE BLOCKER: current validate_entry requires numeric params_b and gpu_memory_gb; API-aware schema required. No inference/authentication
+    call performed.'
+  api: true
+  discovered: '2026-10-20'
+  proposed_by: models-rescout.merged
+- id: qwen3-0.6b-nothink
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-0.6B
+  params_b: 0.6
+  gpu_memory_gb: 6
+  test_tier: true
+  license: Apache-2.0
+  notes: thinking model; suites disable thinking via chat template kwargs thinking disabled via chat template (non-thinking
+    condition)
+  max_model_len: 16384
+  superseded_by: qwen3-5-0-8b
+  generation: qwen3
+  serve_args:
+  - --chat-template
+  - safety_kb/catalog/chat_templates/qwen3-nothink.jinja
+  variant_of: qwen3-0.6b
+  thinking: disabled
+- id: qwen3-1.7b-nothink
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-1.7B
+  params_b: 1.7
+  gpu_memory_gb: 8
+  test_tier: true
+  license: Apache-2.0
+  max_model_len: 16384
+  notes: ' thinking disabled via chat template (non-thinking condition)'
+  superseded_by: qwen3-5-0-8b
+  generation: qwen3
+  serve_args:
+  - --chat-template
+  - safety_kb/catalog/chat_templates/qwen3-nothink.jinja
+  variant_of: qwen3-1.7b
+  thinking: disabled
+- id: qwen3-4b-nothink
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-4B
+  params_b: 4
+  gpu_memory_gb: 14
+  test_tier: true
+  license: Apache-2.0
+  max_model_len: 16384
+  notes: ' thinking disabled via chat template (non-thinking condition)'
+  superseded_by: qwen3-5-2b
+  generation: qwen3
+  serve_args:
+  - --chat-template
+  - safety_kb/catalog/chat_templates/qwen3-nothink.jinja
+  variant_of: qwen3-4b
+  thinking: disabled
+- id: qwen3-8b-nothink
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-8B
+  params_b: 8
+  gpu_memory_gb: 24
+  gpu_memory_utilization: 0.6
+  max_model_len: 16384
+  license: Apache-2.0
+  notes: ' thinking disabled via chat template (non-thinking condition)'
+  superseded_by: qwen3-5-4b
+  generation: qwen3
+  serve_args:
+  - --chat-template
+  - safety_kb/catalog/chat_templates/qwen3-nothink.jinja
+  variant_of: qwen3-8b
+  thinking: disabled
+- id: qwen3-14b-nothink
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-14B
+  params_b: 14
+  gpu_memory_gb: 40
+  gpu_memory_utilization: 0.7
+  max_model_len: 16384
+  license: Apache-2.0
+  notes: ' thinking disabled via chat template (non-thinking condition)'
+  superseded_by: qwen3-8-27b
+  generation: qwen3
+  serve_args:
+  - --chat-template
+  - safety_kb/catalog/chat_templates/qwen3-nothink.jinja
+  variant_of: qwen3-14b
+  thinking: disabled
+- id: qwen3-32b-nothink
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-32B
+  params_b: 32
+  gpu_memory_gb: 75
+  gpu_memory_utilization: 0.9
+  max_model_len: 8192
+  license: Apache-2.0
+  superseded_by: qwen3-8-27b
+  generation: qwen3
+  serve_args:
+  - --chat-template
+  - safety_kb/catalog/chat_templates/qwen3-nothink.jinja
+  notes: ' thinking disabled via chat template (non-thinking condition)'
+  variant_of: qwen3-32b
+  thinking: disabled
+- id: qwen3-30b-a3b-nothink
+  family: qwen
+  vendor: Alibaba
+  access: vllm:Qwen/Qwen3-30B-A3B
+  params_b: 30
+  gpu_memory_gb: 70
+  gpu_memory_utilization: 0.9
+  max_model_len: 8192
+  license: Apache-2.0
+  notes: MoE, 3B active thinking disabled via chat template (non-thinking condition)
+  superseded_by: qwen3-8-27b
+  generation: qwen3
+  serve_args:
+  - --chat-template
+  - safety_kb/catalog/chat_templates/qwen3-nothink.jinja
+  variant_of: qwen3-30b-a3b
+  thinking: disabled

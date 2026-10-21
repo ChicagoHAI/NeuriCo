@@ -16,7 +16,6 @@ from contextlib import ExitStack
 from uuid import uuid4
 import inspect
 import logging
-import subprocess
 import shlex
 import sys
 import os
@@ -40,12 +39,9 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.config_loader import ConfigLoader
 from core.local_resources import stage_local_resources, staged_immutable_resource_roots
-from core.agent_cli import (
-    MODEL_ENV_VAR,
-    build_agent_command,
-    build_agent_environment,
-    provider_workspace_root,
-)
+from core import agent_auth, azure_config
+from core.agent_cli import MODEL_ENV_VAR, provider_workspace_root
+from core.agent_factory import AgentFactory
 from core.security import sanitize_text
 from core.compute_backend import (
     attach_runtime_compute_backend,
@@ -1446,24 +1442,27 @@ class ResearchRunner:
         print(f"   Timeout: {timeout} seconds")
         print()
 
-        # Execute agent
+        # Execute agent through the factory: a deadline that fires while the agent
+        # streams, process-group cleanup and a ledger line, which the old
+        # read-to-EOF loop here never had.
         success = False
         try:
-            # Set environment variables
-            env = build_agent_environment(provider)
-            if use_scribe:
-                env["SCRIBE_RUN_DIR"] = str(work_dir)
-
-            # Prepare command
-            log_file = work_dir / "logs" / f"execution_{provider}.log"
-
-            cmd = build_agent_command(
-                provider,
+            factory = AgentFactory()
+            spec = factory.spec(
+                "experiment_runner",
+                provider=provider,
                 full_permissions=full_permissions,
                 use_scribe=use_scribe,
+                timeout=timeout,
+                # This legacy path reports the exit code; artifact checks (REPORT.md)
+                # belong to the orchestrator route. The prompt files are written above.
+                output={"kind": "return_code"},
+                transcript={"save_prompt": False},
             )
+            handle = factory.build(spec)
+            log_file = work_dir / "logs" / f"execution_{provider}.log"
 
-            print(f"   Command: {cmd}")
+            print(f"   Command: {shlex.join(handle.argv)}")
             print(f"   Log file: {log_file}")
             print()
             print("=" * 80)
@@ -1471,48 +1470,19 @@ class ResearchRunner:
             print("=" * 80)
             print()
 
-            with open(log_file, "w", encoding="utf-8") as log_f:
-                # Start process in workspace directory
-                process = subprocess.Popen(
-                    shlex.split(cmd),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    text=True,
-                    encoding="utf-8",
-                    bufsize=1,
-                    cwd=str(work_dir),
-                )
-
-                # Send session instructions
-                process.stdin.write(session_instructions)
-                process.stdin.close()
-
-                # Stream output (sanitized for security)
-                for line in iter(process.stdout.readline, ""):
-                    if line:
-                        sanitized_line = sanitize_text(line)
-                        print(sanitized_line, end="")
-                        log_f.write(sanitized_line)
-
-                # Wait for completion
-                return_code = process.wait(timeout=timeout)
+            launch = factory.run(handle, session_instructions, work_dir)
 
             print()
             print("=" * 80)
 
-            if return_code == 0:
+            if launch.timed_out:
+                print(f"\n⏱️  Execution timed out after {timeout} seconds")
+            if launch.success:
                 print("✅ Research execution completed successfully!")
                 success = True
             else:
-                print(f"⚠️  Research execution finished with return code: {return_code}")
+                print(f"⚠️  Research execution finished with return code: {launch.return_code}")
                 success = False
-
-        except subprocess.TimeoutExpired:
-            print(f"\n⏱️  Execution timed out after {timeout} seconds")
-            process.kill()
-            success = False
 
         except Exception as e:
             print(f"\n❌ Error during execution: {e}")
@@ -1779,13 +1749,16 @@ https://github.com/ChicagoHAI/neurico
             provider_workspace_root(provider)
             for provider in ("claude", "gemini", "codex")
         ]
-        compute_skill_names = {"modal-training", "modal-vllm", "dsi-slurm"}
+        compute_skill_names = {"modal-training", "modal-vllm", "dsi-slurm", azure_config.AZURE_SKILL}
         backend_skill_names = {
             "local": set(),
             "modal": {"modal-training", "modal-vllm"},
             "dsi-slurm": {"dsi-slurm"},
         }
-        selected_compute_skills = backend_skill_names[compute_backend]
+        selected_compute_skills = set(backend_skill_names[compute_backend])
+        if azure_config.azure_active():
+            # Research-key layer: agents only see the Azure skill when Azure is active.
+            selected_compute_skills.add(azure_config.AZURE_SKILL)
         workspace_mode = read_workspace_mode(work_dir)
 
         if skills_src.exists():
@@ -2022,6 +1995,13 @@ def main():
         default=None,
         help="Model for the provider CLI (e.g. claude-opus-5-5, gpt-5.6-sol). "
         "Applies to every agent stage; default: the provider CLI's own default.",
+    )
+    parser.add_argument(
+        "--agent-auth",
+        default=None,
+        choices=["oauth", "azure"],
+        help="Account the agent CLI runs on: its OAuth login (default) or Azure "
+        "(Codex on Azure OpenAI; Claude Code on Azure AI Foundry). Overrides NEURICO_AGENT_AUTH.",
     )
     parser.add_argument(
         "--compute-backend",
@@ -2261,6 +2241,15 @@ def main():
         # Every stage builds its provider command from this run-wide override.
         os.environ[MODEL_ENV_VAR] = args.model
         print(f"   Model: {args.model}")
+    if args.agent_auth:
+        os.environ[agent_auth.AGENT_AUTH_ENV_VAR] = args.agent_auth
+    auth_mode = agent_auth.resolve_agent_auth()
+    unsupported = agent_auth.supports(args.provider, auth_mode)
+    if unsupported:
+        print(f"❌ {unsupported}")
+        return 1
+    print(f"   {agent_auth.describe(args.provider, auth_mode, args.model)}")
+    print(f"   {azure_config.describe()}")
     runner = ResearchRunner(use_github=not args.no_github, github_org=args.github_org)
 
     # Handle comment mode separately

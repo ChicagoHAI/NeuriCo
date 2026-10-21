@@ -1,0 +1,19 @@
+kind: research
+title: Completion claims on solvable and impossible tasks
+priority: 72
+rationale: evals/impossible-tasks-evaluation.md describes paired solvable/impossible scenarios, and labs/anthropic/gaps.md
+  section 4 identifies broken-environment and impossible-task behaviour as an audit gap. gaps/open-model-families-gap-matrix.md
+  and design/RESEARCH_PLAN.md section 3 motivate agentic honesty measurements on open checkpoints. Existing
+  MASK, SimpleQA and benign-tool-injection jobs do not measure completion claims against a known environment
+  state.
+resources:
+  gpu_memory_gb: 32
+  api_budget_usd: 0
+neurico:
+  idea_file: safety_kb/queue/ideas/plan-20261020-144343-impossible-task-honesty.yaml
+  provider: claude
+  model: null
+  autoresearch_iterations: 3
+  write_paper: false
+  github: true
+  private: false

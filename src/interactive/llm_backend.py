@@ -19,6 +19,7 @@ import threading
 import time
 
 from core.security import remove_github_credentials
+from core.llm_client import LLMClient
 
 
 @dataclass
@@ -896,6 +897,42 @@ class LLMBackend:
             ))
         return tool_calls
 
+    def _send_api(
+        self,
+        route: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        *,
+        timeout_seconds: Optional[float],
+        missing_key_message: str,
+    ) -> LLMResponse:
+        """One manager turn through core.llm_client on a single route.
+
+        The backend name is a lane the operator chose ("anthropic_api" or
+        "openrouter"), so only that route is used, with no cross-provider
+        fallback. Model, max_tokens and the timeout come from the
+        interactive_manager_api role in config/agents.yaml (NEURICO_MANAGER_MODEL
+        or --model overrides the model). A missing key stays a ValueError so the
+        interactive CLI reports it the way it always has.
+        """
+        client = LLMClient.for_role(
+            "interactive_manager_api",
+            route_names=(route,),
+            model=self.model,
+            timeout_s=timeout_seconds,
+        )
+        if not client.available:
+            raise ValueError(missing_key_message)
+        response = client.chat(messages, tools=tools)
+        return LLMResponse(
+            text=response.text,
+            tool_calls=[
+                ToolCall(id=call.id, name=call.name, arguments=call.arguments)
+                for call in response.tool_calls
+            ],
+            raw=response.raw,
+        )
+
     def _send_anthropic_api(
         self,
         messages: List[Dict[str, Any]],
@@ -903,82 +940,10 @@ class LLMBackend:
         *,
         timeout_seconds: Optional[float] = None,
     ) -> LLMResponse:
-        """Send via Anthropic Python SDK. Requires ANTHROPIC_API_KEY."""
-        try:
-            import anthropic
-        except ImportError:
-            raise ImportError(
-                "anthropic package required for API backend. "
-                "Install with: pip install anthropic"
-            )
-
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY environment variable required for anthropic_api backend")
-
-        client_kwargs: Dict[str, Any] = {"api_key": api_key}
-        if timeout_seconds is not None:
-            client_kwargs["timeout"] = timeout_seconds
-        client = anthropic.Anthropic(**client_kwargs)
-
-        # Separate system message from conversation
-        system_msg = ""
-        api_messages = []
-        for msg in messages:
-            if msg["role"] == "system":
-                system_msg = msg["content"]
-            elif msg["role"] == "tool_result":
-                api_messages.append({
-                    "role": "user",
-                    "content": [{"type": "tool_result",
-                                 "tool_use_id": msg.get("tool_call_id", ""),
-                                 "content": msg["content"]}]
-                })
-            else:
-                api_messages.append({"role": msg["role"], "content": msg["content"]})
-
-        # Build API tool definitions
-        api_tools = None
-        if tools:
-            api_tools = []
-            for tool in tools:
-                api_tools.append({
-                    "name": tool["name"],
-                    "description": tool.get("description", ""),
-                    "input_schema": tool.get("parameters", {"type": "object", "properties": {}})
-                })
-
-        model = self.model or "claude-sonnet-4-6"
-
-        kwargs = {
-            "model": model,
-            "max_tokens": 4096,
-            "messages": api_messages,
-        }
-        if system_msg:
-            kwargs["system"] = system_msg
-        if api_tools:
-            kwargs["tools"] = api_tools
-
-        response = client.messages.create(**kwargs)
-
-        # Parse response
-        text_parts = []
-        tool_calls = []
-        for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                tool_calls.append(ToolCall(
-                    id=block.id,
-                    name=block.name,
-                    arguments=block.input
-                ))
-
-        return LLMResponse(
-            text="\n".join(text_parts),
-            tool_calls=tool_calls,
-            raw=response
+        """Send via the Anthropic Messages API. Requires ANTHROPIC_API_KEY."""
+        return self._send_api(
+            "anthropic", messages, tools, timeout_seconds=timeout_seconds,
+            missing_key_message="ANTHROPIC_API_KEY environment variable required for anthropic_api backend",
         )
 
     def _send_openrouter(
@@ -988,69 +953,11 @@ class LLMBackend:
         *,
         timeout_seconds: Optional[float] = None,
     ) -> LLMResponse:
-        """Send via OpenRouter API. Requires OPENROUTER_API_KEY."""
-        try:
-            import httpx
-        except ImportError:
-            raise ImportError(
-                "httpx package required for OpenRouter backend. "
-                "Install with: pip install httpx"
-            )
-
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
-            raise ValueError("OPENROUTER_API_KEY environment variable required for openrouter backend")
-
-        model = self.model or "anthropic/claude-sonnet-4"
-
-        payload = {
-            "model": model,
-            "messages": [{"role": m["role"], "content": m["content"]} for m in messages],
-            "max_tokens": 4096,
-        }
-
-        if tools:
-            payload["tools"] = [{
-                "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t.get("description", ""),
-                    "parameters": t.get("parameters", {})
-                }
-            } for t in tools]
-
-        response = httpx.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=timeout_seconds if timeout_seconds is not None else 120
+        """Send via OpenRouter. Requires OPENROUTER_KEY or OPENROUTER_API_KEY."""
+        return self._send_api(
+            "openrouter", messages, tools, timeout_seconds=timeout_seconds,
+            missing_key_message="OPENROUTER_KEY or OPENROUTER_API_KEY environment variable required for openrouter backend",
         )
-        response.raise_for_status()
-        data = response.json()
-
-        # Parse OpenAI-compatible response
-        choice = data["choices"][0]["message"]
-        text = choice.get("content", "") or ""
-        tool_calls = []
-
-        for tc in choice.get("tool_calls", []):
-            func = tc.get("function", {})
-            args = func.get("arguments", "{}")
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {"raw": args}
-            tool_calls.append(ToolCall(
-                id=tc.get("id", ""),
-                name=func.get("name", ""),
-                arguments=args
-            ))
-
-        return LLMResponse(text=text, tool_calls=tool_calls, raw=data)
 
 
 def create_backend(config: Dict[str, Any]) -> LLMBackend:

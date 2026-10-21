@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -39,6 +40,38 @@ from typing import Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NEURICO = PROJECT_ROOT / "neurico"
+SIGKILL_GRACE_SECONDS = 15.0
+
+
+def host_mode() -> bool:
+    """True when ./neurico runs natively (docker/host.sh) instead of in Docker."""
+    return os.environ.get("NEURICO_MODE", "").lower() == "host"
+
+
+def host_job_pgid(name: str) -> Optional[int]:
+    """Process group of a host-mode job, from the launcher's logs/host-jobs/<name>.pid."""
+    jobs_dir = Path(os.environ.get("NEURICO_HOST_JOBS_DIR") or PROJECT_ROOT / "logs" / "host-jobs")
+    try:
+        return int((jobs_dir / f"{name}.pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def killpg_quiet(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def escalate_sigkill(pgids: List[int], delay: float = SIGKILL_GRACE_SECONDS) -> None:
+    """SIGKILL the groups still alive after ``delay`` seconds (non-blocking)."""
+    if not pgids:
+        return
+    timer = threading.Timer(delay, lambda: [killpg_quiet(p, signal.SIGKILL) for p in pgids])
+    timer.daemon = True
+    timer.start()
+
 
 # -----------------------------------------------------------------------------
 # What to run: (method, provider, model). Comment a row out to skip it.
@@ -264,8 +297,10 @@ class Batch:
         with open(job.log_file, "a", encoding="utf-8") as log:
             log.write(f"\n$ {' '.join(command)}\n")
             log.flush()
+            # Own session: stop() kills the whole tree (launcher, python, agents)
+            # by process group, which is all that exists in host mode.
             process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=env, stdin=subprocess.DEVNULL,
-                                       stdout=log, stderr=subprocess.STDOUT)
+                                       stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             with self.lock:
                 self.processes[job.container] = process
             try:
@@ -397,12 +432,20 @@ class Batch:
         if self.stopping:
             return
         self.stopping = True
-        self.say("Stopping: killing running containers...")
+        self.say("Stopping: killing running jobs...")
         with self.lock:
             running = dict(self.processes)
+        groups: List[int] = []
         for container, process in running.items():
-            subprocess.run(["docker", "kill", container], capture_output=True)
-            process.terminate()
+            if not host_mode() and shutil.which("docker"):
+                subprocess.run(["docker", "kill", container], capture_output=True)
+            pgid = host_job_pgid(container)
+            if pgid:
+                groups.append(pgid)
+            groups.append(process.pid)  # start_new_session=True: pid == pgid
+        for pgid in groups:
+            killpg_quiet(pgid, signal.SIGTERM)
+        escalate_sigkill(groups)
 
     def make_job(self, idea_file: Path, method: Method, resume: Optional[str] = None) -> Job:
         name = f"{idea_file.stem}__{method.label}"

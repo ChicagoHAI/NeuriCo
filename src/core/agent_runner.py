@@ -12,22 +12,26 @@ this module:
 - Tracks invocation status via .neurico/runs/<run_id>/
 - Does NOT move idea files between folders
 - Does NOT manage GitHub integration
-- Does NOT impose timeouts (the caller handles that)
+- Imposes no timeout unless ``--timeout`` is given (the manager owns the deadline)
 
 Usage (inside Docker):
     python src/core/agent_runner.py <agent_name> --workspace /path --provider claude --run-id rf_001 --idea-file /path/to/idea.yaml
 
 Supported agents: resource_finder, experiment_runner, paper_writer, comment_handler
+
+Launches go through ``core.agent_factory`` (role defaults from config/agents.yaml,
+both auth lanes, process-group cleanup, a ledger line); ``run_prebuilt_cli_agent``
+below is the primitive the factory runs on.
 """
 
 from pathlib import Path
 from typing import Dict, Any, Optional
 import argparse
+import contextlib
 import json
 import os
 import queue
 import signal
-import shlex
 import subprocess
 import sys
 import threading
@@ -38,10 +42,6 @@ import traceback
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.compute_backend import attach_runtime_compute_backend
-from core.agent_cli import (
-    build_agent_command,
-    build_agent_environment,
-)
 from core.security import remove_github_credentials, sanitize_text
 from core.hitl_util import utc_now
 
@@ -118,76 +118,46 @@ class RunTracker:
             json.dump(status, f, indent=2)
 
 
-def _build_agent_command(
-    provider: str, full_permissions: bool = True, use_scribe: bool = False
-) -> str:
-    """Build the CLI command for launching an agent."""
-    return build_agent_command(
-        provider,
+def _run_cli_agent(
+    role: str,
+    provider: str,
+    prompt: str,
+    work_dir: Path,
+    tracker: RunTracker,
+    *,
+    full_permissions: bool = True,
+    use_scribe: bool = False,
+    env_extra: Optional[Dict[str, str]] = None,
+    timeout: Optional[int] = None,
+    save_prompt: bool = True,
+) -> Dict[str, Any]:
+    """
+    Launch one agent for the interactive manager through the agent factory.
+
+    The role (config/agents.yaml) supplies provider flags on both auth lanes and
+    the log layout (``logs/<role>_<provider>.log`` and transcript). Two things
+    are deliberately this entry point's own: success is the exit code, because
+    the manager inspects the workspace itself (``check_workspace``), and the
+    deadline is off unless the caller sets one. Gemini keeps its trust prompt
+    here, as before. The tracker records the pid, as it always did.
+    """
+    # Lazy import: core.agent_factory builds on run_prebuilt_cli_agent below.
+    from core.agent_factory import AgentFactory
+
+    factory = AgentFactory()
+    spec = factory.spec(
+        role,
+        provider=provider,
         full_permissions=full_permissions,
         use_scribe=use_scribe,
         gemini_skip_trust=False,
+        timeout=timeout,
+        output={"kind": "return_code", "tolerate_nonzero": False},
+        transcript={"save_prompt": save_prompt},
     )
-
-
-def _run_cli_agent(
-    cmd: str,
-    prompt: str,
-    work_dir: Path,
-    log_file: Path,
-    transcript_file: Path,
-    tracker: RunTracker,
-    env_extra: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
-    """
-    Execute a CLI agent with streaming output capture.
-
-    This is the common execution pattern shared by all agents.
-    """
-    env = build_agent_environment("gemini" if "gemini" in cmd else "", env_extra)
-
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-
-    start_time = time.time()
-
-    with open(log_file, "w") as log_f, open(transcript_file, "w") as transcript_f:
-        process = subprocess.Popen(
-            shlex.split(cmd),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-            text=True,
-            bufsize=1,
-            cwd=str(work_dir),
-        )
-
-        tracker.mark_running(process.pid)
-
-        # Send prompt via stdin
-        process.stdin.write(prompt)
-        process.stdin.close()
-
-        # Stream output
-        for line in iter(process.stdout.readline, ""):
-            if line:
-                sanitized_line = sanitize_text(line)
-                print(sanitized_line, end="")
-                log_f.write(sanitized_line)
-                transcript_f.write(sanitized_line)
-
-        return_code = process.wait()
-
-    elapsed = time.time() - start_time
-    success = return_code == 0
-
-    return {
-        "success": success,
-        "return_code": return_code,
-        "elapsed_time": elapsed,
-        "log_file": str(log_file),
-        "transcript_file": str(transcript_file),
-    }
+    handle = factory.build(spec, env_extra)
+    result = factory.run(handle, prompt, work_dir, on_start=tracker.mark_running)
+    return result.legacy_dict()
 
 
 def next_attempt_number(logs_dir: Path, name_for_attempt) -> int:
@@ -232,6 +202,7 @@ def run_prebuilt_cli_agent(
     tracker: Optional[RunTracker] = None,
     provider: Optional[str] = None,
     defer_provider_failure_to_runtime: bool = False,
+    stderr_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Execute a caller-constructed CLI command with streaming capture.
@@ -239,6 +210,10 @@ def run_prebuilt_cli_agent(
     The caller owns provider flags, environment, working directory, and any
     backend setup/cleanup. This helper only handles subprocess execution,
     sanitized output streaming, optional wall-clock timeout, and reaping.
+
+    stderr is merged into stdout (and so into the log and transcript) unless
+    ``stderr_file`` is given; the agent factory routes Codex stderr there so
+    the ``--json`` transcript stays a clean JSONL stream for usage parsing.
     """
     from core.hitl_run_control import current_hitl_run_budget_prompt
 
@@ -258,16 +233,24 @@ def run_prebuilt_cli_agent(
     process_env = dict(env)
     remove_github_credentials(process_env)
 
+    if stderr_file is not None:
+        Path(stderr_file).parent.mkdir(parents=True, exist_ok=True)
+    stderr_context = (
+        open(stderr_file, "w", encoding="utf-8")
+        if stderr_file is not None
+        else contextlib.nullcontext(None)
+    )
     with (
         open(log_file, "w", encoding="utf-8") as log_f,
         open(transcript_file, "w", encoding="utf-8") as transcript_f,
+        stderr_context as stderr_f,
     ):
         try:
             process = subprocess.Popen(
                 command_argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.STDOUT if stderr_f is None else stderr_f,
                 env=process_env,
                 text=True,
                 encoding="utf-8",
@@ -447,6 +430,7 @@ def run_resource_finder(
     tracker: RunTracker,
     full_permissions: bool = True,
     templates_dir: Optional[Path] = None,
+    timeout: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run the resource finder agent."""
     from agents.resource_finder import generate_resource_finder_prompt
@@ -467,18 +451,11 @@ def run_resource_finder(
         workspace_mode=read_workspace_mode(work_dir).value,
     )
 
-    # Save prompt for reference
-    prompt_file = work_dir / "logs" / "resource_finder_prompt.txt"
-    prompt_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(prompt_file, "w", encoding="utf-8") as f:
-        f.write(prompt)
-
-    # Build and run command
-    cmd = _build_agent_command(provider, full_permissions)
-    log_file = work_dir / "logs" / f"resource_finder_{provider}.log"
-    transcript_file = work_dir / "logs" / f"resource_finder_{provider}_transcript.jsonl"
-
-    result = _run_cli_agent(cmd, prompt, work_dir, log_file, transcript_file, tracker)
+    # The factory saves the prompt as logs/resource_finder_prompt.txt and runs the agent.
+    result = _run_cli_agent(
+        "resource_finder", provider, prompt, work_dir, tracker,
+        full_permissions=full_permissions, timeout=timeout,
+    )
 
     # Check for outputs
     outputs = {}
@@ -506,6 +483,7 @@ def run_experiment_runner(
     use_scribe: bool = False,
     templates_dir: Optional[Path] = None,
     scoring_enabled: bool = False,
+    timeout: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Run the experiment runner agent.
@@ -568,24 +546,13 @@ def run_experiment_runner(
         with open(session_file, "w", encoding="utf-8") as f:
             f.write(session_instructions)
 
-        # Build and run command
-        cmd = _build_agent_command(provider, full_permissions, use_scribe)
-        if use_scribe:
-            env_extra = env_extra or {}
-            env_extra["SCRIBE_RUN_DIR"] = str(work_dir)
-
-        log_file = work_dir / "logs" / f"execution_{provider}.log"
-        transcript_file = work_dir / "logs" / f"execution_{provider}_transcript.jsonl"
-
-        # Experiment runner uses session_instructions (not raw prompt) as input
+        # Experiment runner uses session_instructions (not raw prompt) as input; the
+        # prompt files were saved above, so the factory does not save another. The
+        # experiment_runner role names the artifacts logs/execution_<provider>.*
         result = _run_cli_agent(
-            cmd,
-            session_instructions,
-            work_dir,
-            log_file,
-            transcript_file,
-            tracker,
-            env_extra=env_extra,
+            "experiment_runner", provider, session_instructions, work_dir, tracker,
+            full_permissions=full_permissions, use_scribe=use_scribe, env_extra=env_extra,
+            timeout=timeout, save_prompt=False,
         )
         if result.get("success") and dsi_remote_info is not None:
             from core.dsi_slurm_artifacts import archive_dsi_slurm_artifacts
@@ -605,6 +572,7 @@ def run_paper_writer(
     full_permissions: bool = True,
     paper_style: str = "neurips",
     templates_dir: Optional[Path] = None,
+    timeout: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run the paper writer agent."""
     from agents.paper_writer import run_paper_writer as _run_paper_writer
@@ -622,7 +590,7 @@ def run_paper_writer(
         work_dir=work_dir,
         provider=provider,
         style=paper_style,
-        timeout=None,  # No timeout in interactive mode
+        timeout=timeout,  # None: no timeout in interactive mode unless --timeout is given
         full_permissions=full_permissions,
         domain=domain,
     )
@@ -637,6 +605,7 @@ def run_comment_handler(
     tracker: RunTracker,
     full_permissions: bool = True,
     templates_dir: Optional[Path] = None,
+    timeout: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run the comment handler agent for targeted improvements."""
     from agents.comment_handler import generate_comment_prompt
@@ -666,22 +635,10 @@ def run_comment_handler(
 
         prompt = generate_comment_prompt(idea, work_dir, templates_dir, provider=provider)
 
-        # Build and run command
-        cmd = _build_agent_command(provider, full_permissions)
-        log_file = work_dir / "logs" / f"comment_handler_{provider}.log"
-        transcript_file = work_dir / "logs" / f"comment_handler_{provider}_transcript.jsonl"
-
-        result = _run_cli_agent(
-            cmd,
-            prompt,
-            work_dir,
-            log_file,
-            transcript_file,
-            tracker,
-            env_extra=env_extra,
+        return _run_cli_agent(
+            "comment_handler", provider, prompt, work_dir, tracker,
+            full_permissions=full_permissions, env_extra=env_extra, timeout=timeout,
         )
-
-        return result
 
 
 # Agent dispatch table
@@ -775,6 +732,12 @@ def main():
         action="store_true",
         help="Use scribe for notebook integration (for experiment_runner agent)",
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=0,
+        help="Wall-clock limit in seconds for the agent (default 0: no limit; the manager owns the deadline)",
+    )
 
     args = parser.parse_args()
 
@@ -788,13 +751,17 @@ def main():
     work_dir = Path(args.workspace)
 
     if not work_dir.exists():
-        print(f"Error: workspace path does not exist inside the container: {work_dir}")
-        print(f"Expected a path under /workspaces/, e.g. /workspaces/{work_dir.name}")
+        print(f"Error: workspace path does not exist: {work_dir}")
+        if os.environ.get("NEURICO_MODE", "").lower() == "host":
+            print(f"Expected a directory under {os.environ.get('NEURICO_WORKSPACE', 'the workspace parent')}")
+        else:
+            print(f"Expected a path under /workspaces/, e.g. /workspaces/{work_dir.name}")
         sys.exit(1)
 
     # Build kwargs based on agent type
     kwargs = {
         "full_permissions": args.full_permissions,
+        "timeout": args.timeout or None,
     }
     if args.agent == "paper_writer":
         kwargs["paper_style"] = args.paper_style

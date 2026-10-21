@@ -72,6 +72,20 @@ class ConfigLoader:
         """
         return self.load_config('domains')
 
+    def get_agents_config(self) -> Dict[str, Any]:
+        """
+        Get the per-role agent defaults (config/agents.yaml).
+
+        The agent factory (core.agent_factory) resolves roles from this
+        file with the precedence CLI flag > NEURICO_* env > role block >
+        `default` block; this accessor exists so other readers (daemon,
+        status commands) see the same cached document.
+
+        Returns:
+            Agents config dictionary with keys `version`, `default`, `roles`, `ledger`
+        """
+        return self.load_config('agents')
+
     def get_valid_domains(self) -> List[str]:
         """
         Get list of valid domain names.

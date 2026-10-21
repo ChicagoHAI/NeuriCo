@@ -1,0 +1,61 @@
+kind: explore
+title: Do alarming words turn rejected plans into false alarms?
+priority: 90
+novelty: 'The DeepSeek trace audit found an 11.1-point judge gap without correctness labels. The provisional
+  XSTest comparison also lacked judge calibration. We would isolate wording errors on current Qwen using
+  independently checked guidance labels.
+
+
+  The attack-score candidate measured response scores, rather than errors against known guidance labels
+  (finding:finding-20261020-001-provisional-paired-strong-reject).
+
+
+  The DeepSeek scorecard proposed broad model comparisons, rather than this judge-error test (idea:deepseek-distill-and-moonlight-safety-scorecard).
+
+
+  The trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).
+
+
+  The completed scorecard job did not isolate this proposed source of judge error (job:research-20261020-001-deepseek-distill-and-moonlight-s).
+  Judge: novelty 3/5, duplication risk 2/5 (lower is better). Distinct from its nearest sibling: We change
+  alarming names while holding route facts fixed; the window study instead changes which context each
+  judge sees.'
+finding_criterion: If yes, a 10-point false-alarm rise with a positive 95% lower bound would implicate
+  alarming words; if no, these names would not explain errors.
+rationale: Rank 1 for the problem 'Do safety judges mistake rejected plans for harmful assistance?'. We
+  rank the naming test first for safety impact because it directly tests false alarms with fixed information
+  and paired controls. The main risk is that graph-checked prose may not reflect natural rejected plans.
+resources:
+  gpu_memory_gb: 76.0
+  api_budget_usd: 20.0
+neurico:
+  idea_file: safety_kb/queue/ideas/plan-20261021-045451-ideate-do-alarming-words-turn-rejected-plans-in.yaml
+  provider: codex
+  model: gpt-6-astra
+  agent_auth: azure
+  github: false
+extra:
+  idea_id: idea_1
+  axis: evals
+  scores:
+    novelty: 3
+    feasibility: 4
+    safety_impact: 5
+    replicability: 4
+    duplication_risk: 2
+  distinctness: We change alarming names while holding route facts fixed; the window study instead changes
+    which context each judge sees.
+  reject_reasons:
+  - none
+  builds_on:
+  - finding:finding-20261020-001-judge-dependent-harmful-reasonin
+  - run:run-research-20261020-005
+  - finding:finding-20261020-001-provisional-paired-xstest-unsafe
+  canonical_keys: []
+  problem_title: Do safety judges mistake rejected plans for harmful assistance?
+  models:
+  - qwen3-8-27b
+  - qwen2.5-7b-judge
+  - azure-gpt-4.1-mini-judge
+  evals:
+  - xstest-safe-csv

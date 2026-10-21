@@ -23,6 +23,13 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
+# --- host mode hook -----------------------------------------------------------
+# NEURICO_MODE=host runs every subcommand natively (no Docker); the whole
+# implementation lives in host.sh, which only defines functions when sourced.
+# shellcheck source=host.sh
+. "$SCRIPT_DIR/host.sh"
+# -----------------------------------------------------------------------------
+
 # macOS BSD sed requires an explicit empty-string backup argument for in-place editing.
 # GNU sed on Linux does not. This wrapper handles both.
 sed_inplace() {
@@ -960,6 +967,23 @@ cmd_run() {
         docker_args+=( -v "$NEURICO_HF_CACHE:/hf_cache" -e HF_HOME=/hf_cache )
         echo -e "${BLUE}Hugging Face cache:${NC} $NEURICO_HF_CACHE -> /hf_cache"
     fi
+    # Safety engine: a shared evaluation venv (inspect_ai, vllm) mounted at the same
+    # absolute path so its interpreter works unchanged, and the knowledge base read-only.
+    if [ -n "${NEURICO_SAFETY_VENV:-}" ] && [ -d "$NEURICO_SAFETY_VENV" ]; then
+        docker_args+=( -v "$NEURICO_SAFETY_VENV:$NEURICO_SAFETY_VENV:ro" -e NEURICO_SAFETY_VENV="$NEURICO_SAFETY_VENV" )
+        # The venv's interpreter lives outside the venv (pyvenv.cfg "home"); mount it too.
+        local venv_home
+        venv_home=$(sed -n 's/^home *= *//p' "$NEURICO_SAFETY_VENV/pyvenv.cfg" 2>/dev/null | head -1)
+        if [ -n "$venv_home" ] && [ -d "$venv_home" ]; then
+            venv_home=$(dirname "$venv_home")
+            docker_args+=( -v "$venv_home:$venv_home:ro" )
+        fi
+        echo -e "${BLUE}Safety eval venv:${NC} $NEURICO_SAFETY_VENV"
+    fi
+    if [ -n "${NEURICO_SAFETY_KB:-}" ] && [ -d "$NEURICO_SAFETY_KB" ]; then
+        docker_args+=( -v "$NEURICO_SAFETY_KB:/safety_kb:ro" -e NEURICO_SAFETY_KB=/safety_kb )
+        echo -e "${BLUE}Safety knowledge base:${NC} $NEURICO_SAFETY_KB -> /safety_kb"
+    fi
 
     echo -e "${BLUE}Running research exploration...${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
@@ -1019,6 +1043,17 @@ cmd_baseline() {
     echo -e "${BLUE}Running zero-shot baseline...${NC}"
     echo -e "${BLUE}Workspace:${NC} $workspace_dir -> /workspaces"
     docker "${docker_args[@]}"
+}
+
+# -----------------------------------------------------------------------------
+# Safety engine (host side): the daemon launches ./neurico containers itself
+# -----------------------------------------------------------------------------
+cmd_safety() {
+    if ! command -v uv >/dev/null 2>&1; then
+        echo -e "${RED}Error: the safety engine runs on the host and needs uv (https://docs.astral.sh/uv/)${NC}"
+        exit 1
+    fi
+    cd "$PROJECT_ROOT" && exec uv run python src/cli/safety.py "$@"
 }
 
 # -----------------------------------------------------------------------------
@@ -1901,6 +1936,17 @@ cmd_config() {
         echo -e "    ${BOLD}[11]${NC} Workspace Directory .... ${GREEN}[SET: $ws_val]${NC}"
         echo ""
 
+        # Azure: research keys for agents (layer 1) and agent backbone auth (layer 2)
+        local azure_flag azure_auth
+        azure_flag=$(grep -E "^NEURICO_AZURE=" "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
+        azure_auth=$(grep -E "^NEURICO_AGENT_AUTH=" "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
+        echo -e "  ${BOLD}Azure${NC}  ${DIM}— [12-13] keys agents use for API calls; [14] switch; [15] which account the agent CLI itself runs on${NC}"
+        echo -e "    ${BOLD}[12]${NC} Azure OpenAI Key ....... $(format_status AZURE_OPENAI_API_KEY true)"
+        echo -e "    ${BOLD}[13]${NC} Azure Resource Name .... $(format_status AZURE_FOUNDRY_RESOURCE false)"
+        echo -e "    ${BOLD}[14]${NC} Azure for agents ....... ${GREEN}[${azure_flag:-0}]${NC} ${DIM}(NEURICO_AZURE=1 adds the azure-models skill + keys)${NC}"
+        echo -e "    ${BOLD}[15]${NC} Agent backbone auth .... ${GREEN}[${azure_auth:-oauth}]${NC} ${DIM}(oauth = CLI login; azure = Codex on Azure OpenAI)${NC}"
+        echo ""
+
         echo -e "    ${BOLD}[q]${NC}  Save & exit"
         echo ""
         echo -ne "  > "
@@ -1963,6 +2009,39 @@ cmd_config() {
                 echo ""
                 prompt_secret "Weights & Biases API Key" "WANDB_API_KEY" "optional" "" \
                     "For experiment tracking (https://wandb.ai)" || true
+                ;;
+            12)
+                echo ""
+                prompt_secret "Azure OpenAI API Key" "AZURE_OPENAI_API_KEY" "optional" "" \
+                    "Key of the Azure OpenAI / AI Foundry resource (agents use it for API calls when NEURICO_AZURE=1)" || true
+                ;;
+            13)
+                echo ""
+                prompt_text "Azure resource name" \
+                    "The <resource> in https://<resource>.openai.azure.com/openai/v1" ""
+                if [ -n "$REPLY" ]; then
+                    config_set_env "AZURE_FOUNDRY_RESOURCE" "$REPLY"
+                    echo -e "    ${GREEN}[OK]${NC} AZURE_FOUNDRY_RESOURCE set"
+                fi
+                ;;
+            14)
+                echo ""
+                prompt_text "Azure for agents (1 = on, 0 = off)" \
+                    "When on, every agent gets the azure-models skill and the Azure keys for its own API calls." "1"
+                config_set_env "NEURICO_AZURE" "${REPLY:-1}"
+                echo -e "    ${GREEN}[OK]${NC} NEURICO_AZURE=${REPLY:-1}"
+                ;;
+            15)
+                echo ""
+                prompt_text "Agent backbone auth (oauth | azure)" \
+                    "oauth: the provider CLI's own login. azure: run Codex on the Azure OpenAI deployments (needs [12]-[14]); per run: ./neurico run <id> --provider codex --agent-auth azure" "oauth"
+                case "${REPLY:-oauth}" in
+                    oauth|azure)
+                        config_set_env "NEURICO_AGENT_AUTH" "${REPLY:-oauth}"
+                        echo -e "    ${GREEN}[OK]${NC} NEURICO_AGENT_AUTH=${REPLY:-oauth}"
+                        ;;
+                    *) echo -e "    ${RED}Expected oauth or azure${NC}" ;;
+                esac
                 ;;
             11)
                 echo ""
@@ -2450,6 +2529,7 @@ cmd_help() {
     echo "  submit <idea.yaml>        Submit a research idea"
     echo "  run <id> [options]        Run research exploration"
     echo "  baseline <idea.yaml>      Run a zero-shot baseline (single agent session)"
+    echo "  safety <subcommand>       Safety engine: init | enqueue-suite | enqueue-idea | start | status | stop | plan | digest"
     echo "  hitl-web [id]             Open the containerized HITL idea portal"
     echo "  hitl-cli <id>             Open the containerized HITL terminal client"
     echo "  hitl-stop <id> [--yes]    Stop HITL research and preserve saved progress"
@@ -2485,9 +2565,23 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
     return 0
 fi
 
+# --- host mode hook: `./neurico --host <cmd>` sets NEURICO_MODE=host ---------
+if [ "${1:-}" = "--host" ]; then
+    export NEURICO_MODE=host
+    shift
+fi
+# -----------------------------------------------------------------------------
+
 # Parse command
 ACTION="${1:-help}"
 shift 2>/dev/null || true
+
+# --- host mode hook: everything below is the Docker route --------------------
+if is_host_mode; then
+    host_dispatch "$ACTION" "$@"
+    exit $?
+fi
+# -----------------------------------------------------------------------------
 
 # Check Docker is available (skip for commands that don't need it)
 if [ "$ACTION" != "config" ] && [ "$ACTION" != "help" ] && [ "$ACTION" != "--help" ] && [ "$ACTION" != "-h" ]; then
@@ -2527,6 +2621,9 @@ case "$ACTION" in
         ;;
     baseline)
         cmd_baseline "$@"
+        ;;
+    safety)
+        cmd_safety "$@"
         ;;
     _run-agent)
         cmd__run_agent "$@"

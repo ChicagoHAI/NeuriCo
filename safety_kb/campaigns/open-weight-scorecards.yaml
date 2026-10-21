@@ -1,0 +1,55 @@
+# Campaign A: frontier-card-grade safety scorecards for open-weight families.
+# Start on this server with the small members (GPU 2); move the full-size members to the
+# compute server in host mode by editing target_models and budgets only.
+name: open-weight-scorecards
+objective: >
+  Produce paired, calibrated, reproducible safety scorecards (refusal and over-refusal, jailbreak
+  robustness, honesty, sycophancy, hallucination, bias, dangerous-capability proxies with a
+  capability baseline, agentic misuse, deception suites) for the Qwen, DeepSeek, GLM and Kimi
+  families, in the vocabulary frontier model cards use, and file any surprising behaviour as a
+  candidate finding with a reproduction pack. See design/RESEARCH_PLAN.md section 3.
+target_models:
+  subjects: [qwen3-5-0-8b, qwen3-5-2b, qwen3-5-4b, qwen3-5-9b, qwen3-8-27b, deepseek-r1-0528-qwen3-8b, glm-z1-9b-0414, glm-4-9b-0414, moonlight-16b-a3b-instruct]
+  judges: [qwen2.5-7b-judge, azure-gpt-4.1-mini-judge]
+eval_categories_in_scope:
+  - refusal-calibration
+  - jailbreak-robustness
+  - honesty
+  - sycophancy
+  - hallucination
+  - bias
+  - cbrn-proxy
+  - cyber
+  - agentic-misuse
+  - deception-scheming
+fixed_suites:
+  - name: nightly-scorecard
+    evals: [xstest-safe-csv, xstest-unsafe-csv, strong-reject, sycophancy, truthfulqa-mc1, bbq, wmdp-bio, wmdp-cyber]
+    models: [qwen3-5-4b, qwen3-5-9b, qwen3-8-27b, deepseek-r1-0528-qwen3-8b, glm-4-9b-0414, moonlight-16b-a3b-instruct]
+    limit: null          # full sets; the numbers are the product
+    every_hours: 24
+    priority: 40
+budgets:
+  max_concurrent_neurico_jobs: 2
+  max_concurrent_suite_jobs: 1
+  openrouter_usd_per_day: 20
+  azure_usd_per_day: 50
+  gpu_ids: ["0", "1", "2", "3"]   # one Slurm allocation of 4 GPUs (scripts/slurm/safety_daemon.sbatch)
+defaults:
+  neurico: {provider: codex, model: gpt-6-astra, agent_auth: azure, github: false}
+planner:
+  approval: auto
+  modes: {ideate: 0.6, replicate: 0.4}   # share of planner rounds that look for new findings vs fill card gaps
+  max_new_jobs_per_run: 3
+  prefer_kinds: [research, optimise, suite]
+  avoid:
+    - "real hazardous content generation (use proxies such as WMDP)"
+    - "models needing more than 80 GB GPU memory (one A100/H100 per model; no tensor parallel yet)"
+    - "API-model explore jobs (campaign C handles those with human approval)"
+reporting:
+  digest_every_days: 1
+  scorecards: [qwen]
+labels:
+  pipeline_scale_note: "Members below 7B are pipeline-grade; family-level claims need the 9B+ members."
+  freshness: "The planner refreshes catalog/models_latest.yaml from Hugging Face before every round and must use the newest generation that fits one GPU; older generations are baselines."
+  agent_backbone: "Codex on Azure (gpt-6-astra) by default; agents get the azure-models skill for GPT inference and judging."

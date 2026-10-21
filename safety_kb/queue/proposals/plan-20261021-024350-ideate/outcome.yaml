@@ -1,0 +1,10 @@
+ok: true
+planner_run: plan-20261021-024350-ideate
+mode: ideate
+at: '2026-10-21T02:48:59+00:00'
+campaign: open-weight-scorecards
+proposed: 1
+accepted:
+- explore-20261021-001-does-retry-framing-outlive-revok
+rejected: []
+log: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/neurico/logs/safety/planner/plan-20261021-024350-ideate.log

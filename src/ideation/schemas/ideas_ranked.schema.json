@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "scored": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "idea_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scores": {
+            "type": "object",
+            "properties": {
+              "novelty": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              "feasibility": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              "safety_impact": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              "replicability": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              "duplication_risk": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5,
+                "description": "RISK of duplication: 1 = none, 5 = near-duplicate (lower is better)."
+              }
+            },
+            "required": [
+              "novelty",
+              "feasibility",
+              "safety_impact",
+              "replicability",
+              "duplication_risk"
+            ],
+            "additionalProperties": false,
+            "description": "1-5 integers. duplication_risk is a RISK (1 = no overlap with registry/existing work/literature, 5 = near-duplicate); the other four are higher-is-better."
+          },
+          "reject_reasons": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "restates_paper",
+                "extension_authors_could_do",
+                "uninformative_either_way",
+                "dodges_headline_claim",
+                "infeasible_compute",
+                "stale_frontier_assumption",
+                "duplicates_registry",
+                "not_safety",
+                "duplicates_sibling",
+                "none"
+              ]
+            }
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sibling_of": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Ids of other candidate ideas that share this idea's experimental scaffold (same models + data + splits + judge with a different readout). Required when reject_reasons contains duplicates_sibling. top must not contain two siblings."
+          },
+          "distinctness": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 210,
+            "description": "<= 25 words: what makes this idea's experiment different from its nearest sibling (or 'no near sibling')."
+          }
+        },
+        "required": [
+          "idea_id",
+          "scores",
+          "reject_reasons",
+          "rationale",
+          "distinctness"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "top": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "idea_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "rank",
+          "idea_id",
+          "rationale"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 5
+    },
+    "judge_notes": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "scored",
+    "top"
+  ],
+  "additionalProperties": false
+}

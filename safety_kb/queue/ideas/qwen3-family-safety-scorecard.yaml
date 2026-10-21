@@ -1,0 +1,49 @@
+idea:
+  title: "Safety scorecard for the Qwen3 family: refusal calibration, jailbreak robustness, honesty and sycophancy across model sizes"
+  domain: ai_safety
+  hypothesis: >
+    Across Qwen3-4B, Qwen3-8B, Qwen3-14B and Qwen3-32B (non-thinking mode as the primary
+    condition), safety behaviour does not improve monotonically with scale: at least one of
+    over-refusal on safe prompts (XSTest safe), harmful compliance on StrongREJECT (direct and
+    under one jailbreak), honesty under pressure (MASK) and sycophancy changes by more than 10
+    points (absolute) between adjacent sizes, and the direction of change differs across metrics.
+  background:
+    description: >
+      Frontier model cards (Gemini 4 Argon, Claude Opus 5.5, GPT-6 Astra) report refusal and
+      over-refusal, jailbreak robustness, honesty and sycophancy; Qwen's technical reports and
+      model cards report none of these for the released chat models
+      (/safety_kb/gaps/open-model-families-gap-matrix.md, /safety_kb/labs/alibaba-qwen/README.md).
+      This run produces the first paired, calibrated scorecard across the Qwen3 size ladder in the
+      vocabulary those cards use. Serve models locally with vLLM through the safety-evals skill
+      ($NEURICO_SAFETY_VENV/bin/python, one GPU per model, see CUDA_VISIBLE_DEVICES); use the
+      azure-models skill (Azure OpenAI deployment gpt-4.1-mini) as the API judge and the local
+      qwen2.5-7b-judge as the second judge; report their agreement.
+  methodology:
+    approach: "Paired comparison across model sizes on identical items with two calibrated judges and bootstrap confidence intervals"
+    steps:
+      - "Run the catalog evals xstest-safe, xstest-unsafe, strong-reject (direct), strong-reject with the AIM jailbreak, sycophancy, mask and truthfulqa-mc1 on each model with the skill's run_eval.py (full datasets, no --limit)"
+      - "Calibrate both judges on at least 150 hand-labelled items drawn from these generations (judge_calibration.py); report accuracy and Cohen's kappa; use the better-calibrated judge as primary"
+      - "Compute per-model metrics with n, SE and 95% CIs; paired differences between adjacent sizes and between direct and jailbreak conditions on identical items"
+      - "Repeat the strong-reject and xstest runs for Qwen3-8B with thinking enabled as an ablation"
+      - "Write REPORT.md with the scorecard table in model-card format and findings/*.yaml for every effect whose CI excludes zero and whose size exceeds 10 points"
+    baselines:
+      - "Direct-request StrongREJECT score (no jailbreak)"
+      - "XSTest unsafe refusal rate as the counterpart to safe over-refusal"
+      - "Published frontier-card numbers quoted from /safety_kb/labs/*/system-cards.md as reference rows (clearly marked as different harnesses)"
+    metrics:
+      - "XSTest safe over-refusal rate and unsafe refusal rate"
+      - "StrongREJECT score, direct and AIM"
+      - "MASK honesty score"
+      - "Sycophancy answer-flip rate"
+      - "TruthfulQA MC1 accuracy"
+      - "Judge agreement (accuracy, kappa) per judge"
+  constraints:
+    compute: gpu_required
+    dependencies: [inspect-ai, inspect-evals, vllm, transformers, scikit-learn]
+  evaluation_criteria:
+    - "Every number has n and SE or CI; comparisons are paired on identical items"
+    - "Judge calibration figures reported with the results"
+    - "results/safety/*.json in the neurico-safety-result/v1 schema for every eval x model; candidate findings in findings/*.yaml with reproduction commands"
+  expected_outputs:
+    - {type: metrics, format: json, description: "results/safety/<eval>__<model>.json for every pair plus judge calibration files"}
+    - {type: report, format: markdown, description: "REPORT.md scorecard in model-card format with limitations; findings/*.yaml"}

@@ -1,0 +1,1653 @@
+refreshed: '2026-10-20T20:46:53.273225+00:00'
+families:
+  qwen:
+    newest_generation: Qwen3.8
+    released: '2026-08-12'
+    members:
+    - hf_id: Qwen/Qwen3.8-2.4T-A95B
+      generation: Qwen3.8
+      params_b: 2446.182725504
+      bf16_gb: 4892.365451008
+      fits_single_gpu: false
+      released: '2026-08-12'
+      license: qwen3.8-max
+      gated: false
+      thinking: always
+      notes: Bundled chat template; open checkpoint always starts <think>; hosted Qwen3.8-Max also supports non-thinking and
+        vision; native context 262144; vLLM support linked in card; use text-only inputs for this lab.
+      card_url: https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.8-2.4T-A95B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 4892365649336
+      last_modified: '2026-08-12T10:24:04.000Z'
+      created_at: '2026-08-08T01:50:52.000Z'
+      pipeline_tag: text-generation
+      context_length: 262144
+      trust_remote_code: false
+      active_params_b: 95.0
+    - hf_id: Qwen/Qwen3.8-27B
+      generation: Qwen3.8
+      params_b: 27.781427952
+      bf16_gb: 55.562855904
+      fits_single_gpu: true
+      released: '2026-08-14'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab.
+      card_url: https://huggingface.co/Qwen/Qwen3.8-27B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.8-27B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 55563006776
+      last_modified: '2026-08-14T15:00:01.000Z'
+      created_at: '2026-08-05T08:22:59.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+      revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+      verified_at: '2026-10-20T20:46:53.273225+00:00'
+    - hf_id: Qwen/Qwen3.8-Flash-Next
+      generation: Qwen3.8
+      params_b: 179.999981459
+      bf16_gb: 359.999962918
+      fits_single_gpu: false
+      released: '2026-08-26'
+      license: qwen-community-1.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab. Architecture preview; Hub total includes 51B n-gram embeddings and MTP, while
+        card quotes 125B backbone/6B active.
+      card_url: https://huggingface.co/Qwen/Qwen3.8-Flash-Next
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.8-Flash-Next?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8-Flash-Next/main/README.md
+      weights_bytes: 360000192888
+      last_modified: '2026-08-27T05:03:36.000Z'
+      created_at: '2026-08-24T08:24:59.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+      active_params_b: 6.0
+    - hf_id: Qwen/Qwen3.6-35B-A3B
+      generation: Qwen3.6
+      params_b: 35.951822704
+      bf16_gb: 71.903645408
+      fits_single_gpu: false
+      released: '2026-04-16'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab.
+      card_url: https://huggingface.co/Qwen/Qwen3.6-35B-A3B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.6-35B-A3B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 71903776776
+      last_modified: '2026-04-24T02:53:42.000Z'
+      created_at: '2026-04-15T05:59:19.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+      active_params_b: 3.0
+    - hf_id: Qwen/Qwen3.6-27B
+      generation: Qwen3.6
+      params_b: 27.781427952
+      bf16_gb: 55.562855904
+      fits_single_gpu: true
+      released: '2026-04-22'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab.
+      card_url: https://huggingface.co/Qwen/Qwen3.6-27B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.6-27B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.6-27B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.6-27B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.6-27B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 55563006400
+      last_modified: '2026-04-24T02:39:16.000Z'
+      created_at: '2026-04-21T07:50:43.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+    - hf_id: Qwen/Qwen3.5-397B-A17B
+      generation: Qwen3.5
+      params_b: 403.397928944
+      bf16_gb: 806.795857888
+      fits_single_gpu: false
+      released: '2026-02-16'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab. Retained earlier generation for size-tier coverage/comparison.
+      card_url: https://huggingface.co/Qwen/Qwen3.5-397B-A17B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.5-397B-A17B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.5-397B-A17B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.5-397B-A17B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.5-397B-A17B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 806796241352
+      last_modified: '2026-04-24T05:51:23.000Z'
+      created_at: '2026-02-16T04:55:12.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+      active_params_b: 17.0
+    - hf_id: Qwen/Qwen3.5-122B-A10B
+      generation: Qwen3.5
+      params_b: 125.086497008
+      bf16_gb: 250.172994016
+      fits_single_gpu: false
+      released: '2026-02-24'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab. Retained earlier generation for size-tier coverage/comparison.
+      card_url: https://huggingface.co/Qwen/Qwen3.5-122B-A10B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.5-122B-A10B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.5-122B-A10B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.5-122B-A10B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.5-122B-A10B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 250173250864
+      last_modified: '2026-04-24T03:55:23.000Z'
+      created_at: '2026-02-24T09:43:37.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+      active_params_b: 10.0
+    - hf_id: Qwen/Qwen3.5-35B-A3B
+      generation: Qwen3.5
+      params_b: 35.951822704
+      bf16_gb: 71.903645408
+      fits_single_gpu: false
+      released: '2026-02-24'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab. Retained earlier generation for size-tier coverage/comparison.
+      card_url: https://huggingface.co/Qwen/Qwen3.5-35B-A3B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.5-35B-A3B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.5-35B-A3B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.5-35B-A3B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.5-35B-A3B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 71903878016
+      last_modified: '2026-04-24T02:38:38.000Z'
+      created_at: '2026-02-24T09:39:25.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+      active_params_b: 3.0
+    - hf_id: Qwen/Qwen3.5-27B
+      generation: Qwen3.5
+      params_b: 27.781427952
+      bf16_gb: 55.562855904
+      fits_single_gpu: true
+      released: '2026-02-24'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab. Retained earlier generation for size-tier coverage/comparison.
+      card_url: https://huggingface.co/Qwen/Qwen3.5-27B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.5-27B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.5-27B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.5-27B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.5-27B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 55563022432
+      last_modified: '2026-04-24T02:54:49.000Z'
+      created_at: '2026-02-24T09:41:56.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+    - hf_id: Qwen/Qwen3.5-9B
+      generation: Qwen3.5
+      params_b: 9.653104368
+      bf16_gb: 19.306208736
+      fits_single_gpu: true
+      released: '2026-03-02'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab. Retained earlier generation for size-tier coverage/comparison.
+      card_url: https://huggingface.co/Qwen/Qwen3.5-9B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.5-9B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 19306310880
+      last_modified: '2026-03-02T00:51:43.000Z'
+      created_at: '2026-02-27T12:58:26.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+    - hf_id: Qwen/Qwen3.5-4B
+      generation: Qwen3.5
+      params_b: 4.659865088
+      bf16_gb: 9.319730176
+      fits_single_gpu: true
+      released: '2026-03-02'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab. Retained earlier generation for size-tier coverage/comparison.
+      card_url: https://huggingface.co/Qwen/Qwen3.5-4B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.5-4B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 9319828096
+      last_modified: '2026-03-02T00:52:52.000Z'
+      created_at: '2026-02-27T14:45:03.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+    - hf_id: Qwen/Qwen3.5-2B
+      generation: Qwen3.5
+      params_b: 2.274069824
+      bf16_gb: 4.548139648
+      fits_single_gpu: true
+      released: '2026-03-02'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab. Retained earlier generation for size-tier coverage/comparison.
+      card_url: https://huggingface.co/Qwen/Qwen3.5-2B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.5-2B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.5-2B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.5-2B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.5-2B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 4548221488
+      last_modified: '2026-03-02T11:26:29.000Z'
+      created_at: '2026-02-28T23:56:16.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+    - hf_id: Qwen/Qwen3.5-0.8B
+      generation: Qwen3.5
+      params_b: 0.873438784
+      bf16_gb: 1.746877568
+      fits_single_gpu: true
+      released: '2026-03-02'
+      license: apache-2.0
+      gated: false
+      thinking: optional
+      notes: Bundled chat template; enable_thinking=false disables thinking; native context 262144; vLLM support linked in
+        card; use text-only inputs for this lab. Retained earlier generation for size-tier coverage/comparison.
+      card_url: https://huggingface.co/Qwen/Qwen3.5-0.8B
+      source_urls:
+      - https://huggingface.co/api/models/Qwen/Qwen3.5-0.8B?blobs=true
+      - https://huggingface.co/Qwen/Qwen3.5-0.8B/blob/main/README.md
+      - https://huggingface.co/Qwen/Qwen3.5-0.8B/blob/main/config.json
+      - https://huggingface.co/Qwen/Qwen3.5-0.8B/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/QwenLM/Qwen3.8/main/README.md
+      weights_bytes: 1746942600
+      last_modified: '2026-03-02T11:26:58.000Z'
+      created_at: '2026-02-28T23:57:01.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: false
+    notes: Newest two released open generations are Qwen3.8 and Qwen3.6; Qwen3.5 retained for older small/mid/MoE tier comparison.
+      Main-line unified text+vision models remain text subjects; dedicated VL/audio/coder/math/guard/base/quantized repos
+      excluded. Author catalog checked with limit=1000 (469 repositories). Qwen3.8-Max/Flash hosted versions are not identical
+      to open checkpoints. 2.4T and Flash-Next use qwen-community-1.0 rather than Apache-2.0.
+  deepseek:
+    newest_generation: DeepSeek-V4.1
+    released: '2026-09-10'
+    members:
+    - hf_id: deepseek-ai/DeepSeek-V4.1-Flash-1017
+      generation: DeepSeek-V4.1
+      params_b: 763.205315794
+      bf16_gb: 1526.410631588
+      fits_single_gpu: false
+      released: '2026-10-17'
+      license: mit
+      gated: false
+      thinking: optional
+      notes: 'No Jinja chat template: use repository encoding scripts/deepseek-recipe; 1048576 context; mixed low-precision
+        stored weights; BF16 policy uses complete Hub total. Active parameters are 8B prefill / 16B decode; card backbone
+        count excludes Engram and auxiliary tensors; vLLM support not established by this card.'
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4.1-Flash-1017?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 510296708312
+      last_modified: '2026-10-17T05:46:55.000Z'
+      created_at: '2026-10-17T02:40:38.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 1048576
+      trust_remote_code: false
+      active_params_b: 16.0
+    - hf_id: deepseek-ai/DeepSeek-V4.1-Flash
+      generation: DeepSeek-V4.1
+      params_b: 763.205315794
+      bf16_gb: 1526.410631588
+      fits_single_gpu: false
+      released: '2026-09-10'
+      license: mit
+      gated: false
+      thinking: optional
+      notes: 'No Jinja chat template: use repository encoding scripts/deepseek-recipe; 1048576 context; mixed low-precision
+        stored weights; BF16 policy uses complete Hub total. Active parameters are 8B prefill / 16B decode; card backbone
+        count excludes Engram and auxiliary tensors; vLLM support not established by this card.'
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4.1-Flash?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/chat_template.jinja
+      weights_bytes: 510296708312
+      last_modified: '2026-10-16T09:27:28.000Z'
+      created_at: '2026-09-10T02:17:58.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 1048576
+      trust_remote_code: false
+      active_params_b: 16.0
+    - hf_id: deepseek-ai/DeepSeek-V4-Pro-0813
+      generation: DeepSeek-V4
+      params_b: 1650.497936906
+      bf16_gb: 3300.995873812
+      fits_single_gpu: false
+      released: '2026-08-13'
+      license: mit
+      gated: false
+      thinking: optional
+      notes: 'No Jinja chat template: use repository encoding scripts/deepseek-recipe; 1048576 context; mixed low-precision
+        stored weights; BF16 policy uses complete Hub total. Card documents vLLM deployment; --trust-remote-code; preview
+        checkpoints retained alongside dated GA updates.'
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4-Pro-0813?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 892744322880
+      last_modified: '2026-08-13T16:28:28.000Z'
+      created_at: '2026-08-13T03:05:06.000Z'
+      pipeline_tag: text-generation
+      context_length: 1048576
+      trust_remote_code: false
+      active_params_b: 49.0
+    - hf_id: deepseek-ai/DeepSeek-V4-Flash-0731
+      generation: DeepSeek-V4
+      params_b: 304.180418494
+      bf16_gb: 608.360836988
+      fits_single_gpu: false
+      released: '2026-07-31'
+      license: mit
+      gated: false
+      thinking: optional
+      notes: 'No Jinja chat template: use repository encoding scripts/deepseek-recipe; 1048576 context; mixed low-precision
+        stored weights; BF16 policy uses complete Hub total. Card documents vLLM deployment; --trust-remote-code; preview
+        checkpoints retained alongside dated GA updates.'
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4-Flash-0731?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 166886535336
+      last_modified: '2026-08-01T03:07:41.000Z'
+      created_at: '2026-07-31T07:30:24.000Z'
+      pipeline_tag: text-generation
+      context_length: 1048576
+      trust_remote_code: false
+      active_params_b: 13.0
+    - hf_id: deepseek-ai/DeepSeek-V4-Pro
+      generation: DeepSeek-V4
+      params_b: 1598.839674782
+      bf16_gb: 3197.679349564
+      fits_single_gpu: false
+      released: '2026-04-24'
+      license: mit
+      gated: false
+      thinking: optional
+      notes: 'No Jinja chat template: use repository encoding scripts/deepseek-recipe; 1048576 context; mixed low-precision
+        stored weights; BF16 policy uses complete Hub total. Card documents vLLM deployment; --trust-remote-code; preview
+        checkpoints retained alongside dated GA updates.'
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4-Pro?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 864721029744
+      last_modified: '2026-06-22T12:12:50.000Z'
+      created_at: '2026-04-22T06:04:45.000Z'
+      pipeline_tag: text-generation
+      context_length: 1048576
+      trust_remote_code: false
+      active_params_b: 49.0
+    - hf_id: deepseek-ai/DeepSeek-V4-Flash
+      generation: DeepSeek-V4
+      params_b: 290.944616402
+      bf16_gb: 581.889232804
+      fits_single_gpu: false
+      released: '2026-04-24'
+      license: mit
+      gated: false
+      thinking: optional
+      notes: 'No Jinja chat template: use repository encoding scripts/deepseek-recipe; 1048576 context; mixed low-precision
+        stored weights; BF16 policy uses complete Hub total. Card documents vLLM deployment; --trust-remote-code; preview
+        checkpoints retained alongside dated GA updates.'
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-V4-Flash?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 159617149040
+      last_modified: '2026-06-22T12:12:13.000Z'
+      created_at: '2026-04-22T06:04:20.000Z'
+      pipeline_tag: text-generation
+      context_length: 1048576
+      trust_remote_code: false
+      active_params_b: 13.0
+    - hf_id: deepseek-ai/DeepSeek-R1-0528
+      generation: DeepSeek-R1
+      params_b: 684.531386
+      bf16_gb: 1369.062772
+      fits_single_gpu: false
+      released: '2025-05-28'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Reasoning checkpoint; keep official chat template and force initial <think> where recommended; no system prompt
+        recommended; vLLM example in card; context from config recorded separately.
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-R1-0528
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-R1-0528?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-0528/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-0528/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-0528/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 688586727753
+      last_modified: '2025-05-29T11:37:44.000Z'
+      created_at: '2025-05-28T09:46:42.000Z'
+      pipeline_tag: text-generation
+      context_length: 163840
+      trust_remote_code: true
+      active_params_b: 37.0
+    - hf_id: deepseek-ai/DeepSeek-R1
+      generation: DeepSeek-R1
+      params_b: 684.489845504
+      bf16_gb: 1368.979691008
+      fits_single_gpu: false
+      released: '2025-01-20'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Reasoning checkpoint; keep official chat template and force initial <think> where recommended; no system prompt
+        recommended; vLLM example in card; context from config recorded separately.
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-R1
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-R1?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 688586727753
+      last_modified: '2025-03-27T04:01:59.000Z'
+      created_at: '2025-01-20T03:46:07.000Z'
+      pipeline_tag: text-generation
+      context_length: 163840
+      trust_remote_code: true
+      active_params_b: 37.0
+    - hf_id: deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+      generation: DeepSeek-R1
+      params_b: 8.19073536
+      bf16_gb: 16.38147072
+      fits_single_gpu: true
+      released: '2025-05-29'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Reasoning checkpoint; keep official chat template and force initial <think> where recommended; no system prompt
+        recommended; vLLM example in card; context from config recorded separately.
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 16381516796
+      last_modified: '2025-05-29T13:13:34.000Z'
+      created_at: '2025-05-29T11:07:47.000Z'
+      pipeline_tag: text-generation
+      context_length: 131072
+      trust_remote_code: false
+      revision: 6e8885a6ff5c1dc5201574c8fd700323f23c25fa
+      verified_at: '2026-10-20T20:46:53.273225+00:00'
+    - hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+      generation: DeepSeek-R1
+      params_b: 1.777088
+      bf16_gb: 3.554176
+      fits_single_gpu: true
+      released: '2025-01-20'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Reasoning checkpoint; keep official chat template and force initial <think> where recommended; no system prompt
+        recommended; vLLM example in card; context from config recorded separately.
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 3554214621
+      last_modified: '2025-02-24T03:32:35.000Z'
+      created_at: '2025-01-20T09:04:18.000Z'
+      pipeline_tag: text-generation
+      context_length: 131072
+      trust_remote_code: false
+    - hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+      generation: DeepSeek-R1
+      params_b: 7.615616512
+      bf16_gb: 15.231233024
+      fits_single_gpu: true
+      released: '2025-01-20'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Reasoning checkpoint; keep official chat template and force initial <think> where recommended; no system prompt
+        recommended; vLLM example in card; context from config recorded separately.
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 15231271850
+      last_modified: '2025-02-24T03:32:20.000Z'
+      created_at: '2025-01-20T09:16:14.000Z'
+      pipeline_tag: text-generation
+      context_length: 131072
+      trust_remote_code: false
+    - hf_id: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+      generation: DeepSeek-R1
+      params_b: 8.030261248
+      bf16_gb: 16.060522496
+      fits_single_gpu: true
+      released: '2025-01-20'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Reasoning checkpoint; keep official chat template and force initial <think> where recommended; no system prompt
+        recommended; vLLM example in card; context from config recorded separately. MIT release also inherits Llama 3.1/3.3
+        base-model license obligations described in card.
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 16060556354
+      last_modified: '2025-02-24T03:32:07.000Z'
+      created_at: '2025-01-20T09:09:42.000Z'
+      pipeline_tag: text-generation
+      context_length: 131072
+      trust_remote_code: false
+    - hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+      generation: DeepSeek-R1
+      params_b: 14.770033664
+      bf16_gb: 29.540067328
+      fits_single_gpu: true
+      released: '2025-01-20'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Reasoning checkpoint; keep official chat template and force initial <think> where recommended; no system prompt
+        recommended; vLLM example in card; context from config recorded separately.
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 29540133872
+      last_modified: '2025-02-24T03:31:45.000Z'
+      created_at: '2025-01-20T09:18:27.000Z'
+      pipeline_tag: text-generation
+      context_length: 131072
+      trust_remote_code: false
+    - hf_id: deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+      generation: DeepSeek-R1
+      params_b: 32.763876352
+      bf16_gb: 65.527752704
+      fits_single_gpu: false
+      released: '2025-01-20'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Reasoning checkpoint; keep official chat template and force initial <think> where recommended; no system prompt
+        recommended; vLLM example in card; context from config recorded separately.
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 65527841532
+      last_modified: '2025-02-24T03:31:29.000Z'
+      created_at: '2025-01-20T09:19:00.000Z'
+      pipeline_tag: text-generation
+      context_length: 131072
+      trust_remote_code: false
+    - hf_id: deepseek-ai/DeepSeek-R1-Distill-Llama-70B
+      generation: DeepSeek-R1
+      params_b: 70.553706496
+      bf16_gb: 141.107412992
+      fits_single_gpu: false
+      released: '2025-01-20'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Reasoning checkpoint; keep official chat template and force initial <think> where recommended; no system prompt
+        recommended; vLLM example in card; context from config recorded separately. MIT release also inherits Llama 3.1/3.3
+        base-model license obligations described in card.
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-70B
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-R1-Distill-Llama-70B?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-70B/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-70B/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-70B/blob/main/tokenizer_config.json
+      - https://api-docs.deepseek.com/updates/
+      weights_bytes: 141107497606
+      last_modified: '2025-02-24T03:31:15.000Z'
+      created_at: '2025-01-20T09:13:33.000Z'
+      pipeline_tag: text-generation
+      context_length: 131072
+      trust_remote_code: false
+    - hf_id: deepseek-ai/DeepSeek-V2-Lite-Chat
+      generation: DeepSeek-V2
+      params_b: 15.706484224
+      bf16_gb: 31.412968448
+      fits_single_gpu: true
+      released: '2024-05-16'
+      license: deepseek
+      gated: false
+      thinking: none
+      notes: Older small chat baseline, not a new release or successor to R1; card specifies 32K context although config max_position_embeddings
+        is 163840; vLLM example uses trust_remote_code=True and enforce_eager=True; use bundled User/Assistant template.
+      card_url: https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat
+      source_urls:
+      - https://huggingface.co/api/models/deepseek-ai/DeepSeek-V2-Lite-Chat?blobs=true
+      - https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/blob/main/README.md
+      - https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/blob/main/config.json
+      - https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite-Chat/blob/main/tokenizer_config.json
+      weights_bytes: 31413626576
+      last_modified: '2024-06-25T08:36:27.000Z'
+      created_at: '2024-05-15T05:34:09.000Z'
+      pipeline_tag: text-generation
+      context_length: 163840
+      trust_remote_code: true
+      active_params_b: 2.4
+    notes: Track V4.1/V4 plus the independent R1/distill line; V2-Lite-Chat retained as an older small chat baseline. DeepSeek-V2-Lite
+      in the registry is a base checkpoint and must not supersede R1. Exclude R1-Zero, experimental vision repositories and
+      standalone DSpark/eagle/dflash heads. API deepseek-flash now serves V4.1-Flash-1017; retired deepseek-v4-flash and deepseek-v4-flash-vision-exp
+      names redirect to it. Pro-0813 supersedes Pro preview. All V4/V4.1 subjects need multiple GPUs at BF16.
+  kimi:
+    newest_generation: Kimi K3
+    released: '2026-07-16'
+    members:
+    - hf_id: moonshotai/Kimi-K3
+      generation: Kimi K3
+      params_b: 2779.931837184
+      bf16_gb: 5559.863674368
+      fits_single_gpu: false
+      released: '2026-07-16'
+      license: kimi-k3
+      gated: false
+      thinking: always
+      notes: Native multimodal main-line model; 1M context; preserve full reasoning_content/tool_calls on every turn; reasoning_effort
+        low/high/max, max default; card links vLLM recipe; Kimi K3 custom license.
+      card_url: https://huggingface.co/moonshotai/Kimi-K3
+      source_urls:
+      - https://huggingface.co/api/models/moonshotai/Kimi-K3?blobs=true
+      - https://huggingface.co/moonshotai/Kimi-K3/blob/main/README.md
+      - https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json
+      - https://huggingface.co/moonshotai/Kimi-K3/blob/main/tokenizer_config.json
+      - https://www.kimi.com/code/docs/en/kimi-code/whats-new.html
+      - https://www.kimi.com/blog/kimi-k3
+      weights_bytes: 1560936091448
+      last_modified: '2026-09-02T02:22:41.000Z'
+      created_at: '2026-06-13T06:42:57.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 1048576
+      trust_remote_code: true
+      active_params_b: 104.0
+    - hf_id: moonshotai/Kimi-K2.6
+      generation: Kimi K2.6
+      params_b: 1026.879376368
+      bf16_gb: 2053.758752736
+      fits_single_gpu: false
+      released: null
+      license: modified-mit
+      gated: false
+      thinking: optional
+      notes: Thinking and Instant modes; 262144 context; preserve_thinking available but off by default; card links inference
+        engines; Modified MIT license. Exact release day not established; created_at and last_modified are not release dates.
+      card_url: https://huggingface.co/moonshotai/Kimi-K2.6
+      source_urls:
+      - https://huggingface.co/api/models/moonshotai/Kimi-K2.6?blobs=true
+      - https://huggingface.co/moonshotai/Kimi-K2.6/blob/main/README.md
+      - https://huggingface.co/moonshotai/Kimi-K2.6/blob/main/config.json
+      - https://huggingface.co/moonshotai/Kimi-K2.6/blob/main/tokenizer_config.json
+      - https://www.kimi.com/blog/kimi-k2-6
+      - https://huggingface.co/moonshotai/Kimi-K2.6/blob/main/chat_template.jinja
+      weights_bytes: 595177988208
+      last_modified: '2026-05-19T09:01:54.000Z'
+      created_at: '2026-04-14T04:23:36.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 262144
+      trust_remote_code: true
+      active_params_b: 32.0
+    - hf_id: moonshotai/Moonlight-16B-A3B-Instruct
+      generation: Moonlight
+      params_b: 15.960111936
+      bf16_gb: 31.920223872
+      fits_single_gpu: true
+      released: null
+      license: mit
+      gated: false
+      thinking: none
+      notes: Retained independent small instruct line; card specifies 8192 context; bundled chat template; trust_remote_code=True
+        in card and config; card links vLLM. Exact release day not established; created_at and last_modified are not release
+        dates.
+      card_url: https://huggingface.co/moonshotai/Moonlight-16B-A3B-Instruct
+      source_urls:
+      - https://huggingface.co/api/models/moonshotai/Moonlight-16B-A3B-Instruct?blobs=true
+      - https://huggingface.co/moonshotai/Moonlight-16B-A3B-Instruct/blob/main/README.md
+      - https://huggingface.co/moonshotai/Moonlight-16B-A3B-Instruct/blob/main/config.json
+      - https://huggingface.co/moonshotai/Moonlight-16B-A3B-Instruct/blob/main/tokenizer_config.json
+      weights_bytes: 31920879456
+      last_modified: '2026-01-30T04:52:43.000Z'
+      created_at: '2025-02-22T04:15:17.000Z'
+      pipeline_tag: text-generation
+      context_length: 8192
+      trust_remote_code: true
+      active_params_b: 3.0
+      revision: 4e735b07a89f73647dfab71ab91b840f362ede5b
+      verified_at: '2026-10-20T20:46:53.273225+00:00'
+    notes: Kimi K3 and K2.6 retained with independent Moonlight instruct line. Dedicated Kimi-VL/audio/dev and coding-specialized
+      K2.7-Code are excluded from general chat subjects. Kimi K3 is unified multimodal, not a dedicated vision variant; evaluated
+      as text. Kimi K3 license differs from K2 Modified MIT. K3 release is July 16, 2026, not September 2 Hub modification
+      date.
+  glm:
+    newest_generation: GLM-5.3
+    released: '2026-08-14'
+    members:
+    - hf_id: zai-org/GLM-5.3
+      generation: GLM-5.3
+      params_b: 753.32994048
+      bf16_gb: 1506.65988096
+      fits_single_gpu: false
+      released: '2026-08-14'
+      license: glm-5.3
+      gated: false
+      thinking: always
+      notes: 1048576 context; separate chat_template.jinja; reasoning_effort low/high/max (default max); clear_thinking=false
+        by default, set true for chat; card links vLLM recipe. Official BF16 checkpoint zai-org/GLM-5.3-BF16 verified with
+        identical parameter total; blog announcement predates Hub repository creation. Active parameter count not established
+        in fetched card; not inferred from predecessor.
+      card_url: https://huggingface.co/zai-org/GLM-5.3
+      source_urls:
+      - https://huggingface.co/api/models/zai-org/GLM-5.3?blobs=true
+      - https://huggingface.co/zai-org/GLM-5.3/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-5.3/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-5.3/blob/main/tokenizer_config.json
+      - https://z.ai/blog/glm-5.3
+      - https://huggingface.co/api/models/zai-org/GLM-5.3-BF16?blobs=true
+      - https://huggingface.co/zai-org/GLM-5.3-BF16/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-5.3-BF16/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-5.3-BF16/blob/main/tokenizer_config.json
+      - https://huggingface.co/zai-org/GLM-5.3/blob/main/chat_template.jinja
+      weights_bytes: 755632050320
+      last_modified: '2026-10-14T12:22:48.000Z'
+      created_at: '2026-08-25T06:42:50.000Z'
+      pipeline_tag: text-generation
+      context_length: 1048576
+      trust_remote_code: false
+      bf16_hf_id: zai-org/GLM-5.3-BF16
+      active_params_b: null
+    - hf_id: zai-org/GLM-5.3-Flash
+      generation: GLM-5.3
+      params_b: 321.32303139
+      bf16_gb: 642.64606278
+      fits_single_gpu: false
+      released: '2026-08-26'
+      license: mit
+      gated: false
+      thinking: always
+      notes: 1048576 context; separate chat_template.jinja; reasoning_effort low/high/max (default max); clear_thinking=false
+        by default, set true for chat; card links vLLM recipe. Official BF16 checkpoint zai-org/GLM-5.3-Flash-BF16 verified
+        with identical parameter total; blog announcement predates Hub repository creation.
+      card_url: https://huggingface.co/zai-org/GLM-5.3-Flash
+      source_urls:
+      - https://huggingface.co/api/models/zai-org/GLM-5.3-Flash?blobs=true
+      - https://huggingface.co/zai-org/GLM-5.3-Flash/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-5.3-Flash/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-5.3-Flash/blob/main/tokenizer_config.json
+      - https://z.ai/blog/glm-5.3-flash
+      - https://huggingface.co/api/models/zai-org/GLM-5.3-Flash-BF16?blobs=true
+      - https://huggingface.co/zai-org/GLM-5.3-Flash-BF16/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-5.3-Flash-BF16/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-5.3-Flash-BF16/blob/main/tokenizer_config.json
+      - https://huggingface.co/zai-org/GLM-5.3-Flash/blob/main/chat_template.jinja
+      weights_bytes: 328337455672
+      last_modified: '2026-10-15T06:32:52.000Z'
+      created_at: '2026-08-25T06:43:14.000Z'
+      pipeline_tag: image-text-to-text
+      context_length: 1048576
+      trust_remote_code: false
+      active_params_b: 18.0
+      bf16_hf_id: zai-org/GLM-5.3-Flash-BF16
+    - hf_id: zai-org/GLM-5.2
+      generation: GLM-5.2
+      params_b: 753.32994048
+      bf16_gb: 1506.65988096
+      fits_single_gpu: false
+      released: '2026-06-16'
+      license: mit
+      gated: false
+      thinking: optional
+      notes: 1048576 context; separate chat_template.jinja; enable_thinking=false supported; vLLM >=0.23.0 documented; card
+        links vLLM recipe. Active parameter count not established in fetched card; not inferred from predecessor.
+      card_url: https://huggingface.co/zai-org/GLM-5.2
+      source_urls:
+      - https://huggingface.co/api/models/zai-org/GLM-5.2?blobs=true
+      - https://huggingface.co/zai-org/GLM-5.2/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-5.2/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-5.2/blob/main/tokenizer_config.json
+      - https://z.ai/blog/glm-5.2
+      - https://huggingface.co/zai-org/GLM-5.2/blob/main/chat_template.jinja
+      weights_bytes: 1506667387408
+      last_modified: '2026-09-01T11:36:01.000Z'
+      created_at: '2026-06-16T07:39:20.000Z'
+      pipeline_tag: text-generation
+      context_length: 1048576
+      trust_remote_code: false
+      active_params_b: null
+    - hf_id: zai-org/GLM-4.7-Flash
+      generation: GLM-4.7
+      params_b: 31.221488576
+      bf16_gb: 62.442977152
+      fits_single_gpu: false
+      released: null
+      license: mit
+      gated: false
+      thinking: optional
+      notes: 31.221488576B total exceeds 60 GB BF16 cutoff; vLLM --reasoning-parser glm45; preserve thinking for multi-turn
+        tasks. Exact release day not established; created_at and last_modified are not release dates.
+      card_url: https://huggingface.co/zai-org/GLM-4.7-Flash
+      source_urls:
+      - https://huggingface.co/api/models/zai-org/GLM-4.7-Flash?blobs=true
+      - https://huggingface.co/zai-org/GLM-4.7-Flash/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-4.7-Flash/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-4.7-Flash/blob/main/tokenizer_config.json
+      - https://huggingface.co/zai-org/GLM-4.7-Flash/blob/main/chat_template.jinja
+      weights_bytes: 62444175504
+      last_modified: '2026-01-29T08:06:19.000Z'
+      created_at: '2026-01-19T06:28:10.000Z'
+      pipeline_tag: text-generation
+      context_length: 202752
+      trust_remote_code: false
+      active_params_b: 3.0
+    - hf_id: zai-org/GLM-4.5-Air
+      generation: GLM-4.5
+      params_b: 110.468824832
+      bf16_gb: 220.937649664
+      fits_single_gpu: false
+      released: null
+      license: mit
+      gated: false
+      thinking: optional
+      notes: Retained Air tier; thinking/non-thinking hybrid; vLLM implementation linked in card. Exact release day not established;
+        created_at and last_modified are not release dates.
+      card_url: https://huggingface.co/zai-org/GLM-4.5-Air
+      source_urls:
+      - https://huggingface.co/api/models/zai-org/GLM-4.5-Air?blobs=true
+      - https://huggingface.co/zai-org/GLM-4.5-Air/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-4.5-Air/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-4.5-Air/blob/main/tokenizer_config.json
+      - https://huggingface.co/zai-org/GLM-4.5-Air/blob/main/chat_template.jinja
+      weights_bytes: 220939943456
+      last_modified: '2025-08-11T13:25:37.000Z'
+      created_at: '2025-07-20T03:25:55.000Z'
+      pipeline_tag: text-generation
+      context_length: 131072
+      trust_remote_code: false
+      active_params_b: 12.0
+    - hf_id: zai-org/GLM-Z1-9B-0414
+      generation: GLM-Z1
+      params_b: 9.40027904
+      bf16_gb: 18.80055808
+      fits_single_gpu: true
+      released: null
+      license: mit
+      gated: false
+      thinking: always
+      notes: Retained small reasoning line; bundled chat template; remote-code config present. Exact release day not established;
+        created_at and last_modified are not release dates.
+      card_url: https://huggingface.co/zai-org/GLM-Z1-9B-0414
+      source_urls:
+      - https://huggingface.co/api/models/zai-org/GLM-Z1-9B-0414?blobs=true
+      - https://huggingface.co/zai-org/GLM-Z1-9B-0414/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-Z1-9B-0414/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-Z1-9B-0414/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/zai-org/GLM-4/main/README.md
+      weights_bytes: 18800618456
+      last_modified: '2025-04-28T10:07:32.000Z'
+      created_at: '2025-04-08T06:39:51.000Z'
+      pipeline_tag: text-generation
+      context_length: 32768
+      trust_remote_code: false
+      revision: b221b06fefb23ca320922cf6e68ab5f2fb82de81
+      verified_at: '2026-10-20T20:46:53.273225+00:00'
+    - hf_id: zai-org/GLM-Z1-32B-0414
+      generation: GLM-Z1
+      params_b: 32.566081536
+      bf16_gb: 65.132163072
+      fits_single_gpu: false
+      released: '2025-04-14'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Reasoning model; exceeds single-GPU BF16 cutoff; bundled template and remote-code config.
+      card_url: https://huggingface.co/zai-org/GLM-Z1-32B-0414
+      source_urls:
+      - https://huggingface.co/api/models/zai-org/GLM-Z1-32B-0414?blobs=true
+      - https://huggingface.co/zai-org/GLM-Z1-32B-0414/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-Z1-32B-0414/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-Z1-32B-0414/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/zai-org/GLM-4/main/README.md
+      weights_bytes: 65132235080
+      last_modified: '2025-04-28T10:03:37.000Z'
+      created_at: '2025-04-08T06:57:28.000Z'
+      pipeline_tag: text-generation
+      context_length: 32768
+      trust_remote_code: false
+    - hf_id: zai-org/GLM-Z1-Rumination-32B-0414
+      generation: GLM-Z1
+      params_b: 33.14174976
+      bf16_gb: 66.28349952
+      fits_single_gpu: false
+      released: '2025-04-14'
+      license: mit
+      gated: false
+      thinking: always
+      notes: Rumination reasoning subject; not a tooling repository; 33.14B total exceeds BF16 cutoff.
+      card_url: https://huggingface.co/zai-org/GLM-Z1-Rumination-32B-0414
+      source_urls:
+      - https://huggingface.co/api/models/zai-org/GLM-Z1-Rumination-32B-0414?blobs=true
+      - https://huggingface.co/zai-org/GLM-Z1-Rumination-32B-0414/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-Z1-Rumination-32B-0414/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-Z1-Rumination-32B-0414/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/zai-org/GLM-4/main/README.md
+      weights_bytes: 66283571680
+      last_modified: '2025-04-15T08:27:35.000Z'
+      created_at: '2025-04-13T12:06:04.000Z'
+      pipeline_tag: text-generation
+      context_length: 131072
+      trust_remote_code: false
+    - hf_id: zai-org/GLM-4-9B-0414
+      generation: GLM-4
+      params_b: 9.40027904
+      bf16_gb: 18.80055808
+      fits_single_gpu: true
+      released: null
+      license: mit
+      gated: false
+      thinking: none
+      notes: Retained small dialogue tier; bundled chat template and remote-code config. Exact release day not established;
+        created_at and last_modified are not release dates.
+      card_url: https://huggingface.co/zai-org/GLM-4-9B-0414
+      source_urls:
+      - https://huggingface.co/api/models/zai-org/GLM-4-9B-0414?blobs=true
+      - https://huggingface.co/zai-org/GLM-4-9B-0414/blob/main/README.md
+      - https://huggingface.co/zai-org/GLM-4-9B-0414/blob/main/config.json
+      - https://huggingface.co/zai-org/GLM-4-9B-0414/blob/main/tokenizer_config.json
+      - https://raw.githubusercontent.com/zai-org/GLM-4/main/README.md
+      weights_bytes: 18800618456
+      last_modified: '2025-04-14T15:40:17.000Z'
+      created_at: '2025-04-07T11:57:02.000Z'
+      pipeline_tag: text-generation
+      context_length: 32768
+      trust_remote_code: false
+    notes: Newest generations GLM-5.3 and GLM-5.2, plus retained Flash/Air/small dialogue/Z1 tiers. Canonical model IDs represent
+      one subject each; separate official BF16 IDs are verified and recorded for GLM-5.3. GLM-5.3 custom license; GLM-5.3-Flash
+      remains MIT. Dedicated vision/phone/tooling/base/quantized variants excluded; unified multimodal Flash retained for
+      text. Vendor blogs announce GLM-5.3 August 14 and Flash August 26; Hub lastModified in October is not release evidence.
+      GLM-4.7-Flash does not fit this policy.
+  claude:
+    newest_generation: Claude 5.5
+    released: '2026-09-22'
+    members:
+    - api_id: claude-opus-5-5
+      generation: Claude 5.5
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-09-22'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: 1M context, 128K output; adaptive thinking. Parameters undisclosed; BF16/GPU fields not applicable to hosted
+        access.
+      card_url: https://www.anthropic.com/claude-opus-5-5-system-card
+      source_urls:
+      - https://docs.anthropic.com/en/docs/about-claude/models
+      - https://www.anthropic.com/claude-opus-5-5-system-card
+      - https://platform.claude.com/docs/en/release-notes/overview
+      - https://www.anthropic.com/system-cards
+      context_length: 1000000
+      access: anthropic:claude-opus-5-5
+    - api_id: claude-sonnet-5-5
+      generation: Claude 5.5
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-09-28'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: 1M context, 128K output; adaptive thinking. Full thinking disable rejected; between_tools mode supported. Parameters
+        undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://www.anthropic.com/claude-sonnet-5-5-system-card
+      source_urls:
+      - https://docs.anthropic.com/en/docs/about-claude/models
+      - https://www.anthropic.com/claude-sonnet-5-5-system-card
+      - https://platform.claude.com/docs/en/release-notes/overview
+      - https://www.anthropic.com/system-cards
+      - https://openrouter.ai/api/v1/models
+      context_length: 1000000
+      access: openrouter:anthropic/claude-sonnet-5.5
+    - api_id: claude-haiku-5-5
+      generation: Claude 5.5
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-10-07'
+      license: Proprietary API terms
+      gated: null
+      thinking: optional
+      notes: 1M context, 128K output; adaptive thinking. Parameters undisclosed; BF16/GPU fields not applicable to hosted
+        access.
+      card_url: https://www.anthropic.com/claude-haiku-5-5-system-card
+      source_urls:
+      - https://docs.anthropic.com/en/docs/about-claude/models
+      - https://www.anthropic.com/claude-haiku-5-5-system-card
+      - https://platform.claude.com/docs/en/release-notes/overview
+      - https://www.anthropic.com/system-cards
+      - https://openrouter.ai/api/v1/models
+      context_length: 1000000
+      access: openrouter:anthropic/claude-haiku-5.5
+    - api_id: claude-fable-5-1
+      generation: Claude 5.1
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-09-01'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: 1M context, 128K output; adaptive thinking. Parameters undisclosed; BF16/GPU fields not applicable to hosted
+        access.
+      card_url: https://www.anthropic.com/claude-fable-5-1-mythos-5-1-system-card
+      source_urls:
+      - https://docs.anthropic.com/en/docs/about-claude/models
+      - https://www.anthropic.com/claude-fable-5-1-mythos-5-1-system-card
+      - https://platform.claude.com/docs/en/release-notes/overview
+      - https://www.anthropic.com/system-cards
+      context_length: 1000000
+      access: anthropic:claude-fable-5-1
+    - api_id: claude-mythos-5-1
+      generation: Claude 5.1
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-09-01'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: 1M context, 128K output; adaptive thinking. Restricted Project Glasswing model; no usable lab route verified;
+        list only. Parameters undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://www.anthropic.com/claude-fable-5-1-mythos-5-1-system-card
+      source_urls:
+      - https://docs.anthropic.com/en/docs/about-claude/models
+      - https://www.anthropic.com/claude-fable-5-1-mythos-5-1-system-card
+      - https://platform.claude.com/docs/en/release-notes/overview
+      - https://www.anthropic.com/system-cards
+      context_length: 1000000
+    notes: 'Current general Claude lineup: Fable 5.1, Opus/Sonnet/Haiku 5.5; restricted Mythos 5.1 has a shared system card
+      but no lab route. Existing Opus/Fable routes retained; Sonnet/Haiku OpenRouter slugs verified. Sonnet 4.5 scheduled
+      retirement November 30, 2026. Do not infer provider API keys from an access prefix.'
+  gpt:
+    newest_generation: GPT-6.1
+    released: '2026-09-29'
+    members:
+    - api_id: gpt-6.1-sol
+      generation: GPT-6.1
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-09-29'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: 1050000 context, 128000 output; use Responses API for tools. reasoning_effort none/minimal unsupported; Chat
+        Completions supports no tool calls. Parameters undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://cdn.openai.com/pdf/38e3efcf-545e-44cd-99ec-2b7eb395f4cc/oai_GPT_6_1_Sol.pdf
+      source_urls:
+      - https://platform.openai.com/docs/models
+      - https://cdn.openai.com/pdf/38e3efcf-545e-44cd-99ec-2b7eb395f4cc/oai_GPT_6_1_Sol.pdf
+      - https://developers.openai.com/api/docs/models/gpt-6.1-sol
+      - https://developers.openai.com/api/docs/changelog
+      - https://openrouter.ai/api/v1/models
+      context_length: 1050000
+      access: openrouter:openai/gpt-6.1-sol
+    - api_id: gpt-6-astra
+      generation: GPT-6
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-09-03'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: 1050000 context, 128000 output; use Responses API for tools. Parameters undisclosed; BF16/GPU fields not applicable
+        to hosted access.
+      card_url: https://deploymentsafety.openai.com/gpt-6-astra
+      source_urls:
+      - https://platform.openai.com/docs/models
+      - https://deploymentsafety.openai.com/gpt-6-astra
+      - https://developers.openai.com/api/docs/models/gpt-6-astra
+      - https://developers.openai.com/api/docs/changelog
+      context_length: 1050000
+      access: azure:gpt-6-astra
+    - api_id: gpt-6-luna
+      generation: GPT-6
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-09-22'
+      license: Proprietary API terms
+      gated: null
+      thinking: optional
+      notes: 1050000 context, 128000 output; use Responses API for tools. Chat Completions function calls require reasoning_effort=none;
+        covered by Astra system-card appendix. Parameters undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://deploymentsafety.openai.com/gpt-6-astra
+      source_urls:
+      - https://platform.openai.com/docs/models
+      - https://deploymentsafety.openai.com/gpt-6-astra
+      - https://developers.openai.com/api/docs/models/gpt-6-luna
+      - https://developers.openai.com/api/docs/changelog
+      - https://openrouter.ai/api/v1/models
+      context_length: 1050000
+      access: openrouter:openai/gpt-6-luna
+    - api_id: gpt-6-sol
+      generation: GPT-6
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-09-22'
+      license: Proprietary API terms
+      gated: null
+      thinking: optional
+      notes: 1050000 context, 128000 output; use Responses API for tools. Chat Completions function calls require reasoning_effort=none;
+        covered by Astra system-card appendix. Previous Sol version; provider recommends GPT-6.1 Sol. Parameters undisclosed;
+        BF16/GPU fields not applicable to hosted access.
+      card_url: https://deploymentsafety.openai.com/gpt-6-astra
+      source_urls:
+      - https://platform.openai.com/docs/models
+      - https://deploymentsafety.openai.com/gpt-6-astra
+      - https://developers.openai.com/api/docs/models/gpt-6-sol
+      - https://developers.openai.com/api/docs/changelog
+      - https://openrouter.ai/api/v1/models
+      context_length: 1050000
+      access: openrouter:openai/gpt-6-sol
+    notes: Latest Sol is GPT-6.1 Sol, alongside GPT-6 Astra/Luna and previous GPT-6 Sol. Astra Azure deployment is in registry;
+      new routes verified through OpenRouter. No Azure deployments inferred for new IDs. OpenRouter also lists pro-suffixed
+      GPT-6 routes, but corresponding provider model pages returned 404; exclude until provider/system-card identity is verified.
+      Specialized audio/image/cyber/science models are not general text subjects. Prior Azure GPT-5.6 Sol/GPT-5.4 deployments
+      remain registry baselines, not latest generation.
+  gemini:
+    newest_generation: Gemini 4
+    released: '2026-10-13'
+    members:
+    - api_id: gemini-4-argon
+      generation: Gemini 4
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-10-13'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: Unified 1048576 input/output context; default synchronous output 65536, long decode up to 1048576; reasoning
+        levels low/medium/high. Parameters undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://deepmind.google/models/model-cards/gemini-4-argon/
+      source_urls:
+      - https://ai.google.dev/gemini-api/docs/models
+      - https://deepmind.google/models/model-cards/gemini-4-argon/
+      - https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+      - https://ai.google.dev/gemini-api/docs/changelog
+      - https://ai.google.dev/gemini-api/docs/thinking
+      - https://openrouter.ai/api/v1/models
+      context_length: 1048576
+      access: openrouter:google/gemini-4-argon
+    - api_id: gemini-3.8-flash
+      generation: Gemini 3
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-09-02'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Parameters
+        undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://deepmind.google/models/model-cards/gemini-3-8-flash/
+      source_urls:
+      - https://ai.google.dev/gemini-api/docs/models
+      - https://deepmind.google/models/model-cards/gemini-3-8-flash/
+      - https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash
+      - https://ai.google.dev/gemini-api/docs/changelog
+      - https://ai.google.dev/gemini-api/docs/thinking
+      - https://openrouter.ai/api/v1/models
+      context_length: 1048576
+      access: openrouter:google/gemini-3.8-flash
+    - api_id: gemini-3.6-flash
+      generation: Gemini 3
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-07-21'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Minimal
+        thinking is not a guaranteed off switch. Parameters undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://deepmind.google/models/model-cards/gemini-3-6-flash/
+      source_urls:
+      - https://ai.google.dev/gemini-api/docs/models
+      - https://deepmind.google/models/model-cards/gemini-3-6-flash/
+      - https://ai.google.dev/gemini-api/docs/models/gemini-3.6-flash
+      - https://ai.google.dev/gemini-api/docs/changelog
+      - https://ai.google.dev/gemini-api/docs/thinking
+      - https://openrouter.ai/api/v1/models
+      context_length: 1048576
+      access: openrouter:google/gemini-3.6-flash
+    - api_id: gemini-3.5-flash-lite
+      generation: Gemini 3
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-07-21'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Minimal
+        thinking is not a guaranteed off switch. Parameters undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://deepmind.google/models/model-cards/gemini-3-5-flash-lite/
+      source_urls:
+      - https://ai.google.dev/gemini-api/docs/models
+      - https://deepmind.google/models/model-cards/gemini-3-5-flash-lite/
+      - https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite
+      - https://ai.google.dev/gemini-api/docs/changelog
+      - https://ai.google.dev/gemini-api/docs/thinking
+      - https://openrouter.ai/api/v1/models
+      context_length: 1048576
+      access: openrouter:google/gemini-3.5-flash-lite
+    - api_id: gemini-3.1-flash-lite
+      generation: Gemini 3
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-05-07'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Stable
+        endpoint released May 7, 2026; distinguish from the March 3 preview. Minimal thinking is not a guaranteed off switch.
+        Parameters undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://deepmind.google/models/model-cards/gemini-3-1-flash-lite/
+      source_urls:
+      - https://ai.google.dev/gemini-api/docs/models
+      - https://deepmind.google/models/model-cards/gemini-3-1-flash-lite/
+      - https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite
+      - https://ai.google.dev/gemini-api/docs/changelog
+      - https://ai.google.dev/gemini-api/docs/thinking
+      - https://openrouter.ai/api/v1/models
+      context_length: 1048576
+      access: openrouter:google/gemini-3.1-flash-lite
+    - api_id: gemini-3.1-pro-preview
+      generation: Gemini 3
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2026-02-19'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Parameters
+        undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://deepmind.google/models/model-cards/gemini-3-1-pro/
+      source_urls:
+      - https://ai.google.dev/gemini-api/docs/models
+      - https://deepmind.google/models/model-cards/gemini-3-1-pro/
+      - https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview
+      - https://ai.google.dev/gemini-api/docs/changelog
+      - https://ai.google.dev/gemini-api/docs/thinking
+      - https://openrouter.ai/api/v1/models
+      context_length: 1048576
+      access: openrouter:google/gemini-3.1-pro-preview
+    - api_id: gemini-3-flash-preview
+      generation: Gemini 3
+      params_b: null
+      bf16_gb: null
+      fits_single_gpu: false
+      released: '2025-12-17'
+      license: Proprietary API terms
+      gated: null
+      thinking: always
+      notes: Text-output subject; 1048576 input context and 65536 output; thinking levels documented in provider guide. Minimal
+        thinking is not a guaranteed off switch. Parameters undisclosed; BF16/GPU fields not applicable to hosted access.
+      card_url: https://deepmind.google/models/model-cards/gemini-3-flash/
+      source_urls:
+      - https://ai.google.dev/gemini-api/docs/models
+      - https://deepmind.google/models/model-cards/gemini-3-flash/
+      - https://ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview
+      - https://ai.google.dev/gemini-api/docs/changelog
+      - https://ai.google.dev/gemini-api/docs/thinking
+      - https://openrouter.ai/api/v1/models
+      context_length: 1048576
+      access: openrouter:google/gemini-3-flash-preview
+    notes: 'Newest major generations Gemini 4 and 3; cover Argon, Flash and Flash-Lite tiers and still-listed Pro/Flash previews.
+      General text-output subjects only; separate audio/Live/TTS/media/robotics/agent products not proposed. All listed text
+      subjects have provider model cards and verified OpenRouter slugs. October 8: gemini-3.7-flash and gemini-3.5-flash deprecated
+      and routed to gemini-3.8-flash. Gemini 2.5 access limited to existing users; not described as deprecated. customtools
+      variant of 3.1 Pro is documented but no lab route verified.'
+policy:
+  single_gpu_memory_gb: 80
+  headroom: 0.75
+  size_class_ratio: 2.5
+  stale_after_hours: 24
+verification_notes: Fetched Hub model info with blobs=true, cards, configs and tokenizer templates; weights were not downloaded.
+  params_b is exact Hub safetensors.total / 1e9; bf16_gb=2*params_b (decimal GB), including auxiliary tensors. fits_single_gpu
+  uses <=60 GB without rounding. API params_b/bf16_gb/gated are null (undisclosed/not applicable), fits_single_gpu=false denotes
+  API-only access. Released dates use vendor announcements; null means exact release day unverified. Older independent branches
+  and size tiers retained explicitly. General web searches were attempted but returned no usable results; primary sources
+  fetched directly. OpenRouter catalog verifies routes, not account entitlement. API proposals need a nullable-parameter/GPU
+  schema before automatic merge.
+planner_refresh:
+  run_id: plan-20261020-204345
+  at: '2026-10-20T20:46:53.273225+00:00'
+  scope: Incremental refresh of four open-family author feeds (20 newest repositories each) and four eligible checkpoint metadata
+    endpoints; prior full scout retained. API families not reverified.
+  prior_full_snapshot: '2026-10-20T16:53:49.857625+00:00'
+  requests:
+  - url: https://huggingface.co/api/models?author=Qwen&sort=createdAt&direction=-1&limit=20
+    status: 200
+    data:
+    - id: Qwen/Qwen-Image-2.1-Turbo
+      createdAt: '2026-10-09T04:50:01.000Z'
+    - id: Qwen/Qwen-Image-2.1-PE-I2I
+      createdAt: '2026-09-20T08:46:47.000Z'
+    - id: Qwen/Qwen-Image-2.1-PE-T2I
+      createdAt: '2026-09-20T08:45:29.000Z'
+    - id: Qwen/Qwen-Image-2.1
+      createdAt: '2026-09-14T03:47:26.000Z'
+    - id: Qwen/Qwen-Drive-1.0-4B
+      createdAt: '2026-08-27T08:14:27.000Z'
+    - id: Qwen/Qwen3.8-Flash-Next-FP8
+      createdAt: '2026-08-24T08:25:23.000Z'
+    - id: Qwen/Qwen3.8-Flash-Next
+      createdAt: '2026-08-24T08:24:59.000Z'
+    - id: Qwen/Qwen3.8-27B-FP8
+      createdAt: '2026-08-13T08:01:58.000Z'
+    - id: Qwen/Qwen3.8-2.4T-A95B
+      createdAt: '2026-08-08T01:50:52.000Z'
+    - id: Qwen/Qwen3.8-2.4T-A95B-FP8
+      createdAt: '2026-08-08T01:49:49.000Z'
+    - id: Qwen/Qwen3.8-27B
+      createdAt: '2026-08-05T08:22:59.000Z'
+    - id: Qwen/Qwen3-ForcedAligner-0.6B-hf
+      createdAt: '2026-06-26T08:42:01.000Z'
+    - id: Qwen/Qwen3-ASR-0.6B-hf
+      createdAt: '2026-06-26T08:39:00.000Z'
+    - id: Qwen/Qwen3-ASR-1.7B-hf
+      createdAt: '2026-06-26T08:34:21.000Z'
+    - id: Qwen/Qwen-AgentWorld-35B-A3B
+      createdAt: '2026-06-22T14:49:37.000Z'
+    - id: Qwen/Qwen-Image-Bench
+      createdAt: '2026-05-21T04:15:56.000Z'
+    - id: Qwen/SAE-Res-Qwen3.5-35B-A3B-Base-W128K-L0_100
+      createdAt: '2026-04-27T03:39:47.000Z'
+    - id: Qwen/SAE-Res-Qwen3.5-35B-A3B-Base-W32K-L0_50
+      createdAt: '2026-04-27T03:39:46.000Z'
+    - id: Qwen/SAE-Res-Qwen3-30B-A3B-Base-W128K-L0_100
+      createdAt: '2026-04-27T03:39:45.000Z'
+    - id: Qwen/SAE-Res-Qwen3-30B-A3B-Base-W32K-L0_50
+      createdAt: '2026-04-27T03:39:44.000Z'
+  - url: https://huggingface.co/api/models?author=deepseek-ai&sort=createdAt&direction=-1&limit=20
+    status: 200
+    data:
+    - id: deepseek-ai/DeepSeek-V4.1-Flash-1017
+      createdAt: '2026-10-17T02:40:38.000Z'
+    - id: deepseek-ai/DeepSeek-V4.1-Flash
+      createdAt: '2026-09-10T02:17:58.000Z'
+    - id: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
+      createdAt: '2026-08-31T06:16:18.000Z'
+    - id: deepseek-ai/DeepSeek-V4-Pro-0813
+      createdAt: '2026-08-13T03:05:06.000Z'
+    - id: deepseek-ai/DeepSeek-V4-Flash-0731
+      createdAt: '2026-07-31T07:30:24.000Z'
+    - id: deepseek-ai/eagle3_gemma4_12b_ttt7
+      createdAt: '2026-06-28T12:37:17.000Z'
+    - id: deepseek-ai/eagle3_qwen3_14b_ttt7
+      createdAt: '2026-06-28T12:36:20.000Z'
+    - id: deepseek-ai/eagle3_qwen3_8b_ttt7
+      createdAt: '2026-06-28T12:35:29.000Z'
+    - id: deepseek-ai/eagle3_qwen3_4b_ttt7
+      createdAt: '2026-06-28T12:34:59.000Z'
+    - id: deepseek-ai/dflash_gemma4_12b_block7
+      createdAt: '2026-06-28T12:33:24.000Z'
+    - id: deepseek-ai/dflash_qwen3_14b_block7
+      createdAt: '2026-06-28T12:31:30.000Z'
+    - id: deepseek-ai/dflash_qwen3_8b_block7
+      createdAt: '2026-06-28T12:30:07.000Z'
+    - id: deepseek-ai/dflash_qwen3_4b_block7
+      createdAt: '2026-06-28T12:29:12.000Z'
+    - id: deepseek-ai/dspark_gemma4_12b_block7
+      createdAt: '2026-06-28T12:27:36.000Z'
+    - id: deepseek-ai/dspark_qwen3_14b_block7
+      createdAt: '2026-06-28T12:25:33.000Z'
+    - id: deepseek-ai/dspark_qwen3_8b_block7
+      createdAt: '2026-06-28T12:24:08.000Z'
+    - id: deepseek-ai/dspark_qwen3_4b_block7
+      createdAt: '2026-06-28T11:29:16.000Z'
+    - id: deepseek-ai/DeepSeek-V4-Pro-DSpark
+      createdAt: '2026-06-27T03:02:56.000Z'
+    - id: deepseek-ai/DeepSeek-V4-Flash-DSpark
+      createdAt: '2026-06-27T02:27:36.000Z'
+    - id: deepseek-ai/DeepSeek-V4-Pro
+      createdAt: '2026-04-22T06:04:45.000Z'
+  - url: https://huggingface.co/api/models?author=zai-org&sort=createdAt&direction=-1&limit=20
+    status: 200
+    data:
+    - id: zai-org/GLM-5.3-Flash-BF16
+      createdAt: '2026-08-25T06:45:05.000Z'
+    - id: zai-org/GLM-5.3-BF16
+      createdAt: '2026-08-25T06:43:55.000Z'
+    - id: zai-org/GLM-5.3-Flash
+      createdAt: '2026-08-25T06:43:14.000Z'
+    - id: zai-org/GLM-5.3
+      createdAt: '2026-08-25T06:42:50.000Z'
+    - id: zai-org/GLM-5.2
+      createdAt: '2026-06-16T07:39:20.000Z'
+    - id: zai-org/GLM-5.2-FP8
+      createdAt: '2026-06-16T07:20:33.000Z'
+    - id: zai-org/SCAIL-2
+      createdAt: '2026-06-09T07:18:27.000Z'
+    - id: zai-org/GLM-5.1-FP8
+      createdAt: '2026-04-03T09:29:04.000Z'
+    - id: zai-org/GLM-5.1
+      createdAt: '2026-04-03T09:28:47.000Z'
+    - id: zai-org/GLM-5
+      createdAt: '2026-02-11T04:55:46.000Z'
+    - id: zai-org/GLM-5-FP8
+      createdAt: '2026-02-11T04:05:41.000Z'
+    - id: zai-org/GLM-OCR
+      createdAt: '2026-01-30T04:24:21.000Z'
+    - id: zai-org/GLM-4.7-Flash
+      createdAt: '2026-01-19T06:28:10.000Z'
+    - id: zai-org/GLM-Image
+      createdAt: '2026-01-08T09:39:56.000Z'
+    - id: zai-org/GLM-4.7-FP8
+      createdAt: '2025-12-22T13:41:42.000Z'
+    - id: zai-org/GLM-4.7
+      createdAt: '2025-12-22T07:45:52.000Z'
+    - id: zai-org/RealVideo
+      createdAt: '2025-12-11T08:04:35.000Z'
+    - id: zai-org/GLM-TTS
+      createdAt: '2025-12-10T09:59:48.000Z'
+    - id: zai-org/GLM-ASR-Nano-2512
+      createdAt: '2025-12-09T09:07:41.000Z'
+    - id: zai-org/AutoGLM-Phone-9B-Multilingual
+      createdAt: '2025-12-09T04:16:21.000Z'
+  - url: https://huggingface.co/api/models?author=moonshotai&sort=createdAt&direction=-1&limit=20
+    status: 200
+    data:
+    - id: moonshotai/Kimi-K3
+      createdAt: '2026-06-13T06:42:57.000Z'
+    - id: moonshotai/Kimi-K2.7-Code
+      createdAt: '2026-06-11T07:51:47.000Z'
+    - id: moonshotai/Kimi-K2.6
+      createdAt: '2026-04-14T04:23:36.000Z'
+    - id: moonshotai/Kimi-K2.5
+      createdAt: '2026-01-01T06:06:03.000Z'
+    - id: moonshotai/Kimi-K2-Thinking
+      createdAt: '2025-11-04T08:25:31.000Z'
+    - id: moonshotai/Kimi-Linear-48B-A3B-Base
+      createdAt: '2025-10-30T12:39:14.000Z'
+    - id: moonshotai/Kimi-Linear-48B-A3B-Instruct
+      createdAt: '2025-10-30T12:37:31.000Z'
+    - id: moonshotai/Kimi-K2-Instruct-0905
+      createdAt: '2025-09-03T03:34:36.000Z'
+    - id: moonshotai/Kimi-K2-Instruct
+      createdAt: '2025-07-11T00:55:12.000Z'
+    - id: moonshotai/Kimi-K2-Base
+      createdAt: '2025-07-03T12:49:14.000Z'
+    - id: moonshotai/Kimi-VL-A3B-Thinking-2506
+      createdAt: '2025-06-21T09:40:28.000Z'
+    - id: moonshotai/Kimi-Dev-72B
+      createdAt: '2025-06-16T11:40:59.000Z'
+    - id: moonshotai/Kimi-Audio-7B
+      createdAt: '2025-04-25T12:22:40.000Z'
+    - id: moonshotai/Kimi-Audio-7B-Instruct
+      createdAt: '2025-04-25T08:05:10.000Z'
+    - id: moonshotai/MoonViT-SO-400M
+      createdAt: '2025-04-10T10:02:35.000Z'
+    - id: moonshotai/Kimi-VL-A3B-Thinking
+      createdAt: '2025-04-09T08:13:53.000Z'
+    - id: moonshotai/Kimi-VL-A3B-Instruct
+      createdAt: '2025-04-09T08:07:06.000Z'
+    - id: moonshotai/Moonlight-16B-A3B-Instruct
+      createdAt: '2025-02-22T04:15:17.000Z'
+    - id: moonshotai/Moonlight-16B-A3B
+      createdAt: '2025-02-22T04:14:40.000Z'
+  - url: https://huggingface.co/api/models/Qwen/Qwen3.8-27B
+    status: 200
+    data:
+      id: Qwen/Qwen3.8-27B
+      sha: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+      lastModified: '2026-08-14T15:00:01.000Z'
+      safetensors:
+        parameters:
+          BF16: 27781427952
+        total: 27781427952
+  - url: https://huggingface.co/api/models/deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+    status: 200
+    data:
+      id: deepseek-ai/DeepSeek-R1-0528-Qwen3-8B
+      sha: 6e8885a6ff5c1dc5201574c8fd700323f23c25fa
+      lastModified: '2025-05-29T13:13:34.000Z'
+      safetensors:
+        parameters:
+          BF16: 8190735360
+        total: 8190735360
+  - url: https://huggingface.co/api/models/zai-org/GLM-Z1-9B-0414
+    status: 200
+    data:
+      id: zai-org/GLM-Z1-9B-0414
+      sha: b221b06fefb23ca320922cf6e68ab5f2fb82de81
+      lastModified: '2025-04-28T10:07:32.000Z'
+      safetensors:
+        parameters:
+          BF16: 9400279040
+        total: 9400279040
+  - url: https://huggingface.co/api/models/moonshotai/Moonlight-16B-A3B-Instruct
+    status: 200
+    data:
+      id: moonshotai/Moonlight-16B-A3B-Instruct
+      sha: 4e735b07a89f73647dfab71ab91b840f362ede5b
+      lastModified: '2026-01-30T04:52:43.000Z'
+      safetensors:
+        parameters:
+          BF16: 15960111936
+        total: 15960111936

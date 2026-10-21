@@ -1,0 +1,5 @@
+#!/bin/bash
+# neurico-host - run NeuriCo natively on this machine (no Docker).
+# Equivalent to `./neurico --host <cmd>`; see docs/HOST_MODE.md.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NEURICO_MODE=host exec "$SCRIPT_DIR/docker/run.sh" "$@"

@@ -40,6 +40,7 @@ run experiments, analyze results, and document the work.
 
 - **Docker:** [Git](https://git-scm.com/) and a running [Docker](https://docs.docker.com/get-docker/) installation
 - **Local `uv`:** Git, Python 3.10+, and [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
+- **Host mode:** the same `./neurico` commands without Docker (`./neurico --host <cmd>` or `./neurico-host <cmd>`), for compute servers; see [docs/HOST_MODE.md](docs/HOST_MODE.md)
 
 **Provider access:**
 
@@ -87,6 +88,9 @@ uv sync
 cp .env.example .env
 claude  # or: codex, gemini
 ```
+
+On a server without Docker, `./neurico --host build` replaces `uv sync` and
+every `./neurico` command below works with `--host` (see [docs/HOST_MODE.md](docs/HOST_MODE.md)).
 
 More information about provider authentication, workspace location, and
 optional services is available under [Configuration](#configuration).
@@ -205,7 +209,7 @@ and enforces an outer wall-clock deadline over the complete request.
 | --- | --- | --- |
 | `OPENROUTER_KEY` | Yes, unless `OPENAI_API_KEY` is set | OpenRouter access for paper-finder, IdeaHub conversion, LLM repo naming, and experiments that need it |
 | `OPENAI_API_KEY` | Yes, unless `OPENROUTER_KEY` is set | Direct OpenAI access (paper-finder's fallback when both keys are set) for paper-finder, IdeaHub conversion, LLM repo naming, and experiments that need it |
-| `NEURICO_EVAL_VERIFIER_MODEL` | No | Override the verifier model (`openai/gpt-4.1` through OpenRouter or `gpt-4.1` through OpenAI by default) |
+| `NEURICO_EVAL_VERIFIER_MODEL` | No | Override the verifier model (`openai/gpt-4.1` through OpenRouter or `gpt-4.1` through OpenAI by default; routes and defaults live under `roles.eval_verifier` in `config/agents.yaml`) |
 | `S2_API_KEY` | For paper-finder | Semantic Scholar API key ([get here](https://www.semanticscholar.org/product/api)) |
 | `COHERE_API_KEY` | No | Improves paper-finder ranking (~7% boost) |
 
@@ -219,6 +223,12 @@ experiments
 | `OPENROUTER_KEY` | OpenRouter multi-model access |
 | `HF_TOKEN` | Hugging Face model/dataset access |
 | `WANDB_API_KEY` | Weights & Biases experiment tracking |
+| `NEURICO_AZURE=1` + `AZURE_OPENAI_API_KEY`, `AZURE_FOUNDRY_RESOURCE` | Azure OpenAI for agents' own API calls (adds the `azure-models` skill); see [`docs/AGENT_AUTH.md`](docs/AGENT_AUTH.md) |
+
+**Agent backbone auth** — which account the agent CLI itself runs on: `NEURICO_AGENT_AUTH=oauth`
+(default, the CLI's login) or `azure` (Codex on the Azure OpenAI deployments; per run
+`./neurico run <idea_id> --provider codex --agent-auth azure --model gpt-6-astra`). Details and
+the allowed combinations are in [`docs/AGENT_AUTH.md`](docs/AGENT_AUTH.md).
 
 </details>
 

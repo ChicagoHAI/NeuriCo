@@ -1,0 +1,51 @@
+# Model families the engine tracks. This is data, not code: the model scout agent reads it to
+# decide where to look (Hugging Face authors, vendor blogs, API catalogs) and what counts as a
+# member; nothing about family names or naming conventions is hard-coded in Python.
+#
+# role: open-weight families are evaluated locally (vllm); api families are evaluated through
+# their APIs (research keys) and also serve as agent backbones.
+families:
+  - id: qwen
+    vendor: Alibaba (Qwen team)
+    role: open-weight
+    hf_authors: [Qwen]
+    sources: [https://huggingface.co/Qwen, https://qwenlm.github.io/blog/, https://github.com/QwenLM]
+    scope: "main-line chat/instruct/thinking text models of the newest generation, all sizes; base, VL, audio, coder, math, guard and quantized variants are not subjects"
+  - id: deepseek
+    vendor: DeepSeek
+    role: open-weight
+    hf_authors: [deepseek-ai]
+    sources: [https://huggingface.co/deepseek-ai, https://api-docs.deepseek.com/news/]
+    scope: "V-series and R-series chat models plus their official distills; speculative-decoding heads and experimental repos are not subjects"
+  - id: kimi
+    vendor: Moonshot AI
+    role: open-weight
+    hf_authors: [moonshotai]
+    sources: [https://huggingface.co/moonshotai, https://moonshotai.github.io/]
+    scope: "Kimi K-series and Moonlight instruct models; vision/audio/dev variants are not subjects"
+  - id: glm
+    vendor: Zhipu AI / Z.ai
+    role: open-weight
+    hf_authors: [zai-org]
+    sources: [https://huggingface.co/zai-org, https://z.ai/blog]
+    scope: "GLM chat/flash/air models and GLM-Z reasoning models; vision, phone-agent and tooling repos are not subjects"
+  - id: claude
+    vendor: Anthropic
+    role: api
+    sources: [https://docs.anthropic.com/en/docs/about-claude/models, https://www.anthropic.com/news]
+    scope: "current Claude models with system cards"
+  - id: gpt
+    vendor: OpenAI
+    role: api
+    sources: [https://platform.openai.com/docs/models, https://openai.com/news/]
+    scope: "current GPT models with system cards; the lab's Azure deployments are listed in catalog/models.yaml"
+  - id: gemini
+    vendor: Google DeepMind
+    role: api
+    sources: [https://ai.google.dev/gemini-api/docs/models, https://deepmind.google/models/]
+    scope: "current Gemini models with model cards"
+policy:
+  single_gpu_memory_gb: 80          # a subject must fit one GPU in bf16 with headroom unless multi-GPU serving exists
+  headroom: 0.75
+  size_class_ratio: 2.5             # an entry is superseded only by a newer member within this parameter ratio
+  stale_after_hours: 24             # the daemon re-runs the scout when models_latest.yaml is older than this

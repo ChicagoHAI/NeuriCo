@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "statement": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1008,
+      "description": "<= 120 words, written for the reader; no ids, file names or pipeline talk (code checks words; maxLength is the character backstop)."
+    },
+    "why_now": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1008,
+      "description": "<= 120 words, written for the reader; no ids, file names or pipeline talk (code checks words; maxLength is the character backstop)."
+    },
+    "evidence_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1
+    },
+    "blocking": {
+      "type": "string",
+      "minLength": 1
+    },
+    "what_would_change_our_mind": {
+      "type": "string",
+      "minLength": 1
+    },
+    "alternatives_considered": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "why_not": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "title",
+    "statement",
+    "why_now",
+    "evidence_ids",
+    "blocking",
+    "what_would_change_our_mind"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,21 @@
+# Raw fetched sources stay local (835 MB); every note cites its URL and the local copy name.
+sources/
+# Engine runtime state
+queue/state.json
+queue/proposals/*/prompt.md
+queue/pending/
+queue/running/
+queue/done/
+queue/failed/
+results/
+runs/
+findings/
+reports/
+inbox/
+logs/
+kb.sqlite*
+.kb.sqlite.*.new
+kb.sqlite.tmp
+# installed by every index rebuild from templates/skills/safety-kb/scripts/kb.py
+tools/kb.py
+.neurico/

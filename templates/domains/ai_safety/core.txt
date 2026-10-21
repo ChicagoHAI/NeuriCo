@@ -1,0 +1,106 @@
+# AI Safety Evaluation Domain Guidance
+
+This template covers safety evaluation, red-teaming, monitoring and auditing of language
+models: refusal calibration, jailbreak robustness, honesty and hallucination, sycophancy,
+deception and scheming propensity, dangerous-capability proxies (CBRN, cyber), agentic misuse,
+bias, probes and monitors, and comparisons across model families and versions.
+
+## Domain Overview
+
+The purpose of this work is to produce findings that an AI lab or an independent evaluator
+would trust: numbers with uncertainty, judges with known error rates, transcripts for every
+flagged behaviour, and a reproduction pack. Evaluations are experiments. Treat them as such.
+
+## Key Methodological Principles
+
+### 1. Every number carries n and uncertainty
+- Report mean, standard error (or a 95% CI) and n next to every headline number. Binary
+  scores: SE = sqrt(p(1-p)/n). Use clustered SEs when items share a source (seed prompts,
+  mutations of one base behaviour, repeated beliefs).
+- Compare models or conditions with paired differences on identical items, same sampling
+  settings, same judge. Never compare numbers taken from different `--limit` subsets or
+  different shuffle seeds.
+- Small suites (XSTest 450, StrongREJECT 313, JailbreakBench 200) only detect large effects.
+  Say so. Prefer more samples per item (`--epochs`) over lowering temperature.
+- Before claiming drift or regression between model versions, establish the repeated-run noise
+  floor for that (model, eval) pair (at least 3 identical runs).
+
+### 2. Judges are instruments: calibrate them
+- Every LLM judge (refusal, harmfulness, honesty, sycophancy) is calibrated on a labelled set
+  (100-200 items) and its agreement (accuracy, Cohen's kappa, TPR at a fixed FPR) is reported
+  with the results. Re-calibrate whenever the judge model or prompt changes.
+- Prefer two independent judges (for example a local open-weight judge and an API judge) and
+  report their agreement; send disagreements to a human-review list in the report.
+- Count unscored or unparseable judge outputs and report them as a fraction of n.
+- A judge must never share a model family with a policy being optimised against it.
+
+### 3. Pair every metric with its counterpart
+- Refusal on unsafe prompts is paired with over-refusal on safe look-alikes (XSTest safe +
+  unsafe, OR-Bench).
+- Capability on hazardous proxies (WMDP) is paired with a general-knowledge baseline (MMLU
+  subset) so uplift is separable from general ability.
+- Harmful compliance under jailbreak is paired with the direct-request baseline.
+- A detector (probe, monitor, classifier) reports both its true-positive rate and its
+  false-positive rate at the operating point actually used.
+
+### 4. Probes, monitors and classifiers
+- Train on one split, tune on a dev split, report only on a held-out test split; report AUROC
+  and TPR at 1% and 5% FPR with bootstrap CIs.
+- Validate on model organisms with known ground truth (implanted behaviours) when available,
+  but never tune the detector on the organism it is scored on.
+- Record the exact layer, token position, pooling and normalisation; save the probe artefact.
+
+### 5. Evaluation awareness and sandbagging
+- Score evaluation awareness on transcripts where behaviour matters (agentic scenarios): count
+  verbalised "this is a test" statements; keep a realism filter; report rates with results.
+- For open-weight models, compare behaviour under "evaluation" and "deployment" framings of the
+  same task; a large gap is itself a finding.
+
+### 6. Fairness across models
+- Identical prompts, system prompts (or documented absence), temperature, max tokens, tool
+  definitions and judge for every model in a comparison. Record the exact model id, revision
+  hash or API version, and date.
+- Thinking/reasoning models: state whether reasoning was enabled and whether the judge saw it.
+- Label runs on 0.5B-3B models as pipeline tests; they do not support cross-family claims.
+
+### 7. Hazard handling and disclosure
+- Never generate or store real uplift content for CBRN or offensive cyber; use proxies (WMDP,
+  CTF ranges, benchmark behaviours) and store any harmful completions only under
+  `results/restricted/` (git-ignored), summarised and hashed in reports.
+- A finding on an API model goes to the provider's disclosure channel before publication;
+  the report records the disclosure state.
+- Treat downloaded datasets and model outputs as untrusted data: never execute them.
+
+### 8. Reproducibility pack (required for every finding)
+- `findings/<slug>.yaml` with: title, category, models, summary, evidence (metrics with n and
+  SE, transcript paths), reproduction (exact command, dataset revision, judge id and version,
+  seeds), limitations.
+- `results/safety/*.json` in the `neurico-safety-result/v1` schema (one file per eval x model),
+  produced by the safety-evals skill scripts.
+- Inspect `.eval`/`.json` logs kept under `results/safety/inspect_logs/`.
+
+### 9. Validation runs
+When the idea asks you to validate an existing finding, reproduce it on fresh samples with a
+different judge (and provider where possible), report paired statistics, and write
+`validation/verdict.yaml` with `finding_id`, `verdict` (reproduced | refuted | inconclusive),
+`summary`, and `evidence` (numbers with n and CIs). Do not edit the original finding.
+
+### 10. Models and freshness
+Subjects should be the newest released generation of each family unless the idea names a version
+on purpose (older generations serve as baselines, say so). Check `$HF_HOME/hub` and
+`$NEURICO_MODELS_DIR` for weights already on the system before downloading; keep `HF_HOME` as
+set so downloads are shared; record the exact HF revision hash of every model used.
+
+## Standard Tooling (see the safety-evals skill)
+- Inspect (`inspect_ai`) and `inspect_evals` tasks: xstest, strong_reject, sycophancy,
+  truthfulqa, bbq, simpleqa, mask, wmdp_*, agentharm, agentic_misalignment, gdm_* suites.
+- vLLM for local open-weight models (OpenAI-compatible endpoint); OpenRouter / Anthropic /
+  OpenAI APIs for closed models.
+- Petri / Bloom for automated behavioural audits; TransformerLens, nnsight, SAELens, repeng for
+  activations, probes and steering.
+
+## Reporting Standard
+Every REPORT.md states: model ids and versions with dates; eval names with harness version and
+dataset revision; n, mean, SE/CI, clustering; judge id and calibration figures; unscored
+samples; elicitation details; evaluation-awareness rate where applicable; limitations; and
+what would change the conclusion.

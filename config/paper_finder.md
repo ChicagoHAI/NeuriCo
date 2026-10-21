@@ -43,6 +43,10 @@ make start-dev
 
 The service runs at `http://localhost:8000`.
 
+With host mode (`./neurico --host ...`, see `docs/HOST_MODE.md`) this is automated:
+`./neurico --host build` creates the venv and every `run`/`baseline` reuses a healthy
+server on port 8000 or starts one (`./neurico --host paper-finder start|stop|status`).
+
 ## How It Works
 
 When running neurico, skills are copied to `.claude/skills/` in the workspace. Agents call the helper script to search for papers:

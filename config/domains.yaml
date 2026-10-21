@@ -33,6 +33,29 @@ domains:
       - prompt
       - token
 
+  ai_safety:
+    name: "AI Safety Evaluation"
+    description: "Safety evaluation, red-teaming, monitoring and auditing of language models: refusal calibration, jailbreak robustness, honesty, sycophancy, deception, dangerous-capability proxies, probes and monitors"
+    has_template: true
+    keywords:
+      - safety
+      - jailbreak
+      - refusal
+      - red team
+      - red-team
+      - sycophancy
+      - deception
+      - scheming
+      - sandbagging
+      - alignment
+      - misalignment
+      - probe
+      - monitor
+      - harmful
+      - dangerous capability
+      - model card
+      - system card
+
   machine_learning:
     name: "Machine Learning"
     description: "Model training, evaluation, hyperparameter tuning"
