@@ -4,9 +4,18 @@ LLM Backend Abstraction
 Provides a unified interface for calling LLMs, whether via CLI (claude -p)
 or API (Anthropic SDK / OpenRouter). The backend is configured by the user
 in config/manager.yaml or .env.
+
+CLI turns have two implementations for one release (docs/AGENT_FACTORY_ASSESSMENT.md
+step 8). With ``NEURICO_MANAGER_FACTORY=1`` each turn is a launch through
+``core.agent_factory.AgentFactory.session()`` on the ``hitl_manager`` (or
+``interactive_manager``) role: same flags, plus the Azure auth lane, a ledger
+line per turn and the role's config in ``config/agents.yaml``. Unset, the
+backend builds and runs the ``claude -p`` / ``codex exec`` commands itself as
+before. Text and tool extraction (``_parse_cli_response``), the MCP readiness
+gate, cancellation and the manager's retry loop are the same on both paths.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional
 from dataclasses import dataclass, field
 import json
 import math
@@ -20,6 +29,14 @@ import time
 
 from core.security import remove_github_credentials
 from core.llm_client import LLMClient
+
+MANAGER_FACTORY_ENV_VAR = "NEURICO_MANAGER_FACTORY"
+
+
+def manager_factory_enabled(env: Optional[Dict[str, str]] = None) -> bool:
+    """Whether CLI manager turns go through the agent factory (default off this release)."""
+    value = (os.environ if env is None else env).get(MANAGER_FACTORY_ENV_VAR, "")
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -52,19 +69,45 @@ class LLMBackend:
     parsed responses with tool calls.
     """
 
-    def __init__(self, backend: str = "cli", model: Optional[str] = None):
+    def __init__(
+        self,
+        backend: str = "cli",
+        model: Optional[str] = None,
+        *,
+        work_dir: Optional[Path] = None,
+        logs_dir: Optional[Path] = None,
+        use_factory: Optional[bool] = None,
+        factory: Any = None,
+    ):
         """
         Args:
-            backend: "cli", "anthropic_api", or "openrouter"
+            backend: "cli", "codex_cli", "anthropic_api", or "openrouter"
             model: Model name override (None = default for backend)
+            work_dir: Workspace for factory turns: their cwd, the root of the
+                ``.neurico/agent_runs.jsonl`` ledger and the default log location
+                (``.neurico/manager/logs``). None = the process cwd.
+            logs_dir: Where factory turns write prompt / log / transcript files.
+            use_factory: Route CLI turns through ``AgentFactory.session()``;
+                None = ``NEURICO_MANAGER_FACTORY``.
+            factory: An ``AgentFactory`` to share; None = one per backend.
         """
         self.backend = backend
         self.model = model
+        self.work_dir = Path(work_dir) if work_dir is not None else None
+        self.logs_dir = Path(logs_dir) if logs_dir is not None else None
+        self.use_factory = manager_factory_enabled() if use_factory is None else bool(use_factory)
+        self._factory = factory
+        self._session: Any = None
+        self._session_lock = threading.Lock()
         self._process_lock = threading.Lock()
         self._active_process: Optional[subprocess.Popen[str]] = None
 
     def cancel_active(self) -> None:
         """Terminate the active CLI call owned by this backend, if any."""
+        with self._session_lock:
+            session = self._session
+        if session is not None:
+            session.cancel()
         with self._process_lock:
             process = self._active_process
         if process is not None:
@@ -113,6 +156,17 @@ class LLMBackend:
         Returns:
             LLMResponse with text content and any tool calls
         """
+        if self.backend in {"cli", "codex", "codex_cli"} and self.use_factory:
+            return self._send_factory(
+                messages,
+                tools,
+                timeout_seconds=timeout_seconds,
+                disable_native_tools=disable_native_tools,
+                mcp_config_path=mcp_config_path,
+                allowed_mcp_tools=allowed_mcp_tools,
+                mcp_startup_timeout_seconds=mcp_startup_timeout_seconds,
+                use_dedicated_system_prompt=use_dedicated_system_prompt,
+            )
         if self.backend == "cli":
             return self._send_cli(
                 messages,
@@ -217,26 +271,195 @@ class LLMBackend:
             raise RuntimeError(f"Codex CLI backend error: {error_msg}")
         return self._parse_codex_cli_response(stdout)
 
+    # -- factory path (NEURICO_MANAGER_FACTORY=1) ---------------------------------------------------
+
+    @staticmethod
+    def _system_prompt_text(messages: List[Dict[str, Any]]) -> str:
+        return "\n\n".join(
+            str(message.get("content", "")).strip()
+            for message in messages
+            if message.get("role") == "system" and str(message.get("content", "")).strip()
+        )
+
+    def _factory_session(self, factory: Any, handle: Any, work_dir: Path, *, resume: bool) -> Any:
+        """One AgentSession per backend; the handle is replaced per turn (allow-list, system prompt)."""
+        with self._session_lock:
+            session = self._session
+            if session is None:
+                session = factory.session(handle, work_dir, resume=resume)
+                self._session = session
+            else:
+                session.handle = handle
+                session.work_dir = work_dir
+                session.resume = resume
+            return session
+
+    def _send_factory(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        timeout_seconds: Optional[float] = None,
+        disable_native_tools: bool = False,
+        mcp_config_path: Optional[str] = None,
+        allowed_mcp_tools: Optional[List[str]] = None,
+        mcp_startup_timeout_seconds: Optional[float] = None,
+        use_dedicated_system_prompt: bool = False,
+    ) -> LLMResponse:
+        """One manager turn as an AgentFactory launch on the ``hitl_manager`` role
+        (``interactive_manager`` for the plain interactive manager).
+
+        The prompt is flattened exactly as on the legacy path; the role config
+        supplies the permission mode, the MCP config and allow-list become the
+        spec's ``mcp_only`` permissions, the system prompt its ``--system-prompt``
+        / ``--append-system-prompt`` flag. ``timeout_seconds`` is the only
+        deadline (None = the role's budget, which is no limit unless configured).
+        The factory runs each turn once: provider retries belong to
+        ``HitlManager._send`` (``config/agents.yaml: roles.hitl_manager.retry``).
+        """
+        from core.agent_factory import AgentFactory, mcp_server_names, validated_mcp_startup_timeout
+
+        provider = "claude" if self.backend == "cli" else "codex"
+        hitl_turn = disable_native_tools or bool(mcp_config_path)
+        role = "hitl_manager" if hitl_turn else "interactive_manager"
+        system_prompt = self._system_prompt_text(messages)
+        prompt_messages = (
+            [message for message in messages if message.get("role") != "system"]
+            if use_dedicated_system_prompt
+            else messages
+        )
+        prompt = self._messages_to_prompt(prompt_messages, None if mcp_config_path else tools)
+        names = list(dict.fromkeys(str(name).strip() for name in allowed_mcp_tools or [] if str(name).strip()))
+
+        overrides: Dict[str, Any] = {
+            "provider": provider,
+            "model": self.model,
+            # the manager owns retries (classification of MCP vs provider failures happens here)
+            "retry": {"max_attempts": 1, "max_invalid_outputs": 0, "retry_on_timeout": False},
+            # a dead or failing manager provider is reported to the manager loop, never a run stop
+            "defer_provider_failure_to_runtime": True,
+        }
+        if timeout_seconds is not None:
+            seconds = float(timeout_seconds)
+            overrides["budget"] = {"timeout_s": max(1, math.ceil(seconds)) if seconds > 0 else 0}
+        if mcp_config_path:
+            overrides["permissions"] = {"mode": "mcp_only", "allowed_tools": names}
+            overrides["mcp_config"] = Path(mcp_config_path)
+            if mcp_startup_timeout_seconds is not None:
+                overrides["mcp_startup_timeout_s"] = validated_mcp_startup_timeout(mcp_startup_timeout_seconds)
+        elif disable_native_tools:
+            overrides["permissions"] = {"mode": "no_tools"}
+        if use_dedicated_system_prompt and system_prompt:
+            overrides["system_prompt"] = system_prompt
+            overrides["append_system_prompt"] = bool(mcp_config_path)
+        work_dir = self.work_dir or Path.cwd()
+        logs_dir = self.logs_dir or (work_dir / ".neurico" / "manager" / "logs")
+        overrides["transcript"] = {"logs_dir": str(logs_dir), "prefix": role}
+
+        if self._factory is None:
+            self._factory = AgentFactory()
+        factory = self._factory
+        spec = factory.spec(role, **overrides)
+        handle = factory.build(spec)
+        resume = bool((spec.extras.get("session") or {}).get("resume", False))
+        session = self._factory_session(factory, handle, work_dir, resume=resume)
+
+        gate: Optional[_ClaudeMcpGate] = None
+        if provider == "claude" and mcp_config_path and mcp_startup_timeout_seconds is not None:
+            gate = _ClaudeMcpGate(
+                startup_timeout=validated_mcp_startup_timeout(mcp_startup_timeout_seconds),
+                server_names=mcp_server_names(Path(mcp_config_path)),
+                expected_tools=names,
+                pid_getter=lambda: session.live_pid,
+            )
+        try:
+            result = session.send(
+                prompt,
+                on_line=gate.on_line if gate is not None else None,
+                tags={"manager_turn": len(session.turns) + 1, "backend": self.backend},
+            )
+        except BaseException:
+            # KeyboardInterrupt on the interactive manager's thread, or anything else: never
+            # leave the turn's process group running (the launch owns its own session).
+            session.cancel()
+            raise
+        finally:
+            if gate is not None:
+                gate.close()
+
+        transcript_text = self._read_text(result.transcript_file)
+        stderr_text = self._read_text(result.stderr_file)
+        if gate is not None:
+            gate.raise_for(result, transcript_text, stderr_text)
+        if result.timed_out:
+            raise TimeoutError(
+                ("Codex CLI backend" if provider == "codex" else "CLI backend")
+                + f" timed out after {float(timeout_seconds or 0):g} seconds"
+            )
+        if result.stopped:
+            raise RuntimeError("CLI backend turn was cancelled before it finished")
+        if result.return_code != 0:
+            if provider == "codex":
+                if mcp_config_path:
+                    server_names = mcp_server_names(Path(mcp_config_path))
+                    if self._codex_required_mcp_startup_failed(
+                        stdout=transcript_text, stderr=stderr_text, server_names=server_names
+                    ):
+                        if self._codex_required_mcp_startup_timed_out(
+                            stdout=transcript_text, stderr=stderr_text, server_names=server_names
+                        ):
+                            raise McpReadinessTimeout(
+                                "Codex did not report manager MCP readiness within the current startup window."
+                            )
+                        raise McpInitializationError(
+                            "Codex could not initialize required manager MCP server(s): " + ", ".join(server_names)
+                        )
+                error_msg = stderr_text.strip() or f"codex exec exited with code {result.return_code}"
+                raise RuntimeError(f"Codex CLI backend error: {error_msg}")
+            error_msg = self._claude_cli_error_message(
+                stdout=transcript_text, stderr=stderr_text, returncode=int(result.return_code or 0)
+            )
+            raise RuntimeError(f"CLI backend error: {error_msg}")
+
+        response = (
+            self._parse_codex_cli_response(transcript_text)
+            if provider == "codex"
+            else self._parse_cli_response(transcript_text)
+        )
+        if mcp_config_path:
+            # The CLI executed these MCP calls inside its provider turn; the bridge recorded
+            # them, so the outer ReAct loop must not replay them as legacy XML tool calls.
+            response.tool_calls = []
+        return response
+
+    @staticmethod
+    def _read_text(path: Optional[Path]) -> str:
+        if path is None:
+            return ""
+        try:
+            return Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+
+    # -- legacy helpers (the factory owns the implementations) -------------------------------------
+
     @staticmethod
     def _codex_config_value(value: Any) -> str:
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        return json.dumps(value, ensure_ascii=False)
+        from core.agent_factory import _codex_config_value
+
+        return _codex_config_value(value)
 
     @staticmethod
     def _validated_mcp_startup_timeout(value: float) -> float:
-        timeout = float(value)
-        if not math.isfinite(timeout) or timeout <= 0:
-            raise ValueError("MCP startup timeout must be a positive finite number")
-        return timeout
+        from core.agent_factory import validated_mcp_startup_timeout
+
+        return validated_mcp_startup_timeout(value)
 
     @staticmethod
     def _mcp_server_names(mcp_config_path: str) -> List[str]:
-        payload = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
-        servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
-        if not isinstance(servers, dict) or not servers:
-            raise ValueError("MCP configuration must define at least one server")
-        return [str(name) for name in servers]
+        from core.agent_factory import mcp_server_names
+
+        return mcp_server_names(Path(mcp_config_path))
 
     @staticmethod
     def _codex_required_mcp_startup_failed(
@@ -282,50 +505,13 @@ class LLMBackend:
         allowed_mcp_tools: Optional[List[str]] = None,
         startup_timeout_seconds: Optional[float] = None,
     ) -> List[str]:
-        payload = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
-        servers = payload.get("mcpServers") or payload.get("mcp_servers") or {}
-        if not isinstance(servers, dict) or not servers:
-            raise ValueError("Codex MCP configuration must define at least one server")
-        args: List[str] = []
-        for name, server in servers.items():
-            if not isinstance(server, dict):
-                raise ValueError(f"Codex MCP server {name!r} must be an object")
-            prefix = f"mcp_servers.{name}"
-            for key in ("command", "args", "cwd", "url", "enabled"):
-                if key in server:
-                    args.extend(["-c", f"{prefix}.{key}={cls._codex_config_value(server[key])}"])
-            if "default_tools_approval_mode" in server:
-                args.extend([
-                    "-c",
-                    f"{prefix}.default_tools_approval_mode={cls._codex_config_value(server['default_tools_approval_mode'])}",
-                ])
-            else:
-                args.extend(["-c", f'{prefix}.default_tools_approval_mode="approve"'])
-            env = server.get("env")
-            if isinstance(env, dict):
-                for env_key, env_value in env.items():
-                    args.extend([
-                        "-c",
-                        f"{prefix}.env.{env_key}={cls._codex_config_value(str(env_value))}",
-                    ])
-            if "enabled" not in server:
-                args.extend(["-c", f"{prefix}.enabled=true"])
-            allowed_prefix = f"mcp__{name}__"
-            enabled_tools = [
-                tool_name[len(allowed_prefix):]
-                for raw_name in allowed_mcp_tools or []
-                if (tool_name := str(raw_name).strip()).startswith(allowed_prefix)
-            ]
-            if allowed_mcp_tools is not None:
-                args.extend([
-                    "-c",
-                    f"{prefix}.enabled_tools={cls._codex_config_value(enabled_tools)}",
-                ])
-            args.extend(["-c", f"{prefix}.required=true"])
-            if startup_timeout_seconds is not None:
-                timeout = cls._validated_mcp_startup_timeout(startup_timeout_seconds)
-                args.extend(["-c", f"{prefix}.startup_timeout_sec={timeout:g}"])
-        return args
+        from core.agent_factory import codex_mcp_config_args
+
+        return codex_mcp_config_args(
+            Path(mcp_config_path),
+            allowed_mcp_tools=allowed_mcp_tools,
+            startup_timeout_seconds=startup_timeout_seconds,
+        )
 
     def _send_cli(
         self,
@@ -960,16 +1146,109 @@ class LLMBackend:
         )
 
 
-def create_backend(config: Dict[str, Any]) -> LLMBackend:
+class _ClaudeMcpGate:
+    """The MCP readiness gate for a factory-run Claude turn.
+
+    The legacy path (``_communicate_with_claude_mcp_gate``) reads the CLI's stdout
+    itself; here the runner streams the transcript and this observer sees each line
+    through ``run_prebuilt_cli_agent(on_line=...)``. Semantics are the same: the
+    ``system/init`` event must arrive within the startup window plus a short grace
+    and must show every required server connected and every expected tool
+    visible; otherwise the turn's process group is terminated and the failure is
+    classified as retryable (``McpReadinessTimeout``) or not
+    (``McpInitializationError``) once the run returns.
+    """
+
+    def __init__(
+        self,
+        *,
+        startup_timeout: float,
+        server_names: List[str],
+        expected_tools: List[str],
+        pid_getter: Callable[[], Optional[int]],
+    ) -> None:
+        self.startup_timeout = float(startup_timeout)
+        self.grace = max(1.0, min(5.0, self.startup_timeout * 0.2))
+        self.server_names = list(server_names)
+        self.expected_tools = list(expected_tools)
+        self._pid_getter = pid_getter
+        self.observed = False
+        self.error = ""
+        self.timed_out = False
+        self._ready = threading.Event()
+        self._closed = threading.Event()
+        self._watchdog = threading.Thread(target=self._watch, daemon=True, name="neurico-manager-mcp-gate")
+        self._watchdog.start()
+
+    def on_line(self, line: str) -> None:
+        if self.observed or self.error or self.timed_out:
+            return
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return
+        if not isinstance(event, dict) or event.get("type") != "system" or event.get("subtype") != "init":
+            return
+        self.observed = True
+        error = LLMBackend._claude_mcp_readiness_error(
+            event, server_names=self.server_names, expected_tools=self.expected_tools
+        )
+        if error:
+            self.error = error
+            self._terminate()
+        self._ready.set()
+
+    def _watch(self) -> None:
+        if self._ready.wait(self.startup_timeout + self.grace):
+            return
+        if self._closed.is_set() or self.observed:
+            return
+        self.timed_out = True
+        self._terminate()
+
+    def _terminate(self) -> None:
+        pid = self._pid_getter()
+        if pid is None:
+            return
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        self._closed.set()
+        self._ready.set()
+
+    def raise_for(self, result: Any, transcript_text: str, stderr_text: str) -> None:
+        """Translate the gate's outcome into the legacy exceptions, or return when ready."""
+        if self.error:
+            raise McpInitializationError(self.error)
+        if self.timed_out:
+            raise McpReadinessTimeout(
+                f"Claude did not report manager MCP readiness within {self.startup_timeout:g} seconds."
+            )
+        if not self.observed:
+            if result.return_code not in (0, None):
+                detail = LLMBackend._claude_cli_error_message(
+                    stdout=transcript_text, stderr=stderr_text, returncode=int(result.return_code)
+                )
+                raise RuntimeError(f"CLI backend error: {detail}")
+            raise McpInitializationError("Claude exited before reporting manager MCP readiness.")
+
+
+def create_backend(config: Dict[str, Any], *, work_dir: Optional[Path] = None,
+                   logs_dir: Optional[Path] = None) -> LLMBackend:
     """
     Create an LLM backend from configuration.
 
     Config can come from config/manager.yaml or environment variables.
-    Environment variables take precedence.
+    Environment variables take precedence. ``work_dir`` is the workspace the
+    factory path (NEURICO_MANAGER_FACTORY=1) runs its turns in and writes the
+    ledger under.
     """
     backend = os.environ.get("NEURICO_MANAGER_BACKEND",
                              config.get("manager", {}).get("llm_backend", "cli"))
     model = os.environ.get("NEURICO_MANAGER_MODEL",
                            config.get("manager", {}).get("llm_model")) or None
 
-    return LLMBackend(backend=backend, model=model)
+    return LLMBackend(backend=backend, model=model, work_dir=work_dir, logs_dir=logs_dir)

@@ -293,6 +293,21 @@ The human may switch the manager provider between Codex and Claude. One manager
 turn has one provider; the two providers are not combined as simultaneous
 manager backbones.
 
+### Manager turns through the agent factory
+
+Each provider turn is one CLI call made by `interactive/llm_backend.py`. With
+`NEURICO_MANAGER_FACTORY=1` (off by default this release) that call is an
+`AgentFactory.session()` launch on the `hitl_manager` role of
+`config/agents.yaml`: the same flags and prompt, plus the Azure auth lane and
+a ledger line per turn under `<workspace>/.neurico/agent_runs.jsonl`
+(usage, cost, provider session id). The bridge, the readiness gate,
+cancellation and provider switching behave identically on both paths; the
+provider retry policy (`roles.hitl_manager.retry`) and the MCP startup window
+(`roles.hitl_manager.mcp`) are read from `config/agents.yaml` on both paths,
+with the older `config/manager.yaml` keys still overriding when set. Turn
+transcripts are written to `<workspace>/.neurico/hitl/manager/logs/`. See
+`docs/AGENT_AUTH.md` "Manager turns" for the flag and the flip plan.
+
 ## User Interfaces
 
 ### Web interface

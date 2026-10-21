@@ -39,6 +39,13 @@ from core.hitl_workspace_inspection import HitlWorkspaceInspector
 LOGGER = logging.getLogger(__name__)
 
 
+def hitl_manager_role_defaults() -> Dict[str, Any]:
+    """The merged ``roles.hitl_manager`` block of config/agents.yaml (retry policy, MCP window)."""
+    from core.agent_factory import load_agents_config, resolve_role_config
+
+    return resolve_role_config(load_agents_config(), "hitl_manager")
+
+
 class _StaleManagerTurn(RuntimeError):
     """Internal signal that rollback invalidated an in-flight manager turn."""
 
@@ -325,18 +332,38 @@ class HitlManager:
         # provider stops calling tools. Opt in with manager.hitl_manager_max_turns in config/manager.yaml.
         _max_turns = config.get("manager", {}).get("hitl_manager_max_turns")
         self.max_react_turns: Optional[int] = int(_max_turns) if _max_turns else None
+        # Provider retry policy and the MCP startup window live in config/agents.yaml
+        # (roles.hitl_manager: retry.max_attempts / retry.backoff_s, mcp.startup_timeout_s /
+        # mcp.startup_increment_s). The config/manager.yaml keys keep overriding when set.
+        role_defaults = hitl_manager_role_defaults()
+        role_retry = role_defaults.get("retry") or {}
+        role_mcp = role_defaults.get("mcp") or {}
         self.max_backend_retries = max(
-            1, int(config.get("manager", {}).get("hitl_manager_backend_retries", 3))
+            1,
+            int(
+                manager_config.get(
+                    "hitl_manager_backend_retries", role_retry.get("max_attempts", 3)
+                )
+            ),
         )
         self.backend_retry_delay_seconds = max(
             0.1,
-            float(config.get("manager", {}).get("hitl_manager_retry_delay_seconds", 1.0)),
+            float(
+                manager_config.get(
+                    "hitl_manager_retry_delay_seconds", role_retry.get("backoff_s", 1.0)
+                )
+            ),
         )
         self.mcp_startup_timeout_seconds = float(
-            manager_config.get("hitl_manager_mcp_startup_timeout_seconds", 30.0)
+            manager_config.get(
+                "hitl_manager_mcp_startup_timeout_seconds", role_mcp.get("startup_timeout_s", 30.0)
+            )
         )
         self.mcp_startup_timeout_increment_seconds = float(
-            manager_config.get("hitl_manager_mcp_startup_timeout_increment_seconds", 15.0)
+            manager_config.get(
+                "hitl_manager_mcp_startup_timeout_increment_seconds",
+                role_mcp.get("startup_increment_s", 15.0),
+            )
         )
         if (
             not math.isfinite(self.mcp_startup_timeout_seconds)
@@ -370,12 +397,19 @@ class HitlManager:
         from interactive.llm_backend import LLMBackend
 
         provider = str(provider or "claude").strip().lower()
+        # The factory path (NEURICO_MANAGER_FACTORY=1) runs turns in the workspace, logs them
+        # under the manager's private directory and ledgers them in <work_dir>/.neurico.
+        placement = {
+            "work_dir": self.work_dir,
+            "logs_dir": hitl_manager_dir(self.work_dir) / "logs",
+        }
         if provider == "claude":
             return LLMBackend(
                 backend="cli",
                 model=self._manager_config.get("hitl_manager_llm_model")
                 or self._manager_config.get("llm_model")
                 or None,
+                **placement,
             )
         if provider != "codex":
             raise ValueError("HITL manager provider must be codex or claude.")
@@ -384,6 +418,7 @@ class HitlManager:
             model=self._manager_config.get("hitl_manager_llm_model")
             or self._manager_config.get("codex_model")
             or None,
+            **placement,
         )
 
     def set_provider(self, provider: str) -> None:
