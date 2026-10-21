@@ -1,0 +1,133 @@
+# Per-role agent defaults for core.agent_factory (docs/AGENT_FACTORY_ASSESSMENT.md 4.3).
+#
+# Precedence, highest first: CLI flag (factory.spec(role, **overrides)) >
+# NEURICO_AGENT_PROVIDER / NEURICO_AGENT_MODEL / NEURICO_AGENT_AUTH > role block
+# (following its `extends` chain) > `default` block. The same file is read at
+# /app/config in the container and $PROJECT_ROOT/config on the host.
+#
+# Blocks the factory interprets: provider, model, auth, permissions, budget,
+# output, extra_outputs, retry, transcript, reasoning_effort, system_prompt,
+# mcp_config, use_scribe, skills, env_allowlist, isolate_home, extra_args,
+# env_extra, tags, defer_provider_failure_to_runtime. Any other key (template,
+# routes, params, kind, mcp, codex, backend) is kept on AgentSpec.extras for
+# the readers that own it (prompt registry, LLMClient, manager).
+#
+# `validator` / `check` values are "module:function" references resolved only
+# when a contract is evaluated; `schema` paths are relative to the project root.
+version: 1
+
+default:
+  provider: claude                 # NEURICO_AGENT_PROVIDER / --provider
+  model: null                      # NEURICO_AGENT_MODEL / --model (null = CLI default; Azure maps Codex to a deployment)
+  auth: oauth                      # NEURICO_AGENT_AUTH / --agent-auth
+  permissions: {mode: bypass}      # --full-permissions / --no-full-permissions -> bypass / inherit
+  budget: {timeout_s: 3600, max_turns: null, max_cost_usd: null, max_prompt_chars: 400000}
+  retry: {max_attempts: 1, max_invalid_outputs: 0, backoff_s: 30, rate_limit_backoff_s: 90, retry_on_timeout: false}
+  transcript: {save_prompt: true, attempt_numbered: false}
+  output: {kind: return_code}
+
+roles:
+  resource_finder:
+    budget: {timeout_s: 2700}
+    output: {kind: marker, marker: .resource_finder_complete}
+    template: agents/resource_finder.txt
+  rule_maker:
+    budget: {timeout_s: 1800}
+    transcript: {attempt_numbered: true}
+    output: {kind: validator, validator: agents.rule_maker:validate_rule_maker_outputs}
+    retry: {max_invalid_outputs: 0}   # the orchestrator's verifier loop owns the retry
+    template: agents/rule_maker.txt
+  rule_maker_bootstrap:
+    budget: {timeout_s: 1800}
+    output: {kind: validator, validator: agents.rule_maker_bootstrap:validate_bootstrap_outputs}
+    template: agents/rule_maker_bootstrap.txt
+  manifest_trimmer:
+    budget: {timeout_s: 300}
+    transcript: {stream_json: false}  # plain-text mode: stdout is the JSON answer
+    output: {kind: json_stdout, schema: config/schemas/manifest_trim.json}
+    retry: {max_invalid_outputs: 2}
+    template: agents/manifest_trimmer.txt
+  experiment_runner:
+    budget: {timeout_s: 0}            # 0 = no limit, as today's CLI default
+    output: {kind: files, required_files: [REPORT.md]}
+    transcript: {prefix: execution}
+    template: agents/session_instructions.txt
+  autoresearch_proposer:
+    budget: {timeout_s: 900, max_prompt_chars: 200000}
+    output: {kind: files, required_files: [proposal.md]}
+    transcript: {prefix: proposer}
+    template: agents/autoresearch_proposer.txt
+  comment_handler:
+    budget: {timeout_s: 1800}
+    output: {kind: return_code, tolerate_nonzero: true}   # today's behaviour, made explicit
+    template: agents/comment_handler.txt
+  paper_writer:
+    budget: {timeout_s: 3600}
+    output: {kind: files, required_files: [paper_draft/main.tex]}
+    template: agents/paper_writer.txt
+  zero_shot_baseline:
+    budget: {timeout_s: null}
+    output: {kind: files, required_files: [paper_draft/main.pdf]}
+    transcript: {prefix: zeroshot}
+  hitl_manager:                     # one ReAct turn per launch; multi-turn through AgentFactory.session()
+    permissions: {mode: mcp_only}
+    budget: {timeout_s: 600, max_turns: 1}
+    retry: {max_attempts: 3, backoff_s: 1.0}
+    mcp: {startup_timeout_s: 30, startup_increment_s: 15}
+    codex: {sandbox: read-only}
+  interactive_manager:
+    backend: cli                    # cli | anthropic_api | openrouter (today's manager.llm_backend)
+    permissions: {mode: read_only}
+  safety_planner:
+    budget: {timeout_s: 3600}
+    output: {kind: validator, validator: safety.planner:validate_proposals}
+    templates: {replicate: agents/safety_planner.txt, ideate: agents/safety_ideator.txt}
+  planner: {extends: safety_planner}
+  ideator:                          # alias for safety_planner in ideate mode; separate so its model can differ
+    extends: safety_planner
+    model: null
+  model_scout:
+    provider: codex
+    budget: {timeout_s: 2400}
+    template: agents/model_scout.txt
+  judge:                            # direct API roles (LLMClient, step 5), not CLI sessions
+    kind: api
+    routes:
+      - {name: openrouter, model: openai/gpt-4.1, privacy: {zdr: true, data_collection: deny}}
+      - {name: openai,     model: gpt-4.1,        privacy: {store: false}}
+    params: {temperature: 0, max_tokens: 4096, timeout_s: 180, response_format: json_object}
+  eval_verifier: {extends: judge}
+  idea_converter:
+    extends: judge
+    params: {temperature: 0.1, max_tokens: 2000, timeout_s: 60}
+  manager_api:                      # llm_backend anthropic_api / openrouter backends
+    kind: api
+    routes:
+      - {name: anthropic, model: claude-sonnet-4-6}
+      - {name: openrouter, model: anthropic/claude-sonnet-4}
+    params: {max_tokens: 4096}
+
+  ideation.problem:                 # the three stages ported in IDEATION_INTEGRATION.md 4.2
+    extends: ideator
+    provider: codex
+    permissions: {mode: bypass}
+    budget: {timeout_s: 1500, max_cost_usd: 40, hard: true}   # SAI_DIGEST_STAGE_TIMEOUT_S / SAI_DIGEST_MAX_COST_USD
+    retry: {max_attempts: 3, max_invalid_outputs: 1, retry_on_timeout: false}
+    isolate_home: true
+    skills: [templates/skills/safety-kb]
+    output: {kind: json_file, path: output/problem.json, schema: src/ideation/schemas/problem.schema.json,
+             check: ideation.runtime:_check_problem}
+  ideation.ideation:
+    extends: ideation.problem
+    output: {kind: json_file, path: output/ideas.json, schema: src/ideation/schemas/ideas.schema.json,
+             check: ideation.runtime:_check_ideas}
+  ideation.idea_judge:
+    extends: ideation.problem
+    output: {kind: json_file, path: output/ideas_ranked.json, schema: src/ideation/schemas/ideas_ranked.schema.json,
+             check: ideation.runtime:_check_ranked}
+
+ledger:
+  path: .neurico/agent_runs.jsonl   # relative to work_dir (next to RunTracker's .neurico/runs/); the safety
+                                    # daemon, planner and ideation pass the KB root as work_dir
+  global_path: logs/agent_runs.jsonl   # relative to the project root; NEURICO_AGENT_LEDGER overrides
+  redact: [argv_env]                # never write env values
