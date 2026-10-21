@@ -106,12 +106,26 @@ Daemon settings (`safety_kb/engine.yaml`, overridable by flags): `gpus`, `gpu_me
 
 ## Knowledge-base index, findings lifecycle and ideation
 
-- `./neurico safety kb rebuild` builds `safety_kb/kb.sqlite` from the YAML/JSON records (runs,
-  per-eval results with timestamps, findings with status history, planner rounds, catalogs);
-  `kb timeline` writes `findings/INDEX.md` and `reports/results-timeline.md`; `kb anomalies`
-  lists metrics that moved more than 3 combined standard errors between consecutive observations
-  of the same model x eval; `kb query "<sql>"` runs any read query. The daemon refreshes the index,
-  the timelines and the anomaly inbox after every ingest.
+- `./neurico safety kb rebuild` builds `safety_kb/kb.sqlite` from the files: the legacy tables
+  (runs, per-eval results with timestamps, findings with status history, planner rounds, catalogs)
+  plus a node store with full-text search and typed edges over every file type (findings, events,
+  runs, results, jobs, ideas, planner rounds, inbox items, catalog entries, eval/lab/third-party
+  notes, perspectives, gaps, design docs, reports); see `docs/KNOWLEDGE_BASE.md`. `kb search
+  "<text>" [--kind ...] [--since 30d]`, `kb show <id>`, `kb related <id>` and `kb check-idea
+  "<hypothesis>"` (the duplicate-idea gate with similarity bands) query it; the same queries are the
+  stdlib tool `safety_kb/tools/kb.py` / the `safety-kb` skill for agents. `kb timeline` writes
+  `findings/INDEX.md` and `reports/results-timeline.md`; `kb anomalies` lists metrics that moved
+  more than 3 combined standard errors between consecutive observations of the same model x eval;
+  `kb query "<sql>"` runs any read query. The daemon refreshes the index, the timelines and the
+  anomaly inbox after every ingest (about 3 s on the live knowledge base).
+- `./neurico safety crawl` (daemon: every `crawl_interval_hours`, default 24) fetches new arXiv
+  papers, Hugging Face releases of the tracked families and lab/evaluator posts from the feeds in
+  `safety_kb/catalog/sources.yaml` into `safety_kb/inbox/` as dated notes with front matter, skipping
+  anything already seen (hash ledger `inbox/seen.jsonl` + the `seen` table). No LLM is involved;
+  the planner triages the inbox and moves handled notes to `inbox/archive/`.
+- The planner context (`build_context`) is built from the index: recent findings and runs with
+  their result ids, open inbox items and live drift, catalog ids, and notes ranked against the
+  campaign objective, every line carrying an id the agent expands with the kb tool.
 - Findings are files under `findings/` with a dated `status_history`. `./neurico safety finding
   <id> --status reproduced|confirmed|refuted|withdrawn --by <who> --note "..."` appends an event;
   ingest only ever creates `candidate` findings.

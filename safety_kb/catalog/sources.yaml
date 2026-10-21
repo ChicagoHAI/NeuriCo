@@ -1,0 +1,136 @@
+# Where the crawler looks (src/safety/crawler.py, `./neurico safety crawl`). This is data, not code:
+# categories, keyword lists and feed URLs live here so the sweep can be tuned without a Python change.
+# Every item found becomes one dated note under inbox/ with front matter (source, url, published,
+# fetched, hash); items already seen (hash registry: inbox/seen.jsonl + the `seen` table in kb.sqlite)
+# are skipped. No LLM calls: triage is the planner's job. Social-media sources are deliberately absent
+# (no credentials, no scraping of X/LinkedIn); forums with public feeds are fine.
+#
+# Politeness: one request every `rate_limit_seconds` per host, a descriptive User-Agent, and every
+# source wrapped so a feed that is down is reported, not fatal. Mark a feed `enabled: false` to park it.
+
+user_agent: "neurico-safety-crawler/0.1 (+https://github.com/ChicagoHAI/neurico; AI-safety evaluation research)"
+rate_limit_seconds: 3.0          # arXiv asks for >= 3 s between API calls; applied per host everywhere
+timeout_seconds: 30
+retry_wait_seconds: 15           # one retry after this on HTTP 429 / 5xx / timeouts, then the source is reported down
+max_items_per_source: 40         # cap per source per run, newest first
+lookback_days: 7                 # ignore items published earlier than this (per-source override: lookback_days)
+
+arxiv:
+  api: http://export.arxiv.org/api/query
+  max_results: 100               # per query; the API pages, we take one page sorted by submittedDate
+  lookback_days: 7
+  categories: [cs.CL, cs.AI, cs.LG, cs.CR, cs.CY]
+  # Each entry is one query: (categories) AND (any keyword) [AND (any require term)]. A paper is kept
+  # only when a keyword (and a require term, when given) appears in its title or abstract; use
+  # `require` for keyword lists that are generic on their own ("linear probe" matches time-series
+  # papers). Keep lists short: arXiv ANDs/ORs phrase terms literally and long queries return 400.
+  queries:
+    - id: safety-evals
+      keywords: ["safety evaluation", "red teaming", "jailbreak", "harmful compliance", "over-refusal", "refusal"]
+      require: ["language model", "LLM", "chatbot", "assistant"]
+    - id: honesty-deception
+      keywords: ["sycophancy", "sandbagging", "scheming", "alignment faking", "evaluation awareness", "deceptive alignment"]
+    - id: monitoring-control
+      keywords: ["chain-of-thought monitoring", "AI control", "scalable oversight", "sabotage evaluation", "model organisms", "unfaithful reasoning"]
+    - id: agents-misuse
+      keywords: ["prompt injection", "agent safety", "tool misuse", "cyber capability", "biosecurity uplift", "dual-use"]
+      require: ["language model", "LLM", "agent"]
+    - id: interpretability-probes
+      keywords: ["linear probe", "activation steering", "sparse autoencoder", "representation engineering"]
+      require: ["safety", "deception", "harmful", "refusal", "jailbreak", "alignment"]
+
+huggingface:
+  api: https://huggingface.co/api
+  lookback_days: 14
+  models_per_author: 20          # newest repos per `hf_authors` entry of catalog/families.yaml
+  include_datasets: true
+  dataset_searches: [jailbreak, "red team", "safety eval", sycophancy, "harmful behaviors", "prompt injection", "model organism"]
+  datasets_per_search: 15
+  skip_tags: [gguf, awq, gptq, mlx]   # quantised re-uploads are not new subjects
+
+# Feed URLs were checked on 2026-10-20 (entries fetched and parsed) unless the entry says otherwise.
+feeds:
+  # Frontier labs
+  - id: openai-news
+    url: https://openai.com/news/rss.xml
+    org: openai
+    kind: lab
+    keywords: [safety, preparedness, system card, red team, alignment, evaluation, misuse, jailbreak, model]
+  - id: deepmind-blog
+    url: https://deepmind.google/blog/rss.xml
+    org: google
+    kind: lab
+  - id: anthropic-news
+    url: https://www.anthropic.com/rss.xml
+    org: anthropic
+    kind: lab
+    enabled: false
+    notes: "no public feed found on 2026-10-20 (anthropic.com and alignment.anthropic.com return 404); the model scout covers system cards"
+  - id: meta-ai-blog
+    url: https://ai.meta.com/blog/rss/
+    org: meta
+    kind: lab
+    enabled: false
+    notes: "404 on 2026-10-20; find the current feed URL before enabling"
+  - id: qwen-blog
+    url: https://qwenlm.github.io/blog/index.xml
+    org: alibaba-qwen
+    kind: lab
+  - id: huggingface-blog
+    url: https://huggingface.co/blog/feed.xml
+    org: huggingface
+    kind: ecosystem
+    keywords: [safety, jailbreak, red team, alignment, evaluation, guard, bias, fairness]
+  # Evaluators and safety research orgs
+  - id: metr
+    url: https://metr.org/feed.xml
+    org: metr
+    kind: evaluator
+  - id: apollo-research
+    url: https://www.apolloresearch.ai/blog?format=rss
+    org: apollo-research
+    kind: evaluator
+    enabled: false
+    notes: "returns the HTML blog page, not RSS (2026-10-20)"
+  - id: redwood-research
+    url: https://blog.redwoodresearch.org/feed
+    org: redwood-research
+    kind: evaluator
+  - id: palisade-research
+    url: https://palisaderesearch.org/feed.xml
+    org: palisade-research
+    kind: evaluator
+  - id: uk-aisi
+    url: https://www.aisi.gov.uk/rss.xml
+    org: uk-aisi
+    kind: evaluator
+    enabled: false
+    notes: "404 on 2026-10-20 (rss.xml, blog/rss.xml, feed.xml)"
+  - id: transluce
+    url: https://transluce.org/rss.xml
+    org: transluce
+    kind: evaluator
+    enabled: false
+    notes: "404 on 2026-10-20 (rss.xml, feed.xml, rss)"
+  - id: far-ai
+    url: https://far.ai/blog/rss.xml
+    org: far-ai
+    kind: evaluator
+  # Community and newsletters (public feeds; no accounts)
+  - id: alignment-forum
+    url: https://www.alignmentforum.org/feed.xml?view=frontpage-rss
+    org: alignment-forum
+    kind: community
+  - id: lesswrong-curated
+    url: https://www.lesswrong.com/feed.xml?view=curated-rss
+    org: lesswrong
+    kind: community
+    keywords: [safety, alignment, evaluation, deception, jailbreak, interpretability, control]
+  - id: import-ai
+    url: https://importai.substack.com/feed
+    org: import-ai
+    kind: newsletter
+  - id: ai-safety-newsletter
+    url: https://newsletter.safe.ai/feed
+    org: cais
+    kind: newsletter
