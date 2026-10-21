@@ -23,6 +23,7 @@ Supported agents: resource_finder, experiment_runner, paper_writer, comment_hand
 from pathlib import Path
 from typing import Dict, Any, Optional
 import argparse
+import contextlib
 import json
 import os
 import queue
@@ -232,6 +233,7 @@ def run_prebuilt_cli_agent(
     tracker: Optional[RunTracker] = None,
     provider: Optional[str] = None,
     defer_provider_failure_to_runtime: bool = False,
+    stderr_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
     Execute a caller-constructed CLI command with streaming capture.
@@ -239,6 +241,10 @@ def run_prebuilt_cli_agent(
     The caller owns provider flags, environment, working directory, and any
     backend setup/cleanup. This helper only handles subprocess execution,
     sanitized output streaming, optional wall-clock timeout, and reaping.
+
+    stderr is merged into stdout (and so into the log and transcript) unless
+    ``stderr_file`` is given; the agent factory routes Codex stderr there so
+    the ``--json`` transcript stays a clean JSONL stream for usage parsing.
     """
     from core.hitl_run_control import current_hitl_run_budget_prompt
 
@@ -258,16 +264,24 @@ def run_prebuilt_cli_agent(
     process_env = dict(env)
     remove_github_credentials(process_env)
 
+    if stderr_file is not None:
+        Path(stderr_file).parent.mkdir(parents=True, exist_ok=True)
+    stderr_context = (
+        open(stderr_file, "w", encoding="utf-8")
+        if stderr_file is not None
+        else contextlib.nullcontext(None)
+    )
     with (
         open(log_file, "w", encoding="utf-8") as log_f,
         open(transcript_file, "w", encoding="utf-8") as transcript_f,
+        stderr_context as stderr_f,
     ):
         try:
             process = subprocess.Popen(
                 command_argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.STDOUT if stderr_f is None else stderr_f,
                 env=process_env,
                 text=True,
                 encoding="utf-8",

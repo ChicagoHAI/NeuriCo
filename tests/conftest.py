@@ -34,13 +34,16 @@ class FakeCli:
     capture: Path
     monkeypatch: pytest.MonkeyPatch
 
-    def configure(self, *, exit_code: Optional[int] = None, sleep: Optional[float] = None,
-                  files: Optional[Dict[str, str]] = None, touch: Optional[List[str]] = None,
+    def configure(self, *, exit_code: Any = None, sleep: Optional[float] = None,
+                  files: Any = None, touch: Optional[List[str]] = None,
                   spawn_child: bool = False, result_text: Optional[str] = None,
                   structured: Any = None) -> None:
-        """Set the control variables for the next launches (unset ones are cleared)."""
+        """Set the control variables for the next launches (unset ones are cleared).
+
+        ``exit_code`` and ``files`` may be lists to vary behaviour per launch.
+        """
         values = {
-            "NEURICO_FAKE_CLI_EXIT": None if exit_code is None else str(exit_code),
+            "NEURICO_FAKE_CLI_EXIT": None if exit_code is None else json.dumps(exit_code),
             "NEURICO_FAKE_CLI_SLEEP": None if sleep is None else str(sleep),
             "NEURICO_FAKE_CLI_FILES": json.dumps(files) if files else None,
             "NEURICO_FAKE_CLI_TOUCH": os.pathsep.join(touch) if touch else None,

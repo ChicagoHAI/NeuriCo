@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Manifest trimmer decision",
+  "description": "Shape of the JSON object the manifest_trimmer agent prints on stdout. The semantic gate (enum values, length caps) stays in core.workspace_manifest.parse_trim_decision; this schema only rejects structurally wrong answers before that parser runs.",
+  "type": "object",
+  "required": ["primary_runner_outputs", "producer_signatures", "task_shape", "intent_summary", "output_description"],
+  "properties": {
+    "primary_runner_outputs": {"type": "array", "items": {"type": "string"}},
+    "producer_signatures": {
+      "type": "object",
+      "additionalProperties": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+    },
+    "task_shape": {
+      "type": "object",
+      "required": ["task_type", "evaluation_paradigm", "label_space", "dataset_family"],
+      "properties": {
+        "task_type": {"type": "string"},
+        "evaluation_paradigm": {"type": "string"},
+        "label_space": {"type": "string"},
+        "dataset_family": {"type": ["string", "null"]}
+      }
+    },
+    "intent_summary": {"type": "string"},
+    "output_description": {"type": "string"}
+  }
+}

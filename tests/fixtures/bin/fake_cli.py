@@ -10,9 +10,10 @@ Behaviour is driven by environment variables so launch code needs no test hooks:
 
     NEURICO_FAKE_CLI_CAPTURE      JSONL file; one record per invocation (argv, cwd,
                                   prompt, env keys, non-secret env values, pids)
-    NEURICO_FAKE_CLI_EXIT         exit code (default 0)
+    NEURICO_FAKE_CLI_EXIT         exit code (default 0), or a JSON list indexed by launch
     NEURICO_FAKE_CLI_SLEEP        seconds to sleep before the final result line
-    NEURICO_FAKE_CLI_FILES        JSON object {relative path: content} written to cwd
+    NEURICO_FAKE_CLI_FILES        JSON object {relative path: content} written to cwd,
+                                  or a JSON list of such objects indexed by launch
     NEURICO_FAKE_CLI_TOUCH        os.pathsep-separated relative paths to create empty
     NEURICO_FAKE_CLI_SPAWN_CHILD  "1": spawn a sleeping child (process-group tests)
     NEURICO_FAKE_CLI_RESULT_TEXT  final assistant text in the canned transcript
@@ -44,8 +45,23 @@ def _provider() -> str:
     return name
 
 
+def _invocation_index() -> int:
+    """How many launches the capture file already holds: lets a test vary behaviour per attempt."""
+    capture = os.environ.get("NEURICO_FAKE_CLI_CAPTURE")
+    if not capture or not Path(capture).exists():
+        return 0
+    return sum(1 for line in Path(capture).read_text(encoding="utf-8").splitlines() if line.strip())
+
+
+def _per_attempt(value):
+    """A JSON list is indexed by invocation (last entry repeats); anything else applies to every launch."""
+    if isinstance(value, list):
+        return value[min(_invocation_index(), len(value) - 1)] if value else None
+    return value
+
+
 def _write_requested_files() -> None:
-    files = json.loads(os.environ.get("NEURICO_FAKE_CLI_FILES") or "{}")
+    files = _per_attempt(json.loads(os.environ.get("NEURICO_FAKE_CLI_FILES") or "{}")) or {}
     for rel, content in files.items():
         path = Path(rel)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -129,6 +145,7 @@ def _transcript(provider: str, text: str) -> None:
 
 def main() -> int:
     prompt = "" if sys.stdin.isatty() else sys.stdin.read()
+    exit_code = int(_per_attempt(json.loads(os.environ.get("NEURICO_FAKE_CLI_EXIT") or "0")))
     _write_requested_files()
     child_pid = None
     if os.environ.get("NEURICO_FAKE_CLI_SPAWN_CHILD") == "1":
@@ -138,7 +155,7 @@ def main() -> int:
     sys.stderr.write("fake-cli: stderr noise\n")
     sys.stderr.flush()
     _transcript(_provider(), os.environ.get("NEURICO_FAKE_CLI_RESULT_TEXT") or "fake agent reply")
-    return int(os.environ.get("NEURICO_FAKE_CLI_EXIT") or 0)
+    return exit_code
 
 
 if __name__ == "__main__":
