@@ -15,7 +15,7 @@ daemon:
   planner_model: gpt-6-astra
   eval_python: /net/spaces/chenhao/chai-lab-models/haokunliu/safety/safety_venv/bin/python
   hf_cache: /net/spaces/chenhao/chai-lab-models/haokunliu/models/hf_cache
-  planner_enabled: true
+  planner_enabled: false   # 2026-10-21: owner paused ideation; focus on the Gemini-Argon environments
   models_dir: /net/spaces/chenhao/chai-lab-models/haokunliu/models
   # Daily spend caps per billing lane, checked against the run ledgers before every launch
   # (null = no cap; any <lane>_daily_cap_usd key works). A job over a cap stays pending with
