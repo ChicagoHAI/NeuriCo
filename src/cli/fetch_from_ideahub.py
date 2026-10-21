@@ -230,6 +230,22 @@ def _convert_without_llm(ideahub_content: dict) -> dict:
     return {'parsed': idea_data, 'yaml_string': yaml_string}
 
 
+def _idea_converter_client():
+    """The idea_converter role's LLMClient, or None (reason printed) when no key is configured.
+
+    Template conversion is a fallback, not an error: submitting an idea has to
+    work on a machine with no API key at all. Routes, model and parameters come
+    from config/agents.yaml (NEURICO_IDEA_CONVERTER_MODEL overrides the model).
+    """
+    from core.llm_client import LLMClient
+
+    client = LLMClient.for_role("idea_converter")
+    if not client.available:
+        print("ℹ️  No OPENROUTER_KEY or OPENAI_API_KEY set — using template-based conversion instead.")
+        return None
+    return client
+
+
 def convert_to_yaml(ideahub_content: dict) -> dict:
     """
     Use GPT to convert IdeaHub content to NeuriCo YAML format.
@@ -242,26 +258,9 @@ def convert_to_yaml(ideahub_content: dict) -> dict:
     """
     print("\n🤖 Converting to NeuriCo format using GPT...")
 
-    # Check for an API key: prefer OpenRouter (the repo default), fall back
-    # to a direct OpenAI key.
-    openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
-    api_key = openrouter_key or os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        print("ℹ️  No OPENROUTER_KEY or OPENAI_API_KEY set — using template-based conversion instead.")
+    client = _idea_converter_client()
+    if client is None:
         return _convert_without_llm(ideahub_content)
-
-    try:
-        from openai import OpenAI
-    except ImportError:
-        print("ℹ️  openai package not installed — using template-based conversion instead.")
-        return _convert_without_llm(ideahub_content)
-
-    if openrouter_key:
-        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-        model_name = "openai/gpt-4.1"
-    else:
-        client = OpenAI(api_key=api_key)
-        model_name = "gpt-4.1"
 
     # Read schema for reference
     schema_path = Path(__file__).parent.parent.parent / "ideas" / "schema.yaml"
@@ -363,23 +362,20 @@ idea:
 
     try:
         print("   Calling GPT API...")
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a research assistant that formats research ideas into minimal YAML. Only include information explicitly provided - do not invent datasets, methods, or metrics. Return valid YAML without markdown formatting."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.1,  # Lower temperature for more conservative output
-            max_tokens=2000  # Reduced since we want minimal output
-        )
+        # temperature, max_tokens and the timeout are the idea_converter role's
+        # params in config/agents.yaml; the client falls back across routes itself.
+        response = client.chat([
+            {
+                "role": "system",
+                "content": "You are a research assistant that formats research ideas into minimal YAML. Only include information explicitly provided - do not invent datasets, methods, or metrics. Return valid YAML without markdown formatting."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ])
 
-        yaml_content = response.choices[0].message.content.strip()
+        yaml_content = response.text.strip()
 
         # Remove markdown code fences if present
         yaml_content = re.sub(r'^```ya?ml\s*\n', '', yaml_content)

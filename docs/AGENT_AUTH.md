@@ -75,6 +75,35 @@ answered on the lab's Foundry resource, so Claude Code stays on OAuth until one 
 tells the agent to prefer Azure for GPT-family calls and OpenRouter for everything else.
 `templates/agents/session_instructions.txt` points agents at it when present.
 
+## Direct API calls (`core.llm_client`)
+
+The tool-less model calls that are not agent sessions (the eval verifier, the
+IdeaHub / local idea converters, the interactive manager's `anthropic_api` and
+`openrouter` backends) go through `core.llm_client.LLMClient`, built from the
+`kind: api` roles in `config/agents.yaml`:
+
+| Role | Call site | Routes (fallback order) | Model override |
+| --- | --- | --- | --- |
+| `judge` | shared defaults | `openrouter` (`openai/gpt-4.1`, zero data retention) then `openai` (`gpt-4.1`, `store: false`) | - |
+| `eval_verifier` | `agents/eval_verifier.py` | extends `judge` | `NEURICO_EVAL_VERIFIER_MODEL` |
+| `idea_converter` | `cli/submit_local.py`, `cli/fetch_from_ideahub.py` | extends `judge`, temperature 0.1, 2000 tokens, 60 s | `NEURICO_IDEA_CONVERTER_MODEL` |
+| `interactive_manager_api` | `interactive/llm_backend.py` | `anthropic` (`claude-sonnet-4-6`) or `openrouter` (`anthropic/claude-sonnet-4`); the backend name picks the lane | `NEURICO_MANAGER_MODEL` |
+
+A route is used when its key is set: `OPENROUTER_KEY` / `OPENROUTER_API_KEY`,
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`; `azure_openai` and `azure_foundry` routes
+read the layer-1 Azure variables above and can be listed on any role. Each call
+makes one HTTP request per route under one wall-clock deadline (no SDK retries).
+A rejected key (401), no credits (402) or a key limit (403) marks the route down
+for 600 s and the next route is tried; a plain 429 moves on without a cooldown;
+anything else is raised to the caller. Every call appends a line to the run
+ledger (`logs/agent_runs.jsonl`, and `<work_dir>/.neurico/agent_runs.jsonl`
+when the caller knows the work dir) with tokens and, for OpenRouter, the priced
+cost. Key values never appear in logs or the ledger, only variable names.
+
+`services/paper-finder` keeps its own LangChain client; its environment is the
+`judge` routes (same key order, `openai/gpt-4.1`), passed through by
+`docker/host.sh` and `docker/run.sh` rather than generated from the YAML.
+
 ## Safety engine
 
 `catalog/models.yaml` entries with `access: azure:<deployment>` are served to Inspect as

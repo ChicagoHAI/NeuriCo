@@ -209,7 +209,7 @@ and enforces an outer wall-clock deadline over the complete request.
 | --- | --- | --- |
 | `OPENROUTER_KEY` | Yes, unless `OPENAI_API_KEY` is set | OpenRouter access for paper-finder, IdeaHub conversion, LLM repo naming, and experiments that need it |
 | `OPENAI_API_KEY` | Yes, unless `OPENROUTER_KEY` is set | Direct OpenAI access (paper-finder's fallback when both keys are set) for paper-finder, IdeaHub conversion, LLM repo naming, and experiments that need it |
-| `NEURICO_EVAL_VERIFIER_MODEL` | No | Override the verifier model (`openai/gpt-4.1` through OpenRouter or `gpt-4.1` through OpenAI by default) |
+| `NEURICO_EVAL_VERIFIER_MODEL` | No | Override the verifier model (`openai/gpt-4.1` through OpenRouter or `gpt-4.1` through OpenAI by default; routes and defaults live under `roles.eval_verifier` in `config/agents.yaml`) |
 | `S2_API_KEY` | For paper-finder | Semantic Scholar API key ([get here](https://www.semanticscholar.org/product/api)) |
 | `COHERE_API_KEY` | No | Improves paper-finder ranking (~7% boost) |
 

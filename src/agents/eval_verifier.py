@@ -28,16 +28,18 @@ without evaluation.metrics or mandated functions skip it entirely.
 from pathlib import Path, PurePosixPath
 from typing import Optional, Dict, Any, List, Tuple
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import sys
 import time
 import json
-import os
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent_runner import next_attempt_number
+from core.llm_client import LLMClient, LLMResponseInvalidError
 from core.hitl_util import atomic_write_json
 from core.hitl_run_control import HitlRunStopRequested, active_hitl_run_stop_control
 
@@ -58,8 +60,9 @@ SCORING_EVIDENCE_FILES = (
 MAX_EVIDENCE_FILE_BYTES = 256 * 1024
 MAX_EVIDENCE_TOTAL_BYTES = 1024 * 1024
 MAX_EVIDENCE_BUNDLE_BYTES = 2 * 1024 * 1024
-DEFAULT_OPENAI_MODEL = "gpt-4.1"
-DEFAULT_OPENROUTER_MODEL = "openai/gpt-4.1"
+# Routes, models, privacy flags and the NEURICO_EVAL_VERIFIER_MODEL override live in
+# config/agents.yaml under this role (docs/AGENT_FACTORY_ASSESSMENT.md step 5).
+LLM_ROLE = "eval_verifier"
 FAILURE_KIND_API_UNAVAILABLE = "api_unavailable"
 FAILURE_KIND_EVIDENCE_INVALID = "evidence_invalid"
 FAILURE_KIND_VERDICT_INVALID = "verdict_invalid"
@@ -316,76 +319,41 @@ def generate_eval_verifier_prompt(
     return messages[1]['content']
 
 
-def _verifier_api_client(timeout: int):
-    """Create the repository-standard OpenAI-compatible API client."""
-    # Match the repository's other OpenAI-compatible API callers: prefer
-    # OpenRouter, including its conventional alias, then use direct OpenAI.
-    openrouter_key = os.getenv('OPENROUTER_KEY') or os.getenv('OPENROUTER_API_KEY')
-    openai_key = os.getenv('OPENAI_API_KEY')
-    api_key = openrouter_key or openai_key
-    if not api_key:
-        raise RuntimeError(
-            "eval verifier requires OPENROUTER_KEY, OPENROUTER_API_KEY, or "
-            "OPENAI_API_KEY; CLI fallback is intentionally disabled"
-        )
-    try:
-        from openai import AsyncOpenAI
-    except ImportError as exc:
-        raise RuntimeError("eval verifier requires the openai package") from exc
+# run_eval_verifier knows the work dir (for the per-idea ledger); _call_verifier_api's
+# two-argument signature is a seam the tests monkeypatch, so the dir travels here instead.
+_ledger_work_dir: ContextVar[Optional[Path]] = ContextVar("eval_verifier_work_dir", default=None)
 
-    configured_model = os.getenv('NEURICO_EVAL_VERIFIER_MODEL')
-    if openrouter_key:
-        client = AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://openrouter.ai/api/v1",
-            timeout=timeout,
-            max_retries=0,
-        )
-        return client, configured_model or DEFAULT_OPENROUTER_MODEL, 'openrouter'
-    client = AsyncOpenAI(api_key=api_key, timeout=timeout, max_retries=0)
-    return client, configured_model or DEFAULT_OPENAI_MODEL, 'openai'
+
+@contextmanager
+def _ledger_scope(work_dir: Optional[Path]):
+    token = _ledger_work_dir.set(work_dir)
+    try:
+        yield
+    finally:
+        _ledger_work_dir.reset(token)
+
+
+def _verifier_client(timeout: int) -> LLMClient:
+    """The eval_verifier role's client: routes, key order and privacy flags from config/agents.yaml.
+
+    No CLI fallback on purpose: the verifier must stay a tool-less data-in,
+    text-out call, so a missing key is reported, never worked around.
+    """
+    return LLMClient.for_role(LLM_ROLE, timeout_s=timeout, work_dir=_ledger_work_dir.get())
 
 
 async def _call_verifier_api_async(messages: List[Dict[str, str]], timeout: int):
     """Make one asynchronous tool-less API call."""
-    client, model, backend = _verifier_api_client(timeout)
-    request: Dict[str, Any] = {
-        'model': model,
-        'messages': messages,
-        'temperature': 0,
-        'max_tokens': 4096,
-        'response_format': {'type': 'json_object'},
-        # Deliberately no tools/functions: the remote model receives data and
-        # returns text, with no callback into the local runtime.
-    }
-    if backend == 'openrouter':
-        # Fail rather than route sealed source to an upstream that retains or
-        # collects it. This policy is enforced by OpenRouter per request.
-        request['extra_body'] = {
-            'provider': {'zdr': True, 'data_collection': 'deny'}
-        }
-    else:
-        # Direct OpenAI Chat Completions has no application-state retention
-        # when store=false. Provider abuse-monitoring policy remains an account
-        # concern. This uses the repository's configured shared API access.
-        request['store'] = False
+    client = _verifier_client(timeout)
+    # Deliberately no tools/functions: the remote model receives data and
+    # returns text, with no callback into the local runtime. The route's
+    # privacy flags (OpenRouter zdr / data_collection=deny, OpenAI store=false)
+    # refuse to send sealed source to an upstream that retains it.
     try:
-        response = await client.chat.completions.create(**request)
-    finally:
-        # API timeout and shared run cancellation both propagate into HTTPX.
-        # Close the transport before returning control to the pipeline.
-        await client.close()
-    try:
-        content = response.choices[0].message.content
-    except (AttributeError, IndexError, KeyError, TypeError) as exc:
-        raise VerifierResponseInvalidError(
-            "eval verifier API response did not contain message content"
-        ) from exc
-    if not isinstance(content, str) or not content.strip():
-        raise VerifierResponseInvalidError(
-            "eval verifier API returned an empty response"
-        )
-    return content, backend, model
+        response = await client.achat(messages)
+    except LLMResponseInvalidError as exc:
+        raise VerifierResponseInvalidError(f"eval verifier {exc}") from exc
+    return response.text, response.route.name, response.route.model
 
 
 def _call_verifier_api(messages: List[Dict[str, str]], timeout: int):
@@ -533,7 +501,8 @@ def run_eval_verifier(
     if budget_context:
         messages = [*messages, {'role': 'system', 'content': budget_context}]
     try:
-        content, backend, model = _call_verifier_api(messages, timeout)
+        with _ledger_scope(work_dir):
+            content, backend, model = _call_verifier_api(messages, timeout)
     except HitlRunStopRequested:
         raise
     except VerifierResponseInvalidError as exc:
