@@ -521,12 +521,15 @@ ADAPTERS: Dict[str, ProviderAdapter] = {
 PRICES_PATH = PROJECT_ROOT / "config" / "prices.yaml"
 
 
-def price_usage(usage: Usage, model: Optional[str], prices_path: Path = PRICES_PATH) -> Optional[float]:
+def price_usage(usage: Usage, model: Optional[str], prices_path: Optional[Path] = None) -> Optional[float]:
     """USD for ``usage`` from ``config/prices.yaml`` (per-million-token rates), else None.
 
-    The file is optional and absent by default; an unknown model yields None so
-    a missing price is visible in the ledger instead of looking free.
+    The file documents its own format; it is optional, and a model that is missing
+    or mapped to null yields None so a missing price is visible in the ledger
+    (``unpriced_runs``) instead of looking free. ``prices_path`` defaults to
+    ``PRICES_PATH`` at call time (tests point it elsewhere).
     """
+    prices_path = Path(prices_path) if prices_path is not None else PRICES_PATH
     if not model or not prices_path.exists():
         return None
     try:

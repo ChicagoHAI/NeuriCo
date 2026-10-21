@@ -146,6 +146,15 @@ without a price count as `unpriced` and never as a guess.
   `config/agents.yaml` (per role or in `default`); Codex and Gemini have no such flag, so their
   caps are the ledger checks above. `budget.hard: true` makes the factory raise instead of
   recording (ideation stages).
+- Prices are data: `config/prices.yaml` maps a model name as it appears in the ledger (an
+  Azure deployment such as `gpt-4.1-mini`, an OpenRouter slug such as `openai/gpt-4.1-mini`, a
+  direct API model id such as `claude-sonnet-4-6`) to USD per million `input`, `output`,
+  `cache_read` and `cache_write` tokens; `agent_factory.price_usage` applies it to every run
+  whose provider reports no cost itself (the Claude CLI and OpenRouter report their own). A
+  model mapped to `null` or missing from the table is "unpriced": the ledger line gets
+  `cost_usd: null`, the spend figures count it under `unpriced` and the budget checks add
+  nothing for it, so a missing price is visible rather than a guess. The Azure deployments
+  `gpt-6-astra`, `gpt-5.6-sol` and `gpt-5.4` are null until their list prices are confirmed.
 - Suites run Inspect directly; their model usage is in the result files (`model_usage`) but not
   priced, so it is not in the spend figures.
 

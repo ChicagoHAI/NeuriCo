@@ -25,7 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from core import agent_auth  # noqa: E402
 from core.agent_factory import (  # noqa: E402
     AgentConfigError, AgentFactory, AgentSpec, Budget, BudgetExceeded, OutputContract, Permissions, RetryPolicy,
-    TranscriptPolicy, Usage, evaluate_contract, feedback_prompt, resolve_role_config, spec_from_config,
+    TranscriptPolicy, Usage, evaluate_contract, feedback_prompt, price_usage, resolve_role_config, spec_from_config,
 )
 from core.agent_runner import run_prebuilt_cli_agent  # noqa: E402
 from core.config_loader import ConfigLoader  # noqa: E402
@@ -371,6 +371,38 @@ def test_prompt_size_guard_and_hard_budget(fake_cli, factory, tmp_path, oauth):
     assert RunLedger.read(work / ".neurico" / "agent_runs.jsonl")[0]["status"] == "budget_exceeded"
     soft = AgentSpec(role="cap", budget=Budget(timeout_s=30, max_cost_usd=0.001))
     assert factory.run(factory.build(soft), "p", work).status == "budget_exceeded"
+
+
+# -- pricing table (config/prices.yaml) ---------------------------------------------------------------------------
+
+PRICES_YAML = Path(__file__).resolve().parents[1] / "config" / "prices.yaml"
+
+
+def test_price_usage_reads_config_prices_yaml(tmp_path, monkeypatch):
+    usage = Usage(input_tokens=1_000_000, output_tokens=100_000, cache_read_tokens=500_000, cache_write_tokens=10_000)
+    # Anthropic API route (config/agents.yaml): 3 + 1.5 + 0.15 + 0.0375
+    assert price_usage(usage, "claude-sonnet-4-6", PRICES_YAML) == 4.6875
+    # cache fields are optional (0 when absent): 0.40 + 0.16 + 0.05
+    assert price_usage(usage, "gpt-4.1-mini", PRICES_YAML) == 0.61
+    assert price_usage(usage, "openai/gpt-4.1-mini", PRICES_YAML) == 0.61  # OpenRouter slug, same rates
+    # entries whose price is unknown are null -> unpriced, never a guess; so are unknown names
+    for deployment in ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.4"):
+        assert price_usage(usage, deployment, PRICES_YAML) is None
+    assert price_usage(usage, "no-such-model", PRICES_YAML) is None and price_usage(usage, None, PRICES_YAML) is None
+    assert price_usage(usage, "gpt-4.1-mini", tmp_path / "missing.yaml") is None
+    # the table covers every priced lane the engine launches on, with the documented keys only
+    table = yaml.safe_load(PRICES_YAML.read_text(encoding="utf-8"))["models"]
+    for name in ("claude-sonnet-4-6", "claude-opus-5-5", "claude-fable-5-1", "anthropic/claude-sonnet-4",
+                 "openai/gpt-4.1", "gpt-4.1", "gpt-4.1-mini", "openai/gpt-4.1-mini", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.4"):
+        assert name in table
+    for name, rates in table.items():
+        assert rates is None or (set(rates) <= {"input", "output", "cache_read", "cache_write"}
+                                 and rates["input"] is not None and rates["output"] is not None), name
+    # the default path is the project table, resolved at call time (the conftest fixture hides it from tests)
+    import core.agent_factory as agent_factory
+    assert price_usage(usage, "gpt-4.1-mini") is None
+    monkeypatch.setattr(agent_factory, "PRICES_PATH", PRICES_YAML)
+    assert price_usage(usage, "gpt-4.1-mini") == 0.61
 
 
 def test_tracker_run_id_writes_run_tracker_files(fake_cli, factory, tmp_path, oauth):

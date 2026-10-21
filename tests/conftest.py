@@ -81,8 +81,15 @@ class FakeCli:
 @pytest.fixture(autouse=True)
 def _agent_ledger_in_tmp(tmp_path, monkeypatch):
     """Call sites now go through AgentFactory, which also appends to the project-wide
-    ledger (logs/agent_runs.jsonl); tests must never write there."""
+    ledger (logs/agent_runs.jsonl); tests must never write there. The price table
+    (config/prices.yaml) is data that changes with the invoices, so tests see none
+    unless they pass a path to ``price_usage`` themselves."""
     monkeypatch.setenv("NEURICO_AGENT_LEDGER", str(tmp_path / "agent_runs.global.jsonl"))
+    src = str(FAKE_CLI.parents[3] / "src")
+    if src not in sys.path:  # test modules add it themselves; a lone module may not have yet
+        sys.path.insert(0, src)
+    import core.agent_factory as agent_factory
+    monkeypatch.setattr(agent_factory, "PRICES_PATH", tmp_path / "no-prices.yaml")
 
 
 @pytest.fixture
