@@ -1,0 +1,19 @@
+kind: research
+title: Benign tool-injection failures with matched utility controls
+priority: 61
+rationale: gaps/open-model-families-gap-matrix.md and labs/alibaba-qwen/README.md document the agentic-misuse
+  reporting gap; design/RESEARCH_PLAN.md section 3 calls for agentic evaluations with capability controls.
+  Existing research and nightly suites contain no tool-use evaluation. A small deterministic simulation
+  makes non-compliance distinguishable from inability while avoiding the hazardous content of unrestricted
+  AgentHarm tasks.
+resources:
+  gpu_memory_gb: 48
+  api_budget_usd: 0
+neurico:
+  idea_file: safety_kb/queue/ideas/plan-20261020-084340-benign-tool-injection.yaml
+  provider: claude
+  model: null
+  autoresearch_iterations: 3
+  write_paper: false
+  github: true
+  private: false

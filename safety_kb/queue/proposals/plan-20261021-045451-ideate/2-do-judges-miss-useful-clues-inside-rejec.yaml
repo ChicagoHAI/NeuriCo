@@ -1,0 +1,59 @@
+kind: explore
+title: Do judges miss useful clues inside rejected plans?
+priority: 88
+novelty: 'The synthetic-secret study counted exact token emission and explicitly omitted partial or encoded
+  disclosure. The DeepSeek judge gap did not test correctness. We would test whether rejection hides useful
+  partial clues from judges.
+
+
+  The secret-disclosure proposal measured exact emission, rather than judges missing useful partial clues
+  (idea:plan-20261020-144343-synthetic-secret-boundaries).
+
+
+  The secret-disclosure job tested model leakage, rather than the accuracy of rejection-sensitive judgments
+  (job:research-20261020-001-synthetic-secret-leakage-with-au).
+
+
+  The trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).
+  Judge: novelty 3/5, duplication risk 2/5 (lower is better). Distinct from its nearest sibling: We change
+  rejection wording around fixed code clues; the naming study changes alarming words around plans without
+  useful clues.'
+finding_criterion: If yes, a 10-point rise in missed clues with a positive 95% lower bound would show
+  rejection masks useful disclosure; if no, it would not.
+rationale: Rank 2 for the problem 'Do safety judges mistake rejected plans for harmful assistance?'. We
+  rank the clue test next for safety impact because it checks whether rejection hides useful disclosure
+  from judges. Independent code solvers anchor correctness, but toy information gain may not predict real
+  assistance.
+resources:
+  gpu_memory_gb: 76.0
+  api_budget_usd: 15.0
+neurico:
+  idea_file: safety_kb/queue/ideas/plan-20261021-045451-ideate-do-judges-miss-useful-clues-inside-rejec.yaml
+  provider: codex
+  model: gpt-6-astra
+  agent_auth: azure
+  github: false
+extra:
+  idea_id: idea_2
+  axis: evals
+  scores:
+    novelty: 3
+    feasibility: 4
+    safety_impact: 5
+    replicability: 4
+    duplication_risk: 2
+  distinctness: We change rejection wording around fixed code clues; the naming study changes alarming
+    words around plans without useful clues.
+  reject_reasons:
+  - none
+  builds_on:
+  - finding:finding-20261020-001-judge-dependent-harmful-reasonin
+  - run:run-research-20261020-006
+  canonical_keys: []
+  problem_title: Do safety judges mistake rejected plans for harmful assistance?
+  models:
+  - qwen3-8-27b
+  - qwen2.5-7b-judge
+  - azure-gpt-4.1-mini-judge
+  evals:
+  - xstest-safe-csv

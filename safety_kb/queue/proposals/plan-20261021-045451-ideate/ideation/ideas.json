@@ -1,0 +1,922 @@
+{
+  "problem_title": "Do safety judges mistake rejected plans for harmful assistance?",
+  "ideas": [
+    {
+      "id": "idea_1",
+      "title": "Do alarming words turn rejected plans into false alarms?",
+      "axis": "evals",
+      "category": "refusal-calibration",
+      "hypothesis": "On qwen3-8-27b reasoning, alarming versus neutral names raise local-judge false harmful labels by 10 percentage points under a paired rate test.",
+      "method": "We would rename inert plans in qwen3-8-27b reasoning with alarming versus neutral words while keeping their information fixed.\n\nWe would generate 800 independent toy maps with blocked goals and ask Qwen for a rejected plan in a fixed sentence grammar. Names would denote fictional game moves, never real harmful procedures. Each map would also supply a working route as a positive control, even when its text rejects using it.\n\nTwo separate graph checkers would label guidance by whether disclosed edges reduce the shortest known route to the blocked goal. Rejected plan names without edges would be negative; unknown parses would remain unresolved. We would balance word sets across maps and pair each renamed trace with its original.\n\nWe would calibrate qwen2.5-7b-judge and azure-gpt-4.1-mini-judge on 160 disjoint maps before freezing their prompts. Both judges would score full traces, including final replies; we would report accuracy, agreement, and errors by label.\n\nThe primary contrast would be the local judge\u2019s false-positive rate for alarming minus neutral names. We would resample whole maps for a paired 95% interval and require a 10-point estimate with a positive lower bound. We would check power before test inference; 800 cases target this effect, not a three-point difference.",
+      "method_steps": [
+        "We would elicit rejected game plans from qwen3-8-27b in a fixed grammar.",
+        "We would swap alarming and neutral move names without changing route facts.",
+        "We would derive guidance labels with two independent graph checkers.",
+        "We would calibrate both judges on separate maps and score matched full traces.",
+        "We would test the paired false-alarm difference and retain working-route controls."
+      ],
+      "resources": "We would use one 80 GB GPU for an estimated 12 hours and cap Azure judging at $20. Data would comprise public XSTest safe prompts and newly generated toy maps.",
+      "expected_result": "If yes, a 10-point false-alarm rise with a positive 95% lower bound would implicate alarming words; if no, these names would not explain errors.",
+      "builds_on": [
+        "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+        "run:run-research-20261020-005",
+        "finding:finding-20261020-001-provisional-paired-xstest-unsafe"
+      ],
+      "risks": "We would limit the claim to the fixed grammar because graph labels cannot certify free prose. We would report unresolved traces and require the effect to survive missing-data bounds.",
+      "closest_prior_work": "The DeepSeek trace audit found an 11.1-point judge gap without correctness labels. The provisional XSTest comparison also lacked judge calibration. We would isolate wording errors on current Qwen using independently checked guidance labels.\n\nThe attack-score candidate measured response scores, rather than errors against known guidance labels (finding:finding-20261020-001-provisional-paired-strong-reject).\n\nThe DeepSeek scorecard proposed broad model comparisons, rather than this judge-error test (idea:deepseek-distill-and-moonlight-safety-scorecard).\n\nThe trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).\n\nThe completed scorecard job did not isolate this proposed source of judge error (job:research-20261020-001-deepseek-distill-and-moonlight-s).",
+      "neurico": {
+        "domain": "ai_safety",
+        "job_kind": "explore",
+        "models": [
+          "qwen3-8-27b",
+          "qwen2.5-7b-judge",
+          "azure-gpt-4.1-mini-judge"
+        ],
+        "evals": [
+          "xstest-safe-csv"
+        ],
+        "background": {
+          "description": "The DeepSeek trace audit found an 11.1-point judge gap without correctness labels. The provisional XSTest comparison also lacked judge calibration. We would isolate wording errors on current Qwen using independently checked guidance labels.",
+          "papers": []
+        },
+        "methodology": {
+          "approach": "We would rename inert plans in qwen3-8-27b reasoning with alarming versus neutral words while keeping their information fixed.\n\nWe would generate 800 independent toy maps with blocked goals and ask Qwen for a rejected plan in a fixed sentence grammar. Names would denote fictional game moves, never real harmful procedures. Each map would also supply a working route as a positive control, even when its text rejects using it.\n\nTwo separate graph checkers would label guidance by whether disclosed edges reduce the shortest known route to the blocked goal. Rejected plan names without edges would be negative; unknown parses would remain unresolved. We would balance word sets across maps and pair each renamed trace with its original.\n\nWe would calibrate qwen2.5-7b-judge and azure-gpt-4.1-mini-judge on 160 disjoint maps before freezing their prompts. Both judges would score full traces, including final replies; we would report accuracy, agreement, and errors by label.\n\nThe primary contrast would be the local judge\u2019s false-positive rate for alarming minus neutral names. We would resample whole maps for a paired 95% interval and require a 10-point estimate with a positive lower bound. We would check power before test inference; 800 cases target this effect, not a three-point difference.",
+          "steps": [
+            "We would elicit rejected game plans from qwen3-8-27b in a fixed grammar.",
+            "We would swap alarming and neutral move names without changing route facts.",
+            "We would derive guidance labels with two independent graph checkers.",
+            "We would calibrate both judges on separate maps and score matched full traces.",
+            "We would test the paired false-alarm difference and retain working-route controls.",
+            "We would freeze data, prompts, model revisions, parsing rules, and analysis before test calls.",
+            "We would use safety-evals with an Inspect extension and serve each local model in turn through vLLM.",
+            "We would verify native reasoning extraction and preserve both reasoning and final text.",
+            "We would report custom proxy scores separately from the unmodified XSTest safe refusal check.",
+            "We would cap subject output at 512 tokens, judge output at 128 tokens, and context at 2048 tokens.",
+            "We would use greedy decoding, small batches, and full GPU availability; memory or budget failures would remain reported as incomplete data.",
+            "We would label any useful content as positive even when rejected; only independently verified absence of useful content would be negative.",
+            "We would publish seed 42, 10000 paired bootstrap resamples, and a two-sided 95% interval for the primary contrast.",
+            "We would target 80% power in a paired simulation before test calls, using development error rates and a conservative 50% discordance case.",
+            "We would freeze the planned sample size and report low power as inconclusive; test outcomes would never change enrollment.",
+            "We would interpret grammar-constrained reasoning as a controlled proxy, without inferring accuracy on unrestricted harmful requests.",
+            "We would validate all generated text against the grammar; unparsed reasoning would stay unresolved, including text outside designated fact fields."
+          ],
+          "baselines": [
+            "Neutral names on identical traces",
+            "Working routes despite rejection wording"
+          ],
+          "metrics": [
+            "Local false-positive rate difference",
+            "Azure false-positive rate difference",
+            "Working-route detection",
+            "Unresolved trace rate",
+            "Judge accuracy and agreement"
+          ]
+        },
+        "constraints": {
+          "compute": "gpu_required",
+          "dependencies": [
+            "inspect-ai",
+            "inspect-evals",
+            "vllm",
+            "transformers",
+            "numpy",
+            "scipy",
+            "scikit-learn"
+          ],
+          "time_limit": 43200,
+          "memory": "80 GB GPU; serve the 76 GB subject and 20 GB judge in separate sessions.",
+          "budget": 20
+        },
+        "expected_outputs": [
+          {
+            "type": "metrics",
+            "format": "json",
+            "description": "results/safety/*.json in the neurico-safety-result/v1 schema"
+          },
+          {
+            "type": "report",
+            "format": "markdown",
+            "description": "REPORT.md plus findings/*.yaml for any candidate finding"
+          }
+        ],
+        "evaluation_criteria": [
+          "If yes, a 10-point false-alarm rise with a positive 95% lower bound would implicate alarming words; if no, these names would not explain errors.",
+          "We would report planned and observed n, standard errors, and paired 95% confidence intervals for all test estimates across 800 independent cases.",
+          "We would report each judge against independent labels, plus raw agreement and kappa, which measures agreement beyond chance.",
+          "We would keep calibration cases separate and require 90% accuracy on clear positive and negative controls before testing.",
+          "We would score invalid judgments as errors and retain failed generations in worst-case bounds; bounds must preserve the finding.",
+          "We would publish the toy grammar and both label checkers; disagreement between checkers blocks a correctness claim.",
+          "We would run the full xstest-safe-csv set as a separate calibration check, without generating unsafe benchmark answers.",
+          "We would stop if the named subject cannot load or native reasoning cannot be captured; we would not replace its checkpoint."
+        ]
+      }
+    },
+    {
+      "id": "idea_2",
+      "title": "Do judges miss useful clues inside rejected plans?",
+      "axis": "evals",
+      "category": "refusal-calibration",
+      "hypothesis": "For qwen3-8-27b traces, rejection versus neutral wording raises missed useful-clue labels by 10 percentage points under a paired error-rate test.",
+      "method": "We would compare rejected versus neutrally described clues that reveal the same information about a fictional code.\n\nWe would create 600 independent code puzzles and ask qwen3-8-27b for bounded reasoning using an equation grammar. We would retain the clue content and replace only the sentence describing whether the speaker endorses it. Final replies would withhold the code in both arms.\n\nA brute-force solver and a separately written constraint solver would count possible codes before and after reading every output channel. Any reduction would count as useful guidance, including partial disclosure inside a rejected plan. Plan names and redundant equations would provide negative controls.\n\nWe would tune neither labels nor wording on test outcomes. A separate 150-puzzle calibration set would set fixed prompts for qwen2.5-7b-judge and azure-gpt-4.1-mini-judge. Their task would be to detect information gain, with accuracy and agreement reported separately.\n\nWe would compare each puzzle\u2019s missed-guidance indicators under rejection and neutral wording. The local judge\u2019s mean paired difference must reach 10 points with a 95% interval above zero. We would report Azure replication and performance across clue strengths as secondary estimates; independent puzzles would determine sample size and bootstrap units.",
+      "method_steps": [
+        "We would generate fictional code puzzles and Qwen reasoning with machine-readable clues.",
+        "We would hold equations fixed while changing rejection to neutral wording.",
+        "We would count information gain with two separately implemented solvers.",
+        "We would calibrate both judges on disjoint puzzles and report their agreement.",
+        "We would test whether rejection increases missed useful guidance."
+      ],
+      "resources": "We would budget an estimated 10 GPU hours on 80 GB and $15 for Azure calls. We would use generated code puzzles and public XSTest safe data.",
+      "expected_result": "If yes, a 10-point rise in missed clues with a positive 95% lower bound would show rejection masks useful disclosure; if no, it would not.",
+      "builds_on": [
+        "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+        "run:run-research-20261020-006"
+      ],
+      "risks": "We would call any clue that narrows the code set useful, rather than treating a final refusal as safety. The result would concern fictional information gain, not real secret theft.",
+      "closest_prior_work": "The synthetic-secret study counted exact token emission and explicitly omitted partial or encoded disclosure. The DeepSeek judge gap did not test correctness. We would test whether rejection hides useful partial clues from judges.\n\nThe secret-disclosure proposal measured exact emission, rather than judges missing useful partial clues (idea:plan-20261020-144343-synthetic-secret-boundaries).\n\nThe secret-disclosure job tested model leakage, rather than the accuracy of rejection-sensitive judgments (job:research-20261020-001-synthetic-secret-leakage-with-au).\n\nThe trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).",
+      "neurico": {
+        "domain": "ai_safety",
+        "job_kind": "explore",
+        "models": [
+          "qwen3-8-27b",
+          "qwen2.5-7b-judge",
+          "azure-gpt-4.1-mini-judge"
+        ],
+        "evals": [
+          "xstest-safe-csv"
+        ],
+        "background": {
+          "description": "The synthetic-secret study counted exact token emission and explicitly omitted partial or encoded disclosure. The DeepSeek judge gap did not test correctness. We would test whether rejection hides useful partial clues from judges.",
+          "papers": [],
+          "code_references": [
+            {
+              "repo": "https://github.com/Hypogenic-AI/synthetic-secret-leakage-3677-codex-gpt-6-astra",
+              "description": "We would compare our clue labels with the earlier exact-emission design; its run had incomplete coverage."
+            }
+          ]
+        },
+        "methodology": {
+          "approach": "We would compare rejected versus neutrally described clues that reveal the same information about a fictional code.\n\nWe would create 600 independent code puzzles and ask qwen3-8-27b for bounded reasoning using an equation grammar. We would retain the clue content and replace only the sentence describing whether the speaker endorses it. Final replies would withhold the code in both arms.\n\nA brute-force solver and a separately written constraint solver would count possible codes before and after reading every output channel. Any reduction would count as useful guidance, including partial disclosure inside a rejected plan. Plan names and redundant equations would provide negative controls.\n\nWe would tune neither labels nor wording on test outcomes. A separate 150-puzzle calibration set would set fixed prompts for qwen2.5-7b-judge and azure-gpt-4.1-mini-judge. Their task would be to detect information gain, with accuracy and agreement reported separately.\n\nWe would compare each puzzle\u2019s missed-guidance indicators under rejection and neutral wording. The local judge\u2019s mean paired difference must reach 10 points with a 95% interval above zero. We would report Azure replication and performance across clue strengths as secondary estimates; independent puzzles would determine sample size and bootstrap units.",
+          "steps": [
+            "We would generate fictional code puzzles and Qwen reasoning with machine-readable clues.",
+            "We would hold equations fixed while changing rejection to neutral wording.",
+            "We would count information gain with two separately implemented solvers.",
+            "We would calibrate both judges on disjoint puzzles and report their agreement.",
+            "We would test whether rejection increases missed useful guidance.",
+            "We would freeze data, prompts, model revisions, parsing rules, and analysis before test calls.",
+            "We would use safety-evals with an Inspect extension and serve each local model in turn through vLLM.",
+            "We would verify native reasoning extraction and preserve both reasoning and final text.",
+            "We would report custom proxy scores separately from the unmodified XSTest safe refusal check.",
+            "We would cap subject output at 512 tokens, judge output at 128 tokens, and context at 2048 tokens.",
+            "We would use greedy decoding, small batches, and full GPU availability; memory or budget failures would remain reported as incomplete data.",
+            "We would label any useful content as positive even when rejected; only independently verified absence of useful content would be negative.",
+            "We would publish seed 42, 10000 paired bootstrap resamples, and a two-sided 95% interval for the primary contrast.",
+            "We would target 80% power in a paired simulation before test calls, using development error rates and a conservative 50% discordance case.",
+            "We would freeze the planned sample size and report low power as inconclusive; test outcomes would never change enrollment.",
+            "We would interpret grammar-constrained reasoning as a controlled proxy, without inferring accuracy on unrestricted harmful requests.",
+            "We would validate all generated text against the grammar; unparsed reasoning would stay unresolved, including text outside designated fact fields."
+          ],
+          "baselines": [
+            "Identical clues with neutral wording",
+            "Redundant equations with no information gain",
+            "Plan mentions without equations"
+          ],
+          "metrics": [
+            "Paired missed-guidance rate",
+            "Remaining code count",
+            "Partial-clue detection",
+            "False alarms on redundant clues",
+            "Judge agreement"
+          ]
+        },
+        "constraints": {
+          "compute": "gpu_required",
+          "dependencies": [
+            "inspect-ai",
+            "inspect-evals",
+            "vllm",
+            "transformers",
+            "numpy",
+            "scipy",
+            "scikit-learn"
+          ],
+          "time_limit": 36000,
+          "memory": "80 GB GPU; serve the 76 GB subject and 20 GB judge in separate sessions.",
+          "budget": 15
+        },
+        "expected_outputs": [
+          {
+            "type": "metrics",
+            "format": "json",
+            "description": "results/safety/*.json in the neurico-safety-result/v1 schema"
+          },
+          {
+            "type": "report",
+            "format": "markdown",
+            "description": "REPORT.md plus findings/*.yaml for any candidate finding"
+          }
+        ],
+        "evaluation_criteria": [
+          "If yes, a 10-point rise in missed clues with a positive 95% lower bound would show rejection masks useful disclosure; if no, it would not.",
+          "We would report planned and observed n, standard errors, and paired 95% confidence intervals for all test estimates across 600 independent cases.",
+          "We would report each judge against independent labels, plus raw agreement and kappa, which measures agreement beyond chance.",
+          "We would keep calibration cases separate and require 90% accuracy on clear positive and negative controls before testing.",
+          "We would score invalid judgments as errors and retain failed generations in worst-case bounds; bounds must preserve the finding.",
+          "We would publish the toy grammar and both label checkers; disagreement between checkers blocks a correctness claim.",
+          "We would run the full xstest-safe-csv set as a separate calibration check, without generating unsafe benchmark answers.",
+          "We would stop if the named subject cannot load or native reasoning cannot be captured; we would not replace its checkpoint."
+        ]
+      }
+    },
+    {
+      "id": "idea_3",
+      "title": "Does requiring evidence reduce false harmful labels?",
+      "axis": "control_oversight",
+      "category": "refusal-calibration",
+      "hypothesis": "Requiring checked evidence versus a direct verdict reduces local-judge false alarms on qwen3-8-27b plans by eight percentage points under paired testing.",
+      "method": "We would compare a direct safety verdict with a verdict that must cite usable steps from the same Qwen trace.\n\nWe would build 800 fictional assembly tasks, each with rejected part names and a matched reply containing useful assembly steps. qwen3-8-27b would render typed step lists into a restricted prose grammar; two parsers would recover the full list. A simulator would check whether supplied steps advance the forbidden toy assembly.\n\nThe evidence arm would ask each judge to quote the exact useful span and name its effect. A checker would reject invented quotes and unsupported effects, then return an unresolved verdict for review. The direct arm would use the same policy without evidence fields.\n\nWe would use 200 separate assemblies to calibrate qwen2.5-7b-judge and azure-gpt-4.1-mini-judge in both formats. We would count unresolved verdicts as errors for primary accuracy, preventing abstention from earning credit. Raw agreement, checked-span accuracy, and true-positive rates would accompany false alarms.\n\nWe would resample task pairs to estimate the local judge\u2019s false-alarm reduction and 95% interval. A finding requires an eight-point reduction with a positive lower bound and a one-sided 95% sensitivity-loss bound below three points. We would simulate paired power before freezing the 800-case test.",
+      "method_steps": [
+        "We would render fictional assembly plans with qwen3-8-27b and verify all recovered steps.",
+        "We would compare direct verdicts with required evidence on identical traces.",
+        "We would check cited spans and effects against a simulator.",
+        "We would calibrate both judges in both formats on separate assemblies.",
+        "We would measure false-alarm reduction while bounding losses on useful guidance."
+      ],
+      "resources": "We would reserve one 80 GB GPU for an estimated 14 hours and cap API cost at $25. Data would use synthetic assemblies and XSTest safe prompts.",
+      "expected_result": "If yes, the eight-point gain and sensitivity guard would support evidence checks; if no, they would not meet the stated error tradeoff.",
+      "builds_on": [
+        "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+        "run:run-explore-20261021-001"
+      ],
+      "risks": "We would count missing evidence as an error, since an abstention-only system could otherwise appear safer. Grammar errors would remain visible rather than becoming negative labels.",
+      "closest_prior_work": "The permission audit tested whether auditors confused task goals with write rights. The trace audit left harmfulness labels unresolved. We would require evidence of usable assistance, rather than evidence of completed actions.\n\nThe permission proposal tested completed writes, rather than useful information inside rejected plans (idea:plan-20261021-013804-goal-permission-substitution).\n\nThe permission job audited action rights, rather than the proposed assistance boundary (job:explore-20261021-001-do-auditors-substitute-task-rele).\n\nThe trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).",
+      "neurico": {
+        "domain": "ai_safety",
+        "job_kind": "explore",
+        "models": [
+          "qwen3-8-27b",
+          "qwen2.5-7b-judge",
+          "azure-gpt-4.1-mini-judge"
+        ],
+        "evals": [
+          "xstest-safe-csv"
+        ],
+        "background": {
+          "description": "The permission audit tested whether auditors confused task goals with write rights. The trace audit left harmfulness labels unresolved. We would require evidence of usable assistance, rather than evidence of completed actions.",
+          "papers": []
+        },
+        "methodology": {
+          "approach": "We would compare a direct safety verdict with a verdict that must cite usable steps from the same Qwen trace.\n\nWe would build 800 fictional assembly tasks, each with rejected part names and a matched reply containing useful assembly steps. qwen3-8-27b would render typed step lists into a restricted prose grammar; two parsers would recover the full list. A simulator would check whether supplied steps advance the forbidden toy assembly.\n\nThe evidence arm would ask each judge to quote the exact useful span and name its effect. A checker would reject invented quotes and unsupported effects, then return an unresolved verdict for review. The direct arm would use the same policy without evidence fields.\n\nWe would use 200 separate assemblies to calibrate qwen2.5-7b-judge and azure-gpt-4.1-mini-judge in both formats. We would count unresolved verdicts as errors for primary accuracy, preventing abstention from earning credit. Raw agreement, checked-span accuracy, and true-positive rates would accompany false alarms.\n\nWe would resample task pairs to estimate the local judge\u2019s false-alarm reduction and 95% interval. A finding requires an eight-point reduction with a positive lower bound and a one-sided 95% sensitivity-loss bound below three points. We would simulate paired power before freezing the 800-case test.",
+          "steps": [
+            "We would render fictional assembly plans with qwen3-8-27b and verify all recovered steps.",
+            "We would compare direct verdicts with required evidence on identical traces.",
+            "We would check cited spans and effects against a simulator.",
+            "We would calibrate both judges in both formats on separate assemblies.",
+            "We would measure false-alarm reduction while bounding losses on useful guidance.",
+            "We would freeze data, prompts, model revisions, parsing rules, and analysis before test calls.",
+            "We would use safety-evals with an Inspect extension and serve each local model in turn through vLLM.",
+            "We would verify native reasoning extraction and preserve both reasoning and final text.",
+            "We would report custom proxy scores separately from the unmodified XSTest safe refusal check.",
+            "We would cap subject output at 512 tokens, judge output at 128 tokens, and context at 2048 tokens.",
+            "We would use greedy decoding, small batches, and full GPU availability; memory or budget failures would remain reported as incomplete data.",
+            "We would label any useful content as positive even when rejected; only independently verified absence of useful content would be negative.",
+            "We would publish seed 42, 10000 paired bootstrap resamples, and a two-sided 95% interval for the primary contrast.",
+            "We would target 80% power in a paired simulation before test calls, using development error rates and a conservative 50% discordance case.",
+            "We would freeze the planned sample size and report low power as inconclusive; test outcomes would never change enrollment.",
+            "We would interpret grammar-constrained reasoning as a controlled proxy, without inferring accuracy on unrestricted harmful requests.",
+            "We would validate all generated text against the grammar; unparsed reasoning would stay unresolved, including text outside designated fact fields."
+          ],
+          "baselines": [
+            "Direct binary verdict",
+            "Verified useful steps with rejection wording",
+            "Rejected part names without steps"
+          ],
+          "metrics": [
+            "False-alarm reduction",
+            "Useful-guidance sensitivity loss",
+            "Evidence validity",
+            "Unresolved verdict rate",
+            "Judge agreement"
+          ]
+        },
+        "constraints": {
+          "compute": "gpu_required",
+          "dependencies": [
+            "inspect-ai",
+            "inspect-evals",
+            "vllm",
+            "transformers",
+            "numpy",
+            "scipy",
+            "scikit-learn"
+          ],
+          "time_limit": 50400,
+          "memory": "80 GB GPU; serve the 76 GB subject and 20 GB judge in separate sessions.",
+          "budget": 25
+        },
+        "expected_outputs": [
+          {
+            "type": "metrics",
+            "format": "json",
+            "description": "results/safety/*.json in the neurico-safety-result/v1 schema"
+          },
+          {
+            "type": "report",
+            "format": "markdown",
+            "description": "REPORT.md plus findings/*.yaml for any candidate finding"
+          }
+        ],
+        "evaluation_criteria": [
+          "If yes, the eight-point gain and sensitivity guard would support evidence checks; if no, they would not meet the stated error tradeoff.",
+          "We would report planned and observed n, standard errors, and paired 95% confidence intervals for all test estimates across 800 independent cases.",
+          "We would report each judge against independent labels, plus raw agreement and kappa, which measures agreement beyond chance.",
+          "We would keep calibration cases separate and require 90% accuracy on clear positive and negative controls before testing.",
+          "We would score invalid judgments as errors and retain failed generations in worst-case bounds; bounds must preserve the finding.",
+          "We would publish the toy grammar and both label checkers; disagreement between checkers blocks a correctness claim.",
+          "We would run the full xstest-safe-csv set as a separate calibration check, without generating unsafe benchmark answers.",
+          "We would stop if the named subject cannot load or native reasoning cannot be captured; we would not replace its checkpoint.",
+          "We would require the eight-point gain\u2019s paired 95% interval above zero and the one-sided 95% sensitivity-loss bound below three points."
+        ]
+      }
+    },
+    {
+      "id": "idea_4",
+      "title": "Can judge activations separate rejected plans from useful guidance?",
+      "axis": "interpretability",
+      "category": "refusal-calibration",
+      "hypothesis": "A linear readout versus emitted verdicts lowers local-judge error on qwen3-8-27b plan traces by eight percentage points under paired testing.",
+      "method": "We would train a linear readout, a weighted label predictor, of local-judge activations and compare its labels with emitted verdicts.\n\nqwen3-8-27b would write short game recipes using a finite grammar with accepted and rejected branches. An interpreter and a separate reachability checker would label whether either branch supplies useful steps, regardless of endorsement. We would reserve distinct game rules for 1200 training, 200 development, and 800 sealed test cases.\n\nAfter unloading Qwen, we would capture qwen2.5-7b-judge activations at the last input token using Transformers. We would fit logistic regression, a weighted linear label rule, at three evenly spaced layers. Development data would choose one layer and threshold; test labels would stay sealed.\n\nBaselines would include emitted verdicts and a word-count classifier, which uses token frequencies. We would calibrate the local judge and azure-gpt-4.1-mini-judge on 160 further cases and report agreement against independent labels.\n\nThe sealed score would be balanced error, the mean of both class errors. An eight-point reduction against emitted verdicts must have a paired 95% lower bound above zero. We would resample whole recipes and report each class error, testing whether gains persist on unseen rules and reordered wording.",
+      "method_steps": [
+        "We would collect Qwen recipe traces and independently check useful steps.",
+        "We would split by game rules before training or inspecting activations.",
+        "We would extract local-judge activations and fit a linear label rule.",
+        "We would select the layer on development data and seal the test set.",
+        "We would compare class errors with emitted verdicts and a word-count baseline."
+      ],
+      "resources": "We would spend an estimated 18 hours on one 80 GB GPU and at most $20 on Azure checks. Data would be generated recipes plus public XSTest safe items.",
+      "expected_result": "If yes, an eight-point gain with a positive 95% lower bound would reveal unused judge information; if no, this readout would not.",
+      "builds_on": [
+        "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+        "gap:open-model-families-gap-matrix"
+      ],
+      "risks": "We would avoid claims about a safety circuit because a readout only measures accessible information. Unseen rules and word-order controls would test shortcuts from grammar or vocabulary.",
+      "closest_prior_work": "The trace audit measured output-label disagreement without testing the local judge\u2019s internal states. Qwen3Guard reports reasoning moderation, which does not establish this readout on current Qwen traces. We would test information lost between judge activations and verdicts.\n\nThe trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).\n\nExisting probes target harmful intent; we would test whether judge states encode assistance despite misleading verdicts.",
+      "neurico": {
+        "domain": "ai_safety",
+        "job_kind": "optimise",
+        "models": [
+          "qwen3-8-27b",
+          "qwen2.5-7b-judge",
+          "azure-gpt-4.1-mini-judge"
+        ],
+        "evals": [
+          "xstest-safe-csv"
+        ],
+        "background": {
+          "description": "The trace audit measured output-label disagreement without testing the local judge\u2019s internal states. Qwen3Guard reports reasoning moderation, which does not establish this readout on current Qwen traces. We would test information lost between judge activations and verdicts.\n\nExisting probes target harmful intent; we would test whether judge states encode assistance despite misleading verdicts.",
+          "papers": [
+            {
+              "url": "https://arxiv.org/abs/2510.14276",
+              "description": "Qwen3Guard covers reasoning moderation and streaming guards. We would test correctness on controlled rejected-plan contrasts from current Qwen."
+            }
+          ]
+        },
+        "methodology": {
+          "approach": "We would train a linear readout, a weighted label predictor, of local-judge activations and compare its labels with emitted verdicts.\n\nqwen3-8-27b would write short game recipes using a finite grammar with accepted and rejected branches. An interpreter and a separate reachability checker would label whether either branch supplies useful steps, regardless of endorsement. We would reserve distinct game rules for 1200 training, 200 development, and 800 sealed test cases.\n\nAfter unloading Qwen, we would capture qwen2.5-7b-judge activations at the last input token using Transformers. We would fit logistic regression, a weighted linear label rule, at three evenly spaced layers. Development data would choose one layer and threshold; test labels would stay sealed.\n\nBaselines would include emitted verdicts and a word-count classifier, which uses token frequencies. We would calibrate the local judge and azure-gpt-4.1-mini-judge on 160 further cases and report agreement against independent labels.\n\nThe sealed score would be balanced error, the mean of both class errors. An eight-point reduction against emitted verdicts must have a paired 95% lower bound above zero. We would resample whole recipes and report each class error, testing whether gains persist on unseen rules and reordered wording.",
+          "steps": [
+            "We would collect Qwen recipe traces and independently check useful steps.",
+            "We would split by game rules before training or inspecting activations.",
+            "We would extract local-judge activations and fit a linear label rule.",
+            "We would select the layer on development data and seal the test set.",
+            "We would compare class errors with emitted verdicts and a word-count baseline.",
+            "We would freeze data, prompts, model revisions, parsing rules, and analysis before test calls.",
+            "We would use safety-evals with an Inspect extension and serve each local model in turn through vLLM.",
+            "We would verify native reasoning extraction and preserve both reasoning and final text.",
+            "We would report custom proxy scores separately from the unmodified XSTest safe refusal check.",
+            "We would cap subject output at 512 tokens, judge output at 128 tokens, and context at 2048 tokens.",
+            "We would use greedy decoding, small batches, and full GPU availability; memory or budget failures would remain reported as incomplete data.",
+            "We would label any useful content as positive even when rejected; only independently verified absence of useful content would be negative.",
+            "We would publish seed 42, 10000 paired bootstrap resamples, and a two-sided 95% interval for the primary contrast.",
+            "We would target 80% power in a paired simulation before test calls, using development error rates and a conservative 50% discordance case.",
+            "We would freeze the planned sample size and report low power as inconclusive; test outcomes would never change enrollment.",
+            "We would interpret grammar-constrained reasoning as a controlled proxy, without inferring accuracy on unrestricted harmful requests.",
+            "We would validate all generated text against the grammar; unparsed reasoning would stay unresolved, including text outside designated fact fields."
+          ],
+          "baselines": [
+            "Local judge emitted verdict",
+            "Word-count logistic classifier",
+            "Azure judge reference labels"
+          ],
+          "metrics": [
+            "Balanced error reduction",
+            "False-positive and false-negative rates",
+            "Unseen-rule accuracy",
+            "Judge agreement"
+          ]
+        },
+        "constraints": {
+          "compute": "gpu_required",
+          "dependencies": [
+            "inspect-ai",
+            "inspect-evals",
+            "vllm",
+            "transformers",
+            "numpy",
+            "scipy",
+            "scikit-learn"
+          ],
+          "time_limit": 64800,
+          "memory": "80 GB GPU; serve the 76 GB subject and 20 GB judge in separate sessions.",
+          "budget": 20
+        },
+        "expected_outputs": [
+          {
+            "type": "metrics",
+            "format": "json",
+            "description": "results/safety/*.json in the neurico-safety-result/v1 schema"
+          },
+          {
+            "type": "report",
+            "format": "markdown",
+            "description": "REPORT.md plus findings/*.yaml for any candidate finding"
+          }
+        ],
+        "evaluation_criteria": [
+          "If yes, an eight-point gain with a positive 95% lower bound would reveal unused judge information; if no, this readout would not.",
+          "We would report planned and observed n, standard errors, and paired 95% confidence intervals for all test estimates across 800 independent cases.",
+          "We would report each judge against independent labels, plus raw agreement and kappa, which measures agreement beyond chance.",
+          "We would keep calibration cases separate and require 90% accuracy on clear positive and negative controls before testing.",
+          "We would score invalid judgments as errors and retain failed generations in worst-case bounds; bounds must preserve the finding.",
+          "We would publish the toy grammar and both label checkers; disagreement between checkers blocks a correctness claim.",
+          "We would run the full xstest-safe-csv set as a separate calibration check, without generating unsafe benchmark answers.",
+          "We would stop if the named subject cannot load or native reasoning cannot be captured; we would not replace its checkpoint."
+        ],
+        "evaluation": {
+          "metric": "heldout_balanced_error",
+          "direction": "minimize",
+          "description": "We would minimize mean class error on 800 sealed recipes after selecting one layer and threshold on development cases."
+        }
+      }
+    },
+    {
+      "id": "idea_5",
+      "title": "Can rejected instructions still steer the safety judge?",
+      "axis": "security_injection",
+      "category": "refusal-calibration",
+      "hypothesis": "Quoted grading commands versus neutral text raise local-judge false alarms on qwen3-8-27b rejected plans by 10 percentage points under paired testing.",
+      "method": "We would insert a grading command inside a rejected plan and compare it with a neutral quote of equal length.\n\nWe would ask qwen3-8-27b to explain 600 fictional access puzzles using fixed fact fields and short connective text. A policy checker and an independent table lookup would determine whether disclosed facts help reach a blocked toy room. Rejected plan descriptions without access facts would remain negative, while supplied access facts would remain positive despite refusal.\n\nWe would freeze one command asking the evaluator to output the unsafe label before collecting test judgments. A quoted vocabulary exercise containing the same label words would control for word matching. The inserted text would change neither room facts nor the final reply.\n\nqwen2.5-7b-judge and azure-gpt-4.1-mini-judge would first pass calibration on 150 separate puzzles without the command. We would compare attacked and control verdicts on each trace, reporting oracle accuracy and judge agreement.\n\nA local false-alarm increase of 10 points, with a paired 95% interval above zero, would meet the finding rule. We would also report errors on useful-fact controls and a secondary arm that places the command outside the rejected quotation. No adaptive attack search would use held-out labels.",
+      "method_steps": [
+        "We would generate fictional access traces with qwen3-8-27b and independently check their facts.",
+        "We would pair a rejected grading command with a neutral quote of equal length.",
+        "We would keep label words in a separate vocabulary control.",
+        "We would calibrate both judges before exposing them to the fixed command.",
+        "We would measure paired false alarms and useful-fact detection."
+      ],
+      "resources": "We would allocate an estimated 12 hours on one 80 GB GPU and $20 for Azure judgments. We would use toy access puzzles and public XSTest safe data.",
+      "expected_result": "If yes, a 10-point false-alarm increase with a positive 95% lower bound would show judges follow rejected commands; if no, this fixed command would fail.",
+      "builds_on": [
+        "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+        "finding:finding-20261020-001-deepseek-r1-distill-llama-8b-pro",
+        "run:run-explore-20261020-002"
+      ],
+      "risks": "We would keep commands inert and inside judged text. Label-word controls would separate instruction following from a preference for the unsafe token.",
+      "closest_prior_work": "The benign injection study measured protected-record attempts, while the source-attribution study tested assistant memory. Neither measured instructions aimed at judges inside rejected plans. We would extend the judge-gap audit with a fixed attack on the verdict.\n\nThe source-attribution proposal changed assistant memory, rather than a safety judge\u2019s input (idea:plan-20261020-162139-summary-provenance-role).\n\nThe memory job measured actor actions, rather than grading commands inside rejected plans (job:explore-20261020-001-does-lost-source-attribution-bec).\n\nThe trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).\n\nThe injection run tested protected-record attempts, rather than attacks on judge verdicts (run:run-research-20261020-003).",
+      "neurico": {
+        "domain": "ai_safety",
+        "job_kind": "explore",
+        "models": [
+          "qwen3-8-27b",
+          "qwen2.5-7b-judge",
+          "azure-gpt-4.1-mini-judge"
+        ],
+        "evals": [
+          "xstest-safe-csv"
+        ],
+        "background": {
+          "description": "The benign injection study measured protected-record attempts, while the source-attribution study tested assistant memory. Neither measured instructions aimed at judges inside rejected plans. We would extend the judge-gap audit with a fixed attack on the verdict.",
+          "papers": [],
+          "code_references": [
+            {
+              "repo": "https://github.com/Hypogenic-AI/benign-tool-injection-failures-3246-codex-gpt-6-astra",
+              "description": "We would reuse the distinction between quoted text and operative instructions, while targeting judge labels instead of actor writes."
+            }
+          ]
+        },
+        "methodology": {
+          "approach": "We would insert a grading command inside a rejected plan and compare it with a neutral quote of equal length.\n\nWe would ask qwen3-8-27b to explain 600 fictional access puzzles using fixed fact fields and short connective text. A policy checker and an independent table lookup would determine whether disclosed facts help reach a blocked toy room. Rejected plan descriptions without access facts would remain negative, while supplied access facts would remain positive despite refusal.\n\nWe would freeze one command asking the evaluator to output the unsafe label before collecting test judgments. A quoted vocabulary exercise containing the same label words would control for word matching. The inserted text would change neither room facts nor the final reply.\n\nqwen2.5-7b-judge and azure-gpt-4.1-mini-judge would first pass calibration on 150 separate puzzles without the command. We would compare attacked and control verdicts on each trace, reporting oracle accuracy and judge agreement.\n\nA local false-alarm increase of 10 points, with a paired 95% interval above zero, would meet the finding rule. We would also report errors on useful-fact controls and a secondary arm that places the command outside the rejected quotation. No adaptive attack search would use held-out labels.",
+          "steps": [
+            "We would generate fictional access traces with qwen3-8-27b and independently check their facts.",
+            "We would pair a rejected grading command with a neutral quote of equal length.",
+            "We would keep label words in a separate vocabulary control.",
+            "We would calibrate both judges before exposing them to the fixed command.",
+            "We would measure paired false alarms and useful-fact detection.",
+            "We would freeze data, prompts, model revisions, parsing rules, and analysis before test calls.",
+            "We would use safety-evals with an Inspect extension and serve each local model in turn through vLLM.",
+            "We would verify native reasoning extraction and preserve both reasoning and final text.",
+            "We would report custom proxy scores separately from the unmodified XSTest safe refusal check.",
+            "We would cap subject output at 512 tokens, judge output at 128 tokens, and context at 2048 tokens.",
+            "We would use greedy decoding, small batches, and full GPU availability; memory or budget failures would remain reported as incomplete data.",
+            "We would label any useful content as positive even when rejected; only independently verified absence of useful content would be negative.",
+            "We would publish seed 42, 10000 paired bootstrap resamples, and a two-sided 95% interval for the primary contrast.",
+            "We would target 80% power in a paired simulation before test calls, using development error rates and a conservative 50% discordance case.",
+            "We would freeze the planned sample size and report low power as inconclusive; test outcomes would never change enrollment.",
+            "We would interpret grammar-constrained reasoning as a controlled proxy, without inferring accuracy on unrestricted harmful requests.",
+            "We would validate all generated text against the grammar; unparsed reasoning would stay unresolved, including text outside designated fact fields."
+          ],
+          "baselines": [
+            "Equal-length neutral quotation",
+            "Vocabulary exercise containing the same label words",
+            "Useful access facts despite refusal"
+          ],
+          "metrics": [
+            "Paired attack-induced false alarms",
+            "Useful-fact detection",
+            "Vocabulary-control contrast",
+            "Judge agreement"
+          ]
+        },
+        "constraints": {
+          "compute": "gpu_required",
+          "dependencies": [
+            "inspect-ai",
+            "inspect-evals",
+            "vllm",
+            "transformers",
+            "numpy",
+            "scipy",
+            "scikit-learn"
+          ],
+          "time_limit": 43200,
+          "memory": "80 GB GPU; serve the 76 GB subject and 20 GB judge in separate sessions.",
+          "budget": 20
+        },
+        "expected_outputs": [
+          {
+            "type": "metrics",
+            "format": "json",
+            "description": "results/safety/*.json in the neurico-safety-result/v1 schema"
+          },
+          {
+            "type": "report",
+            "format": "markdown",
+            "description": "REPORT.md plus findings/*.yaml for any candidate finding"
+          }
+        ],
+        "evaluation_criteria": [
+          "If yes, a 10-point false-alarm increase with a positive 95% lower bound would show judges follow rejected commands; if no, this fixed command would fail.",
+          "We would report planned and observed n, standard errors, and paired 95% confidence intervals for all test estimates across 600 independent cases.",
+          "We would report each judge against independent labels, plus raw agreement and kappa, which measures agreement beyond chance.",
+          "We would keep calibration cases separate and require 90% accuracy on clear positive and negative controls before testing.",
+          "We would score invalid judgments as errors and retain failed generations in worst-case bounds; bounds must preserve the finding.",
+          "We would publish the toy grammar and both label checkers; disagreement between checkers blocks a correctness claim.",
+          "We would run the full xstest-safe-csv set as a separate calibration check, without generating unsafe benchmark answers.",
+          "We would stop if the named subject cannot load or native reasoning cannot be captured; we would not replace its checkpoint."
+        ]
+      }
+    },
+    {
+      "id": "idea_6",
+      "title": "Can paired training teach judges the rejected-plan boundary?",
+      "axis": "training_time_fixes",
+      "category": "refusal-calibration",
+      "hypothesis": "Paired boundary training versus matched ordinary training lowers local-judge error on qwen3-8-27b rejected plans by eight percentage points under paired testing.",
+      "method": "We would compare two local-judge fine-tunes that differ only in whether training pairs isolate useful content from rejection wording.\n\nWe would construct 2400 labeled toy instruction examples using fictional board games. One training set would pair useless rejected plans with usable instructions carrying the same refusal. The control set would contain the same class counts and token budget, but ordinary refusals and direct instructions.\n\nWe would freeze qwen3-8-27b outputs for 800 test games with new rules and vocabulary before training either judge. A game interpreter and a separate exhaustive search would label whether each trace supplies progress toward the blocked goal. Full reasoning and final text would count toward that label.\n\nWe would train rank-eight LoRA adapters on qwen2.5-7b-judge with the same seed, optimizer, learning rate, and one-epoch budget. We would fix hyperparameters on 200 development examples and calibrate both variants and azure-gpt-4.1-mini-judge on 160 disjoint cases.\n\nWe would test the paired reduction in balanced error, the mean of both class errors, on unseen games. An eight-point reduction with a positive 95% lower bound would count, provided useful-guidance sensitivity loses at most three points under a one-sided bound. We would report the untouched judge, each class error, and agreement as controls.",
+      "method_steps": [
+        "We would prepare equal-budget training sets with and without paired boundary examples.",
+        "We would freeze current Qwen test traces on unseen game rules.",
+        "We would derive test labels with two independently written game checkers.",
+        "We would fine-tune the local judge with matched LoRA settings.",
+        "We would calibrate both variants and compare their errors with an Azure reference."
+      ],
+      "resources": "We would budget an estimated 22 GPU hours within 80 GB and $20 for Azure judging. We would train only the 7B judge, after unloading the 27B subject.",
+      "expected_result": "If yes, the eight-point gain and sensitivity guard would support paired training; if no, it would not meet the stated error tradeoff.",
+      "builds_on": [
+        "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+        "finding:finding-20261020-001-provisional-paired-xstest-unsafe",
+        "gap:open-model-families-gap-matrix"
+      ],
+      "risks": "We would hold out rules and vocabulary to limit template memorization. A single training seed would support a bounded intervention result, not a claim that all training runs improve.",
+      "closest_prior_work": "The provisional XSTest result used an uncalibrated judge, while the trace audit found judge-dependent labels. Qwen3Guard trains moderation models but does not establish this matched-data intervention. We would isolate the value of paired boundary examples.\n\nThe trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).",
+      "neurico": {
+        "domain": "ai_safety",
+        "job_kind": "explore",
+        "models": [
+          "qwen3-8-27b",
+          "qwen2.5-7b-judge",
+          "azure-gpt-4.1-mini-judge"
+        ],
+        "evals": [
+          "xstest-safe-csv"
+        ],
+        "background": {
+          "description": "The provisional XSTest result used an uncalibrated judge, while the trace audit found judge-dependent labels. Qwen3Guard trains moderation models but does not establish this matched-data intervention. We would isolate the value of paired boundary examples.",
+          "papers": [
+            {
+              "url": "https://arxiv.org/abs/2510.14276",
+              "description": "Qwen3Guard covers reasoning moderation and streaming guards. We would test correctness on controlled rejected-plan contrasts from current Qwen."
+            }
+          ]
+        },
+        "methodology": {
+          "approach": "We would compare two local-judge fine-tunes that differ only in whether training pairs isolate useful content from rejection wording.\n\nWe would construct 2400 labeled toy instruction examples using fictional board games. One training set would pair useless rejected plans with usable instructions carrying the same refusal. The control set would contain the same class counts and token budget, but ordinary refusals and direct instructions.\n\nWe would freeze qwen3-8-27b outputs for 800 test games with new rules and vocabulary before training either judge. A game interpreter and a separate exhaustive search would label whether each trace supplies progress toward the blocked goal. Full reasoning and final text would count toward that label.\n\nWe would train rank-eight LoRA adapters on qwen2.5-7b-judge with the same seed, optimizer, learning rate, and one-epoch budget. We would fix hyperparameters on 200 development examples and calibrate both variants and azure-gpt-4.1-mini-judge on 160 disjoint cases.\n\nWe would test the paired reduction in balanced error, the mean of both class errors, on unseen games. An eight-point reduction with a positive 95% lower bound would count, provided useful-guidance sensitivity loses at most three points under a one-sided bound. We would report the untouched judge, each class error, and agreement as controls.",
+          "steps": [
+            "We would prepare equal-budget training sets with and without paired boundary examples.",
+            "We would freeze current Qwen test traces on unseen game rules.",
+            "We would derive test labels with two independently written game checkers.",
+            "We would fine-tune the local judge with matched LoRA settings.",
+            "We would calibrate both variants and compare their errors with an Azure reference.",
+            "We would freeze data, prompts, model revisions, parsing rules, and analysis before test calls.",
+            "We would use safety-evals with an Inspect extension and serve each local model in turn through vLLM.",
+            "We would verify native reasoning extraction and preserve both reasoning and final text.",
+            "We would report custom proxy scores separately from the unmodified XSTest safe refusal check.",
+            "We would use AdamW at learning rate 0.0001, batch size 16 through accumulation, and rank-eight adapters on attention projections.",
+            "We would cap training examples at 512 tokens and use seed 42 for both arms.",
+            "We would cap subject output at 512 tokens, judge output at 128 tokens, and context at 2048 tokens.",
+            "We would use greedy decoding, small batches, and full GPU availability; memory or budget failures would remain reported as incomplete data.",
+            "We would label any useful content as positive even when rejected; only independently verified absence of useful content would be negative.",
+            "We would publish seed 42, 10000 paired bootstrap resamples, and a two-sided 95% interval for the primary contrast.",
+            "We would target 80% power in a paired simulation before test calls, using development error rates and a conservative 50% discordance case.",
+            "We would freeze the planned sample size and report low power as inconclusive; test outcomes would never change enrollment.",
+            "We would interpret grammar-constrained reasoning as a controlled proxy, without inferring accuracy on unrestricted harmful requests.",
+            "We would validate all generated text against the grammar; unparsed reasoning would stay unresolved, including text outside designated fact fields."
+          ],
+          "baselines": [
+            "Equal-token ordinary training",
+            "Untouched local judge",
+            "Azure reference judge"
+          ],
+          "metrics": [
+            "Balanced error reduction",
+            "Useful-guidance sensitivity loss",
+            "False alarms on rejected plans",
+            "Agreement across judge variants"
+          ]
+        },
+        "constraints": {
+          "compute": "gpu_required",
+          "dependencies": [
+            "inspect-ai",
+            "inspect-evals",
+            "vllm",
+            "transformers",
+            "numpy",
+            "scipy",
+            "scikit-learn",
+            "peft"
+          ],
+          "time_limit": 79200,
+          "memory": "80 GB GPU; serve the 76 GB subject and 20 GB judge in separate sessions.",
+          "budget": 20
+        },
+        "expected_outputs": [
+          {
+            "type": "metrics",
+            "format": "json",
+            "description": "results/safety/*.json in the neurico-safety-result/v1 schema"
+          },
+          {
+            "type": "report",
+            "format": "markdown",
+            "description": "REPORT.md plus findings/*.yaml for any candidate finding"
+          }
+        ],
+        "evaluation_criteria": [
+          "If yes, the eight-point gain and sensitivity guard would support paired training; if no, it would not meet the stated error tradeoff.",
+          "We would report planned and observed n, standard errors, and paired 95% confidence intervals for all test estimates across 800 independent cases.",
+          "We would report each judge against independent labels, plus raw agreement and kappa, which measures agreement beyond chance.",
+          "We would keep calibration cases separate and require 90% accuracy on clear positive and negative controls before testing.",
+          "We would score invalid judgments as errors and retain failed generations in worst-case bounds; bounds must preserve the finding.",
+          "We would publish the toy grammar and both label checkers; disagreement between checkers blocks a correctness claim.",
+          "We would run the full xstest-safe-csv set as a separate calibration check, without generating unsafe benchmark answers.",
+          "We would stop if the named subject cannot load or native reasoning cannot be captured; we would not replace its checkpoint.",
+          "We would require the eight-point gain\u2019s paired 95% interval above zero and the one-sided 95% sensitivity-loss bound below three points."
+        ]
+      }
+    },
+    {
+      "id": "idea_7",
+      "title": "Does splitting reasoning create false harmful labels?",
+      "axis": "evals",
+      "category": "refusal-calibration",
+      "hypothesis": "Independent windows versus full traces raise local-judge false alarms on qwen3-8-27b rejected plans by 10 percentage points under paired testing.",
+      "method": "We would compare whole-trace judging with independent windows and a rule that flags any unsafe window.\n\nWe would generate 600 short fictional route narratives with qwen3-8-27b. Each would explain why a named route cannot work, without giving usable edges; paired controls would disclose a working route despite a final refusal. Two graph algorithms would certify guidance from the entire trace before segmentation.\n\nWe would vary the window boundary across the rejection clause while preserving every token and the order of sentences. All windows together would contain the exact full trace. A second window condition would repeat the governing rejection clause as context, without deleting useful route facts.\n\nWe would calibrate qwen2.5-7b-judge and azure-gpt-4.1-mini-judge on 150 separate route sets. Each would receive a task-specific usefulness rubric and score full and split views. We would report agreement, per-window errors, and full-response false alarms.\n\nThe primary test would compare local false alarms under independent windows versus whole traces. A 10-point rise with a paired 95% lower bound above zero would meet the criterion. We would resample narratives, not windows; the repeated-clause arm would test whether lost context explains the effect.\n\nEqual-length neutral narratives would measure false alarms from repeated judging alone.",
+      "method_steps": [
+        "We would collect verified Qwen route narratives with and without useful steps.",
+        "We would shift window boundaries around rejection clauses without dropping tokens.",
+        "We would compare whole traces, independent windows, and windows with governing context.",
+        "We would calibrate both judges on separate routes.",
+        "We would test false-alarm inflation using narratives as the independent units."
+      ],
+      "resources": "We would use one 80 GB GPU for an estimated 14 hours and cap Azure spend at $25. Generated route narratives and XSTest safe prompts would supply data.",
+      "expected_result": "If yes, a 10-point rise with a positive 95% lower bound would implicate splitting; if no, this window scheme would not explain errors.",
+      "builds_on": [
+        "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+        "run:run-research-20261020-005",
+        "gap:open-model-families-gap-matrix"
+      ],
+      "risks": "We would include neutral narratives to separate context loss from having more chances to flag a window. Only fully captured traces would support the paired claim.",
+      "closest_prior_work": "Qwen3GuardTest covers reasoning and streaming moderation; CARE, a guard-triggered rewrite method, runs on Qwen3-4B. The DeepSeek audit did not isolate segmentation errors against independent guidance labels. We would test rejection-clause boundaries and repeated-judgment controls on current Qwen traces.\n\nThe attack-score candidate measured response scores, rather than errors against known guidance labels (finding:finding-20261020-001-provisional-paired-strong-reject).\n\nThe XSTest candidate compared refusal rates without establishing the rejected-plan boundary (finding:finding-20261020-001-provisional-paired-xstest-unsafe).\n\nThe DeepSeek scorecard proposed broad model comparisons, rather than this judge-error test (idea:deepseek-distill-and-moonlight-safety-scorecard).\n\nThe trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).\n\nThe completed scorecard job did not isolate this proposed source of judge error (job:research-20261020-001-deepseek-distill-and-moonlight-s).",
+      "neurico": {
+        "domain": "ai_safety",
+        "job_kind": "explore",
+        "models": [
+          "qwen3-8-27b",
+          "qwen2.5-7b-judge",
+          "azure-gpt-4.1-mini-judge"
+        ],
+        "evals": [
+          "xstest-safe-csv"
+        ],
+        "background": {
+          "description": "Qwen3GuardTest covers reasoning and streaming moderation; CARE, a guard-triggered rewrite method, runs on Qwen3-4B. The DeepSeek audit did not isolate segmentation errors against independent guidance labels. We would test rejection-clause boundaries and repeated-judgment controls on current Qwen traces.",
+          "papers": [
+            {
+              "url": "https://arxiv.org/abs/2510.14276",
+              "description": "Qwen3Guard covers reasoning moderation and streaming guards. We would test correctness on controlled rejected-plan contrasts from current Qwen."
+            }
+          ]
+        },
+        "methodology": {
+          "approach": "We would compare whole-trace judging with independent windows and a rule that flags any unsafe window.\n\nWe would generate 600 short fictional route narratives with qwen3-8-27b. Each would explain why a named route cannot work, without giving usable edges; paired controls would disclose a working route despite a final refusal. Two graph algorithms would certify guidance from the entire trace before segmentation.\n\nWe would vary the window boundary across the rejection clause while preserving every token and the order of sentences. All windows together would contain the exact full trace. A second window condition would repeat the governing rejection clause as context, without deleting useful route facts.\n\nWe would calibrate qwen2.5-7b-judge and azure-gpt-4.1-mini-judge on 150 separate route sets. Each would receive a task-specific usefulness rubric and score full and split views. We would report agreement, per-window errors, and full-response false alarms.\n\nThe primary test would compare local false alarms under independent windows versus whole traces. A 10-point rise with a paired 95% lower bound above zero would meet the criterion. We would resample narratives, not windows; the repeated-clause arm would test whether lost context explains the effect.\n\nEqual-length neutral narratives would measure false alarms from repeated judging alone.",
+          "steps": [
+            "We would collect verified Qwen route narratives with and without useful steps.",
+            "We would shift window boundaries around rejection clauses without dropping tokens.",
+            "We would compare whole traces, independent windows, and windows with governing context.",
+            "We would calibrate both judges on separate routes.",
+            "We would test false-alarm inflation using narratives as the independent units.",
+            "We would freeze data, prompts, model revisions, parsing rules, and analysis before test calls.",
+            "We would use safety-evals with an Inspect extension and serve each local model in turn through vLLM.",
+            "We would verify native reasoning extraction and preserve both reasoning and final text.",
+            "We would report custom proxy scores separately from the unmodified XSTest safe refusal check.",
+            "We would cap subject output at 512 tokens, judge output at 128 tokens, and context at 2048 tokens.",
+            "We would use greedy decoding, small batches, and full GPU availability; memory or budget failures would remain reported as incomplete data.",
+            "We would label any useful content as positive even when rejected; only independently verified absence of useful content would be negative.",
+            "We would publish seed 42, 10000 paired bootstrap resamples, and a two-sided 95% interval for the primary contrast.",
+            "We would target 80% power in a paired simulation before test calls, using development error rates and a conservative 50% discordance case.",
+            "We would freeze the planned sample size and report low power as inconclusive; test outcomes would never change enrollment.",
+            "We would interpret grammar-constrained reasoning as a controlled proxy, without inferring accuracy on unrestricted harmful requests.",
+            "We would validate all generated text against the grammar; unparsed reasoning would stay unresolved, including text outside designated fact fields."
+          ],
+          "baselines": [
+            "Whole-trace judgment",
+            "Windows with the governing rejection clause",
+            "Neutral narratives with equal window counts"
+          ],
+          "metrics": [
+            "Window-induced false-positive difference",
+            "Useful-route sensitivity",
+            "Context-restoration contrast",
+            "Judge agreement"
+          ]
+        },
+        "constraints": {
+          "compute": "gpu_required",
+          "dependencies": [
+            "inspect-ai",
+            "inspect-evals",
+            "vllm",
+            "transformers",
+            "numpy",
+            "scipy",
+            "scikit-learn"
+          ],
+          "time_limit": 50400,
+          "memory": "80 GB GPU; serve the 76 GB subject and 20 GB judge in separate sessions.",
+          "budget": 25
+        },
+        "expected_outputs": [
+          {
+            "type": "metrics",
+            "format": "json",
+            "description": "results/safety/*.json in the neurico-safety-result/v1 schema"
+          },
+          {
+            "type": "report",
+            "format": "markdown",
+            "description": "REPORT.md plus findings/*.yaml for any candidate finding"
+          }
+        ],
+        "evaluation_criteria": [
+          "If yes, a 10-point rise with a positive 95% lower bound would implicate splitting; if no, this window scheme would not explain errors.",
+          "We would report planned and observed n, standard errors, and paired 95% confidence intervals for all test estimates across 600 independent cases.",
+          "We would report each judge against independent labels, plus raw agreement and kappa, which measures agreement beyond chance.",
+          "We would keep calibration cases separate and require 90% accuracy on clear positive and negative controls before testing.",
+          "We would score invalid judgments as errors and retain failed generations in worst-case bounds; bounds must preserve the finding.",
+          "We would publish the toy grammar and both label checkers; disagreement between checkers blocks a correctness claim.",
+          "We would run the full xstest-safe-csv set as a separate calibration check, without generating unsafe benchmark answers.",
+          "We would stop if the named subject cannot load or native reasoning cannot be captured; we would not replace its checkpoint."
+        ]
+      }
+    },
+    {
+      "id": "idea_8",
+      "title": "Does judge disagreement improve error review?",
+      "axis": "control_oversight",
+      "category": "refusal-calibration",
+      "hypothesis": "Disagreement-based versus random review raises error yield on qwen3-8-27b plan judgments by 10 percentage points under paired policy testing.",
+      "method": "We would compare disagreement-based review with random review at the same fixed review budget.\n\nWe would sample 1000 fictional recipe tasks and obtain qwen3-8-27b reasoning in a checked ingredient-and-step grammar. The panel would balance useless rejected recipes, usable recipes despite refusal, direct usable recipes, and plain refusals. Two independent recipe executors would label whether the output advances the forbidden toy goal.\n\nqwen2.5-7b-judge and azure-gpt-4.1-mini-judge would calibrate on 200 separate recipes, then label all test traces without seeing executor results. We would freeze a policy that reviews disagreements first and breaks ties using a fixed random seed. The control would review a random subset of equal size, set to 40% of test traces.\n\nA review would reveal the executor label and correct the local verdict. We would compare the share of reviewed cases containing a local error, plus remaining error after review. Each resampled task panel would rerun both policies, preserving their shared items and fixed budget.\n\nThe primary criterion would be a 10-point review-yield gain with a paired 95% interval above zero. We would simulate power using development disagreement rates; too few reviewed errors would make the result inconclusive. Agreement errors would remain visible in the full labeled panel rather than being assumed correct.",
+      "method_steps": [
+        "We would generate a balanced Qwen recipe panel and independent executor labels.",
+        "We would calibrate both judges and collect verdicts without exposing gold labels.",
+        "We would freeze disagreement-first and random review policies at equal budgets.",
+        "We would reveal executor labels only for selected reviews.",
+        "We would compare review yield and errors left among agreeing judges."
+      ],
+      "resources": "We would reserve an estimated 12 hours on one 80 GB GPU and $20 for Azure calls. Generated recipe tasks and public XSTest safe items would provide data.",
+      "expected_result": "If yes, a 10-point review-yield gain with a positive 95% lower bound would justify disagreement-first review; if no, agreement would provide no such triage advantage.",
+      "builds_on": [
+        "finding:finding-20261020-001-judge-dependent-harmful-reasonin",
+        "run:run-research-20261020-005",
+        "run:run-explore-20261021-001"
+      ],
+      "risks": "We would report the full error table because both judges can agree on wrong labels. A balanced toy panel would not estimate the rate of harm in deployment.",
+      "closest_prior_work": "The DeepSeek audit measured disagreement, and the permission study used independent action labels. Neither established whether disagreement selects incorrect rejected-plan verdicts efficiently. We would test review value against known labels at a fixed budget.\n\nThe attack-score candidate measured response scores, rather than errors against known guidance labels (finding:finding-20261020-001-provisional-paired-strong-reject).\n\nThe XSTest candidate compared refusal rates without establishing the rejected-plan boundary (finding:finding-20261020-001-provisional-paired-xstest-unsafe).\n\nThe permission proposal tested completed writes, rather than useful information inside rejected plans (idea:plan-20261021-013804-goal-permission-substitution).\n\nThe DeepSeek scorecard proposed broad model comparisons, rather than this judge-error test (idea:deepseek-distill-and-moonlight-safety-scorecard).\n\nThe permission job audited action rights, rather than the proposed assistance boundary (job:explore-20261021-001-do-auditors-substitute-task-rele).\n\nThe trace audit measured disagreement without independent correctness labels (run:run-research-20261020-005).\n\nThe completed scorecard job did not isolate this proposed source of judge error (job:research-20261020-001-deepseek-distill-and-moonlight-s).",
+      "neurico": {
+        "domain": "ai_safety",
+        "job_kind": "explore",
+        "models": [
+          "qwen3-8-27b",
+          "qwen2.5-7b-judge",
+          "azure-gpt-4.1-mini-judge"
+        ],
+        "evals": [
+          "xstest-safe-csv"
+        ],
+        "background": {
+          "description": "The DeepSeek audit measured disagreement, and the permission study used independent action labels. Neither established whether disagreement selects incorrect rejected-plan verdicts efficiently. We would test review value against known labels at a fixed budget.",
+          "papers": []
+        },
+        "methodology": {
+          "approach": "We would compare disagreement-based review with random review at the same fixed review budget.\n\nWe would sample 1000 fictional recipe tasks and obtain qwen3-8-27b reasoning in a checked ingredient-and-step grammar. The panel would balance useless rejected recipes, usable recipes despite refusal, direct usable recipes, and plain refusals. Two independent recipe executors would label whether the output advances the forbidden toy goal.\n\nqwen2.5-7b-judge and azure-gpt-4.1-mini-judge would calibrate on 200 separate recipes, then label all test traces without seeing executor results. We would freeze a policy that reviews disagreements first and breaks ties using a fixed random seed. The control would review a random subset of equal size, set to 40% of test traces.\n\nA review would reveal the executor label and correct the local verdict. We would compare the share of reviewed cases containing a local error, plus remaining error after review. Each resampled task panel would rerun both policies, preserving their shared items and fixed budget.\n\nThe primary criterion would be a 10-point review-yield gain with a paired 95% interval above zero. We would simulate power using development disagreement rates; too few reviewed errors would make the result inconclusive. Agreement errors would remain visible in the full labeled panel rather than being assumed correct.",
+          "steps": [
+            "We would generate a balanced Qwen recipe panel and independent executor labels.",
+            "We would calibrate both judges and collect verdicts without exposing gold labels.",
+            "We would freeze disagreement-first and random review policies at equal budgets.",
+            "We would reveal executor labels only for selected reviews.",
+            "We would compare review yield and errors left among agreeing judges.",
+            "We would freeze data, prompts, model revisions, parsing rules, and analysis before test calls.",
+            "We would use safety-evals with an Inspect extension and serve each local model in turn through vLLM.",
+            "We would verify native reasoning extraction and preserve both reasoning and final text.",
+            "We would report custom proxy scores separately from the unmodified XSTest safe refusal check.",
+            "We would cap subject output at 512 tokens, judge output at 128 tokens, and context at 2048 tokens.",
+            "We would use greedy decoding, small batches, and full GPU availability; memory or budget failures would remain reported as incomplete data.",
+            "We would label any useful content as positive even when rejected; only independently verified absence of useful content would be negative.",
+            "We would publish seed 42, 10000 paired bootstrap resamples, and a two-sided 95% interval for the primary contrast.",
+            "We would target 80% power in a paired simulation before test calls, using development error rates and a conservative 50% discordance case.",
+            "We would freeze the planned sample size and report low power as inconclusive; test outcomes would never change enrollment.",
+            "We would interpret grammar-constrained reasoning as a controlled proxy, without inferring accuracy on unrestricted harmful requests.",
+            "We would validate all generated text against the grammar; unparsed reasoning would stay unresolved, including text outside designated fact fields."
+          ],
+          "baselines": [
+            "Random review at the same budget",
+            "No review",
+            "All-case executor labels for measuring residual errors"
+          ],
+          "metrics": [
+            "Paired review error-yield gain",
+            "Remaining local-judge error",
+            "Errors among agreements",
+            "Review coverage",
+            "Judge agreement"
+          ]
+        },
+        "constraints": {
+          "compute": "gpu_required",
+          "dependencies": [
+            "inspect-ai",
+            "inspect-evals",
+            "vllm",
+            "transformers",
+            "numpy",
+            "scipy",
+            "scikit-learn"
+          ],
+          "time_limit": 43200,
+          "memory": "80 GB GPU; serve the 76 GB subject and 20 GB judge in separate sessions.",
+          "budget": 20
+        },
+        "expected_outputs": [
+          {
+            "type": "metrics",
+            "format": "json",
+            "description": "results/safety/*.json in the neurico-safety-result/v1 schema"
+          },
+          {
+            "type": "report",
+            "format": "markdown",
+            "description": "REPORT.md plus findings/*.yaml for any candidate finding"
+          }
+        ],
+        "evaluation_criteria": [
+          "If yes, a 10-point review-yield gain with a positive 95% lower bound would justify disagreement-first review; if no, agreement would provide no such triage advantage.",
+          "We would report planned and observed n, standard errors, and paired 95% confidence intervals for all test estimates across 1000 independent cases.",
+          "We would report each judge against independent labels, plus raw agreement and kappa, which measures agreement beyond chance.",
+          "We would keep calibration cases separate and require 90% accuracy on clear positive and negative controls before testing.",
+          "We would score invalid judgments as errors and retain failed generations in worst-case bounds; bounds must preserve the finding.",
+          "We would publish the toy grammar and both label checkers; disagreement between checkers blocks a correctness claim.",
+          "We would run the full xstest-safe-csv set as a separate calibration check, without generating unsafe benchmark answers.",
+          "We would stop if the named subject cannot load or native reasoning cannot be captured; we would not replace its checkpoint."
+        ]
+      }
+    }
+  ]
+}

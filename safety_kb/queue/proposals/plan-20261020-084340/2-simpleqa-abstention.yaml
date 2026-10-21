@@ -1,0 +1,19 @@
+kind: research
+title: SimpleQA factual errors versus abstention on three open checkpoints
+priority: 65
+rationale: gaps/open-model-families-gap-matrix.md distinguishes Qwen and DeepSeek partial hallucination
+  reporting from Kimi large-model factuality reporting; it does not establish Moonlight coverage. design/RESEARCH_PLAN.md
+  section 3 names simpleqa, but active jobs cover only TruthfulQA MC1 and MASK, and the nightly suite
+  omits SimpleQA. This experiment measures whether explicit permission to abstain reduces factual errors
+  while retaining correct answers, with a fresh calibration check.
+resources:
+  gpu_memory_gb: 48
+  api_budget_usd: 12
+neurico:
+  idea_file: safety_kb/queue/ideas/plan-20261020-084340-simpleqa-abstention.yaml
+  provider: claude
+  model: null
+  autoresearch_iterations: 3
+  write_paper: false
+  github: true
+  private: false
