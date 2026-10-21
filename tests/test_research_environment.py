@@ -1,5 +1,6 @@
 """Regression tests for the relocated research dependency environment."""
 
+import shutil
 import json
 import sys
 from pathlib import Path
@@ -364,6 +365,7 @@ def test_manifest_reindexes_relocated_dependency_metadata(tmp_path):
     assert not any("/.venv/" in path for path in files)
 
 
+@pytest.mark.skipif(shutil.which("rg") is None, reason="workspace inspection shells out to ripgrep")
 def test_manager_inspection_exposes_only_research_dependency_metadata(tmp_path):
     env_dir = _research_env(tmp_path)
     venv_dir = env_dir / ".venv"

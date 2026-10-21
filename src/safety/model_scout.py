@@ -146,7 +146,7 @@ def latest_models_summary(kb: KB) -> str:
 
 
 def run_scout(kb: KB, *, provider: str = "codex", model: Optional[str] = None, agent_auth: Optional[str] = None,
-              timeout: int = 2400, dry_run: bool = False) -> Dict[str, Any]:
+              timeout: Optional[int] = None, dry_run: bool = False) -> Dict[str, Any]:
     """One scout session in the KB root (the model_scout role; Codex by default), then the merge."""
     import sys
     sys.path.insert(0, str(PROJECT_ROOT / "src"))

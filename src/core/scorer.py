@@ -59,7 +59,7 @@ def _resolve_python_executable(work_dir: Path) -> str:
 
 def run_scorer(
     work_dir: Path,
-    timeout: Optional[int] = 600,
+    timeout: Optional[int] = None,
     python_executable: Optional[str] = None,
     *,
     idea: Dict[str, Any],
@@ -70,7 +70,7 @@ def run_scorer(
     Args:
         work_dir: Workspace root containing scoring/eval.py and the
                   runner's outputs.
-        timeout: Max execution time for eval.py in seconds.
+        timeout: Max execution time for eval.py in seconds (None or 0 = no limit, the default).
         python_executable: Python binary to use. Defaults to the workspace's
                   workspace mode's research interpreter (where the runner
                   installed dependencies). Native workspaces fall back to
@@ -166,7 +166,7 @@ def run_scorer(
             log_file=log_path,
             transcript_file=scoring_dir / "eval_transcript.txt",
             env=os.environ.copy(),
-            timeout=timeout,
+            timeout=timeout or None,
         )
         return_code = launch.get("return_code")
         stopped = bool(launch.get("stopped"))

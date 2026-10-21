@@ -109,9 +109,11 @@ class VLLMServer:
 
     def start(self, timeout: Optional[float] = None) -> "VLLMServer":
         # First start on a network filesystem can take 20+ minutes (weights, torch.compile,
-        # CUDA graphs); later starts reuse the compile cache under VLLM_CACHE_ROOT.
+        # CUDA graphs); later starts reuse the compile cache under VLLM_CACHE_ROOT. The wait is
+        # unlimited by default: the loop only gives up when the server process exits (liveness).
+        # NEURICO_VLLM_STARTUP_TIMEOUT=<seconds> (or timeout=) opts in to a wall clock; 0 = none.
         if timeout is None:
-            timeout = float(os.environ.get("NEURICO_VLLM_STARTUP_TIMEOUT", 2700))
+            timeout = float(os.environ.get("NEURICO_VLLM_STARTUP_TIMEOUT") or 0) or None
         env = os.environ.copy()
         cache_root = os.environ.get("NEURICO_CACHE_ROOT")
         if cache_root:
@@ -139,8 +141,8 @@ class VLLMServer:
         # vLLM prints how many requests of max_model_len tokens fit in the KV cache; clients that
         # send more than that make it preempt and recompute instead of finishing requests.
         self.max_concurrency: Optional[int] = None
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = None if not timeout else time.time() + timeout
+        while deadline is None or time.time() < deadline:
             if self.process.poll() is not None:
                 raise RuntimeError(f"vLLM exited with code {self.process.returncode}; see {self.log_file}")
             if self.max_concurrency is None:

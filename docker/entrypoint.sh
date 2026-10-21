@@ -232,7 +232,7 @@ show_help() {
     echo "    --provider {claude|codex|gemini}  AI provider (default: claude)"
     echo "    --full-permissions                Skip permission prompts"
     echo "    --no-github                       Run locally without GitHub"
-    echo "    --timeout SECONDS                 Execution timeout (default: 3600)"
+    echo "    --timeout SECONDS                 Execution timeout (default: none; 0 = no limit)"
     echo ""
     echo -e "${BLUE}Workspace:${NC} /workspaces (mounted from host)"
     echo -e "${BLUE}App:${NC} /app"

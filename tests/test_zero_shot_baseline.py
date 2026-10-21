@@ -370,11 +370,13 @@ def test_resume_reuses_the_workspace_and_keeps_earlier_logs(tmp_path, monkeypatc
 
 
 def test_no_run_is_cut_off_by_default():
+    # None = the flag is not passed, so the roles' config/agents.yaml budgets apply (no limit
+    # unless opted in there); 0 would pass an explicit "no limit". Either way nothing is cut off.
     run_methods = _load_run_methods()
-    assert run_methods.RESOURCE_FINDER_TIMEOUT == 0
-    assert run_methods.EXPERIMENT_TIMEOUT == 0
-    assert run_methods.PAPER_TIMEOUT == 0
-    assert run_methods.ZERO_SHOT_TIMEOUT == 0
+    assert run_methods.RESOURCE_FINDER_TIMEOUT is None
+    assert run_methods.EXPERIMENT_TIMEOUT is None
+    assert run_methods.PAPER_TIMEOUT is None
+    assert run_methods.ZERO_SHOT_TIMEOUT is None
 
 
 def test_prompt_without_timeout_sets_no_time_budget():

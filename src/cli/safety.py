@@ -360,7 +360,8 @@ def main() -> int:
     p.add_argument("--provider", help="claude | codex | gemini (default: the ideation.* role, Codex)")
     p.add_argument("--model")
     p.add_argument("--agent-auth", choices=("oauth", "azure"))
-    p.add_argument("--timeout", type=int, help="seconds per stage (default: the role's 1500; 0 = no limit)")
+    p.add_argument("--timeout", type=int, help="seconds per stage (default: the ideation.* roles' budget in "
+                                              "config/agents.yaml, no limit unless set there; 0 = no limit)")
     p.set_defaults(func=cmd_ideate)
 
     p = sub.add_parser("kb", help="knowledge base: rebuild | search <text> | show <id> | related <id> | "

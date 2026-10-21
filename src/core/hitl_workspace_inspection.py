@@ -9,9 +9,10 @@ HITL tools.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
 from core.hitl_util import sha256_file
 from core.scoring_seal import SEALED_PATHS
@@ -50,7 +51,8 @@ _MAX_DIRECTORY_ENTRIES = 500
 _MAX_FILE_MATCHES = 1000
 _MAX_READ_BYTES = 400_000
 _MAX_SEARCH_COLUMNS = 500
-_SEARCH_TIMEOUT_SECONDS = 30
+# Wall clock for one `rg` search: unset/0 (the default) = none; NEURICO_HITL_SEARCH_TIMEOUT_SECONDS opts in.
+_SEARCH_TIMEOUT_SECONDS: Optional[float] = float(os.environ.get("NEURICO_HITL_SEARCH_TIMEOUT_SECONDS") or 0) or None
 
 
 class HitlWorkspaceInspectionError(ValueError):

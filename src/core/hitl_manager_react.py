@@ -11,6 +11,7 @@ import json
 import hashlib
 import http.server
 import inspect
+import itertools
 import logging
 import math
 import os
@@ -320,7 +321,10 @@ class HitlManager:
         self.world_model = HitlWorldModelSync(self.work_dir)
         self.world_model.reconcile(self.research)
         self.tool_definitions = self._load_tools()
-        self.max_react_turns = int(config.get("manager", {}).get("hitl_manager_max_turns", 12))
+        # ReAct turns per manager reply: None (the default) = no cap, the loop ends when the
+        # provider stops calling tools. Opt in with manager.hitl_manager_max_turns in config/manager.yaml.
+        _max_turns = config.get("manager", {}).get("hitl_manager_max_turns")
+        self.max_react_turns: Optional[int] = int(_max_turns) if _max_turns else None
         self.max_backend_retries = max(
             1, int(config.get("manager", {}).get("hitl_manager_backend_retries", 3))
         )
@@ -2276,7 +2280,8 @@ class HitlManager:
                 self.conversation.append(speaker, content)
         executor = HitlManagerToolExecutor(self)
         fragments: List[str] = []
-        for _ in range(self.max_react_turns):
+        turns = range(self.max_react_turns) if self.max_react_turns else itertools.count()
+        for _ in turns:
             with self._turn_lock:
                 if not self._generation_is_current(generation):
                     return ""

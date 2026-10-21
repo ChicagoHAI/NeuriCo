@@ -333,7 +333,7 @@ def _ledger_scope(work_dir: Optional[Path]):
         _ledger_work_dir.reset(token)
 
 
-def _verifier_client(timeout: int) -> LLMClient:
+def _verifier_client(timeout: Optional[int]) -> LLMClient:
     """The eval_verifier role's client: routes, key order and privacy flags from config/agents.yaml.
 
     No CLI fallback on purpose: the verifier must stay a tool-less data-in,
@@ -342,7 +342,7 @@ def _verifier_client(timeout: int) -> LLMClient:
     return LLMClient.for_role(LLM_ROLE, timeout_s=timeout, work_dir=_ledger_work_dir.get())
 
 
-async def _call_verifier_api_async(messages: List[Dict[str, str]], timeout: int):
+async def _call_verifier_api_async(messages: List[Dict[str, str]], timeout: Optional[int]):
     """Make one asynchronous tool-less API call."""
     client = _verifier_client(timeout)
     # Deliberately no tools/functions: the remote model receives data and
@@ -356,7 +356,7 @@ async def _call_verifier_api_async(messages: List[Dict[str, str]], timeout: int)
     return response.text, response.route.name, response.route.model
 
 
-def _call_verifier_api(messages: List[Dict[str, str]], timeout: int):
+def _call_verifier_api(messages: List[Dict[str, str]], timeout: Optional[int]):
     """Await one API call under its existing timeout and shared run stop."""
     control = active_hitl_run_stop_control()
 
@@ -382,7 +382,8 @@ def _call_verifier_api(messages: List[Dict[str, str]], timeout: int):
             await asyncio.gather(request, return_exceptions=True)
 
     async def bounded_call():
-        return await asyncio.wait_for(interruptible_call(), timeout=timeout)
+        # timeout None: no outer deadline (the default); the client's own deadline, if any, applies
+        return await asyncio.wait_for(interruptible_call(), timeout=timeout or None)
 
     return asyncio.run(bounded_call())
 
@@ -402,7 +403,7 @@ def run_eval_verifier(
     idea: Dict[str, Any],
     work_dir: Path,
     templates_dir: Optional[Path] = None,
-    timeout: int = 180,
+    timeout: Optional[int] = None,  # None = the eval_verifier role's params.timeout_s (no deadline unless set)
     persist_verdict: bool = True,
     persist_audit: bool = True,
 ) -> Dict[str, Any]:
@@ -439,7 +440,7 @@ def run_eval_verifier(
 
     print("🔎 Starting Eval Verifier API review")
     print(f"   Work dir: {work_dir}")
-    print(f"   Timeout: {timeout}s")
+    print(f"   Timeout: {'role params (config/agents.yaml)' if timeout is None else f'{timeout}s'}")
     print("=" * 80)
     start_time = time.time()
     backend = None

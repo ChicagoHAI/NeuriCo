@@ -12,7 +12,7 @@ this module:
 - Tracks invocation status via .neurico/runs/<run_id>/
 - Does NOT move idea files between folders
 - Does NOT manage GitHub integration
-- Imposes no timeout unless ``--timeout`` is given (the manager owns the deadline)
+- Imposes no timeout unless ``--timeout`` or the role's config/agents.yaml budget sets one
 
 Usage (inside Docker):
     python src/core/agent_runner.py <agent_name> --workspace /path --provider claude --run-id rf_001 --idea-file /path/to/idea.yaml
@@ -735,8 +735,8 @@ def main():
     parser.add_argument(
         "--timeout",
         type=int,
-        default=0,
-        help="Wall-clock limit in seconds for the agent (default 0: no limit; the manager owns the deadline)",
+        default=None,
+        help="Wall-clock limit in seconds for the agent (default: the role's budget in config/agents.yaml, no limit unless set there; 0 = no limit)",
     )
 
     args = parser.parse_args()
@@ -761,7 +761,7 @@ def main():
     # Build kwargs based on agent type
     kwargs = {
         "full_permissions": args.full_permissions,
-        "timeout": args.timeout or None,
+        "timeout": args.timeout,  # None = the role's config, 0 = no limit
     }
     if args.agent == "paper_writer":
         kwargs["paper_style"] = args.paper_style

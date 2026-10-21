@@ -140,7 +140,7 @@ Handles idea lifecycle management:
 Manages the multi-stage execution:
 - **Stage Management**: Runs resource finder, then experiment runner
 - **State Persistence**: Saves progress to `.neurico/pipeline_state.json`
-- **Timeout Handling**: Configurable timeouts per stage (default: 45 min / 3 hours)
+- **Timeout Handling**: Opt-in timeouts per stage (default: no limit; `config/agents.yaml` budgets or `--timeout` flags)
 - **Resume Capability**: Can restart from last completed stage
 
 ### Resource Finder Agent (`src/agents/resource_finder.py`)
@@ -220,7 +220,7 @@ Options:
 
 ### 3. Pipeline Execution
 
-**Stage 1: Resource Finder** (45 min default)
+**Stage 1: Resource Finder** (no time limit by default)
 - Agent searches for relevant papers, datasets, and code
 - Downloads and organizes resources
 - Creates `literature_review.md` synthesizing findings

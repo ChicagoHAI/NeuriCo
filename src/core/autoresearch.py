@@ -1025,13 +1025,13 @@ def construct_fresh_initial_node(
     provider: str,
     pause_after_resources: bool,
     skip_resource_finder: bool,
-    resource_finder_timeout: int,
-    experiment_runner_timeout: int,
+    resource_finder_timeout: Optional[int],
+    experiment_runner_timeout: Optional[int],
     full_permissions: bool,
     use_scribe: bool,
-    rule_maker_timeout: int,
-    scorer_timeout: int,
-    manifest_trimmer_timeout: int,
+    rule_maker_timeout: Optional[int],
+    scorer_timeout: Optional[int],
+    manifest_trimmer_timeout: Optional[int],
     autoresearch_history_dir: Optional[Path],
 ) -> InitialAutoResearchNodeResult:
     """Run the fresh scored pipeline and mark its output as the initial best node."""
@@ -1098,9 +1098,9 @@ def construct_bootstrap_initial_node(
     templates_dir: Path,
     provider: str,
     full_permissions: bool,
-    rule_maker_timeout: int,
-    scorer_timeout: int,
-    manifest_trimmer_timeout: int,
+    rule_maker_timeout: Optional[int],
+    scorer_timeout: Optional[int],
+    manifest_trimmer_timeout: Optional[int],
     autoresearch_history_dir: Optional[Path],
     prepare_workspace: Optional[Callable[[Path], None]] = None,
 ) -> Dict[str, Any]:
@@ -1323,11 +1323,11 @@ def continue_from_current_best(
     templates_dir: Path,
     provider: str,
     full_permissions: bool,
-    scorer_timeout: int,
+    scorer_timeout: Optional[int],
     iterations: int,
     autoresearch_history_dir: Optional[Path],
-    proposer_timeout: int,
-    comment_timeout: int,
+    proposer_timeout: Optional[int],
+    comment_timeout: Optional[int],
     continue_recover: bool = False,
 ) -> Dict[str, Any]:
     """Validate the current scored node and run Phase 2 AutoResearch search."""
@@ -1992,9 +1992,9 @@ def run_autoresearch_loop(
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
     full_permissions: bool = True,
-    proposal_timeout: int = 900,
-    comment_timeout: int = 1800,
-    scorer_timeout: int = 600,
+    proposal_timeout: Optional[int] = None,
+    comment_timeout: Optional[int] = None,
+    scorer_timeout: Optional[int] = None,
 ) -> AutoResearchRunResult:
     """Run ordinary AutoResearch with NeuriCo's proposer, worker, and scorer."""
     from agents.autoresearch_proposer import run_autoresearch_proposer

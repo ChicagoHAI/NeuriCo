@@ -160,7 +160,7 @@ class IdeationRun:
         overrides: Dict[str, Any] = {"provider": self.provider, "model": self.model, "auth": self.agent_auth,
                                      "transcript": {"logs_dir": self.logs, "stem": stage.id, "save_prompt": True}}
         if self.timeout is not None:
-            overrides["timeout"] = self.timeout   # 0 = no limit (the call-site convention); None keeps the role default
+            overrides["timeout"] = self.timeout   # 0 = no limit; None keeps the role's budget (no limit unless configured)
         return overrides
 
     def _actor(self, spec: Any) -> str:

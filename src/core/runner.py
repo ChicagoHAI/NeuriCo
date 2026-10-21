@@ -359,24 +359,24 @@ class ResearchRunner:
         self,
         idea_id: str,
         provider: str = "claude",
-        timeout: int = 3600,
+        timeout: Optional[int] = None,
         full_permissions: bool = True,
         multi_agent: bool = True,
         pause_after_resources: bool = False,
         skip_resource_finder: bool = False,
-        resource_finder_timeout: int = 2700,
+        resource_finder_timeout: Optional[int] = None,
         use_scribe: bool = False,
         write_paper: bool = True,
         paper_style: str = None,
-        paper_timeout: int = 3600,
+        paper_timeout: Optional[int] = None,
         no_hash: bool = False,
         private: bool = False,
         force_fresh: bool = False,
         scoring_enabled: bool = False,
-        rule_maker_timeout: int = 1800,
-        scorer_timeout: int = 600,
+        rule_maker_timeout: Optional[int] = None,
+        scorer_timeout: Optional[int] = None,
         bootstrap_mode: bool = False,
-        manifest_trimmer_timeout: int = 300,
+        manifest_trimmer_timeout: Optional[int] = None,
         autoresearch: bool = False,
         autoresearch_iterations: int = 1,
         autoresearch_history_dir: Optional[Path] = None,
@@ -384,7 +384,7 @@ class ResearchRunner:
         continue_recover: bool = False,
         bootstrap_autoresearch_baseline: bool = False,
         hitl_bootstrap_autoresearch_baseline: bool = False,
-        proposer_timeout: int = 900,
+        proposer_timeout: Optional[int] = None,
         compute_backend: str = "local",
         hitl_research: Optional[str] = None,
         hitl_autoresearch: Optional[str] = None,
@@ -408,16 +408,17 @@ class ResearchRunner:
         Args:
             idea_id: Unique identifier of the idea
             provider: AI provider (claude, gemini, codex)
-            timeout: Maximum execution time in seconds (for experiment runner)
+            timeout: Wall-clock limit in seconds for the experiment runner. None = the
+                role's budget in config/agents.yaml (no limit unless set there); 0 = no limit.
             full_permissions: Allow full permissions to CLI agents (default: False)
             multi_agent: Use multi-agent pipeline (default: True)
             pause_after_resources: Pause for human review after resource finding (default: False)
             skip_resource_finder: Skip resource finder stage (default: False)
-            resource_finder_timeout: Timeout for resource finder in seconds (default: 45 min)
+            resource_finder_timeout: Timeout for resource finder in seconds (None = config, 0 = no limit)
             use_scribe: Use scribe for notebook integration (default: False, raw CLI)
             write_paper: Generate paper draft after experiments (default: False)
             paper_style: Paper template style (neurips, icml, acl, ams). None = auto-detect from domain
-            paper_timeout: Timeout for paper writing in seconds
+            paper_timeout: Timeout for paper writing in seconds (None = config, 0 = no limit)
             force_fresh: Ignore existing local workspace and start a new run from scratch
             hitl_research: Human interface for a manager-driven ordinary research
                 run: ``web`` or ``cli``.
@@ -1439,7 +1440,7 @@ class ResearchRunner:
         mode_str = "scribe (notebooks)" if use_scribe else "raw CLI"
         print(f"▶️  Executing research in {mode_str} mode...")
         print(f"   Using provider: {provider}")
-        print(f"   Timeout: {timeout} seconds")
+        print(f"   Timeout: {'none (role budget from config/agents.yaml)' if timeout is None else timeout}")
         print()
 
         # Execute agent through the factory: a deadline that fires while the agent
@@ -1538,7 +1539,7 @@ https://github.com/ChicagoHAI/neurico
         self,
         idea_id: str,
         provider: str = "claude",
-        timeout: int = 1800,
+        timeout: Optional[int] = None,
         full_permissions: bool = True,
         compute_backend: str = "local",
         workspace_mode: Optional[str] = None,
@@ -1552,7 +1553,7 @@ https://github.com/ChicagoHAI/neurico
         Args:
             idea_id: ID of the idea with comments
             provider: AI provider (claude, codex, gemini)
-            timeout: Maximum execution time in seconds (default: 30 min)
+            timeout: Wall-clock limit in seconds (None = the comment_handler role's config, 0 = no limit)
             full_permissions: Allow full permissions to CLI agents
             workspace_mode: Optional dependency-layout selection for a workspace
                 that has not recorded one yet. Existing workspaces retain their
@@ -2015,7 +2016,7 @@ def main():
         help="Skip random hash in repo name if creating a new repo (use {slug}-{provider} instead of {slug}-{hash}-{provider})",
     )
     parser.add_argument(
-        "--timeout", type=int, default=3600, help="Timeout in seconds (default: 3600; 0 = no limit)"
+        "--timeout", type=int, default=None, help="Experiment runner timeout in seconds (default: the role's budget in config/agents.yaml, no limit unless set there; 0 = no limit)"
     )
     parser.add_argument(
         "--no-github", action="store_true", help="Disable GitHub integration (run locally only)"
@@ -2052,8 +2053,8 @@ def main():
     parser.add_argument(
         "--resource-finder-timeout",
         type=int,
-        default=2700,
-        help="Timeout for resource finder in seconds (default: 2700 = 45 min; 0 = no limit)",
+        default=None,
+        help="Timeout for resource finder in seconds (default: the role's budget in config/agents.yaml, no limit unless set there; 0 = no limit)",
     )
     parser.add_argument(
         "--use-scribe",
@@ -2075,8 +2076,8 @@ def main():
     parser.add_argument(
         "--paper-timeout",
         type=int,
-        default=3600,
-        help="Timeout for paper writing in seconds (default: 3600 = 60 min; 0 = no limit)",
+        default=None,
+        help="Timeout for paper writing in seconds (default: the role's budget in config/agents.yaml, no limit unless set there; 0 = no limit)",
     )
     parser.add_argument(
         "--force-fresh",
@@ -2106,14 +2107,14 @@ def main():
     parser.add_argument(
         "--rule-maker-timeout",
         type=int,
-        default=1800,
-        help="Timeout for rule_maker stage in seconds (default: 1800 = 30 min, scoring mode only)",
+        default=None,
+        help="Timeout for rule_maker stage in seconds, scoring mode only (default: the role's budget in config/agents.yaml, no limit unless set there; 0 = no limit)",
     )
     parser.add_argument(
         "--scorer-timeout",
         type=int,
-        default=600,
-        help="Timeout for scorer stage in seconds (default: 600 = 10 min, scoring mode only)",
+        default=None,
+        help="Timeout for the scorer (eval.py) in seconds, scoring mode only (default: no limit; 0 = no limit)",
     )
     parser.add_argument(
         "--time-limit-seconds",
@@ -2181,15 +2182,14 @@ def main():
     parser.add_argument(
         "--proposer-timeout",
         type=int,
-        default=900,
-        help="Timeout for proposal generation stages in seconds " "(default: 900 = 15 min)",
+        default=None,
+        help="Timeout for proposal generation stages in seconds (default: the role's budget in config/agents.yaml, no limit unless set there; 0 = no limit)",
     )
     parser.add_argument(
         "--manifest-trimmer-timeout",
         type=int,
-        default=300,
-        help="Timeout for each manifest_trimmer agent call in seconds (default: 300 = 5 min, "
-        "bootstrap mode only)",
+        default=None,
+        help="Timeout for each manifest_trimmer agent call in seconds, bootstrap mode only (default: the role's budget in config/agents.yaml, no limit unless set there; 0 = no limit)",
     )
     parser.add_argument(
         "--hitl-autoresearch",
@@ -2233,10 +2233,12 @@ def main():
     ]
     if len(autoresearch_modes) > 1:
         parser.error("Choose at most one AutoResearch entry mode: " + ", ".join(autoresearch_modes))
-    # A timeout of 0 disables that stage's wall-clock limit.
-    for name in ("timeout", "resource_finder_timeout", "paper_timeout"):
+    # Timeouts: None (flag not given) = the role's budget in config/agents.yaml, which is
+    # "no limit" unless opted in there; 0 or a negative value = explicitly no limit.
+    for name in ("timeout", "resource_finder_timeout", "paper_timeout", "rule_maker_timeout",
+                 "scorer_timeout", "proposer_timeout", "manifest_trimmer_timeout"):
         if getattr(args, name) is not None and getattr(args, name) <= 0:
-            setattr(args, name, None)
+            setattr(args, name, 0)
     if args.model:
         # Every stage builds its provider command from this run-wide override.
         os.environ[MODEL_ENV_VAR] = args.model

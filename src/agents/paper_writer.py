@@ -188,7 +188,7 @@ def run_paper_writer(
     work_dir: Path,
     provider: str = "claude",
     style: str = "neurips",
-    timeout: Optional[int] = 3600,
+    timeout: Optional[int] = None,
     full_permissions: bool = True,
     domain: str = "general"
 ) -> Dict[str, Any]:
@@ -206,7 +206,7 @@ def run_paper_writer(
         work_dir: Workspace with experiment results
         provider: AI provider (claude, codex, gemini)
         style: Paper style (neurips, icml, acl)
-        timeout: Execution timeout in seconds
+        timeout: Wall-clock limit in seconds (None = the paper_writer role's config, no limit unless set; 0 = no limit)
         full_permissions: Skip permission prompts
         domain: Research domain for template override lookup
 
@@ -291,7 +291,7 @@ if __name__ == "__main__":
     parser.add_argument("work_dir", type=Path, help="Workspace directory with experiment results")
     parser.add_argument("--provider", default="claude", choices=["claude", "codex", "gemini"])
     parser.add_argument("--style", default=default_style, help="Paper style (must match a directory in templates/paper_styles/)")
-    parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument("--timeout", type=int, default=None, help="Wall-clock limit in seconds (default: the role's budget in config/agents.yaml, no limit unless set there; 0 = no limit)")
     parser.add_argument("--no-permissions", action="store_true", help="Require permission prompts")
 
     args = parser.parse_args()

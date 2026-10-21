@@ -17,6 +17,12 @@ from typing import Any, Dict
 
 _PROTOCOL_VERSION = "2024-11-05"
 
+# Client-side deadline for one loopback request to the HitlManager process. Unset or 0
+# (the default) = none: a manager tool call takes as long as the manager needs, and this
+# adapter must never fail it on elapsed time. NEURICO_HITL_MANAGER_REQUEST_TIMEOUT_SECONDS
+# opts in. A dead manager still fails promptly (connection refused / reset).
+_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("NEURICO_HITL_MANAGER_REQUEST_TIMEOUT_SECONDS") or 0) or None
+
 
 def _error(request_id: Any, code: int, message: str) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
@@ -41,7 +47,7 @@ def _runtime_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

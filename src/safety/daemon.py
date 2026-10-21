@@ -4,7 +4,8 @@ Runs on the host (it launches ``./neurico`` containers and host-side suite
 scripts). One loop iteration:
 
 1. reconcile ``queue/state.json`` with reality (process alive? log growing?);
-2. watchdog: kill and requeue jobs whose log has stalled or whose process died;
+2. watchdog: requeue jobs whose process died; warn (by default) or, with
+   ``stall_action: kill``, kill and requeue jobs whose log has stalled;
 3. fill free slots with the highest-priority approved pending jobs that fit;
 4. ingest finished jobs into the knowledge base (runs/, findings/, results/);
 5. write ``logs/safety/status.md`` + ``status.json`` and append ``events.log``;
@@ -84,7 +85,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "gpu_memory_gb": 48,           # memory per listed GPU
     "max_neurico_jobs": 1,         # concurrent NeuriCo containers
     "max_suite_jobs": 1,           # concurrent suite jobs
-    "stall_minutes": 45,           # no log growth for this long -> job is stalled
+    "stall_minutes": 45,           # no log growth for this long -> STALL event (0 = never check)
+    "stall_action": "warn",        # warn: log once per stall episode (default) | kill: kill and requeue
     "retries": 2,                  # per job
     "retry_wait_seconds": 120,
     "poll_seconds": 30,
@@ -96,13 +98,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "planner_provider": "claude",
     "planner_model": None,
     "planner_agent_auth": None,    # oauth | azure (None = NEURICO_AGENT_AUTH / role default)
-    "planner_timeout": 3600,       # seconds for one planner session (0 = no limit)
+    "planner_timeout": None,       # seconds per planner/ideation session: None = the role's budget in
+                                   # config/agents.yaml (no limit unless set there), 0 = no limit
     "eval_python": "/data/hypogenicai/safety_venv/bin/python",
     "hf_cache": "/data/hypogenicai/hf_cache",
     "workspace_dir": None,         # defaults to config/workspace.yaml
-    "resource_finder_timeout": 0,
-    "experiment_timeout": 0,
-    "paper_timeout": 0,
+    # Stage timeouts passed to `./neurico run`: None = not passed (the roles' budgets in
+    # config/agents.yaml, no limit unless set there), 0 = no limit, N = seconds.
+    "resource_finder_timeout": None,
+    "experiment_timeout": None,
+    "paper_timeout": None,
     # Spend caps per billing lane, read from the run ledgers before every launch (None = no cap).
     # Any `<lane>_daily_cap_usd` key works; lanes are core.run_ledger.billing_lane names.
     "openrouter_daily_cap_usd": None,
@@ -133,6 +138,7 @@ class JobRuntime:
     run_id: Optional[str] = None
     note: str = ""
     commands: List[str] = field(default_factory=list)
+    stall_warned_for: Optional[str] = None   # last_progress_at the STALL warning was logged for
 
 
 class Daemon:
@@ -215,10 +221,11 @@ class Daemon:
 
     def neurico_run_command(self, spec: JobSpec, rt: JobRuntime) -> List[str]:
         cmd = [str(NEURICO), "run", rt.idea_id or "<idea_id>", "--provider", spec.provider,
-               "--full-permissions",
-               "--resource-finder-timeout", str(self.config["resource_finder_timeout"]),
-               "--timeout", str(self.config["experiment_timeout"]),
-               "--paper-timeout", str(self.config["paper_timeout"])]
+               "--full-permissions"]
+        for flag, key in (("--resource-finder-timeout", "resource_finder_timeout"),
+                          ("--timeout", "experiment_timeout"), ("--paper-timeout", "paper_timeout")):
+            if self.config.get(key) is not None:
+                cmd += [flag, str(int(self.config[key]))]
         if spec.model:
             cmd += ["--model", spec.model]
         if spec.agent_auth:
@@ -410,14 +417,25 @@ class Daemon:
         append_line(Path(rt.log_file or self.kb.logs_dir / "orphans.log"), f"[safety] killed: {reason}")
 
     def watchdog(self) -> None:
-        stall = float(self.config["stall_minutes"]) * 60
+        """Liveness: a job whose process is gone fails (and retries). Elapsed time never kills by
+        default: a stalled log is a STALL warning once per episode; ``stall_action: kill`` opts in."""
+        stall = float(self.config.get("stall_minutes") or 0) * 60
+        action = str(self.config.get("stall_action") or "warn").lower()
         now = datetime.now(timezone.utc)
         for rt in self.running():
-            last = datetime.fromisoformat(rt.last_progress_at or rt.started_at or utc_now())
+            last_at = rt.last_progress_at or rt.started_at or utc_now()
+            last = datetime.fromisoformat(last_at)
             alive = rt.id in self.processes or rt.id in self.adopted or bool(rt.pid and _pid_alive(rt.pid))
-            if alive and (now - last).total_seconds() > stall:
-                self.event(f"STALL  {rt.id}: no log growth for {int((now - last).total_seconds() // 60)} min")
-                self.kill_job(rt.id, "stalled")
+            if alive and stall > 0 and (now - last).total_seconds() > stall:
+                minutes = int((now - last).total_seconds() // 60)
+                if action == "kill":
+                    self.event(f"STALL  {rt.id}: no log growth for {minutes} min; killing (stall_action: kill)")
+                    self.kill_job(rt.id, "stalled")
+                elif rt.stall_warned_for != last_at:
+                    self.event(f"STALL  {rt.id}: no log growth for {minutes} min; leaving it running "
+                               f"(stall_action: warn)")
+                    rt.stall_warned_for = last_at
+                    self.put(rt)
             elif not alive and rt.id not in self.processes:
                 # Adopted from a previous daemon process and gone: treat as failed attempt.
                 self.event(f"LOST   {rt.id}: process {rt.pid} is gone")
@@ -534,7 +552,7 @@ class Daemon:
                 result = run_planner(self.kb, self.campaign, provider=self.config["planner_provider"],
                                      model=self.config["planner_model"],
                                      agent_auth=self.config.get("planner_agent_auth"),
-                                     timeout=self.config.get("planner_timeout", 3600))
+                                     timeout=_optional_int(self.config.get("planner_timeout")))
                 self.event(f"PLAN   planner proposed {result.get('proposed', 0)} job(s)")
             except Exception as e:  # noqa: BLE001
                 self.event(f"PLAN   planner failed: {type(e).__name__}: {e}")
@@ -720,6 +738,11 @@ def _make_readable(path: Path) -> None:
             parent.chmod(parent.stat().st_mode | 0o555)
     except OSError:
         pass
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    """None stays None (= use the role's config); anything else is an int (0 = no limit)."""
+    return None if value is None or value == "" else int(value)
 
 
 def _pid_alive(pid: int) -> bool:

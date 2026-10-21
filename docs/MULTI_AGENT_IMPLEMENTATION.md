@@ -15,7 +15,7 @@ The system has been refactored from a single monolithic agent to a multi-agent p
 ### 1. Resource Finder Agent (CLI-based)
 - **Purpose**: Literature review, resource gathering, and data collection
 - **Technology**: Direct CLI agent (Claude Code, Codex, or Gemini) without scribe
-- **Duration**: ~45 minutes (configurable)
+- **Duration**: as long as it needs (no wall clock by default; `--resource-finder-timeout` or the role's `config/agents.yaml` budget opts in)
 - **Outputs**:
   - `literature_review.md`: Comprehensive synthesis of research papers
   - `resources.md`: Catalog of all resources with locations
@@ -96,8 +96,8 @@ python src/core/runner.py <idea_id> --provider claude
 ```
 
 This will:
-1. Launch Resource Finder agent (45 min)
-2. Automatically proceed to Experiment Runner (3 hours)
+1. Launch Resource Finder agent (no time limit by default)
+2. Automatically proceed to Experiment Runner (no time limit by default)
 3. Commit results to GitHub
 
 ### With Human Review Checkpoint

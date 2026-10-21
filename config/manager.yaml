@@ -28,9 +28,21 @@ manager:
   # How often to proactively show progress summaries during long runs (seconds)
   engagement_interval: 1800  # 30 minutes
 
-  # HITL only: one unresolved worker request cannot spend unlimited manager
-  # provider turns across reminder rounds. Human response time is not counted.
-  hitl_manager_max_request_provider_turns: 48
+  # HITL only: provider turns one unresolved worker request may spend across
+  # reminder rounds. Unset/null = no cap (the default; completion comes first).
+  # No code reads this key today; it is kept as the documented opt-in name.
+  hitl_manager_max_request_provider_turns: null
+
+  # HITL only: MCP server readiness window per manager turn (seconds), grown by
+  # the increment on each readiness retry. This is the CLI's own MCP startup
+  # limit, retried, not a cap on the manager's work.
+  # hitl_manager_mcp_startup_timeout_seconds: 30
+  # hitl_manager_mcp_startup_timeout_increment_seconds: 15
+
+  # HITL only: ReAct turns (provider call + tool calls) per manager reply.
+  # Unset/null = no cap, the loop ends when the provider stops calling tools.
+  # Opt in with e.g. `hitl_manager_max_turns: 12`.
+  hitl_manager_max_turns: null
 
   # Default AI provider for research agents
   default_provider: claude

@@ -69,7 +69,7 @@ def run_resource_finder(
     work_dir: Path,
     provider: str = "claude",
     templates_dir: Optional[Path] = None,
-    timeout: Optional[int] = 2700,  # 45 minutes default
+    timeout: Optional[int] = None,  # None = the role's config (no limit unless set), 0 = no limit
     full_permissions: bool = True,
     completion_marker_name: str = ".resource_finder_complete",
     completion_mode: str = "marker",
@@ -87,7 +87,7 @@ def run_resource_finder(
         work_dir: Working directory for research
         provider: AI provider (claude, codex, gemini)
         templates_dir: Path to templates directory (auto-detected if None)
-        timeout: Maximum execution time in seconds (default: 45 min)
+        timeout: Wall-clock limit in seconds (None = config/agents.yaml, 0 = no limit)
         full_permissions: Allow full permissions to CLI agents (default: True)
         completion_marker_name: Marker expected for a normal, non-HITL
             invocation. Normal resource finding uses .resource_finder_complete.
@@ -124,7 +124,7 @@ def run_resource_finder(
     print("🔍 Starting Resource Finder Agent")
     print(f"   Provider: {provider}")
     print(f"   Work dir: {work_dir}")
-    timeout_label = "disabled" if timeout is None else f"{timeout}s ({timeout // 60} minutes)"
+    timeout_label = "role budget (config/agents.yaml)" if timeout is None else ("disabled" if not timeout else f"{timeout}s ({timeout // 60} minutes)")
     print(f"   Timeout: {timeout_label}")
     print("=" * 80)
 
@@ -329,7 +329,7 @@ def _launch_hitl_runtime(
     )
 
 
-def wait_for_completion(work_dir: Path, timeout: int = 3600, check_interval: int = 5) -> bool:
+def wait_for_completion(work_dir: Path, timeout: Optional[int] = None, check_interval: int = 5) -> bool:
     """
     Poll for completion marker file.
 
@@ -337,7 +337,7 @@ def wait_for_completion(work_dir: Path, timeout: int = 3600, check_interval: int
 
     Args:
         work_dir: Working directory to check
-        timeout: Maximum wait time in seconds
+        timeout: Maximum wait time in seconds (None = wait until the marker appears)
         check_interval: How often to check in seconds
 
     Returns:
@@ -348,9 +348,9 @@ def wait_for_completion(work_dir: Path, timeout: int = 3600, check_interval: int
 
     print("⏳ Waiting for resource finder completion...")
     print(f"   Checking for: {completion_marker}")
-    print(f"   Timeout: {timeout}s ({timeout//60} minutes)")
+    print(f"   Timeout: {'none' if not timeout else f'{timeout}s ({timeout // 60} minutes)'}")
 
-    while time.time() - start_time < timeout:
+    while not timeout or time.time() - start_time < timeout:
         if completion_marker.exists():
             elapsed = time.time() - start_time
             print(f"✅ Completion marker found after {elapsed:.1f}s")

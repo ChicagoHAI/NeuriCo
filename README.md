@@ -280,7 +280,7 @@ when you want one complete pass without iterative improvement.
 | `--provider claude\|codex\|gemini` | `claude` | Select the research worker provider |
 | `--model NAME` | provider CLI default | Select the model every agent stage runs, e.g. `claude-opus-5-5` or `gpt-5.6-sol` |
 | `--compute-backend local\|dsi-slurm\|modal` | `local` | Select where experiments execute |
-| `--timeout SECONDS` | `3600` | Set the experiment-runner timeout |
+| `--timeout SECONDS` | none | Experiment-runner wall clock; default is the role's budget in `config/agents.yaml` (no limit unless set there); `0` = no limit |
 | `--no-full-permissions` | full permissions | Restore normal provider permission prompts |
 | `--no-write-paper` | paper enabled | Skip paper generation |
 | `--paper-style neurips\|icml\|acl\|ams` | domain default | Select the paper template |
@@ -304,7 +304,7 @@ when you want one complete pass without iterative improvement.
 | --- | --- |
 | `--pause-after-resources` | Review resources before experimentation |
 | `--skip-resource-finder` | Use an already prepared workspace |
-| `--resource-finder-timeout SECONDS` | Change the resource-finder timeout; default `2700` |
+| `--resource-finder-timeout SECONDS` | Resource-finder wall clock; default none (the role's `config/agents.yaml` budget); `0` = no limit |
 | `--use-scribe` | Use the optional notebook-oriented execution path |
 | `--enable-scoring` | Add a sealed rule-maker and scorer stage |
 | `--comment-mode` | Apply targeted changes from comments in the submitted idea |
@@ -360,10 +360,10 @@ to AutoResearch.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--proposer-timeout SECONDS` | `900` | Set proposal-generation timeout |
-| `--rule-maker-timeout SECONDS` | `1800` | Set scoring-contract construction timeout |
-| `--scorer-timeout SECONDS` | `600` | Set scoring timeout |
-| `--manifest-trimmer-timeout SECONDS` | `300` | Set bootstrap manifest-trimmer timeout |
+| `--proposer-timeout SECONDS` | none | Proposal-generation wall clock (default: no limit unless `config/agents.yaml` opts in) |
+| `--rule-maker-timeout SECONDS` | none | Scoring-contract construction wall clock (default: no limit unless `config/agents.yaml` opts in) |
+| `--scorer-timeout SECONDS` | none | Scoring (`eval.py`) wall clock (default: no limit) |
+| `--manifest-trimmer-timeout SECONDS` | none | Bootstrap manifest-trimmer wall clock (default: no limit unless `config/agents.yaml` opts in) |
 | `--bootstrap-rule-maker` | off | Retrofit scoring without creating AutoResearch continuation state |
 
 </details>

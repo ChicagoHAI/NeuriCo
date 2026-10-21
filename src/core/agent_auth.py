@@ -129,8 +129,13 @@ def patched_codex_catalog(env: Optional[Mapping[str, str]] = None) -> Optional[P
     try:
         if shutil.which("codex"):
             cache_dir.mkdir(parents=True, exist_ok=True)
+            # Liveness probe of a local CLI, not an agent's work: `codex debug models` prints
+            # JSON and exits. If it hangs, the except below skips the catalog patch and the
+            # launch proceeds (soft fail), so the deadline cuts nothing short. Unset or 0 =
+            # wait forever; NEURICO_CODEX_PROBE_TIMEOUT_S opts in to a wall clock.
+            probe_timeout = float(os.environ.get("NEURICO_CODEX_PROBE_TIMEOUT_S") or 0) or None
             completed = subprocess.run(["codex", "debug", "models", "--bundled"], capture_output=True, text=True,
-                                       timeout=60, check=True, stdin=subprocess.DEVNULL)
+                                       timeout=probe_timeout, check=True, stdin=subprocess.DEVNULL)
             catalog = json.loads(completed.stdout)
             models = catalog.get("models") if isinstance(catalog, dict) else catalog
             patched = False

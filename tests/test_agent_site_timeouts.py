@@ -7,6 +7,9 @@ here drives the real call site against a fake CLI that keeps streaming past the
 deadline and spawns a child, and proves three things: the timeout fires while
 the agent is still running, the whole process group is reaped, and the ledger
 has a line for the launch.
+
+Every wall clock here is an explicit opt-in (``timeout=TIMEOUT_S``): the defaults impose
+no limit, which ``tests/test_no_default_limits.py`` proves.
 """
 
 from __future__ import annotations
