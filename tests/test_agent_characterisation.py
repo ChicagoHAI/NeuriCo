@@ -10,9 +10,9 @@ the factory migration must preserve:
   3. the prompt / log / transcript files the site writes, and the result shape.
 
 Quirks are recorded as they are, not as they should be (the comment handler
-counting a non-zero exit as success, the paper writer ignoring the Azure lane,
-``_run-agent`` failing on the Azure lane). Later steps change those on purpose
-and update the pin here in the same commit.
+counting a non-zero exit as success). Later steps change those on purpose and
+update the pin here in the same commit: step 2 gave ``_run-agent`` the Azure
+lane and step 3 gave the paper writer both lanes (see those tests).
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from core import agent_auth  # noqa: E402
 from core.agent_cli import build_agent_command  # noqa: E402
 from core.agent_runner import run_prebuilt_cli_agent  # noqa: E402
+from core.run_ledger import RunLedger  # noqa: E402
 
 TEMPLATES = PROJECT_ROOT / "templates"
 AZURE_BASE = "https://labres.openai.azure.com/openai/v1"
@@ -136,6 +137,30 @@ def logs_written(directory: Path) -> set:
     return {p.name for p in Path(directory).iterdir()}
 
 
+def factory_artifacts(prefix: str, provider: str, *, prompt: bool = True) -> set:
+    """Files one AgentFactory launch writes: today's prompt/log/transcript names unchanged,
+    plus the Codex stderr file step 1 introduced so the ``--json`` transcript stays a clean
+    JSONL stream for usage parsing."""
+    names = {f"{prefix}_{provider}.log", f"{prefix}_{provider}_transcript.jsonl"}
+    if prompt:
+        names.add(f"{prefix}_prompt.txt")
+    if provider == "codex":
+        names.add(f"{prefix}_codex_stderr.log")
+    return names
+
+
+def stem_artifacts(stem: str, provider: str) -> set:
+    """Same, for sites that name artifacts by run id (``<stem>.log``) rather than by provider."""
+    names = {f"{stem}.log", f"{stem}_transcript.jsonl"}
+    if provider == "codex":
+        names.add(f"{stem}_stderr.log")
+    return names
+
+
+def ledger_roles(work_dir: Path) -> list:
+    return [e["gen_ai.agent.name"] for e in RunLedger.read(work_dir / ".neurico" / "agent_runs.jsonl")]
+
+
 # -- build_agent_command itself ------------------------------------------------------------------------
 
 def test_build_agent_command_snapshots(lane):
@@ -170,8 +195,7 @@ def test_resource_finder_marker_mode(fake_cli, tmp_path, lane, provider):
     result = resource_finder.run_resource_finder({}, work, provider=provider, prompt_override="rf prompt", timeout=30)
     record = fake_cli.last()
     assert_launch(fake_cli, record, provider, lane, cwd=work, prompt="rf prompt")
-    assert logs_written(work / "logs") == {"resource_finder_prompt.txt", f"resource_finder_{provider}.log",
-                                           f"resource_finder_{provider}_transcript.jsonl"}
+    assert logs_written(work / "logs") == factory_artifacts("resource_finder", provider)
     assert result["success"] is True
     assert set(result) == {"success", "completion_marker", "outputs", "log_file", "transcript_file", "elapsed_time",
                            "background_processes_terminated"}
@@ -259,9 +283,10 @@ def test_rule_maker_bootstrap(fake_cli, tmp_path, lane, provider, monkeypatch):
     log_dir = tmp_path / "bootstrap-logs"
     result = rule_maker_bootstrap.run_bootstrap_rule_maker({}, work, provider=provider, timeout=30, log_dir=log_dir)
     assert_launch(fake_cli, fake_cli.last(), provider, lane, cwd=work, prompt="bootstrap prompt")
-    # transcript only: no .log file on this path
-    assert logs_written(log_dir) == {"bootstrap_rule_maker_prompt.txt", f"bootstrap_rule_maker_{provider}_transcript.jsonl"}
+    # step 2: this path used to write the transcript only; through the factory it also gets a .log
+    assert logs_written(log_dir) == factory_artifacts("bootstrap_rule_maker", provider)
     assert result["success"] is False and result["return_code"] == 0
+    assert result["validation"] == {} and not any(result["outputs_exist"].values())
     assert {"success", "return_code", "elapsed_time"} <= set(result)
 
 
@@ -274,16 +299,25 @@ def test_manifest_trimmer_json_on_stdout(fake_cli, tmp_path, lane, provider, mon
     work = tmp_path / "ws"
     work.mkdir()
     log_dir = tmp_path / "trim-logs"
-    fake_cli.configure(result_text='Here you go:\n{"primary_runner_outputs": ["out.json"]}')
+    decision = {"primary_runner_outputs": ["out.json"], "producer_signatures": {"out.json": ["run.py"]},
+                "task_shape": {"task_type": "t", "evaluation_paradigm": "e", "label_space": "l", "dataset_family": None},
+                "intent_summary": "s", "output_description": "d"}
+    fake_cli.configure(result_text="Here you go:\n" + json.dumps(decision))
     payload = manifest_trimmer.run_manifest_trimmer({}, work, provider=provider, timeout=30, log_dir=log_dir)
-    # plain-text mode on purpose (manifest_trimmer.TRANSCRIPT_FLAGS is empty): no stream flags,
-    # so stdout is the final answer and the first balanced JSON object in it is the payload
+    # plain-text mode on purpose (the manifest_trimmer role sets transcript.stream_json: false): no
+    # stream flags, so stdout is the final answer and the first balanced JSON object in it is the payload
     plain_argv = [a for a in ARGV[(provider, lane)] if a not in ("--verbose", "--output-format", "stream-json", "--json")]
     assert_launch(fake_cli, fake_cli.last(), provider, lane, argv=plain_argv, cwd=work, prompt="trim prompt")
-    assert logs_written(log_dir) == {"trimmer_prompt.txt", f"trimmer_{provider}_transcript.jsonl"}
-    assert payload == {"primary_runner_outputs": ["out.json"]}
+    # step 2: the trimmer gained a .log next to its transcript
+    assert logs_written(log_dir) == factory_artifacts("trimmer", provider)
+    assert payload == decision
     fake_cli.configure(exit_code=2)
     with pytest.raises(RuntimeError):
+        manifest_trimmer.run_manifest_trimmer({}, work, provider=provider, timeout=30, log_dir=log_dir)
+    # a structurally wrong answer is rejected here (config/schemas/manifest_trim.json) rather than by
+    # parse_trim_decision; curate_manifest retries with the message either way
+    fake_cli.configure(result_text='{"primary_runner_outputs": ["out.json"]}')
+    with pytest.raises(ValueError, match="schema"):
         manifest_trimmer.run_manifest_trimmer({}, work, provider=provider, timeout=30, log_dir=log_dir)
 
 
@@ -301,7 +335,9 @@ def test_autoresearch_proposer_ordinary(fake_cli, tmp_path, lane, provider, monk
                                                               provider=provider, timeout=30)
     # the ordinary proposer runs in the attempt directory, not the workspace
     assert_launch(fake_cli, fake_cli.last(), provider, lane, cwd=attempt, prompt="proposal prompt")
-    assert logs_written(attempt) == {"proposer_prompt.txt", f"proposer_{provider}_transcript.jsonl", "proposal.md"}
+    # step 2: the ordinary proposer gained a .log; its ledger line goes to the workspace, not the attempt dir
+    assert logs_written(attempt) == factory_artifacts("proposer", provider) | {"proposal.md"}
+    assert (work / ".neurico" / "agent_runs.jsonl").is_file()
     assert result["success"] is True
     assert set(result) == {"success", "return_code", "proposal_path", "prompt_file", "transcript_file", "elapsed_time",
                            "error", "timed_out", "background_processes_terminated"}
@@ -367,7 +403,14 @@ def test_hitl_comment_handler_launch_descriptor(fake_cli, tmp_path, lane, provid
 
 # -- 7 paper writer ---------------------------------------------------------------------------------------------
 
-def test_paper_writer_bypasses_auth_lanes(fake_cli, tmp_path, lane, provider, monkeypatch):
+def test_paper_writer_uses_auth_lanes(fake_cli, tmp_path, lane, provider, monkeypatch):
+    """Step 3 changed this on purpose. The paper writer used to keep a private copy of
+    CLI_COMMANDS, assemble its own flags and launch with os.environ.copy(), so
+    NEURICO_AGENT_AUTH=azure was silently ignored: no Codex ``-c`` overrides, no Foundry
+    environment, no Azure research-key layer (the old pin asserted the OAuth argv on both
+    lanes). Through factory.spec("paper_writer") it launches like every other agent:
+    the same argv as before on the OAuth lane, the Azure lane's flags and environment on
+    Azure, and GitHub credentials stripped as always."""
     from agents import paper_writer
 
     monkeypatch.setattr(paper_writer, "generate_paper_writer_prompt", lambda *a, **kw: "paper prompt")
@@ -377,14 +420,8 @@ def test_paper_writer_bypasses_auth_lanes(fake_cli, tmp_path, lane, provider, mo
     work = tmp_path / "ws"
     work.mkdir()
     result = paper_writer.run_paper_writer(work, provider=provider, timeout=30)
-    record = fake_cli.last()
-    # private flag assembly: the OAuth argv on both lanes, no Azure overrides, no Foundry env
-    assert record["argv"] == ARGV[(provider, "oauth")]
-    assert fake_cli.added_env_keys(record) == {"PYTHONUNBUFFERED"}
-    assert "GITHUB_TOKEN" in fake_cli.removed_env_keys(record)  # stripped by run_prebuilt_cli_agent
-    assert record["cwd"] == str(work) and record["prompt"] == "paper prompt"
-    assert logs_written(work / "logs") == {"paper_writer_prompt.txt", f"paper_writer_{provider}.log",
-                                           f"paper_writer_{provider}_transcript.jsonl"}
+    assert_launch(fake_cli, fake_cli.last(), provider, lane, cwd=work, prompt="paper prompt")
+    assert logs_written(work / "logs") == factory_artifacts("paper_writer", provider)
     assert result == {"success": True, "draft_dir": str(work / "paper_draft"),
                       "log_file": str(work / "logs" / f"paper_writer_{provider}.log"), "return_code": 0, "stopped": False}
 
@@ -442,8 +479,9 @@ def test_legacy_runner_path(fake_cli, tmp_path, lane, provider, monkeypatch):
     record = fake_cli.last()
     assert_launch(fake_cli, record, provider, lane, cwd=work)
     assert record["prompt"] == (work / "logs" / "session_instructions.txt").read_text(encoding="utf-8")
-    # .log only; this path writes no transcript
-    assert logs_written(work / "logs") == {"research_prompt.txt", "session_instructions.txt", f"execution_{provider}.log"}
+    # step 2: this path used to write the .log only; through the factory it also gets the transcript
+    assert logs_written(work / "logs") == {"research_prompt.txt", "session_instructions.txt"} | \
+        factory_artifacts("execution", provider, prompt=False)
     assert result == {"work_dir": work, "github_url": None, "success": True}
 
 
@@ -457,17 +495,14 @@ def test_agent_runner_run_resource_finder(fake_cli, tmp_path, lane, provider, mo
     work = tmp_path / "ws"
     work.mkdir()
     tracker = agent_runner.RunTracker(work, "rf_001", "resource_finder")
-    if lane == "azure":
-        # build_agent_environment is called with provider "" on this path, which the Azure lane rejects
-        with pytest.raises(RuntimeError):
-            agent_runner.run_resource_finder({}, work, provider, tracker)
-        return
+    # step 2: this path used to build its environment with provider "", which the Azure lane
+    # rejected; through the factory `_run-agent` works on both lanes
     result = agent_runner.run_resource_finder({}, work, provider, tracker)
     record = fake_cli.last()
     assert_launch(fake_cli, record, provider, lane, cwd=work, prompt="rf prompt")
-    assert logs_written(work / "logs") == {"resource_finder_prompt.txt", f"resource_finder_{provider}.log",
-                                           f"resource_finder_{provider}_transcript.jsonl"}
-    assert set(result) == {"success", "return_code", "elapsed_time", "log_file", "transcript_file", "outputs"}
+    assert logs_written(work / "logs") == factory_artifacts("resource_finder", provider)
+    assert set(result) == LAUNCH_KEYS | {"outputs"}  # legacy_dict() plus the outputs listing
+    assert result["success"] is True  # exit code, not the marker: the manager inspects the workspace itself
     status = json.loads((work / ".neurico" / "runs" / "rf_001" / "status.json").read_text(encoding="utf-8"))
     assert status["status"] == "running" and status["pid"] == record["pid"]
 
@@ -501,9 +536,12 @@ def test_zero_shot_baseline(fake_cli, tmp_path, lane, provider, monkeypatch):
     result = zero_shot.run_baseline(idea, provider, model="m-1", timeout=30, use_github=False)
     record = fake_cli.last()
     assert_launch(fake_cli, record, provider, lane, argv=with_model(ARGV[(provider, lane)], "m-1"), cwd=work)
-    assert logs_written(work / "logs") == {"zeroshot_prompt.txt", f"zeroshot_{provider}.log",
-                                           f"zeroshot_{provider}_transcript.jsonl"}
+    assert logs_written(work / "logs") == {"zeroshot_prompt.txt"} | stem_artifacts(f"zeroshot_{provider}", provider)
     assert result["success"] is True and result["paper_exists"] is True
+    # step 4: the ledger line and its usage travel with the baseline metadata
+    assert ledger_roles(work) == ["zero_shot"]
+    run_info = json.loads((work / zero_shot.METADATA_DIR / "run.json").read_text(encoding="utf-8"))
+    assert run_info["agent_run_id"].startswith("zero_shot_") and "cost_usd" in run_info["usage"]
 
 
 # -- 13 safety planner ---------------------------------------------------------------------------------------------
@@ -532,9 +570,13 @@ def test_safety_planner(fake_cli, kb, lane, provider, monkeypatch):
                   extra_env=["NEURICO_SAFETY_KB"], cwd=kb.root, prompt="planner prompt")
     assert record["env"]["NEURICO_SAFETY_KB"] == str(kb.root)
     run = record_out["planner_run"]
-    assert logs_written(kb.logs_dir / "planner") == {f"{run}.log", f"{run}_transcript.jsonl"}
+    assert logs_written(kb.logs_dir / "planner") == stem_artifacts(run, provider)
     assert logs_written(kb.queue_dir / "proposals" / run) == {"prompt.md", "outcome.yaml"}
     assert record_out["ok"] is True and record_out["log"] == str(kb.logs_dir / "planner" / f"{run}.log")
+    # step 4: every safety run is in the KB's ledger, attributed per mode (planner / ideator)
+    assert ledger_roles(kb.root) == ["planner"] and record_out["agent_run_id"].startswith("planner_")
+    ideate = planner.run_planner(kb, "camp", provider=provider, model="m-1", timeout=30, mode="ideate")
+    assert ledger_roles(kb.root) == ["planner", "ideator"] and ideate["mode"] == "ideate"
 
 
 # -- 14 model scout ---------------------------------------------------------------------------------------------------
@@ -549,9 +591,8 @@ def test_model_scout(fake_cli, kb, lane, provider, monkeypatch):
     assert_launch(fake_cli, record, provider, lane, extra_env=["NEURICO_SAFETY_KB"], cwd=kb.root, prompt="scout prompt")
     assert record["env"]["NEURICO_SAFETY_KB"] == str(kb.root)
     run = record_out["scout_run"]
-    assert logs_written(kb.logs_dir / "scout") == {f"{run}_prompt.md", f"{run}.log", f"{run}_transcript.jsonl",
-                                                   f"{run}_outcome.yaml"}
-    assert record_out["ok"] is True
+    assert logs_written(kb.logs_dir / "scout") == {f"{run}_prompt.md", f"{run}_outcome.yaml"} | stem_artifacts(run, provider)
+    assert record_out["ok"] is True and ledger_roles(kb.root) == ["model_scout"]
 
 
 def test_model_scout_defaults_to_codex(fake_cli, kb, monkeypatch):

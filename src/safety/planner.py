@@ -17,7 +17,6 @@ with ``approved`` set according to the campaign's approval policy.
 from __future__ import annotations
 
 import os
-import shlex
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -290,10 +289,16 @@ def _targets_api_model(spec: JobSpec, models: Dict[str, Any]) -> bool:
 
 
 def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: Optional[str] = None,
-                timeout: Optional[int] = 3600, dry_run: bool = False, mode: Optional[str] = None) -> Dict[str, Any]:
+                agent_auth: Optional[str] = None, timeout: Optional[int] = 3600, dry_run: bool = False,
+                mode: Optional[str] = None) -> Dict[str, Any]:
+    """One planner session in the KB root, then Python validation of its proposals.
+
+    ``provider``, ``model`` and ``agent_auth`` are the daemon's (or the CLI's)
+    choices and override the ``planner`` / ``ideator`` role defaults in
+    config/agents.yaml; ``None`` leaves the role or environment default in place.
+    """
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
-    from core.agent_cli import build_agent_command, build_agent_environment
-    from core.agent_runner import run_prebuilt_cli_agent
+    from core.agent_factory import AgentFactory
 
     kb.ensure_layout()
     campaign = kb.campaign(campaign_name)
@@ -301,7 +306,7 @@ def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: 
     from safety.model_scout import is_stale, run_scout
     if is_stale(kb) and not dry_run:
         try:
-            scouted = run_scout(kb, provider=provider, model=model)
+            scouted = run_scout(kb, provider=provider, model=model, agent_auth=agent_auth)
             print(f"model scout: refreshed {scouted.get('refreshed')}, added {scouted.get('accepted')}")
         except Exception as e:  # noqa: BLE001 - planning must not depend on the scout succeeding
             print(f"model scout skipped: {type(e).__name__}: {e}")
@@ -320,16 +325,18 @@ def run_planner(kb: KB, campaign_name: str, *, provider: str = "claude", model: 
 
     log_dir = kb.logs_dir / "planner"
     log_dir.mkdir(parents=True, exist_ok=True)
-    command = build_agent_command(provider, full_permissions=True, model=model)
-    env = build_agent_environment(provider, {"NEURICO_SAFETY_KB": str(kb.root)})
-    result = run_prebuilt_cli_agent(
-        command_argv=shlex.split(command), prompt=prompt, work_dir=kb.root,
-        log_file=log_dir / f"{planner_run}.log", transcript_file=log_dir / f"{planner_run}_transcript.jsonl",
-        env=env, timeout=timeout, provider=provider,
-    )
+    # Separate roles per mode so the ledger attributes spend to replicate vs ideate rounds.
+    # The artifacts keep the planner-run name (<run>.log, <run>_transcript.jsonl); the prompt
+    # was saved as prompt.md above; the KB root is the ledger's work_dir.
+    factory = AgentFactory()
+    spec = factory.spec("ideator" if mode == "ideate" else "planner", provider=provider, model=model,
+                        auth=agent_auth, timeout=timeout,
+                        transcript={"logs_dir": log_dir, "stem": planner_run, "save_prompt": False})
+    result = factory.run(factory.build(spec, {"NEURICO_SAFETY_KB": str(kb.root)}), prompt, kb.root)
     outcome = validate_proposals(kb, campaign, proposal_dir, mode)
-    record = {"ok": bool(result.get("success", True)), "planner_run": planner_run, "mode": mode, "at": utc_now(),
+    record = {"ok": result.success, "planner_run": planner_run, "mode": mode, "at": utc_now(),
               "campaign": campaign_name, "proposed": len(outcome["accepted"]), "accepted": outcome["accepted"],
-              "rejected": outcome["rejected"], "log": str(log_dir / f"{planner_run}.log")}
+              "rejected": outcome["rejected"], "log": str(result.log_file),
+              "agent_run_id": result.run_id, "cost_usd": result.usage.cost_usd}
     save_yaml(proposal_dir / "outcome.yaml", record)
     return record

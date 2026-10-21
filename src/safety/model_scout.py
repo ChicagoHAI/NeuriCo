@@ -15,7 +15,6 @@ parameter counts under the policy in families.yaml.
 
 from __future__ import annotations
 
-import shlex
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -142,12 +141,12 @@ def latest_models_summary(kb: KB) -> str:
     return "\n".join(lines)
 
 
-def run_scout(kb: KB, *, provider: str = "codex", model: Optional[str] = None, timeout: int = 2400,
-              dry_run: bool = False) -> Dict[str, Any]:
+def run_scout(kb: KB, *, provider: str = "codex", model: Optional[str] = None, agent_auth: Optional[str] = None,
+              timeout: int = 2400, dry_run: bool = False) -> Dict[str, Any]:
+    """One scout session in the KB root (the model_scout role; Codex by default), then the merge."""
     import sys
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
-    from core.agent_cli import build_agent_command, build_agent_environment
-    from core.agent_runner import run_prebuilt_cli_agent
+    from core.agent_factory import AgentFactory
 
     kb.ensure_layout()
     (kb.catalog_dir / "proposals").mkdir(parents=True, exist_ok=True)
@@ -158,16 +157,15 @@ def run_scout(kb: KB, *, provider: str = "codex", model: Optional[str] = None, t
     (log_dir / f"{scout_run}_prompt.md").write_text(prompt, encoding="utf-8")
     if dry_run:
         return {"ok": True, "scout_run": scout_run, "prompt": str(log_dir / f"{scout_run}_prompt.md")}
-    command = build_agent_command(provider, full_permissions=True, model=model)
-    env = build_agent_environment(provider, {"NEURICO_SAFETY_KB": str(kb.root)})
-    result = run_prebuilt_cli_agent(command_argv=shlex.split(command), prompt=prompt, work_dir=kb.root,
-                                    log_file=log_dir / f"{scout_run}.log",
-                                    transcript_file=log_dir / f"{scout_run}_transcript.jsonl",
-                                    env=env, timeout=timeout, provider=provider)
+    # Artifacts keep the scout-run name; the prompt was saved as <run>_prompt.md above.
+    factory = AgentFactory()
+    spec = factory.spec("model_scout", provider=provider, model=model, auth=agent_auth, timeout=timeout,
+                        transcript={"logs_dir": log_dir, "stem": scout_run, "save_prompt": False})
+    result = factory.run(factory.build(spec, {"NEURICO_SAFETY_KB": str(kb.root)}), prompt, kb.root)
     outcome = merge_proposals(kb)
     latest = load_yaml(kb.catalog_dir / "models_latest.yaml") or {}
-    record = {"ok": bool(result.get("success", True)), "scout_run": scout_run, "at": utc_now(),
+    record = {"ok": result.success, "scout_run": scout_run, "at": utc_now(),
               "refreshed": latest.get("refreshed"), "accepted": outcome["accepted"], "rejected": outcome["rejected"],
-              "log": str(log_dir / f"{scout_run}.log")}
+              "log": str(result.log_file), "agent_run_id": result.run_id, "cost_usd": result.usage.cost_usd}
     save_yaml(log_dir / f"{scout_run}_outcome.yaml", record)
     return record

@@ -13,7 +13,6 @@ from typing import Any, Dict, Optional
 import json
 import os
 import shlex
-import subprocess
 import sys
 import time
 
@@ -21,7 +20,7 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.compute_backend import get_runtime_compute_backend
-from core.security import sanitize_text
+from core.agent_factory import AgentFactory
 from core.agent_runner import run_prebuilt_cli_agent
 from core.agent_cli import (
     CLI_COMMANDS,
@@ -335,79 +334,26 @@ def run_autoresearch_proposer(
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
 
-    cmd = build_agent_command(provider, full_permissions=full_permissions)
-
     transcript_file = attempt_dir / f"proposer_{provider}_transcript.jsonl"
 
-    print(f"▶️  Launching {provider} CLI proposer...")
-    print(f"   Command: {cmd}")
-    if not hitl_submission:
-        print(f"   Proposal: {proposal_path}")
-    else:
-        print("   Proposal: submitted directly to HITL runtime")
-    print(f"   Transcript: {transcript_file}")
-    print()
-
-    env = build_agent_environment(provider, env_extra)
-
     start_time = time.time()
-    return_code: Optional[int] = None
     error: Optional[str] = None
-    launch: Dict[str, Any] = {
-        "success": False,
-        "timed_out": False,
-        "background_processes_terminated": False,
-    }
 
     try:
         if hitl_submission:
-            # HITL proposal submission is a live runtime interaction. Use the
-            # shared runner so the configured deadline applies even while the
-            # provider streams progress indefinitely.
-            launch = run_prebuilt_cli_agent(
-                command_argv=shlex.split(cmd),
-                prompt=prompt,
-                work_dir=work_dir,
-                log_file=attempt_dir / f"proposer_{provider}.log",
-                transcript_file=transcript_file,
-                env=env,
-                timeout=timeout,
-                provider=provider,
-                defer_provider_failure_to_runtime=True,
+            launch = _launch_hitl_submission(
+                prompt, work_dir, attempt_dir, provider, full_permissions=full_permissions,
+                timeout=timeout, env_extra=env_extra,
             )
-            return_code = launch["return_code"]
-            if launch["timed_out"]:
-                error = f"AutoResearch proposer timed out after {timeout}s"
-                print(f"\n⏱️  {error}")
         else:
-            with open(transcript_file, "w", encoding="utf-8") as transcript_f:
-                process = subprocess.Popen(
-                    shlex.split(cmd),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    text=True,
-                    encoding="utf-8",
-                    bufsize=1,
-                    cwd=str(attempt_dir),
-                )
-
-                process.stdin.write(prompt)
-                process.stdin.close()
-
-                for line in iter(process.stdout.readline, ""):
-                    if line:
-                        sanitized_line = sanitize_text(line)
-                        print(sanitized_line, end="")
-                        transcript_f.write(sanitized_line)
-
-                return_code = process.wait(timeout=timeout)
-
-    except subprocess.TimeoutExpired:
-        process.kill()
-        error = f"AutoResearch proposer timed out after {timeout}s"
-        print(f"\n⏱️  {error}")
+            launch = _launch_ordinary(
+                prompt, work_dir, attempt_dir, provider, full_permissions=full_permissions,
+                timeout=timeout, env_extra=env_extra,
+            )
+        return_code = launch["return_code"]
+        if launch["timed_out"]:
+            error = f"AutoResearch proposer timed out after {timeout}s"
+            print(f"\n⏱️  {error}")
     except Exception as e:
         error = f"AutoResearch proposer error: {e}"
         print(f"\n❌ {error}")
@@ -415,12 +361,9 @@ def run_autoresearch_proposer(
 
     elapsed = time.time() - start_time
     proposal_exists = proposal_path.exists() and proposal_path.stat().st_size > 0
-    success = (
-        return_code == 0
-        and (hitl_submission or proposal_exists)
-        and error is None
-        and not bool(launch.get("background_processes_terminated"))
-    )
+    # Ordinary mode: the role's files contract (proposal.md) is folded into the
+    # launch verdict; HITL mode: the runtime owns the proposal, so the launch decides.
+    success = bool(launch.get("success")) and error is None
 
     if not hitl_submission and not proposal_exists and error is None:
         error = f"proposal.md was not created at {proposal_path}"
@@ -447,6 +390,70 @@ def run_autoresearch_proposer(
     if hitl_submission:
         result["provider_process_failed"] = bool(launch.get("provider_process_failed"))
     return result
+
+
+def _print_launch_banner(provider: str, command: str, proposal: Optional[Path], transcript_file: Path) -> None:
+    print(f"▶️  Launching {provider} CLI proposer...")
+    print(f"   Command: {command}")
+    print(f"   Proposal: {proposal}" if proposal else "   Proposal: submitted directly to HITL runtime")
+    print(f"   Transcript: {transcript_file}")
+    print()
+
+
+def _launch_ordinary(
+    prompt: str,
+    work_dir: Path,
+    attempt_dir: Path,
+    provider: str,
+    *,
+    full_permissions: bool,
+    timeout: Optional[int],
+    env_extra: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
+    """Ordinary proposing through the agent factory.
+
+    The proposer runs *in the attempt directory* (its artifacts and proposal.md
+    live there) but belongs to the workspace, which is where its ledger line
+    goes. The role's files contract makes a missing or empty proposal.md a
+    failed launch, as the old loop's post-check did.
+    """
+    factory = AgentFactory()
+    spec = factory.spec(
+        "autoresearch_proposer", provider=provider, full_permissions=full_permissions, timeout=timeout,
+        transcript={"logs_dir": attempt_dir, "prefix": "proposer"},
+    )
+    handle = factory.build(spec, env_extra)
+    _print_launch_banner(provider, shlex.join(handle.argv), attempt_dir / "proposal.md",
+                         attempt_dir / f"proposer_{provider}_transcript.jsonl")
+    return factory.run(handle, prompt, attempt_dir, ledger_dir=work_dir).legacy_dict()
+
+
+def _launch_hitl_submission(
+    prompt: str,
+    work_dir: Path,
+    attempt_dir: Path,
+    provider: str,
+    *,
+    full_permissions: bool,
+    timeout: Optional[int],
+    env_extra: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
+    """HITL proposal submission: a live runtime interaction on the shared runner,
+    so the configured deadline applies even while the provider streams progress."""
+    cmd = build_agent_command(provider, full_permissions=full_permissions)
+    transcript_file = attempt_dir / f"proposer_{provider}_transcript.jsonl"
+    _print_launch_banner(provider, cmd, None, transcript_file)
+    return run_prebuilt_cli_agent(
+        command_argv=shlex.split(cmd),
+        prompt=prompt,
+        work_dir=work_dir,
+        log_file=attempt_dir / f"proposer_{provider}.log",
+        transcript_file=transcript_file,
+        env=build_agent_environment(provider, env_extra),
+        timeout=timeout,
+        provider=provider,
+        defer_provider_failure_to_runtime=True,
+    )
 
 
 def _read_text_if_exists(path: Path) -> str:

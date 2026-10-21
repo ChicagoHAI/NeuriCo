@@ -16,7 +16,6 @@ from contextlib import ExitStack
 from uuid import uuid4
 import inspect
 import logging
-import subprocess
 import shlex
 import sys
 import os
@@ -41,12 +40,8 @@ from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.config_loader import ConfigLoader
 from core.local_resources import stage_local_resources, staged_immutable_resource_roots
 from core import agent_auth, azure_config
-from core.agent_cli import (
-    MODEL_ENV_VAR,
-    build_agent_command,
-    build_agent_environment,
-    provider_workspace_root,
-)
+from core.agent_cli import MODEL_ENV_VAR, provider_workspace_root
+from core.agent_factory import AgentFactory
 from core.security import sanitize_text
 from core.compute_backend import (
     attach_runtime_compute_backend,
@@ -1447,24 +1442,27 @@ class ResearchRunner:
         print(f"   Timeout: {timeout} seconds")
         print()
 
-        # Execute agent
+        # Execute agent through the factory: a deadline that fires while the agent
+        # streams, process-group cleanup and a ledger line, which the old
+        # read-to-EOF loop here never had.
         success = False
         try:
-            # Set environment variables
-            env = build_agent_environment(provider)
-            if use_scribe:
-                env["SCRIBE_RUN_DIR"] = str(work_dir)
-
-            # Prepare command
-            log_file = work_dir / "logs" / f"execution_{provider}.log"
-
-            cmd = build_agent_command(
-                provider,
+            factory = AgentFactory()
+            spec = factory.spec(
+                "experiment_runner",
+                provider=provider,
                 full_permissions=full_permissions,
                 use_scribe=use_scribe,
+                timeout=timeout,
+                # This legacy path reports the exit code; artifact checks (REPORT.md)
+                # belong to the orchestrator route. The prompt files are written above.
+                output={"kind": "return_code"},
+                transcript={"save_prompt": False},
             )
+            handle = factory.build(spec)
+            log_file = work_dir / "logs" / f"execution_{provider}.log"
 
-            print(f"   Command: {cmd}")
+            print(f"   Command: {shlex.join(handle.argv)}")
             print(f"   Log file: {log_file}")
             print()
             print("=" * 80)
@@ -1472,48 +1470,19 @@ class ResearchRunner:
             print("=" * 80)
             print()
 
-            with open(log_file, "w", encoding="utf-8") as log_f:
-                # Start process in workspace directory
-                process = subprocess.Popen(
-                    shlex.split(cmd),
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    env=env,
-                    text=True,
-                    encoding="utf-8",
-                    bufsize=1,
-                    cwd=str(work_dir),
-                )
-
-                # Send session instructions
-                process.stdin.write(session_instructions)
-                process.stdin.close()
-
-                # Stream output (sanitized for security)
-                for line in iter(process.stdout.readline, ""):
-                    if line:
-                        sanitized_line = sanitize_text(line)
-                        print(sanitized_line, end="")
-                        log_f.write(sanitized_line)
-
-                # Wait for completion
-                return_code = process.wait(timeout=timeout)
+            launch = factory.run(handle, session_instructions, work_dir)
 
             print()
             print("=" * 80)
 
-            if return_code == 0:
+            if launch.timed_out:
+                print(f"\n⏱️  Execution timed out after {timeout} seconds")
+            if launch.success:
                 print("✅ Research execution completed successfully!")
                 success = True
             else:
-                print(f"⚠️  Research execution finished with return code: {return_code}")
+                print(f"⚠️  Research execution finished with return code: {launch.return_code}")
                 success = False
-
-        except subprocess.TimeoutExpired:
-            print(f"\n⏱️  Execution timed out after {timeout} seconds")
-            process.kill()
-            success = False
 
         except Exception as e:
             print(f"\n❌ Error during execution: {e}")

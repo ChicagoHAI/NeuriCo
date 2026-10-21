@@ -78,6 +78,13 @@ class FakeCli:
         return {k for k in set(os.environ) - set(record["env_keys"]) if not k.startswith("BASH_FUNC_")}
 
 
+@pytest.fixture(autouse=True)
+def _agent_ledger_in_tmp(tmp_path, monkeypatch):
+    """Call sites now go through AgentFactory, which also appends to the project-wide
+    ledger (logs/agent_runs.jsonl); tests must never write there."""
+    monkeypatch.setenv("NEURICO_AGENT_LEDGER", str(tmp_path / "agent_runs.global.jsonl"))
+
+
 @pytest.fixture
 def fake_cli(tmp_path, monkeypatch) -> FakeCli:
     bin_dir = tmp_path / "fake-bin"

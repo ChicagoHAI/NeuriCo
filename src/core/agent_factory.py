@@ -145,6 +145,7 @@ class TranscriptPolicy:
 
     logs_dir: Optional[Path] = None  # default <work_dir>/logs
     prefix: str = ""  # default: role name
+    stem: str = ""  # full artifact stem (planner/scout name files by run id, not by provider)
     attempt_numbered: bool = False
     save_prompt: bool = True
     tracker_run_id: Optional[str] = None
@@ -832,6 +833,11 @@ class AgentFactory:
     @staticmethod
     def _apply_overrides(cfg: Dict[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
         for key, value in overrides.items():
+            if key == "timeout":
+                # Today's call-site parameter: None means "no limit" at every site, so it must
+                # not fall through to the role default the way other None overrides do.
+                cfg["budget"] = _deep_merge(cfg.get("budget") or {}, {"timeout_s": 0 if value is None else int(value)})
+                continue
             if value is None:
                 continue
             if key == "full_permissions":  # today's flag, mapped onto the permissions block
@@ -869,10 +875,14 @@ class AgentFactory:
     # -- run ---------------------------------------------------------------------------------------------
     def run(self, handle: AgentHandle, prompt: str, work_dir: Path, env_extra: Optional[Mapping[str, str]] = None,
             *, run_id: Optional[str] = None, prompt_meta: Any = None,
-            on_start: Optional[Callable[[int], None]] = None) -> AgentResult:
+            on_start: Optional[Callable[[int], None]] = None, ledger_dir: Optional[Path] = None) -> AgentResult:
         """1. prompt-size check  2. stage skills / isolation  3. attempts loop over
         ``run_prebuilt_cli_agent``  4. parse transcript  5. evaluate contracts
-        6. ledger  7. return."""
+        6. ledger  7. return.
+
+        ``ledger_dir`` is the per-idea ledger root when it differs from the process
+        cwd (the AutoResearch proposer runs in an attempt directory but belongs to
+        the workspace); ``on_start`` receives the pid as today's RunTracker does."""
         spec = handle.spec
         work_dir = Path(work_dir)
         run_id = run_id or new_run_id(spec.role)
@@ -897,7 +907,7 @@ class AgentFactory:
                 time.sleep(delay)
         result.attempts = attempt
         result.run_id = run_id
-        self._record(handle, result, work_dir, prompt, ts_start, prompt_meta)
+        self._record(handle, result, Path(ledger_dir) if ledger_dir else work_dir, prompt, ts_start, prompt_meta)
         if spec.budget.hard and result.status == "budget_exceeded":
             raise BudgetExceeded(f"{spec.role}: cost {result.usage.cost_usd} exceeds {spec.budget.max_cost_usd} USD")
         return result
@@ -941,14 +951,16 @@ class AgentFactory:
         t = spec.transcript
         logs_dir = Path(t.logs_dir) if t.logs_dir is not None else work_dir / "logs"
         prefix = t.prefix or spec.role
+        base = t.stem or f"{prefix}_{spec.provider}"
         if t.attempt_numbered:
-            n = next_attempt_number(logs_dir, lambda i: f"{prefix}_{spec.provider}_attempt{i}.log")
+            n = next_attempt_number(logs_dir, lambda i: f"{base}_attempt{i}.log")
             suffix = f"_attempt{n}"
         else:
             suffix = f"_attempt{attempt}" if attempt > 1 else ""
-        stem = f"{prefix}_{spec.provider}{suffix}"
+        stem = f"{base}{suffix}"
+        prompt_stem = t.stem or prefix
         return _ArtifactNames(
-            prompt=(logs_dir / f"{prefix}_prompt{suffix}.txt") if t.save_prompt else None,
+            prompt=(logs_dir / f"{prompt_stem}_prompt{suffix}.txt") if t.save_prompt else None,
             log=logs_dir / f"{stem}.log",
             transcript=logs_dir / f"{stem}_transcript.jsonl",
             stderr=(logs_dir / f"{stem}_stderr.log") if spec.provider == "codex" else None,

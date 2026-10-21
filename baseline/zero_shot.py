@@ -36,7 +36,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from core.agent_cli import build_agent_command, build_agent_environment  # noqa: E402
+from core.agent_factory import AgentFactory  # noqa: E402
 from core.config_loader import ConfigLoader  # noqa: E402
 from core.github_manager import GitHubManager  # noqa: E402
 from core.security import sanitize_files, sanitize_logs_directory, sanitize_text  # noqa: E402
@@ -331,8 +331,6 @@ def run_baseline(
     resume_workspace: Optional[str] = None,
     resume_mode: str = "continue",
 ) -> Dict[str, Any]:
-    from core.agent_runner import run_prebuilt_cli_agent
-
     if resume_mode not in RESUME_NOTES:
         raise ValueError(f"resume_mode must be one of {sorted(RESUME_NOTES)}, got {resume_mode!r}")
 
@@ -366,20 +364,29 @@ def run_baseline(
     setup_gitignore(work_dir)
 
     prompt = build_prompt(idea, timeout)
-    cmd = build_agent_command(provider, full_permissions=full_permissions, model=model)
     if resume_workspace:
         run_info = workspace["run_info"]
         resume_number = len(run_info.get("resumes", [])) + 1
         prompt = prompt.rstrip() + "\n" + RESUME_NOTES[resume_mode]
-        stem = f"{METHOD}_{provider}_resume{resume_number}"
-        (logs_dir / f"{METHOD}_resume{resume_number}_prompt.txt").write_text(prompt, encoding="utf-8")
+        stem, prompt_name = f"{METHOD}_{provider}_resume{resume_number}", f"{METHOD}_resume{resume_number}_prompt.txt"
+    else:
+        stem, prompt_name = f"{METHOD}_{provider}", f"{METHOD}_prompt.txt"
+    (logs_dir / prompt_name).write_text(prompt, encoding="utf-8")
+    # The zero_shot role (config/agents.yaml) supplies the provider flags on both auth
+    # lanes and the deadline; the log and transcript keep this file's stem, and the
+    # prompt file above keeps its own name, so the factory saves no second copy.
+    factory = AgentFactory()
+    handle = factory.build(factory.spec(
+        "zero_shot", provider=provider, model=model, full_permissions=full_permissions, timeout=timeout,
+        transcript={"logs_dir": logs_dir, "stem": stem, "save_prompt": False},
+    ))
+    cmd = shlex.join(handle.argv)
+    if resume_workspace:
         run_info.setdefault("resumes", []).append(
             {"model": model, "command": cmd, "mode": resume_mode, "started_at": utc_now()}
         )
         run_info["status"] = "running"
     else:
-        stem = f"{METHOD}_{provider}"
-        (logs_dir / f"{METHOD}_prompt.txt").write_text(prompt, encoding="utf-8")
         run_info = {
             "method": label,
             "provider": provider,
@@ -409,16 +416,12 @@ def run_baseline(
 
     result: Dict[str, Any] = {"success": False, "return_code": None}
     try:
-        result = run_prebuilt_cli_agent(
-            command_argv=shlex.split(cmd),
-            prompt=prompt,
-            work_dir=work_dir,
-            log_file=log_file,
-            transcript_file=transcript_file,
-            env=build_agent_environment(provider),
-            timeout=timeout,
-            provider=provider,
-        )
+        agent_result = factory.run(handle, prompt, work_dir)
+        result = agent_result.legacy_dict()
+        # The ledger's view of the run travels with the baseline metadata so a
+        # comparison can cite what the session cost.
+        result["agent_run_id"] = agent_result.run_id
+        result["usage"] = agent_result.usage.as_dict()
     except Exception as e:
         result["error"] = sanitize_text(str(e))
         print(f"\n❌ Error during execution: {result['error']}")
@@ -431,6 +434,8 @@ def run_baseline(
             elapsed_seconds=result.get("elapsed_time"),
             timed_out=bool(result.get("timed_out")),
         )
+        if result.get("agent_run_id"):
+            outcome.update(agent_run_id=result["agent_run_id"], usage=result["usage"])
         if resume_number:
             run_info["resumes"][-1].update(outcome)
         else:
