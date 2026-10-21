@@ -46,7 +46,7 @@ roles:
     budget: {timeout_s: 300}
     transcript: {stream_json: false}  # plain-text mode: stdout is the JSON answer
     output: {kind: json_stdout, schema: config/schemas/manifest_trim.json}
-    retry: {max_invalid_outputs: 2}
+    retry: {max_invalid_outputs: 0}   # core.workspace_manifest.curate_manifest owns the retry (prior_error)
     template: agents/manifest_trimmer.txt
   experiment_runner:
     budget: {timeout_s: 0}            # 0 = no limit, as today's CLI default
@@ -54,7 +54,7 @@ roles:
     transcript: {prefix: execution}
     template: agents/session_instructions.txt
   autoresearch_proposer:
-    budget: {timeout_s: 900, max_prompt_chars: 200000}
+    budget: {timeout_s: 900, max_prompt_chars: 900000}   # = MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS, checked first by the site
     output: {kind: files, required_files: [proposal.md]}
     transcript: {prefix: proposer}
     template: agents/autoresearch_proposer.txt

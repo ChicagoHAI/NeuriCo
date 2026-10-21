@@ -286,16 +286,25 @@ def test_manifest_trimmer_json_on_stdout(fake_cli, tmp_path, lane, provider, mon
     work = tmp_path / "ws"
     work.mkdir()
     log_dir = tmp_path / "trim-logs"
-    fake_cli.configure(result_text='Here you go:\n{"primary_runner_outputs": ["out.json"]}')
+    decision = {"primary_runner_outputs": ["out.json"], "producer_signatures": {"out.json": ["run.py"]},
+                "task_shape": {"task_type": "t", "evaluation_paradigm": "e", "label_space": "l", "dataset_family": None},
+                "intent_summary": "s", "output_description": "d"}
+    fake_cli.configure(result_text="Here you go:\n" + json.dumps(decision))
     payload = manifest_trimmer.run_manifest_trimmer({}, work, provider=provider, timeout=30, log_dir=log_dir)
-    # plain-text mode on purpose (manifest_trimmer.TRANSCRIPT_FLAGS is empty): no stream flags,
-    # so stdout is the final answer and the first balanced JSON object in it is the payload
+    # plain-text mode on purpose (the manifest_trimmer role sets transcript.stream_json: false): no
+    # stream flags, so stdout is the final answer and the first balanced JSON object in it is the payload
     plain_argv = [a for a in ARGV[(provider, lane)] if a not in ("--verbose", "--output-format", "stream-json", "--json")]
     assert_launch(fake_cli, fake_cli.last(), provider, lane, argv=plain_argv, cwd=work, prompt="trim prompt")
-    assert logs_written(log_dir) == {"trimmer_prompt.txt", f"trimmer_{provider}_transcript.jsonl"}
-    assert payload == {"primary_runner_outputs": ["out.json"]}
+    # step 2: the trimmer gained a .log next to its transcript
+    assert logs_written(log_dir) == factory_artifacts("trimmer", provider)
+    assert payload == decision
     fake_cli.configure(exit_code=2)
     with pytest.raises(RuntimeError):
+        manifest_trimmer.run_manifest_trimmer({}, work, provider=provider, timeout=30, log_dir=log_dir)
+    # a structurally wrong answer is rejected here (config/schemas/manifest_trim.json) rather than by
+    # parse_trim_decision; curate_manifest retries with the message either way
+    fake_cli.configure(result_text='{"primary_runner_outputs": ["out.json"]}')
+    with pytest.raises(ValueError, match="schema"):
         manifest_trimmer.run_manifest_trimmer({}, work, provider=provider, timeout=30, log_dir=log_dir)
 
 
@@ -313,7 +322,9 @@ def test_autoresearch_proposer_ordinary(fake_cli, tmp_path, lane, provider, monk
                                                               provider=provider, timeout=30)
     # the ordinary proposer runs in the attempt directory, not the workspace
     assert_launch(fake_cli, fake_cli.last(), provider, lane, cwd=attempt, prompt="proposal prompt")
-    assert logs_written(attempt) == {"proposer_prompt.txt", f"proposer_{provider}_transcript.jsonl", "proposal.md"}
+    # step 2: the ordinary proposer gained a .log; its ledger line goes to the workspace, not the attempt dir
+    assert logs_written(attempt) == factory_artifacts("proposer", provider) | {"proposal.md"}
+    assert (work / ".neurico" / "agent_runs.jsonl").is_file()
     assert result["success"] is True
     assert set(result) == {"success", "return_code", "proposal_path", "prompt_file", "transcript_file", "elapsed_time",
                            "error", "timed_out", "background_processes_terminated"}

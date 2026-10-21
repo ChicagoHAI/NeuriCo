@@ -97,3 +97,35 @@ def test_rule_maker_bootstrap_times_out(hanging_cli, tmp_path, oauth, monkeypatc
     assert result["success"] is False and "timed out" in result["error"]
     assert_reaped(hanging_cli.last()["child_pid"])
     assert ledger_entry(work, "rule_maker_bootstrap")["status"] == "timeout"
+
+
+# -- 4 manifest trimmer ---------------------------------------------------------------------------------------------
+
+def test_manifest_trimmer_times_out(hanging_cli, tmp_path, oauth, monkeypatch):
+    from agents import manifest_trimmer
+
+    monkeypatch.setattr(manifest_trimmer, "generate_trimmer_prompt", lambda **kw: "p")
+    work = workspace(tmp_path)
+    started = time.time()
+    with pytest.raises(TimeoutError):
+        manifest_trimmer.run_manifest_trimmer({}, work, provider="claude", timeout=TIMEOUT_S, log_dir=tmp_path / "trim-logs")
+    assert time.time() - started < MAX_WALL_S
+    assert_reaped(hanging_cli.last()["child_pid"])
+    assert ledger_entry(work, "manifest_trimmer")["status"] == "timeout"
+
+
+# -- 5 autoresearch proposer, ordinary mode -------------------------------------------------------------------------
+
+def test_autoresearch_proposer_times_out(hanging_cli, tmp_path, oauth, monkeypatch):
+    from agents import autoresearch_proposer
+
+    monkeypatch.setattr(autoresearch_proposer, "generate_autoresearch_proposal_prompt", lambda **kw: "p")
+    work = workspace(tmp_path)
+    started = time.time()
+    result = autoresearch_proposer.run_autoresearch_proposer({}, work, parent_sha="abc", attempt_dir=tmp_path / "attempt1",
+                                                             provider="codex", timeout=TIMEOUT_S)
+    assert time.time() - started < MAX_WALL_S
+    assert result["success"] is False and result["timed_out"] is True and "timed out" in result["error"]
+    assert_reaped(hanging_cli.last()["child_pid"])
+    # the proposer runs in the attempt dir; the ledger line belongs to the workspace
+    assert ledger_entry(work, "autoresearch_proposer")["status"] == "timeout"

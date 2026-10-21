@@ -18,23 +18,22 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 import json
 import shlex
-import subprocess
 import sys
-import time
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.security import sanitize_text
-from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
+from core.agent_cli import CLI_COMMANDS
+from core.agent_factory import AgentFactory
 
 # NOTE: unlike rule_maker / autoresearch_proposer (which only need the
 # transcript for human debugging), the trimmer must PARSE the agent's
 # response from stdout. Stream-json mode wraps the response in
 # per-event envelopes whose first object is a system-init message --
 # our JSON extractor would grab that and fail validation. Plain text
-# mode prints only the final response, which is exactly what we need.
-TRANSCRIPT_FLAGS: dict[str, str] = {}
+# mode prints only the final response, which is exactly what we need;
+# the manifest_trimmer role in config/agents.yaml selects it
+# (transcript.stream_json: false) with a json_stdout output contract.
 
 
 _REPORT_MAX_CHARS = 50_000
@@ -121,76 +120,38 @@ def run_manifest_trimmer(
         prior_error=prior_error,
     )
 
-    if log_dir is not None:
-        log_dir = Path(log_dir)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        (log_dir / "trimmer_prompt.txt").write_text(prompt, encoding="utf-8")
+    # The factory needs somewhere for its log and transcript; without a caller-owned
+    # log_dir they go where every other agent's artifacts go.
+    log_dir = Path(log_dir) if log_dir is not None else work_dir / "logs"
 
-    cmd = build_agent_command(
-        provider,
-        full_permissions=full_permissions,
-        transcript_flags=TRANSCRIPT_FLAGS,
+    factory = AgentFactory()
+    spec = factory.spec(
+        "manifest_trimmer", provider=provider, full_permissions=full_permissions, timeout=timeout,
+        transcript={"logs_dir": log_dir, "prefix": "trimmer"},
     )
+    handle = factory.build(spec)
 
     print(f"🧹 Launching manifest trimmer ({provider})")
-    print(f"   Command: {cmd}")
+    print(f"   Command: {shlex.join(handle.argv)}")
     print(f"   Workspace: {work_dir}")
     print(f"   Prompt length: {len(prompt)} chars")
 
-    env = build_agent_environment(provider)
-
-    transcript_path: Optional[Path] = None
-    if log_dir is not None:
-        transcript_path = log_dir / f"trimmer_{provider}_transcript.jsonl"
-
-    start = time.time()
-    try:
-        process = subprocess.Popen(
-            shlex.split(cmd),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
-            cwd=str(work_dir),
-        )
-
-        captured_lines: list[str] = []
-        transcript_file = transcript_path.open("w", encoding="utf-8") if transcript_path else None
-
-        try:
-            process.stdin.write(prompt)
-            process.stdin.close()
-
-            for line in iter(process.stdout.readline, ""):
-                if not line:
-                    continue
-                clean = sanitize_text(line)
-                captured_lines.append(clean)
-                if transcript_file is not None:
-                    transcript_file.write(clean)
-
-            return_code = process.wait(timeout=timeout)
-        finally:
-            if transcript_file is not None:
-                transcript_file.close()
-    except subprocess.TimeoutExpired:
-        process.kill()
+    # Plain-text mode: stdout is the answer, and the role's json_stdout contract
+    # extracts the first balanced JSON object and checks it against the schema.
+    # Every failure is raised, as before, so curate_manifest can retry with the
+    # message as prior_error.
+    result = factory.run(handle, prompt, work_dir)
+    if result.timed_out:
         raise TimeoutError(f"Manifest trimmer timed out after {timeout}s")
-
-    elapsed = time.time() - start
-    raw_output = "".join(captured_lines)
-
-    if return_code != 0:
+    if result.return_code != 0:
         raise RuntimeError(
-            f"Manifest trimmer exited with code {return_code} after {elapsed:.1f}s"
+            f"Manifest trimmer exited with code {result.return_code} after {result.elapsed_s:.1f}s"
         )
+    if not result.success:
+        raise ValueError("; ".join(result.issues) or f"Manifest trimmer failed: {result.status}")
 
-    payload = _extract_json_object(raw_output)
-    print(f"✅ Trimmer returned in {elapsed:.1f}s")
-    return payload
+    print(f"✅ Trimmer returned in {result.elapsed_s:.1f}s")
+    return result.structured
 
 
 def _extract_json_object(text: str) -> Dict[str, Any]:
