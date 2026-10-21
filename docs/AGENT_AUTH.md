@@ -104,6 +104,46 @@ cost. Key values never appear in logs or the ledger, only variable names.
 `judge` routes (same key order, `openai/gpt-4.1`), passed through by
 `docker/host.sh` and `docker/run.sh` rather than generated from the YAML.
 
+## Manager turns (HITL and interactive)
+
+The HITL manager (`core/hitl_manager_react.py`) and the interactive manager
+(`interactive/manager.py`) make one CLI call per ReAct turn through
+`interactive/llm_backend.py: LLMBackend`. For one release that backend has two
+implementations of the CLI path, selected by `NEURICO_MANAGER_FACTORY`:
+
+| `NEURICO_MANAGER_FACTORY` | What a turn is | Auth lane | Ledger |
+| --- | --- | --- | --- |
+| unset / `0` (default this release) | the backend's own `claude -p` / `codex exec` command, as before | OAuth only (the lane variables are copied through but never applied) | none |
+| `1` | one `AgentFactory.session()` launch on the `hitl_manager` role (`interactive_manager` for `./neurico interactive`) from `config/agents.yaml` | `NEURICO_AGENT_AUTH` / `--agent-auth`, exactly as every other role: Foundry variables for Claude, `-c model_provider="azure"` and the deployment model for Codex | one line per turn in `<workspace>/.neurico/agent_runs.jsonl` (tokens, cost, `session_id`, `tags.manager_turn`) and `logs/agent_runs.jsonl` |
+
+What does not change between the two: the flattened prompt, the text and
+tool extraction (`_parse_cli_response`), the flags (`--mcp-config ...
+--strict-mcp-config --tools ToolSearch --allowedTools ...
+--dangerously-skip-permissions` for a bridged turn, `--safe-mode --tools ""`
+for a tool-less one; the factory orders them differently), the MCP readiness
+gate and its `McpReadinessTimeout` / `McpInitializationError` classification,
+`cancel_active` (the turn runs in its own process group and is terminated
+with it), `set_provider` (a new backend and a new bridge token), and the
+manager's retry loop. The factory runs each turn exactly once; provider
+retries and the delay between them come from `roles.hitl_manager.retry`
+(`max_attempts: 3, backoff_s: 1.0`), the MCP startup window from
+`roles.hitl_manager.mcp`; the older `config/manager.yaml` keys
+(`hitl_manager_backend_retries`, `hitl_manager_retry_delay_seconds`,
+`hitl_manager_mcp_startup_timeout_seconds`, `..._increment_seconds`) still
+override them when set. No deadline, turn cap or cost cap applies unless the
+role's `budget` block or the caller opts in. Differences under the flag: the
+turn's cwd is the workspace (the legacy path inherited the NeuriCo process
+cwd), the Codex launch drops the explicit `-` stdin marker, and turn logs
+live under `<workspace>/.neurico/hitl/manager/logs/` (HITL) or
+`.neurico/manager/logs/` (interactive) instead of nowhere.
+
+Flip plan: this release ships with the flag off and the legacy path as the
+default; `tests/test_hitl_manager_factory.py` pins argv parity on both lanes
+and the bridge start-up with a fake `claude` that spawns the MCP adapter. The
+next release flips the default (`NEURICO_MANAGER_FACTORY=0` opts back out for
+one more release), and the one after removes `_send_cli` / `_send_codex_cli`
+(assessment step 9).
+
 ## Safety engine
 
 `catalog/models.yaml` entries with `access: azure:<deployment>` are served to Inspect as

@@ -25,7 +25,7 @@ config, two auth layers (OAuth vs Azure), structured output contracts and a run 
 | Of which docs (`docs/*.md`) | 7 files, +2,219 |
 | Of which tests | 14 files, +3,985 / -78 |
 | Tests on `main` | 573 passed (1 pre-existing failure, deselected) |
-| Tests on `safety-engine` | 701 passed, 1 skipped (ripgrep absent on some nodes), 1 deselected, 49 s on a compute node (measured 2026-10-21 after steps 6, 7 and the no-default-limits audit) |
+| Tests on `safety-engine` | 718 passed, 1 deselected, 45 s on a compute node (measured 2026-10-21 after step 8; one test skips when ripgrep is absent on the node) |
 
 Test command used: `.venv/bin/python -m pytest tests -q --deselect tests/test_hitl_timeout_recovery.py::test_run_worker_does_not_translate_sigterm_into_user_stop`.
 
@@ -297,7 +297,7 @@ All commands from `docs/SAFETY_ENGINE.md`; `./neurico safety <cmd>` equals `uv r
 | Ledger-backed budgets: spend in `status` and `digest`, daemon enforces `api_budget_usd` / daily caps, `--max-budget-usd` for Claude roles | step 7; `docs/SAFETY_ENGINE.md` "Budgets and spend" | done (2026-10-21): `safety.spend` reads the ledgers, over-budget jobs stay pending with a `BUDGET` event, caps are opt-in `engine.yaml` data (default none); a campaign-level cap is still open |
 | Judge preference (pairwise judging of ideas) | `docs/IDEATION_INTEGRATION.md` status table, risk 6 | open |
 | Timeout removal (no default limits as policy) | owner direction (2026-10-21); `agents.yaml` carries explicit `timeout_s` per role today | in progress (subagent branch): defaults become no limit, limits opt-in, watchdog warns instead of killing |
-| HITL / interactive manager turns through `factory.session()` | step 8 | not started; `AgentSession` exists in `agent_factory.py`, `llm_backend` CLI path still builds its own commands |
+| HITL / interactive manager turns through `factory.session()` | step 8; `docs/AGENT_AUTH.md` "Manager turns" | done behind a flag (2026-10-21): `LLMBackend` routes CLI turns through `AgentFactory.session()` on the `hitl_manager` / `interactive_manager` roles when `NEURICO_MANAGER_FACTORY=1` (default off this release, flip next release); argv parity on both lanes, the MCP bridge coming up through a fake `claude` that spawns the adapter, `set_provider`, cancellation, the opt-in deadline and the per-turn ledger line are pinned in `tests/test_hitl_manager_factory.py`; `manager.yaml`'s retry keys moved to `agents.yaml: roles.hitl_manager.retry` / `.mcp` with the old keys still overriding. The legacy `_send_cli` / `_send_codex_cli` bodies are deleted in step 9 |
 | Cleanup of duplicate provider checks and doc refresh | step 9 | not started |
 | Cost pricing for Azure and Codex models | `config/prices.yaml` (format documented in the file) | present for the GPT-4.1 family and the Claude API routes; `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.4` are null (unpriced) until their list prices are confirmed |
 | `env_allowlist` for the ideation roles (Azure lane variables must be enumerated first) | `docs/IDEATION_INTEGRATION.md` status table | open |
