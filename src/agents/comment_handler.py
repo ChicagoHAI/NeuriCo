@@ -23,10 +23,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent_runner import run_prebuilt_cli_agent
 from core.agent_cli import (
-    CLI_COMMANDS,
     append_prompt_block,
     build_agent_command,
     build_agent_environment,
+    require_supported_provider,
 )
 
 
@@ -183,8 +183,7 @@ def run_comment_handler(
     Raises:
         ValueError: If provider not supported or comments not found
     """
-    if provider not in CLI_COMMANDS:
-        raise ValueError(f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}")
+    require_supported_provider(provider)
 
     # Validate that comments exist
     idea_spec = idea.get('idea', idea)

@@ -532,11 +532,7 @@ class LLMBackend:
         # Build prompt from messages
         # When HITL supplies a real MCP surface, the CLI receives its tools
         # natively. Do not also emit the legacy XML tool convention in text.
-        system_prompt = "\n\n".join(
-            str(message.get("content", "")).strip()
-            for message in messages
-            if message.get("role") == "system" and str(message.get("content", "")).strip()
-        )
+        system_prompt = self._system_prompt_text(messages)
         prompt_messages = (
             [message for message in messages if message.get("role") != "system"]
             if use_dedicated_system_prompt

@@ -23,11 +23,11 @@ from core.compute_backend import get_runtime_compute_backend
 from core.agent_factory import AgentFactory
 from core.agent_runner import run_prebuilt_cli_agent
 from core.agent_cli import (
-    CLI_COMMANDS,
     append_prompt_block,
     build_agent_command,
     build_agent_environment,
     provider_skill_root,
+    require_supported_provider,
 )
 
 
@@ -299,10 +299,7 @@ def run_autoresearch_proposer(
     returns its materialized proposal path; HITL proposal content is submitted
     directly to runtime and has no worker-owned proposal artifact.
     """
-    if provider not in CLI_COMMANDS:
-        raise ValueError(
-            f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}"
-        )
+    require_supported_provider(provider)
 
     if templates_dir is None:
         templates_dir = Path(__file__).parent.parent.parent / "templates"

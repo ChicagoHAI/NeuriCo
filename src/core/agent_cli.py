@@ -40,6 +40,19 @@ PROVIDER_WORKSPACE_ROOTS = {
 }
 
 
+def require_supported_provider(provider: str) -> str:
+    """Return ``provider`` when a CLI command is known for it, else raise ``ValueError``.
+
+    The one provider check every launcher shares (the factory's adapters and
+    ``build_agent_command`` cover the same set).
+    """
+    if provider not in CLI_COMMANDS:
+        raise ValueError(
+            f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}"
+        )
+    return provider
+
+
 def resolve_agent_model(model: Optional[str] = None) -> Optional[str]:
     """Return the explicit model, else the run-wide override, else None."""
     selected = (model or os.environ.get(MODEL_ENV_VAR) or "").strip()
@@ -79,10 +92,7 @@ def build_agent_command(
     ``agent_auth`` (or ``NEURICO_AGENT_AUTH``) selects the account the CLI runs on: the
     provider's OAuth login (default) or Azure (see ``core.agent_auth``).
     """
-    if provider not in CLI_COMMANDS:
-        raise ValueError(
-            f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}"
-        )
+    require_supported_provider(provider)
     auth_mode = agent_auth_module.resolve_agent_auth(agent_auth)
     model = agent_auth_module.agent_model(provider, auth_mode, resolve_agent_model(model))
     command = f"scribe {provider}" if use_scribe else CLI_COMMANDS[provider]

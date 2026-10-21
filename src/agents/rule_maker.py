@@ -31,7 +31,7 @@ import stat
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent_runner import next_attempt_number, run_prebuilt_cli_agent
-from core.agent_cli import CLI_COMMANDS, build_agent_command, build_agent_environment
+from core.agent_cli import build_agent_command, build_agent_environment, require_supported_provider
 from core.hitl_scoring_workspace import validate_checkpoint_gitlinks
 from core.research_environment import (
     read_workspace_mode,
@@ -394,10 +394,7 @@ def run_rule_maker(
         Dict with: success, outputs (paths of generated files), issues,
         log_file, transcript_file, elapsed_time.
     """
-    if provider not in CLI_COMMANDS:
-        raise ValueError(
-            f"Unsupported provider: {provider}. " f"Choose from: {list(CLI_COMMANDS.keys())}"
-        )
+    require_supported_provider(provider)
 
     if templates_dir is None:
         templates_dir = Path(__file__).parent.parent.parent / "templates"

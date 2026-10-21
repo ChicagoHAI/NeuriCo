@@ -23,7 +23,7 @@ import sys
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.agent_cli import CLI_COMMANDS
+from core.agent_cli import require_supported_provider
 from core.agent_factory import AgentFactory
 
 # NOTE: unlike rule_maker / autoresearch_proposer (which only need the
@@ -104,10 +104,7 @@ def run_manifest_trimmer(
     agent emitted on stdout. Raises on subprocess error, timeout, or non-JSON
     output -- the curate_manifest wrapper catches these and retries.
     """
-    if provider not in CLI_COMMANDS:
-        raise ValueError(
-            f"Unsupported provider: {provider}. Choose from: {list(CLI_COMMANDS.keys())}"
-        )
+    require_supported_provider(provider)
 
     if templates_dir is None:
         templates_dir = Path(__file__).parent.parent.parent / "templates"
