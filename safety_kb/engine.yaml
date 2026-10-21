@@ -1,7 +1,7 @@
 daemon:
   gpus: []
   gpu_memory_gb: 80
-  max_neurico_jobs: 2
+  max_neurico_jobs: 3   # 4 GPUs on the current node: 3 research jobs + 1 suite
   max_suite_jobs: 1
   stall_minutes: 60            # no log growth for this long -> STALL warning (stall_action: warn, default)
   # stall_action: kill         # opt in: kill and requeue a stalled job instead of warning
