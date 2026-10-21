@@ -1,0 +1,42 @@
+# Fixture idea for the prompt golden tests (tests/test_prompt_registry.py).
+idea:
+  title: "Label noise and calibration in small vision classifiers"
+  domain: machine_learning
+  hypothesis: >-
+    Training a ResNet-18 on CIFAR-10 with 20% symmetric label noise degrades
+    expected calibration error more than it degrades accuracy, and temperature
+    scaling recovers most of the gap.
+  background:
+    context: >-
+      Prior work reports that noisy labels hurt calibration; the size of the
+      effect at small scale is not well documented.
+    papers:
+      - title: "On Calibration of Modern Neural Networks"
+        url: https://arxiv.org/abs/1706.04599
+      - "Understanding deep learning requires rethinking generalization"
+    datasets:
+      - name: CIFAR-10
+        source: torchvision
+    code_references:
+      - repo: https://github.com/gpleiss/temperature_scaling
+        description: Reference temperature scaling implementation
+  methodology:
+    approach: Controlled comparison of clean and noisy training runs.
+    steps:
+      - Train ResNet-18 on clean CIFAR-10 and on 20% symmetric label noise.
+      - Measure accuracy and expected calibration error on the test split.
+      - Apply temperature scaling fitted on a held-out validation split.
+    metrics: [accuracy, expected_calibration_error]
+  constraints:
+    time_limit: 1800
+    compute: single GPU
+  expected_outputs:
+    - type: table
+      format: csv
+      fields: [condition, accuracy, ece]
+      description: Accuracy and ECE per training condition.
+    - type: figure
+      format: png
+      description: Reliability diagrams before and after temperature scaling.
+  evaluation_criteria:
+    - The noisy-label ECE gap is reported with a confidence interval.

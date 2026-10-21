@@ -32,13 +32,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.prompt_registry import PromptRegistry, RenderedPrompt
 from safety.jobs import JobSpec, Queue
 from safety.kb import KB, PROJECT_ROOT, load_yaml, save_yaml, utc_now
 
-TEMPLATES = {
-    "replicate": PROJECT_ROOT / "templates" / "agents" / "safety_planner.txt",
-    "ideate": PROJECT_ROOT / "templates" / "agents" / "safety_ideator.txt",
-}
+# Template ids are paths under templates/ (the same ids config/agents.yaml names for safety_planner).
+TEMPLATE_IDS = {"replicate": "agents/safety_planner.txt", "ideate": "agents/safety_ideator.txt"}
+TEMPLATES = {mode: PROJECT_ROOT / "templates" / template_id for mode, template_id in TEMPLATE_IDS.items()}
 TEMPLATE = TEMPLATES["replicate"]
 PLANNER_MODES = tuple(TEMPLATES)
 MAX_CHARS = {"campaign": 6000, "catalog_evals": 12000, "catalog_models": 6000, "findings": 8000,
@@ -210,18 +210,20 @@ def choose_mode(kb: KB, campaign: Dict[str, Any]) -> str:
     return max(weights, key=lambda m: weights[m] / sum(weights.values()) - done[m] / total)
 
 
-def render_prompt(kb: KB, campaign_name: str, planner_run: str, mode: str = "replicate") -> str:
+def render(kb: KB, campaign_name: str, planner_run: str, mode: str = "replicate") -> RenderedPrompt:
+    """The planner prompt for ``mode`` with the template and variable hashes the ledger records."""
     from safety.model_scout import latest_models_summary
-    template = TEMPLATES[mode].read_text(encoding="utf-8")
     context = build_context(kb, campaign_name)
     context["latest_models"] = latest_models_summary(kb)
     campaign = kb.campaign(campaign_name)
     context.update({"planner_run": planner_run, "kb_root": str(kb.root), "campaign_name": campaign_name,
                     "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                     "max_new_jobs": str((campaign.get("planner") or {}).get("max_new_jobs_per_run", 3))})
-    for key, value in context.items():
-        template = template.replace("{{" + key + "}}", value)
-    return template
+    return PromptRegistry().render(TEMPLATE_IDS[mode], context)
+
+
+def render_prompt(kb: KB, campaign_name: str, planner_run: str, mode: str = "replicate") -> str:
+    return render(kb, campaign_name, planner_run, mode).text
 
 
 def validate_proposals(kb: KB, campaign: Dict[str, Any], proposal_dir: Path, mode: str = "replicate") -> Dict[str, Any]:
@@ -335,7 +337,8 @@ def run_planner(kb: KB, campaign_name: str, *, provider: Optional[str] = "claude
     planner_run = planner_run or datetime.now(timezone.utc).strftime(f"plan-%Y%m%d-%H%M%S-{mode}")
     proposal_dir = kb.queue_dir / "proposals" / planner_run
     proposal_dir.mkdir(parents=True, exist_ok=True)
-    prompt = render_prompt(kb, campaign_name, planner_run, mode)
+    rendered = render(kb, campaign_name, planner_run, mode)
+    prompt = rendered.text
     (proposal_dir / "prompt.md").write_text(prompt, encoding="utf-8")
     if dry_run:
         save_yaml(proposal_dir / "outcome.yaml", {"planner_run": planner_run, "mode": mode, "dry_run": True,
@@ -350,7 +353,7 @@ def run_planner(kb: KB, campaign_name: str, *, provider: Optional[str] = "claude
     factory = AgentFactory()
     spec = factory.spec("planner", provider=provider, model=model, auth=agent_auth, timeout=timeout,
                         transcript={"logs_dir": log_dir, "stem": planner_run, "save_prompt": False})
-    result = factory.run(factory.build(spec, {"NEURICO_SAFETY_KB": str(kb.root)}), prompt, kb.root)
+    result = factory.run(factory.build(spec, {"NEURICO_SAFETY_KB": str(kb.root)}), prompt, kb.root, prompt_meta=rendered)
     outcome = validate_proposals(kb, campaign, proposal_dir, mode)
     record = {"ok": result.success, "planner_run": planner_run, "mode": mode, "at": utc_now(),
               "campaign": campaign_name, "proposed": len(outcome["accepted"]), "accepted": outcome["accepted"],

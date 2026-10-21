@@ -33,6 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from core import agent_auth  # noqa: E402
 from core.agent_cli import build_agent_command  # noqa: E402
 from core.agent_runner import run_prebuilt_cli_agent  # noqa: E402
+from core.prompt_registry import RenderedPrompt  # noqa: E402
 from core.run_ledger import RunLedger  # noqa: E402
 
 TEMPLATES = PROJECT_ROOT / "templates"
@@ -558,11 +559,16 @@ def kb(tmp_path, monkeypatch):
     return kb
 
 
+def _stub_prompt(text: str) -> RenderedPrompt:
+    """What the planner/scout ``render`` seam returns; these tests characterise the launch, not the prompt."""
+    return RenderedPrompt(text=text, template_id="stub", template_sha="0" * 64, variables_sha="0" * 64)
+
+
 def test_safety_planner(fake_cli, kb, lane, provider, monkeypatch):
     from safety import model_scout, planner
 
     monkeypatch.setattr(model_scout, "is_stale", lambda kb: False)
-    monkeypatch.setattr(planner, "render_prompt", lambda *a, **kw: "planner prompt")
+    monkeypatch.setattr(planner, "render", lambda *a, **kw: _stub_prompt("planner prompt"))
     monkeypatch.setattr(planner, "validate_proposals", lambda *a, **kw: {"accepted": [], "rejected": []})
     record_out = planner.run_planner(kb, "camp", provider=provider, model="m-1", timeout=30, mode="replicate")
     record = fake_cli.last()
@@ -595,7 +601,7 @@ def test_safety_planner(fake_cli, kb, lane, provider, monkeypatch):
 def test_model_scout(fake_cli, kb, lane, provider, monkeypatch):
     from safety import model_scout
 
-    monkeypatch.setattr(model_scout, "render_prompt", lambda *a, **kw: "scout prompt")
+    monkeypatch.setattr(model_scout, "render", lambda *a, **kw: _stub_prompt("scout prompt"))
     monkeypatch.setattr(model_scout, "merge_proposals", lambda *a, **kw: {"accepted": [], "rejected": []})
     record_out = model_scout.run_scout(kb, provider=provider, timeout=30)
     record = fake_cli.last()
@@ -611,7 +617,7 @@ def test_model_scout_defaults_to_codex(fake_cli, kb, monkeypatch):
 
     for name in LANE_VARS:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(model_scout, "render_prompt", lambda *a, **kw: "p")
+    monkeypatch.setattr(model_scout, "render", lambda *a, **kw: _stub_prompt("p"))
     monkeypatch.setattr(model_scout, "merge_proposals", lambda *a, **kw: {"accepted": [], "rejected": []})
     model_scout.run_scout(kb, timeout=30)
     assert fake_cli.last()["argv"] == CODEX_ARGV
