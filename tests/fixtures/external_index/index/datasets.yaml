@@ -1,0 +1,18 @@
+datasets:
+- id: gdm-stealth-tasks
+  name: gdm_stealth task bundle
+  source_url: https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/gdm_stealth
+  license: MIT
+  size: 4 tasks
+  hash: sha256:abc
+  local_path: data/gdm-stealth
+  used_by: [gdm-stealth]
+- id: xstest
+  source_url: https://github.com/paul-rottger/xstest
+  license: CC-BY-4.0
+  size: 450 prompts
+  hash: sha256:def
+  local_path: data/xstest
+  used_by: [over-refusal-xstest]
+- id: orphan-dataset
+  source_url: https://example.org/orphan

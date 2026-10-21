@@ -1,0 +1,21 @@
+environments:
+- id: gdm-stealth
+  name: gdm_stealth via inspect_evals
+  path: envs/gdm-stealth
+  status: verified
+  implements: gdm-stealth
+  datasets: [gdm-stealth-tasks]
+  run_command: envs/gdm-stealth/run.sh --model openrouter:moonshotai/kimi-k3
+  cost_estimate: ~$12 per model (API)
+  last_verified: '2026-10-22'
+  models_run: [Kimi K3, qwen3-0.6b]
+- id: over-refusal-xstest
+  status: built
+  implements: [over-refusal-evals]
+  datasets:
+  - id: xstest
+  cost: low
+- id: broken-env
+  status: built
+  datasets: not-a-list-but-a-string-is-fine
+- {status: built, path: envs/missing-id}

@@ -111,6 +111,9 @@ Runnable evaluations (catalog/evals.yaml ids; one line each):
 - xstest-safe [refusal-calibration] runner=inspect:xstest judge=default small_model_ok=True: over-refusal on safe prompts
 - sycophancy [sycophancy] runner=inspect:sycophancy judge=none small_model_ok=?: answer flips under user pushback
 
+### Curated environments (lab-reported evaluations we can rerun)
+(no external registries indexed; see catalog/external_indexes.yaml)
+
 ### Model registry
 Model registry (catalog/models.yaml ids; superseded entries are baselines only):
 - gpt-judge family=gpt params_b=None gpu_gb=None access=openrouter:openai/gpt-4.1-mini role=judge

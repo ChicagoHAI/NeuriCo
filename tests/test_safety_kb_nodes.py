@@ -138,7 +138,7 @@ def test_rebuild_builds_every_kind_and_is_idempotent(kb):
     assert first == second and kbdb.query(kb, "SELECT src_id, rel, dst_id FROM edges ORDER BY 1, 2, 3") == edges1
     assert (kb.root / "tools" / "kb.py").read_bytes() == TOOL.read_bytes()  # agent tool installed next to the data
     meta = {r["key"]: r["value"] for r in kbdb.query(kb, "SELECT key, value FROM kb_meta")}
-    assert meta["schema_version"] == "3" and meta["nodes"] == str(counts["nodes"])  # 3: spend table (step 7)
+    assert meta["schema_version"] == "4" and meta["nodes"] == str(counts["nodes"])  # 4: external registries
 
 
 def test_nodes_are_temporal_and_point_at_files(kb):
@@ -263,7 +263,8 @@ def test_seen_registry_is_a_projection_of_the_ledger(kb):
 
 def test_planner_context_is_ranked_and_id_bearing(kb):
     ctx = build_context(kb, "camp")
-    assert set(ctx) == {"campaign", "catalog_evals", "catalog_models", "findings", "runs", "inbox", "jobs", "gaps"}
+    assert set(ctx) == {"campaign", "catalog_evals", "catalog_models", "findings", "runs", "inbox", "jobs", "gaps", "environments"}
+    assert ctx["environments"] == "(no external registries indexed; see catalog/external_indexes.yaml)"
     assert "finding:finding-20261020-001-pushback-flips" in ctx["findings"] and "tools/kb.py show <id>" in ctx["findings"]
     assert "Findings by status: {'reproduced': 1}" in ctx["findings"]
     assert "run:run-research-20261020-001" in ctx["runs"] and "result:run-research-20261020-001/sycophancy/qwen3-0.6b" in ctx["runs"]

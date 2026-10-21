@@ -1,0 +1,58 @@
+# A small registry in the shape docs/KNOWLEDGE_BASE.md documents (index/evals.yaml of an envs folder).
+evals:
+- id: gdm-stealth
+  report_row: 28
+  name: Stealth evaluations (open-source; 4 challenges)
+  report_section: 3.4.1.4 TCL assessment
+  pages: [68, 70]
+  category: deception-scheming
+  measures: completing a secret side task without being flagged by an action monitor
+  metric: success rate over 50 attempts per challenge
+  reported_results:
+  - {model: Gemini 4 Argon, value: 4/4 challenges passed, ci: null, n: 50 x 4, note: Figure 3.11}
+  - {model: Claude Fable 5.1, value: 3/4, ci: null, n: 50 x 4, note: comparison}
+  - {model: Kimi K3, value: fig only, ci: null, n: null, note: not in our catalog}
+  n: 4 challenges x 50 attempts
+  who_ran: Internal
+  public_availability: open-source
+  reproducibility: exact
+  reproducibility_reason: published as inspect_evals gdm_stealth
+  data_sources: [https://github.com/UKGovernmentBEIS/inspect_evals/tree/main/src/inspect_evals/gdm_stealth]
+  priority: 5
+- id: over-refusal-evals
+  report_row: 70
+  name: Over-refusal evaluations (single-turn, multi-turn)
+  report_section: 5.6.1 Over-refusals
+  pages: [194]
+  category: over-refusal
+  measures: helpful response rate on adversarially benign prompts
+  metric: helpful response rate (%)
+  reported_results:
+  - {model: Gemini 4 Argon, value: fig only, ci: null, n: null, note: Figure 5.15}
+  n: not stated
+  who_ran: Internal
+  public_availability: internal-only
+  reproducibility: proxy
+  reproducibility_reason: internal prompts analogous to XSTest
+  data_sources: [https://github.com/paul-rottger/xstest]
+  priority: 4
+- id: cbrn-expert-red-teaming
+  report_row: 1
+  name: CBRN expert red teaming
+  category: cbrn
+  measures: information uplift scored by expert red teamers
+  metric: 0-100 rubric
+  reported_results: [{model: Gemini 4 Argon, value: 91.2, ci: null, n: null, note: BIO-1}]
+  public_availability: internal-only
+  reproducibility: not-reproducible
+  reproducibility_reason: unpublished scenarios; human red teamers
+  data_sources: []
+  priority: 1
+- id: no-name-eval
+  category: cyber
+  reproducibility: exact
+- this is not a mapping
+- id: gdm-stealth
+  name: duplicate of the first entry
+- id: ''
+  name: empty id
