@@ -85,7 +85,7 @@ roles:
     output: {kind: return_code}
     templates: {replicate: agents/safety_planner.txt, ideate: agents/safety_ideator.txt}
   planner: {extends: safety_planner}
-  ideator:                          # alias for safety_planner in ideate mode; separate so its model can differ
+  ideator:                          # base of the ideation.* roles below (the single-session ideate mode is retired)
     extends: safety_planner
     model: null
   model_scout:
