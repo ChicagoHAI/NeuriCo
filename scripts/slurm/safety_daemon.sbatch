@@ -18,6 +18,9 @@ cd "${NEURICO_ROOT:-$SLURM_SUBMIT_DIR}"
 S=$(dirname "$PWD")
 export NEURICO_MODE=host
 export UV_CACHE_DIR="$S/.uv_cache" UV_PYTHON_INSTALL_DIR="$S/.uv_python"
+export NEURICO_SAFETY_VENV="$S/safety_venv"
+export NEURICO_SAFETY_KB="$PWD/safety_kb"
+export NEURICO_CODEX_CATALOG_DIR="$S/.codex-catalog"
 # Model weights live in the lab's shared models directory (reused across jobs and by agents);
 # only compile caches go to node-local scratch, which is fast and disposable.
 MODELS_DIR="${NEURICO_MODELS_DIR:-/net/spaces/chenhao/chai-lab-models/haokunliu/models}"
