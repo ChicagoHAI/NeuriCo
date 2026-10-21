@@ -93,6 +93,9 @@ routine ones.
 ### Evaluation catalog
 {{catalog_evals}}
 
+### Curated environments (lab-reported evaluations we can rerun)
+{{environments}}
+
 ### Model registry
 {{catalog_models}}
 

@@ -81,6 +81,9 @@ campaign's `prefer_kinds`, and respect `avoid`.
 ### Evaluation catalog (catalog/evals.yaml)
 {{catalog_evals}}
 
+### Curated environments (lab-reported evaluations we can rerun; catalog/external_indexes.yaml)
+{{environments}}
+
 ### Model registry (catalog/models.yaml)
 {{catalog_models}}
 

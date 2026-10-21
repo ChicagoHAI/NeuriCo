@@ -218,6 +218,14 @@ def cmd_kb(args: argparse.Namespace) -> int:
             return 2
         for row in kbdb.query(kb, args.arg):
             print(row)
+    elif args.action == "envs":
+        data = kbdb.envs(kb)
+        if args.json:
+            import json as _json
+            print(_json.dumps(data, indent=1, ensure_ascii=False, default=str))
+        else:
+            print("\n".join(kbdb.format_envs(data, status=args.status, min_priority=args.min_priority,
+                                             reproducibility=args.reproducibility, evals=not args.no_evals)))
     elif args.action in ("search", "show", "related", "check-idea", "stats"):
         return _kb_tool(kbdb, kb, args)
     return 0
@@ -365,8 +373,8 @@ def main() -> int:
     p.set_defaults(func=cmd_ideate)
 
     p = sub.add_parser("kb", help="knowledge base: rebuild | search <text> | show <id> | related <id> | "
-                                  "check-idea <hypothesis> | stats | timeline | anomalies | query <sql> | scout | merge-models")
-    p.add_argument("action", choices=("rebuild", "search", "show", "related", "check-idea", "stats", "timeline",
+                                  "check-idea <hypothesis> | stats | envs | timeline | anomalies | query <sql> | scout | merge-models")
+    p.add_argument("action", choices=("rebuild", "search", "show", "related", "check-idea", "stats", "envs", "timeline",
                                       "anomalies", "query", "scout", "merge-models"))
     p.add_argument("arg", nargs="?", help="query text, node id, hypothesis or SQL depending on the action")
     p.add_argument("--kind", help="comma-separated node kinds, e.g. finding,run,eval_note")
@@ -383,6 +391,10 @@ def main() -> int:
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--no-recency", action="store_true", help="search: rank by text only")
     p.add_argument("--full", action="store_true", help="show: do not truncate the body")
+    p.add_argument("--min-priority", type=float, help="envs: only entries with priority >= this")
+    p.add_argument("--reproducibility", choices=("exact", "proxy", "not-reproducible"),
+                   help="envs: only reported evaluations with this reproducibility")
+    p.add_argument("--no-evals", action="store_true", help="envs: list the environments only")
     p.add_argument("--json", action="store_true")
     p.add_argument("--provider", default="codex")
     p.add_argument("--agent-auth", choices=("oauth", "azure"))

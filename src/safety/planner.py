@@ -42,9 +42,10 @@ TEMPLATES = {mode: PROJECT_ROOT / "templates" / template_id for mode, template_i
 TEMPLATE = TEMPLATES["replicate"]
 PLANNER_MODES = tuple(TEMPLATES)
 MAX_CHARS = {"campaign": 6000, "catalog_evals": 12000, "catalog_models": 6000, "findings": 8000,
-             "runs": 10000, "inbox": 8000, "jobs": 6000, "gaps": 12000}
+             "runs": 10000, "inbox": 8000, "jobs": 6000, "gaps": 12000, "environments": 4000}
 # How many ranked records each block carries; the agent expands any id with the kb tool.
-LIMITS = {"findings": 40, "runs": 25, "results_per_run": 4, "inbox": 30, "anomalies": 12, "notes": 14}
+# ``environments`` is the fallback when catalog/external_indexes.yaml sets no ``context.max_entries``.
+LIMITS = {"findings": 40, "runs": 25, "results_per_run": 4, "inbox": 30, "anomalies": 12, "notes": 14, "environments": 12}
 TOOL_HINT = ("Ids expand with `python3 tools/kb.py show <id>`; search the whole knowledge base with "
              "`python3 tools/kb.py search \"<query>\" [--kind finding,run,eval_note,...] [--since 30d]`; "
              "`python3 tools/kb.py related <id>` walks the links; run the dedup gate "
@@ -157,7 +158,51 @@ def build_context(kb: KB, campaign_name: str) -> Dict[str, str]:
         "inbox": _clip("\n".join(inbox_lines), MAX_CHARS["inbox"]),
         "jobs": _clip("\n".join(jobs_lines) or "(none)", MAX_CHARS["jobs"]),
         "gaps": _clip("\n".join(gap_lines), MAX_CHARS["gaps"]),
+        "environments": _clip("\n".join(environments_block(kb)), MAX_CHARS["environments"]),
     }
+
+
+def environments_block(kb: KB) -> List[str]:
+    """The compact "Curated environments" block: counts, then the top entries by priority (the
+    environments first, best status first, then lab-reported evaluations that are reproducible but
+    have no environment yet). ``context.max_entries`` of catalog/external_indexes.yaml sets how
+    many; the agent expands any id with the kb tool and ``./neurico safety kb envs`` lists all."""
+    from safety import kbdb
+    try:
+        data = kbdb.envs(kb)
+    except Exception as e:  # noqa: BLE001 - the block is a bonus, never a blocker
+        return [f"(curated environments unavailable: {type(e).__name__}: {e})"]
+    c = data["counts"]
+    if not c["environments"] and not c["reported_evals"]:
+        return ["(no external registries indexed; see catalog/external_indexes.yaml)"]
+    limit = kbdb.external_context_limit(kb) or LIMITS["environments"]
+    lines = [f"{c['environments']} curated environment(s) {c['environments_by_status'] or ''} rerunning "
+             f"{c['reported_evals_with_environment']} of {c['reported_evals']} lab-reported evaluation(s) "
+             f"{c['reported_evals_by_reproducibility'] or ''}. A run that reruns one carries `environment: <id>` "
+             f"in its record. Full listing: `./neurico safety kb envs`; ids expand with the kb tool "
+             f"(`python3 tools/kb.py show environment:<registry>/<id>`).", ""]
+    shown = 0
+    for e in data["environments"]:
+        if shown >= limit:
+            break
+        lines.append(f"- {e['id']} [{e['status']} p{e['priority'] if e['priority'] is not None else '?'}] {e['title']} "
+                     f"(cost {e['cost_estimate'] or '?'}; verified {(e['last_verified'] or '-')[:10]}; "
+                     f"models run: {', '.join(e['models_run']) or 'none'}; our runs: {len(e['runs'])})"
+                     + (f" -> {', '.join(e['implements'])}" if e["implements"] else ""))
+        shown += 1
+    pending = [e for e in data["reported_evals"] if not e["environments"] and e["reproducibility"] in ("exact", "proxy")]
+    if pending and shown < limit:
+        lines.append(f"Reproducible without an environment yet ({len(pending)}; top by priority):")
+    for e in pending:
+        if shown >= limit:
+            break
+        lines.append(f"- {e['id']} [{e['reproducibility']} p{e['priority'] if e['priority'] is not None else '?'}] "
+                     f"{e['title']} ({e['category'] or '-'}; {e['metric'] or '-'})")
+        shown += 1
+    rest = c["environments"] + len(pending) - shown
+    if rest > 0:
+        lines.append(f"... {rest} more; `./neurico safety kb envs` lists them all.")
+    return lines
 
 
 def _legacy_context(kb: KB, campaign_name: str) -> Dict[str, str]:
@@ -189,6 +234,7 @@ def _legacy_context(kb: KB, campaign_name: str) -> Dict[str, str]:
         "inbox": _clip("\n".join(inbox_lines) or "(none)", MAX_CHARS["inbox"]),
         "jobs": _clip("\n".join(jobs_lines) or "(none)", MAX_CHARS["jobs"]),
         "gaps": _clip(gaps or "(none)", MAX_CHARS["gaps"]),
+        "environments": "(index unavailable; `./neurico safety kb envs` lists the curated environments)",
     }
 
 

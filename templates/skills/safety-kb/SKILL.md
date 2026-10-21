@@ -1,6 +1,6 @@
 ---
 name: safety-kb
-description: Search NeuriCo's AI-safety knowledge base (findings, runs, results, evaluations, lab notes, third-party evaluators, inbox items, ideas, planner rounds) and run the duplicate-idea gate before proposing work. Use when planning or ideating safety evaluations, writing related-work or novelty arguments for a safety idea, checking what has already been run on a model or eval, or triaging inbox items.
+description: Search NeuriCo's AI-safety knowledge base (findings, runs, results, evaluations, lab notes, third-party evaluators, inbox items, ideas, planner rounds, lab-reported evaluations and the curated environments that rerun them) and run the duplicate-idea gate before proposing work. Use when planning or ideating safety evaluations, writing related-work or novelty arguments for a safety idea, checking what has already been run on a model or eval, or triaging inbox items.
 ---
 
 # Safety knowledge base
@@ -30,7 +30,12 @@ Ids are `<kind>:<native id>`. Kinds: `finding` (our candidate/reproduced/confirm
 with metrics), `job`, `idea` (NeuriCo idea YAMLs), `proposal` (one planner round), `inbox` (crawler,
 anomaly and scout items awaiting triage), `eval` and `model` (catalog entries), `family`, `campaign`,
 `eval_note` (one note per evaluation family, with "Used by" lab lines), `lab` and `lab_note`,
-`third_party` (evaluator organisations), `perspective`, `gap`, `design`, `report`.
+`third_party` (evaluator organisations), `perspective`, `gap`, `design`, `report`; from external
+registries (`reported_eval:<registry>/<id>` etc.): `reported_eval` (an evaluation as a lab reported
+it, numbers in `meta.reported_results`, status = reproducibility exact/proxy/not-reproducible),
+`environment` (a curated rerunnable environment: status built/verified/confirmed, cost, last
+verified, models run; `-implements->` the reported eval, `-uses->` its `dataset`s, our runs
+`-ran_in->` it), `report_table` and `report_figure` (`-shows->` the reported eval).
 
 Filters: `--kind a,b`, `--since 30d|2026-10-01`, `--status candidate`, `--family qwen`, `--model <id>`,
 `--eval <id>`, `--tag category:sycophancy`. `--recency off` ranks by text alone (use it for "has this

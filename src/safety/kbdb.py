@@ -17,7 +17,9 @@ The node store (docs/KNOWLEDGE_BASE.md):
 
     nodes      one row per knowledge object of any kind (finding, event, run, result, job, idea,
                proposal, inbox, eval, model, family, campaign, eval_note, lab, lab_note, third_party,
-               perspective, gap, design, report): id ``<kind>:<native>``, title, summary, body, the
+               perspective, gap, design, report, and from the external registries listed in
+               ``catalog/external_indexes.yaml``: reported_eval, environment, dataset, report_table,
+               report_figure): id ``<kind>:<native>``, title, summary, body, the
                filter columns (family, model, eval, category, lab, status), the temporal columns
                (created, observed, valid_from, date, recorded_at), source_path, url/urls, tags,
                canonical_keys, content_hash, meta JSON
@@ -38,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import logging
 import re
 import shutil
 import sqlite3
@@ -53,9 +56,17 @@ import yaml
 from safety.kb import KB, PROJECT_ROOT, load_json, load_yaml, save_yaml, utc_now
 
 TOOL_PATH = PROJECT_ROOT / "templates" / "skills" / "safety-kb" / "scripts" / "kb.py"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4  # 4: external registries (reported_eval, environment, dataset, report_table, report_figure)
 BODY_CHARS_MAX = 80_000
 SUMMARY_CHARS = 600
+# Node kinds an external registry file may hold (catalog/external_indexes.yaml ``files:`` keys) and
+# the top-level list key its file uses by default (the file stem also works, and ``entries``).
+EXTERNAL_KINDS = {"reported_eval": "evals", "environment": "environments", "dataset": "datasets",
+                  "report_table": "tables", "report_figure": "figures"}
+# Statuses of an environment in the order a planner should prefer them.
+ENV_STATUS_ORDER = ("confirmed", "verified", "built", "not-reproducible")
+
+log = logging.getLogger("safety.kbdb")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, job TEXT, kind TEXT, campaign TEXT, title TEXT,
@@ -189,6 +200,106 @@ def canonical_keys(urls: Iterable[str], primary_url: Optional[str] = None) -> Li
     return keys
 
 
+def external_indexes(kb: KB) -> List[Dict[str, Any]]:
+    """The external registries to index: ``catalog/external_indexes.yaml`` (``indexes:``), each with
+    ``name``, ``path`` (``engine.yaml: external_indexes: {<name>: {path: ...}}`` or a bare path
+    string overrides it), ``lab``, ``files`` (kind -> file relative to ``path``). Entries without a
+    name or path, or with a file kind the index does not know, are dropped with a logged reason."""
+    path = kb.catalog_dir / "external_indexes.yaml"
+    try:
+        data = load_yaml(path) or {}
+    except yaml.YAMLError as exc:
+        log.warning("external indexes: %s unreadable: %s", path, exc)
+        return []
+    if not isinstance(data, dict):
+        return []
+    try:
+        overrides = (kb.engine_config().get("external_indexes") or {}) if kb.engine_config_file.exists() else {}
+    except yaml.YAMLError:
+        overrides = {}
+    out: List[Dict[str, Any]] = []
+    for entry in data.get("indexes") or []:
+        if not isinstance(entry, dict) or not entry.get("name") or not entry.get("path"):
+            log.warning("external indexes: entry without name/path skipped: %r", entry)
+            continue
+        name = str(entry["name"])
+        override = overrides.get(name) if isinstance(overrides, dict) else None
+        root = override.get("path") if isinstance(override, dict) else override
+        root = Path(str(root or entry["path"])).expanduser()
+        files: Dict[str, str] = {}
+        for kind, rel in (entry.get("files") or {}).items():
+            if kind not in EXTERNAL_KINDS:
+                log.warning("external index %s: unknown kind %r in files, skipped", name, kind)
+                continue
+            if rel:
+                files[kind] = str(rel)
+        out.append({**entry, "name": name, "path": root, "files": files})
+    return out
+
+
+def external_context_limit(kb: KB) -> Optional[int]:
+    """``context.max_entries`` of ``catalog/external_indexes.yaml`` (None when unset)."""
+    try:
+        data = load_yaml(kb.catalog_dir / "external_indexes.yaml") or {}
+    except yaml.YAMLError:
+        return None
+    value = ((data.get("context") or {}) if isinstance(data, dict) else {}).get("max_entries")
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _model_aliases(models: Dict[str, Any]) -> Dict[str, str]:
+    """slug -> catalog model id, from the id, the access string's tail (``vllm:Qwen/Qwen3-8B`` ->
+    ``qwen3-8b``, ``azure:gpt-6-astra`` -> ``gpt-6-astra``), ``name`` and ``aliases``."""
+    out: Dict[str, str] = {}
+    for mid, m in models.items():
+        names = [mid, m.get("name"), m.get("hf_id")] + list(m.get("aliases") or [])
+        access = str(m.get("access") or "")
+        if access:
+            tail = access.split(":", 1)[-1]
+            names += [tail, tail.rsplit("/", 1)[-1]]
+        for n in names:
+            if n:
+                out.setdefault(_slug(str(n)), mid)
+    return out
+
+
+def _match_model(name: Any, aliases: Dict[str, str]) -> Optional[str]:
+    """A reported model name -> catalog id when the slugs agree exactly (``Claude Fable 5.1`` ->
+    ``claude-fable-5-1``); a parenthesised qualifier (``(with safeguards)``) is ignored."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    base = re.sub(r"\s*\(.*?\)\s*", " ", name).strip()
+    for candidate in (name, base):
+        hit = aliases.get(_slug(candidate))
+        if hit:
+            return hit
+    return None
+
+
+def _str_list(value: Any) -> List[str]:
+    """A field that may be a string, a list of strings or a list of ``{id: ...}`` dicts -> ids."""
+    if value in (None, ""):
+        return []
+    if isinstance(value, (str, int, float)):
+        return [str(value)]
+    out: List[str] = []
+    for v in value if isinstance(value, (list, tuple)) else []:
+        if isinstance(v, dict):
+            if v.get("id"):
+                out.append(str(v["id"]))
+        elif v not in (None, ""):
+            out.append(str(v))
+    return out
+
+
+def _first(d: Dict[str, Any], *keys: str) -> Any:
+    """The first present, non-empty field among ``keys`` (registries vary slightly in field names)."""
+    for k in keys:
+        if d.get(k) not in (None, "", [], {}):
+            return d[k]
+    return None
+
+
 def _urls(text: str, limit: int = 40) -> List[str]:
     out: List[str] = []
     for u in _URL_RE.findall(text or ""):
@@ -236,6 +347,9 @@ class _Collector:
         self.edges: List[Tuple[str, str, str, str]] = []
         self.seen: Dict[str, Dict[str, Any]] = {}
         self._idea_by_prefix: Dict[str, List[str]] = {}
+        # external registries: entries skipped with a reason, and environment ids runs may name
+        self.skipped: List[Dict[str, Any]] = []
+        self._env_ids: Dict[str, str] = {}   # "<native id>" and "<registry>/<native id>" -> environment node id
 
     def rel(self, path: Path) -> str:
         try:
@@ -380,10 +494,19 @@ class _Collector:
                 self.edge(nid, "in_campaign", f"campaign:{run['campaign']}", "run.campaign")
             for fid in findings:
                 self.edge(f"finding:{fid}", "from_run", nid, "run.findings")
-            for o in obs:
+            # ``environment`` (a string or a list) names the curated environment(s) the run reran;
+            # the first one is inherited by every observation that names none of its own.
+            run_envs = [self.env_node(e) for e in _str_list(run.get("environment"))]
+            for env_id in run_envs:
+                if env_id:
+                    self.edge(nid, "ran_in", env_id, "run.environment")
+            for o, raw in zip(obs, [r for r in results if isinstance(r, dict)] + [q for q in pairs if isinstance(q, dict)]):
                 if not o.get("eval") or not o.get("model"):
                     continue
                 oid = f"result:{rid}/{o['eval']}/{o['model']}"
+                env_id = self.env_node(raw.get("environment")) or next((e for e in run_envs if e), None)
+                if env_id:
+                    self.edge(oid, "ran_in", env_id, "result.environment" if raw.get("environment") else "run.environment")
                 metrics = o.get("metrics") if isinstance(o.get("metrics"), dict) else {}
                 shown = ", ".join(f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in list(metrics.items())[:8])
                 summary = f"{o.get('status')} n={o.get('n')} judge={o.get('judge') or '-'}: {shown}" + (
@@ -607,8 +730,204 @@ class _Collector:
                     continue  # generated from this index
                 self._note(p, kind, f"{kind}:{p.stem}")
 
+    # -- external registries: reported evals, environments, datasets, report tables and figures -------
+    def _skip(self, registry: str, file: str, what: Any, reason: str) -> None:
+        ident = what.get("id") if isinstance(what, dict) else what
+        rec = {"registry": registry, "file": file, "id": None if ident in (None, "") else str(ident)[:120], "reason": reason}
+        self.skipped.append(rec)
+        log.warning("external index %s: %s: skipped %s: %s", registry, file, rec["id"] or "entry", reason)
+
+    def _external_entries(self, registry: Dict[str, Any], kind: str, rel: str) -> List[Tuple[Dict[str, Any], Path]]:
+        """Validated entries of one registry file: dicts with a unique non-empty ``id``; everything
+        else is skipped with a reason. A missing file is silent (the orchestrator may not have
+        written it yet); an unreadable one is one skip record for the whole file."""
+        name, path = registry["name"], registry["path"] / rel
+        if not path.is_file():
+            return []
+        try:
+            data = load_yaml(path)
+        except yaml.YAMLError as exc:
+            self._skip(name, rel, None, f"not valid YAML: {str(exc).splitlines()[0][:160]}")
+            return []
+        if isinstance(data, dict):
+            items = _first(data, EXTERNAL_KINDS[kind], path.stem, "entries")
+        else:
+            items = data
+        if items is None:
+            return []
+        if not isinstance(items, list):
+            self._skip(name, rel, None, f"expected a list under '{EXTERNAL_KINDS[kind]}:' (or '{path.stem}:' / 'entries:')")
+            return []
+        out: List[Tuple[Dict[str, Any], Path]] = []
+        seen_ids: set = set()
+        for n, item in enumerate(items):
+            if not isinstance(item, dict):
+                self._skip(name, rel, f"#{n}", "entry is not a mapping")
+                continue
+            ident = item.get("id")
+            if not isinstance(ident, (str, int)) or isinstance(ident, bool) or not str(ident).strip():
+                self._skip(name, rel, f"#{n}", "missing or empty id")
+                continue
+            ident = str(ident).strip()
+            if ident in seen_ids:
+                self._skip(name, rel, ident, "duplicate id in the same file")
+                continue
+            if kind == "reported_eval" and not isinstance(_first(item, "name", "title"), str):
+                self._skip(name, rel, ident, "reported evaluation without a name")
+                continue
+            seen_ids.add(ident)
+            out.append(({**item, "id": ident}, path))
+        return out
+
+    def external(self) -> None:
+        aliases = _model_aliases(self.kb.models())
+        for reg in external_indexes(self.kb):
+            name, root, lab = reg["name"], reg["path"], reg.get("lab")
+            if not root.is_dir():
+                log.info("external index %s: %s not present, nothing indexed", name, root)
+                continue
+            lab_node = f"lab:{lab}" if lab else None
+            report_date = _iso(reg.get("report_date"))
+            base_tags = [f"registry:{name}", f"lab:{lab}" if lab else ""]
+            files = reg["files"]
+            evals: Dict[str, Dict[str, Any]] = {}       # native id -> entry
+            by_row: Dict[str, str] = {}                 # report_row -> native id
+
+            # reported evaluations: what the lab ran and the numbers it published
+            for e, path in self._external_entries(reg, "reported_eval", files["reported_eval"]) if files.get("reported_eval") else []:
+                nid = f"reported_eval:{name}/{e['id']}"
+                evals[e["id"]] = e
+                if e.get("report_row") not in (None, ""):
+                    by_row[str(e["report_row"])] = e["id"]
+                results = [r for r in (e.get("reported_results") or []) if isinstance(r, dict)] if isinstance(e.get("reported_results"), list) else []
+                matched = {str(r.get("model")): _match_model(r.get("model"), aliases) for r in results if r.get("model")}
+                shown = "; ".join(f"{r.get('model')}: {r.get('value')}" + (f" ({r.get('ci')})" if r.get("ci") else "")
+                                  for r in results[:6])
+                summary = " ".join(s for s in (str(_first(e, "measures", "description") or ""),
+                                               f"Metric: {e['metric']}." if e.get("metric") else "",
+                                               f"Reported: {shown}." if shown else "") if s)
+                sources = _str_list(e.get("data_sources"))
+                tags = base_tags + [f"category:{e['category']}" if e.get("category") else "",
+                                    f"reproducibility:{e['reproducibility']}" if e.get("reproducibility") else "",
+                                    f"availability:{e['public_availability']}" if e.get("public_availability") else "",
+                                    f"priority:{e['priority']}" if e.get("priority") not in (None, "") else ""]
+                tags += [f"model:{mid or _slug(n)}" for n, mid in matched.items()]
+                self.node(nid, "reported_eval", str(_first(e, "name", "title")), path=path, summary=summary, body=_yaml(e),
+                          category=e.get("category"), lab=lab, status=str(e.get("reproducibility") or "unknown"),
+                          created=report_date, urls=_urls(" ".join(sources)), tags=tags,
+                          meta={"registry": name, "report_section": e.get("report_section"), "pages": e.get("pages"),
+                                "report_row": e.get("report_row"), "metric": e.get("metric"), "n": e.get("n"),
+                                "who_ran": e.get("who_ran"), "checkpoint": e.get("checkpoint"),
+                                "public_availability": e.get("public_availability"),
+                                "reproducibility": e.get("reproducibility"),
+                                "reproducibility_reason": e.get("reproducibility_reason"), "priority": e.get("priority"),
+                                "data_sources": sources, "closest_public_proxy": e.get("closest_public_proxy"),
+                                "reported_results": results, "models_matched": {n: m for n, m in matched.items() if m}})
+                if lab_node:
+                    self.edge(nid, "reported_by", lab_node, "external_indexes.yaml lab")
+                for mid in sorted({m for m in matched.values() if m}):
+                    self.edge(nid, "reports_on", f"model:{mid}", "reported_results[].model matches a catalog model")
+
+            # datasets: what an environment downloads
+            datasets: Dict[str, Dict[str, Any]] = {}
+            for d, path in self._external_entries(reg, "dataset", files["dataset"]) if files.get("dataset") else []:
+                nid = f"dataset:{name}/{d['id']}"
+                datasets[d["id"]] = d
+                url = _first(d, "source_url", "source", "url")
+                url = str(url) if isinstance(url, str) else None
+                used_by = _str_list(_first(d, "used_by", "envs", "environments"))
+                summary = "; ".join(s for s in (str(_first(d, "description", "notes") or ""),
+                                                f"license {d['license']}" if d.get("license") else "",
+                                                f"size {d['size']}" if d.get("size") else "",
+                                                f"local {d['local_path']}" if d.get("local_path") else "",
+                                                f"used by {', '.join(used_by)}" if used_by else "") if s)
+                self.node(nid, "dataset", str(_first(d, "name", "title") or d["id"]), path=path, summary=summary, body=_yaml(d),
+                          lab=lab, status=str(d.get("status") or "registered"), observed=_iso(_first(d, "fetched", "downloaded")),
+                          url=url, tags=base_tags + [f"license:{_slug(str(d['license']))}" if d.get("license") else ""]
+                          + [f"used-by:{u}" for u in used_by],
+                          meta={"registry": name, "license": d.get("license"), "size": d.get("size"), "hash": d.get("hash"),
+                                "local_path": d.get("local_path"), "used_by": used_by, "source_url": url})
+                for env_id in used_by:
+                    self.edge(f"environment:{name}/{env_id}", "uses", nid, "dataset.used_by")
+
+            # environments: what we can rerun
+            for env, path in self._external_entries(reg, "environment", files["environment"]) if files.get("environment") else []:
+                nid = f"environment:{name}/{env['id']}"
+                implements = _str_list(_first(env, "implements", "reported_eval", "reported_evals", "eval", "eval_id", "evals"))
+                ds = _str_list(env.get("datasets"))
+                models_run = _str_list(_first(env, "models_run", "models"))
+                status = str(env.get("status") or "unknown")
+                verified = _iso(_first(env, "last_verified", "verified", "last_verified_date"))
+                cost = _first(env, "cost_estimate", "cost")
+                command = _first(env, "run_command", "run", "command")
+                first_eval = next((evals[i] for i in implements if i in evals), None)
+                priority = env.get("priority", (first_eval or {}).get("priority"))
+                category = env.get("category") or (first_eval or {}).get("category")
+                summary = "; ".join(s for s in (str(_first(env, "description", "notes") or ""),
+                                                f"status {status}", f"implements {', '.join(implements)}" if implements else "",
+                                                f"priority {priority}" if priority not in (None, "") else "",
+                                                f"cost {cost}" if cost else "", f"last verified {verified[:10]}" if verified else "",
+                                                f"models run: {', '.join(models_run)}" if models_run else "models run: none",
+                                                f"run: {command}" if command else "") if s)
+                tags = base_tags + [status, f"category:{category}" if category else "",
+                                    f"priority:{priority}" if priority not in (None, "") else ""]
+                tags += [f"implements:{i}" for i in implements] + [f"model:{_match_model(m, aliases) or _slug(m)}" for m in models_run]
+                ds_urls = [u for i in ds for u in _str_list(_first(datasets.get(i) or {}, "source_url", "source", "url"))]
+                self.node(nid, "environment", str(_first(env, "name", "title") or env["id"]), path=path, summary=summary,
+                          body=_yaml(env), category=category, lab=lab, status=status, observed=verified,
+                          urls=_urls(" ".join(ds_urls)),
+                          tags=tags, meta={"registry": name, "path": env.get("path"), "implements": implements, "datasets": ds,
+                                           "run_command": command, "cost_estimate": cost, "last_verified": verified,
+                                           "models_run": models_run, "priority": priority,
+                                           "reported_eval_ids": [f"reported_eval:{name}/{i}" for i in implements]})
+                self._env_ids.setdefault(env["id"], nid)
+                self._env_ids[f"{name}/{env['id']}"] = nid
+                for i in implements:
+                    self.edge(nid, "implements", f"reported_eval:{name}/{i}", "environment.implements")
+                for i in ds:
+                    self.edge(nid, "uses", f"dataset:{name}/{i}", "environment.datasets")
+                for m in models_run:
+                    mid = _match_model(m, aliases)
+                    if mid:
+                        self.edge(nid, "evaluates", f"model:{mid}", "environment.models_run")
+
+            # report tables and figures: every number the report prints, linked to the eval rows
+            for kind in ("report_table", "report_figure"):
+                for t, path in self._external_entries(reg, kind, files[kind]) if files.get(kind) else []:
+                    nid = f"{kind}:{name}/{t['id']}"
+                    values = t.get("values") if isinstance(t.get("values"), list) else []
+                    models = _str_list(t.get("models"))
+                    rows = [str(r) for r in _str_list(t.get("eval_rows"))]
+                    eval_ids = [by_row[r] for r in rows if r in by_row] + [i for i in _str_list(_first(t, "evals", "eval_ids")) if i in evals]
+                    summary = " ".join(s for s in (str(_first(t, "shows", "description") or ""),
+                                                   f"Metric: {t['metric']}." if t.get("metric") else "",
+                                                   f"Page {t['page']}." if t.get("page") not in (None, "") else "",
+                                                   f"{len(values)} value(s)." if values else "") if s)
+                    self.node(nid, kind, str(_first(t, "caption", "title") or t["id"]), path=path, summary=summary, body=_yaml(t),
+                              lab=lab, status="report", created=report_date,
+                              category=(evals.get(eval_ids[0]) or {}).get("category") if eval_ids else None,
+                              tags=base_tags + [f"page:{t['page']}" if t.get("page") not in (None, "") else ""]
+                              + [f"model:{_match_model(m, aliases) or _slug(m)}" for m in models],
+                              meta={"registry": name, "page": t.get("page"), "section": t.get("section"), "eval_rows": rows,
+                                    "models": models, "metric": t.get("metric"), "n_values": len(values),
+                                    "value_source_summary": t.get("value_source_summary"), "notes": t.get("notes"),
+                                    "reported_eval_ids": [f"reported_eval:{name}/{i}" for i in dict.fromkeys(eval_ids)]})
+                    for i in dict.fromkeys(eval_ids):
+                        self.edge(nid, "shows", f"reported_eval:{name}/{i}", f"{kind}.eval_rows")
+
+    def env_node(self, ref: Any) -> Optional[str]:
+        """``environment:`` value of a run record -> environment node id (native id, ``<registry>/<id>``
+        or a full node id)."""
+        if not isinstance(ref, str) or not ref.strip():
+            return None
+        ref = ref.strip()
+        if ref.startswith("environment:"):
+            return ref if ref in self.nodes else None
+        return self._env_ids.get(ref)
+
     def collect(self) -> None:
         self.catalogs()
+        self.external()   # before runs(): run records name environment ids
         self.runs()
         self.findings()
         self.queue()
@@ -759,6 +1078,7 @@ def rebuild(kb: KB) -> Dict[str, int]:
     counts["nodes"] = len(col.nodes)
     for n in col.nodes.values():
         counts[f"nodes:{n['kind']}"] += 1
+    counts["external_skipped"] = len(col.skipped)
     now = utc_now()
     kept = {(s, r, d): ev for s, r, d, ev in col.edges if s in col.nodes and d in col.nodes}
     conn.executemany("INSERT OR REPLACE INTO edges VALUES (?,?,?,?,?)",
@@ -773,7 +1093,7 @@ def rebuild(kb: KB) -> Dict[str, int]:
     conn.executemany("INSERT OR REPLACE INTO kb_meta VALUES (?,?)", [
         ("built_at", now), ("root", str(kb.root)), ("schema_version", str(SCHEMA_VERSION)),
         ("tool_hash", hashlib.sha256(tool_path.read_bytes()).hexdigest()[:16]), ("nodes", str(len(col.nodes))),
-        ("edges", str(len(kept)))])
+        ("edges", str(len(kept))), ("external_skipped", _j(col.skipped))])
     conn.commit()
     conn.close()
     staged = path.with_name(f".{path.name}.{os.getpid()}.new")
@@ -810,10 +1130,23 @@ INDEXED_DIRS = ("runs", "findings", "inbox", "queue", "catalog", "campaigns", "e
                 "perspectives", "gaps", "design", "reports")
 
 
+def _index_schema_version(path: Path) -> Optional[str]:
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            row = conn.execute("SELECT value FROM kb_meta WHERE key = 'schema_version'").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
 def ensure_index(kb: KB) -> Path:
-    """Rebuild when the index is missing or older than the newest indexed file (a cheap stat walk)."""
+    """Rebuild when the index is missing, built by an older schema, or older than the newest indexed
+    file (a cheap stat walk over the knowledge base and the external registry files)."""
     path = db_path(kb)
-    if not path.exists():
+    if not path.exists() or _index_schema_version(path) != str(SCHEMA_VERSION):
         rebuild(kb)
         return path
     built = path.stat().st_mtime
@@ -828,6 +1161,14 @@ def ensure_index(kb: KB) -> Path:
                     newest = max(newest, p.stat().st_mtime)
                 except OSError:
                     pass
+    for reg in external_indexes(kb):
+        for rel in reg["files"].values():
+            p = reg["path"] / rel
+            try:
+                if p.is_file():
+                    newest = max(newest, p.stat().st_mtime)
+            except OSError:
+                pass
     if newest > built:
         rebuild(kb)
     return path
@@ -891,6 +1232,99 @@ def stats(kb: KB) -> Dict[str, Any]:
         return tool().stats_rows(conn)
     finally:
         conn.close()
+
+
+def envs(kb: KB) -> Dict[str, Any]:
+    """The curated environments and the lab-reported evaluations they implement, for ``kb envs``
+    and the planner's "Curated environments" block: ``environments`` (status, priority, cost, last
+    verified, models run, the reported evals implemented, our runs that ran in it), ``reported_evals``
+    (priority, reproducibility, category, whether an environment exists), ``counts`` and the
+    entries the last rebuild skipped. Ordered by status (confirmed, verified, built, ...) and
+    priority, highest first."""
+    conn = _ro(kb)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute("SELECT id, kind, title, status, category, lab, date, summary, source_path, tags, meta "
+                                              "FROM nodes WHERE kind IN ('environment', 'reported_eval')")]
+        ran_in: Dict[str, List[str]] = defaultdict(list)
+        for r in conn.execute("SELECT src_id, dst_id FROM edges WHERE rel = 'ran_in' AND src_id LIKE 'run:%' ORDER BY src_id"):
+            ran_in[r["dst_id"]].append(r["src_id"])
+        meta_row = conn.execute("SELECT value FROM kb_meta WHERE key = 'external_skipped'").fetchone()
+    finally:
+        conn.close()
+    skipped = json.loads(meta_row[0]) if meta_row and meta_row[0] else []
+    env_rows, eval_rows = [], []
+    implemented: Dict[str, List[str]] = defaultdict(list)
+    for r in rows:
+        meta = json.loads(r.get("meta") or "{}")
+        if r["kind"] == "environment":
+            item = {"id": r["id"], "title": r["title"], "status": r["status"], "priority": meta.get("priority"),
+                    "cost_estimate": meta.get("cost_estimate"), "last_verified": meta.get("last_verified"),
+                    "models_run": meta.get("models_run") or [], "implements": meta.get("reported_eval_ids") or [],
+                    "run_command": meta.get("run_command"), "path": meta.get("path"), "category": r["category"],
+                    "lab": r["lab"], "runs": ran_in.get(r["id"], []), "source_path": r["source_path"]}
+            env_rows.append(item)
+            for eid in item["implements"]:
+                implemented[eid].append(r["id"])
+    for r in rows:
+        if r["kind"] != "reported_eval":
+            continue
+        meta = json.loads(r.get("meta") or "{}")
+        eval_rows.append({"id": r["id"], "title": r["title"], "priority": meta.get("priority"),
+                          "reproducibility": meta.get("reproducibility") or r["status"], "category": r["category"],
+                          "metric": meta.get("metric"), "public_availability": meta.get("public_availability"),
+                          "models_matched": meta.get("models_matched") or {}, "environments": implemented.get(r["id"], []),
+                          "lab": r["lab"], "source_path": r["source_path"]})
+
+    def prio(v: Any) -> float:
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else -1.0
+
+    status_rank = {s: i for i, s in enumerate(ENV_STATUS_ORDER)}
+    env_rows.sort(key=lambda e: (status_rank.get(e["status"], len(status_rank)), -prio(e["priority"]), e["id"]))
+    repro_rank = {"exact": 0, "proxy": 1, "not-reproducible": 2}
+    eval_rows.sort(key=lambda e: (-prio(e["priority"]), repro_rank.get(e["reproducibility"], 3), e["id"]))
+    counts = {"environments": len(env_rows), "reported_evals": len(eval_rows),
+              "environments_by_status": dict(sorted(((s, sum(1 for e in env_rows if e["status"] == s)) for s in {e["status"] for e in env_rows}))),
+              "reported_evals_by_reproducibility": dict(sorted(((s, sum(1 for e in eval_rows if e["reproducibility"] == s))
+                                                                for s in {e["reproducibility"] for e in eval_rows}))),
+              "reported_evals_with_environment": sum(1 for e in eval_rows if e["environments"]),
+              "registries": [{"name": reg["name"], "path": str(reg["path"]), "present": reg["path"].is_dir()} for reg in external_indexes(kb)],
+              "skipped": len(skipped)}
+    return {"counts": counts, "environments": env_rows, "reported_evals": eval_rows, "skipped": skipped}
+
+
+def format_envs(data: Dict[str, Any], *, status: Optional[str] = None, min_priority: Optional[float] = None,
+                reproducibility: Optional[str] = None, evals: bool = True) -> List[str]:
+    """Plain-text listing of ``envs()`` for humans, one line per environment and reported evaluation.
+    ``status`` filters environments, ``reproducibility`` the reported evaluations, ``min_priority`` both."""
+    c = data["counts"]
+
+    def above(p: Any) -> bool:
+        return min_priority is None or (isinstance(p, (int, float)) and not isinstance(p, bool) and p >= min_priority)
+    lines = [f"{c['environments']} environment(s) {c['environments_by_status'] or ''}; {c['reported_evals']} reported evaluation(s) "
+             f"{c['reported_evals_by_reproducibility'] or ''}; {c['reported_evals_with_environment']} with an environment."]
+    for reg in c.get("registries") or []:
+        lines.append(f"registry {reg['name']}: {reg['path']}" + ("" if reg["present"] else " (not present)"))
+    lines.append("")
+    env_rows = [e for e in data["environments"] if (not status or e["status"] == status) and above(e["priority"])]
+    lines.append("Environments (status, priority, cost, last verified, models run):")
+    for e in env_rows:
+        lines.append(f"- {e['id']} [{e['status']}] p{e['priority'] if e['priority'] is not None else '?'} cost={e['cost_estimate'] or '?'} "
+                     f"verified={(e['last_verified'] or '-')[:10]} models_run={','.join(e['models_run']) or '-'} "
+                     f"runs={len(e['runs'])}: {e['title']}" + (f" -> {', '.join(e['implements'])}" if e["implements"] else ""))
+    if not env_rows:
+        lines.append("  (none)")
+    if evals:
+        lines += ["", "Reported evaluations by priority (reproducibility; environments):"]
+        for e in data["reported_evals"]:
+            if not above(e["priority"]) or (reproducibility and e["reproducibility"] != reproducibility):
+                continue
+            lines.append(f"- {e['id']} p{e['priority'] if e['priority'] is not None else '?'} [{e['reproducibility']}] "
+                         f"{e['category'] or '-'}: {e['title']}" + (f" (env: {', '.join(e['environments'])})" if e["environments"] else ""))
+    if data["skipped"]:
+        lines += ["", f"{len(data['skipped'])} registry entr{'y' if len(data['skipped']) == 1 else 'ies'} skipped at the last rebuild:"]
+        lines += [f"- {s['registry']}/{s['file']} {s['id'] or ''}: {s['reason']}" for s in data["skipped"]]
+    return lines
 
 
 def snapshot_to(kb: KB, dst: Path, exclude_ids: Optional[Iterable[str]] = None) -> Path:

@@ -12,7 +12,7 @@ Artifacts written (``artifacts/`` of the run):
     registry_snapshot.json   ideas, jobs and planner rounds of the last ``SNAPSHOT_DAYS`` days + in flight
     dedup_candidates.json    {"candidates": dedup.candidates(feed)}
     context/campaign.md      the campaign file and the latest-models summary (the newest-generation rule)
-    context/catalog.md       one line per catalog eval and model
+    context/catalog.md       one line per catalog eval and model, plus the curated environments block
     context/knowledge-base.md  findings, runs, inbox + drift, jobs, gaps blocks from planner.build_context
 
 A feed item is ``{id, kind, source, title, url, summary, status, date, category, models, tags,
@@ -196,7 +196,8 @@ def write_context(kb: KB, campaign_name: str, artifacts: Path, *, planner_run: s
         "Rule: subjects are the newest generation of a family that fits one GPU unless the idea deliberately "
         "compares generations; registry entries marked superseded are baselines only.", ""])
     catalog_md = "\n".join(["# Catalogs", "", "## Evaluations", "", blocks["catalog_evals"], "",
-                            "## Model registry", "", blocks["catalog_models"], ""])
+                            "## Model registry", "", blocks["catalog_models"], "",
+                            "## Curated environments (lab-reported evaluations we can rerun)", "", blocks["environments"], ""])
     kb_md = "\n".join(["# Knowledge base (ranked excerpts; every id expands with `python3 tools/kb.py show <id>`)", "",
                        "## Findings", "", blocks["findings"], "", "## Recent runs and their observations", "", blocks["runs"], "",
                        "## Inbox and result drift", "", blocks["inbox"], "", "## Jobs in the queue (do not duplicate)", "",

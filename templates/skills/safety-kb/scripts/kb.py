@@ -6,6 +6,7 @@ the SQLite *projection* of it (``safety_kb/kb.sqlite``, rebuilt by ``./neurico s
 and after every ingest). Nothing lives only in the database: every hit carries ``source_path``,
 the file to open for the full record.
 
+    python3 kb.py search "stealth evaluations" --kind environment,reported_eval   # curated lab evals
     python3 kb.py search "sycophancy qwen3"  [--kind finding,run] [--since 30d] [--status candidate]
                                              [--family qwen] [--model <id>] [--eval <id>] [--tag t]
                                              [--recency on|off] [--limit 10] [--json]
@@ -53,11 +54,15 @@ SCHEMA_VERSION = 2
 
 KINDS = ("finding", "event", "run", "result", "job", "idea", "proposal", "inbox", "eval", "model",
          "family", "campaign", "eval_note", "lab", "lab_note", "third_party", "perspective", "gap",
-         "design", "report")
+         "design", "report",
+         # from external registries (catalog/external_indexes.yaml): a lab's reported evaluations,
+         # the curated environments that rerun them, their datasets, the report's tables and figures
+         "reported_eval", "environment", "dataset", "report_table", "report_figure")
 # Relation vocabulary of the ``edges`` table (fixed; see docs/KNOWLEDGE_BASE.md).
 RELS = ("from_run", "produced", "evaluates", "measures", "about_model", "has_event", "by_run",
         "for_job", "uses_idea", "proposed", "validates", "in_campaign", "member_of", "part_of",
-        "used_by", "catalogued_as", "cites")
+        "used_by", "catalogued_as", "cites",
+        "implements", "uses", "reports_on", "reported_by", "ran_in", "shows")
 MAX_LIMIT = 50
 SUMMARY_CHARS = 320
 BODY_CHARS = 6000

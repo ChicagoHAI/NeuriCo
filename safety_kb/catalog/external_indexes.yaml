@@ -1,0 +1,29 @@
+# External registries the knowledge-base index reads at every rebuild (docs/KNOWLEDGE_BASE.md,
+# section "External registries"). Each entry is a folder maintained by another process; the YAML
+# files under it are data written by that process, validated entry by entry at rebuild time
+# (malformed entries are skipped with a logged reason, a missing folder or file is not an error).
+#
+# Node ids are `<kind>:<name>/<native id>` so two registries never collide. `lab` names the
+# `labs/<lab>/` directory the reported evaluations link to (`reported_by`).
+#
+# `engine.yaml` may override a path without editing this file:
+#   external_indexes:
+#     gemini-argon-envs: {path: /somewhere/else}
+#
+# `files` maps a node kind to the file (relative to `path`) that holds a list of entries, under a
+# top-level key named after the file stem (`evals:`, `environments:`, ...) or `entries:`, or a
+# bare list. Kinds: reported_eval, environment, dataset, report_table, report_figure.
+context:
+  max_entries: 12        # entries the planner's "Curated environments" block lists (counts are always shown)
+indexes:
+- name: gemini-argon-envs
+  path: /net/spaces/chenhao/chai-lab-models/haokunliu/safety-gemini-argon-envs
+  lab: google
+  report: Gemini 4 Argon Safety & Security Report and Model Card (October 2026)
+  report_date: '2026-10'
+  files:
+    reported_eval: index/evals.yaml
+    environment: index/environments.yaml
+    dataset: index/datasets.yaml
+    report_table: index/tables.yaml
+    report_figure: index/figures.yaml
