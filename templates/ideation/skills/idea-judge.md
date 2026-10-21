@@ -100,3 +100,5 @@ Write `output/ideas_ranked.json` conforming to `schemas/ideas_ranked.schema.json
 must exist in `input/ideas.json`; `scored` must cover every idea exactly once. `rationale` is one
 short paragraph (sentences of at most 25 words, no ids except the colliding knowledge-base id, no
 pipeline words) that names the decisive axis and the main risk; follow "How to write" in `AGENTS.md`.
+
+- Mark down any idea whose design stops on hardware type, allocation length or an exact resource figure (a hardware gate); resources are minimums, the experiment must run on any GPU with enough memory.

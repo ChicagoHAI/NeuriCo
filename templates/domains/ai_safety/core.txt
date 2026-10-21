@@ -104,3 +104,13 @@ Every REPORT.md states: model ids and versions with dates; eval names with harne
 dataset revision; n, mean, SE/CI, clustering; judge id and calibration figures; unscored
 samples; elicitation details; evaluation-awareness rate where applicable; limitations; and
 what would change the conclusion.
+
+## Resources are minimums, never stop conditions
+
+The idea's resource lines (GPU memory, hours, model sizes) are minimums and estimates, not gates.
+Any GPU with at least the required memory is acceptable whatever its model name (an H100 94 GB or
+H200 141 GB satisfies "80 GB A100"); the allocation's wall-clock length is not a precondition. If
+less time than planned is available, scale n or the grid down, pre-register the reduced plan and say
+so in the report; never stop before running the subject model because of hardware type, allocation
+length, or a resource figure that differs from the idea's wording. A "feasibility only" report
+without subject inference is a failed run, not a cautious one.
