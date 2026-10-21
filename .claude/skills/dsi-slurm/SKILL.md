@@ -45,6 +45,14 @@ and a request for a fully allocated type can pend for hours. Slurm 24.11 support
 
 CUDA self-check (`torch.cuda.is_available()`; a failing node is appended to `bad_nodes.txt` and the job resubmits itself), node-local scratch for compile and HF caches (`/local/$USER` when present, else the share), shared models dir `/net/spaces/chenhao/chai-lab-models/haokunliu/models/hf_cache`, `NEURICO_VLLM_STARTUP_TIMEOUT`, `PATH` with `~/.local/bin` (codex).
 
+## Run tests and other fsync-heavy work on a compute node
+
+The login node serves hundreds of users (load ~19, local disk at 85% utilisation on 2026-10-21);
+pytest runs there stall in ext4 journal waits (`jbd2_log_wait_commit`, uninterruptible, unkillable).
+Use `scripts/slurm/pytest_node.sh [pytest args]`: it runs the suite under `srun` on a general
+compute node (8 CPUs, 32 GB, 40 min, local `--basetemp`), where 200 fsyncs take 0.05 s and the
+allocation starts in under a minute. Never run a background pytest on the login node.
+
 ## Lustre and node quirks learned the hard way
 
 - First vLLM start of a model from the share can take 20-25 min (weights stream from Lustre); later starts on the same node are fast. Do not treat a quiet server log as a hang before then.
