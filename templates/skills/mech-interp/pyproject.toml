@@ -1,0 +1,45 @@
+# Dedicated uv environment for the mech-interp toolkit. This is a SEPARATE venv
+# from the main neurico env and from the generation lane -- it lives on the
+# project share, never under /home:
+#
+#   export NEURICO_MECH_INTERP_VENV=/net/spaces/chenhao/chai-lab-models/haokunliu/envs/mech-interp
+#   uv venv "$NEURICO_MECH_INTERP_VENV" --python 3.11
+#   uv pip install --python "$NEURICO_MECH_INTERP_VENV/bin/python" -r requirements.txt
+#
+# Versions verified on PyPI 2026-10-22 (see docs/MODEL_MONITOR_AGENT_DESIGN.md
+# for citations). Pin exact interp libraries; leave torch/transformers on a
+# compatible floor so CUDA wheels resolve for the cluster's driver.
+#
+# NOTE: vLLM 0.32.0 / SGLang 0.5.22 (the generation/monitoring lane) are NOT
+# installed here -- they pin torch tightly and would fight the interp stack.
+# Serve through safety-evals (`$NEURICO_SAFETY_VENV`) or modal-vllm instead, as
+# a separate process on separate GPUs.
+
+[project]
+name = "neurico-mech-interp"
+version = "0.1.0"
+description = "Mechanistic-interpretability toolkit for the model-monitor agent"
+requires-python = ">=3.10,<3.13"
+
+dependencies = [
+    # --- core hooked-forward extraction (the robust default) ---
+    "torch>=2.3",
+    "transformers>=4.44",
+    "accelerate>=0.33",
+    "huggingface-hub>=0.24",
+    "datasets>=2.20",
+    "safetensors>=0.4",
+    # --- probing ---
+    "scikit-learn>=1.3",
+    "numpy>=1.26",
+    # --- interp libraries (pinned to the versions this skill documents) ---
+    "nnsight==0.8.1",            # NNsight + NDIF remote execution (ICLR 2025)
+    "transformer-lens==4.2.0",   # TransformerBridge; HookedTransformer compat layer
+    "sae-lens==6.54.12",         # Gemma Scope / Gemma Scope 2 / Llama Scope loaders
+    "pyvene==0.1.8",             # declarative activation/path patching + steering
+]
+
+[project.optional-dependencies]
+# Optional FlashAttention-2 kernels; fall back to attn_implementation="sdpa" if
+# the build is unavailable for the cluster's CUDA.
+flash = ["flash-attn>=2.6; platform_system == 'Linux'"]

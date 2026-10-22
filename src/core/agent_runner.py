@@ -659,12 +659,44 @@ def run_comment_handler(
         )
 
 
+def run_model_monitor(
+    idea: Dict[str, Any],
+    work_dir: Path,
+    provider: str,
+    tracker: RunTracker,
+    full_permissions: bool = True,
+    templates_dir: Optional[Path] = None,
+    timeout: Optional[int] = None,
+    objective: str = "",
+) -> Dict[str, Any]:
+    """Run the model-monitor (mechanistic-interpretability) agent.
+
+    Delegates to agents.model_monitor, which launches through the agent factory
+    with the ``model_monitor`` role (config/agents.yaml: files contract on
+    REPORT.md, mech-interp + safety-evals + dsi-slurm skills). Registering it
+    here makes it callable via ``run_agent`` / ``./neurico _run-agent
+    model_monitor`` and selectable by the interactive manager's run_agent tool
+    (its allowlist lives in src/interactive/tools.py).
+    """
+    from agents.model_monitor import run_model_monitor as _run
+
+    print(f"🔬 Starting Model-Monitor Agent (run: {tracker.run_id})")
+    print(f"   Provider: {provider}")
+    print(f"   Work dir: {work_dir}")
+    return _run(
+        idea=idea, work_dir=work_dir, provider=provider, tracker=tracker,
+        templates_dir=templates_dir, timeout=timeout,
+        full_permissions=full_permissions, objective=objective,
+    )
+
+
 # Agent dispatch table
 AGENTS = {
     "resource_finder": run_resource_finder,
     "experiment_runner": run_experiment_runner,
     "paper_writer": run_paper_writer,
     "comment_handler": run_comment_handler,
+    "model_monitor": run_model_monitor,
 }
 
 

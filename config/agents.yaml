@@ -181,6 +181,28 @@ roles:
     output: {kind: json_file, path: output/ideas_ranked.json, schema: src/ideation/schemas/ideas_ranked.schema.json,
              check: ideation.runtime:_check_ranked}
 
+  # -- model-monitor (mechanistic interpretability + monitoring) --------------------------------
+  # agents/model_monitor.py launches a CLI agent that runs the mech-interp toolkit: hooked local
+  # serving for activation access, probes on internals, SAEs (Gemma Scope / Gemma Scope 2 / Llama
+  # Scope), and causal interventions. Full permissions because it drives uv, srun/sbatch (dsi-slurm)
+  # and GPU jobs; success is the files contract (REPORT.md). The skills below are copied into the
+  # agent workspace so it composes them rather than re-implementing serving/evals/cluster logic.
+  model_monitor:
+    provider: claude
+    permissions: {mode: bypass}
+    output: {kind: files, required_files: [REPORT.md]}
+    retry: {max_attempts: 1}          # GPU runs are expensive; the agent polls its own jobs in-turn
+    transcript: {prefix: model_monitor, save_prompt: true}
+    skills: [templates/skills/mech-interp, templates/skills/safety-evals, templates/skills/dsi-slurm]
+    template: agents/model_monitor.txt
+    tags: {project: model-monitor, lane: interp}
+  model_monitor.probe:                # Phase-1: linear/nonlinear probes on hidden states
+    extends: model_monitor
+  model_monitor.sae:                  # SAE feature analysis / training
+    extends: model_monitor
+  model_monitor.causal:               # activation/path patching, tracing, steering
+    extends: model_monitor
+
 ledger:
   path: .neurico/agent_runs.jsonl   # relative to work_dir (next to RunTracker's .neurico/runs/); the safety
                                     # daemon, planner and ideation pass the KB root as work_dir

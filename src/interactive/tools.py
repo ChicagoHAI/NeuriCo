@@ -95,7 +95,7 @@ class ToolExecutor:
         if not agent_name:
             return "Error: 'agent' parameter is required"
 
-        valid_agents = ["resource_finder", "experiment_runner", "paper_writer", "comment_handler"]
+        valid_agents = ["resource_finder", "experiment_runner", "paper_writer", "comment_handler", "model_monitor"]
         if agent_name not in valid_agents:
             return f"Error: Unknown agent '{agent_name}'. Choose from: {valid_agents}"
 
