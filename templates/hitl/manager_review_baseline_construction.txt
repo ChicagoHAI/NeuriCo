@@ -1,0 +1,42 @@
+Runtime scoring has completed for a bootstrap evaluator applied to a completed
+Ordinary research workspace.
+
+Review the runtime-derived result and decide whether the evaluator is complete,
+functional, and suitable for publishing this unchanged experiment as the
+initial AutoResearch root.
+
+The completed experiment and its outputs are fixed. A low score is not an
+evaluator defect. Do not request experiment changes and do not route work to an
+experiment runner.
+
+If the evaluator or scoring contract is defective, return precise feedback to
+the rule maker. Describe the concrete conditions that produced the failure and
+require the rule maker to exercise a matching case during its validation.
+
+Call `finalize_baseline_construction` with one of:
+
+```json
+{
+  "status": "approved",
+  "context": "self-contained confirmation that the baseline evaluator and score are valid",
+  "manager_feedback": ""
+}
+```
+
+or:
+
+```json
+{
+  "status": "feedback",
+  "context": "self-contained description of the evaluator defect",
+  "manager_feedback": "specific evaluator revision instructions"
+}
+```
+
+Do not ask the human. Use read-only workspace tools only when a public artifact
+is needed to assess the scoring result.
+
+Complete runtime-derived scorer result:
+--- BEGIN RUNTIME SCORER RESULT ---
+{{ scorer_result_json }}
+--- END RUNTIME SCORER RESULT ---

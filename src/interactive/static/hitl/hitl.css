@@ -32,3 +32,5 @@
 .workspace-state.publication_failed{color:var(--coral)}
 .portal-status.publication_failed{background:var(--coral)}
 @media(max-width:740px){.status-mode{display:none}}
+
+.run-budget{flex-shrink:0;white-space:nowrap;color:var(--muted);font:12px var(--mono);font-variant-numeric:tabular-nums}

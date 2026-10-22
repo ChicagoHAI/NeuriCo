@@ -55,6 +55,7 @@ def test_run_worker_does_not_translate_sigterm_into_user_stop(tmp_path, monkeypa
             "project_root": str(run_worker.PROJECT_ROOT),
             "provider": "codex",
             "mode": "fresh",
+            "workflow": "autoresearch",
             "interface": "web",
             "hitl_mode": "auto",
             "iterations": 1,

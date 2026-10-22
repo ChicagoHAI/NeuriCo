@@ -5,6 +5,25 @@
 {% if requesting_actor == "rule_maker" %}
 This request was raised by the rule maker. Apply these boundaries when resolving
 it:
+{% if baseline_construction %}
+
+The completed experiment and its outputs are fixed. Resolve the request only
+within the bootstrap evaluator's design and implementation. Do not defer work to
+an experiment runner or request changes to the completed experiment.
+
+The mechanical manifest supplies possible outputs but does not decide the
+scoring contract. Require the rule maker to select and justify authoritative
+outputs from those candidates and to measure the research result rather than
+file existence. Do not resolve an uncertainty by authorizing a generic
+artifact-validity objective.
+
+Use this read-only candidate manifest when resolving the request. It is runtime
+evidence and must not be copied into the worker's plan or artifacts:
+
+```json
+{{ baseline_candidate_manifest_json }}
+```
+{% endif %}
 
 - To ensure objectivity and security, the rule maker is solely responsible for
   preparing the complete, functional evaluator and everything it requires or
@@ -13,8 +32,13 @@ it:
 - The rule maker may create, generate, write, or replace required files under
   `data/.test`. It is illegal for the rule maker to read the contents of files
   under `data/.test`.
+{% if baseline_construction %}
+- The rule maker must not inspect the withheld completed outputs or execute the
+  evaluator against them. Runtime performs that scoring after review.
+{% else %}
 - Running `scoring/eval.py` as a functional preflight is permitted and required;
   it is not the same as reading private input contents.
+{% endif %}
 - These boundaries are fixed workflow requirements, not options that the
   manager or human may relax.
 

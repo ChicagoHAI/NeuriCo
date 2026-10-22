@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.agent_runner import next_attempt_number
 from core.hitl_util import atomic_write_json
+from core.hitl_run_control import HitlRunStopRequested, active_hitl_run_stop_control
 
 VERDICT_FILE_NAME = "verification.json"
 EVIDENCE_SCHEMA_VERSION = 1
@@ -371,8 +372,8 @@ async def _call_verifier_api_async(messages: List[Dict[str, str]], timeout: int)
     try:
         response = await client.chat.completions.create(**request)
     finally:
-        # Cancellation from the outer wall-clock deadline propagates into
-        # HTTPX. Close the transport before returning control to the pipeline.
+        # API timeout and shared run cancellation both propagate into HTTPX.
+        # Close the transport before returning control to the pipeline.
         await client.close()
     try:
         content = response.choices[0].message.content
@@ -388,13 +389,32 @@ async def _call_verifier_api_async(messages: List[Dict[str, str]], timeout: int)
 
 
 def _call_verifier_api(messages: List[Dict[str, str]], timeout: int):
-    """Make one tool-less API call under an end-to-end wall-clock deadline."""
+    """Await one API call under its existing timeout and shared run stop."""
+    control = active_hitl_run_stop_control()
+
+    def check_stop():
+        if control is not None and control.requested():
+            raise HitlRunStopRequested(f"HITL run stopped: {control.stop_reason()}.")
+
+    async def interruptible_call():
+        if control is None:
+            return await _call_verifier_api_async(messages, timeout)
+        check_stop()
+        request = asyncio.create_task(_call_verifier_api_async(messages, timeout))
+        try:
+            while not request.done():
+                await asyncio.wait({request}, timeout=0.1)
+                check_stop()
+            return await request
+        finally:
+            # Await existing client cleanup before propagating stop/timeout;
+            # a cleanup error must not mask an already-observed stop cause.
+            if not request.done():
+                request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
 
     async def bounded_call():
-        return await asyncio.wait_for(
-            _call_verifier_api_async(messages, timeout),
-            timeout=timeout,
-        )
+        return await asyncio.wait_for(interruptible_call(), timeout=timeout)
 
     return asyncio.run(bounded_call())
 
@@ -507,8 +527,15 @@ def run_eval_verifier(
     except Exception as exc:
         return failure_result(FAILURE_KIND_EVIDENCE_INVALID, type(exc).__name__)
 
+    from core.hitl_run_control import current_hitl_run_budget_prompt
+
+    budget_context = current_hitl_run_budget_prompt(work_dir)
+    if budget_context:
+        messages = [*messages, {'role': 'system', 'content': budget_context}]
     try:
         content, backend, model = _call_verifier_api(messages, timeout)
+    except HitlRunStopRequested:
+        raise
     except VerifierResponseInvalidError as exc:
         return failure_result(FAILURE_KIND_VERDICT_INVALID, type(exc).__name__)
     except Exception as exc:

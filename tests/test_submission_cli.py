@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import sys
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -20,8 +21,9 @@ class FrozenDateTime(datetime):
         return cls(2026, 1, 2, 3, 4, 5, tzinfo=tz)
 
 
+@pytest.mark.parametrize("selected_model", [None, "test-model"])
 def test_cli_same_title_across_providers_preserves_content_mounts_and_repo_metadata(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, selected_model
 ):
     ideas_dir = tmp_path / "ideas"
     workspace = tmp_path / "workspace"
@@ -36,8 +38,19 @@ def test_cli_same_title_across_providers_preserves_content_mounts_and_repo_metad
             self.org_name = org_name
 
         def create_research_repo(
-            self, *, idea_id, title, description, private, domain, provider, no_hash, hypothesis
+            self,
+            *,
+            idea_id,
+            title,
+            description,
+            private,
+            domain,
+            provider,
+            no_hash,
+            hypothesis,
+            model=None,
         ):
+            assert model == selected_model
             name = f"research-{provider}"
             return {
                 "repo_name": name,
@@ -76,9 +89,10 @@ def test_cli_same_title_across_providers_preserves_content_mounts_and_repo_metad
         }
         source = tmp_path / f"{provider}.yaml"
         source.write_text(yaml.safe_dump(spec), encoding="utf-8")
-        monkeypatch.setattr(
-            sys, "argv", ["submit", str(source), "--provider", provider, "--private"]
-        )
+        argv = ["submit", str(source), "--provider", provider, "--private"]
+        if selected_model is not None:
+            argv.extend(["--model", selected_model])
+        monkeypatch.setattr(sys, "argv", argv)
 
         submit.main()
 

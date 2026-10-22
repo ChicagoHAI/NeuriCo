@@ -19,6 +19,7 @@ from core.local_resources import (  # noqa: E402
     find_path_tokens,
     missing_paths_in_idea,
     stage_local_resources,
+    staged_immutable_resource_roots,
     validate_evaluation_spec,
     validate_local_resources,
 )
@@ -228,6 +229,15 @@ def test_stage_copies_and_rewrites_paths(tmp_path):
     gitignore = (work_dir / ".gitignore").read_text()
     assert "datasets/local/" in gitignore
     assert "code/local/" not in gitignore
+
+
+def test_staged_datasets_define_immutable_guard_roots(tmp_path):
+    work_dir, idea_spec, _data, _fn = _staged_fixture(tmp_path)
+    stage_local_resources(work_dir, idea_spec)
+
+    assert staged_immutable_resource_roots(idea_spec) == [
+        "datasets/local/toy_dataset"
+    ]
 
 
 def test_stage_is_idempotent(tmp_path):

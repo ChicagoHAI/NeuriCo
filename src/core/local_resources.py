@@ -41,6 +41,26 @@ FUNCTIONS_STAGING_DIR = "code/local"
 LARGE_DATASET_BYTES = 2 * 1024 ** 3
 
 
+def staged_immutable_resource_roots(idea_spec: Dict[str, Any]) -> List[str]:
+    """Return trusted workspace paths for staged, user-declared datasets."""
+    idea = idea_spec.get('idea')
+    if not isinstance(idea, dict):
+        return []
+    resources = idea.get('local_resources')
+    if not isinstance(resources, dict):
+        return []
+
+    prefix = f"{DATASETS_STAGING_DIR}/"
+    roots = set()
+    for entry in resources.get('datasets') or []:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get('path', '')).replace('\\', '/').strip('/')
+        if path.startswith(prefix):
+            roots.add(path)
+    return sorted(roots)
+
+
 # Path-like tokens: absolute (/...), relative (./ or ../), or home (~/) with at
 # least two segments. The lookbehind rejects tokens embedded in URLs or words
 # (e.g. the /data.csv inside https://example.com/data.csv).
@@ -349,7 +369,8 @@ def workspace_contract_copy(idea_spec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
-                          base_dir: Path = None, *, preserve_existing: bool = False) -> int:
+                          base_dir: Path = None, *, preserve_existing: bool = False,
+                          write_workspace_contract: bool = True) -> int:
     """
     Copy declared local resources into the workspace and rewrite their paths.
 
@@ -376,6 +397,8 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
         base_dir: Directory to resolve relative source paths against
         preserve_existing: Reuse already-reviewed staged inputs during initial
             resume; never refresh or supply missing files in that case.
+        write_workspace_contract: Whether to refresh the workspace idea copy;
+            false preserves the exact contract of a pending reviewed request.
 
     Returns:
         Number of resources actually copied this pass (0 if none needed)
@@ -467,11 +490,12 @@ def stage_local_resources(work_dir: Path, idea_spec: Dict[str, Any],
         # Written even when GitHub setup did not create it: the staged idea
         # is the canonical contract for every agent in this workspace. Host
         # paths are redacted — this file may be pushed to GitHub.
-        workspace_idea = work_dir / ".neurico" / "idea.yaml"
-        workspace_idea.parent.mkdir(parents=True, exist_ok=True)
-        with open(workspace_idea, 'w', encoding='utf-8') as f:
-            yaml.dump(workspace_contract_copy(idea_spec), f,
-                      default_flow_style=False, sort_keys=False)
+        if write_workspace_contract:
+            workspace_idea = work_dir / ".neurico" / "idea.yaml"
+            workspace_idea.parent.mkdir(parents=True, exist_ok=True)
+            with open(workspace_idea, 'w', encoding='utf-8') as f:
+                yaml.dump(workspace_contract_copy(idea_spec), f,
+                          default_flow_style=False, sort_keys=False)
 
     return staged
 

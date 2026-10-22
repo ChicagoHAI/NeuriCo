@@ -71,6 +71,11 @@ def main():
         help="AI provider for repo naming (e.g., {slug}-{hash}-claude)"
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help="Model the provider will run, for repo naming (e.g., {slug}-{hash}-claude-opus-5-5)"
+    )
+    parser.add_argument(
         "--no-hash",
         action="store_true",
         help="Skip random hash in repo name (use {slug}-{provider} instead of {slug}-{hash}-{provider})"
@@ -149,7 +154,8 @@ def main():
                         domain=domain,
                         provider=args.provider,
                         no_hash=args.no_hash,
-                        hypothesis=idea.get('idea', {}).get('hypothesis', '')
+                        hypothesis=idea.get('idea', {}).get('hypothesis', ''),
+                        model=args.model,
                     )
 
                     github_repo_url = repo_info['repo_url']

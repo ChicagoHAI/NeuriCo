@@ -379,6 +379,10 @@ def test_durable_report_replays_real_manager_request_without_rerunning():
         requires_human_approval=False,
         plan_fingerprint="plan-sha",
         workspace_fingerprint="workspace-sha",
+        workspace_fingerprint_scope={
+            "runtime_private_roots": ["runtime-private"],
+            "immutable_resource_roots": ["datasets/immutable"],
+        },
         scoring_handoff_context={"candidate_id": "candidate-1"},
         verifier_report="PERSISTED report",
         hitl_mode="auto",
@@ -390,6 +394,10 @@ def test_durable_report_replays_real_manager_request_without_rerunning():
         lambda: calls.append(1) or "FRESH report", pending=pending)
     # The resumed request replays the persisted report and never calls the model.
     assert pending["request_key"] == request_key
+    assert pending["workspace_fingerprint_scope"] == {
+        "runtime_private_roots": ["runtime-private"],
+        "immutable_resource_roots": ["datasets/immutable"],
+    }
     assert runtime._durable_conformance_report(
         request_key, "review"
     ) == "PERSISTED report"

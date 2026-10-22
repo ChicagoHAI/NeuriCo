@@ -157,6 +157,45 @@ tools:
         required: true
     returns: Updated active frontier state, or a retryable error.
 
+  - name: call_additional_agent
+    description: |
+      Request one allowlisted agent before the next AutoResearch proposal. This
+      is available only at the runtime-managed proposal-preparation boundary.
+      Once admitted, the agent runs through its ordinary HITL worker lifecycle.
+    parameters:
+      agent:
+        type: string
+        description: Available agent name. Currently only resource_finder.
+        required: true
+      objective:
+        type: string
+        description: Concrete information gap for the agent to investigate.
+        required: true
+      reason:
+        type: string
+        description: Strategic rationale for running the agent before proposing.
+        required: true
+      premise_idea_id:
+        type: string
+        description: Finalized idea id supporting this decision.
+        required: true
+    returns: Confirmation that runtime recorded the additional-agent request.
+
+  - name: proceed_to_proposal
+    description: |
+      Finish proposal preparation and proceed using the available evidence. This
+      is available only at the runtime-managed proposal-preparation boundary.
+    parameters:
+      reason:
+        type: string
+        description: Strategic rationale for proceeding without another agent run.
+        required: true
+      premise_idea_id:
+        type: string
+        description: Finalized idea id supporting this decision.
+        required: true
+    returns: Confirmation that runtime recorded the proceed decision.
+
   - name: ask_human
     description: |
       Ask the human researcher for input required to resolve the pending worker
@@ -265,6 +304,18 @@ tools:
         description: Concise semantic review context for the scoring handoff.
         required: false
     returns: Confirmation that scoring will run and the worker request remains pending.
+
+  - name: finalize_baseline_construction
+    description: |
+      Finalize review of a scored baseline construction. Approve the scored
+      workspace as the AutoResearch root, or return evaluator feedback to the
+      held rule maker. This command cannot route work to an experiment runner.
+    parameters:
+      result:
+        type: object
+        description: '{"status":"approved|feedback","context":"...","manager_feedback":"..."}'
+        required: true
+    returns: Confirmation that runtime finalized the baseline scoring review.
 
   - name: finalize_frontier_decision
     description: |

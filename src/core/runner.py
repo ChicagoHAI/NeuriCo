@@ -12,6 +12,8 @@ This module orchestrates the execution of research by:
 from pathlib import Path
 from typing import Optional, Dict, Any
 from functools import wraps
+from contextlib import ExitStack
+from uuid import uuid4
 import inspect
 import logging
 import subprocess
@@ -37,8 +39,9 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 from core.idea_manager import IdeaManager, resolve_ideas_dir
 from core.config_loader import ConfigLoader
-from core.local_resources import stage_local_resources
+from core.local_resources import stage_local_resources, staged_immutable_resource_roots
 from core.agent_cli import (
+    MODEL_ENV_VAR,
     build_agent_command,
     build_agent_environment,
     provider_workspace_root,
@@ -51,6 +54,12 @@ from core.compute_backend import (
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_run_control import HitlRunStopRequested, raise_if_hitl_run_stop_requested
+from core.research_environment import (
+    configure_workspace_mode,
+    read_workspace_mode,
+    reject_ambiguous_root_venv,
+    render_research_environment_placeholders,
+)
 from templates.prompt_generator import PromptGenerator
 from templates.research_agent_instructions import generate_instructions
 
@@ -111,6 +120,32 @@ def _record_github_repository(
     metadata["github_repo_private"] = _github_repository_private(repo_info)
 
 
+def _enter_workspace_run_context(stack, work_dir, *, owner, install_control=True):
+    """Keep the existing lease and stop control alive through runner cleanup."""
+    from core.hitl_lock import hitl_workspace_run_lease
+    from core.hitl_run_control import (
+        HitlRunStopControl, active_hitl_run_stop_control, activate_hitl_run_stop_control,
+    )
+
+    workspace = Path(work_dir).resolve()
+    control = active_hitl_run_stop_control()
+    if control is not None and control.work_dir != workspace:
+        raise RuntimeError("This process already controls a different workspace run.")
+    if control is None and not install_control:
+        stack.enter_context(hitl_workspace_run_lease(workspace, owner=owner))
+        return None
+    owns_control = control is None
+    if owns_control:
+        control = HitlRunStopControl(workspace, uuid4().hex)
+    stack.enter_context(hitl_workspace_run_lease(
+        workspace, owner={**owner, "request_id": control.request_id}, reuse=True,
+    ))
+    if owns_control:
+        stack.enter_context(activate_hitl_run_stop_control(control))
+    raise_if_hitl_run_stop_requested()
+    return control
+
+
 def _with_hitl_workspace_run_ownership(method):
     """Hold the workspace lease around every HITL entry into the shared runner."""
     method_signature = inspect.signature(method)
@@ -123,11 +158,10 @@ def _with_hitl_workspace_run_ownership(method):
             arguments.arguments["hitl_research"]
             or arguments.arguments["hitl_autoresearch"]
             or arguments.arguments["hitl_continue_autoresearch"]
+            or arguments.arguments["hitl_construct_baseline"]
         )
         if not hitl_interface:
             return method(self, *args, **kwargs)
-
-        from core.hitl_lock import hitl_workspace_run_lease
 
         idea_id = str(arguments.arguments["idea_id"])
         expected_work_dir = self._hitl_workspace_for_run_ownership(
@@ -147,6 +181,7 @@ def _with_hitl_workspace_run_ownership(method):
         mode = (
             "continue"
             if arguments.arguments["hitl_continue_autoresearch"]
+            or arguments.arguments["hitl_construct_baseline"]
             or (
                 arguments.arguments["hitl_research"]
                 and (work_dir / ".neurico" / "pipeline_state.json").is_file()
@@ -154,31 +189,82 @@ def _with_hitl_workspace_run_ownership(method):
             else "fresh"
         )
         hitl_mode = normalize_hitl_mode(arguments.arguments["hitl_mode"])
-        with hitl_workspace_run_lease(
-            work_dir,
-            owner={
-                "idea_id": idea_id,
-                "interface": str(hitl_interface),
-                "mode": mode,
-                "workflow": (
-                    "ordinary" if arguments.arguments["hitl_research"] else "autoresearch"
-                ),
-                "hitl_mode": hitl_mode.value,
-                "provider": str(arguments.arguments["provider"]),
-                "request_id": str(os.environ.get("NEURICO_HITL_REQUEST_ID", "")).strip(),
-            },
-        ):
+        baseline_construction = bool(arguments.arguments["hitl_construct_baseline"])
+        workflow = (
+            "ordinary"
+            if arguments.arguments["hitl_research"] or baseline_construction
+            else "autoresearch"
+        )
+        from core.hitl_run_control import active_hitl_run_stop_control
+
+        owns_control = active_hitl_run_stop_control() is None
+        with ExitStack() as stack:
+            control = _enter_workspace_run_context(
+                stack,
+                work_dir,
+                owner={
+                    "idea_id": idea_id,
+                    "interface": str(hitl_interface),
+                    "mode": mode,
+                    "operation": (
+                        "construct_baseline" if baseline_construction else "research"
+                    ),
+                    "workflow": workflow,
+                    "hitl_mode": hitl_mode.value,
+                    "provider": str(arguments.arguments["provider"]),
+                },
+                install_control=not bool(arguments.arguments["hitl_research"]),
+            )
             from core.pipeline_orchestrator import PipelineState
 
-            PipelineState.require_compatible_workflow(
-                work_dir,
-                "ordinary" if arguments.arguments["hitl_research"] else "autoresearch",
-            )
+            PipelineState.require_compatible_workflow(work_dir, workflow)
+            if baseline_construction:
+                from core.hitl_autoresearch import (
+                    managed_baseline_construction_eligibility,
+                )
+
+                eligibility = managed_baseline_construction_eligibility(work_dir)
+                if not eligibility.get("available"):
+                    raise RuntimeError(str(eligibility.get("reason", "")).strip())
             # A renderer can request stop while the detached worker is still
             # waiting to acquire this lease. Honor that request before the
             # runner mutates any research state.
             raise_if_hitl_run_stop_requested()
-            return method(*arguments.args, **arguments.kwargs)
+            host_scope = ExitStack()
+            arguments.arguments["_hitl_host_scope"] = host_scope
+            stopped = False
+            caught_stop = None
+            try:
+                result = method(*arguments.args, **arguments.kwargs)
+            except HitlRunStopRequested as stop:
+                caught_stop = stop
+            finally:
+                # Stop owned manager writers before recovery and lease release,
+                # even when startup or final status publication raises.
+                host_scope.close()
+                stopped = (
+                    owns_control
+                    and control is not None
+                    and control.requested()
+                    and workflow == "autoresearch"
+                )
+                if stopped:
+                    if control.stop_reason() == "budget_exhausted":
+                        from core.hitl_autoresearch import finalize_budget_exhausted_autoresearch
+
+                        finalize_budget_exhausted_autoresearch(
+                            work_dir,
+                            request_id=control.request_id,
+                        )
+                    else:
+                        from core.hitl_autoresearch import recover_interrupted_hitl_autoresearch_attempt
+
+                        recover_interrupted_hitl_autoresearch_attempt(work_dir)
+            if stopped:
+                raise HitlRunStopRequested(f"HITL run stopped: {control.stop_reason()}.")
+            if caught_stop is not None:
+                raise caught_stop
+            return result
 
     return owned_run
 
@@ -307,11 +393,15 @@ class ResearchRunner:
         hitl_research: Optional[str] = None,
         hitl_autoresearch: Optional[str] = None,
         hitl_continue_autoresearch: Optional[str] = None,
+        hitl_construct_baseline: Optional[str] = None,
         hitl_manager_port: int = 7890,
         hitl_manager_no_browser: bool = False,
         hitl_host: Optional[Any] = None,
         hitl_mode: str = "full",
         hitl_work_dir: Optional[Path] = None,
+        time_limit_seconds: Optional[int] = None,
+        workspace_mode: Optional[str] = None,
+        _hitl_host_scope: Optional[ExitStack] = None,
     ) -> Dict[str, Any]:
         """
         Execute research for a given idea.
@@ -339,8 +429,13 @@ class ResearchRunner:
                 ``web`` or ``cli``.
             hitl_continue_autoresearch: Human interface for continuing an
                 existing HITL AutoResearch workspace: ``web`` or ``cli``.
+            hitl_construct_baseline: Human interface for constructing a managed
+                AutoResearch baseline from completed Ordinary research.
             hitl_work_dir: Authoritative workspace selected by the HITL launcher.
                 Internal to managed execution; GitHub publication cannot replace it.
+            workspace_mode: Optional dependency-layout selection. ``native`` keeps
+                the historical root project; ``embedded`` isolates NeuriCo-owned
+                dependencies from an externally owned workspace root.
 
         Returns:
             Dictionary with:
@@ -360,6 +455,7 @@ class ResearchRunner:
             "--hitl-research": hitl_research,
             "--hitl-autoresearch": hitl_autoresearch,
             "--hitl-continue-autoresearch": hitl_continue_autoresearch,
+            "managed baseline construction": hitl_construct_baseline,
         }
         invalid_hitl_modes = [
             name for name, mode in hitl_modes.items() if mode not in {None, "web", "cli"}
@@ -369,7 +465,12 @@ class ResearchRunner:
         selected_hitl_modes = [name for name, mode in hitl_modes.items() if mode]
         if len(selected_hitl_modes) > 1:
             raise ValueError("Choose one HITL entry mode: " + ", ".join(selected_hitl_modes))
-        hitl = hitl_research or hitl_autoresearch or hitl_continue_autoresearch
+        hitl = (
+            hitl_research
+            or hitl_autoresearch
+            or hitl_continue_autoresearch
+            or hitl_construct_baseline
+        )
         if hitl_work_dir is not None and not hitl:
             raise ValueError("hitl_work_dir is valid only with a managed research entry mode.")
         selected_hitl_mode = normalize_hitl_mode(hitl_mode)
@@ -412,6 +513,29 @@ class ResearchRunner:
                     + ", ".join(incompatible)
                 + "."
             )
+        if hitl_construct_baseline:
+            incompatible = [
+                name
+                for name, enabled in (
+                    ("--pause-after-resources", pause_after_resources),
+                    ("--enable-scoring", scoring_enabled),
+                    ("--bootstrap-rule-maker", bootstrap_mode),
+                    ("--autoresearch", autoresearch),
+                    ("--continue-autoresearch", continue_autoresearch),
+                    ("--bootstrap-autoresearch-baseline", bootstrap_autoresearch_baseline),
+                    (
+                        "--hitl-bootstrap-autoresearch-baseline",
+                        hitl_bootstrap_autoresearch_baseline,
+                    ),
+                )
+                if enabled
+            ]
+            if incompatible:
+                raise ValueError(
+                    "Managed baseline construction cannot be combined with "
+                    + ", ".join(incompatible)
+                    + "."
+                )
         if hitl and not multi_agent:
             raise ValueError("Managed research requires the multi-agent pipeline.")
         if continue_recover and not continue_autoresearch:
@@ -442,6 +566,7 @@ class ResearchRunner:
                 ("--continue-autoresearch", continue_autoresearch),
                 ("--bootstrap-autoresearch-baseline", bootstrap_autoresearch_baseline),
                 ("--hitl-bootstrap-autoresearch-baseline", hitl_bootstrap_autoresearch_baseline),
+                ("managed baseline construction", bool(hitl_construct_baseline)),
             )
             if enabled
         ]
@@ -458,6 +583,9 @@ class ResearchRunner:
             print("   Bootstrap AutoResearch baseline: enabled")
         print("=" * 80)
 
+        if time_limit_seconds is not None and not (hitl and not hitl_research):
+            raise ValueError("A run time limit is supported only for managed AutoResearch.")
+
         # Load idea
         idea = self.idea_manager.get_idea(idea_id)
         if idea is None:
@@ -472,6 +600,28 @@ class ResearchRunner:
         if paper_style is None:
             domain = idea_spec.get("domain", "general")
             paper_style = ConfigLoader().get_domain_paper_style(domain)
+
+        if hitl and not hitl_research:
+            if type(autoresearch_iterations) is not int or autoresearch_iterations < 0:
+                raise ValueError("AutoResearch iterations must be a non-negative integer.")
+            from core.hitl_run_control import active_hitl_run_stop_control
+
+            control = active_hitl_run_stop_control()
+            if control is None:
+                raise RuntimeError("Managed AutoResearch requires active run control.")
+            if not Path(hitl_work_dir).is_dir():
+                raise ValueError(f"HITL workspace does not exist: {hitl_work_dir}")
+            constraints = idea_spec.get("constraints", {})
+            if not isinstance(constraints, dict):
+                raise ValueError("Idea constraints must be an object.")
+            from core.hitl_autoresearch import finalize_previous_budget_exhaustion_if_needed
+
+            finalize_previous_budget_exhaustion_if_needed(
+                Path(hitl_work_dir),
+                current_request_id=control.request_id,
+            )
+            control.configure_budget(time_limit_seconds)
+            raise_if_hitl_run_stop_requested()
 
         # Update status
         self.idea_manager.update_status(idea_id, "in_progress")
@@ -621,6 +771,7 @@ class ResearchRunner:
                         provider=provider,
                         no_hash=no_hash,
                         hypothesis=idea_spec.get("hypothesis", ""),
+                        model=os.environ.get(MODEL_ENV_VAR),
                     )
 
                     github_url = repo_info["repo_url"]
@@ -695,6 +846,29 @@ class ResearchRunner:
 
                 print(f"📁 Working directory: {work_dir}\n")
 
+        active_workspace_mode = configure_workspace_mode(work_dir, workspace_mode)
+        print(f"   Workspace mode: {active_workspace_mode.value}")
+
+        if (
+            (continue_autoresearch and autoresearch_iterations != 0)
+            or bootstrap_mode
+            or bootstrap_autoresearch_baseline
+            or hitl_bootstrap_autoresearch_baseline
+            or bool(hitl_construct_baseline)
+        ):
+            reject_ambiguous_root_venv(work_dir)
+
+        if hitl and not hitl_research:
+            # Metadata above is persisted from the original idea. Downstream
+            # workers receive research constraints without YAML run policy.
+            from copy import deepcopy
+
+            idea = deepcopy(idea)
+            idea_spec = idea.get("idea", {})
+            constraints = idea_spec.get("constraints", {})
+            constraints.pop("time_limit", None)
+            constraints.pop("time", None)
+
         preserve_initial_inputs = False
         if hitl_research:
             from core.pipeline_orchestrator import ResearchPipelineOrchestrator
@@ -718,33 +892,6 @@ class ResearchRunner:
             if autoresearch:
                 preserve_initial_inputs = prepare_initial_hitl_resume(work_dir)
 
-        # Create subdirectories
-        (work_dir / "logs").mkdir(parents=True, exist_ok=True)
-        (work_dir / "results").mkdir(parents=True, exist_ok=True)
-        (work_dir / "artifacts").mkdir(parents=True, exist_ok=True)
-        # Only create notebooks/ when using scribe
-        if use_scribe:
-            (work_dir / "notebooks").mkdir(parents=True, exist_ok=True)
-
-        # Copy helper scripts and backend-selected skills to workspace.
-        if not preserve_initial_inputs:
-            self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
-
-        # Stage user-declared local resources (datasets, functions) into the
-        # workspace and rewrite their paths workspace-relative, so no agent
-        # ever depends on host paths. Hard error if a declared path is gone.
-        if preserve_initial_inputs:
-            # Reconnect the saved contract without refreshing reviewed files
-            # from host-side sources. Integrity checks still use the submitted idea.
-            from core.local_resources import staged_function_mismatches
-
-            issues = staged_function_mismatches(work_dir, idea)
-            if issues:
-                raise RuntimeError("Cannot resume reviewed initial inputs: " + "; ".join(issues))
-            stage_local_resources(work_dir, idea, preserve_existing=True)
-        else:
-            stage_local_resources(work_dir, idea)
-
         recovered_hitl_attempt = None
         if hitl and continue_autoresearch:
             # Recovery can restore the private HITL manager database. Do it before
@@ -753,7 +900,46 @@ class ResearchRunner:
 
             recovered_hitl_attempt = recover_interrupted_hitl_autoresearch_attempt(work_dir)
 
-        owns_hitl_host = False
+        if recovered_hitl_attempt is not None and recovered_hitl_attempt.recovery_classification in {
+            "pending_worker_request", "frontier_decision_transition",
+        }:
+            preserve_initial_inputs = True
+
+        if not hitl_construct_baseline:
+            # Create subdirectories
+            (work_dir / "logs").mkdir(parents=True, exist_ok=True)
+            (work_dir / "results").mkdir(parents=True, exist_ok=True)
+            (work_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+            # Only create notebooks/ when using scribe
+            if use_scribe:
+                (work_dir / "notebooks").mkdir(parents=True, exist_ok=True)
+
+            # Copy helper scripts and backend-selected skills to workspace.
+            if not preserve_initial_inputs:
+                self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
+
+            # Stage user-declared local resources (datasets, functions) into the
+            # workspace and rewrite their paths workspace-relative, so no agent
+            # ever depends on host paths. Hard error if a declared path is gone.
+            if preserve_initial_inputs:
+                # Reconnect the saved contract without refreshing reviewed files
+                # from host-side sources. Integrity checks still use the submitted idea.
+                from core.local_resources import staged_function_mismatches
+
+                issues = staged_function_mismatches(work_dir, idea)
+                if issues:
+                    raise RuntimeError(
+                        "Cannot resume reviewed initial inputs: " + "; ".join(issues)
+                    )
+                stage_local_resources(
+                    work_dir,
+                    idea,
+                    preserve_existing=True,
+                    write_workspace_contract=not (hitl and not hitl_research),
+                )
+            else:
+                stage_local_resources(work_dir, idea)
+
         if hitl:
             from core.hitl_lock import select_hitl_manager_provider
             from core.hitl_manager_inbox import HitlManagerInbox
@@ -762,9 +948,16 @@ class ResearchRunner:
             # Recovery may restore an older runtime.json. Record the selected
             # run backend after recovery and before the manager starts.
             select_hitl_manager_provider(work_dir, provider)
-            adoption = HitlRuntimeState(work_dir).adopt_hitl_mode(
-                selected_hitl_mode.value
+            runtime_state = HitlRuntimeState(work_dir)
+            guard_scope = runtime_state.workspace_guard_scope()
+            runtime_state.set_workspace_guard_scope(
+                runtime_private_roots=guard_scope["runtime_private_roots"],
+                immutable_resource_roots=sorted(
+                    set(guard_scope["immutable_resource_roots"])
+                    | set(staged_immutable_resource_roots(idea))
+                ),
             )
+            adoption = runtime_state.adopt_hitl_mode(selected_hitl_mode.value)
             stale_reply_key = str(
                 adoption.get("discard_resolution_reply_for", "")
             ).strip()
@@ -781,12 +974,76 @@ class ResearchRunner:
                     project_root=self.project_root,
                     title=title,
                 )
+                # Managed entry always supplies its cleanup scope. Register
+                # immediately after successful startup, before provider setup.
+                assert _hitl_host_scope is not None
                 hitl_host.start()
-                owns_hitl_host = True
+                _hitl_host_scope.callback(hitl_host.stop)
             set_manager_provider = getattr(hitl_host.manager, "set_provider", None)
             if not callable(set_manager_provider):
                 raise RuntimeError("The HITL host cannot select a manager backend.")
             set_manager_provider(provider)
+
+        if hitl_construct_baseline:
+            success = False
+            baseline_result: Dict[str, Any] = {}
+            hitl_stop_requested = False
+            github_publication: Optional[Dict[str, Any]] = None
+            try:
+                from core.hitl_autoresearch import construct_managed_baseline
+
+                node_result = construct_managed_baseline(
+                    idea=idea,
+                    idea_id=idea_id,
+                    work_dir=work_dir,
+                    templates_dir=self.project_root / "templates",
+                    provider=provider,
+                    full_permissions=full_permissions,
+                    rule_maker_timeout=None,
+                    scorer_timeout=None,
+                    manifest_trimmer_timeout=manifest_trimmer_timeout,
+                    autoresearch_history_dir=autoresearch_history_dir,
+                    hitl_mode=selected_hitl_mode,
+                    prepare_workspace=lambda baseline_work_dir: self._copy_workspace_resources(
+                        baseline_work_dir,
+                        compute_backend=compute_backend,
+                    ),
+                    manager=hitl_host.manager,
+                    channel=hitl_host.channel,
+                    manager_config=hitl_host.manager.config,
+                )
+                baseline_result = {
+                    "success": node_result.success,
+                    "mode": node_result.mode,
+                    "current_best_sha": node_result.current_best_sha,
+                    "reason": node_result.reason,
+                }
+                success = node_result.success
+            except HitlRunStopRequested:
+                hitl_stop_requested = True
+                raise
+            except Exception as e:
+                print(f"\n❌ Managed baseline construction error: {e}")
+                success = False
+            finally:
+                github_publication = self._finalize_research(
+                    idea_id,
+                    work_dir,
+                    github_url,
+                    title,
+                    provider,
+                    success,
+                    push_existing=hitl_work_dir is not None,
+                    publish_github=not hitl_stop_requested,
+                )
+
+            return {
+                "work_dir": work_dir,
+                "github_url": github_url,
+                "success": success,
+                "construct_baseline": baseline_result,
+                "github_publication": github_publication,
+            }
 
         if continue_autoresearch:
             success = False
@@ -861,8 +1118,6 @@ class ResearchRunner:
                     push_existing=hitl_work_dir is not None,
                     publish_github=not hitl_stop_requested,
                 )
-                if owns_hitl_host:
-                    hitl_host.stop()
 
             result = {
                 "work_dir": work_dir,
@@ -926,8 +1181,6 @@ class ResearchRunner:
                     success,
                     push_existing=hitl_work_dir is not None,
                 )
-                if owns_hitl_host:
-                    hitl_host.stop()
 
             result = {
                 "work_dir": work_dir,
@@ -1130,8 +1383,6 @@ class ResearchRunner:
                     push_existing=hitl_work_dir is not None,
                     publish_github=not hitl_stop_requested,
                 )
-                if owns_hitl_host:
-                    hitl_host.stop()
 
             # Return result info
             result = {
@@ -1156,7 +1407,11 @@ class ResearchRunner:
 
         # Generate prompt
         print("📝 Generating research prompt...")
-        prompt = self.prompt_generator.generate_research_prompt(
+        prompt_generator = PromptGenerator(
+            self.project_root / "templates",
+            workspace_mode=read_workspace_mode(work_dir),
+        )
+        prompt = prompt_generator.generate_research_prompt(
             idea, root_dir=work_dir, scoring_enabled=scoring_enabled)
 
         # Save prompt for reference
@@ -1316,6 +1571,7 @@ https://github.com/ChicagoHAI/neurico
         timeout: int = 1800,
         full_permissions: bool = True,
         compute_backend: str = "local",
+        workspace_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run comment mode: make targeted improvements based on user comments.
@@ -1328,6 +1584,9 @@ https://github.com/ChicagoHAI/neurico
             provider: AI provider (claude, codex, gemini)
             timeout: Maximum execution time in seconds (default: 30 min)
             full_permissions: Allow full permissions to CLI agents
+            workspace_mode: Optional dependency-layout selection for a workspace
+                that has not recorded one yet. Existing workspaces retain their
+                recorded mode.
 
         Returns:
             Dictionary with work_dir, github_url, and success status
@@ -1380,7 +1639,9 @@ https://github.com/ChicagoHAI/neurico
                 "and the workspace exists or can be cloned."
             )
 
+        active_workspace_mode = configure_workspace_mode(work_dir, workspace_mode)
         print(f"   Work dir: {work_dir}")
+        print(f"   Workspace mode: {active_workspace_mode.value}")
         print()
         self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
         stage_local_resources(work_dir, idea)
@@ -1525,6 +1786,7 @@ https://github.com/ChicagoHAI/neurico
             "dsi-slurm": {"dsi-slurm"},
         }
         selected_compute_skills = backend_skill_names[compute_backend]
+        workspace_mode = read_workspace_mode(work_dir)
 
         if skills_src.exists():
             for provider_root in provider_skill_roots:
@@ -1545,6 +1807,19 @@ https://github.com/ChicagoHAI/neurico
                     if dst_skill_dir.exists():
                         shutil.rmtree(dst_skill_dir)
                     shutil.copytree(skill_dir, dst_skill_dir)
+                    for copied_path in dst_skill_dir.rglob("*"):
+                        if not copied_path.is_file():
+                            continue
+                        try:
+                            source_text = copied_path.read_text(encoding="utf-8")
+                        except (OSError, UnicodeDecodeError):
+                            continue
+                        rendered_text = render_research_environment_placeholders(
+                            source_text,
+                            workspace_mode,
+                        )
+                        if rendered_text != source_text:
+                            copied_path.write_text(rendered_text, encoding="utf-8")
                     copied += 1
                 print(f"   Copied {copied} skills to {provider_root}/skills/")
 
@@ -1743,6 +2018,12 @@ def main():
         help="AI provider to use (default: claude)",
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help="Model for the provider CLI (e.g. claude-opus-5-5, gpt-5.6-sol). "
+        "Applies to every agent stage; default: the provider CLI's own default.",
+    )
+    parser.add_argument(
         "--compute-backend",
         default="local",
         choices=["local", "dsi-slurm", "modal"],
@@ -1754,7 +2035,7 @@ def main():
         help="Skip random hash in repo name if creating a new repo (use {slug}-{provider} instead of {slug}-{hash}-{provider})",
     )
     parser.add_argument(
-        "--timeout", type=int, default=3600, help="Timeout in seconds (default: 3600)"
+        "--timeout", type=int, default=3600, help="Timeout in seconds (default: 3600; 0 = no limit)"
     )
     parser.add_argument(
         "--no-github", action="store_true", help="Disable GitHub integration (run locally only)"
@@ -1792,7 +2073,7 @@ def main():
         "--resource-finder-timeout",
         type=int,
         default=2700,
-        help="Timeout for resource finder in seconds (default: 2700 = 45 min)",
+        help="Timeout for resource finder in seconds (default: 2700 = 45 min; 0 = no limit)",
     )
     parser.add_argument(
         "--use-scribe",
@@ -1815,12 +2096,20 @@ def main():
         "--paper-timeout",
         type=int,
         default=3600,
-        help="Timeout for paper writing in seconds (default: 3600 = 60 min)",
+        help="Timeout for paper writing in seconds (default: 3600 = 60 min; 0 = no limit)",
     )
     parser.add_argument(
         "--force-fresh",
         action="store_true",
         help="Ignore existing local workspace and start a new run from scratch",
+    )
+    parser.add_argument(
+        "--workspace-mode",
+        choices=["native", "embedded"],
+        default=None,
+        help="Dependency layout for a new workspace: native keeps the root project; "
+        "embedded uses neurico-research-env/ for externally owned workspaces. "
+        "Existing workspaces retain their recorded mode.",
     )
     parser.add_argument(
         "--comment-mode",
@@ -1845,6 +2134,12 @@ def main():
         type=int,
         default=600,
         help="Timeout for scorer stage in seconds (default: 600 = 10 min, scoring mode only)",
+    )
+    parser.add_argument(
+        "--time-limit-seconds",
+        type=int,
+        default=None,
+        help="Optional total seconds for this managed AutoResearch Start (default: no limit).",
     )
     parser.add_argument(
         "--autoresearch",
@@ -1958,6 +2253,14 @@ def main():
     ]
     if len(autoresearch_modes) > 1:
         parser.error("Choose at most one AutoResearch entry mode: " + ", ".join(autoresearch_modes))
+    # A timeout of 0 disables that stage's wall-clock limit.
+    for name in ("timeout", "resource_finder_timeout", "paper_timeout"):
+        if getattr(args, name) is not None and getattr(args, name) <= 0:
+            setattr(args, name, None)
+    if args.model:
+        # Every stage builds its provider command from this run-wide override.
+        os.environ[MODEL_ENV_VAR] = args.model
+        print(f"   Model: {args.model}")
     runner = ResearchRunner(use_github=not args.no_github, github_org=args.github_org)
 
     # Handle comment mode separately
@@ -1969,6 +2272,7 @@ def main():
                 timeout=args.timeout,
                 full_permissions=args.full_permissions,
                 compute_backend=args.compute_backend,
+                workspace_mode=args.workspace_mode,
             )
 
             print()
@@ -2014,6 +2318,7 @@ def main():
             manifest_trimmer_timeout=args.manifest_trimmer_timeout,
             autoresearch=args.autoresearch,
             autoresearch_iterations=args.autoresearch_iterations,
+            time_limit_seconds=args.time_limit_seconds,
             autoresearch_history_dir=args.autoresearch_history_dir,
             continue_autoresearch=args.continue_autoresearch,
             continue_recover=args.continue_recover,
@@ -2026,6 +2331,7 @@ def main():
             hitl_manager_port=args.hitl_manager_port,
             hitl_manager_no_browser=args.hitl_manager_no_browser,
             hitl_mode="auto" if args.auto else "full",
+            workspace_mode=args.workspace_mode,
         )
 
         print()
@@ -2039,6 +2345,9 @@ def main():
             print(f"GitHub: {result['github_url']}")
         print("=" * 80)
 
+    except HitlRunStopRequested as stop:
+        print(f"\nResearch stopped: {stop}")
+        return
     except Exception as e:
         print(f"\n❌ Error: {e}", file=sys.stderr)
         sys.exit(1)

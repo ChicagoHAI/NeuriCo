@@ -9,9 +9,11 @@ updates the plan, and resumes from the current workspace state.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import csv
 import json
 import logging
 import os
+import re
 import stat
 import hashlib
 import http.server
@@ -57,6 +59,7 @@ _WORKER_COMMAND_MODULES = {
     "hitl-report-idea": "hitl_report_idea.py",
     "hitl-raise-idea": "hitl_raise_idea.py",
     "hitl-view-ideas": "hitl_view_ideas.py",
+    "hitl-time-budget": "hitl_time_budget.py",
     "hitl-finish-phase": "hitl_finish_phase.py",
     "hitl-resume-worker-request": "hitl_resume_worker_request.py",
     "hitl-submit-proposal": "hitl_submit_proposal.py",
@@ -827,6 +830,62 @@ class HitlPaths:
         return self.tool_bin_dir / "view_current_frontier"
 
 
+def log_frontier_decision_record(
+    work_dir: Path,
+    *,
+    proposal_idea_id: str,
+    accepted: bool,
+    reason: str,
+    provenance: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist one manager-finalized frontier decision without starting a manager."""
+    log = HitlIdeaLog(work_dir)
+    parent_node_id = str(provenance.get("parent_node_id", "")).strip()
+    attempt_id = str(provenance.get("attempt_id", "")).strip()
+    for existing in log.records():
+        if (
+            parent_node_id
+            and attempt_id
+            and existing.get("parent_node_id") == parent_node_id
+            and existing.get("attempt_id") == attempt_id
+            and existing.get("idea_type") == "decision"
+            and existing.get("actor") == "manager"
+            and existing.get("decision_needed")
+            == "Should the scored candidate be retained in the HITL research frontier?"
+        ):
+            return existing
+    premises = [proposal_idea_id]
+    from core.hitl_runtime_state import HitlRuntimeState
+
+    pending_request = HitlRuntimeState(work_dir).pending_worker_command()
+    scoring_review_idea_id = str(
+        (pending_request or {}).get("scoring_review_idea_id", "")
+    ).strip()
+    if scoring_review_idea_id and scoring_review_idea_id not in premises:
+        premises.append(scoring_review_idea_id)
+    record = {
+        "pipeline_stage": "experiment_runner",
+        "hitl_stage": "review",
+        "idea_type": "decision",
+        "idea_category": "method_choice",
+        "level": "B",
+        "actor": "manager",
+        "premises": premises,
+        "context": "Manager reviewed the scored AutoResearch candidate against its active frontier direction.",
+        "related_artifacts": [],
+        "decision_needed": "Should the scored candidate be retained in the HITL research frontier?",
+        "options": [
+            "Accept candidate into the frontier.",
+            "Reject candidate and restore its parent frontier node.",
+        ],
+        "decision": "O1" if accepted else "O2",
+        "manager_feedback": str(reason).strip(),
+        "raised": False,
+    }
+    _apply_runtime_provenance(record, provenance)
+    return log.append(record, idempotent=True)
+
+
 class HitlRuntime:
     """Small orchestration helper for one plan-centered HITL stage."""
 
@@ -873,6 +932,8 @@ class HitlRuntime:
         self._proposal_submit_result: Optional[Dict[str, Any]] = None
         self._raised_idea_results: Dict[str, Dict[str, Any]] = {}
         self._started_scoring_requests: set[str] = set()
+        self._scoring_threads: set[threading.Thread] = set()
+        self._scoring_threads_lock = threading.Lock()
         self._tool_lock = threading.RLock()
         # This only serializes concurrent HTTP command handlers inside this
         # runtime process. Cross-process ownership lives in HitlRuntimeState.
@@ -943,6 +1004,7 @@ class HitlRuntime:
             allow_raised_ideas=True,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
+            baseline_construction=bool(self._tool_context.get("baseline_construction")),
             **self._autoresearch_candidate_prompt_context(),
         )
 
@@ -956,6 +1018,7 @@ class HitlRuntime:
             allow_raised_ideas=True,
             feedback=feedback,
             hitl_mode=self.hitl_mode.value,
+            baseline_construction=bool(self._tool_context.get("baseline_construction")),
             **self._autoresearch_candidate_prompt_context(),
         )
 
@@ -1115,6 +1178,12 @@ class HitlRuntime:
             hitl_mode=self.hitl_mode,
             request_context=dict(provenance or {}),
             scoring_enabled=bool(self._tool_context.get("allow_scoring_approval")),
+            baseline_construction=bool(
+                self._tool_context.get("baseline_construction")
+            ),
+            baseline_candidate_manifest=dict(
+                self._tool_context.get("baseline_candidate_manifest") or {}
+            ),
         )
         try:
             return finalized["record"]
@@ -1136,7 +1205,10 @@ class HitlRuntime:
         plan_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
         phase_finish_validator: Optional[Callable[[], Dict[str, Any]]] = None,
         scoring_handler: Optional[Callable[[Dict[str, Any]], None]] = None,
+        scoring_repair_cleanup: Optional[Callable[[], None]] = None,
         worker_prompt_contexts: Optional[Dict[str, str]] = None,
+        baseline_construction: bool = False,
+        baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
     ) -> None:
         if hitl_stage not in HITL_STAGES:
             raise HitlValidationError(f"Invalid HITL idea tool hitl_stage: {hitl_stage}")
@@ -1164,9 +1236,14 @@ class HitlRuntime:
         if hitl_stage == "proposal" and proposal_submission_validator is None:
             from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
-            proposal_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
+            proposal_guard = HitlWorkspaceWriteGuard.capture_public(
+                self.work_dir,
+                scope=self._workspace_guard_scope(),
+            )
             proposal_submission_validator = proposal_guard.require_unchanged
         allowed_worker_commands = self._worker_commands_for_stage(hitl_stage)
+        if self._time_budget_command_available():
+            allowed_worker_commands.add("hitl-time-budget")
         from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
 
         pending_command = HitlRuntimeState(self.work_dir).pending_worker_command()
@@ -1190,7 +1267,10 @@ class HitlRuntime:
             "supplied_plan_finish_validator": plan_finish_validator,
             "supplied_phase_finish_validator": phase_finish_validator,
             "scoring_handler": scoring_handler,
+            "scoring_repair_cleanup": scoring_repair_cleanup,
             "worker_prompt_contexts": dict(worker_prompt_contexts or {}),
+            "baseline_construction": bool(baseline_construction),
+            "baseline_candidate_manifest": dict(baseline_candidate_manifest or {}),
             "allowed_worker_commands": allowed_worker_commands,
         }
         self._install_stage_guards(hitl_stage)
@@ -1214,7 +1294,10 @@ class HitlRuntime:
             if callable(supplied):
                 self._tool_context["plan_finish_validator"] = supplied
                 return
-            plan_guard = HitlWorkspaceWriteGuard.capture_public(self.work_dir)
+            plan_guard = HitlWorkspaceWriteGuard.capture_public(
+                self.work_dir,
+                scope=self._workspace_guard_scope(),
+            )
             plan_path = self.paths.plan_path.relative_to(self.work_dir).as_posix()
 
             def validate_plan_finish() -> Dict[str, Any]:
@@ -1290,6 +1373,8 @@ class HitlRuntime:
         self.current_hitl_stage = to_stage
         self._tool_context["requires_human_approval"] = False
         self._tool_context["allowed_worker_commands"] = self._worker_commands_for_stage(to_stage)
+        if self._time_budget_command_available():
+            self._tool_context["allowed_worker_commands"].add("hitl-time-budget")
         self._install_stage_guards(to_stage)
         self._write_idea_tool_commands()
         if prompt_block:
@@ -1328,6 +1413,11 @@ class HitlRuntime:
         if command_name not in commands:
             commands.add(command_name)
             self._write_idea_tool_commands()
+
+    def _time_budget_command_available(self) -> bool:
+        from core.hitl_run_control import current_hitl_run_time_usage
+
+        return current_hitl_run_time_usage(self.work_dir) is not None
 
     def _require_worker_command(self, command_name: str) -> None:
         commands = self._tool_context.get("allowed_worker_commands")
@@ -1527,6 +1617,20 @@ class HitlRuntime:
 
     def clear_idea_tool_context(self) -> None:
         self.stop_idea_tool_server()
+        # A stopped worker can unwind before its asynchronous scorer finishes
+        # observing the shared stop request. Keep recovery behind that existing
+        # ownership boundary so no scorer can publish state after rollback.
+        while True:
+            with self._scoring_threads_lock:
+                active = [
+                    thread
+                    for thread in self._scoring_threads
+                    if thread is not threading.current_thread()
+                ]
+            if not active:
+                break
+            for thread in active:
+                thread.join()
         self._tool_context = {}
         self._phase_finish_result = None
         self._phase_finish_request_key = ""
@@ -2101,48 +2205,13 @@ class HitlRuntime:
         provenance: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Finalize the manager's strategic scored-candidate decision."""
-        parent_node_id = str(provenance.get("parent_node_id", "")).strip()
-        attempt_id = str(provenance.get("attempt_id", "")).strip()
-        for existing in self.log.records():
-            if (
-                parent_node_id
-                and attempt_id
-                and existing.get("parent_node_id") == parent_node_id
-                and existing.get("attempt_id") == attempt_id
-                and existing.get("idea_type") == "decision"
-                and existing.get("actor") == "manager"
-                and existing.get("decision_needed")
-                == "Should the scored candidate be retained in the HITL research frontier?"
-            ):
-                return existing
-        premises = [proposal_idea_id]
-        pending_request = self._pending_worker_command()
-        scoring_review_idea_id = str(
-            (pending_request or {}).get("scoring_review_idea_id", "")
-        ).strip()
-        if scoring_review_idea_id and scoring_review_idea_id not in premises:
-            premises.append(scoring_review_idea_id)
-        record = {
-            "pipeline_stage": "experiment_runner",
-            "hitl_stage": "review",
-            "idea_type": "decision",
-            "idea_category": "method_choice",
-            "level": "B",
-            "actor": "manager",
-            "premises": premises,
-            "context": "Manager reviewed the scored AutoResearch candidate against its active frontier direction.",
-            "related_artifacts": [],
-            "decision_needed": "Should the scored candidate be retained in the HITL research frontier?",
-            "options": [
-                "Accept candidate into the frontier.",
-                "Reject candidate and restore its parent frontier node.",
-            ],
-            "decision": "O1" if accepted else "O2",
-            "manager_feedback": str(reason).strip(),
-            "raised": False,
-        }
-        _apply_runtime_provenance(record, provenance)
-        return self.log.append(record, idempotent=True)
+        return log_frontier_decision_record(
+            self.work_dir,
+            proposal_idea_id=proposal_idea_id,
+            accepted=accepted,
+            reason=reason,
+            provenance=provenance,
+        )
 
     def log_frontier_maintenance_decision(
         self,
@@ -2215,6 +2284,66 @@ class HitlRuntime:
             "options": options,
             "decision": decision,
             "manager_feedback": rationale,
+            "raised": False,
+        }
+        _apply_runtime_provenance(record, provenance)
+        return self.log.append(record, idempotent=True)
+
+    def log_proposal_preparation_decision(
+        self,
+        *,
+        choice: str,
+        reason: str,
+        premise_idea_id: str,
+        provenance: Dict[str, Any],
+        agent: str = "",
+        objective: str = "",
+    ) -> Dict[str, Any]:
+        """Persist one manager-authored proposal-preparation decision.
+
+        Operational run ordinals intentionally stay in preparation-local log
+        paths; the idea record carries only the preparation provenance and the
+        manager's semantic choice.
+        """
+        if choice not in {"proceed", "call_additional_agent"}:
+            raise HitlValidationError(
+                "Proposal preparation choice must be proceed or call_additional_agent"
+            )
+        rationale = _require_text(reason, "reason", "Proposal preparation decision")
+        premise = _require_text(
+            premise_idea_id, "premise_idea_id", "Proposal preparation decision"
+        )
+        selected_agent = str(agent).strip()
+        selected_objective = str(objective).strip()
+        if choice == "call_additional_agent":
+            _require_text(selected_agent, "agent", "Proposal preparation decision")
+            _require_text(selected_objective, "objective", "Proposal preparation decision")
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "decision",
+            "idea_category": "search_strategy",
+            "level": "B",
+            "actor": "manager",
+            "premises": [premise],
+            "context": (
+                "Manager prepared the next proposal within the active "
+                "AutoResearch preparation session."
+            ),
+            "related_artifacts": [],
+            "decision_needed": (
+                "Should runtime proceed to the next proposal or run an additional agent first?"
+            ),
+            "options": [
+                "Proceed to the next proposal using the available evidence.",
+                "Run an additional agent, then return to proposal preparation.",
+            ],
+            "decision": "O1" if choice == "proceed" else "O2",
+            "manager_feedback": (
+                rationale
+                if choice == "proceed"
+                else f"{rationale}\n\nAgent: {selected_agent}\nObjective: {selected_objective}"
+            ),
             "raised": False,
         }
         _apply_runtime_provenance(record, provenance)
@@ -2340,6 +2469,60 @@ class HitlRuntime:
             "decision": "O1" if approved else "O2",
             "manager_feedback": feedback,
             "repair_target": target,
+            "raised": not approved,
+        }
+        return self.log.append(record, idempotent=True)
+
+    def log_baseline_construction_decision(
+        self,
+        *,
+        scoring_review_idea_id: str,
+        approved: bool,
+        context: str,
+        manager_feedback: str,
+    ) -> Dict[str, Any]:
+        """Record review of a bootstrap evaluator for a fixed experiment."""
+        premise = _require_text(
+            scoring_review_idea_id,
+            "scoring_review_idea_id",
+            "Baseline construction scoring decision",
+        )
+        feedback = str(manager_feedback).strip()
+        if not approved:
+            feedback = _require_text(
+                feedback,
+                "manager_feedback",
+                "Baseline evaluator repair decision",
+            )
+        record = {
+            "pipeline_stage": "rule_maker",
+            "hitl_stage": "review",
+            "idea_type": "decision",
+            "idea_category": "evaluation_choice",
+            "level": "B",
+            "actor": "manager",
+            "premises": [premise],
+            "context": _require_text(
+                context,
+                "context",
+                "Baseline construction scoring decision",
+            ),
+            "related_artifacts": [
+                {
+                    "path": "scoring/results.json",
+                    "description": "Runtime-produced score for the completed Ordinary workspace.",
+                }
+            ],
+            "decision_needed": (
+                "Is this evaluator valid for publishing the completed workspace as "
+                "the AutoResearch root?"
+            ),
+            "options": [
+                "Approve the evaluator and publish the scored workspace.",
+                "Return evaluator repair feedback to the rule maker.",
+            ],
+            "decision": "O1" if approved else "O2",
+            "manager_feedback": "" if approved else feedback,
             "raised": not approved,
         }
         return self.log.append(record, idempotent=True)
@@ -2498,13 +2681,18 @@ class HitlRuntime:
 
         Only runs past the plan phase, where the evaluator exists. A reporter
         that raises degrades to an ``UNAVAILABLE`` note rather than failing the
-        review, so a verifier fault never blocks the rule maker.
+        review, so a verifier fault never blocks the rule maker. A run stop
+        propagates to the existing cancellation path instead.
         """
+        from core.hitl_run_control import HitlRunStopRequested
+
         reporter = self._scoring_conformance_reporter
         if not callable(reporter) or hitl_stage == "plan":
             return ""
         try:
             return str(reporter() or "")
+        except HitlRunStopRequested:
+            raise
         except Exception as exc:
             print(f"⚠️  Scoring conformance report unavailable: {exc}")
             return (
@@ -2638,6 +2826,11 @@ class HitlRuntime:
 
         return HitlRuntimeState(self.work_dir).pending_worker_command()
 
+    def _workspace_guard_scope(self) -> Dict[str, Any]:
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        return HitlRuntimeState(self.work_dir).workspace_guard_scope()
+
     def _cancelled_worker_command_result(
         self,
         result: Dict[str, Any],
@@ -2704,13 +2897,19 @@ class HitlRuntime:
             if isinstance(pending, dict) and pending.get("status") == "cancelled":
                 return
             try:
+                def finalize_repair(review: Dict[str, Any]) -> Dict[str, Any]:
+                    cleanup = self._tool_context.get("scoring_repair_cleanup")
+                    if callable(cleanup):
+                        cleanup()
+                    return finalize_failure(review)
+
                 self.manager.resume_worker_request(
                     prompt=_load_hitl_template(
                         "manager_runtime_scoring_failure.txt",
                         error=str(exc),
                     ),
                     validate=self._validate_runtime_scoring_failure,
-                    finalize=finalize_failure,
+                    finalize=finalize_repair,
                     manager_review_kind="scoring_failure",
                 )
             except Exception:
@@ -2718,6 +2917,37 @@ class HitlRuntime:
                 if isinstance(pending, dict) and pending.get("status") == "cancelled":
                     return
                 raise
+
+    def _start_protected_scoring_handler(
+        self,
+        handler: Callable[[Dict[str, Any]], None],
+        approval: Dict[str, Any],
+        *,
+        finalize_failure: Callable[[Dict[str, Any]], Dict[str, Any]],
+        name: str,
+    ) -> None:
+        """Start and retain one scorer thread until its runtime writes are done."""
+
+        def run() -> None:
+            try:
+                self._run_protected_scoring_handler(
+                    handler,
+                    approval,
+                    finalize_failure=finalize_failure,
+                )
+            finally:
+                with self._scoring_threads_lock:
+                    self._scoring_threads.discard(threading.current_thread())
+
+        thread = threading.Thread(target=run, daemon=True, name=name)
+        with self._scoring_threads_lock:
+            self._scoring_threads.add(thread)
+        try:
+            thread.start()
+        except Exception:
+            with self._scoring_threads_lock:
+                self._scoring_threads.discard(thread)
+            raise
 
     def _finalize_resumed_scoring_failure(
         self,
@@ -2799,13 +3029,12 @@ class HitlRuntime:
                     pending=pending,
                 )
 
-            threading.Thread(
-                target=self._run_protected_scoring_handler,
-                args=(handler, approval),
-                kwargs={"finalize_failure": finalize_failure},
-                daemon=True,
+            self._start_protected_scoring_handler(
+                handler,
+                approval,
+                finalize_failure=finalize_failure,
                 name="neurico-hitl-resumed-scoring",
-            ).start()
+            )
         return self.manager.wait_for_worker_request(request_key)
 
     def resume_pending_worker_command(self) -> Dict[str, Any]:
@@ -2976,7 +3205,11 @@ class HitlRuntime:
             plan_fingerprint = self._current_plan_fingerprint()
             from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
 
-            workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(self.work_dir)
+            workspace_fingerprint_scope = self._workspace_guard_scope()
+            workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+                self.work_dir,
+                scope=workspace_fingerprint_scope,
+            )
             request_key = self._phase_finish_request_key_for(
                 hitl_stage=hitl_stage,
                 plan_fingerprint=plan_fingerprint,
@@ -3029,6 +3262,32 @@ class HitlRuntime:
                             "session, then call hitl-finish-phase again.",
                         )
                     ).strip()
+                    if bool(validation.get("restart_stage")):
+                        response = {
+                            "status": "restart_stage",
+                            "feedback": feedback,
+                            "next_phase": "complete",
+                            "instruction": (
+                                "Runtime rejected this worker invocation and will restore the "
+                                "clean stage boundary. Stop this worker session now."
+                            ),
+                            "prompt_block": "",
+                            "final": True,
+                        }
+                        self._phase_finish_result = {
+                            "called": True,
+                            "status": "restart_stage",
+                            "hitl_stage": hitl_stage,
+                            "plan_fingerprint": plan_fingerprint,
+                            "workspace_fingerprint": workspace_fingerprint,
+                            "summary": summary,
+                            "related_artifacts": related_artifacts,
+                            "manager_feedback": feedback,
+                            "context": feedback_context,
+                            "next_phase": "complete",
+                            "final": True,
+                        }
+                        return self._remember_phase_finish_response(request_key, response)
                     self._tool_context["hitl_stage"] = next_stage
                     self.current_hitl_stage = next_stage
                     self._phase_finish_result = {
@@ -3157,13 +3416,12 @@ class HitlRuntime:
                 finalized["record"] = record
                 payload = {**review, "scoring_review_idea_id": record["idea_id"]}
 
-                threading.Thread(
-                    target=self._run_protected_scoring_handler,
-                    args=(handler, payload),
-                    kwargs={"finalize_failure": persist_phase_review},
-                    daemon=True,
+                self._start_protected_scoring_handler(
+                    handler,
+                    payload,
+                    finalize_failure=persist_phase_review,
                     name="neurico-hitl-scoring",
-                ).start()
+                )
                 self._started_scoring_requests.add(request_key)
                 return payload
 
@@ -3173,6 +3431,7 @@ class HitlRuntime:
                 plan_text=self._read_optional(self.paths.plan_path),
                 plan_fingerprint=plan_fingerprint,
                 workspace_fingerprint=workspace_fingerprint,
+                workspace_fingerprint_scope=workspace_fingerprint_scope,
                 finish_summary=summary,
                 related_artifacts=related_artifacts,
                 request_key=request_key,
@@ -3182,6 +3441,12 @@ class HitlRuntime:
                 scoring_enabled=bool(self._tool_context.get("allow_scoring_approval")),
                 scoring_handoff_context=dict(self._tool_context.get("provenance") or {}),
                 verifier_report=self._durable_conformance_report(request_key, hitl_stage),
+                baseline_construction=bool(
+                    self._tool_context.get("baseline_construction")
+                ),
+                baseline_candidate_manifest=dict(
+                    self._tool_context.get("baseline_candidate_manifest") or {}
+                ),
                 on_finalize=persist_phase_review,
                 on_scoring_approval=persist_scoring_approval,
                 hitl_mode=self.hitl_mode,
@@ -3258,6 +3523,7 @@ class HitlRuntime:
                 "hitl_stage": hitl_stage,
                 "plan_fingerprint": plan_fingerprint,
                 "workspace_fingerprint": workspace_fingerprint,
+                "workspace_fingerprint_scope": workspace_fingerprint_scope,
                 "summary": summary,
                 "related_artifacts": related_artifacts,
                 "manager_feedback": "",
@@ -3323,6 +3589,13 @@ class HitlRuntime:
             return cancelled
         finish = self.phase_finish_result()
         resolved = self.resolved_worker_response()
+        if finish and finish.get("status") == "restart_stage":
+            self._clear_worker_continuation()
+            return {
+                "approved": False,
+                "restart_stage": True,
+                "error": str(finish.get("manager_feedback", "")).strip(),
+            }
         if resolved and (
             bool(resolved.get("final"))
             or isinstance(resolved.get("scored_candidate"), dict)
@@ -4006,6 +4279,16 @@ class HitlRuntime:
                         result = runtime.view_ideas_for_tool(payload)
                         self._send_json(200, {"ok": True, "text": result["text"]})
                         return
+                    if self.path == "/time-budget":
+                        runtime._require_worker_command("hitl-time-budget")
+                        from core.hitl_run_control import current_hitl_run_time_usage
+
+                        usage = current_hitl_run_time_usage(runtime.work_dir)
+                        if usage is None:
+                            self._send_json(409, {"error": "No time budget is active for this run."})
+                            return
+                        self._send_json(200, {"ok": True, "usage": usage})
+                        return
                     if self.path == "/frontier/current":
                         runtime._require_worker_command("view_current_frontier")
                         result = runtime.view_current_frontier_for_tool()
@@ -4261,6 +4544,47 @@ class RequiredArtifact:
     path: str
     purpose: str
     required: bool
+    any_of_group: Optional[str] = None
+
+
+_ANY_OF_REQUIREMENT_PREFIX = "any-of:"
+_ANY_OF_GROUP_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _normalize_any_of_group(value: str) -> str:
+    group = value.strip().lower()
+    if not _ANY_OF_GROUP_PATTERN.fullmatch(group):
+        raise HitlValidationError(
+            "Any-of artifact group names must start with a lowercase letter or number "
+            "and contain only lowercase letters, numbers, hyphens, or underscores: "
+            f"{value}"
+        )
+    return group
+
+
+def _validate_artifact_requirements(artifacts: Iterable[RequiredArtifact]) -> None:
+    artifact_list = list(artifacts)
+    groups: Dict[str, List[RequiredArtifact]] = {}
+    for artifact in artifact_list:
+        if artifact.required and artifact.any_of_group:
+            raise HitlValidationError(
+                f"Artifact cannot be both individually required and in an any-of group: "
+                f"{artifact.path}"
+            )
+        if artifact.any_of_group:
+            groups.setdefault(artifact.any_of_group, []).append(artifact)
+
+    for group, members in groups.items():
+        if len(members) < 2:
+            raise HitlValidationError(
+                f"Any-of artifact group '{group}' must contain at least two paths."
+            )
+
+    if not any(artifact.required for artifact in artifact_list) and not groups:
+        raise HitlValidationError(
+            "Files-to-produce table must include at least one required artifact or "
+            "any-of artifact group."
+        )
 
 
 def parse_required_artifacts(interface_path: Path) -> List[RequiredArtifact]:
@@ -4299,61 +4623,90 @@ def parse_required_artifacts(interface_path: Path) -> List[RequiredArtifact]:
             raise HitlValidationError(f"Duplicate required artifact path: {rel_path}")
         seen.add(rel_path)
         required_text = cells[2].strip().lower()
-        if required_text not in {"yes", "no", "recommended"}:
+        any_of_group: Optional[str] = None
+        if required_text.startswith(_ANY_OF_REQUIREMENT_PREFIX):
+            any_of_group = _normalize_any_of_group(
+                required_text.removeprefix(_ANY_OF_REQUIREMENT_PREFIX)
+            )
+        elif required_text not in {"yes", "no", "recommended"}:
             raise HitlValidationError(f"Unknown Required value for {rel_path}: {cells[2]}")
         artifacts.append(
             RequiredArtifact(
                 path=rel_path,
                 purpose=cells[1].strip(),
                 required=required_text == "yes",
+                any_of_group=any_of_group,
             )
         )
         row_idx += 1
 
-    if not any(artifact.required for artifact in artifacts):
-        raise HitlValidationError(
-            "Files-to-produce table must include at least one required artifact."
-        )
+    _validate_artifact_requirements(artifacts)
     return artifacts
+
+
+def _verify_required_artifact(root: Path, artifact: RequiredArtifact) -> None:
+    path = root / artifact.path
+    try:
+        path.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        raise HitlValidationError(
+            f"Required artifact escapes the workspace: {artifact.path}"
+        ) from exc
+    if path.is_symlink():
+        raise HitlValidationError(f"Required artifact cannot be a symlink: {artifact.path}")
+    if not path.exists():
+        raise HitlValidationError(f"Required artifact missing: {artifact.path}")
+    if artifact.path.endswith("/"):
+        if not path.is_dir():
+            raise HitlValidationError(
+                f"Required artifact should be a directory: {artifact.path}"
+            )
+        if not any(path.iterdir()):
+            raise HitlValidationError(f"Required artifact directory is empty: {artifact.path}")
+        return
+    if not path.is_file():
+        raise HitlValidationError(f"Required artifact should be a file: {artifact.path}")
+    if path.stat().st_size == 0:
+        raise HitlValidationError(f"Required artifact is empty: {artifact.path}")
+    if path.suffix == ".json":
+        json.loads(path.read_text(encoding="utf-8"))
+    elif path.suffix == ".csv":
+        try:
+            with path.open(newline="", encoding="utf-8") as f:
+                next(csv.reader(f), None)
+        except csv.Error as exc:
+            raise HitlValidationError(
+                f"Required artifact contains invalid CSV: {artifact.path}: {exc}"
+            ) from exc
 
 
 def verify_required_artifacts(work_dir: Path, artifacts: Iterable[RequiredArtifact]) -> None:
     root = Path(work_dir).resolve()
-    for artifact in artifacts:
-        if not artifact.required:
-            continue
-        path = root / artifact.path
-        try:
-            path.resolve(strict=False).relative_to(root)
-        except ValueError as exc:
-            raise HitlValidationError(
-                f"Required artifact escapes the workspace: {artifact.path}"
-            ) from exc
-        if path.is_symlink():
-            raise HitlValidationError(
-                f"Required artifact cannot be a symlink: {artifact.path}"
-            )
-        if not path.exists():
-            raise HitlValidationError(f"Required artifact missing: {artifact.path}")
-        if artifact.path.endswith("/"):
-            if not path.is_dir():
-                raise HitlValidationError(
-                    f"Required artifact should be a directory: {artifact.path}"
-                )
-            if not any(path.iterdir()):
-                raise HitlValidationError(f"Required artifact directory is empty: {artifact.path}")
-            continue
-        if not path.is_file():
-            raise HitlValidationError(f"Required artifact should be a file: {artifact.path}")
-        if path.stat().st_size == 0:
-            raise HitlValidationError(f"Required artifact is empty: {artifact.path}")
-        if path.suffix == ".json":
-            json.loads(path.read_text(encoding="utf-8"))
-        elif path.suffix == ".csv":
-            import csv
+    artifact_list = list(artifacts)
+    _validate_artifact_requirements(artifact_list)
 
-            with path.open(newline="", encoding="utf-8") as f:
-                next(csv.reader(f), None)
+    any_of_groups: Dict[str, List[RequiredArtifact]] = {}
+    for artifact in artifact_list:
+        if artifact.any_of_group:
+            any_of_groups.setdefault(artifact.any_of_group, []).append(artifact)
+        elif artifact.required:
+            _verify_required_artifact(root, artifact)
+
+    for group, members in any_of_groups.items():
+        failures: List[str] = []
+        for artifact in members:
+            try:
+                _verify_required_artifact(root, artifact)
+                break
+            except (OSError, ValueError, json.JSONDecodeError, HitlValidationError) as exc:
+                failures.append(str(exc))
+        else:
+            choices = ", ".join(artifact.path for artifact in members)
+            details = "; ".join(failures)
+            raise HitlValidationError(
+                f"Required any-of artifact group '{group}' is unsatisfied; expected at "
+                f"least one valid artifact from: {choices}. Candidate issues: {details}"
+            )
 
 
 def validate_required_artifact_contract(work_dir: Path) -> Dict[str, Any]:
@@ -4376,10 +4729,15 @@ def persist_hitl_required_artifact_contract(work_dir: Path) -> List[RequiredArti
     interface_path = root / "scoring" / "interface.md"
     artifacts = parse_required_artifacts(interface_path)
     payload = {
-        "version": 1,
+        "version": 2,
         "interface_sha256": _sha256_file(interface_path),
         "artifacts": [
-            {"path": artifact.path, "purpose": artifact.purpose, "required": artifact.required}
+            {
+                "path": artifact.path,
+                "purpose": artifact.purpose,
+                "required": artifact.required,
+                "any_of_group": artifact.any_of_group,
+            }
             for artifact in artifacts
         ],
     }
@@ -4404,8 +4762,9 @@ def load_hitl_required_artifact_contract(work_dir: Path) -> List[RequiredArtifac
         raise HitlValidationError(
             "Runtime-required artifact contract is missing or unreadable; rerun rule-maker HITL."
         ) from exc
-    if not isinstance(payload, dict) or payload.get("version") != 1:
+    if not isinstance(payload, dict) or payload.get("version") not in {1, 2}:
         raise HitlValidationError("Runtime-required artifact contract has an invalid version.")
+    version = payload["version"]
     interface_path = root / "scoring" / "interface.md"
     if _sha256_file(interface_path) != payload.get("interface_sha256"):
         raise HitlValidationError(
@@ -4415,18 +4774,31 @@ def load_hitl_required_artifact_contract(work_dir: Path) -> List[RequiredArtifac
     if not isinstance(entries, list):
         raise HitlValidationError("Runtime-required artifact contract has no artifact list.")
     artifacts: List[RequiredArtifact] = []
+    seen: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("required"), bool):
             raise HitlValidationError("Runtime-required artifact contract has an invalid entry.")
+        path = _normalize_required_artifact_path(str(entry.get("path", "")))
+        if path in seen:
+            raise HitlValidationError(f"Duplicate required artifact path: {path}")
+        seen.add(path)
+        raw_any_of_group = entry.get("any_of_group") if version == 2 else None
+        if raw_any_of_group is not None and not isinstance(raw_any_of_group, str):
+            raise HitlValidationError("Runtime-required artifact contract has an invalid entry.")
+        any_of_group = (
+            _normalize_any_of_group(raw_any_of_group) if raw_any_of_group is not None else None
+        )
         artifacts.append(
             RequiredArtifact(
-                path=_normalize_required_artifact_path(str(entry.get("path", ""))),
+                path=path,
                 purpose=str(entry.get("purpose", "")).strip(),
                 required=entry["required"],
+                any_of_group=any_of_group,
             )
         )
     if not artifacts:
         raise HitlValidationError("Runtime-required artifact contract is empty.")
+    _validate_artifact_requirements(artifacts)
     return artifacts
 
 

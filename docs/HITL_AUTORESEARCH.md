@@ -144,6 +144,14 @@ iterative AutoResearch:
 6. **Runtime** automatically publishes an approved initial score as the root
    frontier node.
 
+The rule maker declares experiment-runner artifacts in the strict
+`scoring/interface.md` files table. Each row contains one workspace-relative
+path. Use `yes`, `no`, or `recommended` for an individual path. When at least
+one of several alternative artifacts is required, list every path separately
+and give each row the same `any-of:<group-name>` requirement. Runtime accepts
+the group when one or more members are valid and returns it for repair when no
+member is valid.
+
 There is no accept/reject frontier decision for the initial experiment. The
 manager's initial scoring review answers whether the result is valid or needs
 repair; an approved result becomes the root automatically.

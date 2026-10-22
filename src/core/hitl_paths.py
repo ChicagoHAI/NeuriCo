@@ -34,6 +34,10 @@ def hitl_run_control_dir(work_dir: Path) -> Path:
     return hitl_state_dir(work_dir) / "control"
 
 
+def hitl_run_budget_path(work_dir: Path) -> Path:
+    return hitl_run_control_dir(work_dir) / "budget.json"
+
+
 def hitl_stop_request_path(work_dir: Path, request_id: str) -> Path:
     return hitl_run_control_dir(work_dir) / f"stop.{request_id}.json"
 
@@ -42,12 +46,21 @@ def hitl_initial_scoring_repair_control_path(work_dir: Path) -> Path:
     return hitl_run_control_dir(work_dir) / "initial_scoring_repair.json"
 
 
+def hitl_rollback_control_path(work_dir: Path) -> Path:
+    return hitl_run_control_dir(work_dir) / "rollback.json"
+
+
 def hitl_launch_requests_dir(workspace_root: Path) -> Path:
     return Path(workspace_root) / ".neurico" / "hitl-launch-requests"
 
 
 def hitl_artifact_contract_path(work_dir: Path) -> Path:
     return hitl_state_dir(work_dir) / "artifact_contract.json"
+
+
+def hitl_artifact_snapshots_dir(work_dir: Path) -> Path:
+    """Private ignored-artifact snapshots retained outside Git-backed HITL state."""
+    return Path(work_dir) / ".neurico" / "hitl-artifacts"
 
 
 def hitl_research_state_path(work_dir: Path) -> Path:

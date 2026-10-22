@@ -92,10 +92,13 @@ class HitlManagerToolExecutor:
             "view_node": self._view_node,
             "select_frontier": self._select_frontier,
             "prune_frontier": self._prune_frontier,
+            "call_additional_agent": self._call_additional_agent,
+            "proceed_to_proposal": self._proceed_to_proposal,
             "ask_human": self._ask_human,
             "update_research_state": self._update_research_state,
             "design_panel": self._design_panel,
             "finalize_worker_request": self._finalize_worker_request,
+            "finalize_baseline_construction": self._finalize_baseline_construction,
             "approve_for_scoring": self._approve_for_scoring,
             "finalize_frontier_decision": self._finalize_frontier_decision,
         }
@@ -186,6 +189,20 @@ class HitlManagerToolExecutor:
             return "Error: prune_frontier requires node_sha. Call list_frontier, then retry."
         return self.manager.prune_frontier(node_sha, str(args.get("reason", "")).strip())
 
+    def _call_additional_agent(self, args: Dict[str, Any]) -> str:
+        return self.manager.call_additional_agent(
+            str(args.get("agent", "")),
+            str(args.get("objective", "")),
+            str(args.get("reason", "")),
+            str(args.get("premise_idea_id", "")),
+        )
+
+    def _proceed_to_proposal(self, args: Dict[str, Any]) -> str:
+        return self.manager.proceed_to_proposal(
+            str(args.get("reason", "")),
+            str(args.get("premise_idea_id", "")),
+        )
+
     def _ask_human(self, args: Dict[str, Any]) -> str:
         message = str(args.get("message", "")).strip()
         if not message:
@@ -259,6 +276,15 @@ class HitlManagerToolExecutor:
 
     def _approve_for_scoring(self, args: Dict[str, Any]) -> str:
         return self.manager.approve_for_scoring(str(args.get("context", "")).strip())
+
+    def _finalize_baseline_construction(self, args: Dict[str, Any]) -> str:
+        payload = args.get("result", args)
+        if not isinstance(payload, dict):
+            return (
+                "Error: finalize_baseline_construction requires a result object. "
+                "Correct it and retry."
+            )
+        return self.manager.finalize_worker_request(dict(payload))
 
     def _finalize_frontier_decision(self, args: Dict[str, Any]) -> str:
         payload = args.get("result", args)
@@ -423,6 +449,7 @@ class HitlManager:
     _REQUEST_FINALIZER_TOOL_NAMES = frozenset(
         {
             "finalize_worker_request",
+            "finalize_baseline_construction",
             "finalize_frontier_decision",
         }
     )
@@ -460,7 +487,10 @@ class HitlManager:
             kind = str(action.get("kind", "")).strip()
             if kind in {"prune_frontier", "select_frontier"}:
                 names.add(kind)
-            return names
+                return names
+            if kind == "prepare_proposal" and action.get("status") == "pending":
+                names.update({"call_additional_agent", "proceed_to_proposal"})
+                return names
 
         pending = snapshot.get("pending_worker_command")
         if not isinstance(pending, dict) or pending.get("status") != "pending":
@@ -540,6 +570,13 @@ class HitlManager:
                 f"{scoring_handoff} Direct assistant text does not advance the action."
             )
         else:
+            if {"call_additional_agent", "proceed_to_proposal"} <= set(names):
+                lines.append(
+                    "The proposal-preparation action remains unresolved until either "
+                    "`call_additional_agent` or `proceed_to_proposal` succeeds. Direct "
+                    "assistant text does not complete the action."
+                )
+                return "\n".join(lines)
             completion_name = cls._runtime_completion_tool_name(tools)
             if not completion_name:
                 return "\n".join(lines)
@@ -562,6 +599,14 @@ class HitlManager:
             return (
                 native_retry + "The worker request remains unresolved. "
                 f"{scoring_handoff} Direct assistant text cannot advance it."
+            )
+        names = {str(tool.get("name", "")).strip() for tool in tools}
+        if {"call_additional_agent", "proceed_to_proposal"} <= names:
+            return (
+                native_retry
+                + "The proposal-preparation action remains unresolved. Review the "
+                "available evidence, then call either `call_additional_agent` or "
+                "`proceed_to_proposal`."
             )
         completion_name = self._runtime_completion_tool_name(tools)
         if completion_name:
@@ -744,6 +789,12 @@ class HitlManager:
                     f"Runtime is waiting for {kind}. Inspect the frontier if needed, "
                     f"then call {kind} with the required rationale."
                 )
+            if kind == "prepare_proposal":
+                return (
+                    f"Error: {tool_name} is unavailable at this runtime boundary. "
+                    "Runtime is preparing the next proposal; call either "
+                    "call_additional_agent or proceed_to_proposal."
+                )
 
         pending = snapshot.get("pending_worker_command")
         if isinstance(pending, dict) and pending.get("status") == "pending":
@@ -815,6 +866,7 @@ class HitlManager:
         self._thread.start()
 
     def stop(self) -> None:
+        self._invalidate_turns()
         self._stop.set()
         self._turns.put(_Turn("runtime", ""))
         cancel_active = getattr(self.backend, "cancel_active", None)
@@ -1032,6 +1084,8 @@ class HitlManager:
         hitl_mode: HitlMode | str = HitlMode.FULL,
         request_context: Optional[Dict[str, Any]] = None,
         scoring_enabled: bool = False,
+        baseline_construction: bool = False,
+        baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         from core.hitl import _load_hitl_template, _normalize_options, _validate_substantive_options
 
@@ -1104,6 +1158,10 @@ class HitlManager:
             autoresearch_attempt=autoresearch_attempt,
             assigned_candidate_sha=assigned_candidate_sha,
             scoring_enabled=scoring_enabled,
+            baseline_construction=baseline_construction,
+            baseline_candidate_manifest_json=json.dumps(
+                baseline_candidate_manifest or {}, indent=2, ensure_ascii=False
+            ),
         )
         return self.request_worker_resolution(
             command={
@@ -1132,10 +1190,13 @@ class HitlManager:
         requires_human_approval: bool,
         plan_fingerprint: str = "",
         workspace_fingerprint: str = "",
+        workspace_fingerprint_scope: Optional[Dict[str, Any]] = None,
         allow_scoring_approval: bool = False,
         scoring_enabled: bool = False,
         scoring_handoff_context: Optional[Dict[str, Any]] = None,
         verifier_report: str = "",
+        baseline_construction: bool = False,
+        baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         on_scoring_approval: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
@@ -1162,7 +1223,12 @@ class HitlManager:
                 raise ValueError("Phase review status must be approved or feedback.")
             if allow_scoring_approval and status == "approved":
                 raise ValueError(
-                    "Use approve_for_scoring for this completed AutoResearch candidate."
+                    "Use approve_for_scoring for this completed "
+                    + (
+                        "baseline evaluator."
+                        if baseline_construction
+                        else "AutoResearch candidate."
+                    )
                 )
             if status == "feedback":
                 self._require_text(
@@ -1209,6 +1275,7 @@ class HitlManager:
             "hitl_stage": hitl_stage,
             "plan_fingerprint": plan_fingerprint,
             "workspace_fingerprint": workspace_fingerprint,
+            "workspace_fingerprint_scope": dict(workspace_fingerprint_scope or {}),
             "finish_summary": finish_summary,
             "related_artifacts": related_artifacts,
             "provenance": dict(scoring_handoff_context or {}),
@@ -1236,6 +1303,10 @@ class HitlManager:
             hitl_mode=selected_mode.value,
             autoresearch_attempt=autoresearch_attempt,
             assigned_candidate_sha=assigned_candidate_sha,
+            baseline_construction=baseline_construction,
+            baseline_candidate_manifest_json=json.dumps(
+                baseline_candidate_manifest or {}, indent=2, ensure_ascii=False
+            ),
         )
         return self.request_worker_resolution(
             command={
@@ -1453,6 +1524,51 @@ class HitlManager:
             finalize=on_finalize,
             manager_finalizer="finalize_worker_request",
             manager_review_kind="initial_scoring",
+        )
+
+    def review_baseline_scoring_result(
+        self,
+        *,
+        scorer_result: Dict[str, Any],
+        on_finalize: Callable[[Dict[str, Any]], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Review scoring for a fixed completed experiment and its evaluator."""
+        from core.hitl import _load_hitl_template
+
+        def validate(data: Dict[str, Any]) -> Dict[str, Any]:
+            status = str(data.get("status", "")).strip()
+            if status not in {"approved", "feedback"}:
+                raise ValueError("Baseline review status must be approved or feedback.")
+            result = {
+                "status": status,
+                "context": self._require_text(
+                    data.get("context"), "context", "Baseline scoring review"
+                ),
+                "manager_feedback": str(data.get("manager_feedback", "")).strip(),
+            }
+            if status == "feedback":
+                result["manager_feedback"] = self._require_text(
+                    result["manager_feedback"],
+                    "manager_feedback",
+                    "Baseline evaluator repair",
+                )
+            else:
+                if not isinstance(scorer_result.get("results"), dict):
+                    raise ValueError(
+                        "A baseline cannot be approved without a structured scoring result."
+                    )
+                result["manager_feedback"] = ""
+            return result
+
+        return self.resume_worker_request(
+            prompt=_load_hitl_template(
+                "manager_review_baseline_construction.txt",
+                scorer_result_json=json.dumps(scorer_result, ensure_ascii=False, indent=2),
+            ),
+            validate=validate,
+            finalize=on_finalize,
+            manager_finalizer="finalize_baseline_construction",
+            manager_review_kind="baseline_construction_scoring",
         )
 
     def submit_resolution_reply(
@@ -1770,6 +1886,155 @@ class HitlManager:
             )
         return "Runtime recorded the frontier pruning choice. The waiting controller will apply it."
 
+    def call_additional_agent(
+        self,
+        agent: str,
+        objective: str,
+        reason: str,
+        premise_idea_id: str,
+    ) -> str:
+        """Record one allowlisted agent request at proposal preparation."""
+        from core.manager_additional_agents import additional_agent_spec
+
+        try:
+            selected_agent = additional_agent_spec(agent).name
+        except ValueError as exc:
+            return f"Error: {exc}."
+        objective = str(objective).strip()
+        reason = str(reason).strip()
+        premise = str(premise_idea_id).strip()
+        if not objective or not reason or not premise:
+            return (
+                "Error: call_additional_agent requires agent, objective, reason, and "
+                "premise_idea_id. Inspect finalized ideas and retry."
+            )
+        premise_error = self._proposal_preparation_premise_error(premise)
+        if premise_error:
+            return premise_error
+        action = self.runtime_state.snapshot().get("next_autoresearch_action")
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "pending"
+        ):
+            return "Error: call_additional_agent is available only while preparing a proposal."
+        try:
+            self._require_proposal_preparation_workspace(action)
+        except Exception as exc:
+            return (
+                f"Error: runtime could not record the additional-agent request: {exc}. "
+                "The waiting controller will restore the proposal-preparation boundary."
+            )
+        try:
+            self.runtime_state.record_next_autoresearch_action_decision(
+                "prepare_proposal",
+                {
+                    "choice": "call_additional_agent",
+                    "agent": selected_agent,
+                    "objective": objective,
+                    "reason": reason,
+                    "premise_idea_id": premise,
+                },
+            )
+        except Exception as exc:
+            return (
+                f"Error: runtime could not record the additional-agent request: {exc}. "
+                "Retry the same request."
+            )
+        return (
+            "Runtime recorded the additional-agent request. "
+            "The waiting controller will run it next."
+        )
+
+    def proceed_to_proposal(self, reason: str, premise_idea_id: str) -> str:
+        """Record that proposal preparation is complete."""
+        reason = str(reason).strip()
+        premise = str(premise_idea_id).strip()
+        if not reason or not premise:
+            return (
+                "Error: proceed_to_proposal requires reason and premise_idea_id. "
+                "Inspect finalized ideas and retry."
+            )
+        premise_error = self._proposal_preparation_premise_error(premise)
+        if premise_error:
+            return premise_error
+        action = self.runtime_state.snapshot().get("next_autoresearch_action")
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "pending"
+        ):
+            return "Error: proceed_to_proposal is available only while preparing a proposal."
+        try:
+            self._require_proposal_preparation_workspace(action)
+        except Exception as exc:
+            return (
+                f"Error: runtime could not record the proceed decision: {exc}. "
+                "The waiting controller will restore the proposal-preparation boundary."
+            )
+        try:
+            self.runtime_state.record_next_autoresearch_action_decision(
+                "prepare_proposal",
+                {
+                    "choice": "proceed",
+                    "reason": reason,
+                    "premise_idea_id": premise,
+                },
+            )
+        except Exception as exc:
+            return (
+                f"Error: runtime could not record the proceed decision: {exc}. "
+                "Retry the same decision."
+            )
+        return "Runtime recorded the decision to proceed to proposal."
+
+    def _proposal_preparation_premise_error(self, premise_idea_id: str) -> str:
+        from core.hitl import HitlIdeaLog
+
+        if any(
+            str(record.get("idea_id", "")).strip() == premise_idea_id
+            for record in HitlIdeaLog(self.work_dir).records()
+        ):
+            return ""
+        return (
+            "Error: premise_idea_id must identify a finalized HITL idea. "
+            "Call hitl-view-ideas and retry."
+        )
+
+    def _require_proposal_preparation_workspace(
+        self,
+        action: Dict[str, Any],
+    ) -> None:
+        """Validate the live workspace before recording a preparation choice."""
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        approved = str(action.get("workspace_fingerprint", "")).strip()
+        try:
+            observed = HitlWorkspaceWriteGuard.public_fingerprint(
+                self.work_dir,
+                scope=action.get("workspace_fingerprint_scope"),
+            )
+        except Exception as exc:
+            error = RuntimeError(
+                "The proposal-preparation workspace could not be validated against "
+                "its recorded boundary. The whole attempt must roll back."
+            )
+            self.runtime_state.cancel_next_autoresearch_action(
+                "prepare_proposal",
+                reason=str(error),
+            )
+            raise error from exc
+        if not approved or observed != approved:
+            error = RuntimeError(
+                "The proposal-preparation workspace differs from its recorded "
+                "boundary. The whole attempt must roll back."
+            )
+            self.runtime_state.cancel_next_autoresearch_action(
+                "prepare_proposal",
+                reason=str(error),
+            )
+            raise error
+
     def _validate_frontier_choice(self, kind: str, node_sha: str) -> List[str]:
         from core.hitl_frontier import HitlFrontierStore
 
@@ -1857,6 +2122,109 @@ class HitlManager:
                 )
             threading.Event().wait(0.1)
 
+    def begin_proposal_preparation(
+        self,
+        prompt: str,
+        *,
+        parent_sha: str,
+        attempt_id: str,
+        additional_agent_ordinal: int,
+        workspace_fingerprint: str,
+        on_decision: Callable[[Dict[str, Any]], Dict[str, Any]],
+        workspace_fingerprint_scope: Optional[Dict[str, Any]] = None,
+        proposal_base_sha: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Wait for and apply one proceed-or-additional-agent decision."""
+        kind = "prepare_proposal"
+        parent = str(parent_sha).strip()
+        attempt = str(attempt_id).strip()
+        ordinal = int(additional_agent_ordinal)
+        boundary_fingerprint = str(workspace_fingerprint).strip()
+        if not parent or not attempt or ordinal < 1 or not boundary_fingerprint:
+            raise HitlRuntimeStateError(
+                "Proposal preparation requires a parent, attempt, positive run ordinal, "
+                "and workspace fingerprint"
+            )
+        expected = {
+            "kind": kind,
+            "parent_node_sha": parent,
+            "attempt_id": attempt,
+            "additional_agent_ordinal": ordinal,
+            "workspace_fingerprint": boundary_fingerprint,
+        }
+        if proposal_base_sha is not None:
+            prepared_base = str(proposal_base_sha).strip()
+            if not prepared_base:
+                raise HitlRuntimeStateError(
+                    "Proposal preparation requires a valid prepared workspace base"
+                )
+            expected["proposal_base_sha"] = prepared_base
+        if workspace_fingerprint_scope is not None:
+            from core.hitl_workspace_guard import WorkspaceGuardScope
+
+            expected["workspace_fingerprint_scope"] = WorkspaceGuardScope.from_value(
+                workspace_fingerprint_scope
+            ).to_dict()
+        action = self.runtime_state.begin_next_autoresearch_action(expected)
+        if any(action.get(key) != value for key, value in expected.items()):
+            raise HitlRuntimeStateError(
+                "Proposal preparation belongs to another physical AutoResearch attempt"
+            )
+
+        def complete_recorded() -> Dict[str, Any]:
+            current = self.runtime_state.snapshot().get("next_autoresearch_action")
+            decision = current.get("decision") if isinstance(current, dict) else None
+            if not isinstance(decision, dict):
+                raise HitlRuntimeStateError(
+                    "Proposal preparation is missing its manager decision"
+                )
+            if decision.get("choice") != "call_additional_agent":
+                self._require_proposal_preparation_workspace(current)
+            result = on_decision(dict(decision))
+            self.runtime_state.complete_next_autoresearch_action(kind, result)
+            return result
+
+        def reuse_resolved(current: Dict[str, Any]) -> Dict[str, Any]:
+            result = dict(current.get("result") or {})
+            if result.get("choice") == "call_additional_agent":
+                decision = current.get("decision")
+                if not isinstance(decision, dict):
+                    raise HitlRuntimeStateError(
+                        "Resolved proposal preparation is missing its manager decision"
+                    )
+                # Re-enter the ordinary agent callback so its existing approved-
+                # workspace recovery check runs before this action is discarded.
+                result = on_decision(dict(decision))
+            else:
+                self._require_proposal_preparation_workspace(current)
+            return result
+
+        if action.get("status") == "resolved":
+            return reuse_resolved(action)
+        if action.get("status") == "decision_recorded":
+            return complete_recorded()
+
+        self._require_proposal_preparation_workspace(action)
+        self.notify_runtime(prompt, runtime_action_kind=kind)
+        while True:
+            from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+            raise_if_hitl_run_stop_requested()
+            current = self.runtime_state.snapshot().get("next_autoresearch_action")
+            if isinstance(current, dict) and current.get("kind") == kind:
+                if current.get("status") == "decision_recorded":
+                    return complete_recorded()
+                if current.get("status") == "resolved":
+                    return reuse_resolved(current)
+                if current.get("status") == "cancelled":
+                    raise RuntimeError(
+                        str(
+                            current.get("cancellation_reason")
+                            or "Proposal preparation was cancelled."
+                        )
+                    )
+            threading.Event().wait(0.1)
+
     def begin_frontier_pruning(
         self, prompt: str, pruner: Callable[[str, str], Dict[str, Any]]
     ) -> Dict[str, Any]:
@@ -1914,6 +2282,7 @@ class HitlManager:
 
         def selector(node_sha: str, reason: str) -> Dict[str, Any]:
             from core.autoresearch import CheckpointManager
+            from core.hitl_artifact_snapshots import restore_hitl_frontier_node
             from core.hitl_frontier import HitlFrontierStore
 
             store = HitlFrontierStore(self.work_dir)
@@ -1940,7 +2309,7 @@ class HitlManager:
                         "reason": reason,
                     }
                 )
-                checkpoints.restore_checkpoint(node_sha, clean_untracked_public=True)
+                restore_hitl_frontier_node(self.work_dir, node_sha)
                 state = store.select(node_sha)
                 return {
                     **recorded,
@@ -1948,9 +2317,21 @@ class HitlManager:
                     "active_frontier_node_shas": state["active_frontier_node_shas"],
                 }
             except Exception:
-                checkpoints.restore_checkpoint(original_workspace_sha, clean_untracked_public=True)
                 if previous:
+                    restore_hitl_frontier_node(self.work_dir, previous)
                     store.select(previous)
+                elif original_workspace_sha and store.paths.node_json(
+                    original_workspace_sha
+                ).is_file():
+                    restore_hitl_frontier_node(
+                        self.work_dir,
+                        original_workspace_sha,
+                    )
+                else:
+                    checkpoints.restore_checkpoint(
+                        original_workspace_sha,
+                        clean_untracked_public=True,
+                    )
                 raise
 
         return self.begin_frontier_selection(
@@ -2161,9 +2542,11 @@ class HitlManager:
 
         action_kind = turn.runtime_action_kind.strip()
         if action_kind:
-            boundary = (
-                "frontier selection" if action_kind == "select_frontier" else "frontier pruning"
-            )
+            boundary = {
+                "select_frontier": "frontier selection",
+                "prune_frontier": "frontier pruning",
+                "prepare_proposal": "proposal preparation",
+            }.get(action_kind, action_kind.replace("_", " "))
             reason = f"{failure} The {boundary} boundary was not completed; restart HITL AutoResearch to retry it."
             self.runtime_state.cancel_next_autoresearch_action(action_kind, reason=reason)
             self.channel.send(reason, kind="system")
@@ -2373,6 +2756,11 @@ class HitlManager:
         mcp_startup_timeout_seconds: Optional[float] = None,
     ) -> Any:
         """Run one manager provider turn without a wall-clock deadline."""
+        from core.hitl_run_control import current_hitl_run_budget_prompt
+
+        budget_context = current_hitl_run_budget_prompt(self.work_dir)
+        if budget_context:
+            messages = [*messages, {"role": "system", "content": budget_context}]
         result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
 
         parameters: Dict[str, inspect.Parameter] = {}

@@ -144,9 +144,13 @@ def generate_comment_prompt(
     Returns:
         Complete prompt string for comment handler agent
     """
+    from core.research_environment import read_workspace_mode
     from templates.prompt_generator import PromptGenerator
 
-    generator = PromptGenerator(templates_dir)
+    generator = PromptGenerator(
+        templates_dir,
+        workspace_mode=read_workspace_mode(work_dir),
+    )
     return generator.generate_comment_prompt(idea, work_dir, provider=provider)
 
 

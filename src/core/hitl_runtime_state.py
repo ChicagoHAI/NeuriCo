@@ -20,6 +20,7 @@ from core.hitl_util import atomic_write_json, utc_now
 # Durable review identity and the only finalizer legal at each scoring boundary.
 MANAGER_REVIEW_FINALIZERS = {
     "initial_scoring": "finalize_worker_request",
+    "baseline_construction_scoring": "finalize_baseline_construction",
     "frontier_scoring": "finalize_frontier_decision",
     "scoring_failure": "finalize_worker_request",
 }
@@ -71,8 +72,8 @@ class HitlRuntimeState:
 
     A manager may converse freely at all times.  The only exclusive runtime
     resource is one blocking worker command, represented by
-    ``pending_worker_command``.  AutoResearch frontier selection is stored as a
-    separate next action because no worker is waiting for it.
+    ``pending_worker_command``. Runtime-controlled AutoResearch boundaries are
+    stored as a separate next action because no worker is waiting for them.
     """
 
     def __init__(self, work_dir: Path):
@@ -93,6 +94,11 @@ class HitlRuntimeState:
             "manager_provider": "",
             "worker_continuation": None,
             "pending_worker_command": None,
+            "workspace_guard_scope": {
+                "runtime_private_roots": [],
+                "immutable_resource_roots": [],
+                "immutable_resource_digests": {},
+            },
             "next_autoresearch_action": None,
             "rejected_whiteboard_cleanup": None,
             "frontier_decision_transition": None,
@@ -155,6 +161,8 @@ class HitlRuntimeState:
         status = str(command.get("status", ""))
         if review_kind == "initial_scoring":
             stage, phase = "scoring", "initial_result_review"
+        elif review_kind == "baseline_construction_scoring":
+            stage, phase = "scoring", "baseline_result_review"
         elif review_kind == "frontier_scoring":
             stage, phase = "candidate_decision", "accept_or_reject"
         elif review_kind == "scoring_failure":
@@ -439,6 +447,93 @@ class HitlRuntimeState:
         value = self.snapshot().get("pending_worker_command")
         return value if isinstance(value, dict) and value else None
 
+    def workspace_guard_scope(self) -> Dict[str, Any]:
+        """Return the normalized runtime-owned public-fingerprint scope."""
+        from core.hitl_workspace_guard import WorkspaceGuardScope
+
+        value = self.snapshot().get("workspace_guard_scope")
+        return WorkspaceGuardScope.from_value(value).to_dict()
+
+    def set_workspace_guard_scope(
+        self,
+        *,
+        runtime_private_roots: Any = (),
+        immutable_resource_roots: Any = (),
+    ) -> Dict[str, Any]:
+        """Register exact, existing roots before a worker boundary begins."""
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard, WorkspaceGuardScope
+
+        requested = WorkspaceGuardScope.from_value(
+            {
+                "runtime_private_roots": runtime_private_roots,
+                "immutable_resource_roots": immutable_resource_roots,
+            }
+        )
+        for relative in requested.excluded_roots:
+            path = self.work_dir / relative
+            if not path.exists() and not path.is_symlink():
+                raise HitlRuntimeStateError(
+                    f"HITL workspace guard roots must exist before registration: {relative}"
+                )
+            if (
+                relative in requested.runtime_private_roots
+                and not path.is_dir()
+                and not path.is_symlink()
+            ):
+                raise HitlRuntimeStateError(
+                    f"HITL runtime-private roots must be directories or symlinks: {relative}"
+                )
+        try:
+            current_digests = {
+                relative: HitlWorkspaceWriteGuard.immutable_resource_digest(
+                    self.work_dir,
+                    relative,
+                )
+                for relative in requested.immutable_resource_roots
+            }
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            existing = WorkspaceGuardScope.from_value(self._state.get("workspace_guard_scope"))
+            removed = sorted(
+                set(existing.immutable_resource_roots) - set(requested.immutable_resource_roots)
+            )
+            if removed:
+                raise HitlRuntimeStateError(
+                    "HITL immutable resource roots cannot be unregistered: " + ", ".join(removed)
+                )
+
+            existing_digests = dict(existing.immutable_resource_digests)
+            trusted_digests: Dict[str, str] = {}
+            for relative in requested.immutable_resource_roots:
+                if relative in existing.immutable_resource_roots:
+                    expected = existing_digests.get(relative)
+                    if not expected:
+                        raise HitlRuntimeStateError(
+                            "HITL immutable resource has no trusted registration digest: "
+                            + relative
+                        )
+                else:
+                    expected = current_digests[relative]
+                current = current_digests[relative]
+                if current != expected:
+                    raise HitlRuntimeStateError(
+                        "HITL immutable resource changed after registration: " + relative
+                    )
+                trusted_digests[relative] = expected
+
+            scope = WorkspaceGuardScope.from_value(
+                {
+                    "runtime_private_roots": requested.runtime_private_roots,
+                    "immutable_resource_roots": requested.immutable_resource_roots,
+                    "immutable_resource_digests": trusted_digests,
+                }
+            ).require_immutable_resource_digests()
+            self._state["workspace_guard_scope"] = scope.to_dict()
+            self._save_unlocked()
+        return scope.to_dict()
+
     def begin_worker_command(self, command: Dict[str, Any]) -> Dict[str, Any]:
         """Persist one worker command or return its matching retry record."""
         request_key = str(command.get("request_key", "")).strip()
@@ -684,9 +779,14 @@ class HitlRuntimeState:
             record["status"] = "pending"
             record["created_at"] = _now()
             self._state["next_autoresearch_action"] = record
+            phase = {
+                "prune_frontier": "pruning",
+                "select_frontier": "selecting_next",
+                "prepare_proposal": "preparing_proposal",
+            }.get(kind, kind)
             self._record_phase_transition_unlocked(
-                stage="frontier",
-                phase="pruning" if kind == "prune_frontier" else "selecting_next",
+                stage=("experiment_runner" if kind == "prepare_proposal" else "frontier"),
+                phase=phase,
                 activity="reviewing",
             )
             self._save_unlocked()
@@ -697,9 +797,9 @@ class HitlRuntimeState:
         kind: str,
         decision: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Persist a manager's frontier choice before applying it.
+        """Persist a manager's AutoResearch choice before applying it.
 
-        A prune or selection changes more than one store.  Retaining the
+        A runtime-controlled choice may change more than one store. Retaining the
         command arguments in runtime state first makes the remaining log and
         frontier updates restartable without asking the manager to decide a
         second time.
@@ -727,13 +827,18 @@ class HitlRuntimeState:
             action["status"] = "decision_recorded"
             action["decision_recorded_at"] = _now()
             self._state["next_autoresearch_action"] = action
+            phase = {
+                "prune_frontier": "saving_prune_decision",
+                "select_frontier": "saving_selection",
+                "prepare_proposal": "saving_proposal_preparation",
+            }.get(normalized_kind, f"saving_{normalized_kind}")
             self._record_phase_transition_unlocked(
-                stage="frontier",
-                phase=(
-                    "saving_prune_decision"
-                    if normalized_kind == "prune_frontier"
-                    else "saving_selection"
+                stage=(
+                    "experiment_runner"
+                    if normalized_kind == "prepare_proposal"
+                    else "frontier"
                 ),
+                phase=phase,
                 activity="saving",
             )
             self._save_unlocked()
@@ -755,6 +860,128 @@ class HitlRuntimeState:
             self._state["next_autoresearch_action"] = action
             self._save_unlocked()
 
+    def record_next_autoresearch_action_recovery(
+        self,
+        kind: str,
+        recovery: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Attach one durable stage rollback descriptor to a recorded action."""
+        normalized_kind = str(kind).strip()
+        if not normalized_kind or not isinstance(recovery, dict) or not recovery:
+            raise HitlRuntimeStateError(
+                "AutoResearch action recovery requires a kind and descriptor"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if (
+                not isinstance(action, dict)
+                or action.get("kind") != normalized_kind
+                or action.get("status") not in {"decision_recorded", "resolved"}
+            ):
+                raise HitlRuntimeStateError(
+                    "No matching recorded AutoResearch action accepts recovery state"
+                )
+            existing = action.get("recovery")
+            if isinstance(existing, dict):
+                if existing == self._copy(recovery):
+                    return self._copy(action)
+                raise HitlRuntimeStateError(
+                    "AutoResearch action already has a different recovery descriptor"
+                )
+            action["recovery"] = self._copy(recovery)
+            action["updated_at"] = _now()
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(action)
+
+    def record_proposal_preparation_recovery(
+        self,
+        *,
+        workspace_fingerprint: str,
+        workspace_fingerprint_scope: Optional[Dict[str, Any]],
+        proposal_base_sha: str,
+        recovery: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Rebase an undecided preparation action onto one durable boundary."""
+        fingerprint = str(workspace_fingerprint).strip()
+        prepared_base = str(proposal_base_sha).strip()
+        if not fingerprint or not prepared_base or not isinstance(recovery, dict) or not recovery:
+            raise HitlRuntimeStateError(
+                "Proposal preparation recovery requires a fingerprint, base, and descriptor"
+            )
+        if workspace_fingerprint_scope is None:
+            fingerprint_scope = None
+        else:
+            from core.hitl_workspace_guard import WorkspaceGuardScope
+
+            fingerprint_scope = WorkspaceGuardScope.from_value(
+                workspace_fingerprint_scope
+            ).to_dict()
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if (
+                not isinstance(action, dict)
+                or action.get("kind") != "prepare_proposal"
+                or action.get("status") not in {"pending", "cancelled"}
+                or isinstance(action.get("decision"), dict)
+            ):
+                raise HitlRuntimeStateError(
+                    "No matching undecided proposal preparation accepts recovery state"
+                )
+            existing = action.get("recovery")
+            if existing is not None:
+                if not isinstance(existing, dict):
+                    raise HitlRuntimeStateError(
+                        "Proposal preparation recovery state is invalid"
+                    )
+                if existing != self._copy(recovery):
+                    raise HitlRuntimeStateError(
+                        "Proposal preparation already has a different recovery descriptor"
+                    )
+            action["workspace_fingerprint"] = fingerprint
+            action["proposal_base_sha"] = prepared_base
+            if fingerprint_scope is None:
+                action.pop("workspace_fingerprint_scope", None)
+            else:
+                action["workspace_fingerprint_scope"] = fingerprint_scope
+            action["recovery"] = self._copy(recovery)
+            action["status"] = "pending"
+            action.pop("cancellation_reason", None)
+            action["updated_at"] = _now()
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(action)
+
+    def release_next_autoresearch_action_recovery(
+        self,
+        kind: str,
+        *,
+        expected: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Detach and return a stage rollback descriptor before discarding it."""
+        normalized_kind = str(kind).strip()
+        if not normalized_kind:
+            raise HitlRuntimeStateError("AutoResearch action recovery requires kind")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if not isinstance(action, dict) or action.get("kind") != normalized_kind:
+                raise HitlRuntimeStateError("No matching AutoResearch action owns recovery state")
+            recovery = action.get("recovery")
+            if recovery is not None and not isinstance(recovery, dict):
+                raise HitlRuntimeStateError("AutoResearch action recovery state is invalid")
+            if expected is not None and recovery != self._copy(expected):
+                raise HitlRuntimeStateError(
+                    "AutoResearch action recovery ownership changed before release"
+                )
+            action.pop("recovery", None)
+            action["updated_at"] = _now()
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(recovery) if isinstance(recovery, dict) else None
+
     def clear_completed_next_autoresearch_action(self, kind: str) -> None:
         with self._locked():
             self._state = self._load_unlocked() or self._default()
@@ -766,6 +993,202 @@ class HitlRuntimeState:
             ):
                 self._state["next_autoresearch_action"] = None
                 self._save_unlocked()
+
+    def retire_proposal_preparation_for_budget(
+        self,
+        *,
+        parent_node_sha: str,
+    ) -> str:
+        """Replay-safely retire control state owned by budget-ended preparation."""
+        parent = str(parent_node_sha).strip()
+        if not parent:
+            raise HitlRuntimeStateError(
+                "Budget preparation cleanup requires a frontier parent"
+            )
+
+        def belongs_to_parent(value: Any) -> bool:
+            if not isinstance(value, dict):
+                return False
+            provenance = value.get("provenance")
+            return bool(
+                isinstance(provenance, dict)
+                and str(provenance.get("parent_node_id", "")).strip() == parent
+            )
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if isinstance(action, dict) and action:
+                if action.get("kind") != "prepare_proposal":
+                    raise HitlRuntimeStateError(
+                        "Another AutoResearch action replaced proposal preparation"
+                    )
+                if str(action.get("parent_node_sha", "")).strip() != parent:
+                    raise HitlRuntimeStateError(
+                        "Proposal preparation belongs to a different frontier node"
+                    )
+
+            request_key = ""
+            command = self._state.get("pending_worker_command")
+            if (
+                isinstance(command, dict)
+                and command.get("pipeline_stage") == "resource_finder"
+                and belongs_to_parent(command)
+            ):
+                request_key = str(command.get("request_key", "")).strip()
+                self._state["pending_worker_command"] = None
+
+            continuation = self._state.get("worker_continuation")
+            if (
+                isinstance(continuation, dict)
+                and continuation.get("pipeline_stage") == "resource_finder"
+                and continuation.get("actor") == "resource_finder"
+                and belongs_to_parent(continuation)
+            ):
+                self._state["worker_continuation"] = None
+
+            if isinstance(action, dict) and action:
+                self._state["next_autoresearch_action"] = None
+            self._save_unlocked()
+            return request_key
+
+    def advance_proposal_preparation_after_agent(
+        self,
+        *,
+        parent_node_sha: str,
+        attempt_id: str,
+        completed_ordinal: int,
+        workspace_fingerprint: str,
+        workspace_fingerprint_scope: Optional[Dict[str, Any]],
+        provenance: Dict[str, Any],
+        agent: str,
+        pipeline_stage: str,
+        proposal_base_sha: Optional[str] = None,
+        proposal_artifact_snapshot_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Atomically retire one approved agent call and open the next boundary."""
+        parent = str(parent_node_sha).strip()
+        attempt = str(attempt_id).strip()
+        ordinal = int(completed_ordinal)
+        fingerprint = str(workspace_fingerprint).strip()
+        if workspace_fingerprint_scope is None:
+            fingerprint_scope = None
+        else:
+            from core.hitl_workspace_guard import WorkspaceGuardScope
+
+            fingerprint_scope = WorkspaceGuardScope.from_value(
+                workspace_fingerprint_scope
+            ).to_dict()
+        agent_name = str(agent).strip()
+        stage = str(pipeline_stage).strip()
+        prepared_base = str(proposal_base_sha or "").strip()
+        prepared_artifacts = str(proposal_artifact_snapshot_id or "").strip()
+        if prepared_artifacts and not prepared_base:
+            raise HitlRuntimeStateError(
+                "Prepared artifacts require a proposal workspace checkpoint"
+            )
+        expected_provenance = {
+            str(key): str(value)
+            for key, value in dict(provenance or {}).items()
+            if str(value).strip()
+        }
+        if (
+            not parent
+            or not attempt
+            or ordinal < 1
+            or not fingerprint
+            or not agent_name
+            or not stage
+        ):
+            raise HitlRuntimeStateError(
+                "Advancing proposal preparation requires its parent, attempt, "
+                "completed ordinal, agent identity, and approved workspace fingerprint"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._state.get("next_autoresearch_action")
+            if (
+                not isinstance(action, dict)
+                or action.get("kind") != "prepare_proposal"
+                or action.get("status") != "resolved"
+                or str(action.get("parent_node_sha", "")).strip() != parent
+                or str(action.get("attempt_id", "")).strip() != attempt
+                or int(action.get("additional_agent_ordinal", 0)) != ordinal
+            ):
+                raise HitlRuntimeStateError(
+                    "Resolved proposal preparation does not match the completed agent call"
+                )
+            decision = action.get("decision")
+            result = action.get("result")
+            if (
+                not isinstance(decision, dict)
+                or decision.get("choice") != "call_additional_agent"
+                or decision.get("agent") != agent_name
+                or not isinstance(result, dict)
+                or result.get("choice") != "call_additional_agent"
+                or result.get("agent") != agent_name
+            ):
+                raise HitlRuntimeStateError(
+                    "Resolved proposal preparation is not an approved additional-agent call"
+                )
+
+            command = self._state.get("pending_worker_command")
+            response = command.get("response") if isinstance(command, dict) else None
+            command_provenance = (
+                {
+                    str(key): str(value)
+                    for key, value in dict(command.get("provenance") or {}).items()
+                    if str(value).strip()
+                }
+                if isinstance(command, dict)
+                else {}
+            )
+            command_scope = (
+                command.get("workspace_fingerprint_scope")
+                if isinstance(command, dict)
+                else None
+            )
+            if (
+                not isinstance(command, dict)
+                or command.get("pipeline_stage") != stage
+                or command.get("kind") != "phase_finish"
+                or command.get("hitl_stage") not in {"execution", "review"}
+                or command.get("status") != "resolved"
+                or not isinstance(response, dict)
+                or response.get("status") != "approved"
+                or command_provenance != expected_provenance
+                or str(command.get("workspace_fingerprint", "")).strip() != fingerprint
+                or command_scope != fingerprint_scope
+            ):
+                raise HitlRuntimeStateError(
+                    "The completed agent call has no matching approved worker request"
+                )
+
+            next_action = {
+                "kind": "prepare_proposal",
+                "parent_node_sha": parent,
+                "attempt_id": attempt,
+                "additional_agent_ordinal": ordinal + 1,
+                "workspace_fingerprint": fingerprint,
+                "status": "pending",
+                "created_at": _now(),
+            }
+            if prepared_base:
+                next_action["proposal_base_sha"] = prepared_base
+            if prepared_artifacts:
+                next_action["proposal_artifact_snapshot_id"] = prepared_artifacts
+            if fingerprint_scope is not None:
+                next_action["workspace_fingerprint_scope"] = fingerprint_scope
+            self._state["pending_worker_command"] = None
+            self._state["worker_continuation"] = None
+            self._state["next_autoresearch_action"] = next_action
+            self._record_phase_transition_unlocked(
+                stage="experiment_runner",
+                phase="preparing_proposal",
+                activity="reviewing",
+            )
+            self._save_unlocked()
+            return self._copy(next_action)
 
     def cancel_next_autoresearch_action(self, kind: str, *, reason: str) -> Dict[str, Any]:
         message = str(reason).strip()
