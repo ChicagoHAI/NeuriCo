@@ -8,10 +8,47 @@ from typing import Any, Dict, Optional
 
 from core.agent_cli import (
     CLI_COMMANDS,
+    append_prompt_block,
     build_agent_command,
     build_agent_environment,
 )
 from core.agent_runner import next_attempt_number, run_prebuilt_cli_agent
+
+
+def generate_proposal_verifier_prompt(
+    *,
+    assigned_proposal_idea_id: str,
+    templates_dir: Optional[Path] = None,
+    hitl_mode: str = "full",
+) -> str:
+    """Render the focused scientific-verification task contract."""
+
+    from jinja2 import Environment, FileSystemLoader
+
+    proposal_idea_id = str(assigned_proposal_idea_id).strip()
+    if not proposal_idea_id:
+        raise ValueError("Proposal verifier requires an assigned proposal idea ID")
+    root = (
+        Path(templates_dir)
+        if templates_dir is not None
+        else Path(__file__).resolve().parents[2] / "templates"
+    )
+    template_path = root / "agents" / "proposal_verifier.txt"
+    if not template_path.is_file():
+        raise FileNotFoundError(f"Proposal verifier template not found: {template_path}")
+    environment = Environment(
+        loader=FileSystemLoader(str(root)),
+        autoescape=False,
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    return environment.get_template("agents/proposal_verifier.txt").render(
+        assigned_proposal_idea_id=proposal_idea_id,
+        pipeline_stage="experiment_runner",
+        hitl_stage="review",
+        allow_raised_ideas=False,
+        hitl_mode=str(hitl_mode),
+    )
 
 
 def next_proposal_assessment_launch_dir(task_dir: Path) -> Path:
@@ -67,3 +104,34 @@ def run_proposal_assessment(
         "launch_dir": str(launch_dir),
         "prompt_file": str(prompt_path),
     }
+
+
+def run_proposal_verifier(
+    *,
+    assigned_proposal_idea_id: str,
+    work_dir: Path,
+    task_dir: Path,
+    provider: str,
+    env_extra: Dict[str, str],
+    templates_dir: Optional[Path] = None,
+    prompt_suffix: str = "",
+    hitl_mode: str = "full",
+    timeout: Optional[int] = 900,
+    full_permissions: bool = True,
+) -> Dict[str, Any]:
+    """Launch one proposal verifier with the fixed verifier contract."""
+
+    prompt = generate_proposal_verifier_prompt(
+        assigned_proposal_idea_id=assigned_proposal_idea_id,
+        templates_dir=templates_dir,
+        hitl_mode=hitl_mode,
+    )
+    return run_proposal_assessment(
+        prompt=append_prompt_block(prompt, prompt_suffix),
+        work_dir=work_dir,
+        task_dir=task_dir,
+        provider=provider,
+        env_extra=env_extra,
+        timeout=timeout,
+        full_permissions=full_permissions,
+    )

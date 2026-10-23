@@ -2939,7 +2939,7 @@ def _prepare_serial_ranked_proposer_controller(
     return controller, state, attempt_dir, base, whiteboard_path
 
 
-def test_serial_ranked_proposer_stage_records_configured_independent_candidates(
+def test_serial_ranked_proposer_and_verifier_stages_preserve_task_boundaries(
     tmp_path,
     monkeypatch,
     fake_hitl_tool_servers,
@@ -2953,6 +2953,7 @@ def test_serial_ranked_proposer_stage_records_configured_independent_candidates(
     )
     task_runtimes = []
     observations = {}
+    verifier_observations = {}
     launches = []
     original_runtime_factory = controller._new_ranked_task_runtime
 
@@ -3012,16 +3013,50 @@ def test_serial_ranked_proposer_stage_records_configured_independent_candidates(
         )
         return _ranked_launch_result()
 
+    def fake_assessment_runner(**request):
+        assert request["role"] == "verifier"
+        runtime = task_runtimes[-1]
+        task_id = runtime.tool_scope
+        assigned_id = request["assigned_proposal_idea_id"]
+        visible_before = _visible_ids(runtime.view_ideas_for_tool()["ideas"])
+        own_note_id = None
+        if task_id == "r1-v1":
+            own_note = runtime.log_reported_payload(
+                {
+                    "idea_type": "evidence",
+                    "idea_category": "constraint_or_risk",
+                    "premises": [assigned_id],
+                    "context": "A task-local verification finding.",
+                    "related_artifacts": [],
+                    "evidence": "The proposed intervention may have one confound.",
+                }
+            )
+            own_note_id = own_note["idea_id"]
+            assert own_note_id in _visible_ids(runtime.view_ideas_for_tool()["ideas"])
+        verifier_observations[task_id] = {
+            "assigned_id": assigned_id,
+            "visible_before": visible_before,
+            "own_note_id": own_note_id,
+        }
+        runtime.finish_ranked_proposal_task(
+            {
+                "premises": [base["idea_id"]],
+                "assessment": "The proposal is feasible, but attribution depends on keeping evaluation fixed.",
+            }
+        )
+        return _ranked_launch_result()
+
     monkeypatch.setattr(controller, "_new_ranked_task_runtime", tracked_runtime)
     controller.proposal_generator = fake_generator
+    controller.proposal_assessment_runner = fake_assessment_runner
 
-    round_state = controller._run_serial_independent_ranked_proposer_stage(
+    round_state = controller._run_serial_independent_ranked_proposal_round(
         parent_sha="parent",
         attempt_dir=attempt_dir,
         attempt_history=[],
     )
 
-    assert round_state["stage"] == "verifying"
+    assert round_state["stage"] == "reviewing"
     assert list(round_state["tasks"]) == [
         "r1-p1",
         "r1-p2",
@@ -3029,6 +3064,8 @@ def test_serial_ranked_proposer_stage_records_configured_independent_candidates(
         "r1-v1",
         "r1-v2",
         "r1-v3",
+        "r1-r1",
+        "r1-r2",
     ]
     candidate_ids = [round_state["tasks"][f"r1-p{ordinal}"]["result_idea_id"] for ordinal in range(1, 4)]
     assert len(set(candidate_ids)) == 3
@@ -3056,6 +3093,29 @@ def test_serial_ranked_proposer_stage_records_configured_independent_candidates(
     ]
     assert len({Path(launch["launch_dir"]) for launch in launches}) == 3
     assert all(Path(launch["launch_dir"]).is_dir() for launch in launches)
+    first_verifier_note_id = verifier_observations["r1-v1"]["own_note_id"]
+    verification_ids = [
+        round_state["tasks"][f"r1-v{ordinal}"]["result_idea_id"]
+        for ordinal in range(1, 4)
+    ]
+    records_by_id = {
+        record["idea_id"]: record for record in HitlIdeaLog(tmp_path).records()
+    }
+    for ordinal, verification_id in enumerate(verification_ids, start=1):
+        assigned_id = candidate_ids[ordinal - 1]
+        observation = verifier_observations[f"r1-v{ordinal}"]
+        assert observation["assigned_id"] == assigned_id
+        assert observation["visible_before"] == [base["idea_id"], assigned_id]
+        assert first_note_id not in observation["visible_before"]
+        if ordinal > 1:
+            assert first_verifier_note_id not in observation["visible_before"]
+        verification = records_by_id[verification_id]
+        assert verification["premises"].count(assigned_id) == 1
+        assert verification["idea_category"] == "proposal_verification"
+        assert verification["actor"] == "proposal_verifier"
+        assert "ranking" not in verification
+        assert "decision" not in verification
+        assert "proposal" not in verification
     snapshot = state.snapshot()
     assert snapshot["pending_worker_command"] is None
     assert snapshot["worker_continuation"] is None
@@ -3098,7 +3158,7 @@ def test_serial_ranked_proposer_stage_rejects_shared_boundary_mutation_after_fin
     controller.proposal_generator = fake_generator
 
     with pytest.raises(HitlValidationError, match="proposal_task_workspace_boundary"):
-        controller._run_serial_independent_ranked_proposer_stage(
+        controller._run_serial_independent_ranked_proposal_round(
             parent_sha="parent",
             attempt_dir=attempt_dir,
             attempt_history=[],
@@ -3137,3 +3197,20 @@ def test_independent_candidate_prompt_freezes_whiteboard_and_single_prompt_does_
     assert "successful recording, stop" in ranked_prompt
     assert "whiteboard prune-tip" in single_prompt
     assert "On approval, stop" in single_prompt
+
+
+def test_proposal_verifier_prompt_is_scientific_and_uses_minimal_finish_contract():
+    prompt = proposal_assessment.generate_proposal_verifier_prompt(
+        assigned_proposal_idea_id="I24",
+        templates_dir=Path(__file__).resolve().parents[1] / "templates",
+        hitl_mode="auto",
+    )
+
+    assert "Assigned proposal idea: I24" in prompt
+    assert "hitl-finish-proposal-verification" in prompt
+    assert '"premises"' in prompt
+    assert '"assessment"' in prompt
+    assert "Do not return pass/fail" in prompt
+    assert "Do not repeat I24" in prompt
+    assert "ranking" in prompt
+    assert '"proposal_idea_id"' not in prompt
