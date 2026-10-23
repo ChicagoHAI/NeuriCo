@@ -69,10 +69,12 @@ def invoke_proposal_generator(
     attempt_history: list[Dict[str, Any]],
     prompt_suffix: str = "",
     env_extra: Optional[Dict[str, str]] = None,
+    launch_dir: Optional[Path] = None,
+    candidate_recording: bool = False,
 ) -> Any:
     args = (idea, work_dir, parent_sha, attempt_dir, attempt_history)
     kwargs: Dict[str, Any] = {}
-    if prompt_suffix or env_extra:
+    if prompt_suffix or env_extra or launch_dir is not None or candidate_recording:
         signature = inspect.signature(generator)
         accepts_kwargs = any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD
@@ -92,6 +94,20 @@ def invoke_proposal_generator(
                     "accepts env_extra."
                 )
             kwargs["env_extra"] = env_extra
+        if launch_dir is not None:
+            if "launch_dir" not in signature.parameters and not accepts_kwargs:
+                raise TypeError(
+                    "Ranked proposal generation requires a proposal generator that "
+                    "accepts launch_dir."
+                )
+            kwargs["launch_dir"] = launch_dir
+        if candidate_recording:
+            if "candidate_recording" not in signature.parameters and not accepts_kwargs:
+                raise TypeError(
+                    "Ranked proposal generation requires a proposal generator that "
+                    "accepts candidate_recording."
+                )
+            kwargs["candidate_recording"] = True
     return generator(*args, **kwargs)
 
 

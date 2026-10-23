@@ -68,7 +68,11 @@ from core.hitl_paths import (
     hitl_stop_request_path,
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
-from core.hitl_proposal_round import ProposalModeConfig, normalize_proposal_mode_config
+from core.hitl_proposal_round import (
+    INDEPENDENT_RANKED_PROPOSAL_MODE,
+    ProposalModeConfig,
+    normalize_proposal_mode_config,
+)
 from core.hitl_run_control import HitlRunStopRequested
 from core.hitl_runtime_state import (
     HitlRuntimeState,
@@ -3945,6 +3949,235 @@ class HitlAutoResearchController:
             raise RuntimeError("HITL proposal admission did not return an approved proposal.")
         return proposal, proposal_idea_id
 
+    def _capture_ranked_proposal_boundary(
+        self,
+        *,
+        parent_sha: str,
+        preparation_attempt_id: str,
+    ) -> Callable[[], Dict[str, Any]]:
+        """Capture the one read-only boundary shared by a ranked proposal round."""
+
+        from core.hitl_paths import HITL_WHITEBOARD_RELATIVE_PATH
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        action = HitlRuntimeState(self.work_dir).snapshot().get("next_autoresearch_action")
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+            or str(action.get("attempt_id", "")).strip() != preparation_attempt_id
+        ):
+            raise RuntimeError(
+                "Independent-ranked proposal generation requires its resolved preparation."
+            )
+        scope = action.get("workspace_fingerprint_scope")
+        expected_fingerprint = str(action.get("workspace_fingerprint", "")).strip()
+        current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=scope,
+        )
+        if not expected_fingerprint or current_fingerprint != expected_fingerprint:
+            raise RuntimeError(
+                "Prepared proposal workspace no longer matches its approved boundary."
+            )
+        public_guard = HitlWorkspaceWriteGuard.capture_public(
+            self.work_dir,
+            scope=scope,
+        )
+        whiteboard_guard = HitlWorkspaceWriteGuard.capture_paths(
+            self.work_dir,
+            [HITL_WHITEBOARD_RELATIVE_PATH.as_posix()],
+        )
+
+        def require_unchanged() -> Dict[str, Any]:
+            issues = []
+            for validation in (
+                public_guard.require_unchanged(),
+                whiteboard_guard.require_unchanged(),
+            ):
+                if not bool(validation.get("valid")):
+                    raw_issues = validation.get("issues", [])
+                    issues.extend(
+                        str(issue)
+                        for issue in (
+                            raw_issues if isinstance(raw_issues, list) else [raw_issues]
+                        )
+                        if str(issue).strip()
+                    )
+            return {"valid": not issues, "issues": issues}
+
+        return require_unchanged
+
+    def _new_ranked_task_runtime(self, task_id: str) -> HitlRuntime:
+        """Create one isolated tool runtime for one ranked proposal task."""
+
+        owner = self._proposal_hitl_runtime()
+        return HitlRuntime(
+            self.work_dir,
+            "experiment_runner",
+            channel=owner.channel,
+            manager=owner.manager,
+            use_hitl_autoresearch_whiteboard=True,
+            hitl_mode=self.hitl_mode,
+            tool_scope=task_id,
+        )
+
+    def _run_serial_independent_ranked_proposer_stage(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_history: list[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Record every independent candidate, then enter verification."""
+
+        from core.agent_runner import next_attempt_number
+        from core.hitl_proposal_round import proposal_task_id
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        config = self.proposal_mode_config
+        if config.mode != INDEPENDENT_RANKED_PROPOSAL_MODE:
+            raise RuntimeError("Ranked proposer stage requires independent-ranked mode.")
+        if config.proposer_count is None or config.reviewer_count is None:
+            raise RuntimeError("Ranked proposer stage requires proposer and reviewer counts.")
+
+        owner = self._proposal_hitl_runtime()
+        owner.require_ranked_task_session_boundary()
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict):
+            raise RuntimeError("Ranked proposer stage has no proposal preparation state.")
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        boundary_validator = self._capture_ranked_proposal_boundary(
+            parent_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+        )
+        existing_round = action.get("proposal_round")
+        if isinstance(existing_round, dict):
+            base_idea_number = existing_round.get("base_idea_number")
+        else:
+            idea_numbers = [
+                int(idea_id[1:])
+                for record in owner.log.records()
+                if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+                and idea_id[1:].isdigit()
+            ]
+            base_idea_number = max(idea_numbers, default=0)
+        round_state = state.begin_proposal_round(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+            base_idea_number=base_idea_number,
+            proposer_count=config.proposer_count,
+            reviewer_count=config.reviewer_count,
+        )
+        identity = {
+            "parent_node_sha": parent_sha,
+            "preparation_attempt_id": preparation_attempt_id,
+            "candidate_attempt_id": attempt_dir.name,
+            "round_ordinal": int(round_state["round_ordinal"]),
+        }
+        if round_state.get("stage") == "verifying":
+            return round_state
+        if round_state.get("stage") != "proposing":
+            raise RuntimeError("Ranked proposer stage does not own the current round stage.")
+
+        task_prompt = (
+            "Generate one independent proposal candidate and submit it through "
+            "hitl-submit-proposal. Stop after runtime records the candidate."
+        )
+        round_dir = (
+            Path(attempt_dir)
+            / "proposal_round"
+            / f"r{round_state['round_ordinal']}"
+        )
+        for ordinal in range(1, config.proposer_count + 1):
+            raise_if_hitl_run_stop_requested()
+            task_id = proposal_task_id(int(round_state["round_ordinal"]), "proposer", ordinal)
+            current_round = state.proposal_round_snapshot(**identity)
+            task = current_round["tasks"].get(task_id)
+            if not isinstance(task, dict) or task.get("role") != "proposer":
+                raise RuntimeError("Ranked proposer task set is invalid.")
+            if task.get("result_idea_id") is not None:
+                continue
+
+            task_runtime = self._new_ranked_task_runtime(task_id)
+            task_runtime.prepare_idea_tool_context(
+                hitl_stage="proposal",
+                command_profile="proposal_candidate",
+                actor="autoresearch_proposer",
+                proposal_preparation_attempt_id=preparation_attempt_id,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": attempt_dir.name,
+                    "proposal_task_id": task_id,
+                },
+                idea_visibility={
+                    "base_idea_number": round_state["base_idea_number"],
+                    "seed_idea_ids": [],
+                },
+                proposal_submission_validator=boundary_validator,
+            )
+            task_dir = round_dir / task_id
+
+            def launch_worker(
+                prompt: str,
+                _log_prefix: str,
+                *,
+                record_continuation: bool,
+            ) -> Dict[str, Any]:
+                if record_continuation:
+                    raise RuntimeError(
+                        "Ranked proposal tasks must not record global worker continuation."
+                    )
+                launch_number = next_attempt_number(
+                    task_dir,
+                    lambda attempt: f"launch_{attempt}",
+                )
+                launch_dir = task_dir / f"launch_{launch_number}"
+                launch_dir.mkdir(parents=True)
+                return self._call_proposal_generator(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                    attempt_history=attempt_history,
+                    prompt_suffix=prompt,
+                    env_extra=task_runtime.idea_tool_env(),
+                    launch_dir=launch_dir,
+                    candidate_recording=True,
+                )
+
+            try:
+                _result, finish = run_worker_with_replacements(
+                    runtime=task_runtime,
+                    launch_worker=launch_worker,
+                    prompt=task_prompt,
+                    log_prefix=task_id,
+                    phase="proposal",
+                    worker_name=f"Independent proposal generator {task_id}",
+                    record_continuation=False,
+                    result_after_exit=lambda result: (
+                        task_runtime.ranked_task_result_after_worker_exit(
+                            result,
+                            replacement_prompt=task_prompt,
+                            worker_name=f"Independent proposal generator {task_id}",
+                        )
+                    ),
+                )
+            finally:
+                task_runtime.clear_idea_tool_context()
+            if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
+                raise RuntimeError("Ranked proposal task ended without a recorded candidate.")
+
+        raise_if_hitl_run_stop_requested()
+        boundary = boundary_validator()
+        if not bool(boundary.get("valid")):
+            raise RuntimeError(
+                "Ranked proposal stage changed its shared read-only boundary: "
+                + "; ".join(str(issue) for issue in boundary.get("issues", []))
+            )
+        return state.advance_proposal_round(**identity, expected_stage="proposing")
+
     def _run_candidate_experiment_hitl(
         self,
         *,
@@ -4349,6 +4582,8 @@ class HitlAutoResearchController:
         attempt_history: list[Dict[str, Any]],
         prompt_suffix: str = "",
         env_extra: Optional[Dict[str, str]] = None,
+        launch_dir: Optional[Path] = None,
+        candidate_recording: bool = False,
     ) -> Any:
         return invoke_proposal_generator(
             self.proposal_generator,
@@ -4359,6 +4594,8 @@ class HitlAutoResearchController:
             attempt_history=attempt_history,
             prompt_suffix=prompt_suffix,
             env_extra=env_extra,
+            launch_dir=launch_dir,
+            candidate_recording=candidate_recording,
         )
 
     def _proposal_hitl_runtime(self) -> HitlRuntime:
@@ -4551,6 +4788,8 @@ def run_hitl_autoresearch_loop(
         attempt_history: list[Dict[str, Any]],
         prompt_suffix: str = "",
         env_extra: Optional[Dict[str, str]] = None,
+        launch_dir: Optional[Path] = None,
+        candidate_recording: bool = False,
     ) -> Dict[str, Any]:
         return run_autoresearch_proposer(
             idea=idea_payload,
@@ -4564,6 +4803,8 @@ def run_hitl_autoresearch_loop(
             attempt_history=attempt_history,
             prompt_suffix=prompt_suffix,
             env_extra=env_extra,
+            launch_dir=launch_dir,
+            candidate_recording=candidate_recording,
         )
 
     def hitl_comment_mode(

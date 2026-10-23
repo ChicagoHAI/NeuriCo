@@ -136,6 +136,7 @@ def generate_autoresearch_proposal_prompt(
     hitl_submission: bool = False,
     hitl_autoresearch_whiteboard: bool = False,
     hitl_mode: str = "full",
+    candidate_recording: bool = False,
 ) -> str:
     """
     Generate the AutoResearch proposer prompt from a curated public context.
@@ -193,6 +194,7 @@ def generate_autoresearch_proposal_prompt(
         hitl_stage="proposal",
         allow_raised_ideas=False,
         hitl_mode=hitl_mode,
+        candidate_recording=candidate_recording,
         public_context=context,
         whiteboard_active_tips_md=whiteboard_active_tips_md,
         compute_backend_section=_generate_compute_backend_section(idea_spec, provider=provider),
@@ -275,6 +277,8 @@ def run_autoresearch_proposer(
     attempt_history: Optional[list[Dict[str, Any]]] = None,
     prompt_suffix: str = "",
     env_extra: Optional[Dict[str, str]] = None,
+    launch_dir: Optional[Path] = None,
+    candidate_recording: bool = False,
 ) -> Dict[str, Any]:
     """
     Launch the AutoResearch proposer agent.
@@ -294,8 +298,12 @@ def run_autoresearch_proposer(
     work_dir = Path(work_dir)
     attempt_dir = Path(attempt_dir)
     attempt_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir = Path(launch_dir) if launch_dir is not None else attempt_dir
+    artifact_dir.mkdir(parents=True, exist_ok=True)
     proposal_path = attempt_dir / "proposal.md"
     hitl_submission = bool(env_extra and env_extra.get("NEURICO_HITL_URL"))
+    if candidate_recording and not hitl_submission:
+        raise ValueError("Candidate recording requires a scoped HITL proposal task.")
 
     print("🧭 Starting AutoResearch Proposal Generator")
     print(f"   Provider: {provider}")
@@ -320,6 +328,7 @@ def run_autoresearch_proposer(
             env_extra and env_extra.get("NEURICO_HITL_AUTORESEARCH_WHITEBOARD") == "1"
         ),
         hitl_mode=str((env_extra or {}).get("NEURICO_HITL_MODE", "full")),
+        candidate_recording=candidate_recording,
     )
     prompt = append_prompt_block(prompt, prompt_suffix)
     if len(prompt) > MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS:
@@ -330,14 +339,14 @@ def run_autoresearch_proposer(
             f"continuation={len(prompt_suffix)} characters)."
         )
 
-    prompt_file = attempt_dir / "proposer_prompt.txt"
+    prompt_file = artifact_dir / "proposer_prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
     print(f"   Prompt saved to: {prompt_file}")
     print(f"   Prompt length: {len(prompt)} characters")
 
     cmd = build_agent_command(provider, full_permissions=full_permissions)
 
-    transcript_file = attempt_dir / f"proposer_{provider}_transcript.jsonl"
+    transcript_file = artifact_dir / f"proposer_{provider}_transcript.jsonl"
 
     print(f"▶️  Launching {provider} CLI proposer...")
     print(f"   Command: {cmd}")
@@ -368,7 +377,7 @@ def run_autoresearch_proposer(
                 command_argv=shlex.split(cmd),
                 prompt=prompt,
                 work_dir=work_dir,
-                log_file=attempt_dir / f"proposer_{provider}.log",
+                log_file=artifact_dir / f"proposer_{provider}.log",
                 transcript_file=transcript_file,
                 env=env,
                 timeout=timeout,

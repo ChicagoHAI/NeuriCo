@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import cli.hitl_launcher as hitl_launcher  # noqa: E402
 import cli.hitl_run_worker as hitl_run_worker  # noqa: E402
+import agents.autoresearch_proposer as autoresearch_proposer  # noqa: E402
 import agents.proposal_assessment as proposal_assessment  # noqa: E402
 from core.hitl import (  # noqa: E402
     HitlIdeaLog,
@@ -20,6 +21,7 @@ from core.hitl import (  # noqa: E402
 )
 from core.hitl_autoresearch import HitlAutoResearchController  # noqa: E402
 from core.hitl_paths import hitl_launch_requests_dir  # noqa: E402
+from core.hitl_whiteboard import hitl_whiteboard_path  # noqa: E402
 from core.hitl_proposal_round import (  # noqa: E402
     KEMENY_YOUNG_ALGORITHM,
     KemenyYoungResult,
@@ -40,6 +42,7 @@ from core.hitl_run_control import (  # noqa: E402
     activate_hitl_run_stop_control,
 )
 from core.hitl_stage_runtime import run_worker_with_replacements  # noqa: E402
+from core.hitl_workspace_guard import HitlWorkspaceWriteGuard  # noqa: E402
 from core.runner import ResearchRunner  # noqa: E402
 
 
@@ -2874,3 +2877,263 @@ def test_proposal_assessment_launcher_uses_unique_attempt_artifacts(
     assert all(call["defer_provider_failure_to_runtime"] is True for call in calls)
     assert calls[0]["log_file"] != calls[1]["log_file"]
     assert calls[0]["transcript_file"] != calls[1]["transcript_file"]
+
+
+def _prepare_serial_ranked_proposer_controller(
+    tmp_path,
+    *,
+    proposer_count=2,
+    reviewer_count=2,
+):
+    attempt_dir = tmp_path / "logs/experiment-autoresearch/parent/attempt_4"
+    attempt_dir.mkdir(parents=True)
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+        use_hitl_autoresearch_whiteboard=True,
+    )
+    whiteboard_path = hitl_whiteboard_path(tmp_path)
+    whiteboard_path.parent.mkdir(parents=True, exist_ok=True)
+    whiteboard_path.write_text('{"tips": []}\n', encoding="utf-8")
+    base = _append_ranked_session_base_idea(tmp_path)
+    state = HitlRuntimeState(tmp_path)
+    scope = state.workspace_guard_scope()
+    fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path, scope=scope)
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": "parent",
+            "attempt_id": "attempt_3",
+            "additional_agent_ordinal": 1,
+            "workspace_fingerprint": fingerprint,
+            "workspace_fingerprint_scope": scope,
+            "proposal_base_sha": "prepared",
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {"choice": "proceed"},
+    )
+    state.complete_next_autoresearch_action(
+        "prepare_proposal",
+        {"choice": "proceed", "proposal_base_sha": "prepared"},
+    )
+    controller = HitlAutoResearchController(
+        idea={"idea": {"title": "Ranked proposal test"}},
+        idea_id="idea",
+        work_dir=tmp_path,
+        history_root=tmp_path / "logs/experiment-autoresearch",
+        proposal_generator=lambda *_args, **_kwargs: {},
+        scorer=lambda *_args, **_kwargs: {},
+        checkpoint_manager=object(),
+        history_manager=object(),
+        hitl_runtime=runtime,
+        proposal_mode_config=ProposalModeConfig(
+            mode="independent_ranked",
+            proposer_count=proposer_count,
+            reviewer_count=reviewer_count,
+        ),
+    )
+    return controller, state, attempt_dir, base, whiteboard_path
+
+
+def test_serial_ranked_proposer_stage_records_configured_independent_candidates(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+):
+    controller, state, attempt_dir, base, _whiteboard_path = (
+        _prepare_serial_ranked_proposer_controller(
+            tmp_path,
+            proposer_count=3,
+            reviewer_count=2,
+        )
+    )
+    task_runtimes = []
+    observations = {}
+    launches = []
+    original_runtime_factory = controller._new_ranked_task_runtime
+
+    def tracked_runtime(task_id):
+        runtime = original_runtime_factory(task_id)
+        task_runtimes.append(runtime)
+        return runtime
+
+    def fake_generator(
+        _idea,
+        _work_dir,
+        _parent_sha,
+        generator_attempt_dir,
+        _attempt_history,
+        **kwargs,
+    ):
+        runtime = task_runtimes[-1]
+        task_id = runtime.tool_scope
+        if task_id == "r1-p1":
+            tasks_at_first_launch = state.snapshot()["next_autoresearch_action"][
+                "proposal_round"
+            ]["tasks"]
+            assert list(tasks_at_first_launch) == ["r1-p1", "r1-p2", "r1-p3"]
+        visible_before = _visible_ids(runtime.view_ideas_for_tool()["ideas"])
+        own_note_id = None
+        if task_id == "r1-p1":
+            own_note = runtime.log_reported_payload(
+                {
+                    "idea_type": "evidence",
+                    "idea_category": "constraint_or_risk",
+                    "premises": [base["idea_id"]],
+                    "context": "A task-local proposer observation.",
+                    "related_artifacts": [],
+                    "evidence": "The controlled change must preserve evaluation.",
+                }
+            )
+            own_note_id = own_note["idea_id"]
+            assert own_note_id in _visible_ids(runtime.view_ideas_for_tool()["ideas"])
+        observations[task_id] = {
+            "visible_before": visible_before,
+            "own_note_id": own_note_id,
+        }
+        launches.append(
+            {
+                "task_id": task_id,
+                "attempt_dir": generator_attempt_dir,
+                "launch_dir": kwargs["launch_dir"],
+                "candidate_recording": kwargs["candidate_recording"],
+            }
+        )
+        runtime.submit_proposal_payload(
+            {
+                "proposal_type": "exploitation",
+                "premises": [base["idea_id"]],
+                "proposal": "Apply the same controlled modification.",
+            }
+        )
+        return _ranked_launch_result()
+
+    monkeypatch.setattr(controller, "_new_ranked_task_runtime", tracked_runtime)
+    controller.proposal_generator = fake_generator
+
+    round_state = controller._run_serial_independent_ranked_proposer_stage(
+        parent_sha="parent",
+        attempt_dir=attempt_dir,
+        attempt_history=[],
+    )
+
+    assert round_state["stage"] == "verifying"
+    assert list(round_state["tasks"]) == [
+        "r1-p1",
+        "r1-p2",
+        "r1-p3",
+        "r1-v1",
+        "r1-v2",
+        "r1-v3",
+    ]
+    candidate_ids = [round_state["tasks"][f"r1-p{ordinal}"]["result_idea_id"] for ordinal in range(1, 4)]
+    assert len(set(candidate_ids)) == 3
+    candidates = [
+        record
+        for record in HitlIdeaLog(tmp_path).records()
+        if record.get("idea_id") in candidate_ids
+    ]
+    assert [record["proposal_task_id"] for record in candidates] == [
+        "r1-p1",
+        "r1-p2",
+        "r1-p3",
+    ]
+    assert len({record["proposal"] for record in candidates}) == 1
+    first_note_id = observations["r1-p1"]["own_note_id"]
+    assert observations["r1-p2"]["visible_before"] == [base["idea_id"]]
+    assert observations["r1-p3"]["visible_before"] == [base["idea_id"]]
+    assert first_note_id not in observations["r1-p2"]["visible_before"]
+    assert all(launch["attempt_dir"] == attempt_dir for launch in launches)
+    assert all(launch["candidate_recording"] is True for launch in launches)
+    assert [Path(launch["launch_dir"]).name for launch in launches] == [
+        "launch_1",
+        "launch_1",
+        "launch_1",
+    ]
+    assert len({Path(launch["launch_dir"]) for launch in launches}) == 3
+    assert all(Path(launch["launch_dir"]).is_dir() for launch in launches)
+    snapshot = state.snapshot()
+    assert snapshot["pending_worker_command"] is None
+    assert snapshot["worker_continuation"] is None
+
+
+@pytest.mark.parametrize("mutation", ["public", "whiteboard"])
+def test_serial_ranked_proposer_stage_rejects_shared_boundary_mutation_after_finish(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+    mutation,
+):
+    controller, state, attempt_dir, base, whiteboard_path = (
+        _prepare_serial_ranked_proposer_controller(tmp_path)
+    )
+    task_runtimes = []
+    original_runtime_factory = controller._new_ranked_task_runtime
+
+    def tracked_runtime(task_id):
+        runtime = original_runtime_factory(task_id)
+        task_runtimes.append(runtime)
+        return runtime
+
+    def fake_generator(*_args, **_kwargs):
+        runtime = task_runtimes[-1]
+        runtime.submit_proposal_payload(
+            {
+                "proposal_type": "exploitation",
+                "premises": [base["idea_id"]],
+                "proposal": "Record before attempting an invalid workspace mutation.",
+            }
+        )
+        if mutation == "public":
+            (tmp_path / "unauthorized.txt").write_text("changed\n", encoding="utf-8")
+        else:
+            whiteboard_path.write_text('{"tips": [{"id": "T1"}]}\n', encoding="utf-8")
+        return _ranked_launch_result()
+
+    monkeypatch.setattr(controller, "_new_ranked_task_runtime", tracked_runtime)
+    controller.proposal_generator = fake_generator
+
+    with pytest.raises(HitlValidationError, match="proposal_task_workspace_boundary"):
+        controller._run_serial_independent_ranked_proposer_stage(
+            parent_sha="parent",
+            attempt_dir=attempt_dir,
+            attempt_history=[],
+        )
+
+    round_state = state.snapshot()["next_autoresearch_action"]["proposal_round"]
+    assert round_state["stage"] == "proposing"
+    assert round_state["tasks"]["r1-p1"]["result_idea_id"] is not None
+    assert round_state["tasks"]["r1-p2"]["result_idea_id"] is None
+
+
+def test_independent_candidate_prompt_freezes_whiteboard_and_single_prompt_does_not(
+    tmp_path,
+):
+    templates_dir = Path(__file__).resolve().parents[1] / "templates"
+    ranked_prompt = autoresearch_proposer.generate_autoresearch_proposal_prompt(
+        idea={"idea": {"title": "Ranked prompt"}},
+        work_dir=tmp_path,
+        parent_sha="parent",
+        attempt_dir=tmp_path / "attempt_1",
+        templates_dir=templates_dir,
+        hitl_submission=True,
+        candidate_recording=True,
+    )
+    single_prompt = autoresearch_proposer.generate_autoresearch_proposal_prompt(
+        idea={"idea": {"title": "Single prompt"}},
+        work_dir=tmp_path,
+        parent_sha="parent",
+        attempt_dir=tmp_path / "attempt_1",
+        templates_dir=templates_dir,
+        hitl_submission=True,
+    )
+
+    assert "The whiteboard is read-only for this independent proposal task" in ranked_prompt
+    assert "whiteboard prune-tip" not in ranked_prompt
+    assert "successful recording, stop" in ranked_prompt
+    assert "whiteboard prune-tip" in single_prompt
+    assert "On approval, stop" in single_prompt
