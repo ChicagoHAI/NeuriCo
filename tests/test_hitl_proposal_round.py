@@ -11,7 +11,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import cli.hitl_launcher as hitl_launcher  # noqa: E402
 import cli.hitl_run_worker as hitl_run_worker  # noqa: E402
-from core.hitl import HitlIdeaLog, HitlRuntime, HitlValidationError  # noqa: E402
+from core.hitl import (  # noqa: E402
+    HitlIdeaLog,
+    HitlRuntime,
+    HitlValidationError,
+    visible_ranked_idea_records,
+)
 from core.hitl_autoresearch import HitlAutoResearchController  # noqa: E402
 from core.hitl_paths import hitl_launch_requests_dir  # noqa: E402
 from core.hitl_proposal_round import (  # noqa: E402
@@ -802,3 +807,332 @@ def test_existing_idea_rendering_has_no_ranked_fields_when_they_are_absent(tmp_p
     assert "evidence: Existing rendering remains unchanged." in rendered
     assert "proposal_task_id:" not in rendered
     assert "ranking:" not in rendered
+
+
+def _seed_ranked_visibility_records(tmp_path):
+    log = HitlIdeaLog(tmp_path)
+
+    def evidence(
+        text,
+        *,
+        premises=(),
+        actor="experiment_runner",
+        task_id=None,
+        category="constraint_or_risk",
+    ):
+        record = {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "evidence",
+            "idea_category": category,
+            "level": "C",
+            "actor": actor,
+            "premises": list(premises),
+            "context": text,
+            "related_artifacts": [],
+            "evidence": text,
+            "raised": False,
+        }
+        if task_id is not None:
+            record.update(
+                {
+                    "parent_node_id": "parent",
+                    "attempt_id": "attempt_1",
+                    "proposal_task_id": task_id,
+                }
+            )
+        return log.append(record, idempotent=category == "proposal_verification")
+
+    def proposal(text, task_id, premises):
+        return log.append(
+            {
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "proposal",
+                "idea_type": "proposal",
+                "proposal_type": "exploitation",
+                "level": "C",
+                "actor": "autoresearch_proposer",
+                "parent_node_id": "parent",
+                "attempt_id": "attempt_1",
+                "proposal_task_id": task_id,
+                "premises": list(premises),
+                "context": text,
+                "related_artifacts": [],
+                "proposal": text,
+                "raised": False,
+            },
+            idempotent=True,
+        )
+
+    base_one = evidence("Visible historical finding one.")
+    base_two = evidence("Visible historical finding two.")
+    proposer_one_note = evidence(
+        "Private proposer one premise.",
+        premises=[base_one["idea_id"]],
+        actor="autoresearch_proposer",
+        task_id="r1-p1",
+    )
+    proposer_two_note = evidence(
+        "Private proposer two premise.",
+        premises=[base_two["idea_id"]],
+        actor="autoresearch_proposer",
+        task_id="r1-p2",
+    )
+    proposal_one = proposal(
+        "Candidate one.",
+        "r1-p1",
+        [proposer_one_note["idea_id"]],
+    )
+    proposal_two = proposal(
+        "Candidate two.",
+        "r1-p2",
+        [proposer_two_note["idea_id"]],
+    )
+    unused_proposer_note = evidence(
+        "Unused private proposer note.",
+        actor="autoresearch_proposer",
+        task_id="r1-p1",
+    )
+    verifier_one_note = evidence(
+        "Verifier one supporting observation.",
+        premises=[proposal_one["idea_id"]],
+        actor="proposal_verifier",
+        task_id="r1-v1",
+    )
+    verifier_two_note = evidence(
+        "Verifier two supporting observation.",
+        premises=[proposal_two["idea_id"]],
+        actor="proposal_verifier",
+        task_id="r1-v2",
+    )
+    verification_one = evidence(
+        "Candidate one verification.",
+        premises=[proposal_one["idea_id"], verifier_one_note["idea_id"]],
+        actor="proposal_verifier",
+        task_id="r1-v1",
+        category="proposal_verification",
+    )
+    verification_two = evidence(
+        "Candidate two verification.",
+        premises=[proposal_two["idea_id"], verifier_two_note["idea_id"]],
+        actor="proposal_verifier",
+        task_id="r1-v2",
+        category="proposal_verification",
+    )
+    reviewer_one_note = evidence(
+        "Reviewer one private comparison note.",
+        premises=[verification_one["idea_id"]],
+        actor="proposal_reviewer",
+        task_id="r1-r1",
+    )
+    reviewer_two_note = evidence(
+        "Reviewer two private comparison note.",
+        premises=[verification_two["idea_id"]],
+        actor="proposal_reviewer",
+        task_id="r1-r2",
+    )
+    return {
+        "log": log,
+        "base": (base_one, base_two),
+        "proposer_notes": (proposer_one_note, proposer_two_note),
+        "proposals": (proposal_one, proposal_two),
+        "unused_proposer_note": unused_proposer_note,
+        "verifier_notes": (verifier_one_note, verifier_two_note),
+        "verifications": (verification_one, verification_two),
+        "reviewer_notes": (reviewer_one_note, reviewer_two_note),
+    }
+
+
+def _visible_ids(records):
+    return [record["idea_id"] for record in records]
+
+
+def test_ranked_visibility_enforces_role_ownership_and_transitive_closure(tmp_path):
+    seeded = _seed_ranked_visibility_records(tmp_path)
+    records = seeded["log"].records()
+    base_ids = [record["idea_id"] for record in seeded["base"]]
+    proposal_one, proposal_two = seeded["proposals"]
+    verification_one, verification_two = seeded["verifications"]
+
+    proposer_records = visible_ranked_idea_records(
+        records,
+        parent_node_id="parent",
+        candidate_attempt_id="attempt_1",
+        base_idea_number=2,
+        proposal_task_id="r1-p1",
+        role="proposer",
+    )
+    assert _visible_ids(proposer_records) == [
+        *base_ids,
+        seeded["proposer_notes"][0]["idea_id"],
+        proposal_one["idea_id"],
+        seeded["unused_proposer_note"]["idea_id"],
+    ]
+
+    verifier_records = visible_ranked_idea_records(
+        records,
+        parent_node_id="parent",
+        candidate_attempt_id="attempt_1",
+        base_idea_number=2,
+        proposal_task_id="r1-v1",
+        role="verifier",
+        seed_idea_ids=[proposal_one["idea_id"]],
+    )
+    assert _visible_ids(verifier_records) == [
+        *base_ids,
+        seeded["proposer_notes"][0]["idea_id"],
+        proposal_one["idea_id"],
+        seeded["verifier_notes"][0]["idea_id"],
+        verification_one["idea_id"],
+    ]
+
+    reviewer_records = visible_ranked_idea_records(
+        records,
+        parent_node_id="parent",
+        candidate_attempt_id="attempt_1",
+        base_idea_number=2,
+        proposal_task_id="r1-r1",
+        role="reviewer",
+        seed_idea_ids=[
+            proposal_one["idea_id"],
+            proposal_two["idea_id"],
+            verification_one["idea_id"],
+            verification_two["idea_id"],
+        ],
+    )
+    assert _visible_ids(reviewer_records) == [
+        *base_ids,
+        seeded["proposer_notes"][0]["idea_id"],
+        seeded["proposer_notes"][1]["idea_id"],
+        proposal_one["idea_id"],
+        proposal_two["idea_id"],
+        seeded["verifier_notes"][0]["idea_id"],
+        seeded["verifier_notes"][1]["idea_id"],
+        verification_one["idea_id"],
+        verification_two["idea_id"],
+        seeded["reviewer_notes"][0]["idea_id"],
+    ]
+
+
+def test_ranked_idea_tools_share_visibility_for_lookup_premises_and_summaries(tmp_path):
+    seeded = _seed_ranked_visibility_records(tmp_path)
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    runtime._tool_context = {
+        "hitl_stage": "review",
+        "actor": "proposal_verifier",
+        "provenance": {
+            "parent_node_id": "parent",
+            "attempt_id": "attempt_1",
+            "proposal_task_id": "r1-v1",
+        },
+        "idea_visibility": {
+            "base_idea_number": 2,
+            "role": "verifier",
+            "seed_idea_ids": [seeded["proposals"][0]["idea_id"]],
+        },
+    }
+
+    visible = runtime.view_ideas_for_tool()
+    visible_ids = _visible_ids(visible["ideas"])
+    hidden_id = seeded["proposals"][1]["idea_id"]
+    hidden_dependent_id = seeded["verifier_notes"][1]["idea_id"]
+    assert hidden_id not in visible_ids
+    assert hidden_dependent_id not in visible_ids
+    assert hidden_id not in visible["text"]
+    assert "Candidate two." not in visible["text"]
+    assert f"used_by: {hidden_dependent_id}" not in visible["text"]
+    assert f"Finalized HITL ideas: {len(visible_ids)}" in visible["text"]
+
+    for unavailable_id in (hidden_id, "I999"):
+        with pytest.raises(HitlValidationError, match="HITL_ERROR unknown_idea_id"):
+            runtime.view_ideas_for_tool({"idea_id": unavailable_id})
+
+    with pytest.raises(HitlValidationError, match="HITL_ERROR unknown_premise"):
+        runtime.log_reported_payload(
+            {
+                "idea_type": "evidence",
+                "idea_category": "constraint_or_risk",
+                "premises": [hidden_id],
+                "context": "Attempt to cite a hidden proposal.",
+                "related_artifacts": [],
+                "evidence": "This must be rejected without revealing hidden content.",
+            }
+        )
+
+    own_record = runtime.log_reported_payload(
+        {
+            "idea_type": "evidence",
+            "idea_category": "constraint_or_risk",
+            "premises": [seeded["proposals"][0]["idea_id"]],
+            "context": "A visible verifier observation.",
+            "related_artifacts": [],
+            "evidence": "This valid note becomes visible to the same task.",
+        }
+    )
+    assert own_record["idea_id"] in _visible_ids(runtime.view_ideas_for_tool()["ideas"])
+
+
+def test_reviewer_rendering_uses_one_proposal_verification_presentation_order(tmp_path):
+    seeded = _seed_ranked_visibility_records(tmp_path)
+    proposal_one, proposal_two = seeded["proposals"]
+    verification_one, verification_two = seeded["verifications"]
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    pairs = [
+        (proposal_two["idea_id"], verification_two["idea_id"]),
+        (proposal_one["idea_id"], verification_one["idea_id"]),
+    ]
+    runtime._tool_context = {
+        "provenance": {
+            "parent_node_id": "parent",
+            "attempt_id": "attempt_1",
+            "proposal_task_id": "r1-r1",
+        },
+        "idea_visibility": {
+            "base_idea_number": 2,
+            "role": "reviewer",
+            "seed_idea_ids": [
+                proposal_one["idea_id"],
+                proposal_two["idea_id"],
+                verification_one["idea_id"],
+                verification_two["idea_id"],
+            ],
+            "proposal_verification_pairs": pairs,
+        },
+    }
+
+    rendered = runtime.view_ideas_for_tool()["text"]
+    assert "Proposal and verification pairs, in presentation order:" in rendered
+    assert "Ideas in presentation order:" in rendered
+    assert "Chronological ideas:" not in rendered
+    assert rendered.index(f"- {pairs[0][0]} -> {pairs[0][1]}") < rendered.index(
+        f"- {pairs[1][0]} -> {pairs[1][1]}"
+    )
+    first_pair_positions = [rendered.index(f"{idea_id} [") for idea_id in pairs[0]]
+    second_pair_positions = [rendered.index(f"{idea_id} [") for idea_id in pairs[1]]
+    assert max(first_pair_positions) < min(second_pair_positions)
+
+
+def test_unrestricted_idea_tools_keep_existing_full_log_behavior(tmp_path):
+    seeded = _seed_ranked_visibility_records(tmp_path)
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    runtime._tool_context = {}
+
+    result = runtime.view_ideas_for_tool()
+
+    assert result["ideas"] == seeded["log"].records()
+    assert result["text"] == seeded["log"].render_for_agent()

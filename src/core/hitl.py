@@ -22,7 +22,7 @@ import threading
 import secrets
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_mode import HitlMode, normalize_hitl_mode
@@ -294,6 +294,81 @@ def _validate_premises(premises: List[str], existing_ids: Optional[set[str]]) ->
             f"Unknown premise idea id(s): {', '.join(missing)}\n"
             "Run `hitl-view-ideas`, then retry using only finalized idea ids that appear there."
         )
+
+
+def visible_ranked_idea_records(
+    records: Iterable[Dict[str, Any]],
+    *,
+    parent_node_id: str,
+    candidate_attempt_id: str,
+    base_idea_number: int,
+    proposal_task_id: str,
+    role: str,
+    seed_idea_ids: Iterable[str] = (),
+) -> List[Dict[str, Any]]:
+    """Derive one ranked task's visible records from the authoritative idea log."""
+
+    from core.hitl_proposal_round import parse_proposal_task_id
+
+    if not str(parent_node_id).strip() or not str(candidate_attempt_id).strip():
+        raise HitlValidationError("Ranked idea visibility requires parent and attempt identity.")
+    if isinstance(base_idea_number, bool) or not isinstance(base_idea_number, int):
+        raise HitlValidationError("Ranked idea visibility requires an integer idea boundary.")
+    if base_idea_number < 0:
+        raise HitlValidationError("Ranked idea visibility boundary must be non-negative.")
+    try:
+        task_identity = parse_proposal_task_id(proposal_task_id)
+    except ValueError as exc:
+        raise HitlValidationError(str(exc)) from exc
+    if role not in {"proposer", "verifier", "reviewer"} or task_identity.role != role:
+        raise HitlValidationError("Ranked idea visibility role does not match its task ID.")
+
+    all_records = list(records)
+    records_by_id = {
+        str(record.get("idea_id", "")).strip(): record
+        for record in all_records
+        if str(record.get("idea_id", "")).strip()
+    }
+    base_ids = set()
+    for idea_id in records_by_id:
+        if not idea_id.startswith("I") or not idea_id[1:].isdigit():
+            raise HitlValidationError("Finalized HITL idea has an invalid runtime idea ID.")
+        if int(idea_id[1:]) <= base_idea_number:
+            base_ids.add(idea_id)
+
+    own_ids = {
+        idea_id
+        for idea_id, record in records_by_id.items()
+        if str(record.get("parent_node_id", "")) == str(parent_node_id)
+        and str(record.get("attempt_id", "")) == str(candidate_attempt_id)
+        and str(record.get("proposal_task_id", "")) == proposal_task_id
+    }
+    seeds = _normalize_premises(list(seed_idea_ids))
+    if role == "proposer" and seeds:
+        raise HitlValidationError("Proposer idea visibility must not include result seeds.")
+    if role in {"verifier", "reviewer"} and not seeds:
+        raise HitlValidationError(f"{role.capitalize()} idea visibility requires result seeds.")
+
+    closure_ids = set()
+    pending = list(seeds)
+    while pending:
+        idea_id = pending.pop()
+        if idea_id in closure_ids:
+            continue
+        record = records_by_id.get(idea_id)
+        if record is None:
+            raise HitlValidationError(
+                "Ranked idea visibility references an unavailable finalized idea."
+            )
+        closure_ids.add(idea_id)
+        pending.extend(_normalize_premises(record.get("premises")))
+
+    visible_ids = base_ids | own_ids | closure_ids
+    return [
+        record
+        for record in all_records
+        if str(record.get("idea_id", "")).strip() in visible_ids
+    ]
 
 
 def _normalize_proposal_ranking(value: Any) -> List[str]:
@@ -643,55 +718,112 @@ class HitlIdeaLog:
             return []
         return read_jsonl(self.path)
 
-    def render_for_agent(self, *, idea_id: Optional[str] = None) -> str:
-        all_records = self.records()
-        if not all_records:
+    def render_for_agent(
+        self,
+        *,
+        idea_id: Optional[str] = None,
+        records: Optional[Iterable[Dict[str, Any]]] = None,
+        proposal_verification_pairs: Optional[Sequence[tuple[str, str]]] = None,
+    ) -> str:
+        visible_records = self.records() if records is None else list(records)
+        if not visible_records:
             return "No finalized HITL ideas have been recorded yet."
-        records = all_records
+        rendered_records = visible_records
         if idea_id:
-            records = [record for record in all_records if record.get("idea_id") == idea_id]
-            if not records:
+            rendered_records = [
+                record for record in visible_records if record.get("idea_id") == idea_id
+            ]
+            if not rendered_records:
                 raise HitlValidationError(f"No finalized HITL idea exists with id {idea_id}.")
         record_ids = [
             str(record.get("idea_id", "")).strip()
-            for record in all_records
+            for record in visible_records
             if str(record.get("idea_id", "")).strip()
         ]
         used_by: Dict[str, List[str]] = {idea_id: [] for idea_id in record_ids}
-        for record in all_records:
+        for record in visible_records:
             record_id = str(record.get("idea_id", "")).strip()
             for premise in _normalize_premises(record.get("premises")):
-                used_by.setdefault(premise, []).append(record_id)
+                if premise in used_by:
+                    used_by[premise].append(record_id)
 
         if idea_id:
             blocks = [f"Finalized HITL idea: {idea_id}"]
         else:
             roots = [
                 record_id
-                for record_id, record in zip(record_ids, all_records)
+                for record_id, record in zip(record_ids, visible_records)
                 if not _normalize_premises(record.get("premises"))
             ]
             leaves = [record_id for record_id in record_ids if not used_by.get(record_id)]
             evidence_count = sum(
-                1 for record in all_records if record.get("idea_type") == "evidence"
+                1 for record in visible_records if record.get("idea_type") == "evidence"
             )
             decision_count = sum(
-                1 for record in all_records if record.get("idea_type") == "decision"
+                1 for record in visible_records if record.get("idea_type") == "decision"
             )
             proposal_count = sum(
-                1 for record in all_records if record.get("idea_type") == "proposal"
+                1 for record in visible_records if record.get("idea_type") == "proposal"
             )
             blocks = [
-                f"Finalized HITL ideas: {len(all_records)}",
+                f"Finalized HITL ideas: {len(visible_records)}",
                 f"Evidence: {evidence_count}",
                 f"Decision: {decision_count}",
                 f"Proposal: {proposal_count}",
                 f"Roots: {', '.join(roots) if roots else 'none'}",
                 f"Leaves: {', '.join(leaves) if leaves else 'none'}",
-                "",
-                "Chronological ideas:",
             ]
-        for record in records:
+            if proposal_verification_pairs:
+                records_by_id = {
+                    str(record.get("idea_id", "")).strip(): record
+                    for record in visible_records
+                }
+                ordered_pair_ids: List[str] = []
+                seen_pair_ids = set()
+                normalized_pairs: List[tuple[str, str]] = []
+                for proposal_id, verification_id in proposal_verification_pairs:
+                    pair = (str(proposal_id).strip(), str(verification_id).strip())
+                    if not all(pair) or any(item not in records_by_id for item in pair):
+                        raise HitlValidationError(
+                            "Reviewer proposal-verification mapping references an unavailable idea."
+                        )
+                    if any(item in seen_pair_ids for item in pair):
+                        raise HitlValidationError(
+                            "Reviewer proposal-verification mapping contains a duplicate idea."
+                        )
+                    normalized_pairs.append(pair)
+                    ordered_pair_ids.extend(pair)
+                    seen_pair_ids.update(pair)
+                pair_positions = [
+                    index
+                    for index, record in enumerate(visible_records)
+                    if str(record.get("idea_id", "")).strip() in seen_pair_ids
+                ]
+                insert_at = min(pair_positions)
+                remaining = [
+                    record
+                    for record in visible_records
+                    if str(record.get("idea_id", "")).strip() not in seen_pair_ids
+                ]
+                before_count = sum(
+                    1
+                    for record in visible_records[:insert_at]
+                    if str(record.get("idea_id", "")).strip() not in seen_pair_ids
+                )
+                rendered_records = [
+                    *remaining[:before_count],
+                    *(records_by_id[item] for item in ordered_pair_ids),
+                    *remaining[before_count:],
+                ]
+                blocks.extend(["", "Proposal and verification pairs, in presentation order:"])
+                blocks.extend(
+                    f"- {proposal_id} -> {verification_id}"
+                    for proposal_id, verification_id in normalized_pairs
+                )
+                blocks.extend(["", "Ideas in presentation order:"])
+            else:
+                blocks.extend(["", "Chronological ideas:"])
+        for record in rendered_records:
             record_id = str(record.get("idea_id", "")).strip()
             idea_type = str(record.get("idea_type", "")).strip()
             category = str(record.get("idea_category", "")).strip()
@@ -1829,9 +1961,43 @@ class HitlRuntime:
         self._tool_url = ""
         self._tool_token = ""
 
+    def _visible_idea_records_for_tool(self) -> List[Dict[str, Any]]:
+        records = self.log.records()
+        visibility = self._tool_context.get("idea_visibility")
+        if visibility is None:
+            return records
+        if not isinstance(visibility, dict):
+            raise HitlValidationError("Ranked idea visibility context must be an object.")
+        provenance = self._tool_context.get("provenance")
+        if not isinstance(provenance, dict):
+            raise HitlValidationError("Ranked idea visibility requires runtime provenance.")
+        return visible_ranked_idea_records(
+            records,
+            parent_node_id=provenance.get("parent_node_id", ""),
+            candidate_attempt_id=provenance.get("attempt_id", ""),
+            base_idea_number=visibility.get("base_idea_number"),
+            proposal_task_id=provenance.get("proposal_task_id", ""),
+            role=visibility.get("role", ""),
+            seed_idea_ids=visibility.get("seed_idea_ids", ()),
+        )
+
+    def validate_visible_idea_premises(self, premises: Any) -> List[str]:
+        """Validate premises against the same records exposed by the idea tools."""
+
+        normalized = _normalize_premises(premises)
+        if self._tool_context.get("idea_visibility") is not None:
+            visible_ids = {
+                str(record.get("idea_id", "")).strip()
+                for record in self._visible_idea_records_for_tool()
+                if str(record.get("idea_id", "")).strip()
+            }
+            _validate_premises(normalized, visible_ids)
+        return normalized
+
     def log_reported_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
             record = self._record_from_tool_payload(payload, raised=False)
+            self.validate_visible_idea_premises(record.get("premises"))
             existing = self.log.find_equivalent(record)
             if existing is not None:
                 return existing
@@ -2270,16 +2436,31 @@ class HitlRuntime:
 
     def view_ideas_for_tool(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         with self._tool_lock:
+            visible_records = self._visible_idea_records_for_tool()
+            visibility = self._tool_context.get("idea_visibility")
+            proposal_verification_pairs = (
+                visibility.get("proposal_verification_pairs")
+                if isinstance(visibility, dict)
+                else None
+            )
             idea_id = str((payload or {}).get("idea_id", "")).strip()
             if idea_id:
                 try:
+                    selected_records = [
+                        record
+                        for record in visible_records
+                        if record.get("idea_id") == idea_id
+                    ]
+                    if visibility is not None and not selected_records:
+                        raise HitlValidationError(
+                            f"No finalized HITL idea exists with id {idea_id}."
+                        )
                     return {
-                        "ideas": [
-                            record
-                            for record in self.log.records()
-                            if record.get("idea_id") == idea_id
-                        ],
-                        "text": self.log.render_for_agent(idea_id=idea_id),
+                        "ideas": selected_records,
+                        "text": self.log.render_for_agent(
+                            idea_id=idea_id,
+                            records=visible_records,
+                        ),
                     }
                 except HitlValidationError as exc:
                     raise HitlValidationError(
@@ -2288,8 +2469,11 @@ class HitlRuntime:
                         "Run `hitl-view-ideas` to inspect available finalized idea ids, then retry."
                     ) from exc
             return {
-                "ideas": self.log.records(),
-                "text": self.log.render_for_agent(),
+                "ideas": visible_records,
+                "text": self.log.render_for_agent(
+                    records=visible_records,
+                    proposal_verification_pairs=proposal_verification_pairs,
+                ),
             }
 
     def view_current_frontier_for_tool(self) -> Dict[str, Any]:
