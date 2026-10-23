@@ -601,6 +601,10 @@ One `HitlRuntime` object therefore cannot safely represent two simultaneous agen
 
 The coordinator creates one lightweight `HitlRuntime` object for each active task and passes the existing manager and channel into it. This avoids constructing additional managers.
 
+Rollback may replace an attempt-local `HitlRuntime` wrapper. Every replacement
+must reuse the run-owned manager and channel; it must not construct another
+manager or derive provider authority from defaults.
+
 The object is destroyed after the task finishes. It is never durable state.
 
 The outer runner keeps the existing workspace-wide HITL run lease for the

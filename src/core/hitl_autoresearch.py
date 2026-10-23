@@ -2396,6 +2396,13 @@ class HitlAutoResearchController:
         self.proposal_generator = proposal_generator
         self.scorer = scorer
         self.hitl_runtime = hitl_runtime
+        # Rollback replaces attempt-local runtime wrappers, not the run-owned
+        # manager and channel that were injected by the launcher.
+        self._hitl_run_binding = (
+            (hitl_runtime.manager, hitl_runtime.channel)
+            if hitl_runtime is not None
+            else None
+        )
         self.hitl_comment_mode = hitl_comment_mode
         self.hitl_frontier = HitlFrontierStore(self.work_dir)
         self.pending_hitl_recovery = pending_hitl_recovery
@@ -5328,9 +5335,12 @@ class HitlAutoResearchController:
 
     def _proposal_hitl_runtime(self) -> HitlRuntime:
         if self.hitl_runtime is None:
+            binding = getattr(self, "_hitl_run_binding", None)
             self.hitl_runtime = HitlRuntime(
                 self.work_dir,
                 "experiment_runner",
+                manager=binding[0] if binding is not None else None,
+                channel=binding[1] if binding is not None else None,
                 use_hitl_autoresearch_whiteboard=True,
                 hitl_mode=self.hitl_mode,
             )
