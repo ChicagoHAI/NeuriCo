@@ -179,6 +179,19 @@ def _now() -> str:
     return utc_now(timespec="seconds")
 
 
+def _provider_failure_counter_update(result: Dict[str, Any]) -> Optional[bool]:
+    """Return the existing HITL provider-counter update for one launch result."""
+
+    if "provider_process_failed" not in result:
+        return None
+    failed = bool(result.get("provider_process_failed"))
+    if failed:
+        return True
+    if result.get("return_code") == 0:
+        return False
+    return None
+
+
 def _compact_json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
@@ -1956,10 +1969,8 @@ class HitlRuntime:
     def _record_worker_provider_result(self, result: Dict[str, Any]) -> None:
         """Stop after the active continuation exhausts its provider attempts."""
         self._require_default_worker_state("worker provider-failure state")
-        if "provider_process_failed" not in result:
-            return
-        failed = bool(result.get("provider_process_failed"))
-        if not failed and result.get("return_code") != 0:
+        failed = _provider_failure_counter_update(result)
+        if failed is None:
             return
 
         from core.hitl_runtime_state import HitlRuntimeState
@@ -1967,6 +1978,10 @@ class HitlRuntime:
         failures = HitlRuntimeState(self.work_dir).record_worker_provider_result(
             failed=failed
         )
+        self._stop_after_provider_failure_threshold(failures)
+
+    @staticmethod
+    def _stop_after_provider_failure_threshold(failures: int) -> None:
         if failures < MAX_CONSECUTIVE_PROVIDER_FAILURES:
             return
 
@@ -2589,6 +2604,163 @@ class HitlRuntime:
                 "status": "recorded",
                 "idea_id": logged["idea_id"],
                 "instruction": self._ranked_task_instruction(role),
+            }
+
+    def _validate_ranked_task_result_reference(
+        self,
+        task_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        idea_id = str(task_context["task"].get("result_idea_id") or "").strip()
+        record = self._idea_record_by_id(idea_id)
+        if record is None:
+            raise HitlValidationError(
+                "Completed proposal task references a missing finalized idea."
+            )
+        provenance = _runtime_provenance(self._tool_context.get("provenance"))
+        if any(str(record.get(key, "")) != value for key, value in provenance.items()):
+            raise HitlValidationError(
+                "Completed proposal task references an idea with mismatched provenance."
+            )
+        role = str(task_context["role"])
+        terminal_shape = {
+            "proposer": ("proposal", "proposal", None),
+            "verifier": ("review", "evidence", "proposal_verification"),
+            "reviewer": ("review", "evidence", "proposal_review"),
+        }[role]
+        if (
+            record.get("hitl_stage") != terminal_shape[0]
+            or record.get("idea_type") != terminal_shape[1]
+            or (
+                terminal_shape[2] is not None
+                and record.get("idea_category") != terminal_shape[2]
+            )
+        ):
+            raise HitlValidationError(
+                "Completed proposal task references an idea with the wrong role schema."
+            )
+        dependencies = (
+            self._ranked_round_results(task_context["round_state"])
+            if role == "reviewer"
+            else {"candidate_ids": [], "verification_ids": []}
+        )
+        records = self.log.records()
+        existing_ids = {
+            str(candidate.get("idea_id", "")).strip()
+            for candidate in records
+            if str(candidate.get("idea_id", "")).strip() != idea_id
+        }
+        HitlIdeaLog.validate(
+            record,
+            existing_ids=existing_ids,
+            existing_records=records,
+            proposal_review_candidate_ids=(
+                dependencies["candidate_ids"] if role == "reviewer" else None
+            ),
+            require_proposal_review_candidates=role == "reviewer",
+        )
+        premises = _normalize_premises(record.get("premises"))
+        if role == "verifier":
+            assigned_id = str(
+                task_context["task"].get("assigned_proposal_idea_id") or ""
+            ).strip()
+            if not assigned_id or assigned_id not in premises:
+                raise HitlValidationError(
+                    "Completed proposal verification does not cite its assigned proposal."
+                )
+        elif role == "reviewer":
+            missing_verifications = [
+                verification_id
+                for verification_id in dependencies["verification_ids"]
+                if verification_id not in premises
+            ]
+            if missing_verifications:
+                raise HitlValidationError(
+                    "Completed proposal review does not cite every current verification."
+                )
+        return record
+
+    def ranked_task_result_after_worker_exit(
+        self,
+        result: Dict[str, Any],
+        *,
+        replacement_prompt: str,
+        worker_name: str,
+    ) -> Dict[str, Any]:
+        """Resolve one ranked provider exit without global worker continuation state."""
+
+        from core.hitl_run_control import HitlRunStopRequested, hitl_run_stop_requested
+
+        with self._tool_lock:
+            task_context = self._ranked_task_state_context()
+            role = str(task_context["role"])
+            self._validate_ranked_task_workspace(role)
+            if task_context["task"].get("result_idea_id") is not None:
+                record = self._validate_ranked_task_result_reference(task_context)
+                self._tool_context["ranked_task_terminal"] = True
+                return {
+                    "status": "recorded",
+                    "complete": True,
+                    "replacement": False,
+                    "idea_id": record["idea_id"],
+                    "worker_exit_warning": (
+                        f"{worker_name} exited after its ranked task result was recorded. "
+                        "Runtime retained the durable result."
+                        if not result.get("success")
+                        else ""
+                    ),
+                }
+
+            pending = task_context["task"].get("pending_finalization")
+            if pending is not None:
+                if not isinstance(pending, dict) or not pending:
+                    raise HitlValidationError(
+                        "Proposal task has an invalid pending finalization intent."
+                    )
+                finalized = self.finish_ranked_proposal_task(dict(pending))
+                return {
+                    "status": "recorded",
+                    "complete": True,
+                    "replacement": False,
+                    "idea_id": finalized["idea_id"],
+                    "worker_exit_warning": (
+                        f"{worker_name} exited while its result commit was pending. "
+                        "Runtime completed the durable commit without relaunching the worker."
+                    ),
+                }
+
+            if result.get("stopped") or hitl_run_stop_requested():
+                raise HitlRunStopRequested("HITL run stop requested by the user.")
+
+            failed = _provider_failure_counter_update(result)
+            if failed is not None:
+                state_args = {
+                    **task_context["identity"],
+                    "proposal_task_id": task_context["task_id"],
+                    "role": role,
+                }
+                failures = task_context["state"].record_proposal_task_provider_result(
+                    **state_args,
+                    failed=failed,
+                )
+                self._stop_after_provider_failure_threshold(failures)
+
+            prompt_block = self._replacement_prompt_after_worker_exit(
+                _require_text(
+                    replacement_prompt,
+                    "replacement_prompt",
+                    "Ranked proposal task replacement",
+                ),
+                result,
+            )
+            return {
+                "status": "replacement",
+                "complete": False,
+                "replacement": True,
+                "prompt_block": prompt_block,
+                "worker_exit_warning": (
+                    f"{worker_name} exited before recording a ranked task result. Runtime "
+                    "will relaunch the same logical task from its reproducible prompt."
+                ),
             }
 
     def log_reported_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:

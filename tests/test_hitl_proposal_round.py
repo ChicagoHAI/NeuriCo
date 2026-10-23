@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import cli.hitl_launcher as hitl_launcher  # noqa: E402
 import cli.hitl_run_worker as hitl_run_worker  # noqa: E402
+import agents.proposal_assessment as proposal_assessment  # noqa: E402
 from core.hitl import (  # noqa: E402
     HitlIdeaLog,
     HitlRuntime,
@@ -33,6 +34,12 @@ from core.hitl_proposal_round import (  # noqa: E402
     validate_proposal_task_id,
 )
 from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError  # noqa: E402
+from core.hitl_run_control import (  # noqa: E402
+    HitlRunStopControl,
+    HitlRunStopRequested,
+    activate_hitl_run_stop_control,
+)
+from core.hitl_stage_runtime import run_worker_with_replacements  # noqa: E402
 from core.runner import ResearchRunner  # noqa: E402
 
 
@@ -2506,3 +2513,364 @@ def test_unreferenced_ranked_idea_never_completes_task_state(
     task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
     assert task["result_idea_id"] is None
     assert "pending_finalization" not in task
+
+
+def _ranked_launch_result(
+    *,
+    return_code=0,
+    provider_process_failed=False,
+    timed_out=False,
+    stopped=False,
+):
+    return {
+        "success": return_code == 0 and not timed_out and not stopped,
+        "return_code": return_code,
+        "timed_out": timed_out,
+        "stopped": stopped,
+        "background_processes_terminated": False,
+        "provider_process_failed": provider_process_failed,
+    }
+
+
+def _prepare_live_ranked_candidate(tmp_path):
+    base = _append_ranked_session_base_idea(tmp_path)
+    state, identity, _round_state = _begin_ranked_round(tmp_path, base_idea_number=1)
+    runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-p1",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+        base_idea_number=1,
+    )
+    payload = {
+        "proposal_type": "exploitation",
+        "premises": [base["idea_id"]],
+        "proposal": "Change one mechanism and keep evaluation fixed.",
+    }
+    return runtime, state, identity, payload
+
+
+def test_ranked_worker_lifecycle_accepts_committed_result_before_provider_failure(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    runtime, state, identity, payload = _prepare_live_ranked_candidate(tmp_path)
+    launches = []
+    control = HitlRunStopControl(tmp_path, "ranked-committed-result-test")
+
+    def launch_worker(prompt, log_prefix, *, record_continuation):
+        launches.append((prompt, log_prefix, record_continuation))
+        runtime.submit_proposal_payload(payload)
+        control.request(requested_by="test_stop_after_commit")
+        return _ranked_launch_result(return_code=17, provider_process_failed=True)
+
+    try:
+        with activate_hitl_run_stop_control(control):
+            _result, finish = run_worker_with_replacements(
+                runtime=runtime,
+                launch_worker=launch_worker,
+                prompt="Produce one candidate.",
+                log_prefix="r1-p1",
+                phase="proposal",
+                worker_name="Ranked proposer r1-p1",
+                record_continuation=False,
+                result_after_exit=lambda result: runtime.ranked_task_result_after_worker_exit(
+                    result,
+                    replacement_prompt="Produce one candidate.",
+                    worker_name="Ranked proposer r1-p1",
+                ),
+            )
+    finally:
+        runtime.clear_idea_tool_context()
+
+    assert launches == [("Produce one candidate.", "r1-p1", False)]
+    assert finish["complete"] is True
+    task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+    assert task["result_idea_id"] == finish["idea_id"]
+    assert "consecutive_provider_failures" not in task
+
+
+def test_ranked_worker_lifecycle_completes_pending_intent_without_relaunch(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    runtime, state, identity, payload = _prepare_live_ranked_candidate(tmp_path)
+    state.begin_proposal_task_finalization(
+        **identity,
+        proposal_task_id="r1-p1",
+        role="proposer",
+        normalized_output=payload,
+    )
+    launches = []
+
+    def launch_worker(prompt, log_prefix, *, record_continuation):
+        launches.append((prompt, log_prefix, record_continuation))
+        return _ranked_launch_result(return_code=19, provider_process_failed=True)
+
+    try:
+        _result, finish = run_worker_with_replacements(
+            runtime=runtime,
+            launch_worker=launch_worker,
+            prompt="Produce one candidate.",
+            log_prefix="r1-p1",
+            phase="proposal",
+            worker_name="Ranked proposer r1-p1",
+            record_continuation=False,
+            result_after_exit=lambda result: runtime.ranked_task_result_after_worker_exit(
+                result,
+                replacement_prompt="Produce one candidate.",
+                worker_name="Ranked proposer r1-p1",
+            ),
+        )
+    finally:
+        runtime.clear_idea_tool_context()
+
+    assert len(launches) == 1
+    assert finish["complete"] is True
+    task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+    assert task["result_idea_id"] == finish["idea_id"]
+    assert "pending_finalization" not in task
+    assert "consecutive_provider_failures" not in task
+
+
+def test_ranked_worker_replacements_are_serial_inside_one_logical_task(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    runtime, state, identity, payload = _prepare_live_ranked_candidate(tmp_path)
+    launches = []
+    launch_active = False
+
+    def launch_worker(prompt, log_prefix, *, record_continuation):
+        nonlocal launch_active
+        assert launch_active is False
+        launch_active = True
+        launches.append((prompt, log_prefix, record_continuation))
+        try:
+            if len(launches) == 2:
+                runtime.submit_proposal_payload(payload)
+            return _ranked_launch_result()
+        finally:
+            launch_active = False
+
+    try:
+        _result, finish = run_worker_with_replacements(
+            runtime=runtime,
+            launch_worker=launch_worker,
+            prompt="Stable ranked task prompt.",
+            log_prefix="r1-p1",
+            phase="proposal",
+            worker_name="Ranked proposer r1-p1",
+            record_continuation=False,
+            result_after_exit=lambda result: runtime.ranked_task_result_after_worker_exit(
+                result,
+                replacement_prompt="Stable ranked task prompt.",
+                worker_name="Ranked proposer r1-p1",
+            ),
+        )
+    finally:
+        runtime.clear_idea_tool_context()
+
+    assert launches == [
+        ("Stable ranked task prompt.", "r1-p1", False),
+        ("Stable ranked task prompt.", "r1-p1_recovery_1", False),
+    ]
+    assert finish["complete"] is True
+    assert state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"][
+        "result_idea_id"
+    ] == finish["idea_id"]
+
+
+def test_ranked_provider_failure_classification_reuses_single_worker_rule(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    runtime, state, identity, _payload = _prepare_live_ranked_candidate(tmp_path)
+
+    def handle(result):
+        return runtime.ranked_task_result_after_worker_exit(
+            result,
+            replacement_prompt="Stable ranked task prompt.",
+            worker_name="Ranked proposer r1-p1",
+        )
+
+    try:
+        assert handle(
+            _ranked_launch_result(return_code=-15, timed_out=True)
+        )["replacement"]
+        task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+        assert "consecutive_provider_failures" not in task
+
+        assert handle(
+            _ranked_launch_result(return_code=23, provider_process_failed=True)
+        )["replacement"]
+        task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+        assert task["consecutive_provider_failures"] == 1
+
+        assert handle(_ranked_launch_result(return_code=2))["replacement"]
+        task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+        assert task["consecutive_provider_failures"] == 1
+
+        assert handle(_ranked_launch_result())["replacement"]
+        task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+        assert "consecutive_provider_failures" not in task
+    finally:
+        runtime.clear_idea_tool_context()
+
+
+def test_third_ranked_provider_failure_requests_existing_global_stop(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    runtime, state, identity, _payload = _prepare_live_ranked_candidate(tmp_path)
+    launches = []
+    control = HitlRunStopControl(tmp_path, "ranked-provider-test")
+
+    def launch_worker(prompt, log_prefix, *, record_continuation):
+        launches.append((prompt, log_prefix, record_continuation))
+        return _ranked_launch_result(return_code=29, provider_process_failed=True)
+
+    try:
+        with activate_hitl_run_stop_control(control):
+            with pytest.raises(HitlRunStopRequested, match="three consecutive"):
+                run_worker_with_replacements(
+                    runtime=runtime,
+                    launch_worker=launch_worker,
+                    prompt="Stable ranked task prompt.",
+                    log_prefix="r1-p1",
+                    phase="proposal",
+                    worker_name="Ranked proposer r1-p1",
+                    record_continuation=False,
+                    result_after_exit=lambda result: runtime.ranked_task_result_after_worker_exit(
+                        result,
+                        replacement_prompt="Stable ranked task prompt.",
+                        worker_name="Ranked proposer r1-p1",
+                    ),
+                )
+    finally:
+        runtime.clear_idea_tool_context()
+
+    assert len(launches) == 3
+    assert control.record()["requested_by"] == "provider_unavailable"
+    task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+    assert task["consecutive_provider_failures"] == 3
+
+
+def test_ranked_process_creation_failure_remains_immediate(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    runtime, state, identity, _payload = _prepare_live_ranked_candidate(tmp_path)
+
+    def launch_worker(_prompt, _log_prefix, *, record_continuation):
+        assert record_continuation is False
+        raise HitlRunStopRequested("HITL run stopped because its provider was unavailable.")
+
+    try:
+        with pytest.raises(HitlRunStopRequested, match="provider was unavailable"):
+            run_worker_with_replacements(
+                runtime=runtime,
+                launch_worker=launch_worker,
+                prompt="Stable ranked task prompt.",
+                log_prefix="r1-p1",
+                phase="proposal",
+                worker_name="Ranked proposer r1-p1",
+                record_continuation=False,
+                result_after_exit=lambda result: runtime.ranked_task_result_after_worker_exit(
+                    result,
+                    replacement_prompt="Stable ranked task prompt.",
+                    worker_name="Ranked proposer r1-p1",
+                ),
+            )
+    finally:
+        runtime.clear_idea_tool_context()
+
+    task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+    assert "consecutive_provider_failures" not in task
+
+
+def test_worker_replacement_loop_keeps_existing_default_exit_handler(tmp_path):
+    calls = []
+
+    class ExistingRuntime:
+        @staticmethod
+        def handle_worker_exit_after_finish(result, *, phase, worker_name):
+            calls.append((result, phase, worker_name))
+            return {"approved": True}
+
+    launch_result = _ranked_launch_result()
+
+    def launch_worker(prompt, log_prefix, *, record_continuation):
+        assert (prompt, log_prefix, record_continuation) == (
+            "Existing prompt.",
+            "existing",
+            True,
+        )
+        return launch_result
+
+    result, finish = run_worker_with_replacements(
+        runtime=ExistingRuntime(),
+        launch_worker=launch_worker,
+        prompt="Existing prompt.",
+        log_prefix="existing",
+        phase="execute",
+        worker_name="existing worker",
+    )
+
+    assert result is launch_result
+    assert finish == {"approved": True}
+    assert calls == [(launch_result, "execute", "existing worker")]
+
+
+def test_proposal_assessment_launcher_uses_unique_attempt_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        proposal_assessment,
+        "build_agent_command",
+        lambda provider, **_kwargs: f"{provider} worker",
+    )
+    monkeypatch.setattr(
+        proposal_assessment,
+        "build_agent_environment",
+        lambda provider, env_extra: {"provider": provider, **env_extra},
+    )
+
+    def fake_runner(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["log_file"]).write_text("log", encoding="utf-8")
+        Path(kwargs["transcript_file"]).write_text("transcript", encoding="utf-8")
+        return _ranked_launch_result()
+
+    monkeypatch.setattr(proposal_assessment, "run_prebuilt_cli_agent", fake_runner)
+    task_dir = tmp_path / "attempt_4/proposal_round/r1/r1-v1"
+    first = proposal_assessment.run_proposal_assessment(
+        prompt="Assess the assigned proposal.",
+        work_dir=tmp_path,
+        task_dir=task_dir,
+        provider="codex",
+        env_extra={"NEURICO_HITL_URL": "http://runtime-one"},
+    )
+    second = proposal_assessment.run_proposal_assessment(
+        prompt="Assess the assigned proposal.",
+        work_dir=tmp_path,
+        task_dir=task_dir,
+        provider="codex",
+        env_extra={"NEURICO_HITL_URL": "http://runtime-two"},
+    )
+
+    first_dir = Path(first["launch_dir"])
+    second_dir = Path(second["launch_dir"])
+    assert first_dir.name == "launch_1"
+    assert second_dir.name == "launch_2"
+    assert first_dir != second_dir
+    assert first_dir.joinpath("prompt.txt").read_text(encoding="utf-8") == (
+        "Assess the assigned proposal.\n"
+    )
+    assert second_dir.joinpath("prompt.txt").is_file()
+    assert all(call["defer_provider_failure_to_runtime"] is True for call in calls)
+    assert calls[0]["log_file"] != calls[1]["log_file"]
+    assert calls[0]["transcript_file"] != calls[1]["transcript_file"]

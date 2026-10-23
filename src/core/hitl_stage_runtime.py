@@ -22,6 +22,7 @@ from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_re
 WorkerLauncher = Callable[..., Dict[str, Any]]
 StageResultHandler = Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]
 StageFailureHandler = Callable[[Dict[str, Any]], Dict[str, Any]]
+WorkerResultAfterExit = Callable[[Dict[str, Any]], Dict[str, Any]]
 
 
 def run_worker_with_replacements(
@@ -33,20 +34,27 @@ def run_worker_with_replacements(
     phase: str,
     worker_name: str,
     record_continuation: bool = True,
+    result_after_exit: Optional[WorkerResultAfterExit] = None,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """Run one worker and every replacement requested by the HITL runtime."""
+
+    def handle_result(result: Dict[str, Any]) -> Dict[str, Any]:
+        if result_after_exit is not None:
+            return result_after_exit(result)
+        if result.get("stopped") or hitl_run_stop_requested():
+            raise HitlRunStopRequested("HITL run stop requested by the user.")
+        return runtime.handle_worker_exit_after_finish(
+            result,
+            phase=phase,
+            worker_name=worker_name,
+        )
+
     result = launch_worker(
         prompt,
         log_prefix,
         record_continuation=record_continuation,
     )
-    if result.get("stopped") or hitl_run_stop_requested():
-        raise HitlRunStopRequested("HITL run stop requested by the user.")
-    finish = runtime.handle_worker_exit_after_finish(
-        result,
-        phase=phase,
-        worker_name=worker_name,
-    )
+    finish = handle_result(result)
     recovery_index = 0
     while finish.get("replacement"):
         recovery_index += 1
@@ -55,13 +63,7 @@ def run_worker_with_replacements(
             f"{log_prefix}_recovery_{recovery_index}",
             record_continuation=False,
         )
-        if result.get("stopped") or hitl_run_stop_requested():
-            raise HitlRunStopRequested("HITL run stop requested by the user.")
-        finish = runtime.handle_worker_exit_after_finish(
-            result,
-            phase=phase,
-            worker_name=worker_name,
-        )
+        finish = handle_result(result)
     return result, finish
 
 

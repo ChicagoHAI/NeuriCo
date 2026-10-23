@@ -98,7 +98,7 @@ Keep existing regression tests in their current files.
 - [x] Step 7 — Add nested proposal-round state
 - [x] Step 8 — Add scoped tool sessions and closed profiles
 - [x] Step 9 — Add state-first finish commands
-- [ ] Step 10 — Add the serial ranked worker lifecycle
+- [x] Step 10 — Add the serial ranked worker lifecycle
 - [ ] Step 11 — Implement the serial proposer stage
 - [ ] Step 12 — Implement the serial verifier stage
 - [ ] Step 13 — Implement the serial reviewer stage and aggregation
