@@ -111,7 +111,7 @@ Keep existing regression tests in their current files.
 
 ### Phase D: Concurrency
 
-- [ ] Step 17 — Add provider-level local cancellation
+- [x] Step 17 — Add provider-level local cancellation
 - [ ] Step 18 — Add stage-local parallel execution
 
 ### Phase E: Product surface and qualification
