@@ -377,7 +377,10 @@ workspace.
 
 The web interface opens at `http://localhost:7890`. Opening it does not start
 research. Click **Start AutoResearch** in the upper-right corner, review the run
-settings, and start the run.
+settings, and start the run. Proposal generation defaults to one proposer. You
+can instead choose **Independent ranked**, then choose 2–5 proposers and 2–9
+reviewers. The resulting proposals are verified and independently ranked before
+the manager selects one or requests another round.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
@@ -392,7 +395,9 @@ settings, and start the run.
 
 Opening the terminal interface does not start research. Enter `/run` and answer
 the prompts. NeuriCo detects whether to start a fresh HITL run or continue the
-existing workspace.
+existing workspace. The `Proposals` prompt offers the same single and ranked
+proposal modes as the web interface; panel counts are requested only for ranked
+mode.
 
 | Control | Purpose |
 | --- | --- |

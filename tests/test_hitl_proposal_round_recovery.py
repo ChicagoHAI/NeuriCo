@@ -647,3 +647,117 @@ def test_ranked_recovery_rejects_state_reference_with_wrong_task_provenance(
             attempt_history=[],
             boundary_validator=lambda: {"valid": True, "issues": []},
         )
+
+
+def test_serial_and_parallel_scheduling_produce_the_same_ranked_round_semantics(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+):
+    del fake_hitl_tool_servers
+
+    def run_round(work_dir):
+        controller, state, _manager, attempt_dir, base, _round, identity = (
+            _serial_controller(work_dir)
+        )
+        task_runtimes = {}
+        original_factory = controller._new_ranked_task_runtime
+
+        def tracked_runtime(task_id):
+            runtime = original_factory(task_id)
+            task_runtimes[task_id] = runtime
+            return runtime
+
+        def proposal_generator(*_args, **kwargs):
+            task_id = kwargs["output_prefix"]
+            task_runtimes[task_id].finish_ranked_proposal_task(
+                {
+                    "proposal_type": "exploitation",
+                    "premises": [base["idea_id"]],
+                    "proposal": f"Run the controlled experiment proposed by {task_id}.",
+                }
+            )
+            return {
+                "success": True,
+                "return_code": 0,
+                "timed_out": False,
+                "stopped": False,
+                "background_processes_terminated": False,
+                "provider_process_failed": False,
+            }
+
+        def assessment_runner(**request):
+            task_id = request["output_prefix"]
+            runtime = task_runtimes[task_id]
+            if request["role"] == "verifier":
+                payload = {
+                    "premises": [base["idea_id"]],
+                    "assessment": f"{task_id} finds the proposal attributable and feasible.",
+                }
+            else:
+                candidates = proposal_round_results(
+                    state.proposal_round_snapshot(**identity)
+                )["candidate_ids"]
+                payload = {
+                    "ranking": candidates,
+                    "premises": [base["idea_id"]],
+                    "assessment": f"{task_id} ranks the complete candidate set.",
+                }
+            runtime.finish_ranked_proposal_task(payload)
+            return {
+                "success": True,
+                "return_code": 0,
+                "timed_out": False,
+                "stopped": False,
+                "background_processes_terminated": False,
+                "provider_process_failed": False,
+            }
+
+        monkeypatch.setattr(controller, "_new_ranked_task_runtime", tracked_runtime)
+        controller.proposal_generator = proposal_generator
+        controller.proposal_assessment_runner = assessment_runner
+        round_state, aggregate = controller._run_independent_ranked_proposal_round(
+            parent_sha="parent",
+            attempt_dir=attempt_dir,
+            attempt_history=[],
+            boundary_validator=lambda: {"valid": True, "issues": []},
+        )
+        result_to_task = {
+            task["result_idea_id"]: task_id
+            for task_id, task in round_state["tasks"].items()
+        }
+        selected_task = result_to_task[round_state["selection"]["proposal_idea_id"]]
+        return {
+            "stage": round_state["stage"],
+            "task_roles": {
+                task_id: task["role"] for task_id, task in round_state["tasks"].items()
+            },
+            "verifier_assignments": {
+                task_id: result_to_task[task["assigned_proposal_idea_id"]]
+                for task_id, task in round_state["tasks"].items()
+                if task["role"] == "verifier"
+            },
+            "optimal_rankings": [
+                [result_to_task[candidate_id] for candidate_id in ranking]
+                for ranking in aggregate.optimal_rankings
+            ],
+            "selected_task": selected_task,
+            "global_worker_state": (
+                state.snapshot()["pending_worker_command"],
+                state.snapshot()["worker_continuation"],
+            ),
+        }
+
+    def serial_stage(task_ids, run_task):
+        cancel_event = threading.Event()
+        return {task_id: run_task(task_id, cancel_event) for task_id in task_ids}
+
+    with monkeypatch.context() as serial_patch:
+        serial_patch.setattr(
+            "core.hitl_proposal_round.run_parallel_proposal_stage",
+            serial_stage,
+        )
+        serial_result = run_round(tmp_path / "serial")
+    parallel_result = run_round(tmp_path / "parallel")
+
+    assert serial_result == parallel_result

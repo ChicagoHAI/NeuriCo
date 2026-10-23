@@ -117,7 +117,7 @@ Keep existing regression tests in their current files.
 ### Phase E: Product surface and qualification
 
 - [x] Step 19 — Add interface controls and status
-- [ ] Step 20 — Run final regression and interruption qualification
+- [x] Step 20 — Run final regression and interruption qualification
 
 ## 5. Phase A — Foundations with no ranked agents
 

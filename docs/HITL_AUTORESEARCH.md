@@ -27,6 +27,12 @@ start button. In the terminal interface, enter `/run` and answer the prompts.
 NeuriCo automatically detects whether the workspace needs a fresh HITL run or
 should continue its existing frontier.
 
+Proposal generation defaults to **Single**. For a broader proposal search,
+choose **Independent ranked** and set 2–5 proposers and 2–9 reviewers. Panel
+counts appear only for that mode. The interface reports progress from the
+persisted proposal round, so the same stage and completed-task count remain
+visible after an interruption.
+
 The Docker commands run both the manager and research workers in the container.
 The local commands run both through the local `uv` environment.
 
@@ -167,15 +173,31 @@ After the root exists, every iteration follows the selected frontier node.
 
 ### 1. Proposal generation
 
-The proposal worker receives the current idea, selected direction, accepted
-experiment plan, and relevant attempt history. It submits one complete proposal
-through `hitl-submit-proposal` and labels it as:
+In the default single mode, the proposal worker receives the current idea,
+selected direction, accepted experiment plan, and relevant attempt history. It
+submits one complete proposal through `hitl-submit-proposal` and labels it as:
 
 - **exploitation**: improve an existing retained direction;
 - **exploration**: test a structurally different direction or assumption.
 
 The proposal must make one concrete experiment-stage change while preserving
 the research question and scoring protocol.
+
+Independent-ranked mode changes only how that proposal is chosen:
+
+1. Independent proposers receive the same round-start history and submit one
+   candidate each. They do not see one another's current-round work.
+2. One verifier assesses each candidate's scientific soundness, attribution,
+   feasibility, and consistency with the research contract.
+3. Independent reviewers see the same verified candidate set and each submit a
+   complete ranking. They do not see one another's reviews.
+4. Runtime validates the structured results and aggregates the rankings with
+   exact Kemeny–Young. The manager selects a candidate or requests another
+   proposal round.
+
+The selected proposal then enters the existing admission workflow below. The
+ranked mode does not add a second execution path, scorer, frontier policy, or
+proposal copy.
 
 ### 2. Proposal admission
 
