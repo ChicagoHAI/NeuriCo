@@ -89,7 +89,7 @@ _RANKED_COMMAND_PROFILES = {
         "role": "verifier",
         "actor": "proposal_verifier",
         "hitl_stage": "review",
-        "round_stage": "verifying",
+        "round_stages": frozenset({"proposing", "verifying"}),
         "commands": {
             "hitl-view-ideas",
             "hitl-report-idea",
@@ -2242,8 +2242,10 @@ class HitlRuntime:
         if not isinstance(task, dict) or task.get("role") != role:
             raise HitlValidationError("No matching proposal task exists in the active round.")
         active_stage = str(round_state.get("stage", ""))
-        expected_stage = str(profile_spec["round_stage"])
-        if active_stage != expected_stage:
+        expected_stages = profile_spec.get("round_stages")
+        if expected_stages is None:
+            expected_stages = frozenset({str(profile_spec["round_stage"])})
+        if active_stage not in expected_stages:
             stage_order = {
                 "proposing": 0,
                 "verifying": 1,
@@ -2254,7 +2256,8 @@ class HitlRuntime:
             completed_prior_stage = bool(
                 allow_completed_prior_stage
                 and task.get("result_idea_id") is not None
-                and stage_order.get(active_stage, -1) > stage_order.get(expected_stage, -1)
+                and stage_order.get(active_stage, -1)
+                > max(stage_order.get(str(stage), -1) for stage in expected_stages)
             )
             if not completed_prior_stage:
                 raise HitlValidationError(

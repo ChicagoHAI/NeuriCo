@@ -4371,6 +4371,7 @@ class HitlAutoResearchController:
         from core.agent_runner import next_attempt_number
         from core.hitl_proposal_round import (
             aggregate_proposal_round_reviews,
+            parse_proposal_task_id,
             proposal_round_results,
             proposal_selection_decision_record,
             proposal_task_id,
@@ -4491,6 +4492,81 @@ class HitlAutoResearchController:
                         f"Completed ranked {role} stage contains an incomplete task."
                     )
 
+        verifier_prompt = (
+            "Complete the scientific assessment of the assigned proposal and finish "
+            "through hitl-finish-proposal-verification."
+        )
+
+        def run_verifier_task(
+            task_id: str,
+            cancel_event: threading.Event,
+        ) -> Dict[str, Any]:
+            if self.proposal_assessment_runner is None:
+                raise RuntimeError("No ranked proposal assessment runner is configured.")
+            raise_if_hitl_run_stop_requested()
+            task_runtime, _pairs, current_round = task_runtime_for(
+                "verifier",
+                task_id,
+                cancel_event,
+            )
+            task = current_round["tasks"][task_id]
+            assigned_proposal_id = str(
+                task.get("assigned_proposal_idea_id") or ""
+            ).strip()
+            try:
+                reconciled = task_runtime.reconcile_ranked_proposal_task()
+                if reconciled.get("complete") or reconciled.get("cancelled"):
+                    return reconciled
+
+                def launch_verifier(
+                    prompt: str,
+                    _log_prefix: str,
+                    *,
+                    record_continuation: bool,
+                ) -> Dict[str, Any]:
+                    if record_continuation:
+                        raise RuntimeError(
+                            "Ranked proposal tasks must not record global worker continuation."
+                        )
+                    raise_if_hitl_run_stop_requested()
+                    if cancel_event.is_set():
+                        return cancelled_launch_result()
+                    return self.proposal_assessment_runner(
+                        role="verifier",
+                        assigned_proposal_idea_id=assigned_proposal_id,
+                        task_dir=round_dir / task_id,
+                        prompt_suffix=prompt,
+                        env_extra=task_runtime.idea_tool_env(),
+                        cancel_event=cancel_event,
+                        output_prefix=task_id,
+                    )
+
+                _result, finish = run_worker_with_replacements(
+                    runtime=task_runtime,
+                    launch_worker=launch_verifier,
+                    prompt=verifier_prompt,
+                    log_prefix=task_id,
+                    phase="review",
+                    worker_name=f"Proposal verifier {task_id}",
+                    record_continuation=False,
+                    result_after_exit=lambda result: (
+                        task_runtime.ranked_task_result_after_worker_exit(
+                            result,
+                            replacement_prompt=verifier_prompt,
+                            worker_name=f"Proposal verifier {task_id}",
+                        )
+                    ),
+                )
+            finally:
+                task_runtime.clear_idea_tool_context()
+            if finish.get("cancelled"):
+                return finish
+            if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
+                raise RuntimeError(
+                    "Ranked verifier task ended without a recorded assessment."
+                )
+            return finish
+
         if round_state.get("stage") == "proposing":
             task_prompt = (
                 "Generate one independent proposal candidate and submit it through "
@@ -4513,57 +4589,60 @@ class HitlAutoResearchController:
                 )
                 try:
                     reconciled = task_runtime.reconcile_ranked_proposal_task()
-                    if reconciled.get("complete") or reconciled.get("cancelled"):
+                    if reconciled.get("cancelled"):
                         return reconciled
-                    task_dir = round_dir / task_id
+                    if reconciled.get("complete"):
+                        finish = reconciled
+                    else:
+                        task_dir = round_dir / task_id
 
-                    def launch_worker(
-                        prompt: str,
-                        _log_prefix: str,
-                        *,
-                        record_continuation: bool,
-                    ) -> Dict[str, Any]:
-                        if record_continuation:
-                            raise RuntimeError(
-                                "Ranked proposal tasks must not record global worker continuation."
+                        def launch_worker(
+                            prompt: str,
+                            _log_prefix: str,
+                            *,
+                            record_continuation: bool,
+                        ) -> Dict[str, Any]:
+                            if record_continuation:
+                                raise RuntimeError(
+                                    "Ranked proposal tasks must not record global worker continuation."
+                                )
+                            raise_if_hitl_run_stop_requested()
+                            if cancel_event.is_set():
+                                return cancelled_launch_result()
+                            launch_number = next_attempt_number(
+                                task_dir,
+                                lambda attempt: f"launch_{attempt}",
                             )
-                        raise_if_hitl_run_stop_requested()
-                        if cancel_event.is_set():
-                            return cancelled_launch_result()
-                        launch_number = next_attempt_number(
-                            task_dir,
-                            lambda attempt: f"launch_{attempt}",
-                        )
-                        launch_dir = task_dir / f"launch_{launch_number}"
-                        launch_dir.mkdir(parents=True)
-                        return self._call_proposal_generator(
-                            parent_sha=parent_sha,
-                            attempt_dir=attempt_dir,
-                            attempt_history=attempt_history,
-                            prompt_suffix=prompt,
-                            env_extra=task_runtime.idea_tool_env(),
-                            launch_dir=launch_dir,
-                            candidate_recording=True,
-                            cancel_event=cancel_event,
-                            output_prefix=task_id,
-                        )
+                            launch_dir = task_dir / f"launch_{launch_number}"
+                            launch_dir.mkdir(parents=True)
+                            return self._call_proposal_generator(
+                                parent_sha=parent_sha,
+                                attempt_dir=attempt_dir,
+                                attempt_history=attempt_history,
+                                prompt_suffix=prompt,
+                                env_extra=task_runtime.idea_tool_env(),
+                                launch_dir=launch_dir,
+                                candidate_recording=True,
+                                cancel_event=cancel_event,
+                                output_prefix=task_id,
+                            )
 
-                    _result, finish = run_worker_with_replacements(
-                        runtime=task_runtime,
-                        launch_worker=launch_worker,
-                        prompt=task_prompt,
-                        log_prefix=task_id,
-                        phase="proposal",
-                        worker_name=f"Independent proposal generator {task_id}",
-                        record_continuation=False,
-                        result_after_exit=lambda result: (
-                            task_runtime.ranked_task_result_after_worker_exit(
-                                result,
-                                replacement_prompt=task_prompt,
-                                worker_name=f"Independent proposal generator {task_id}",
-                            )
-                        ),
-                    )
+                        _result, finish = run_worker_with_replacements(
+                            runtime=task_runtime,
+                            launch_worker=launch_worker,
+                            prompt=task_prompt,
+                            log_prefix=task_id,
+                            phase="proposal",
+                            worker_name=f"Independent proposal generator {task_id}",
+                            record_continuation=False,
+                            result_after_exit=lambda result: (
+                                task_runtime.ranked_task_result_after_worker_exit(
+                                    result,
+                                    replacement_prompt=task_prompt,
+                                    worker_name=f"Independent proposal generator {task_id}",
+                                )
+                            ),
+                        )
                 finally:
                     task_runtime.clear_idea_tool_context()
                 if finish.get("cancelled"):
@@ -4572,7 +4651,17 @@ class HitlAutoResearchController:
                     raise RuntimeError(
                         "Ranked proposal task ended without a recorded candidate."
                     )
-                return finish
+                state.ensure_proposal_verifier_task(
+                    **identity,
+                    proposer_task_id=task_id,
+                )
+                proposer_identity = parse_proposal_task_id(task_id)
+                verifier_task_id = proposal_task_id(
+                    proposer_identity.round_ordinal,
+                    "verifier",
+                    proposer_identity.ordinal,
+                )
+                return run_verifier_task(verifier_task_id, cancel_event)
 
             run_parallel_proposal_stage(proposer_task_ids, run_proposer_task)
             require_boundary("Ranked proposal stage")
@@ -4588,82 +4677,10 @@ class HitlAutoResearchController:
         if round_state.get("stage") == "verifying":
             if self.proposal_assessment_runner is None:
                 raise RuntimeError("No ranked proposal assessment runner is configured.")
-            task_prompt = (
-                "Complete the scientific assessment of the assigned proposal and finish "
-                "through hitl-finish-proposal-verification."
-            )
             verifier_task_ids = [
                 proposal_task_id(int(identity["round_ordinal"]), "verifier", ordinal)
                 for ordinal in range(1, config.proposer_count + 1)
             ]
-
-            def run_verifier_task(
-                task_id: str,
-                cancel_event: threading.Event,
-            ) -> Dict[str, Any]:
-                raise_if_hitl_run_stop_requested()
-                task_runtime, _pairs, current_round = task_runtime_for(
-                    "verifier",
-                    task_id,
-                    cancel_event,
-                )
-                task = current_round["tasks"][task_id]
-                assigned_proposal_id = str(
-                    task.get("assigned_proposal_idea_id") or ""
-                ).strip()
-                try:
-                    reconciled = task_runtime.reconcile_ranked_proposal_task()
-                    if reconciled.get("complete") or reconciled.get("cancelled"):
-                        return reconciled
-
-                    def launch_verifier(
-                        prompt: str,
-                        _log_prefix: str,
-                        *,
-                        record_continuation: bool,
-                    ) -> Dict[str, Any]:
-                        if record_continuation:
-                            raise RuntimeError(
-                                "Ranked proposal tasks must not record global worker continuation."
-                            )
-                        raise_if_hitl_run_stop_requested()
-                        if cancel_event.is_set():
-                            return cancelled_launch_result()
-                        return self.proposal_assessment_runner(
-                            role="verifier",
-                            assigned_proposal_idea_id=assigned_proposal_id,
-                            task_dir=round_dir / task_id,
-                            prompt_suffix=prompt,
-                            env_extra=task_runtime.idea_tool_env(),
-                            cancel_event=cancel_event,
-                            output_prefix=task_id,
-                        )
-
-                    _result, finish = run_worker_with_replacements(
-                        runtime=task_runtime,
-                        launch_worker=launch_verifier,
-                        prompt=task_prompt,
-                        log_prefix=task_id,
-                        phase="review",
-                        worker_name=f"Proposal verifier {task_id}",
-                        record_continuation=False,
-                        result_after_exit=lambda result: (
-                            task_runtime.ranked_task_result_after_worker_exit(
-                                result,
-                                replacement_prompt=task_prompt,
-                                worker_name=f"Proposal verifier {task_id}",
-                            )
-                        ),
-                    )
-                finally:
-                    task_runtime.clear_idea_tool_context()
-                if finish.get("cancelled"):
-                    return finish
-                if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
-                    raise RuntimeError(
-                        "Ranked verifier task ended without a recorded assessment."
-                    )
-                return finish
 
             run_parallel_proposal_stage(verifier_task_ids, run_verifier_task)
             require_boundary("Ranked verifier stage")

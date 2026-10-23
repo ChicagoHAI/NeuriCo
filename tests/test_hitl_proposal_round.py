@@ -1499,7 +1499,7 @@ def test_task_finalization_intent_is_idempotent_and_required_for_completion(tmp_
 def test_task_operations_reject_wrong_role_stage_task_and_expected_state(tmp_path):
     state, identity, _round_state = _begin_ranked_round(tmp_path)
 
-    with pytest.raises(HitlRuntimeStateError, match="stage is stale"):
+    with pytest.raises(HitlRuntimeStateError, match="No matching proposal task"):
         state.record_proposal_task_provider_result(
             **identity,
             proposal_task_id="r1-v1",
@@ -1531,6 +1531,35 @@ def test_task_operations_reject_wrong_role_stage_task_and_expected_state(tmp_pat
             role="proposer",
             failed=False,
         )
+
+
+def test_completed_proposer_enables_exactly_its_idempotent_verifier_task(tmp_path):
+    state, identity, _round_state = _begin_ranked_round(tmp_path)
+
+    with pytest.raises(HitlRuntimeStateError, match="completed proposal task"):
+        state.ensure_proposal_verifier_task(
+            **identity,
+            proposer_task_id="r1-p1",
+        )
+
+    _finalize_synthetic_task(state, identity, "r1-p1", "proposer", "I101")
+    expected = {
+        "role": "verifier",
+        "assigned_proposal_idea_id": "I101",
+        "result_idea_id": None,
+    }
+    assert state.ensure_proposal_verifier_task(
+        **identity,
+        proposer_task_id="r1-p1",
+    ) == expected
+    assert state.ensure_proposal_verifier_task(
+        **identity,
+        proposer_task_id="r1-p1",
+    ) == expected
+
+    round_state = state.proposal_round_snapshot(**identity)
+    assert round_state["tasks"]["r1-v1"] == expected
+    assert "r1-v2" not in round_state["tasks"]
 
 
 def test_selection_updates_are_idempotent_and_conflicting_updates_are_rejected(tmp_path):
@@ -3785,6 +3814,153 @@ def _prepare_ranked_proposer_controller(
         ),
     )
     return controller, state, attempt_dir, base, whiteboard_path
+
+
+def test_verifier_starts_as_soon_as_its_proposal_is_finalized(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+):
+    controller, state, attempt_dir, base, _whiteboard_path = (
+        _prepare_ranked_proposer_controller(tmp_path)
+    )
+    task_runtimes = {}
+    proposer_two_started = threading.Event()
+    release_proposer_two = threading.Event()
+    proposer_two_finished = threading.Event()
+    verifier_one_started = threading.Event()
+    original_runtime_factory = controller._new_ranked_task_runtime
+
+    def tracked_runtime(task_id):
+        runtime = original_runtime_factory(task_id)
+        task_runtimes[task_id] = runtime
+        return runtime
+
+    def fake_generator(*_args, **kwargs):
+        task_id = kwargs["output_prefix"]
+        runtime = task_runtimes[task_id]
+        if task_id == "r1-p1":
+            assert proposer_two_started.wait(timeout=3)
+        else:
+            proposer_two_started.set()
+            assert release_proposer_two.wait(timeout=3)
+        runtime.submit_proposal_payload(
+            {
+                "proposal_type": "exploitation",
+                "premises": [base["idea_id"]],
+                "proposal": f"Run the controlled experiment from {task_id}.",
+            }
+        )
+        if task_id == "r1-p2":
+            proposer_two_finished.set()
+        return _ranked_launch_result()
+
+    def fake_assessment_runner(**request):
+        task_id = request["output_prefix"]
+        runtime = task_runtimes[task_id]
+        if request["role"] == "verifier":
+            if task_id == "r1-v1":
+                assert not proposer_two_finished.is_set()
+                verifier_one_started.set()
+                release_proposer_two.set()
+            runtime.finish_ranked_proposal_task(
+                {
+                    "premises": [base["idea_id"]],
+                    "assessment": f"{task_id} found the proposal scientifically usable.",
+                }
+            )
+            return _ranked_launch_result()
+
+        assert proposer_two_finished.is_set()
+        current = state.proposal_round_snapshot(
+            parent_node_sha="parent",
+            preparation_attempt_id="attempt_3",
+            candidate_attempt_id="attempt_4",
+            round_ordinal=1,
+        )
+        ranking = [current["tasks"][f"r1-p{ordinal}"]["result_idea_id"] for ordinal in (1, 2)]
+        runtime.finish_ranked_proposal_task(
+            {
+                "ranking": ranking,
+                "premises": [base["idea_id"]],
+                "assessment": "Both candidates are ranked with the same fixed criteria.",
+            }
+        )
+        return _ranked_launch_result()
+
+    monkeypatch.setattr(controller, "_new_ranked_task_runtime", tracked_runtime)
+    controller.proposal_generator = fake_generator
+    controller.proposal_assessment_runner = fake_assessment_runner
+
+    round_state, _aggregate = controller._run_independent_ranked_proposal_round(
+        parent_sha="parent",
+        attempt_dir=attempt_dir,
+        attempt_history=[],
+    )
+
+    assert verifier_one_started.is_set()
+    assert proposer_two_finished.is_set()
+    assert round_state["stage"] == "selected"
+    assert round_state["tasks"]["r1-v1"]["assigned_proposal_idea_id"] == (
+        round_state["tasks"]["r1-p1"]["result_idea_id"]
+    )
+
+
+def test_verifier_failure_cancels_a_still_running_proposer(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+):
+    controller, _state, attempt_dir, base, _whiteboard_path = (
+        _prepare_ranked_proposer_controller(tmp_path)
+    )
+    task_runtimes = {}
+    proposer_two_started = threading.Event()
+    proposer_two_cancelled = threading.Event()
+    original_runtime_factory = controller._new_ranked_task_runtime
+
+    def tracked_runtime(task_id):
+        runtime = original_runtime_factory(task_id)
+        task_runtimes[task_id] = runtime
+        return runtime
+
+    def fake_generator(*_args, **kwargs):
+        task_id = kwargs["output_prefix"]
+        if task_id == "r1-p2":
+            proposer_two_started.set()
+            assert kwargs["cancel_event"].wait(timeout=3)
+            proposer_two_cancelled.set()
+            return {
+                **_ranked_launch_result(return_code=1),
+                "cancelled": True,
+            }
+        assert proposer_two_started.wait(timeout=3)
+        task_runtimes[task_id].submit_proposal_payload(
+            {
+                "proposal_type": "exploitation",
+                "premises": [base["idea_id"]],
+                "proposal": "Run one controlled experiment.",
+            }
+        )
+        return _ranked_launch_result()
+
+    def failing_verifier(**request):
+        assert request["role"] == "verifier"
+        assert request["output_prefix"] == "r1-v1"
+        raise RuntimeError("invalid proposal verification")
+
+    monkeypatch.setattr(controller, "_new_ranked_task_runtime", tracked_runtime)
+    controller.proposal_generator = fake_generator
+    controller.proposal_assessment_runner = failing_verifier
+
+    with pytest.raises(RuntimeError, match="invalid proposal verification"):
+        controller._run_independent_ranked_proposal_round(
+            parent_sha="parent",
+            attempt_dir=attempt_dir,
+            attempt_history=[],
+        )
+
+    assert proposer_two_cancelled.is_set()
 
 
 def test_parallel_ranked_proposal_round_preserves_task_boundaries_and_aggregates(

@@ -45,9 +45,9 @@ _PROPOSAL_ROUND_STAGES = {
     "selected",
 }
 _PROPOSAL_ROLE_STAGES = {
-    "proposer": "proposing",
-    "verifier": "verifying",
-    "reviewer": "reviewing",
+    "proposer": frozenset({"proposing"}),
+    "verifier": frozenset({"proposing", "verifying"}),
+    "reviewer": frozenset({"reviewing"}),
 }
 
 
@@ -923,8 +923,8 @@ class HitlRuntimeState:
     ) -> Dict[str, Any]:
         from core.hitl_proposal_round import parse_proposal_task_id
 
-        expected_stage = _PROPOSAL_ROLE_STAGES.get(role)
-        if expected_stage is None:
+        allowed_stages = _PROPOSAL_ROLE_STAGES.get(role)
+        if allowed_stages is None:
             raise HitlRuntimeStateError("Proposal task role is invalid")
         try:
             identity = parse_proposal_task_id(proposal_task_id)
@@ -933,7 +933,7 @@ class HitlRuntimeState:
         if (
             identity.round_ordinal != round_state.get("round_ordinal")
             or identity.role != role
-            or round_state.get("stage") != expected_stage
+            or round_state.get("stage") not in allowed_stages
         ):
             raise HitlRuntimeStateError("Proposal task identity or stage is stale")
         task = round_state["tasks"].get(proposal_task_id)
@@ -1030,6 +1030,79 @@ class HitlRuntimeState:
             )
             return self._copy(round_state)
 
+    def ensure_proposal_verifier_task(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        proposer_task_id: str,
+    ) -> Dict[str, Any]:
+        """Create the verifier paired with one completed proposer, idempotently."""
+
+        from core.hitl_proposal_round import parse_proposal_task_id, proposal_task_id
+
+        try:
+            proposer_identity = parse_proposal_task_id(proposer_task_id)
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        if (
+            proposer_identity.round_ordinal != round_ordinal
+            or proposer_identity.role != "proposer"
+        ):
+            raise HitlRuntimeStateError("Verifier task requires a current-round proposer")
+        verifier_task_id = proposal_task_id(
+            round_ordinal,
+            "verifier",
+            proposer_identity.ordinal,
+        )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, round_state = self._proposal_round_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal,
+                expected_stage="proposing",
+            )
+            proposer = self._proposal_task_unlocked(
+                round_state,
+                proposal_task_id=proposer_task_id,
+                role="proposer",
+            )
+            proposal_idea_id = str(proposer.get("result_idea_id") or "").strip()
+            if (
+                _IDEA_ID.fullmatch(proposal_idea_id) is None
+                or proposer.get("pending_finalization") is not None
+            ):
+                raise HitlRuntimeStateError(
+                    "Verifier task requires a completed proposal task"
+                )
+            expected = {
+                "role": "verifier",
+                "assigned_proposal_idea_id": proposal_idea_id,
+                "result_idea_id": None,
+            }
+            existing = round_state["tasks"].get(verifier_task_id)
+            if existing is None:
+                round_state["tasks"][verifier_task_id] = expected
+                result = expected
+            else:
+                if (
+                    not isinstance(existing, dict)
+                    or existing.get("role") != "verifier"
+                    or existing.get("assigned_proposal_idea_id") != proposal_idea_id
+                ):
+                    raise HitlRuntimeStateError(
+                        "Existing verifier task conflicts with its completed proposer"
+                    )
+                result = existing
+            action["proposal_round"] = round_state
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(result)
+
     def record_proposal_task_provider_result(
         self,
         *,
@@ -1050,7 +1123,6 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
                 round_ordinal=round_ordinal,
-                expected_stage=_PROPOSAL_ROLE_STAGES.get(role),
             )
             task = self._proposal_task_unlocked(
                 round_state,
@@ -1101,7 +1173,6 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
                 round_ordinal=round_ordinal,
-                expected_stage=_PROPOSAL_ROLE_STAGES.get(role),
             )
             task = self._proposal_task_unlocked(
                 round_state,
@@ -1147,7 +1218,6 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
                 round_ordinal=round_ordinal,
-                expected_stage=_PROPOSAL_ROLE_STAGES.get(role),
             )
             task = self._proposal_task_unlocked(
                 round_state,
@@ -1201,15 +1271,22 @@ class HitlRuntimeState:
                 proposal_task_id(round_ordinal, "reviewer", ordinal)
                 for ordinal in range(1, int(round_state["reviewer_count"]) + 1)
             ]
-            expected_ids = {
-                "proposing": proposer_ids,
-                "verifying": [*proposer_ids, *verifier_ids],
-                "reviewing": [*proposer_ids, *verifier_ids, *reviewer_ids],
-            }[expected_stage]
-            if set(tasks) != set(expected_ids):
-                raise HitlRuntimeStateError(
-                    "Proposal round task set does not match its current stage"
-                )
+            if expected_stage == "proposing":
+                if not set(proposer_ids).issubset(tasks) or not set(tasks).issubset(
+                    {*proposer_ids, *verifier_ids}
+                ):
+                    raise HitlRuntimeStateError(
+                        "Proposal round task set does not match its current stage"
+                    )
+            else:
+                expected_ids = {
+                    "verifying": [*proposer_ids, *verifier_ids],
+                    "reviewing": [*proposer_ids, *verifier_ids, *reviewer_ids],
+                }[expected_stage]
+                if set(tasks) != set(expected_ids):
+                    raise HitlRuntimeStateError(
+                        "Proposal round task set does not match its current stage"
+                    )
             active_ids = {
                 "proposing": proposer_ids,
                 "verifying": verifier_ids,
@@ -1233,13 +1310,29 @@ class HitlRuntimeState:
                     )
             if expected_stage == "proposing":
                 for ordinal, task_id in enumerate(verifier_ids, start=1):
-                    tasks[task_id] = {
+                    expected = {
                         "role": "verifier",
                         "assigned_proposal_idea_id": tasks[proposer_ids[ordinal - 1]][
                             "result_idea_id"
                         ],
                         "result_idea_id": None,
                     }
+                    existing = tasks.get(task_id)
+                    if existing is None:
+                        tasks[task_id] = expected
+                    elif (
+                        not isinstance(existing, dict)
+                        or existing.get("role") != "verifier"
+                        or existing.get("assigned_proposal_idea_id")
+                        != expected["assigned_proposal_idea_id"]
+                    ):
+                        raise HitlRuntimeStateError(
+                            "Existing verifier task conflicts with its completed proposer"
+                        )
+                round_state["tasks"] = {
+                    task_id: tasks[task_id]
+                    for task_id in [*proposer_ids, *verifier_ids]
+                }
                 round_state["stage"] = "verifying"
             elif expected_stage == "verifying":
                 for task_id in reviewer_ids:
