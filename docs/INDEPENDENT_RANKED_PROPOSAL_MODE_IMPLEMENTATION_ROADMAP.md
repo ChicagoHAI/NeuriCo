@@ -103,7 +103,7 @@ Keep existing regression tests in their current files.
 - [x] Step 12 — Implement the serial verifier stage
 - [x] Step 13 — Implement the serial reviewer stage and aggregation
 - [x] Step 14 — Add manager selection and new-round handling
-- [ ] Step 15 — Rejoin existing admission and execution
+- [x] Step 15 — Rejoin existing admission and execution
 
 ### Phase C: Recovery
 

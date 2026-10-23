@@ -2853,6 +2853,295 @@ class HitlRuntime:
                 )
             return result
 
+    def _terminal_ranked_proposal_admission(
+        self,
+        *,
+        proposal_record: Dict[str, Any],
+        manager_selection_decision_idea_id: str,
+    ) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Recover a completed legality/human review for one selected proposal."""
+
+        proposal_id = str(proposal_record["idea_id"])
+        legality_question = (
+            "Is this AutoResearch proposal legal for admission review?"
+            if self.hitl_mode is HitlMode.AUTO
+            else "Is this AutoResearch proposal legal to show to the human for approval?"
+        )
+        records = self.log.records()
+        legality_record = next(
+            (
+                record
+                for record in reversed(records)
+                if record.get("idea_type") == "decision"
+                and record.get("idea_category") == "artifact_boundary_choice"
+                and record.get("level") == "B"
+                and record.get("actor") == "manager"
+                and record.get("decision_needed") == legality_question
+                and proposal_id in _normalize_premises(record.get("premises"))
+            ),
+            None,
+        )
+        if legality_record is None:
+            return None
+        common = {
+            "proposal_idea_id": proposal_id,
+            "manager_idea_id": legality_record["idea_id"],
+            "manager_admission_idea_id": manager_selection_decision_idea_id,
+        }
+        if legality_record.get("decision") == "O2":
+            return legality_record, {
+                **common,
+                "status": "feedback",
+                "feedback": str(legality_record.get("manager_feedback", "")).strip(),
+                "instruction": (
+                    "The selected proposal is illegal. Runtime will open a new proposal round."
+                ),
+            }
+        if self.hitl_mode is HitlMode.AUTO:
+            return legality_record, {
+                **common,
+                "status": "approved",
+                "instruction": "The selected proposal is admitted for execution.",
+                "proposal": proposal_record["proposal"],
+            }
+        human_record = next(
+            (
+                record
+                for record in reversed(records)
+                if record.get("idea_type") == "decision"
+                and record.get("level") == "A"
+                and record.get("actor") == "human"
+                and record.get("decision_needed")
+                == "Should this AutoResearch proposal be admitted to experiment execution?"
+                and proposal_id in _normalize_premises(record.get("premises"))
+                and legality_record["idea_id"]
+                in _normalize_premises(record.get("premises"))
+            ),
+            None,
+        )
+        if human_record is None:
+            return None
+        if human_record.get("decision") == "O1":
+            return legality_record, {
+                **common,
+                "status": "approved",
+                "instruction": "The selected proposal is admitted for execution.",
+                "proposal": proposal_record["proposal"],
+                "human_idea_id": human_record["idea_id"],
+            }
+        return legality_record, {
+            **common,
+            "status": "feedback",
+            "feedback": str(human_record.get("manager_feedback", "")).strip(),
+            "human_feedback": str(human_record.get("human_feedback", "")).strip(),
+            "instruction": (
+                "The human rejected the selected proposal. Runtime will open a new proposal round."
+            ),
+            "human_idea_id": human_record["idea_id"],
+        }
+
+    def review_selected_ranked_proposal(
+        self,
+        *,
+        proposal_idea_id: str,
+        manager_selection_decision_idea_id: str,
+        proposal_review_path: Path,
+    ) -> Dict[str, Any]:
+        """Run the existing manager/human admission boundary for a selected proposal."""
+
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            with self._tool_lock:
+                proposal_id = _require_text(
+                    proposal_idea_id,
+                    "proposal_idea_id",
+                    "Selected ranked proposal review",
+                )
+                selection_decision_id = _require_text(
+                    manager_selection_decision_idea_id,
+                    "manager_selection_decision_idea_id",
+                    "Selected ranked proposal review",
+                )
+                proposal_record = self._proposal_record(proposal_id)
+                if proposal_record is None:
+                    raise HitlValidationError(
+                        "Selected ranked proposal review requires a finalized proposal idea."
+                    )
+                from core.hitl_runtime_state import HitlRuntimeState
+
+                action = HitlRuntimeState(self.work_dir).snapshot().get(
+                    "next_autoresearch_action"
+                )
+                round_state = action.get("proposal_round") if isinstance(action, dict) else None
+                selection = (
+                    round_state.get("selection") if isinstance(round_state, dict) else None
+                )
+                if (
+                    not isinstance(action, dict)
+                    or action.get("kind") != "prepare_proposal"
+                    or action.get("status") != "resolved"
+                    or not isinstance(round_state, dict)
+                    or round_state.get("stage") != "selected"
+                    or not isinstance(selection, dict)
+                    or selection.get("choice") != "select"
+                    or selection.get("proposal_idea_id") != proposal_id
+                    or selection.get("decision_idea_id") != selection_decision_id
+                    or proposal_record.get("parent_node_id")
+                    != action.get("parent_node_sha")
+                    or proposal_record.get("attempt_id")
+                    != round_state.get("candidate_attempt_id")
+                ):
+                    raise HitlValidationError(
+                        "Selected ranked proposal review does not match current round state."
+                    )
+                selection_record = next(
+                    (
+                        record
+                        for record in self.log.records()
+                        if record.get("idea_id") == selection_decision_id
+                    ),
+                    None,
+                )
+                if not isinstance(selection_record, dict):
+                    raise HitlValidationError(
+                        "Selected ranked proposal review requires its exact manager selection decision."
+                    )
+                from core.hitl_proposal_round import (
+                    aggregate_proposal_round_reviews,
+                    proposal_selection_decision_record,
+                )
+
+                expected_round = dict(round_state)
+                expected_round["stage"] = "manager_selection"
+                try:
+                    aggregate = aggregate_proposal_round_reviews(
+                        expected_round,
+                        self.log.records(),
+                    )
+                    expected_selection = proposal_selection_decision_record(
+                        round_state=expected_round,
+                        aggregate=aggregate,
+                        parent_node_id=str(action["parent_node_sha"]),
+                    )
+                except ValueError as exc:
+                    raise HitlValidationError(str(exc)) from exc
+                if HitlIdeaLog.logical_payload(
+                    selection_record
+                ) != HitlIdeaLog.logical_payload(expected_selection):
+                    raise HitlValidationError(
+                        "Selected ranked proposal review requires its exact manager selection decision."
+                    )
+
+                terminal = self._terminal_ranked_proposal_admission(
+                    proposal_record=proposal_record,
+                    manager_selection_decision_idea_id=selection_decision_id,
+                )
+                if terminal is not None:
+                    manager_record, admission = terminal
+                    self._write_proposal_review_artifact(
+                        proposal_record=proposal_record,
+                        manager_record=manager_record,
+                        admission=admission,
+                        proposal_review_path=proposal_review_path,
+                    )
+                    return admission
+
+                finalized: Dict[str, Dict[str, Any]] = {}
+
+                def persist_admission(review: Dict[str, Any]) -> Dict[str, Any]:
+                    manager_record = self._log_proposal_manager_review(
+                        proposal_record=proposal_record,
+                        review=review,
+                    )
+                    if review["status"] == "rejected_illegal":
+                        admission = {
+                            "status": "feedback",
+                            "feedback": str(review["manager_feedback"]).strip(),
+                            "instruction": (
+                                "The selected proposal is illegal. Runtime will open a new "
+                                "proposal round."
+                            ),
+                            "proposal_idea_id": proposal_id,
+                            "manager_idea_id": manager_record["idea_id"],
+                            "manager_admission_idea_id": selection_decision_id,
+                        }
+                    elif self.hitl_mode is HitlMode.AUTO:
+                        admission = {
+                            "status": "approved",
+                            "instruction": (
+                                "The selected proposal is admitted for execution."
+                            ),
+                            "proposal_idea_id": proposal_id,
+                            "manager_idea_id": manager_record["idea_id"],
+                            "manager_admission_idea_id": selection_decision_id,
+                            "proposal": proposal_record["proposal"],
+                        }
+                    else:
+                        admission = self._finalize_proposal_human_admission(
+                            proposal_record=proposal_record,
+                            manager_record=manager_record,
+                            review=review,
+                        )
+                        admission["manager_admission_idea_id"] = selection_decision_id
+                    finalized["result"] = admission
+                    self._write_proposal_review_artifact(
+                        proposal_record=proposal_record,
+                        manager_record=manager_record,
+                        admission=admission,
+                        proposal_review_path=proposal_review_path,
+                    )
+                    return review
+
+                request_key = hashlib.sha256(
+                    (
+                        "selected_ranked_proposal_admission_v1:"
+                        + _compact_json(
+                            {
+                                "parent_node_id": proposal_record.get("parent_node_id"),
+                                "candidate_attempt_id": round_state.get(
+                                    "candidate_attempt_id"
+                                ),
+                                "proposal_idea_id": proposal_id,
+                                "manager_selection_decision_idea_id": selection_decision_id,
+                            }
+                        )
+                    ).encode("utf-8")
+                ).hexdigest()
+                self.manager.review_proposal(
+                    pipeline_stage=self.pipeline_stage,
+                    proposal_text=str(proposal_record["proposal"]),
+                    on_finalize=persist_admission,
+                    request_context={
+                        "proposal_idea_id": proposal_id,
+                        "manager_selection_decision_idea_id": selection_decision_id,
+                        "candidate_attempt_id": round_state["candidate_attempt_id"],
+                    },
+                    hitl_mode=self.hitl_mode,
+                    legality_only=True,
+                    request_key=request_key,
+                )
+                result = finalized.get("result")
+                if result is None:
+                    terminal = self._terminal_ranked_proposal_admission(
+                        proposal_record=proposal_record,
+                        manager_selection_decision_idea_id=selection_decision_id,
+                    )
+                    if terminal is None:
+                        raise RuntimeError(
+                            "Selected proposal review finalized without admission records."
+                        )
+                    manager_record, result = terminal
+                    self._write_proposal_review_artifact(
+                        proposal_record=proposal_record,
+                        manager_record=manager_record,
+                        admission=result,
+                        proposal_review_path=proposal_review_path,
+                    )
+                return dict(result)
+        finally:
+            self._worker_request_lock.release()
+
     @staticmethod
     def _proposal_submission_key(record: Dict[str, Any]) -> str:
         """Identify one proposal command retry without exposing runtime request ids."""
@@ -2877,9 +3166,12 @@ class HitlRuntime:
         proposal_record: Dict[str, Any],
         manager_record: Dict[str, Any],
         admission: Dict[str, Any],
+        proposal_review_path: Optional[Path] = None,
     ) -> None:
         """Materialize the runtime-owned public review trace for one proposal."""
-        raw_path = str(self._tool_context.get("proposal_review_path", "")).strip()
+        raw_path = str(
+            proposal_review_path or self._tool_context.get("proposal_review_path", "")
+        ).strip()
         if not raw_path:
             return
         path = Path(raw_path)

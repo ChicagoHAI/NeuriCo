@@ -1396,6 +1396,8 @@ class HitlManager:
         on_finalize: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
         request_context: Optional[Dict[str, Any]] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
+        legality_only: bool = False,
+        request_key: str = "",
     ) -> Dict[str, Any]:
         from core.hitl import (
             _is_feedback_placeholder,
@@ -1440,6 +1442,11 @@ class HitlManager:
                 data.pop("human_feedback", None)
                 data.pop("manager_escalation_reason", None)
                 if status == "feedback":
+                    if legality_only:
+                        raise ValueError(
+                            "A legal selected proposal is already scientifically admitted; "
+                            "legality-only review must approve it."
+                        )
                     feedback = self._require_text(
                         data.get("manager_feedback"), "manager_feedback", "Proposal feedback"
                     )
@@ -1482,17 +1489,25 @@ class HitlManager:
         request = {
             "pipeline_stage": pipeline_stage,
             "proposal": proposal_text,
+            **({"legality_only": True} if legality_only else {}),
             **(request_context or {}),
         }
         prompt = _load_hitl_template(
-            "manager_review_proposal.txt",
+            (
+                "manager_review_selected_proposal.txt"
+                if legality_only
+                else "manager_review_proposal.txt"
+            ),
             pipeline_stage=pipeline_stage,
             proposal_text=proposal_text,
             hitl_mode=selected_mode.value,
         )
+        stable_request_key = str(request_key).strip() or self._request_key(
+            "proposal", request
+        )
         return self.request_worker_resolution(
             command={
-                "request_key": self._request_key("proposal", request),
+                "request_key": stable_request_key,
                 "kind": "proposal",
                 "hitl_mode": selected_mode.value,
                 **request,

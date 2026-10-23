@@ -548,7 +548,7 @@ def test_kemeny_young_rejects_incomplete_duplicate_or_unknown_candidates(ranking
         )
 
 
-def _seed_ranked_proposal_records(tmp_path):
+def _seed_ranked_proposal_records(tmp_path, *, attempt_id="attempt_1"):
     log = HitlIdeaLog(tmp_path)
     premise = log.append(
         {
@@ -576,7 +576,7 @@ def _seed_ranked_proposal_records(tmp_path):
                 "level": "C",
                 "actor": "autoresearch_proposer",
                 "parent_node_id": "parent",
-                "attempt_id": "attempt_1",
+                "attempt_id": attempt_id,
                 "proposal_task_id": task_id,
                 "premises": [premise["idea_id"]],
                 "context": "An independent proposer submitted an experiment.",
@@ -600,7 +600,7 @@ def _seed_ranked_proposal_records(tmp_path):
                 "level": "C",
                 "actor": "proposal_verifier",
                 "parent_node_id": "parent",
-                "attempt_id": "attempt_1",
+                "attempt_id": attempt_id,
                 "proposal_task_id": task_id,
                 "premises": [candidate_id],
                 "context": "Scientific verification of one proposal.",
@@ -626,7 +626,7 @@ def _proposal_review_record(proposals, verifications, *, ranking=None, task_id="
         "level": "C",
         "actor": "proposal_reviewer",
         "parent_node_id": "parent",
-        "attempt_id": "attempt_1",
+        "attempt_id": proposals[0]["attempt_id"],
         "proposal_task_id": task_id,
         "premises": [
             *candidate_ids,
@@ -1622,7 +1622,10 @@ def test_round_state_stays_nested_without_generic_patch_or_derived_aggregate(tmp
 
 
 def _begin_logged_manager_selection_round(tmp_path):
-    log, _premise, proposals, verifications = _seed_ranked_proposal_records(tmp_path)
+    log, _premise, proposals, verifications = _seed_ranked_proposal_records(
+        tmp_path,
+        attempt_id="attempt_4",
+    )
     candidate_ids = [proposal["idea_id"] for proposal in proposals]
     reviews = [
         log.append(
@@ -1925,6 +1928,46 @@ def _selection_controller(tmp_path):
     return controller
 
 
+class _SelectedProposalReviewManager:
+    def __init__(self, reviews):
+        self.reviews = iter(reviews)
+        self.requests = []
+
+    def review_proposal(self, **request):
+        self.requests.append(request)
+        review = dict(next(self.reviews))
+        request["on_finalize"](review)
+        return review
+
+
+def _prepare_selected_ranked_round(tmp_path, *, hitl_mode="auto"):
+    state, identity, _round_state, aggregate, proposals, reviews = (
+        _begin_logged_manager_selection_round(tmp_path)
+    )
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+        hitl_mode=hitl_mode,
+    )
+    controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    controller.hitl_runtime = runtime
+    selection = state.record_proposal_selection_choice(
+        **identity,
+        choice="select",
+        proposal_idea_id=proposals[1]["idea_id"],
+        reason="Candidate two is the most informative controlled experiment.",
+    )
+    applied = controller._apply_ranked_proposal_selection(
+        identity=identity,
+        aggregate=aggregate,
+        selection=selection,
+    )
+    return controller, runtime, state, identity, applied["proposal_round"], proposals, reviews
+
+
 def test_controller_applies_new_round_choice_after_recording_manager_decision(tmp_path):
     state, identity, _round_state, aggregate, _proposals, reviews = (
         _begin_logged_manager_selection_round(tmp_path)
@@ -1992,6 +2035,296 @@ def test_controller_replays_persisted_selection_decision_without_duplicate_idea(
     assert result["proposal_round"]["stage"] == "selected"
     assert result["decision_idea_id"] == decision["idea_id"]
     assert len(log.records()) == before_count
+
+
+def test_ranked_auto_admission_reuses_selection_as_only_scientific_decision(tmp_path):
+    _controller, runtime, _state, _identity, round_state, proposals, _reviews = (
+        _prepare_selected_ranked_round(tmp_path, hitl_mode="auto")
+    )
+    manager = _SelectedProposalReviewManager(
+        [
+            {
+                "status": "approved",
+                "violations": [],
+                "manager_feedback": "",
+                "context": "The selected proposal is legal for execution.",
+            }
+        ]
+    )
+    runtime.manager = manager
+    review_path = tmp_path / "attempt_4" / "proposal_review.json"
+    selected_id = round_state["selection"]["proposal_idea_id"]
+    selection_decision_id = round_state["selection"]["decision_idea_id"]
+    proposal_count = sum(
+        record.get("idea_type") == "proposal" for record in runtime.log.records()
+    )
+
+    result = runtime.review_selected_ranked_proposal(
+        proposal_idea_id=selected_id,
+        manager_selection_decision_idea_id=selection_decision_id,
+        proposal_review_path=review_path,
+    )
+
+    assert result["status"] == "approved"
+    assert result["proposal"] == proposals[1]["proposal"]
+    assert result["manager_admission_idea_id"] == selection_decision_id
+    assert manager.requests[0]["legality_only"] is True
+    assert manager.requests[0]["hitl_mode"].value == "auto"
+    assert len(manager.requests[0]["request_key"]) == 64
+    records = runtime.log.records()
+    assert sum(record.get("idea_type") == "proposal" for record in records) == proposal_count
+    scientific = [
+        record
+        for record in records
+        if record.get("actor") == "manager"
+        and record.get("idea_type") == "decision"
+        and record.get("idea_category") == "method_choice"
+    ]
+    assert [record["idea_id"] for record in scientific] == [selection_decision_id]
+    legality = next(
+        record
+        for record in records
+        if record.get("idea_category") == "artifact_boundary_choice"
+        and record.get("level") == "B"
+    )
+    artifact = json.loads(review_path.read_text(encoding="utf-8"))
+    assert artifact["proposal_idea_id"] == selected_id
+    assert artifact["manager_legality_decision_idea_id"] == legality["idea_id"]
+    assert artifact["manager_admission_decision_idea_id"] == selection_decision_id
+
+    runtime.manager = object()
+    before_count = len(records)
+    replay = runtime.review_selected_ranked_proposal(
+        proposal_idea_id=selected_id,
+        manager_selection_decision_idea_id=selection_decision_id,
+        proposal_review_path=review_path,
+    )
+    assert replay == result
+    assert len(runtime.log.records()) == before_count
+
+
+def test_selected_proposal_manager_contract_is_legality_only_in_auto_mode():
+    manager = HitlManager.__new__(HitlManager)
+    captured = {}
+
+    def capture_request(**request):
+        captured.update(request)
+        return {}
+
+    manager.request_worker_resolution = capture_request
+    manager.review_proposal(
+        pipeline_stage="experiment_runner",
+        proposal_text="Run the selected controlled experiment.",
+        hitl_mode="auto",
+        legality_only=True,
+        request_key="stable-request",
+    )
+
+    assert captured["command"]["request_key"] == "stable-request"
+    assert captured["command"]["legality_only"] is True
+    assert "scientific selection" in captured["prompt"]
+    assert "Do not compare candidates" in captured["prompt"]
+    assert captured["validate"](
+        {
+            "status": "approved",
+            "violations": [],
+            "manager_feedback": "",
+            "context": "The proposal is legal.",
+        }
+    )["status"] == "approved"
+    with pytest.raises(ValueError, match="already scientifically admitted"):
+        captured["validate"](
+            {
+                "status": "feedback",
+                "violations": [],
+                "manager_feedback": "Try another method.",
+                "context": "The proposal is legal but not preferred.",
+            }
+        )
+    captured.clear()
+    manager.review_proposal(
+        pipeline_stage="experiment_runner",
+        proposal_text="Run the selected controlled experiment.",
+        hitl_mode="full",
+        legality_only=True,
+        request_key="stable-full-request",
+    )
+    assert "use `ask_human`" in captured["prompt"]
+    assert "Do not compare candidates" in captured["prompt"]
+
+
+def test_ranked_full_admission_preserves_human_decision(tmp_path):
+    _controller, runtime, _state, _identity, round_state, proposals, _reviews = (
+        _prepare_selected_ranked_round(tmp_path, hitl_mode="full")
+    )
+    manager = _SelectedProposalReviewManager(
+        [
+            {
+                "status": "approved",
+                "violations": [],
+                "manager_feedback": "",
+                "context": "The selected proposal is legal and the human approved it.",
+                "human_feedback": "Approve proposal.",
+                "manager_escalation_reason": (
+                    "Full HITL requires human approval before experiment execution."
+                ),
+            }
+        ]
+    )
+    runtime.manager = manager
+    review_path = tmp_path / "attempt_4" / "proposal_review.json"
+
+    result = runtime.review_selected_ranked_proposal(
+        proposal_idea_id=round_state["selection"]["proposal_idea_id"],
+        manager_selection_decision_idea_id=round_state["selection"]["decision_idea_id"],
+        proposal_review_path=review_path,
+    )
+
+    assert result["status"] == "approved"
+    assert result["proposal"] == proposals[1]["proposal"]
+    human = next(
+        record
+        for record in runtime.log.records()
+        if record.get("level") == "A" and record.get("actor") == "human"
+    )
+    assert result["human_idea_id"] == human["idea_id"]
+    assert human["decision"] == "O1"
+    artifact = json.loads(review_path.read_text(encoding="utf-8"))
+    assert artifact["human_admission_decision_idea_id"] == human["idea_id"]
+    assert artifact["manager_admission_decision_idea_id"] == round_state["selection"][
+        "decision_idea_id"
+    ]
+
+
+def test_ranked_iteration_hands_selected_proposal_to_existing_execution_unchanged(
+    tmp_path,
+    monkeypatch,
+):
+    parent_sha = "parent"
+    attempt_dir = tmp_path / "logs/experiment-autoresearch/parent/attempt_1"
+
+    class Checkpoints:
+        @staticmethod
+        def checkpoint_exists(sha):
+            return sha == parent_sha
+
+        @staticmethod
+        def current_sha():
+            return parent_sha
+
+    class History:
+        history_root = tmp_path / "logs/experiment-autoresearch"
+
+    controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    controller.checkpoints = Checkpoints()
+    controller.history = History()
+    controller.proposal_mode_config = ProposalModeConfig(
+        mode="independent_ranked",
+        proposer_count=2,
+        reviewer_count=2,
+    )
+    controller._frontier_parent_summary = lambda _sha: object()
+    controller._attempt_history_for = lambda _sha: []
+    controller._run_ranked_proposal_admission_loop = lambda **_kwargs: (
+        "Selected proposal text.",
+        "I21",
+    )
+    controller._run_proposal_admission_loop = lambda **_kwargs: pytest.fail(
+        "independent-ranked mode must not enter single proposal generation"
+    )
+    received = {}
+
+    def stop_in_execution(**kwargs):
+        received.update(kwargs)
+        raise HitlRunStopRequested("stop after observing ranked execution handoff")
+
+    controller._run_candidate_experiment_hitl = stop_in_execution
+    monkeypatch.setattr(
+        "core.hitl_autoresearch.seal_scoring_files",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "core.hitl_autoresearch._begin_hitl_autoresearch_attempt_state",
+        lambda _work_dir, _attempt_dir: f"{parent_sha}/attempt_1",
+    )
+
+    with pytest.raises(HitlRunStopRequested, match="ranked execution handoff"):
+        controller.run_iteration(
+            1,
+            parent_sha,
+            proposal_base_sha=parent_sha,
+            new_attempt_dir=attempt_dir,
+        )
+
+    assert received["proposal"] == "Selected proposal text."
+    assert received["proposal_idea_id"] == "I21"
+    assert received["parent_node_id"] == parent_sha
+    assert received["attempt_id"] == "attempt_1"
+
+
+@pytest.mark.parametrize("rejection", ["illegal", "human"])
+def test_ranked_non_admission_opens_a_fresh_round(tmp_path, monkeypatch, rejection):
+    hitl_mode = "auto" if rejection == "illegal" else "full"
+    controller, runtime, state, identity, round_state, _proposals, _reviews = (
+        _prepare_selected_ranked_round(tmp_path, hitl_mode=hitl_mode)
+    )
+    if rejection == "illegal":
+        review = {
+            "status": "rejected_illegal",
+            "violations": ["The proposal changes the fixed evaluator."],
+            "manager_feedback": "Keep the evaluator unchanged in the next round.",
+            "context": "The selected proposal crosses the evaluator boundary.",
+        }
+    else:
+        review = {
+            "status": "feedback",
+            "violations": [],
+            "manager_feedback": "Use a reversible intervention in the next round.",
+            "context": "The selected proposal is legal, but the human rejected it.",
+            "human_feedback": "Provide feedback: use a reversible intervention.",
+            "manager_escalation_reason": (
+                "Full HITL requires human approval before experiment execution."
+            ),
+        }
+    runtime.manager = _SelectedProposalReviewManager([review])
+    calls = []
+
+    def fake_round(**_kwargs):
+        calls.append(state.snapshot()["next_autoresearch_action"]["proposal_round"])
+        if len(calls) == 1:
+            return round_state, object()
+        raise HitlRunStopRequested("observed replacement round")
+
+    monkeypatch.setattr(
+        controller,
+        "_run_serial_independent_ranked_proposal_round",
+        fake_round,
+    )
+    monkeypatch.setattr(
+        controller,
+        "_capture_ranked_proposal_boundary",
+        lambda **_kwargs: (lambda: {"valid": True, "issues": []}),
+    )
+
+    with pytest.raises(HitlRunStopRequested, match="replacement round"):
+        controller._run_ranked_proposal_admission_loop(
+            parent_sha="parent",
+            attempt_dir=tmp_path / "attempt_4",
+            attempt_history=[],
+        )
+
+    next_round = state.snapshot()["next_autoresearch_action"]["proposal_round"]
+    assert next_round["round_ordinal"] == identity["round_ordinal"] + 1
+    assert next_round["stage"] == "proposing"
+    assert next_round["selection"] is None
+    artifact = json.loads(
+        (tmp_path / "attempt_4" / "proposal_review.json").read_text(encoding="utf-8")
+    )
+    assert artifact["proposal_idea_id"] == round_state["selection"]["proposal_idea_id"]
+    assert artifact["manager_admission_decision_idea_id"] == round_state["selection"][
+        "decision_idea_id"
+    ]
 
 
 def _append_ranked_session_base_idea(work_dir):

@@ -3706,12 +3706,24 @@ class HitlAutoResearchController:
                 existing_sealed_path = sealed_dir_for(self.work_dir)
                 sealed_path = existing_sealed_path if existing_sealed_path.is_dir() else None
             sealed_scoring["path"] = sealed_path
-            proposal, proposal_idea_id = self._run_proposal_admission_loop(
-                parent_sha=parent_sha,
-                attempt_dir=attempt_dir,
-                attempt_id=attempt_id,
-                attempt_history=attempt_history,
+            proposal_mode = getattr(
+                self,
+                "proposal_mode_config",
+                ProposalModeConfig(mode="single"),
             )
+            if proposal_mode.mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
+                proposal, proposal_idea_id = self._run_ranked_proposal_admission_loop(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                    attempt_history=attempt_history,
+                )
+            else:
+                proposal, proposal_idea_id = self._run_proposal_admission_loop(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                    attempt_id=attempt_id,
+                    attempt_history=attempt_history,
+                )
             comment_result = self._run_candidate_experiment_hitl(
                 proposal=proposal,
                 proposal_idea_id=proposal_idea_id,
@@ -4489,6 +4501,83 @@ class HitlAutoResearchController:
         if not isinstance(selected_round, dict):
             raise RuntimeError("Manager proposal selection did not return proposal round state.")
         return selected_round, aggregate
+
+    def _run_ranked_proposal_admission_loop(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_history: list[Dict[str, Any]],
+    ) -> tuple[str, str]:
+        """Run ranked rounds until one selected proposal passes existing admission."""
+
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        runtime = self._proposal_hitl_runtime()
+        state = HitlRuntimeState(self.work_dir)
+        while True:
+            raise_if_hitl_run_stop_requested()
+            round_state, _aggregate = self._run_serial_independent_ranked_proposal_round(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+                attempt_history=attempt_history,
+            )
+            if round_state.get("stage") == "proposing":
+                continue
+            selection = round_state.get("selection")
+            if (
+                round_state.get("stage") != "selected"
+                or not isinstance(selection, dict)
+                or selection.get("choice") != "select"
+            ):
+                raise RuntimeError("Ranked proposal selection did not produce a selected proposal.")
+            proposal_idea_id = str(selection.get("proposal_idea_id", "")).strip()
+            selection_decision_id = str(selection.get("decision_idea_id", "")).strip()
+            if not proposal_idea_id or not selection_decision_id:
+                raise RuntimeError("Selected proposal is missing its durable manager decision.")
+
+            action = state.snapshot().get("next_autoresearch_action")
+            preparation_attempt_id = (
+                str(action.get("attempt_id", "")).strip()
+                if isinstance(action, dict)
+                else ""
+            )
+            boundary_validator = self._capture_ranked_proposal_boundary(
+                parent_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+            )
+            boundary = boundary_validator()
+            if not bool(boundary.get("valid")):
+                raise RuntimeError(
+                    "Selected proposal admission started from an invalid shared boundary."
+                )
+            admission = runtime.review_selected_ranked_proposal(
+                proposal_idea_id=proposal_idea_id,
+                manager_selection_decision_idea_id=selection_decision_id,
+                proposal_review_path=attempt_dir / "proposal_review.json",
+            )
+            if admission.get("status") == "approved":
+                proposal = str(admission.get("proposal", "")).strip()
+                if not proposal:
+                    raise RuntimeError("Approved selected proposal is missing its text.")
+                return proposal, proposal_idea_id
+            if admission.get("status") != "feedback":
+                raise RuntimeError("Selected proposal admission returned an invalid status.")
+
+            idea_numbers = [
+                int(idea_id[1:])
+                for record in runtime.log.records()
+                if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+                and idea_id[1:].isdigit()
+            ]
+            state.begin_next_proposal_round(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=str(round_state["candidate_attempt_id"]),
+                round_ordinal=int(round_state["round_ordinal"]),
+                base_idea_number=max(idea_numbers, default=0),
+                non_admitted_proposal_idea_id=proposal_idea_id,
+            )
 
     def _run_candidate_experiment_hitl(
         self,
