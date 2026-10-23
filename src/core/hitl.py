@@ -68,7 +68,44 @@ _WORKER_COMMAND_MODULES = {
     "hitl-finish-phase": "hitl_finish_phase.py",
     "hitl-resume-worker-request": "hitl_resume_worker_request.py",
     "hitl-submit-proposal": "hitl_submit_proposal.py",
+    "hitl-finish-proposal-verification": "hitl_finish_proposal_verification.py",
+    "hitl-finish-proposal-review": "hitl_finish_proposal_review.py",
     "view_current_frontier": "hitl_view_current_frontier.py",
+}
+_RANKED_COMMAND_PROFILES = {
+    "proposal_candidate": {
+        "role": "proposer",
+        "actor": "autoresearch_proposer",
+        "hitl_stage": "proposal",
+        "commands": {
+            "hitl-view-ideas",
+            "hitl-report-idea",
+            "view_current_frontier",
+            "hitl-submit-proposal",
+        },
+    },
+    "proposal_verifier": {
+        "role": "verifier",
+        "actor": "proposal_verifier",
+        "hitl_stage": "review",
+        "commands": {
+            "hitl-view-ideas",
+            "hitl-report-idea",
+            "view_current_frontier",
+            "hitl-finish-proposal-verification",
+        },
+    },
+    "proposal_reviewer": {
+        "role": "reviewer",
+        "actor": "proposal_reviewer",
+        "hitl_stage": "review",
+        "commands": {
+            "hitl-view-ideas",
+            "hitl-report-idea",
+            "view_current_frontier",
+            "hitl-finish-proposal-review",
+        },
+    },
 }
 PROPOSAL_KINDS = {"exploitation", "exploration"}
 EVIDENCE_IDEA_CATEGORIES = {
@@ -1078,6 +1115,7 @@ class HitlIdeaLog:
 class HitlPaths:
     work_dir: Path
     pipeline_stage: str
+    tool_scope: Optional[str] = None
 
     @property
     def plan_path(self) -> Path:
@@ -1097,7 +1135,8 @@ class HitlPaths:
 
     @property
     def tool_bin_dir(self) -> Path:
-        return self.hitl_dir / "bin"
+        root = self.hitl_dir / "bin"
+        return root / self.tool_scope if self.tool_scope else root
 
     @property
     def report_idea_command(self) -> Path:
@@ -1197,6 +1236,7 @@ class HitlRuntime:
         config: Optional[Dict[str, Any]] = None,
         use_hitl_autoresearch_whiteboard: bool = False,
         hitl_mode: HitlMode | str = HitlMode.FULL,
+        tool_scope: Optional[str] = None,
     ):
         if pipeline_stage not in PIPELINE_STAGES:
             raise ValueError(f"Unsupported HITL pipeline stage: {pipeline_stage}")
@@ -1204,7 +1244,16 @@ class HitlRuntime:
         self.pipeline_stage = pipeline_stage
         self.use_hitl_autoresearch_whiteboard = use_hitl_autoresearch_whiteboard
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
-        self.paths = HitlPaths(self.work_dir, pipeline_stage)
+        normalized_tool_scope = str(tool_scope or "").strip() or None
+        if normalized_tool_scope is not None:
+            from core.hitl_proposal_round import parse_proposal_task_id
+
+            try:
+                parse_proposal_task_id(normalized_tool_scope)
+            except ValueError as exc:
+                raise ValueError("HITL tool scope must be a validated proposal task ID.") from exc
+        self.tool_scope = normalized_tool_scope
+        self.paths = HitlPaths(self.work_dir, pipeline_stage, normalized_tool_scope)
         self.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
         self.paths.hitl_dir.mkdir(parents=True, exist_ok=True)
         self.log = HitlIdeaLog(self.work_dir)
@@ -1494,8 +1543,10 @@ class HitlRuntime:
         self,
         *,
         hitl_stage: str,
+        command_profile: str = "default",
         actor: Optional[str] = None,
         provenance: Optional[Dict[str, Any]] = None,
+        idea_visibility: Optional[Dict[str, Any]] = None,
         requires_human_approval: Optional[bool] = None,
         allow_scoring_approval: bool = False,
         proposal_submission_validator: Optional[Callable[[], Dict[str, Any]]] = None,
@@ -1510,6 +1561,50 @@ class HitlRuntime:
     ) -> None:
         if hitl_stage not in HITL_STAGES:
             raise HitlValidationError(f"Invalid HITL idea tool hitl_stage: {hitl_stage}")
+        profile = str(command_profile).strip()
+        if profile != "default" and profile not in _RANKED_COMMAND_PROFILES:
+            raise HitlValidationError(f"Invalid HITL worker command profile: {profile}")
+        normalized_actor = str(actor or self.pipeline_stage).strip()
+        normalized_provenance = dict(provenance or {})
+        if profile == "default":
+            if self.tool_scope is not None or idea_visibility is not None:
+                raise HitlValidationError(
+                    "Scoped proposal tools require a closed ranked command profile."
+                )
+        else:
+            from core.hitl_proposal_round import parse_proposal_task_id
+
+            profile_spec = _RANKED_COMMAND_PROFILES[profile]
+            if self.pipeline_stage != "experiment_runner" or self.tool_scope is None:
+                raise HitlValidationError(
+                    "Ranked command profiles require a scoped experiment-runner runtime."
+                )
+            if normalized_actor != profile_spec["actor"]:
+                raise HitlValidationError(
+                    "Ranked command profile does not match its worker actor."
+                )
+            if hitl_stage != profile_spec["hitl_stage"]:
+                raise HitlValidationError(
+                    "Ranked command profile does not match its HITL stage."
+                )
+            task_id = str(normalized_provenance.get("proposal_task_id", "")).strip()
+            try:
+                task_identity = parse_proposal_task_id(task_id)
+            except ValueError as exc:
+                raise HitlValidationError(str(exc)) from exc
+            if (
+                task_id != self.tool_scope
+                or task_identity.role != profile_spec["role"]
+                or not str(normalized_provenance.get("parent_node_id", "")).strip()
+                or not str(normalized_provenance.get("attempt_id", "")).strip()
+            ):
+                raise HitlValidationError(
+                    "Ranked command profile does not match its runtime provenance."
+                )
+            if not isinstance(idea_visibility, dict):
+                raise HitlValidationError(
+                    "Ranked command profiles require derived idea visibility inputs."
+                )
         if worker_prompt_contexts is not None:
             required_context_phases = {"plan", "execution", "review"}
             missing_contexts = sorted(
@@ -1539,22 +1634,32 @@ class HitlRuntime:
                 scope=self._workspace_guard_scope(),
             )
             proposal_submission_validator = proposal_guard.require_unchanged
-        allowed_worker_commands = self._worker_commands_for_stage(hitl_stage)
+        allowed_worker_commands = (
+            self._worker_commands_for_stage(hitl_stage)
+            if profile == "default"
+            else set(_RANKED_COMMAND_PROFILES[profile]["commands"])
+        )
         if self._time_budget_command_available():
             allowed_worker_commands.add("hitl-time-budget")
-        from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
+        if profile == "default":
+            from core.hitl_runtime_state import (
+                HitlRuntimeState,
+                worker_command_requires_resume,
+            )
 
-        pending_command = HitlRuntimeState(self.work_dir).pending_worker_command()
-        if worker_command_requires_resume(pending_command):
-            allowed_worker_commands.add("hitl-resume-worker-request")
+            pending_command = HitlRuntimeState(self.work_dir).pending_worker_command()
+            if worker_command_requires_resume(pending_command):
+                allowed_worker_commands.add("hitl-resume-worker-request")
 
         self._tool_context = {
             "work_dir": str(self.work_dir.resolve()),
             "pipeline_stage": self.pipeline_stage,
             "hitl_stage": hitl_stage,
-            "actor": actor or self.pipeline_stage,
+            "command_profile": profile,
+            "actor": normalized_actor,
             "level": "C",
-            "provenance": provenance or {},
+            "provenance": normalized_provenance,
+            "idea_visibility": dict(idea_visibility) if idea_visibility is not None else None,
             "requires_human_approval": requires_human_approval,
             "hitl_mode": self.hitl_mode.value,
             "allow_scoring_approval": allow_scoring_approval,
@@ -1661,6 +1766,7 @@ class HitlRuntime:
         method is deliberately the only in-session transition path so a worker
         cannot receive execution instructions while plan guards remain active.
         """
+        self._require_default_worker_state("worker stage transitions")
         from_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
         allowed = {"plan": {"execution"}, "execution": {"review"}}
         if to_stage not in allowed.get(from_stage, set()):
@@ -1702,6 +1808,7 @@ class HitlRuntime:
         return commands
 
     def _enable_worker_command(self, command_name: str) -> None:
+        self._require_default_worker_state("dynamic worker commands")
         if command_name not in _WORKER_COMMAND_MODULES:
             raise HitlValidationError(f"Unknown HITL worker command: {command_name}")
         commands = self._tool_context.get("allowed_worker_commands")
@@ -1731,6 +1838,33 @@ class HitlRuntime:
             "Follow the current runtime instruction and retry only with an available command."
         )
 
+    def _require_default_worker_state(self, operation: str) -> None:
+        profile = str(self._tool_context.get("command_profile", "default"))
+        if profile != "default":
+            raise HitlValidationError(
+                f"Ranked proposal task sessions do not use global {operation}."
+            )
+
+    def require_ranked_task_session_boundary(self) -> None:
+        """Require ordinary worker lifecycle state to be terminal before ranked tasks."""
+
+        from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
+
+        state = HitlRuntimeState(self.work_dir)
+        pending = state.pending_worker_command()
+        continuation = state.worker_continuation()
+        status = str((pending or {}).get("status", "")).strip()
+        if worker_command_requires_resume(pending) or (
+            isinstance(pending, dict) and status not in {"resolved", "cancelled"}
+        ):
+            raise HitlValidationError(
+                "Ranked proposal tasks cannot start while an ordinary worker request is unresolved."
+            )
+        if isinstance(continuation, dict):
+            raise HitlValidationError(
+                "Ranked proposal tasks cannot start while an ordinary worker continuation exists."
+            )
+
     def register_worker_prompt(self, prompt_block: str) -> None:
         """Persist the runtime-owned continuation point for the active worker.
 
@@ -1738,6 +1872,7 @@ class HitlRuntime:
         The worker never owns this state: runtime records the exact already-rendered
         prompt and may launch a continuation worker against the same tool server.
         """
+        self._require_default_worker_state("worker continuation state")
         prompt = _require_text(prompt_block, "prompt_block", "HITL worker continuation")
         from core.hitl_runtime_state import HitlRuntimeState
 
@@ -1761,6 +1896,7 @@ class HitlRuntime:
         hitl_stage: Optional[str] = None,
         status: Optional[str] = None,
     ) -> None:
+        self._require_default_worker_state("worker continuation state")
         updates: Dict[str, Any] = {}
         if prompt_block:
             updates["prompt_block"] = prompt_block
@@ -1774,6 +1910,7 @@ class HitlRuntime:
             HitlRuntimeState(self.work_dir).update_worker_continuation(**updates)
 
     def _clear_worker_continuation(self) -> None:
+        self._require_default_worker_state("worker continuation state")
         from core.hitl_runtime_state import HitlRuntimeState
 
         HitlRuntimeState(self.work_dir).clear_worker_continuation()
@@ -1792,6 +1929,7 @@ class HitlRuntime:
 
     def worker_continuation(self) -> Optional[Dict[str, Any]]:
         """Return the runtime-owned replacement-worker state, when present."""
+        self._require_default_worker_state("worker continuation state")
         from core.hitl_runtime_state import HitlRuntimeState
 
         continuation = HitlRuntimeState(self.work_dir).worker_continuation()
@@ -1799,6 +1937,7 @@ class HitlRuntime:
 
     def _record_worker_provider_result(self, result: Dict[str, Any]) -> None:
         """Stop after the active continuation exhausts its provider attempts."""
+        self._require_default_worker_state("worker provider-failure state")
         if "provider_process_failed" not in result:
             return
         failed = bool(result.get("provider_process_failed"))
@@ -1827,6 +1966,7 @@ class HitlRuntime:
 
     def resolved_worker_response(self) -> Optional[Dict[str, Any]]:
         """Return the response retained for an idempotent worker-command retry."""
+        self._require_default_worker_state("pending worker state")
         from core.hitl_runtime_state import HitlRuntimeState
 
         pending = HitlRuntimeState(self.work_dir).pending_worker_command()
@@ -1857,6 +1997,7 @@ class HitlRuntime:
         result: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """Reconnect a replacement worker to one durable held command."""
+        self._require_default_worker_state("pending worker state")
         from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
 
         state = HitlRuntimeState(self.work_dir)
@@ -1971,13 +2112,19 @@ class HitlRuntime:
         provenance = self._tool_context.get("provenance")
         if not isinstance(provenance, dict):
             raise HitlValidationError("Ranked idea visibility requires runtime provenance.")
+        profile = str(self._tool_context.get("command_profile", ""))
+        profile_spec = _RANKED_COMMAND_PROFILES.get(profile)
+        if profile_spec is None:
+            raise HitlValidationError(
+                "Ranked idea visibility requires a closed ranked command profile."
+            )
         return visible_ranked_idea_records(
             records,
             parent_node_id=provenance.get("parent_node_id", ""),
             candidate_attempt_id=provenance.get("attempt_id", ""),
             base_idea_number=visibility.get("base_idea_number"),
             proposal_task_id=provenance.get("proposal_task_id", ""),
-            role=visibility.get("role", ""),
+            role=str(profile_spec["role"]),
             seed_idea_ids=visibility.get("seed_idea_ids", ()),
         )
 
@@ -2312,6 +2459,7 @@ class HitlRuntime:
         *,
         worker_name: str,
     ) -> Dict[str, Any]:
+        self._require_default_worker_state("proposal worker continuation state")
         self._join_live_worker_request_handler()
         cancelled = self._cancelled_worker_command_result(
             result,
@@ -2477,13 +2625,17 @@ class HitlRuntime:
             }
 
     def view_current_frontier_for_tool(self) -> Dict[str, Any]:
+        profile = str(self._tool_context.get("command_profile", "default"))
         if (
             self.pipeline_stage != "experiment_runner"
-            or self._tool_context.get("hitl_stage") != "proposal"
+            or (
+                self._tool_context.get("hitl_stage") != "proposal"
+                and profile not in {"proposal_verifier", "proposal_reviewer"}
+            )
         ):
             raise HitlValidationError(
                 "HITL_ERROR frontier_wrong_context\n"
-                "`view_current_frontier` is available only during AutoResearch HITL proposal generation.\n"
+                "`view_current_frontier` is available only during AutoResearch HITL proposal work.\n"
                 "Continue with the command appropriate for the current HITL phase."
             )
         from core.hitl_frontier import HitlFrontierStore
@@ -3929,6 +4081,7 @@ class HitlRuntime:
         live tool-server and request state and gives a continuation worker the runtime
         prompt that the lost worker should have continued from.
         """
+        self._require_default_worker_state("worker exit continuation state")
         self._join_live_worker_request_handler()
         cancelled = self._cancelled_worker_command_result(
             result,

@@ -659,6 +659,7 @@ def test_runtime_assigns_task_provenance_instead_of_accepting_agent_value(tmp_pa
     )
     runtime._tool_context = {
         "hitl_stage": "review",
+        "command_profile": "proposal_verifier",
         "actor": "proposal_verifier",
         "provenance": {
             "parent_node_id": "parent",
@@ -742,6 +743,7 @@ def test_generic_report_command_cannot_finalize_reserved_ranked_categories(tmp_p
     )
     runtime._tool_context = {
         "hitl_stage": "review",
+        "command_profile": "proposal_verifier",
         "actor": "proposal_verifier",
         "provenance": {
             "parent_node_id": "parent",
@@ -1025,6 +1027,7 @@ def test_ranked_idea_tools_share_visibility_for_lookup_premises_and_summaries(tm
     )
     runtime._tool_context = {
         "hitl_stage": "review",
+        "command_profile": "proposal_verifier",
         "actor": "proposal_verifier",
         "provenance": {
             "parent_node_id": "parent",
@@ -1033,7 +1036,6 @@ def test_ranked_idea_tools_share_visibility_for_lookup_premises_and_summaries(tm
         },
         "idea_visibility": {
             "base_idea_number": 2,
-            "role": "verifier",
             "seed_idea_ids": [seeded["proposals"][0]["idea_id"]],
         },
     }
@@ -1093,6 +1095,7 @@ def test_reviewer_rendering_uses_one_proposal_verification_presentation_order(tm
         (proposal_one["idea_id"], verification_one["idea_id"]),
     ]
     runtime._tool_context = {
+        "command_profile": "proposal_reviewer",
         "provenance": {
             "parent_node_id": "parent",
             "attempt_id": "attempt_1",
@@ -1100,7 +1103,6 @@ def test_reviewer_rendering_uses_one_proposal_verification_presentation_order(tm
         },
         "idea_visibility": {
             "base_idea_number": 2,
-            "role": "reviewer",
             "seed_idea_ids": [
                 proposal_one["idea_id"],
                 proposal_two["idea_id"],
@@ -1596,3 +1598,431 @@ def test_round_state_stays_nested_without_generic_patch_or_derived_aggregate(tmp
     assert "proposal_round" in action
     assert "aggregate" not in action["proposal_round"]
     assert action["proposal_round"] == state.proposal_round_snapshot(**identity)
+
+
+def _append_ranked_session_base_idea(work_dir):
+    return HitlIdeaLog(work_dir).append(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "evidence",
+            "idea_category": "experiment_result",
+            "level": "C",
+            "actor": "experiment_runner",
+            "premises": [],
+            "context": "Shared history for scoped tool-session tests.",
+            "related_artifacts": [],
+            "evidence": "The selected parent has a finalized baseline result.",
+            "raised": False,
+        }
+    )
+
+
+def _prepare_ranked_tool_runtime(
+    work_dir,
+    *,
+    task_id,
+    command_profile,
+    actor,
+    hitl_stage,
+    seed_idea_ids=(),
+):
+    runtime = HitlRuntime(
+        work_dir,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+        tool_scope=task_id,
+    )
+    runtime.prepare_idea_tool_context(
+        hitl_stage=hitl_stage,
+        command_profile=command_profile,
+        actor=actor,
+        provenance={
+            "parent_node_id": "parent",
+            "attempt_id": "attempt_4",
+            "proposal_task_id": task_id,
+        },
+        idea_visibility={
+            "base_idea_number": 1,
+            "seed_idea_ids": list(seed_idea_ids),
+        },
+        proposal_submission_validator=lambda: {"valid": True, "issues": []},
+    )
+    return runtime
+
+
+@pytest.fixture
+def fake_hitl_tool_servers(monkeypatch):
+    class FakeToolServer:
+        next_port = 41000
+
+        def __init__(self, _address, _handler):
+            self.server_address = ("127.0.0.1", type(self).next_port)
+            type(self).next_port += 1
+            self.closed = False
+
+        def serve_forever(self):
+            return None
+
+        def shutdown(self):
+            self.closed = True
+
+        def server_close(self):
+            self.closed = True
+
+    monkeypatch.setattr("core.hitl.http.server.ThreadingHTTPServer", FakeToolServer)
+    return FakeToolServer
+
+
+def test_scoped_ranked_tool_sessions_coexist_without_shared_context(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    base = _append_ranked_session_base_idea(tmp_path)
+    candidate = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-p1",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+    )
+    reviewer = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-r1",
+        command_profile="proposal_reviewer",
+        actor="proposal_reviewer",
+        hitl_stage="review",
+        seed_idea_ids=[base["idea_id"]],
+    )
+    try:
+        assert candidate._tool_url != reviewer._tool_url
+        assert candidate._tool_token != reviewer._tool_token
+        assert candidate.paths.tool_bin_dir == tmp_path / ".neurico/hitl/bin/r1-p1"
+        assert reviewer.paths.tool_bin_dir == tmp_path / ".neurico/hitl/bin/r1-r1"
+        assert candidate.paths.tool_bin_dir.is_dir()
+        assert reviewer.paths.tool_bin_dir.is_dir()
+        reviewer_server = reviewer._tool_server
+        reviewer_url = reviewer._tool_url
+        reviewer_token = reviewer._tool_token
+
+        candidate.clear_idea_tool_context()
+
+        assert reviewer._tool_server is reviewer_server
+        assert reviewer_server.closed is False
+        assert reviewer._tool_url == reviewer_url
+        assert reviewer._tool_token == reviewer_token
+        assert reviewer.paths.view_ideas_command.is_file()
+        assert base["idea_id"] in _visible_ids(reviewer.view_ideas_for_tool()["ideas"])
+    finally:
+        candidate.clear_idea_tool_context()
+        reviewer.clear_idea_tool_context()
+
+
+@pytest.mark.parametrize(
+    ("task_id", "profile", "actor", "stage", "expected"),
+    [
+        (
+            "r1-p1",
+            "proposal_candidate",
+            "autoresearch_proposer",
+            "proposal",
+            {
+                "hitl-view-ideas",
+                "hitl-report-idea",
+                "view_current_frontier",
+                "hitl-submit-proposal",
+            },
+        ),
+        (
+            "r1-v1",
+            "proposal_verifier",
+            "proposal_verifier",
+            "review",
+            {
+                "hitl-view-ideas",
+                "hitl-report-idea",
+                "view_current_frontier",
+                "hitl-finish-proposal-verification",
+            },
+        ),
+        (
+            "r1-r1",
+            "proposal_reviewer",
+            "proposal_reviewer",
+            "review",
+            {
+                "hitl-view-ideas",
+                "hitl-report-idea",
+                "view_current_frontier",
+                "hitl-finish-proposal-review",
+            },
+        ),
+    ],
+)
+def test_ranked_command_profiles_are_closed_and_exact(
+    tmp_path,
+    fake_hitl_tool_servers,
+    task_id,
+    profile,
+    actor,
+    stage,
+    expected,
+):
+    base = _append_ranked_session_base_idea(tmp_path)
+    seeds = [] if profile == "proposal_candidate" else [base["idea_id"]]
+    runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id=task_id,
+        command_profile=profile,
+        actor=actor,
+        hitl_stage=stage,
+        seed_idea_ids=seeds,
+    )
+    try:
+        assert runtime._tool_context["allowed_worker_commands"] == expected
+        assert {path.name for path in runtime.paths.tool_bin_dir.iterdir()} == expected
+        assert "hitl-resume-worker-request" not in expected
+        with pytest.raises(HitlValidationError, match="global dynamic worker commands"):
+            runtime._enable_worker_command("hitl-resume-worker-request")
+    finally:
+        runtime.clear_idea_tool_context()
+
+
+def test_ranked_prepare_bypasses_global_worker_state_and_forbids_continuation_mutation(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    _append_ranked_session_base_idea(tmp_path)
+    state = HitlRuntimeState(tmp_path)
+    state.begin_worker_command(
+        {
+            "request_key": "held-request",
+            "kind": "phase_finish",
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+        }
+    )
+    state.record_worker_continuation(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "actor": "experiment_runner",
+            "provenance": {},
+            "prompt_block": "Continue ordinary work.",
+        }
+    )
+    before = state.snapshot()
+
+    runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-p1",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+    )
+    try:
+        assert "hitl-resume-worker-request" not in runtime._tool_context["allowed_worker_commands"]
+        assert (
+            HitlRuntimeState(tmp_path).pending_worker_command() == before["pending_worker_command"]
+        )
+        assert HitlRuntimeState(tmp_path).worker_continuation() == before["worker_continuation"]
+        with pytest.raises(HitlValidationError, match="global worker continuation state"):
+            runtime.register_worker_prompt("Do not persist this ranked-task prompt.")
+        assert HitlRuntimeState(tmp_path).worker_continuation() == before["worker_continuation"]
+    finally:
+        runtime.clear_idea_tool_context()
+
+
+def test_ranked_session_boundary_reuses_existing_worker_state_classification(tmp_path):
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    state = HitlRuntimeState(tmp_path)
+    state.begin_worker_command(
+        {
+            "request_key": "ordinary-request",
+            "kind": "phase_finish",
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+        }
+    )
+    state.record_worker_continuation(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "actor": "experiment_runner",
+            "provenance": {},
+            "prompt_block": "Continue ordinary work.",
+        }
+    )
+
+    with pytest.raises(HitlValidationError, match="worker request is unresolved"):
+        runtime.require_ranked_task_session_boundary()
+
+    state.complete_worker_command(
+        "ordinary-request",
+        {"status": "approved", "final": True},
+    )
+    with pytest.raises(HitlValidationError, match="worker continuation exists"):
+        runtime.require_ranked_task_session_boundary()
+
+    state.clear_worker_continuation()
+    runtime.require_ranked_task_session_boundary()
+
+
+def test_default_tool_context_still_exposes_resume_for_held_request(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    state = HitlRuntimeState(tmp_path)
+    state.begin_worker_command(
+        {
+            "request_key": "held-request",
+            "kind": "phase_finish",
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+        }
+    )
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    runtime.prepare_idea_tool_context(hitl_stage="review")
+    try:
+        assert "hitl-resume-worker-request" in runtime._tool_context["allowed_worker_commands"]
+        assert runtime.paths.resume_worker_request_command.is_file()
+    finally:
+        runtime.clear_idea_tool_context()
+
+
+def test_ranked_profile_requires_matching_scope_actor_stage_and_provenance(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    scoped = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+        tool_scope="r1-p1",
+    )
+    with pytest.raises(HitlValidationError, match="runtime provenance"):
+        scoped.prepare_idea_tool_context(
+            hitl_stage="review",
+            command_profile="proposal_verifier",
+            actor="proposal_verifier",
+            provenance={
+                "parent_node_id": "parent",
+                "attempt_id": "attempt_4",
+                "proposal_task_id": "r1-v1",
+            },
+            idea_visibility={"base_idea_number": 0, "seed_idea_ids": ["I1"]},
+        )
+    with pytest.raises(HitlValidationError, match="closed ranked command profile"):
+        scoped.prepare_idea_tool_context(hitl_stage="proposal")
+
+    unscoped = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    with pytest.raises(HitlValidationError, match="scoped experiment-runner"):
+        unscoped.prepare_idea_tool_context(
+            hitl_stage="proposal",
+            command_profile="proposal_candidate",
+            actor="autoresearch_proposer",
+            provenance={
+                "parent_node_id": "parent",
+                "attempt_id": "attempt_4",
+                "proposal_task_id": "r1-p1",
+            },
+            idea_visibility={"base_idea_number": 0, "seed_idea_ids": []},
+        )
+
+
+def test_ranked_profile_adds_existing_time_budget_command_only_when_active(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+):
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+        tool_scope="r1-p1",
+    )
+    monkeypatch.setattr(runtime, "_time_budget_command_available", lambda: True)
+    runtime.prepare_idea_tool_context(
+        hitl_stage="proposal",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        provenance={
+            "parent_node_id": "parent",
+            "attempt_id": "attempt_4",
+            "proposal_task_id": "r1-p1",
+        },
+        idea_visibility={"base_idea_number": 0, "seed_idea_ids": []},
+        proposal_submission_validator=lambda: {"valid": True, "issues": []},
+    )
+    try:
+        assert "hitl-time-budget" in runtime._tool_context["allowed_worker_commands"]
+        assert (runtime.paths.tool_bin_dir / "hitl-time-budget").is_file()
+    finally:
+        runtime.clear_idea_tool_context()
+
+
+def test_frontier_view_authorization_expands_only_for_ranked_assessment_profiles(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+):
+    from core.hitl_frontier import HitlFrontierStore
+
+    base = _append_ranked_session_base_idea(tmp_path)
+    monkeypatch.setattr(
+        HitlFrontierStore,
+        "current_for_worker",
+        lambda _store: {"node_sha": "parent"},
+    )
+    verifier = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-v1",
+        command_profile="proposal_verifier",
+        actor="proposal_verifier",
+        hitl_stage="review",
+        seed_idea_ids=[base["idea_id"]],
+    )
+    try:
+        assert verifier.view_current_frontier_for_tool()["frontier"] == {"node_sha": "parent"}
+    finally:
+        verifier.clear_idea_tool_context()
+
+    ordinary = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    ordinary._tool_context = {"hitl_stage": "review", "command_profile": "default"}
+    with pytest.raises(HitlValidationError, match="frontier_wrong_context"):
+        ordinary.view_current_frontier_for_tool()
+
+
+@pytest.mark.parametrize("tool_scope", ["proposal-task", "../r1-p1", "r1-p0"])
+def test_scoped_runtime_requires_exact_validated_task_id(tmp_path, tool_scope):
+    with pytest.raises(ValueError, match="validated proposal task ID"):
+        HitlRuntime(
+            tmp_path,
+            "experiment_runner",
+            channel=object(),
+            manager=object(),
+            tool_scope=tool_scope,
+        )
