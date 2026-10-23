@@ -1731,7 +1731,8 @@ workflow:
 3. follow the Section 19.8 shutdown sequence until every provider is reaped,
    every task tool server has stopped accepting requests, and every task
    mutation gate has settled;
-4. let the current physical-attempt rollback restore the prepared boundary;
+4. let the current physical-attempt rollback restore the runtime-owned
+   authoritative state at the prepared boundary;
 5. relaunch from the established controller path.
 
 Do not build an integration worker, merge task writes, or attempt causal attribution. Ranked-round agents have no legitimate public changes to preserve.
@@ -1740,6 +1741,14 @@ This boundary detects unauthorized mutation; it is not a complete
 operating-system read sandbox. The implementation should preserve NeuriCo's
 current trust model rather than introduce containers or per-agent worktrees in
 this change.
+
+Every ranked proposer, verifier, and reviewer process receives
+`PYTHONDONTWRITEBYTECODE=1` through its existing task-specific HITL environment.
+This matches NeuriCo's Docker runtime and prevents ordinary Python imports from
+creating ignored `__pycache__` state inside the shared read-only workspace.
+Checkpoint restoration continues to own tracked files, declared evaluator
+artifacts, private HITL state, and the AutoResearch whiteboard; it does not
+become a general snapshot or cleanup mechanism for unrelated ignored files.
 
 ## 18. Concurrency model
 
@@ -2834,3 +2843,5 @@ The mechanism is complete when:
 29. Parallelism exists between logical tasks only. Each task reuses NeuriCo's
     serial worker-replacement loop, so a replacement cannot overlap the
     preceding provider launch for that task.
+30. Ranked task environments prevent automatic Python bytecode writes without
+    changing single-mode agent environments or weakening the workspace guard.

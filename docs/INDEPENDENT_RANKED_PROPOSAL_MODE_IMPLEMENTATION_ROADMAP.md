@@ -922,6 +922,54 @@ Gate:
 - an existing round can never adopt a new fingerprint;
 - no new state field, recovery path, or single-mode behavior is introduced.
 
+### Step 22 — Prevent ranked Python imports from mutating the workspace
+
+Purpose:
+
+Preserve the ranked read-only boundary when a local proposer, verifier, or
+reviewer imports a workspace Python module. NeuriCo's Docker runtime already
+sets `PYTHONDONTWRITEBYTECODE=1`; ranked local task launches must carry the
+same invariant without changing single mode.
+
+Main mechanisms reused:
+
+- ranked command profiles remain the authoritative role boundary;
+- `HitlRuntime.idea_tool_env()` remains the one task-specific environment
+  builder;
+- every ranked proposer, verifier, reviewer, and replacement launch continues
+  through that existing environment;
+- the workspace guard remains strict and unchanged;
+- physical-attempt rollback continues to restore tracked files, declared
+  evaluator artifacts, private HITL state, and the AutoResearch whiteboard.
+
+Work:
+
+- add `PYTHONDONTWRITEBYTECODE=1` only when the active command profile is a
+  ranked proposal profile;
+- do not add configuration, durable state, cache exclusions, general ignored
+  file cleanup, or another recovery path;
+- clarify that authoritative rollback does not snapshot unrelated ignored
+  files;
+- leave single proposal mode, fingerprints, automatic retry, and terminal
+  failure policy unchanged.
+
+Tests:
+
+- prove every ranked role receives the bytecode policy;
+- launch a child Python process from each ranked role's real task environment,
+  import a workspace module, and prove no nested `__pycache__` is created;
+- prove a default HITL task does not receive the ranked-only override;
+- run the workspace-guard, ranked parallel, ranked recovery, and timeout
+  recovery suites, followed by the full test suite.
+
+Gate:
+
+- ranked local and Docker task launches share the no-bytecode invariant;
+- strict workspace mutation detection remains unchanged;
+- the observed verifier cache mutation cannot recur through ordinary Python
+  imports;
+- no new source of truth or broader cleanup policy is introduced.
+
 ## 11. Required verification at every checkpoint
 
 At minimum:

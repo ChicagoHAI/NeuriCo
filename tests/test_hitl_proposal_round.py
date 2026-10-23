@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -2548,6 +2549,73 @@ def test_ranked_command_profiles_are_closed_and_exact(
         assert "hitl-resume-worker-request" not in expected
         with pytest.raises(HitlValidationError, match="global dynamic worker commands"):
             runtime._enable_worker_command("hitl-resume-worker-request")
+    finally:
+        runtime.clear_idea_tool_context()
+
+
+@pytest.mark.parametrize(
+    ("task_id", "profile", "actor", "stage"),
+    [
+        ("r1-p1", "proposal_candidate", "autoresearch_proposer", "proposal"),
+        ("r1-v1", "proposal_verifier", "proposal_verifier", "review"),
+        ("r1-r1", "proposal_reviewer", "proposal_reviewer", "review"),
+    ],
+)
+def test_ranked_task_environment_prevents_workspace_python_bytecode(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+    task_id,
+    profile,
+    actor,
+    stage,
+):
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    base = _append_ranked_session_base_idea(tmp_path)
+    runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id=task_id,
+        command_profile=profile,
+        actor=actor,
+        hitl_stage=stage,
+        seed_idea_ids=[] if stage == "proposal" else [base["idea_id"]],
+    )
+    module_name = f"experiment_{task_id.replace('-', '_')}"
+    module_root = tmp_path / module_name
+    module_root.mkdir()
+    (module_root / "sample.py").write_text("VALUE = 1\n", encoding="utf-8")
+    try:
+        env = runtime.idea_tool_env()
+        assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+        completed = subprocess.run(
+            [sys.executable, "-c", f"import {module_name}.sample"],
+            cwd=tmp_path,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert not (module_root / "__pycache__").exists()
+    finally:
+        runtime.clear_idea_tool_context()
+
+
+def test_default_task_environment_does_not_add_ranked_bytecode_policy(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+):
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    runtime.prepare_idea_tool_context(hitl_stage="review")
+    try:
+        assert "PYTHONDONTWRITEBYTECODE" not in runtime.idea_tool_env()
     finally:
         runtime.clear_idea_tool_context()
 

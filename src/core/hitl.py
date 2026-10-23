@@ -2082,6 +2082,10 @@ class HitlRuntime:
     def idea_tool_env(self, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         env = dict(base_env or os.environ)
         env["PYTHONUNBUFFERED"] = "1"
+        if str(self._tool_context.get("command_profile", "")) in _RANKED_COMMAND_PROFILES:
+            # Ranked proposal tasks are read-only. Match NeuriCo's Docker
+            # runtime so importing workspace modules cannot create bytecode.
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["NEURICO_HITL_URL"] = self._tool_url
         env["NEURICO_HITL_TOKEN"] = self._tool_token
         env["NEURICO_PROJECT_ROOT"] = str(Path(__file__).resolve().parents[2])
