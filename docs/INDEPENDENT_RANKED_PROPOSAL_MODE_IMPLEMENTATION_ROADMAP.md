@@ -90,7 +90,7 @@ Keep existing regression tests in their current files.
 - [x] Step 2 — Add the configuration value object
 - [x] Step 3 — Transport configuration internally
 - [x] Step 4 — Add pure proposal-round algorithms
-- [ ] Step 5 — Extend the idea schema
+- [x] Step 5 — Extend the idea schema
 - [ ] Step 6 — Add the shared visibility policy
 
 ### Phase B: Complete serial workflow

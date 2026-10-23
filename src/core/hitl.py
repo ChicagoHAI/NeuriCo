@@ -49,7 +49,12 @@ PIPELINE_STAGES = {
     "scorer",
     "paper_writer",
 }
-HITL_WORKER_ACTORS = PIPELINE_STAGES | {"autoresearch_proposer", "comment_handler"}
+HITL_WORKER_ACTORS = PIPELINE_STAGES | {
+    "autoresearch_proposer",
+    "comment_handler",
+    "proposal_verifier",
+    "proposal_reviewer",
+}
 HITL_STAGES = {"plan", "execution", "proposal", "review"}
 LEVELS = {"A", "B", "C"}
 IDEA_TYPES = {"decision", "evidence", "proposal"}
@@ -72,8 +77,11 @@ EVIDENCE_IDEA_CATEGORIES = {
     "implementation_fact",
     "experiment_result",
     "constraint_or_risk",
+    "proposal_verification",
+    "proposal_review",
     "other",
 }
+RANKED_RESULT_EVIDENCE_CATEGORIES = {"proposal_verification", "proposal_review"}
 DECISION_IDEA_CATEGORIES = {
     "dataset_choice",
     "search_strategy",
@@ -105,6 +113,7 @@ IDEA_RECORD_FIELD_ORDER = [
     "actor",
     "parent_node_id",
     "attempt_id",
+    "proposal_task_id",
     "premises",
     "worker_context",
     "context",
@@ -114,6 +123,7 @@ IDEA_RECORD_FIELD_ORDER = [
     "proposal",
     "decision_needed",
     "evidence",
+    "ranking",
     "options",
     "decision",
     "human_feedback",
@@ -122,7 +132,7 @@ IDEA_RECORD_FIELD_ORDER = [
     "worker_escalation_reason",
     "manager_escalation_reason",
 ]
-RUNTIME_PROVENANCE_FIELDS = ("parent_node_id", "attempt_id")
+RUNTIME_PROVENANCE_FIELDS = ("parent_node_id", "attempt_id", "proposal_task_id")
 
 
 def _now() -> str:
@@ -286,6 +296,56 @@ def _validate_premises(premises: List[str], existing_ids: Optional[set[str]]) ->
         )
 
 
+def _normalize_proposal_ranking(value: Any) -> List[str]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise HitlValidationError("Proposal review evidence requires a non-empty ranking.")
+    ranking: List[str] = []
+    seen = set()
+    for item in value:
+        candidate_id = str(item).strip()
+        if not candidate_id.startswith("I") or not candidate_id[1:].isdigit():
+            raise HitlValidationError(
+                f"Proposal review ranking contains an invalid idea id: {candidate_id or '<empty>'}"
+            )
+        if candidate_id in seen:
+            raise HitlValidationError(
+                f"Proposal review ranking contains a duplicate candidate: {candidate_id}"
+            )
+        seen.add(candidate_id)
+        ranking.append(candidate_id)
+    return ranking
+
+
+def _validate_proposal_ranking_candidates(
+    ranking: List[str],
+    *,
+    existing_records: Optional[Iterable[Dict[str, Any]]],
+    expected_candidate_ids: Optional[Iterable[str]],
+) -> None:
+    if existing_records is not None:
+        records_by_id = {
+            str(record.get("idea_id", "")).strip(): record for record in existing_records
+        }
+        invalid = [
+            candidate_id
+            for candidate_id in ranking
+            if candidate_id not in records_by_id
+            or records_by_id[candidate_id].get("idea_type") != "proposal"
+        ]
+        if invalid:
+            raise HitlValidationError(
+                "Proposal review ranking contains unknown proposal candidate(s): "
+                + ", ".join(invalid)
+            )
+    if expected_candidate_ids is None:
+        return
+    expected = _normalize_proposal_ranking(list(expected_candidate_ids))
+    if len(ranking) != len(expected) or set(ranking) != set(expected):
+        raise HitlValidationError(
+            "Proposal review ranking must contain every current-round candidate exactly once."
+        )
+
+
 def _validate_idea_category(idea_type: str, idea_category: Any) -> str:
     category = str(idea_category or "").strip()
     allowed = IDEA_CATEGORIES_BY_TYPE.get(idea_type, set())
@@ -437,7 +497,13 @@ class HitlIdeaLog:
         self.path = hitl_idea_log_path(self.work_dir)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def append(self, idea: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+    def append(
+        self,
+        idea: Dict[str, Any],
+        *,
+        idempotent: bool = False,
+        proposal_review_candidate_ids: Optional[Iterable[str]] = None,
+    ) -> Dict[str, Any]:
         """Finalize one idea, optionally treating an identical retry as a no-op.
 
         Runtime finalizers use ``idempotent=True`` because an interrupted process
@@ -479,7 +545,18 @@ class HitlIdeaLog:
                             "Add the selected action as an option, then retry."
                         )
                     record["decision"] = selected["decision"]
-            self.validate(record, existing_ids=known_ids)
+            if (
+                record.get("idea_type") == "evidence"
+                and record.get("idea_category") == "proposal_review"
+            ):
+                record["ranking"] = _normalize_proposal_ranking(record.get("ranking"))
+            self.validate(
+                record,
+                existing_ids=known_ids,
+                existing_records=existing_records,
+                proposal_review_candidate_ids=proposal_review_candidate_ids,
+                require_proposal_review_candidates=True,
+            )
             ordered = _ordered_idea_record(record)
             existing = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
             addition = _compact_json(ordered) + "\n"
@@ -531,6 +608,11 @@ class HitlIdeaLog:
         payload["premises"] = _normalize_premises(payload["premises"])
         if payload.get("idea_type") == "decision" and "options" in payload:
             payload["options"] = _normalize_options(payload["options"])
+        if (
+            payload.get("idea_type") == "evidence"
+            and payload.get("idea_category") == "proposal_review"
+        ):
+            payload["ranking"] = _normalize_proposal_ranking(payload.get("ranking"))
         return payload
 
     def find_equivalent(self, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -621,6 +703,7 @@ class HitlIdeaLog:
                 f"{record_id} [{idea_type}/{category}] level={level} actor={actor} stage={stage}"
             )
             for key in (
+                "proposal_task_id",
                 "context",
                 "proposal_type",
                 "proposal",
@@ -634,6 +717,9 @@ class HitlIdeaLog:
                 value = record.get(key)
                 if value is not None and str(value).strip():
                     blocks.append(f"{key}: {value}")
+            ranking = record.get("ranking")
+            if isinstance(ranking, list) and ranking:
+                blocks.append(f"ranking: {', '.join(str(item) for item in ranking)}")
             options = record.get("options")
             if isinstance(options, list) and options:
                 blocks.append("options:")
@@ -656,6 +742,9 @@ class HitlIdeaLog:
         record: Dict[str, Any],
         *,
         existing_ids: Optional[set[str]] = None,
+        existing_records: Optional[Iterable[Dict[str, Any]]] = None,
+        proposal_review_candidate_ids: Optional[Iterable[str]] = None,
+        require_proposal_review_candidates: bool = False,
     ) -> None:
         required = [
             "idea_id",
@@ -697,6 +786,33 @@ class HitlIdeaLog:
             raise HitlValidationError(
                 "C-level HITL ideas must be finalized by a recognized HITL worker actor"
             )
+        proposal_task_id = str(record.get("proposal_task_id", "")).strip()
+        ranked_actor_roles = {
+            "autoresearch_proposer": "proposer",
+            "proposal_verifier": "verifier",
+            "proposal_reviewer": "reviewer",
+        }
+        if proposal_task_id:
+            from core.hitl_proposal_round import parse_proposal_task_id
+
+            try:
+                task_identity = parse_proposal_task_id(proposal_task_id)
+            except ValueError as exc:
+                raise HitlValidationError(str(exc)) from exc
+            if actor not in ranked_actor_roles or ranked_actor_roles[actor] != task_identity.role:
+                raise HitlValidationError(
+                    "Proposal task provenance does not match the finalized idea actor."
+                )
+            if not str(record.get("parent_node_id", "")).strip() or not str(
+                record.get("attempt_id", "")
+            ).strip():
+                raise HitlValidationError(
+                    "Proposal task provenance requires parent_node_id and attempt_id."
+                )
+        elif actor in {"proposal_verifier", "proposal_reviewer"}:
+            raise HitlValidationError(
+                "Proposal verifier and reviewer ideas require proposal_task_id provenance."
+            )
         for field in ("basis", "human_basis"):
             if field in record:
                 raise HitlValidationError(
@@ -711,6 +827,8 @@ class HitlIdeaLog:
                 raise HitlValidationError("Decision idea must not include evidence")
             if "proposal" in record:
                 raise HitlValidationError("Decision idea must not include proposal fields")
+            if "ranking" in record:
+                raise HitlValidationError("Decision idea must not include ranking")
             if not premises:
                 raise HitlValidationError("Decision idea requires at least one finalized premise")
             if "decision_needed" not in record or not str(record["decision_needed"]).strip():
@@ -741,7 +859,9 @@ class HitlIdeaLog:
                         "A/B option-based decision must be an option id or CUSTOM"
                     )
         elif record["idea_type"] == "evidence":
-            _validate_idea_category(record["idea_type"], record.get("idea_category"))
+            category = _validate_idea_category(
+                record["idea_type"], record.get("idea_category")
+            )
             if "proposal" in record:
                 raise HitlValidationError("Evidence idea must not include proposal fields")
             forbidden = [
@@ -755,10 +875,56 @@ class HitlIdeaLog:
                 )
             if "evidence" not in record or not str(record["evidence"]).strip():
                 raise HitlValidationError("Evidence idea requires non-empty evidence")
+            if category == "proposal_verification":
+                if actor != "proposal_verifier":
+                    raise HitlValidationError(
+                        "Proposal verification evidence must be finalized by proposal_verifier."
+                    )
+                if "ranking" in record:
+                    raise HitlValidationError(
+                        "Proposal verification evidence must not include ranking."
+                    )
+            elif category == "proposal_review":
+                if actor != "proposal_reviewer":
+                    raise HitlValidationError(
+                        "Proposal review evidence must be finalized by proposal_reviewer."
+                    )
+                ranking = _normalize_proposal_ranking(record.get("ranking"))
+                if require_proposal_review_candidates and proposal_review_candidate_ids is None:
+                    raise HitlValidationError(
+                        "Runtime must supply the current-round candidates for proposal review."
+                    )
+                _validate_proposal_ranking_candidates(
+                    ranking,
+                    existing_records=existing_records,
+                    expected_candidate_ids=proposal_review_candidate_ids,
+                )
+                missing_candidate_premises = [
+                    candidate_id for candidate_id in ranking if candidate_id not in premises
+                ]
+                if missing_candidate_premises:
+                    raise HitlValidationError(
+                        "Proposal review evidence must cite every ranked proposal as a premise."
+                    )
+            elif "ranking" in record:
+                raise HitlValidationError(
+                    "Ranking is valid only on proposal_review evidence."
+                )
+            if category in RANKED_RESULT_EVIDENCE_CATEGORIES and record["hitl_stage"] != "review":
+                raise HitlValidationError(
+                    "Proposal verification and review evidence must use the review HITL stage."
+                )
         else:
             forbidden = [
                 field
-                for field in ("idea_category", "decision_needed", "options", "decision", "evidence")
+                for field in (
+                    "idea_category",
+                    "decision_needed",
+                    "options",
+                    "decision",
+                    "evidence",
+                    "ranking",
+                )
                 if field in record and record.get(field) not in (None, "", [])
             ]
             if forbidden:
@@ -3799,14 +3965,21 @@ class HitlRuntime:
             raise HitlValidationError(f"Invalid HITL tool idea_type: {idea_type}")
         hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
         actor = str(self._tool_context.get("actor", self.pipeline_stage))
+        idea_category = _validate_idea_category(
+            idea_type,
+            payload.get("idea_category"),
+        )
+        if idea_type == "evidence" and idea_category in RANKED_RESULT_EVIDENCE_CATEGORIES:
+            raise HitlValidationError(
+                "HITL_ERROR reserved_idea_category\n"
+                "Proposal verification and review results must be finalized through their "
+                "role-specific finish command."
+            )
         record: Dict[str, Any] = {
             "pipeline_stage": self.pipeline_stage,
             "hitl_stage": hitl_stage,
             "idea_type": idea_type,
-            "idea_category": _validate_idea_category(
-                idea_type,
-                payload.get("idea_category"),
-            ),
+            "idea_category": idea_category,
             "level": "C",
             "actor": actor,
             "premises": _with_runtime_premises(

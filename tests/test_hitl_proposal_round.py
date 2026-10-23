@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import cli.hitl_launcher as hitl_launcher  # noqa: E402
 import cli.hitl_run_worker as hitl_run_worker  # noqa: E402
+from core.hitl import HitlIdeaLog, HitlRuntime, HitlValidationError  # noqa: E402
 from core.hitl_autoresearch import HitlAutoResearchController  # noqa: E402
 from core.hitl_paths import hitl_launch_requests_dir  # noqa: E402
 from core.hitl_proposal_round import (  # noqa: E402
@@ -525,3 +526,279 @@ def test_kemeny_young_rejects_incomplete_duplicate_or_unknown_candidates(ranking
             canonical_candidate_ids=("A", "B", "C"),
             source_review_idea_ids=("I1",),
         )
+
+
+def _seed_ranked_proposal_records(tmp_path):
+    log = HitlIdeaLog(tmp_path)
+    premise = log.append(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "review",
+            "idea_type": "evidence",
+            "idea_category": "experiment_result",
+            "level": "C",
+            "actor": "experiment_runner",
+            "premises": [],
+            "context": "The selected parent has a measured limitation.",
+            "related_artifacts": [],
+            "evidence": "The baseline result leaves room for a controlled intervention.",
+            "raised": False,
+        }
+    )
+
+    def proposal(task_id):
+        return log.append(
+            {
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "proposal",
+                "idea_type": "proposal",
+                "proposal_type": "exploitation",
+                "level": "C",
+                "actor": "autoresearch_proposer",
+                "parent_node_id": "parent",
+                "attempt_id": "attempt_1",
+                "proposal_task_id": task_id,
+                "premises": [premise["idea_id"]],
+                "context": "An independent proposer submitted an experiment.",
+                "related_artifacts": [],
+                "proposal": "Run the same controlled intervention.",
+                "raised": False,
+            },
+            idempotent=True,
+        )
+
+    first = proposal("r1-p1")
+    second = proposal("r1-p2")
+
+    def verification(task_id, candidate_id):
+        return log.append(
+            {
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "review",
+                "idea_type": "evidence",
+                "idea_category": "proposal_verification",
+                "level": "C",
+                "actor": "proposal_verifier",
+                "parent_node_id": "parent",
+                "attempt_id": "attempt_1",
+                "proposal_task_id": task_id,
+                "premises": [candidate_id],
+                "context": "Scientific verification of one proposal.",
+                "related_artifacts": [],
+                "evidence": "The intervention is feasible and its result is interpretable.",
+                "raised": False,
+            },
+            idempotent=True,
+        )
+
+    first_verification = verification("r1-v1", first["idea_id"])
+    second_verification = verification("r1-v2", second["idea_id"])
+    return log, premise, (first, second), (first_verification, second_verification)
+
+
+def _proposal_review_record(proposals, verifications, *, ranking=None, task_id="r1-r1"):
+    candidate_ids = [proposal["idea_id"] for proposal in proposals]
+    return {
+        "pipeline_stage": "experiment_runner",
+        "hitl_stage": "review",
+        "idea_type": "evidence",
+        "idea_category": "proposal_review",
+        "level": "C",
+        "actor": "proposal_reviewer",
+        "parent_node_id": "parent",
+        "attempt_id": "attempt_1",
+        "proposal_task_id": task_id,
+        "premises": [
+            *candidate_ids,
+            *(verification["idea_id"] for verification in verifications),
+        ],
+        "context": "Comparative review of the current proposal candidates.",
+        "related_artifacts": [],
+        "evidence": "The first candidate has greater expected research value.",
+        "ranking": list(ranking if ranking is not None else candidate_ids),
+        "raised": False,
+    }
+
+
+def test_ranked_results_use_existing_idea_log_and_runtime_task_provenance(tmp_path):
+    log, _premise, proposals, verifications = _seed_ranked_proposal_records(tmp_path)
+    candidate_ids = [proposal["idea_id"] for proposal in proposals]
+    review = log.append(
+        _proposal_review_record(proposals, verifications),
+        idempotent=True,
+        proposal_review_candidate_ids=candidate_ids,
+    )
+
+    assert proposals[0]["idea_id"] != proposals[1]["idea_id"]
+    assert proposals[0]["proposal"] == proposals[1]["proposal"]
+    assert proposals[0]["proposal_task_id"] == "r1-p1"
+    assert proposals[1]["proposal_task_id"] == "r1-p2"
+    assert verifications[0]["idea_category"] == "proposal_verification"
+    assert review["idea_category"] == "proposal_review"
+    assert review["ranking"] == candidate_ids
+    assert list(review).index("proposal_task_id") == list(review).index("attempt_id") + 1
+
+    rendered = log.render_for_agent(idea_id=review["idea_id"])
+    assert "proposal_task_id: r1-r1" in rendered
+    assert f"ranking: {', '.join(candidate_ids)}" in rendered
+
+
+def test_runtime_assigns_task_provenance_instead_of_accepting_agent_value(tmp_path):
+    log, premise, _proposals, _verifications = _seed_ranked_proposal_records(tmp_path)
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    runtime._tool_context = {
+        "hitl_stage": "review",
+        "actor": "proposal_verifier",
+        "provenance": {
+            "parent_node_id": "parent",
+            "attempt_id": "attempt_1",
+            "proposal_task_id": "r1-v3",
+        },
+    }
+
+    record = runtime.log_reported_payload(
+        {
+            "idea_type": "evidence",
+            "idea_category": "constraint_or_risk",
+            "premises": [premise["idea_id"]],
+            "context": "A verifier found an additional risk.",
+            "related_artifacts": [],
+            "evidence": "The proposed runtime may exceed the attempt budget.",
+            "proposal_task_id": "r9-v9",
+        }
+    )
+
+    assert record["proposal_task_id"] == "r1-v3"
+    assert log.records()[-1]["proposal_task_id"] == "r1-v3"
+
+
+@pytest.mark.parametrize(
+    ("ranking_kind", "match"),
+    [
+        ("missing", "non-empty ranking"),
+        ("duplicate", "duplicate candidate"),
+        ("unknown", "unknown proposal candidate"),
+        ("incomplete", "every current-round candidate"),
+    ],
+)
+def test_proposal_review_ranking_rejects_invalid_candidate_sets(tmp_path, ranking_kind, match):
+    log, _premise, proposals, verifications = _seed_ranked_proposal_records(tmp_path)
+    candidate_ids = [proposal["idea_id"] for proposal in proposals]
+    record = _proposal_review_record(proposals, verifications)
+    if ranking_kind == "missing":
+        record.pop("ranking")
+    elif ranking_kind == "duplicate":
+        record["ranking"] = [candidate_ids[0], candidate_ids[0]]
+    elif ranking_kind == "unknown":
+        record["ranking"] = [candidate_ids[0], "I999"]
+    else:
+        record["ranking"] = [candidate_ids[0]]
+
+    with pytest.raises(HitlValidationError, match=match):
+        log.append(
+            record,
+            proposal_review_candidate_ids=candidate_ids,
+        )
+
+
+def test_ranking_is_rejected_on_non_review_evidence(tmp_path):
+    log = HitlIdeaLog(tmp_path)
+    with pytest.raises(HitlValidationError, match="only on proposal_review"):
+        log.append(
+            {
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "review",
+                "idea_type": "evidence",
+                "idea_category": "experiment_result",
+                "level": "C",
+                "actor": "experiment_runner",
+                "premises": [],
+                "context": "Ordinary evidence cannot contain a ranking.",
+                "related_artifacts": [],
+                "evidence": "A measured result.",
+                "ranking": ["I1"],
+                "raised": False,
+            }
+        )
+
+
+def test_generic_report_command_cannot_finalize_reserved_ranked_categories(tmp_path):
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    runtime._tool_context = {
+        "hitl_stage": "review",
+        "actor": "proposal_verifier",
+        "provenance": {
+            "parent_node_id": "parent",
+            "attempt_id": "attempt_1",
+            "proposal_task_id": "r1-v1",
+        },
+    }
+
+    with pytest.raises(HitlValidationError, match="reserved_idea_category"):
+        runtime.log_reported_payload(
+            {
+                "idea_type": "evidence",
+                "idea_category": "proposal_verification",
+                "premises": [],
+                "context": "Attempt to bypass the verifier finish command.",
+                "related_artifacts": [],
+                "evidence": "This must not be finalized generically.",
+            }
+        )
+
+
+def test_proposal_task_provenance_must_match_actor_role(tmp_path):
+    log, premise, _proposals, _verifications = _seed_ranked_proposal_records(tmp_path)
+    with pytest.raises(HitlValidationError, match="does not match"):
+        log.append(
+            {
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "review",
+                "idea_type": "evidence",
+                "idea_category": "constraint_or_risk",
+                "level": "C",
+                "actor": "proposal_verifier",
+                "parent_node_id": "parent",
+                "attempt_id": "attempt_1",
+                "proposal_task_id": "r1-r1",
+                "premises": [premise["idea_id"]],
+                "context": "Mismatched task provenance.",
+                "related_artifacts": [],
+                "evidence": "This record must be rejected.",
+                "raised": False,
+            }
+        )
+
+
+def test_existing_idea_rendering_has_no_ranked_fields_when_they_are_absent(tmp_path):
+    log = HitlIdeaLog(tmp_path)
+    record = log.append(
+        {
+            "pipeline_stage": "resource_finder",
+            "hitl_stage": "review",
+            "idea_type": "evidence",
+            "idea_category": "paper_finding",
+            "level": "C",
+            "actor": "resource_finder",
+            "premises": [],
+            "context": "Existing evidence record.",
+            "related_artifacts": [],
+            "evidence": "Existing rendering remains unchanged.",
+            "raised": False,
+        }
+    )
+
+    rendered = log.render_for_agent(idea_id=record["idea_id"])
+    assert "evidence: Existing rendering remains unchanged." in rendered
+    assert "proposal_task_id:" not in rendered
+    assert "ranking:" not in rendered

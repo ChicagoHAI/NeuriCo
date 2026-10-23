@@ -1110,14 +1110,20 @@ class HitlWorkspaceView:
         log = HitlIdeaLog(self.work_dir)
         records = log.records()
         seen: set[str] = set()
+        validated_records: List[Dict[str, Any]] = []
         for record in records:
             try:
-                HitlIdeaLog.validate(record, existing_ids=seen)
+                HitlIdeaLog.validate(
+                    record,
+                    existing_ids=seen,
+                    existing_records=validated_records,
+                )
             except HitlValidationError as exc:
                 raise HitlWorkspaceViewError(
                     f"Invalid finalized HITL idea {record.get('idea_id', '<unknown>')}: {exc}"
                 ) from exc
             seen.add(str(record["idea_id"]))
+            validated_records.append(record)
         return records
 
     def _frontier(self) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
