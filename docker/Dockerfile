@@ -167,6 +167,10 @@ RUN mkdir -p /workspaces \
     /app/ideas/submitted /app/ideas/in_progress /app/ideas/completed \
     /app/logs /app/runs
 
+# Host-mounted repos are owned by the host uid, not neurico (1000), so git
+# would refuse them as "dubious ownership". System config survives HOME=/tmp.
+RUN git config --system --add safe.directory '*'
+
 # Switch to non-root user
 USER neurico
 WORKDIR /app
