@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import itertools
 import json
 import sys
 from pathlib import Path
 
 import pytest
-
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -14,8 +14,17 @@ import cli.hitl_run_worker as hitl_run_worker  # noqa: E402
 from core.hitl_autoresearch import HitlAutoResearchController  # noqa: E402
 from core.hitl_paths import hitl_launch_requests_dir  # noqa: E402
 from core.hitl_proposal_round import (  # noqa: E402
+    KEMENY_YOUNG_ALGORITHM,
+    KemenyYoungResult,
     ProposalModeConfig,
+    ProposalTaskIdentity,
+    aggregate_kemeny_young,
+    canonical_candidate_order,
     normalize_proposal_mode_config,
+    parse_proposal_task_id,
+    proposal_task_id,
+    reviewer_presentation_order,
+    validate_proposal_task_id,
 )
 from core.runner import ResearchRunner  # noqa: E402
 
@@ -32,9 +41,7 @@ def test_explicit_single_mode_has_no_panel_counts():
     ("proposer_count", "reviewer_count"),
     [(2, 2), (3, 3), (5, 9)],
 )
-def test_independent_ranked_mode_accepts_operational_count_range(
-    proposer_count, reviewer_count
-):
+def test_independent_ranked_mode_accepts_operational_count_range(proposer_count, reviewer_count):
     assert normalize_proposal_mode_config(
         "independent_ranked",
         proposer_count=proposer_count,
@@ -56,9 +63,7 @@ def test_invalid_proposal_mode_is_rejected(proposal_mode):
     ("proposer_count", "reviewer_count"),
     [(2, None), (None, 2), ("2", 2), (2, "2"), (True, 2), (2, False)],
 )
-def test_independent_ranked_mode_requires_both_integer_counts(
-    proposer_count, reviewer_count
-):
+def test_independent_ranked_mode_requires_both_integer_counts(proposer_count, reviewer_count):
     with pytest.raises(ValueError, match="requires integer"):
         normalize_proposal_mode_config(
             "independent_ranked",
@@ -69,7 +74,12 @@ def test_independent_ranked_mode_requires_both_integer_counts(
 
 @pytest.mark.parametrize(
     ("proposer_count", "reviewer_count", "field_name"),
-    [(1, 2, "proposer_count"), (6, 2, "proposer_count"), (2, 1, "reviewer_count"), (2, 10, "reviewer_count")],
+    [
+        (1, 2, "proposer_count"),
+        (6, 2, "proposer_count"),
+        (2, 1, "reviewer_count"),
+        (2, 10, "reviewer_count"),
+    ],
 )
 def test_independent_ranked_mode_enforces_operational_limits(
     proposer_count, reviewer_count, field_name
@@ -332,3 +342,186 @@ def test_launcher_serializes_only_normalized_version_five_proposal_fields(
         for key in ("proposal_mode", "proposer_count", "reviewer_count")
         if key in request
     } == expected_fields
+
+
+@pytest.mark.parametrize(
+    ("role", "ordinal", "expected"),
+    [
+        ("proposer", 1, "r2-p1"),
+        ("verifier", 3, "r2-v3"),
+        ("reviewer", 7, "r2-r7"),
+    ],
+)
+def test_proposal_task_ids_use_one_based_round_role_and_ordinal(role, ordinal, expected):
+    assert proposal_task_id(2, role, ordinal) == expected
+    assert parse_proposal_task_id(expected) == ProposalTaskIdentity(2, role, ordinal)
+
+
+@pytest.mark.parametrize(
+    "task_id",
+    ["", "r0-p1", "r1-p0", "r01-p1", "r1-p01", "r1-x1", "r1-p1-extra", 1],
+)
+def test_invalid_proposal_task_ids_are_rejected(task_id):
+    with pytest.raises(ValueError, match="invalid format"):
+        parse_proposal_task_id(task_id)
+
+
+@pytest.mark.parametrize(
+    ("task_id", "round_ordinal", "role", "ordinal"),
+    [
+        ("r1-p1", 2, "proposer", 1),
+        ("r1-p1", 1, "verifier", 1),
+        ("r1-p1", 1, "proposer", 2),
+    ],
+)
+def test_persisted_task_id_must_match_its_definition(task_id, round_ordinal, role, ordinal):
+    with pytest.raises(ValueError, match="does not match"):
+        validate_proposal_task_id(
+            task_id,
+            round_ordinal=round_ordinal,
+            role=role,
+            ordinal=ordinal,
+        )
+
+
+def test_canonical_candidate_order_uses_proposer_ordinal_not_append_or_idea_order():
+    candidates = canonical_candidate_order(
+        {
+            "r3-p3": "I2",
+            "r3-p1": "I20",
+            "r3-p2": "I11",
+        },
+        round_ordinal=3,
+    )
+
+    assert candidates == ("I20", "I11", "I2")
+
+
+@pytest.mark.parametrize(
+    "proposer_results",
+    [
+        {"r1-r1": "I1"},
+        {"r2-p1": "I1"},
+        {"r1-p2": "I1"},
+        {"r1-p1": "I1", "r1-p2": "I1"},
+    ],
+)
+def test_canonical_candidate_order_rejects_wrong_or_ambiguous_tasks(proposer_results):
+    with pytest.raises(ValueError):
+        canonical_candidate_order(proposer_results, round_ordinal=1)
+
+
+def test_reviewer_presentation_order_is_exact_and_reproducible():
+    arguments = {
+        "parent_node_id": "parent",
+        "candidate_attempt_id": "attempt_4",
+        "canonical_candidate_ids": ("I21", "I24", "I27", "I30"),
+    }
+
+    first = reviewer_presentation_order(reviewer_task_id="r1-r1", **arguments)
+    reconstructed = reviewer_presentation_order(reviewer_task_id="r1-r1", **arguments)
+    second = reviewer_presentation_order(reviewer_task_id="r1-r2", **arguments)
+
+    assert first == ("I30", "I24", "I27", "I21")
+    assert reconstructed == first
+    assert second == ("I27", "I30", "I24", "I21")
+    assert set(first) == set(arguments["canonical_candidate_ids"])
+
+
+def test_reviewer_presentation_order_requires_reviewer_identity_and_known_schema():
+    with pytest.raises(ValueError, match="reviewer task"):
+        reviewer_presentation_order(
+            parent_node_id="parent",
+            candidate_attempt_id="attempt_1",
+            reviewer_task_id="r1-p1",
+            canonical_candidate_ids=("I1", "I2"),
+        )
+    with pytest.raises(ValueError, match="schema version"):
+        reviewer_presentation_order(
+            parent_node_id="parent",
+            candidate_attempt_id="attempt_1",
+            reviewer_task_id="r1-r1",
+            canonical_candidate_ids=("I1", "I2"),
+            schema_version=2,
+        )
+
+
+def test_kemeny_young_unanimous_panel_has_one_optimal_ranking():
+    result = aggregate_kemeny_young(
+        [("I1", "I2", "I3"), ("I1", "I2", "I3")],
+        canonical_candidate_ids=("I1", "I2", "I3"),
+        source_review_idea_ids=("I10", "I11"),
+    )
+
+    assert result == KemenyYoungResult(
+        algorithm=KEMENY_YOUNG_ALGORITHM,
+        source_review_idea_ids=("I10", "I11"),
+        candidate_proposal_idea_ids=("I1", "I2", "I3"),
+        optimal_rankings=(("I1", "I2", "I3"),),
+    )
+
+
+def test_kemeny_young_retains_all_ties_in_canonical_display_order():
+    candidates = ("I1", "I2", "I3")
+    result = aggregate_kemeny_young(
+        [candidates, tuple(reversed(candidates))],
+        canonical_candidate_ids=candidates,
+        source_review_idea_ids=("I10", "I11"),
+    )
+
+    assert result.optimal_rankings == tuple(itertools.permutations(candidates))
+
+
+def test_kemeny_young_handles_condorcet_cycle_without_selecting_one_winner():
+    result = aggregate_kemeny_young(
+        [
+            ("A", "B", "C"),
+            ("B", "C", "A"),
+            ("C", "A", "B"),
+        ],
+        canonical_candidate_ids=("A", "B", "C"),
+        source_review_idea_ids=("I1", "I2", "I3"),
+    )
+
+    assert result.optimal_rankings == (
+        ("A", "B", "C"),
+        ("B", "C", "A"),
+        ("C", "A", "B"),
+    )
+
+
+def test_kemeny_young_is_independent_of_reviewer_completion_order():
+    rankings = [
+        ("A", "B", "C"),
+        ("B", "A", "C"),
+        ("B", "C", "A"),
+    ]
+    forward = aggregate_kemeny_young(
+        rankings,
+        canonical_candidate_ids=("A", "B", "C"),
+        source_review_idea_ids=("I7", "I3", "I12"),
+    )
+    reverse = aggregate_kemeny_young(
+        list(reversed(rankings)),
+        canonical_candidate_ids=("A", "B", "C"),
+        source_review_idea_ids=("I12", "I3", "I7"),
+    )
+
+    assert forward.optimal_rankings == reverse.optimal_rankings
+
+
+@pytest.mark.parametrize(
+    "rankings",
+    [
+        [("A", "B")],
+        [("A", "B", "B")],
+        [("A", "B", "D")],
+    ],
+)
+def test_kemeny_young_rejects_incomplete_duplicate_or_unknown_candidates(rankings):
+    with pytest.raises(ValueError):
+        aggregate_kemeny_young(
+            rankings,
+            canonical_candidate_ids=("A", "B", "C"),
+            source_review_idea_ids=("I1",),
+        )

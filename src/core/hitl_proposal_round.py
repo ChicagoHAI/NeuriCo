@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import itertools
+import json
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
-
 
 SINGLE_PROPOSAL_MODE = "single"
 INDEPENDENT_RANKED_PROPOSAL_MODE = "independent_ranked"
@@ -16,6 +20,18 @@ MIN_PROPOSER_COUNT = 2
 MAX_PROPOSER_COUNT = 5
 MIN_REVIEWER_COUNT = 2
 MAX_REVIEWER_COUNT = 9
+PROPOSAL_ROUND_SCHEMA_VERSION = 1
+KEMENY_YOUNG_ALGORITHM = "kemeny_young_complete_rankings_v1"
+
+_TASK_ROLE_MARKERS = {
+    "proposer": "p",
+    "verifier": "v",
+    "reviewer": "r",
+}
+_TASK_MARKER_ROLES = {marker: role for role, marker in _TASK_ROLE_MARKERS.items()}
+_PROPOSAL_TASK_ID = re.compile(
+    r"^r(?P<round>[1-9][0-9]*)-(?P<marker>[pvr])(?P<ordinal>[1-9][0-9]*)$"
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +41,25 @@ class ProposalModeConfig:
     mode: str
     proposer_count: Optional[int] = None
     reviewer_count: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ProposalTaskIdentity:
+    """Parsed identity of one logical task inside a candidate attempt."""
+
+    round_ordinal: int
+    role: str
+    ordinal: int
+
+
+@dataclass(frozen=True)
+class KemenyYoungResult:
+    """Reproducible aggregate derived from completed proposal reviews."""
+
+    algorithm: str
+    source_review_idea_ids: tuple[str, ...]
+    candidate_proposal_idea_ids: tuple[str, ...]
+    optimal_rankings: tuple[tuple[str, ...], ...]
 
 
 def normalize_proposal_mode_config(
@@ -98,6 +133,185 @@ def require_managed_autoresearch_proposal_mode(
     return normalized
 
 
+def proposal_task_id(round_ordinal: int, role: str, ordinal: int) -> str:
+    """Build the local identity of one ranked proposal task."""
+
+    _require_positive_ordinal(round_ordinal, "round_ordinal")
+    _require_positive_ordinal(ordinal, "ordinal")
+    try:
+        marker = _TASK_ROLE_MARKERS[role]
+    except KeyError as exc:
+        raise ValueError("Proposal task role must be proposer, verifier, or reviewer.") from exc
+    return f"r{round_ordinal}-{marker}{ordinal}"
+
+
+def parse_proposal_task_id(value: Any) -> ProposalTaskIdentity:
+    """Parse one exact ranked-task identity."""
+
+    if not isinstance(value, str):
+        raise ValueError("Proposal task ID has invalid format.")
+    match = _PROPOSAL_TASK_ID.fullmatch(value)
+    if match is None:
+        raise ValueError("Proposal task ID has invalid format.")
+    return ProposalTaskIdentity(
+        round_ordinal=int(match.group("round")),
+        role=_TASK_MARKER_ROLES[match.group("marker")],
+        ordinal=int(match.group("ordinal")),
+    )
+
+
+def validate_proposal_task_id(
+    value: Any,
+    *,
+    round_ordinal: int,
+    role: str,
+    ordinal: int,
+) -> ProposalTaskIdentity:
+    """Require a task ID to match its runtime-owned definition."""
+
+    expected = ProposalTaskIdentity(
+        round_ordinal=round_ordinal,
+        role=role,
+        ordinal=ordinal,
+    )
+    proposal_task_id(round_ordinal, role, ordinal)
+    actual = parse_proposal_task_id(value)
+    if actual != expected:
+        raise ValueError("Proposal task ID does not match its round, role, and ordinal.")
+    return actual
+
+
+def canonical_candidate_order(
+    proposer_results: Mapping[str, str],
+    *,
+    round_ordinal: int,
+) -> tuple[str, ...]:
+    """Order proposal idea IDs only by their proposer task ordinal."""
+
+    _require_positive_ordinal(round_ordinal, "round_ordinal")
+    if not isinstance(proposer_results, Mapping) or not proposer_results:
+        raise ValueError("Canonical candidate order requires completed proposer tasks.")
+    ordered: list[tuple[int, str]] = []
+    for task_id, candidate_id in proposer_results.items():
+        identity = parse_proposal_task_id(task_id)
+        if identity.round_ordinal != round_ordinal or identity.role != "proposer":
+            raise ValueError("Canonical candidate order requires current-round proposer tasks.")
+        candidate = _require_identifier(candidate_id, "proposal idea ID")
+        ordered.append((identity.ordinal, candidate))
+    ordered.sort(key=lambda item: item[0])
+    ordinals = [ordinal for ordinal, _candidate in ordered]
+    if ordinals != list(range(1, len(ordered) + 1)):
+        raise ValueError("Proposer task ordinals must be contiguous and one-based.")
+    candidates = tuple(candidate for _ordinal, candidate in ordered)
+    if len(set(candidates)) != len(candidates):
+        raise ValueError("Each proposer task must reference a distinct proposal idea.")
+    return candidates
+
+
+def reviewer_presentation_order(
+    *,
+    parent_node_id: str,
+    candidate_attempt_id: str,
+    reviewer_task_id: str,
+    canonical_candidate_ids: Sequence[str],
+    schema_version: int = PROPOSAL_ROUND_SCHEMA_VERSION,
+) -> tuple[str, ...]:
+    """Derive the version-1 deterministic candidate order for one reviewer."""
+
+    if schema_version != PROPOSAL_ROUND_SCHEMA_VERSION:
+        raise ValueError("Unsupported proposal-round schema version.")
+    parent = _require_identifier(parent_node_id, "parent node ID")
+    attempt = _require_identifier(candidate_attempt_id, "candidate attempt ID")
+    reviewer = parse_proposal_task_id(reviewer_task_id)
+    if reviewer.role != "reviewer":
+        raise ValueError("Reviewer presentation order requires a reviewer task ID.")
+    candidates = _require_candidate_sequence(canonical_candidate_ids)
+    candidate_list = list(candidates)
+    decorated = []
+    for index, candidate_id in enumerate(candidates):
+        encoded = json.dumps(
+            [
+                "proposal_review_presentation_v1",
+                parent,
+                attempt,
+                schema_version,
+                reviewer_task_id,
+                candidate_list,
+                candidate_id,
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        decorated.append((hashlib.sha256(encoded).hexdigest(), index, candidate_id))
+    decorated.sort(key=lambda item: (item[0], item[1]))
+    return tuple(candidate_id for _digest, _index, candidate_id in decorated)
+
+
+def aggregate_kemeny_young(
+    reviewer_rankings: Sequence[Sequence[str]],
+    *,
+    canonical_candidate_ids: Sequence[str],
+    source_review_idea_ids: Sequence[str],
+) -> KemenyYoungResult:
+    """Aggregate complete rankings with exact, unweighted Kemeny–Young."""
+
+    candidates = _require_candidate_sequence(canonical_candidate_ids)
+    if not 2 <= len(candidates) <= MAX_PROPOSER_COUNT:
+        raise ValueError(
+            f"Kemeny–Young aggregation requires between 2 and {MAX_PROPOSER_COUNT} candidates."
+        )
+    if isinstance(reviewer_rankings, (str, bytes)) or not isinstance(reviewer_rankings, Sequence):
+        raise ValueError("Reviewer rankings must be a nonempty sequence.")
+    if isinstance(source_review_idea_ids, (str, bytes)) or not isinstance(
+        source_review_idea_ids, Sequence
+    ):
+        raise ValueError("Source review idea IDs must be a sequence.")
+    review_ids = tuple(
+        _require_identifier(idea_id, "source review idea ID") for idea_id in source_review_idea_ids
+    )
+    if not reviewer_rankings or len(reviewer_rankings) != len(review_ids):
+        raise ValueError("Every reviewer ranking requires one source review idea ID.")
+    if len(set(review_ids)) != len(review_ids):
+        raise ValueError("Source review idea IDs must be distinct.")
+
+    candidate_set = set(candidates)
+    rankings: list[tuple[str, ...]] = []
+    for ranking in reviewer_rankings:
+        normalized = _require_candidate_sequence(ranking)
+        if len(normalized) != len(candidates) or set(normalized) != candidate_set:
+            raise ValueError("Every reviewer must rank every candidate exactly once.")
+        rankings.append(normalized)
+
+    reviewer_positions = [
+        {candidate_id: index for index, candidate_id in enumerate(ranking)} for ranking in rankings
+    ]
+    best_score: Optional[int] = None
+    optimal: list[tuple[str, ...]] = []
+    for ordering in itertools.permutations(candidates):
+        score = 0
+        for left_index, left in enumerate(ordering):
+            for right in ordering[left_index + 1 :]:
+                score += sum(
+                    1 for positions in reviewer_positions if positions[left] > positions[right]
+                )
+        if best_score is None or score < best_score:
+            best_score = score
+            optimal = [ordering]
+        elif score == best_score:
+            optimal.append(ordering)
+
+    canonical_index = {candidate_id: index for index, candidate_id in enumerate(candidates)}
+    optimal.sort(
+        key=lambda ranking: tuple(canonical_index[candidate_id] for candidate_id in ranking)
+    )
+    return KemenyYoungResult(
+        algorithm=KEMENY_YOUNG_ALGORITHM,
+        source_review_idea_ids=review_ids,
+        candidate_proposal_idea_ids=candidates,
+        optimal_rankings=tuple(optimal),
+    )
+
+
 def _require_count(value: Any, *, field_name: str, minimum: int, maximum: int) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(
@@ -106,3 +320,23 @@ def _require_count(value: Any, *, field_name: str, minimum: int, maximum: int) -
         )
     if value < minimum or value > maximum:
         raise ValueError(f"{field_name} must be between {minimum} and {maximum}.")
+
+
+def _require_positive_ordinal(value: Any, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{field_name} must be a positive integer.")
+
+
+def _require_identifier(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be nonempty text.")
+    return value.strip()
+
+
+def _require_candidate_sequence(values: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence) or not values:
+        raise ValueError("Candidate IDs must be a nonempty sequence.")
+    candidates = tuple(_require_identifier(value, "candidate ID") for value in values)
+    if len(set(candidates)) != len(candidates):
+        raise ValueError("Candidate IDs must be distinct.")
+    return candidates
