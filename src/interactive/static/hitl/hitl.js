@@ -14,7 +14,7 @@
     graphScroll: {}, drawerScroll: {}, sidebarCollapsed: false,
     conversationScroll: { top: 0, nearBottom: true, captured: false },
     managerStatusSeq: -1,
-    runDraft: { operation: "research", workflow: "autoresearch", hitlMode: "auto", iterations: 2, timeLimitSeconds: "", writePaper: true, paperStyle: "auto", github: false },
+    runDraft: { operation: "research", workflow: "autoresearch", hitlMode: "auto", proposalMode: "single", proposerCount: 3, reviewerCount: 3, iterations: 2, timeLimitSeconds: "", writePaper: true, paperStyle: "auto", github: false },
     portal: null, ideas: [], selectedIdeaId: initialIdeaId, catalogBusy: false,
     creatingIdea: false, ideaSchema: null, ideaDraft: {}, ideaSubmitError: "",
     renamingIdeaId: "", draggedIdeaId: "",
@@ -863,6 +863,9 @@
     const provider = q("select", { id: "run-provider", "data-focus-key": "run-provider" }); [["codex", "Codex"], ["claude", "Claude"]].forEach(([value, label]) => provider.append(q("option", { value, text: label }))); provider.value = state.provider; provider.onchange = () => { state.provider = provider.value; };
     const workflow = q("select", { id: "run-workflow", "data-focus-key": "run-workflow", ...(workflowLocked ? { disabled: "disabled", title: "The workspace research workflow cannot be changed" } : {}) }); [["autoresearch", "AutoResearch"], ["ordinary", "Ordinary"]].forEach(([value, label]) => workflow.append(q("option", { value, text: label }))); workflow.value = state.runDraft.workflow; workflow.onchange = () => { state.runDraft.workflow = workflow.value; render({ preserveScroll: true }); };
     const hitlMode = q("select", { id: "run-hitl-mode", "data-focus-key": "run-hitl-mode" }); [["full", "No"], ["auto", "Yes"]].forEach(([value, label]) => hitlMode.append(q("option", { value, text: label }))); hitlMode.value = state.runDraft.hitlMode; hitlMode.onchange = () => { state.runDraft.hitlMode = hitlMode.value; };
+    const proposalMode = q("select", { id: "run-proposal-mode", "data-focus-key": "run-proposal-mode" }); [["single", "Single"], ["independent_ranked", "Independent ranked"]].forEach(([value, label]) => proposalMode.append(q("option", { value, text: label }))); proposalMode.value = state.runDraft.proposalMode; proposalMode.onchange = () => { state.runDraft.proposalMode = proposalMode.value; render({ preserveScroll: true }); };
+    const proposerCount = q("input", { id: "run-proposer-count", type: "number", min: "2", max: "5", step: "1", required: "required", value: state.runDraft.proposerCount, "data-focus-key": "run-proposer-count" }); proposerCount.oninput = () => { state.runDraft.proposerCount = proposerCount.value; proposerCount.setCustomValidity(""); };
+    const reviewerCount = q("input", { id: "run-reviewer-count", type: "number", min: "2", max: "9", step: "1", required: "required", value: state.runDraft.reviewerCount, "data-focus-key": "run-reviewer-count" }); reviewerCount.oninput = () => { state.runDraft.reviewerCount = reviewerCount.value; reviewerCount.setCustomValidity(""); };
     const iterations = q("input", { id: "run-iterations", type: "number", min: "1", max: "100", step: "1", required: "required", value: state.runDraft.iterations, "data-focus-key": "run-iterations" }); iterations.oninput = () => { state.runDraft.iterations = iterations.value; iterations.setCustomValidity(""); };
     const timeLimit = q("input", { id: "run-time-limit", type: "number", min: "1", step: "1", placeholder: "sec", title: "Time budget in seconds. Leave blank for no time limit.", "aria-label": "Time budget in seconds (optional)", value: state.runDraft.timeLimitSeconds, "data-focus-key": "run-time-limit" }); timeLimit.oninput = () => { state.runDraft.timeLimitSeconds = timeLimit.value; timeLimit.setCustomValidity(""); };
     const paper = q("input", { id: "run-paper", type: "checkbox", "data-focus-key": "run-paper" }); paper.checked = state.runDraft.writePaper; paper.onchange = () => { state.runDraft.writePaper = paper.checked; };
@@ -885,6 +888,25 @@
       iterations.setCustomValidity("");
       const payload = { provider: provider.value, operation: "research", workflow: workflow.value, hitl_mode: hitlMode.value, write_paper: paper.checked, paper_style: style.value, github: github.checked };
       if (autoresearch) {
+        payload.proposal_mode = proposalMode.value;
+        if (proposalMode.value === "independent_ranked") {
+          const proposerValue = Number(proposerCount.value);
+          if (!proposerCount.value.trim() || !Number.isInteger(proposerValue) || proposerValue < 2 || proposerValue > 5) {
+            proposerCount.setCustomValidity("Enter a whole number from 2 to 5.");
+            proposerCount.reportValidity();
+            proposerCount.focus();
+            return;
+          }
+          const reviewerValue = Number(reviewerCount.value);
+          if (!reviewerCount.value.trim() || !Number.isInteger(reviewerValue) || reviewerValue < 2 || reviewerValue > 9) {
+            reviewerCount.setCustomValidity("Enter a whole number from 2 to 9.");
+            reviewerCount.reportValidity();
+            reviewerCount.focus();
+            return;
+          }
+          payload.proposer_count = proposerValue;
+          payload.reviewer_count = reviewerValue;
+        }
         const duration = timeLimit.value.trim() ? Number(timeLimit.value) : null;
         if (timeLimit.validity.badInput || (duration !== null && (!Number.isSafeInteger(duration) || duration <= 0))) {
           timeLimit.setCustomValidity("Enter a positive whole number of seconds, or leave blank for no limit.");
@@ -897,7 +919,9 @@
       }
       launchRun(payload);
     };
-    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), canConstructBaseline ? row("Action", operation) : null, row("Model", provider), constructingBaseline ? null : row("Research", workflow), row("Auto", hitlMode), !constructingBaseline && workflow.value === "autoresearch" ? row("Iterations", iterations) : null, !constructingBaseline && workflow.value === "autoresearch" ? row("Budget", timeLimit) : null, constructingBaseline ? null : q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), constructingBaseline ? null : row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
+    const autoresearchSetup = !constructingBaseline && workflow.value === "autoresearch";
+    const rankedSetup = autoresearchSetup && proposalMode.value === "independent_ranked";
+    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), canConstructBaseline ? row("Action", operation) : null, row("Model", provider), constructingBaseline ? null : row("Research", workflow), row("Auto", hitlMode), autoresearchSetup ? row("Proposals", proposalMode) : null, rankedSetup ? row("Proposers", proposerCount) : null, rankedSetup ? row("Reviewers", reviewerCount) : null, autoresearchSetup ? row("Iterations", iterations) : null, autoresearchSetup ? row("Budget", timeLimit) : null, constructingBaseline ? null : q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), constructingBaseline ? null : row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
   }
   function conversation() {
     const shell = q("main", { class: "conversation-shell" }); const thread = q("div", { class: "thread" }); const request = state.snapshot?.inbox?.pending_request; const requestId = String(request?.conversation_record_id || "");
