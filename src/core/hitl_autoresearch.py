@@ -1806,6 +1806,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and "proposal_round" in preparation_action
     )
     ranked_round_is_exact = False
+    ranked_round_stage: Optional[str] = None
     if ranked_round_present and isinstance(preparation_action, dict):
         raw_round = preparation_action.get("proposal_round")
         if isinstance(raw_round, dict):
@@ -1834,6 +1835,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                 pass
             else:
                 prepared_sha = _resolved_proposal_base(preparation_action)
+                ranked_round_stage = str(durable_round.get("stage", "")).strip()
                 ranked_round_is_exact = bool(
                     preparation_action.get("status") == "resolved"
                     and str(preparation_action.get("parent_node_sha", "")).strip()
@@ -1844,6 +1846,10 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                     and prepared_sha
                     and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
                 )
+    ordinary_worker_recovery_allowed = bool(
+        not ranked_round_present
+        or (ranked_round_is_exact and ranked_round_stage == "selected")
+    )
     preparation_metadata_is_exact = (
         isinstance(preparation_action, dict)
         and preparation_action.get("kind") == "prepare_proposal"
@@ -1986,7 +1992,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             )
         )
     if (
-        not ranked_round_present
+        ordinary_worker_recovery_allowed
         and worker_command_requires_resume(pending_request)
         and isinstance(continuation, dict)
         and continuation_provenance == pending_provenance

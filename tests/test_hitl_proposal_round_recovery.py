@@ -153,6 +153,188 @@ def _durable_ranked_attempt(
     return checkpoint, state, attempt_dir, marker, round_state, whiteboard
 
 
+def _advance_durable_round_to_stage(
+    state: HitlRuntimeState,
+    *,
+    parent_sha: str,
+    candidate_attempt_id: str,
+    target_stage: str,
+) -> dict:
+    identity = {
+        "parent_node_sha": parent_sha,
+        "preparation_attempt_id": "attempt_3",
+        "candidate_attempt_id": candidate_attempt_id,
+        "round_ordinal": 1,
+    }
+    result_number = 1
+    stages = (
+        ("proposing", "proposer", "p", 2),
+        ("verifying", "verifier", "v", 2),
+        ("reviewing", "reviewer", "r", 2),
+    )
+    if target_stage == "proposing":
+        return state.proposal_round_snapshot(**identity)
+    for stage, role, marker, count in stages:
+        for ordinal in range(1, count + 1):
+            task_id = f"r1-{marker}{ordinal}"
+            output = {"task": task_id, "role": role}
+            state.begin_proposal_task_finalization(
+                **identity,
+                proposal_task_id=task_id,
+                role=role,
+                normalized_output=output,
+            )
+            state.complete_proposal_task_finalization(
+                **identity,
+                proposal_task_id=task_id,
+                role=role,
+                normalized_output=output,
+                result_idea_id=f"I{result_number}",
+            )
+            result_number += 1
+        round_state = state.advance_proposal_round(
+            **identity,
+            expected_stage=stage,
+        )
+        if round_state["stage"] == target_stage:
+            return round_state
+    state.record_proposal_selection_choice(
+        **identity,
+        choice="select",
+        proposal_idea_id="I1",
+        reason="Candidate one is selected for the experiment.",
+    )
+    state.record_proposal_selection_decision(
+        **identity,
+        choice="select",
+        proposal_idea_id="I1",
+        decision_idea_id=f"I{result_number}",
+    )
+    return state.complete_proposal_selection(**identity)
+
+
+def _record_pending_experiment_worker(
+    state: HitlRuntimeState,
+    *,
+    parent_sha: str,
+    candidate_attempt_id: str,
+) -> None:
+    provenance = {
+        "parent_node_id": parent_sha,
+        "attempt_id": candidate_attempt_id,
+        "proposal_idea_id": "I1",
+    }
+    state.record_worker_continuation(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "execution",
+            "actor": "comment_handler",
+            "provenance": provenance,
+            "prompt_block": "Resume the interrupted selected-proposal experiment.",
+        }
+    )
+    state.begin_worker_command(
+        {
+            "request_key": "selected-proposal-execution",
+            "kind": "phase_finish",
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "execution",
+            "provenance": provenance,
+            "finish_summary": "Review the interrupted experiment execution.",
+            "related_artifacts": [],
+        }
+    )
+
+
+def test_selected_ranked_round_resumes_existing_experiment_worker(tmp_path):
+    checkpoint, state, attempt_dir, marker, _round, _whiteboard = (
+        _durable_ranked_attempt(tmp_path)
+    )
+    round_state = _advance_durable_round_to_stage(
+        state,
+        parent_sha=checkpoint.sha,
+        candidate_attempt_id=attempt_dir.name,
+        target_stage="selected",
+    )
+    _record_pending_experiment_worker(
+        state,
+        parent_sha=checkpoint.sha,
+        candidate_attempt_id=attempt_dir.name,
+    )
+    (tmp_path / "baseline.txt").write_text("candidate work\n", encoding="utf-8")
+    state_before = state.snapshot()
+
+    recovered = recover_interrupted_hitl_attempt_if_needed(tmp_path)
+
+    assert recovered is not None
+    assert recovered.recovery_classification == "pending_worker_request"
+    assert recovered.pending_worker_request == state_before["pending_worker_command"]
+    assert recovered.removed_attempt_dir == attempt_dir
+    assert recovered.attempt_dir_removed is False
+    assert read_hitl_current_attempt_marker(tmp_path) == marker
+    assert attempt_dir.is_dir()
+    assert (tmp_path / "baseline.txt").read_text(encoding="utf-8") == "candidate work\n"
+    assert round_state["stage"] == "selected"
+    assert state.snapshot() == state_before
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["proposing", "verifying", "reviewing", "manager_selection"],
+)
+def test_active_ranked_stage_does_not_resume_global_experiment_worker(tmp_path, stage):
+    checkpoint, state, attempt_dir, marker, _round, _whiteboard = (
+        _durable_ranked_attempt(tmp_path)
+    )
+    round_state = _advance_durable_round_to_stage(
+        state,
+        parent_sha=checkpoint.sha,
+        candidate_attempt_id=attempt_dir.name,
+        target_stage=stage,
+    )
+    _record_pending_experiment_worker(
+        state,
+        parent_sha=checkpoint.sha,
+        candidate_attempt_id=attempt_dir.name,
+    )
+
+    recovered = recover_interrupted_hitl_attempt_if_needed(tmp_path)
+
+    assert recovered is not None
+    assert recovered.recovery_classification == "proposal_preparation_transition"
+    assert recovered.pending_worker_request is None
+    assert round_state["stage"] == stage
+    assert read_hitl_current_attempt_marker(tmp_path) == marker
+
+
+def test_invalid_selected_ranked_round_does_not_enable_worker_recovery(tmp_path):
+    checkpoint, state, attempt_dir, marker, _round, whiteboard = (
+        _durable_ranked_attempt(tmp_path)
+    )
+    _advance_durable_round_to_stage(
+        state,
+        parent_sha=checkpoint.sha,
+        candidate_attempt_id=attempt_dir.name,
+        target_stage="selected",
+    )
+    _record_pending_experiment_worker(
+        state,
+        parent_sha=checkpoint.sha,
+        candidate_attempt_id=attempt_dir.name,
+    )
+    whiteboard.write_text('{"tips": [{"id": "T1"}]}\n', encoding="utf-8")
+    assert not HitlGitStateStore(
+        tmp_path
+    ).hitl_autoresearch_whiteboard_matches_attempt_boundary(marker)
+
+    recovered = recover_interrupted_hitl_attempt_if_needed(tmp_path)
+
+    assert recovered is not None
+    assert recovered.recovery_classification == "complete"
+    assert read_hitl_current_attempt_marker(tmp_path) == ""
+    assert "proposal_round" not in state.snapshot()["next_autoresearch_action"]
+
+
 def test_ranked_recovery_accepts_distinct_preparation_and_candidate_attempts(tmp_path):
     checkpoint, _state, attempt_dir, marker, _round, _whiteboard = (
         _durable_ranked_attempt(tmp_path)
