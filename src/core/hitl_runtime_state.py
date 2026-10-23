@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_paths import hitl_runtime_state_path, hitl_state_dir
+from core.hitl_proposal_round import PROPOSAL_ROUND_SCHEMA_VERSION
 from core.hitl_util import atomic_write_json, utc_now
 
 
@@ -33,6 +35,20 @@ UNRESOLVED_WORKER_COMMAND_STATUSES = frozenset(
 )
 MAX_INTERFACE_EVENTS = 500
 LOGGER = logging.getLogger(__name__)
+_LOCAL_ATTEMPT_ID = re.compile(r"^attempt_[0-9]+$")
+_IDEA_ID = re.compile(r"^I[0-9]+$")
+_PROPOSAL_ROUND_STAGES = {
+    "proposing",
+    "verifying",
+    "reviewing",
+    "manager_selection",
+    "selected",
+}
+_PROPOSAL_ROLE_STAGES = {
+    "proposer": "proposing",
+    "verifier": "verifying",
+    "reviewer": "reviewing",
+}
 
 
 def worker_command_requires_resume(command: Any) -> bool:
@@ -757,6 +773,683 @@ class HitlRuntimeState:
             command["updated_at"] = _now()
             self._save_unlocked()
             return self._copy(command)
+
+    @staticmethod
+    def _proposal_round_identity(
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+    ) -> tuple[str, str, str, int]:
+        parent = str(parent_node_sha).strip()
+        preparation = str(preparation_attempt_id).strip()
+        candidate = str(candidate_attempt_id).strip()
+        if not parent or not preparation:
+            raise HitlRuntimeStateError("Proposal round requires parent and preparation identity")
+        if _LOCAL_ATTEMPT_ID.fullmatch(candidate) is None:
+            raise HitlRuntimeStateError(
+                "Proposal round candidate_attempt_id must be the local attempt_N component"
+            )
+        if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
+            raise HitlRuntimeStateError("Proposal round ordinal must be a positive integer")
+        if round_ordinal < 1:
+            raise HitlRuntimeStateError("Proposal round ordinal must be a positive integer")
+        return parent, preparation, candidate, round_ordinal
+
+    def _proposal_preparation_unlocked(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+    ) -> Dict[str, Any]:
+        action = self._state.get("next_autoresearch_action")
+        decision = action.get("decision") if isinstance(action, dict) else None
+        result = action.get("result") if isinstance(action, dict) else None
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_node_sha
+            or str(action.get("attempt_id", "")).strip() != preparation_attempt_id
+            or not isinstance(decision, dict)
+            or decision.get("choice") != "proceed"
+            or not isinstance(result, dict)
+            or result.get("choice") != "proceed"
+        ):
+            raise HitlRuntimeStateError(
+                "No matching resolved proposal preparation owns this proposal round"
+            )
+        return action
+
+    @staticmethod
+    def _validate_proposal_round_shape(round_state: Any) -> Dict[str, Any]:
+        if not isinstance(round_state, dict):
+            raise HitlRuntimeStateError("Proposal round state is missing")
+        if round_state.get("version") != PROPOSAL_ROUND_SCHEMA_VERSION:
+            raise HitlRuntimeStateError("Unsupported proposal round schema version")
+        if str(round_state.get("stage", "")) not in _PROPOSAL_ROUND_STAGES:
+            raise HitlRuntimeStateError("Proposal round has an invalid stage")
+        if not isinstance(round_state.get("tasks"), dict):
+            raise HitlRuntimeStateError("Proposal round tasks must be an object")
+        if isinstance(round_state.get("base_idea_number"), bool) or not isinstance(
+            round_state.get("base_idea_number"), int
+        ):
+            raise HitlRuntimeStateError("Proposal round has an invalid idea boundary")
+        if int(round_state["base_idea_number"]) < 0:
+            raise HitlRuntimeStateError("Proposal round has an invalid idea boundary")
+        from core.hitl_proposal_round import normalize_proposal_mode_config
+
+        try:
+            normalize_proposal_mode_config(
+                "independent_ranked",
+                proposer_count=round_state.get("proposer_count"),
+                reviewer_count=round_state.get("reviewer_count"),
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        selection = round_state.get("selection")
+        if selection is not None and not isinstance(selection, dict):
+            raise HitlRuntimeStateError("Proposal round selection must be null or an object")
+        return round_state
+
+    def _proposal_round_unlocked(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        expected_stage: Optional[str] = None,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        parent, preparation, candidate, ordinal = self._proposal_round_identity(
+            parent_node_sha=parent_node_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=candidate_attempt_id,
+            round_ordinal=round_ordinal,
+        )
+        action = self._proposal_preparation_unlocked(
+            parent_node_sha=parent,
+            preparation_attempt_id=preparation,
+        )
+        round_state = self._validate_proposal_round_shape(action.get("proposal_round"))
+        if (
+            str(round_state.get("candidate_attempt_id", "")).strip() != candidate
+            or round_state.get("round_ordinal") != ordinal
+        ):
+            raise HitlRuntimeStateError("Proposal round identity is stale")
+        if expected_stage is not None:
+            if expected_stage not in _PROPOSAL_ROUND_STAGES:
+                raise HitlRuntimeStateError("Expected proposal round stage is invalid")
+            if round_state.get("stage") != expected_stage:
+                raise HitlRuntimeStateError("Proposal round stage is stale")
+        return action, round_state
+
+    @staticmethod
+    def _new_proposal_round(
+        *,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        base_idea_number: int,
+        proposer_count: int,
+        reviewer_count: int,
+    ) -> Dict[str, Any]:
+        from core.hitl_proposal_round import proposal_task_id
+
+        return {
+            "version": PROPOSAL_ROUND_SCHEMA_VERSION,
+            "candidate_attempt_id": candidate_attempt_id,
+            "round_ordinal": round_ordinal,
+            "stage": "proposing",
+            "base_idea_number": base_idea_number,
+            "proposer_count": proposer_count,
+            "reviewer_count": reviewer_count,
+            "tasks": {
+                proposal_task_id(round_ordinal, "proposer", ordinal): {
+                    "role": "proposer",
+                    "result_idea_id": None,
+                }
+                for ordinal in range(1, proposer_count + 1)
+            },
+            "selection": None,
+        }
+
+    @staticmethod
+    def _proposal_task_unlocked(
+        round_state: Dict[str, Any],
+        *,
+        proposal_task_id: str,
+        role: str,
+    ) -> Dict[str, Any]:
+        from core.hitl_proposal_round import parse_proposal_task_id
+
+        expected_stage = _PROPOSAL_ROLE_STAGES.get(role)
+        if expected_stage is None:
+            raise HitlRuntimeStateError("Proposal task role is invalid")
+        try:
+            identity = parse_proposal_task_id(proposal_task_id)
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        if (
+            identity.round_ordinal != round_state.get("round_ordinal")
+            or identity.role != role
+            or round_state.get("stage") != expected_stage
+        ):
+            raise HitlRuntimeStateError("Proposal task identity or stage is stale")
+        task = round_state["tasks"].get(proposal_task_id)
+        if not isinstance(task, dict) or task.get("role") != role:
+            raise HitlRuntimeStateError("No matching proposal task exists")
+        return task
+
+    def begin_proposal_round(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        base_idea_number: int,
+        proposer_count: int,
+        reviewer_count: int,
+    ) -> Dict[str, Any]:
+        """Create round one beneath one resolved proposal preparation."""
+
+        parent, preparation, candidate, _ordinal = self._proposal_round_identity(
+            parent_node_sha=parent_node_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=candidate_attempt_id,
+            round_ordinal=1,
+        )
+        if isinstance(base_idea_number, bool) or not isinstance(base_idea_number, int):
+            raise HitlRuntimeStateError("Proposal round idea boundary must be non-negative")
+        if base_idea_number < 0:
+            raise HitlRuntimeStateError("Proposal round idea boundary must be non-negative")
+        from core.hitl_proposal_round import normalize_proposal_mode_config
+
+        try:
+            config = normalize_proposal_mode_config(
+                "independent_ranked",
+                proposer_count=proposer_count,
+                reviewer_count=reviewer_count,
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._proposal_preparation_unlocked(
+                parent_node_sha=parent,
+                preparation_attempt_id=preparation,
+            )
+            existing = action.get("proposal_round")
+            if existing is not None:
+                round_state = self._validate_proposal_round_shape(existing)
+                if (
+                    round_state.get("candidate_attempt_id") == candidate
+                    and round_state.get("round_ordinal") == 1
+                    and round_state.get("base_idea_number") == base_idea_number
+                    and round_state.get("proposer_count") == config.proposer_count
+                    and round_state.get("reviewer_count") == config.reviewer_count
+                ):
+                    return self._copy(round_state)
+                raise HitlRuntimeStateError(
+                    "Proposal preparation already owns a different proposal round"
+                )
+            round_state = self._new_proposal_round(
+                candidate_attempt_id=candidate,
+                round_ordinal=1,
+                base_idea_number=base_idea_number,
+                proposer_count=int(config.proposer_count),
+                reviewer_count=int(config.reviewer_count),
+            )
+            action["proposal_round"] = round_state
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(round_state)
+
+    def proposal_round_snapshot(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            _action, round_state = self._proposal_round_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal,
+            )
+            return self._copy(round_state)
+
+    def record_proposal_task_provider_result(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        proposal_task_id: str,
+        role: str,
+        failed: bool,
+    ) -> int:
+        if not isinstance(failed, bool):
+            raise HitlRuntimeStateError("Proposal task provider result requires failed=true/false")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, round_state = self._proposal_round_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal,
+                expected_stage=_PROPOSAL_ROLE_STAGES.get(role),
+            )
+            task = self._proposal_task_unlocked(
+                round_state,
+                proposal_task_id=proposal_task_id,
+                role=role,
+            )
+            if (
+                task.get("result_idea_id") is not None
+                or task.get("pending_finalization") is not None
+            ):
+                raise HitlRuntimeStateError(
+                    "Provider result applies only to an incomplete proposal task"
+                )
+            if failed:
+                prior = task.get("consecutive_provider_failures", 0)
+                if isinstance(prior, bool) or not isinstance(prior, int) or prior < 0:
+                    raise HitlRuntimeStateError("Proposal task provider-failure counter is invalid")
+                count = prior + 1
+                task["consecutive_provider_failures"] = count
+            else:
+                count = 0
+                task.pop("consecutive_provider_failures", None)
+            action["proposal_round"] = round_state
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return count
+
+    def begin_proposal_task_finalization(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        proposal_task_id: str,
+        role: str,
+        normalized_output: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(normalized_output, dict) or not normalized_output:
+            raise HitlRuntimeStateError(
+                "Proposal task finalization requires validated normalized output"
+            )
+        intent = self._copy(normalized_output)
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, round_state = self._proposal_round_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal,
+                expected_stage=_PROPOSAL_ROLE_STAGES.get(role),
+            )
+            task = self._proposal_task_unlocked(
+                round_state,
+                proposal_task_id=proposal_task_id,
+                role=role,
+            )
+            if task.get("result_idea_id") is not None:
+                raise HitlRuntimeStateError("Proposal task is already complete")
+            existing = task.get("pending_finalization")
+            if existing is not None:
+                if existing == intent:
+                    return self._copy(existing)
+                raise HitlRuntimeStateError(
+                    "Proposal task already owns a different finalization intent"
+                )
+            task["pending_finalization"] = intent
+            task.pop("consecutive_provider_failures", None)
+            action["proposal_round"] = round_state
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(intent)
+
+    def complete_proposal_task_finalization(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        proposal_task_id: str,
+        role: str,
+        normalized_output: Dict[str, Any],
+        result_idea_id: str,
+    ) -> Dict[str, Any]:
+        idea_id = str(result_idea_id).strip()
+        if _IDEA_ID.fullmatch(idea_id) is None:
+            raise HitlRuntimeStateError("Proposal task result requires a finalized idea ID")
+        intent = self._copy(normalized_output)
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, round_state = self._proposal_round_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal,
+                expected_stage=_PROPOSAL_ROLE_STAGES.get(role),
+            )
+            task = self._proposal_task_unlocked(
+                round_state,
+                proposal_task_id=proposal_task_id,
+                role=role,
+            )
+            if task.get("result_idea_id") is not None:
+                raise HitlRuntimeStateError("Proposal task is already complete")
+            if task.get("pending_finalization") != intent:
+                raise HitlRuntimeStateError("Proposal task has no matching finalization intent")
+            task["result_idea_id"] = idea_id
+            task.pop("pending_finalization", None)
+            task.pop("consecutive_provider_failures", None)
+            action["proposal_round"] = round_state
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(task)
+
+    def advance_proposal_round(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        expected_stage: str,
+    ) -> Dict[str, Any]:
+        if expected_stage not in {"proposing", "verifying", "reviewing"}:
+            raise HitlRuntimeStateError("Proposal round cannot advance from this stage")
+        from core.hitl_proposal_round import proposal_task_id
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, round_state = self._proposal_round_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal,
+                expected_stage=expected_stage,
+            )
+            tasks = round_state["tasks"]
+            proposer_ids = [
+                proposal_task_id(round_ordinal, "proposer", ordinal)
+                for ordinal in range(1, int(round_state["proposer_count"]) + 1)
+            ]
+            verifier_ids = [
+                proposal_task_id(round_ordinal, "verifier", ordinal)
+                for ordinal in range(1, int(round_state["proposer_count"]) + 1)
+            ]
+            reviewer_ids = [
+                proposal_task_id(round_ordinal, "reviewer", ordinal)
+                for ordinal in range(1, int(round_state["reviewer_count"]) + 1)
+            ]
+            expected_ids = {
+                "proposing": proposer_ids,
+                "verifying": [*proposer_ids, *verifier_ids],
+                "reviewing": [*proposer_ids, *verifier_ids, *reviewer_ids],
+            }[expected_stage]
+            if set(tasks) != set(expected_ids):
+                raise HitlRuntimeStateError(
+                    "Proposal round task set does not match its current stage"
+                )
+            active_ids = {
+                "proposing": proposer_ids,
+                "verifying": verifier_ids,
+                "reviewing": reviewer_ids,
+            }[expected_stage]
+            for task_id in active_ids:
+                task = tasks.get(task_id)
+                if (
+                    not isinstance(task, dict)
+                    or task.get("role")
+                    != {
+                        "proposing": "proposer",
+                        "verifying": "verifier",
+                        "reviewing": "reviewer",
+                    }[expected_stage]
+                    or _IDEA_ID.fullmatch(str(task.get("result_idea_id", ""))) is None
+                    or task.get("pending_finalization") is not None
+                ):
+                    raise HitlRuntimeStateError(
+                        "Proposal round cannot advance before every task is complete"
+                    )
+            if expected_stage == "proposing":
+                for ordinal, task_id in enumerate(verifier_ids, start=1):
+                    tasks[task_id] = {
+                        "role": "verifier",
+                        "assigned_proposal_idea_id": tasks[proposer_ids[ordinal - 1]][
+                            "result_idea_id"
+                        ],
+                        "result_idea_id": None,
+                    }
+                round_state["stage"] = "verifying"
+            elif expected_stage == "verifying":
+                for task_id in reviewer_ids:
+                    tasks[task_id] = {
+                        "role": "reviewer",
+                        "result_idea_id": None,
+                    }
+                round_state["stage"] = "reviewing"
+            else:
+                round_state["stage"] = "manager_selection"
+            action["proposal_round"] = round_state
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(round_state)
+
+    def record_proposal_selection_choice(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        choice: str,
+        reason: str,
+        proposal_idea_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_choice = str(choice).strip()
+        normalized_reason = str(reason).strip()
+        candidate_id = str(proposal_idea_id or "").strip()
+        if normalized_choice not in {"select", "new_round"} or not normalized_reason:
+            raise HitlRuntimeStateError(
+                "Proposal selection requires select/new_round and a nonempty reason"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, round_state = self._proposal_round_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal,
+                expected_stage="manager_selection",
+            )
+            if normalized_choice == "select":
+                proposer_results = {
+                    str(task.get("result_idea_id", ""))
+                    for task in round_state["tasks"].values()
+                    if isinstance(task, dict) and task.get("role") == "proposer"
+                }
+                if candidate_id not in proposer_results:
+                    raise HitlRuntimeStateError(
+                        "Selected proposal is not a current-round candidate"
+                    )
+                selection = {
+                    "choice": "select",
+                    "proposal_idea_id": candidate_id,
+                    "reason": normalized_reason,
+                    "decision_idea_id": None,
+                }
+            else:
+                if candidate_id:
+                    raise HitlRuntimeStateError("A new-round choice must not select a proposal")
+                selection = {
+                    "choice": "new_round",
+                    "reason": normalized_reason,
+                    "decision_idea_id": None,
+                }
+            existing = round_state.get("selection")
+            if existing is not None:
+                if existing == selection:
+                    return self._copy(existing)
+                raise HitlRuntimeStateError(
+                    "Proposal round already records a different manager choice"
+                )
+            round_state["selection"] = selection
+            action["proposal_round"] = round_state
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(selection)
+
+    def record_proposal_selection_decision(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        choice: str,
+        decision_idea_id: str,
+        proposal_idea_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        decision_id = str(decision_idea_id).strip()
+        if _IDEA_ID.fullmatch(decision_id) is None:
+            raise HitlRuntimeStateError("Proposal selection requires a decision idea ID")
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, round_state = self._proposal_round_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal,
+                expected_stage="manager_selection",
+            )
+            selection = round_state.get("selection")
+            candidate_id = str(proposal_idea_id or "").strip()
+            if (
+                not isinstance(selection, dict)
+                or selection.get("choice") != str(choice).strip()
+                or (
+                    selection.get("choice") == "select"
+                    and selection.get("proposal_idea_id") != candidate_id
+                )
+                or (selection.get("choice") == "new_round" and candidate_id)
+            ):
+                raise HitlRuntimeStateError(
+                    "Proposal decision does not match the recorded manager choice"
+                )
+            existing = selection.get("decision_idea_id")
+            if existing is not None:
+                if existing == decision_id:
+                    return self._copy(selection)
+                raise HitlRuntimeStateError(
+                    "Proposal selection already references a different decision idea"
+                )
+            selection["decision_idea_id"] = decision_id
+            round_state["selection"] = selection
+            action["proposal_round"] = round_state
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(selection)
+
+    def complete_proposal_selection(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, round_state = self._proposal_round_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal,
+                expected_stage="manager_selection",
+            )
+            selection = round_state.get("selection")
+            if (
+                not isinstance(selection, dict)
+                or selection.get("choice") != "select"
+                or _IDEA_ID.fullmatch(str(selection.get("proposal_idea_id", ""))) is None
+                or _IDEA_ID.fullmatch(str(selection.get("decision_idea_id", ""))) is None
+            ):
+                raise HitlRuntimeStateError(
+                    "Proposal selection is not durably ready for completion"
+                )
+            round_state["stage"] = "selected"
+            action["proposal_round"] = round_state
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(round_state)
+
+    def begin_next_proposal_round(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        base_idea_number: int,
+        non_admitted_proposal_idea_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if isinstance(base_idea_number, bool) or not isinstance(base_idea_number, int):
+            raise HitlRuntimeStateError("Proposal round idea boundary must be non-negative")
+        if base_idea_number < 0:
+            raise HitlRuntimeStateError("Proposal round idea boundary must be non-negative")
+        non_admitted_id = str(non_admitted_proposal_idea_id or "").strip()
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, round_state = self._proposal_round_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal,
+            )
+            selection = round_state.get("selection")
+            durable_new_round = bool(
+                round_state.get("stage") == "manager_selection"
+                and not non_admitted_id
+                and isinstance(selection, dict)
+                and selection.get("choice") == "new_round"
+                and _IDEA_ID.fullmatch(str(selection.get("decision_idea_id", "")))
+            )
+            durable_non_admission = bool(
+                round_state.get("stage") == "selected"
+                and non_admitted_id
+                and isinstance(selection, dict)
+                and selection.get("choice") == "select"
+                and selection.get("proposal_idea_id") == non_admitted_id
+                and _IDEA_ID.fullmatch(str(selection.get("decision_idea_id", "")))
+            )
+            if not durable_new_round and not durable_non_admission:
+                raise HitlRuntimeStateError(
+                    "Proposal round cannot restart before a durable new-round decision or non-admission"
+                )
+            next_round = self._new_proposal_round(
+                candidate_attempt_id=candidate_attempt_id,
+                round_ordinal=round_ordinal + 1,
+                base_idea_number=base_idea_number,
+                proposer_count=int(round_state["proposer_count"]),
+                reviewer_count=int(round_state["reviewer_count"]),
+            )
+            action["proposal_round"] = next_round
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(next_round)
 
     def begin_next_autoresearch_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
         kind = str(action.get("kind", "")).strip()

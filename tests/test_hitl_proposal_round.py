@@ -32,6 +32,7 @@ from core.hitl_proposal_round import (  # noqa: E402
     reviewer_presentation_order,
     validate_proposal_task_id,
 )
+from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError  # noqa: E402
 from core.runner import ResearchRunner  # noqa: E402
 
 
@@ -1136,3 +1137,462 @@ def test_unrestricted_idea_tools_keep_existing_full_log_behavior(tmp_path):
 
     assert result["ideas"] == seeded["log"].records()
     assert result["text"] == seeded["log"].render_for_agent()
+
+
+def _begin_ranked_round(tmp_path, *, proposer_count=2, reviewer_count=2):
+    state = HitlRuntimeState(tmp_path)
+    state.begin_next_autoresearch_action(
+        {
+            "kind": "prepare_proposal",
+            "parent_node_sha": "parent",
+            "attempt_id": "attempt_3",
+            "additional_agent_ordinal": 1,
+            "workspace_fingerprint": "fingerprint",
+            "proposal_base_sha": "prepared",
+        }
+    )
+    state.record_next_autoresearch_action_decision(
+        "prepare_proposal",
+        {"choice": "proceed"},
+    )
+    state.complete_next_autoresearch_action(
+        "prepare_proposal",
+        {"choice": "proceed", "proposal_base_sha": "prepared"},
+    )
+    identity = {
+        "parent_node_sha": "parent",
+        "preparation_attempt_id": "attempt_3",
+        "candidate_attempt_id": "attempt_4",
+        "round_ordinal": 1,
+    }
+    round_state = state.begin_proposal_round(
+        **{key: value for key, value in identity.items() if key != "round_ordinal"},
+        base_idea_number=18,
+        proposer_count=proposer_count,
+        reviewer_count=reviewer_count,
+    )
+    return state, identity, round_state
+
+
+def _finalize_synthetic_task(state, identity, task_id, role, idea_id):
+    output = {"premises": [], "value": f"normalized {task_id}"}
+    state.begin_proposal_task_finalization(
+        **identity,
+        proposal_task_id=task_id,
+        role=role,
+        normalized_output=output,
+    )
+    state.complete_proposal_task_finalization(
+        **identity,
+        proposal_task_id=task_id,
+        role=role,
+        normalized_output=output,
+        result_idea_id=idea_id,
+    )
+
+
+def _advance_synthetic_round_to_manager_selection(state, identity):
+    round_state = state.proposal_round_snapshot(**identity)
+    proposer_ids = [
+        task_id for task_id, task in round_state["tasks"].items() if task["role"] == "proposer"
+    ]
+    for ordinal, task_id in enumerate(proposer_ids, start=1):
+        _finalize_synthetic_task(state, identity, task_id, "proposer", f"I{100 + ordinal}")
+    round_state = state.advance_proposal_round(**identity, expected_stage="proposing")
+
+    verifier_ids = [
+        task_id for task_id, task in round_state["tasks"].items() if task["role"] == "verifier"
+    ]
+    for ordinal, task_id in enumerate(verifier_ids, start=1):
+        _finalize_synthetic_task(state, identity, task_id, "verifier", f"I{200 + ordinal}")
+    round_state = state.advance_proposal_round(**identity, expected_stage="verifying")
+
+    reviewer_ids = [
+        task_id for task_id, task in round_state["tasks"].items() if task["role"] == "reviewer"
+    ]
+    for ordinal, task_id in enumerate(reviewer_ids, start=1):
+        _finalize_synthetic_task(state, identity, task_id, "reviewer", f"I{300 + ordinal}")
+    return state.advance_proposal_round(**identity, expected_stage="reviewing")
+
+
+def test_proposal_round_state_advances_only_from_task_result_references(tmp_path):
+    state, identity, round_state = _begin_ranked_round(
+        tmp_path,
+        proposer_count=2,
+        reviewer_count=3,
+    )
+
+    assert round_state == {
+        "version": 1,
+        "candidate_attempt_id": "attempt_4",
+        "round_ordinal": 1,
+        "stage": "proposing",
+        "base_idea_number": 18,
+        "proposer_count": 2,
+        "reviewer_count": 3,
+        "tasks": {
+            "r1-p1": {"role": "proposer", "result_idea_id": None},
+            "r1-p2": {"role": "proposer", "result_idea_id": None},
+        },
+        "selection": None,
+    }
+
+    manager_round = _advance_synthetic_round_to_manager_selection(state, identity)
+
+    assert manager_round["stage"] == "manager_selection"
+    assert list(manager_round["tasks"]) == [
+        "r1-p1",
+        "r1-p2",
+        "r1-v1",
+        "r1-v2",
+        "r1-r1",
+        "r1-r2",
+        "r1-r3",
+    ]
+    assert manager_round["tasks"]["r1-v1"] == {
+        "role": "verifier",
+        "assigned_proposal_idea_id": "I101",
+        "result_idea_id": "I201",
+    }
+    assert all(
+        "pending_finalization" not in task
+        and "consecutive_provider_failures" not in task
+        and "running" not in task
+        for task in manager_round["tasks"].values()
+    )
+    assert "aggregate" not in manager_round
+    assert "proposal" not in manager_round
+    assert "assessment" not in manager_round
+    assert "ranking" not in manager_round
+
+    selection = state.record_proposal_selection_choice(
+        **identity,
+        choice="select",
+        proposal_idea_id="I102",
+        reason="Candidate two has the strongest expected research value.",
+    )
+    assert selection == {
+        "choice": "select",
+        "proposal_idea_id": "I102",
+        "reason": "Candidate two has the strongest expected research value.",
+        "decision_idea_id": None,
+    }
+    state.record_proposal_selection_decision(
+        **identity,
+        choice="select",
+        proposal_idea_id="I102",
+        decision_idea_id="I401",
+    )
+    selected = state.complete_proposal_selection(**identity)
+    assert selected["stage"] == "selected"
+
+    snapshot = state.snapshot()
+    assert snapshot["pending_worker_command"] is None
+    assert snapshot["worker_continuation"] is None
+    assert snapshot["next_autoresearch_action"]["proposal_round"] == selected
+
+
+def test_proposal_round_uses_local_candidate_attempt_not_full_marker(tmp_path):
+    state, identity, _round_state = _begin_ranked_round(tmp_path)
+
+    assert state.proposal_round_snapshot(**identity)["candidate_attempt_id"] == "attempt_4"
+    with pytest.raises(HitlRuntimeStateError, match="local attempt_N"):
+        state.proposal_round_snapshot(
+            **{
+                **identity,
+                "candidate_attempt_id": "parent/attempt_4",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value", "match"),
+    [
+        ("parent_node_sha", "other", "resolved proposal preparation"),
+        ("preparation_attempt_id", "attempt_2", "resolved proposal preparation"),
+        ("candidate_attempt_id", "attempt_5", "identity is stale"),
+        ("round_ordinal", 2, "identity is stale"),
+    ],
+)
+def test_proposal_round_rejects_stale_workflow_identity(
+    tmp_path,
+    changed_field,
+    changed_value,
+    match,
+):
+    state, identity, _round_state = _begin_ranked_round(tmp_path)
+
+    with pytest.raises(HitlRuntimeStateError, match=match):
+        state.proposal_round_snapshot(
+            **{
+                **identity,
+                changed_field: changed_value,
+            }
+        )
+
+
+def test_proposal_round_begin_is_idempotent_but_conflicting_config_is_rejected(tmp_path):
+    state, identity, original = _begin_ranked_round(tmp_path)
+    begin_identity = {key: value for key, value in identity.items() if key != "round_ordinal"}
+
+    assert (
+        state.begin_proposal_round(
+            **begin_identity,
+            base_idea_number=18,
+            proposer_count=2,
+            reviewer_count=2,
+        )
+        == original
+    )
+    with pytest.raises(HitlRuntimeStateError, match="different proposal round"):
+        state.begin_proposal_round(
+            **begin_identity,
+            base_idea_number=19,
+            proposer_count=2,
+            reviewer_count=2,
+        )
+
+
+def test_task_provider_failures_are_task_local_and_clear_on_clean_result(tmp_path):
+    state, identity, _round_state = _begin_ranked_round(tmp_path)
+
+    assert (
+        state.record_proposal_task_provider_result(
+            **identity,
+            proposal_task_id="r1-p1",
+            role="proposer",
+            failed=True,
+        )
+        == 1
+    )
+    assert (
+        state.record_proposal_task_provider_result(
+            **identity,
+            proposal_task_id="r1-p1",
+            role="proposer",
+            failed=True,
+        )
+        == 2
+    )
+    assert (
+        state.record_proposal_task_provider_result(
+            **identity,
+            proposal_task_id="r1-p1",
+            role="proposer",
+            failed=False,
+        )
+        == 0
+    )
+
+    snapshot = state.snapshot()
+    task = snapshot["next_autoresearch_action"]["proposal_round"]["tasks"]["r1-p1"]
+    assert "consecutive_provider_failures" not in task
+    assert snapshot["pending_worker_command"] is None
+    assert snapshot["worker_continuation"] is None
+
+
+def test_task_finalization_intent_is_idempotent_and_required_for_completion(tmp_path):
+    state, identity, _round_state = _begin_ranked_round(tmp_path)
+    output = {"premises": ["I1"], "proposal": "Run one controlled experiment."}
+
+    assert (
+        state.begin_proposal_task_finalization(
+            **identity,
+            proposal_task_id="r1-p1",
+            role="proposer",
+            normalized_output=output,
+        )
+        == output
+    )
+    assert (
+        state.begin_proposal_task_finalization(
+            **identity,
+            proposal_task_id="r1-p1",
+            role="proposer",
+            normalized_output=output,
+        )
+        == output
+    )
+    with pytest.raises(HitlRuntimeStateError, match="different finalization intent"):
+        state.begin_proposal_task_finalization(
+            **identity,
+            proposal_task_id="r1-p1",
+            role="proposer",
+            normalized_output={**output, "proposal": "A conflicting retry."},
+        )
+    with pytest.raises(HitlRuntimeStateError, match="matching finalization intent"):
+        state.complete_proposal_task_finalization(
+            **identity,
+            proposal_task_id="r1-p2",
+            role="proposer",
+            normalized_output=output,
+            result_idea_id="I101",
+        )
+
+    completed = state.complete_proposal_task_finalization(
+        **identity,
+        proposal_task_id="r1-p1",
+        role="proposer",
+        normalized_output=output,
+        result_idea_id="I101",
+    )
+    assert completed == {"role": "proposer", "result_idea_id": "I101"}
+    with pytest.raises(HitlRuntimeStateError, match="already complete"):
+        state.begin_proposal_task_finalization(
+            **identity,
+            proposal_task_id="r1-p1",
+            role="proposer",
+            normalized_output=output,
+        )
+
+
+def test_task_operations_reject_wrong_role_stage_task_and_expected_state(tmp_path):
+    state, identity, _round_state = _begin_ranked_round(tmp_path)
+
+    with pytest.raises(HitlRuntimeStateError, match="stage is stale"):
+        state.record_proposal_task_provider_result(
+            **identity,
+            proposal_task_id="r1-v1",
+            role="verifier",
+            failed=True,
+        )
+    with pytest.raises(HitlRuntimeStateError, match="stage is stale"):
+        state.record_proposal_task_provider_result(
+            **identity,
+            proposal_task_id="r1-p1",
+            role="reviewer",
+            failed=True,
+        )
+    with pytest.raises(HitlRuntimeStateError, match="No matching proposal task"):
+        state.record_proposal_task_provider_result(
+            **identity,
+            proposal_task_id="r1-p9",
+            role="proposer",
+            failed=True,
+        )
+    with pytest.raises(HitlRuntimeStateError, match="every task is complete"):
+        state.advance_proposal_round(**identity, expected_stage="proposing")
+
+    _finalize_synthetic_task(state, identity, "r1-p1", "proposer", "I101")
+    with pytest.raises(HitlRuntimeStateError, match="only to an incomplete"):
+        state.record_proposal_task_provider_result(
+            **identity,
+            proposal_task_id="r1-p1",
+            role="proposer",
+            failed=False,
+        )
+
+
+def test_selection_updates_are_idempotent_and_conflicting_updates_are_rejected(tmp_path):
+    state, identity, _round_state = _begin_ranked_round(tmp_path)
+    _advance_synthetic_round_to_manager_selection(state, identity)
+    arguments = {
+        **identity,
+        "choice": "select",
+        "proposal_idea_id": "I101",
+        "reason": "Candidate one is preferred.",
+    }
+
+    first = state.record_proposal_selection_choice(**arguments)
+    assert state.record_proposal_selection_choice(**arguments) == first
+    with pytest.raises(HitlRuntimeStateError, match="different manager choice"):
+        state.record_proposal_selection_choice(
+            **{
+                **arguments,
+                "proposal_idea_id": "I102",
+            }
+        )
+
+    decision = state.record_proposal_selection_decision(
+        **identity,
+        choice="select",
+        proposal_idea_id="I101",
+        decision_idea_id="I401",
+    )
+    assert (
+        state.record_proposal_selection_decision(
+            **identity,
+            choice="select",
+            proposal_idea_id="I101",
+            decision_idea_id="I401",
+        )
+        == decision
+    )
+    with pytest.raises(HitlRuntimeStateError, match="different decision idea"):
+        state.record_proposal_selection_decision(
+            **identity,
+            choice="select",
+            proposal_idea_id="I101",
+            decision_idea_id="I402",
+        )
+
+
+def test_durable_manager_new_round_choice_replaces_round_atomically(tmp_path):
+    state, identity, _round_state = _begin_ranked_round(tmp_path)
+    _advance_synthetic_round_to_manager_selection(state, identity)
+    state.record_proposal_selection_choice(
+        **identity,
+        choice="new_round",
+        reason="The panel exposed a missing control shared by every candidate.",
+    )
+    state.record_proposal_selection_decision(
+        **identity,
+        choice="new_round",
+        decision_idea_id="I401",
+    )
+
+    next_round = state.begin_next_proposal_round(
+        **identity,
+        base_idea_number=401,
+    )
+
+    assert next_round["round_ordinal"] == 2
+    assert next_round["stage"] == "proposing"
+    assert next_round["base_idea_number"] == 401
+    assert list(next_round["tasks"]) == ["r2-p1", "r2-p2"]
+    assert next_round["selection"] is None
+
+
+def test_selected_non_admission_can_start_next_round_only_for_selected_proposal(tmp_path):
+    state, identity, _round_state = _begin_ranked_round(tmp_path)
+    _advance_synthetic_round_to_manager_selection(state, identity)
+    state.record_proposal_selection_choice(
+        **identity,
+        choice="select",
+        proposal_idea_id="I102",
+        reason="Candidate two is preferred.",
+    )
+    state.record_proposal_selection_decision(
+        **identity,
+        choice="select",
+        proposal_idea_id="I102",
+        decision_idea_id="I401",
+    )
+    state.complete_proposal_selection(**identity)
+
+    with pytest.raises(HitlRuntimeStateError, match="durable new-round decision or non-admission"):
+        state.begin_next_proposal_round(
+            **identity,
+            base_idea_number=401,
+            non_admitted_proposal_idea_id="I101",
+        )
+    next_round = state.begin_next_proposal_round(
+        **identity,
+        base_idea_number=401,
+        non_admitted_proposal_idea_id="I102",
+    )
+    assert next_round["round_ordinal"] == 2
+
+
+def test_round_state_stays_nested_without_generic_patch_or_derived_aggregate(tmp_path):
+    state, identity, _round_state = _begin_ranked_round(tmp_path)
+    _advance_synthetic_round_to_manager_selection(state, identity)
+    snapshot = state.snapshot()
+
+    assert not hasattr(state, "update_proposal_round")
+    assert "proposal_round" not in snapshot
+    action = snapshot["next_autoresearch_action"]
+    assert action["kind"] == "prepare_proposal"
+    assert "proposal_round" in action
+    assert "aggregate" not in action["proposal_round"]
+    assert action["proposal_round"] == state.proposal_round_snapshot(**identity)
