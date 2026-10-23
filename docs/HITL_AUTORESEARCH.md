@@ -187,10 +187,12 @@ Independent-ranked mode changes only how that proposal is chosen:
 
 1. Independent proposers receive the same round-start history and submit one
    candidate each. They do not see one another's current-round work.
-2. One verifier assesses each candidate's scientific soundness, attribution,
-   feasibility, and consistency with the research contract.
+2. As soon as a candidate is finalized, its ordinal-matched verifier may assess
+   scientific soundness, attribution, feasibility, and consistency with the
+   research contract while other proposers continue.
 3. Independent reviewers see the same verified candidate set and each submit a
-   complete ranking. They do not see one another's reviews.
+   complete ranking after every candidate has been verified. They do not see
+   one another's reviews.
 4. Runtime validates the structured results and aggregates the rankings with
    exact Kemeny–Young. The manager selects a candidate or requests another
    proposal round.

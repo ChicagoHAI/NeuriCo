@@ -779,7 +779,8 @@ Work:
 - cancel queued futures and signal active siblings after invalidation;
 - close new tool requests, settle mutation gates, join provider cleanup, clear
   sessions, and only then roll back;
-- parallelize proposers first, then verifiers, then reviewers.
+- run each proposer and its ordinal-matched verifier as one parallel chain,
+  then launch reviewers only after every chain completes.
 
 Tests for each stage before enabling the next:
 
@@ -969,6 +970,57 @@ Gate:
 - the observed verifier cache mutation cannot recur through ordinary Python
   imports;
 - no new source of truth or broader cleanup policy is introduced.
+
+### Step 23 — Pipeline each proposal into its verifier
+
+Purpose:
+
+Start scientific verification as soon as its assigned proposal is finalized,
+without changing the complete-panel review barrier or introducing a general
+dependency scheduler.
+
+Main mechanisms reused:
+
+- `run_parallel_proposal_stage(...)` remains the bounded coordinator and owns
+  the shared cancellation event;
+- `run_worker_with_replacements(...)` remains the only logical-task retry and
+  replacement loop;
+- ranked task state remains the sole operational source of truth;
+- verifier tools, visibility, finalization, provider-failure handling, and
+  workspace validation remain unchanged;
+- the existing `verifying` stage remains the durable reconciliation barrier.
+
+Work:
+
+- make each proposer future continue into its ordinal-matched verifier;
+- create that verifier task idempotently from the finalized proposer task;
+- allow an existing verifier task to operate in `proposing` or `verifying`;
+- let proposer-stage advancement validate already-created verifier tasks and
+  create only missing tasks needed by older or interrupted state;
+- preserve canonical task order when the round crosses the proposer barrier;
+- keep reviewer creation behind completion of every verifier.
+
+Tests:
+
+- prove a verifier starts while a slower peer proposer is still running;
+- prove verifier assignment follows proposer ordinal rather than completion
+  order;
+- prove a verifier cannot start without a durable completed proposer;
+- prove a verifier failure cancels a still-running proposer through the
+  existing cancellation event;
+- prove completed proposers and verifiers reconcile without relaunch;
+- prove old `verifying` recovery and the complete reviewer barrier remain
+  unchanged;
+- run ranked state, parallel, recovery, boundary, timeout, and provider-failure
+  suites together.
+
+Gate:
+
+- proposal verification overlaps peer proposal generation;
+- no reviewer sees a partial candidate set;
+- no new scheduler, readiness field, retry loop, cancellation registry, or
+  semantic side store exists;
+- single proposal mode and all downstream stages remain unchanged.
 
 ## 11. Required verification at every checkpoint
 

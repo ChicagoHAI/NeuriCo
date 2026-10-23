@@ -543,8 +543,10 @@ ID in the absence of the matching state-owned intent.
 task `result_idea_id` values and performs each barrier in one atomic state
 write:
 
-- after all proposers complete, create every verifier task and change
-  `proposing` to `verifying`;
+- as each proposer completes, runtime may durably create its ordinal-matched
+  verifier task so verification can begin immediately;
+- after all proposers complete, create any still-missing verifier tasks,
+  validate every existing assignment, and change `proposing` to `verifying`;
 - after all verifiers complete, create every reviewer task and change
   `verifying` to `reviewing`;
 - after all reviewers complete, change `reviewing` to `manager_selection`.
@@ -1094,7 +1096,9 @@ Each proposer receives:
 - the same round-start idea boundary;
 - the same initial whiteboard content.
 
-Advance only after every configured proposer has a finalized proposal result.
+Each finalized proposer result makes only its ordinal-matched verifier ready.
+Other proposers may continue while that verifier runs. The round does not cross
+the proposer barrier until every configured proposer has finalized.
 
 Do not silently reduce the candidate count.
 
@@ -1127,7 +1131,8 @@ Runtime already validates the proposal contract. The verifier evaluates the scie
 
 ### 11.2 Assignment
 
-Create exactly one verifier task for each finalized proposal candidate.
+Create exactly one verifier task for each finalized proposal candidate. Create
+it durably as soon as that candidate finalizes; do not wait for peer proposers.
 
 The assignment belongs to runtime state. The agent does not repeat the assigned proposal ID in its final output.
 
@@ -1763,19 +1768,21 @@ the outer HITL runner. The executor and task-specific runtimes share that
 owner; they do not acquire one lease per task. Consequently another NeuriCo run
 cannot replace the active physical-attempt marker during a live ranked round.
 
-Submit exactly one executor future for each logical task. That future remains
-active across all provider replacements for the task by running the existing
-serial `run_worker_with_replacements(...)` loop. Different task futures may run
-concurrently; successive provider launches belonging to the same task may not.
-The coordinator collects and cancels task futures, but it never launches a
-second future for a task whose first future is still active.
+Submit exactly one executor future for each proposer ordinal. That future runs
+the proposer through the existing serial `run_worker_with_replacements(...)`
+loop, durably creates the assigned verifier task, and then runs that verifier
+through the same loop. Different ordinal chains may run concurrently;
+successive provider launches belonging to one logical task may not. Reviewer
+futures remain one per reviewer. The coordinator collects and cancels futures,
+but it never launches a second future for work already active in a chain.
 
-Parallelize only within each stage:
+Pipeline proposal generation and verification, then retain the complete-panel
+review barrier:
 
 ```text
-all proposers
-barrier
-all verifiers
+P1 -> V1
+P2 -> V2
+...
 barrier
 all reviewers
 barrier
