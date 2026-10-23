@@ -121,7 +121,7 @@ Keep existing regression tests in their current files.
 
 ### Phase F: Smoke-test correction
 
-- [ ] Step 21 — Bind the first ranked round to the restored live workspace
+- [x] Step 21 — Bind the first ranked round to the restored live workspace
 
 ## 5. Phase A — Foundations with no ranked agents
 
