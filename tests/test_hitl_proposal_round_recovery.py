@@ -400,6 +400,77 @@ def _serial_controller(work_dir: Path):
     return controller, state, manager, attempt_dir, base, round_state, identity
 
 
+@pytest.mark.parametrize(
+    "requested_config",
+    [
+        ProposalModeConfig(mode="single"),
+        ProposalModeConfig(
+            mode="independent_ranked",
+            proposer_count=5,
+            reviewer_count=9,
+        ),
+    ],
+)
+def test_ranked_recovery_uses_durable_round_configuration(
+    tmp_path,
+    requested_config,
+):
+    controller, _state, _manager, attempt_dir, _base, round_state, _identity = (
+        _serial_controller(tmp_path)
+    )
+    controller.proposal_mode_config = requested_config
+
+    resolved = controller._proposal_mode_config_for_attempt(
+        parent_sha="parent",
+        attempt_dir=attempt_dir,
+    )
+    resumed = controller._begin_or_resume_ranked_proposal_round(
+        parent_sha="parent",
+        attempt_dir=attempt_dir,
+    )
+
+    assert resolved == ProposalModeConfig(
+        mode="independent_ranked",
+        proposer_count=2,
+        reviewer_count=2,
+    )
+    assert resumed == round_state
+
+
+def test_new_attempt_uses_requested_proposal_configuration(tmp_path):
+    controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    controller.proposal_mode_config = ProposalModeConfig(
+        mode="independent_ranked",
+        proposer_count=5,
+        reviewer_count=9,
+    )
+
+    assert controller._proposal_mode_config_for_attempt(
+        parent_sha="parent",
+        attempt_dir=tmp_path / "attempt_1",
+    ) == ProposalModeConfig(
+        mode="independent_ranked",
+        proposer_count=5,
+        reviewer_count=9,
+    )
+
+
+def test_ranked_recovery_rejects_mismatched_attempt_instead_of_using_launch_config(
+    tmp_path,
+):
+    controller, _state, _manager, _attempt_dir, _base, _round, _identity = (
+        _serial_controller(tmp_path)
+    )
+    controller.proposal_mode_config = ProposalModeConfig(mode="single")
+
+    with pytest.raises(RuntimeError, match="identity is stale"):
+        controller._proposal_mode_config_for_attempt(
+            parent_sha="parent",
+            attempt_dir=tmp_path / "attempt_5",
+        )
+
+
 def _finish_task(controller, state, identity, base, *, role: str, task_id: str):
     round_state = state.proposal_round_snapshot(**identity)
     runtime, _pairs = controller._prepare_ranked_task_runtime(
@@ -606,6 +677,41 @@ def test_parallel_ranked_round_resumes_each_durable_stage_without_relaunching_co
         )
     ]
     assert len(terminal_records) == 6
+
+
+@pytest.mark.parametrize(
+    "requested_config",
+    [
+        ProposalModeConfig(mode="single"),
+        ProposalModeConfig(
+            mode="independent_ranked",
+            proposer_count=5,
+            reviewer_count=9,
+        ),
+    ],
+)
+def test_ranked_recovery_executes_only_durable_round_tasks(
+    tmp_path,
+    fake_hitl_tool_servers,
+    requested_config,
+):
+    controller, state, manager, attempt_dir, base, _round, identity = (
+        _serial_controller(tmp_path)
+    )
+    _seed_stage(controller, state, identity, base, "manager_choice")
+    controller.proposal_mode_config = requested_config
+
+    round_state, _aggregate = controller._run_independent_ranked_proposal_round(
+        parent_sha="parent",
+        attempt_dir=attempt_dir,
+        attempt_history=[],
+        boundary_validator=lambda: {"valid": True, "issues": []},
+    )
+
+    assert round_state["stage"] == "selected"
+    assert round_state["proposer_count"] == 2
+    assert round_state["reviewer_count"] == 2
+    assert manager.calls == 1
 
 
 def test_ranked_recovery_rejects_unreferenced_terminal_idea_before_agent_launch(

@@ -2029,6 +2029,8 @@ def test_controller_applies_new_round_choice_after_recording_manager_decision(tm
     assert result["proposal_round"]["base_idea_number"] == int(
         result["decision_idea_id"][1:]
     )
+    assert result["proposal_round"]["proposer_count"] == 2
+    assert result["proposal_round"]["reviewer_count"] == 2
 
 
 def test_controller_replays_persisted_selection_decision_without_duplicate_idea(tmp_path):

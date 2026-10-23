@@ -3761,10 +3761,9 @@ class HitlAutoResearchController:
                 existing_sealed_path = sealed_dir_for(self.work_dir)
                 sealed_path = existing_sealed_path if existing_sealed_path.is_dir() else None
             sealed_scoring["path"] = sealed_path
-            proposal_mode = getattr(
-                self,
-                "proposal_mode_config",
-                ProposalModeConfig(mode="single"),
+            proposal_mode = self._proposal_mode_config_for_attempt(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
             )
             if proposal_mode.mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
                 proposal, proposal_idea_id = self._run_ranked_proposal_admission_loop(
@@ -4079,6 +4078,41 @@ class HitlAutoResearchController:
 
         return require_unchanged
 
+    def _proposal_mode_config_for_attempt(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> ProposalModeConfig:
+        """Resolve proposal policy from durable state before launch policy."""
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict) or action.get("proposal_round") is None:
+            return getattr(
+                self,
+                "proposal_mode_config",
+                ProposalModeConfig(mode="single"),
+            )
+
+        existing_round = action.get("proposal_round")
+        if not isinstance(existing_round, dict):
+            raise RuntimeError("Ranked proposal round state is invalid.")
+        round_ordinal = existing_round.get("round_ordinal")
+        if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
+            raise RuntimeError("Ranked proposal round state is invalid.")
+        round_state = state.proposal_round_snapshot(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
+            candidate_attempt_id=Path(attempt_dir).name,
+            round_ordinal=round_ordinal,
+        )
+        return normalize_proposal_mode_config(
+            INDEPENDENT_RANKED_PROPOSAL_MODE,
+            proposer_count=round_state.get("proposer_count"),
+            reviewer_count=round_state.get("reviewer_count"),
+        )
+
     def _begin_or_resume_ranked_proposal_round(
         self,
         *,
@@ -4088,12 +4122,6 @@ class HitlAutoResearchController:
         """Open round one on the current live workspace, or resume its durable round."""
 
         from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
-
-        config = self.proposal_mode_config
-        if config.mode != INDEPENDENT_RANKED_PROPOSAL_MODE:
-            raise RuntimeError("Ranked proposer stage requires independent-ranked mode.")
-        if config.proposer_count is None or config.reviewer_count is None:
-            raise RuntimeError("Ranked proposer stage requires proposer and reviewer counts.")
 
         owner = self._proposal_hitl_runtime()
         state = HitlRuntimeState(self.work_dir)
@@ -4114,6 +4142,12 @@ class HitlAutoResearchController:
                 candidate_attempt_id=attempt_dir.name,
                 round_ordinal=round_ordinal,
             )
+
+        config = self.proposal_mode_config
+        if config.mode != INDEPENDENT_RANKED_PROPOSAL_MODE:
+            raise RuntimeError("Ranked proposer stage requires independent-ranked mode.")
+        if config.proposer_count is None or config.reviewer_count is None:
+            raise RuntimeError("Ranked proposer stage requires proposer and reviewer counts.")
 
         idea_numbers = [
             int(idea_id[1:])
@@ -4331,7 +4365,10 @@ class HitlAutoResearchController:
         )
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
-        config = self.proposal_mode_config
+        config = self._proposal_mode_config_for_attempt(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
         if config.mode != INDEPENDENT_RANKED_PROPOSAL_MODE:
             raise RuntimeError("Ranked proposer stage requires independent-ranked mode.")
         if config.proposer_count is None or config.reviewer_count is None:
@@ -4347,6 +4384,11 @@ class HitlAutoResearchController:
         round_state = self._begin_or_resume_ranked_proposal_round(
             parent_sha=parent_sha,
             attempt_dir=attempt_dir,
+        )
+        config = normalize_proposal_mode_config(
+            INDEPENDENT_RANKED_PROPOSAL_MODE,
+            proposer_count=round_state.get("proposer_count"),
+            reviewer_count=round_state.get("reviewer_count"),
         )
         if boundary_validator is None:
             boundary_validator = self._capture_ranked_proposal_boundary(
