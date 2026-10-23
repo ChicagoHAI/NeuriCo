@@ -172,9 +172,13 @@ def _run_cli_agent(
         for line in iter(process.stdout.readline, ""):
             if line:
                 sanitized_line = sanitize_text(line)
-                print(sanitized_line, end="")
                 log_f.write(sanitized_line)
                 transcript_f.write(sanitized_line)
+                # Preserve captured output even if this runner is terminated
+                # before the files close (or its console pipe breaks).
+                log_f.flush()
+                transcript_f.flush()
+                print(sanitized_line, end="")
 
         return_code = process.wait()
 
@@ -316,9 +320,14 @@ def run_prebuilt_cli_agent(
                     return
                 if line is None:
                     continue
-                print(line, end="")
                 log_f.write(line)
                 transcript_f.write(line)
+                # A scheduler can kill the runner without unwinding this
+                # context manager. Do not leave captured output in Python's
+                # file buffers until normal completion.
+                log_f.flush()
+                transcript_f.flush()
+                print(line, end="")
 
         reader = threading.Thread(target=_drain_output, daemon=True)
         reader.start()
