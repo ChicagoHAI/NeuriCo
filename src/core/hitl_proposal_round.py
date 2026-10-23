@@ -82,6 +82,22 @@ def normalize_proposal_mode_config(
     )
 
 
+def require_managed_autoresearch_proposal_mode(
+    config: ProposalModeConfig,
+    *,
+    managed_autoresearch: bool,
+) -> ProposalModeConfig:
+    """Reject ranked mode outside managed HITL AutoResearch."""
+
+    normalized = normalize_proposal_mode_config(config)
+    if normalized.mode == INDEPENDENT_RANKED_PROPOSAL_MODE and not managed_autoresearch:
+        raise ValueError(
+            "Independent-ranked proposal mode is valid only for managed HITL "
+            "AutoResearch proposal generation."
+        )
+    return normalized
+
+
 def _require_count(value: Any, *, field_name: str, minimum: int, maximum: int) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(

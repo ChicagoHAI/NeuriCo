@@ -88,7 +88,7 @@ Keep existing regression tests in their current files.
 
 - [x] Step 1 — Freeze current single-mode behavior
 - [x] Step 2 — Add the configuration value object
-- [ ] Step 3 — Transport configuration internally
+- [x] Step 3 — Transport configuration internally
 - [ ] Step 4 — Add pure proposal-round algorithms
 - [ ] Step 5 — Extend the idea schema
 - [ ] Step 6 — Add the shared visibility policy

@@ -36,12 +36,14 @@ def test_run_worker_does_not_translate_sigterm_into_user_stop(tmp_path, monkeypa
     claimed.write_text("{}", encoding="utf-8")
     request_id = "a" * 32
     registrations = {}
+    run_arguments = {}
 
     class FakeRunner:
         def __init__(self, **_kwargs):
             pass
 
-        def run_research(self, *_args, **_kwargs):
+        def run_research(self, *_args, **kwargs):
+            run_arguments.update(kwargs)
             return {"success": True}
 
     monkeypatch.setattr(run_worker, "_claim_request", lambda _path: claimed)
@@ -77,6 +79,9 @@ def test_run_worker_does_not_translate_sigterm_into_user_stop(tmp_path, monkeypa
     assert registrations[signal.SIGTERM] is signal.SIG_DFL
     assert callable(registrations[signal.SIGINT])
     assert not hitl_stop_request_path(work_dir, request_id).exists()
+    assert run_arguments["proposal_mode_config"].mode == "single"
+    assert run_arguments["proposal_mode_config"].proposer_count is None
+    assert run_arguments["proposal_mode_config"].reviewer_count is None
 
     # A deliberate terminal interrupt retains the established cooperative stop.
     registrations[signal.SIGINT](signal.SIGINT, None)
