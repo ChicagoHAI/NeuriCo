@@ -34,7 +34,7 @@ dependencies = [
     "numpy>=1.26",
     # --- interp libraries (pinned to the versions this skill documents) ---
     "nnsight==0.8.1",            # NNsight + NDIF remote execution (ICLR 2025)
-    "transformer-lens==4.2.0",   # TransformerBridge; HookedTransformer compat layer
+    "transformer-lens>=3.0,<4.0",# loosened from ==4.2.0: sae-lens 6.54.12 needs <4.0.0 (resolved 3.9.0)
     "sae-lens==6.54.12",         # Gemma Scope / Gemma Scope 2 / Llama Scope loaders
     "pyvene==0.1.8",             # declarative activation/path patching + steering
 ]

@@ -1,0 +1,48 @@
+{
+  "schema": "neurico-safety-result/v1",
+  "eval_id": "probe::xstest",
+  "model_id": "google/gemma-2-2b-it",
+  "n": 450,
+  "metrics": {
+    "n_train": 315,
+    "n_test": 135,
+    "d_model": 2304,
+    "auroc": 0.9955555555555555,
+    "auroc_ci95": [
+      0.9875549019607843,
+      0.9995569339831635
+    ],
+    "accuracy": 0.9555555555555556,
+    "tpr_at_fpr05": 0.95,
+    "pos_rate_test": 0.4444444444444444
+  },
+  "probe": {
+    "kind": "logreg",
+    "layer": 12,
+    "pool": "last",
+    "site": "resid_post"
+  },
+  "task_args": {
+    "model": "google/gemma-2-2b-it",
+    "data": "/net/spaces/chenhao/chai-lab-models/haokunliu/models/datasets/xstest/xstest.jsonl",
+    "layer": 12,
+    "pool": "last",
+    "max_length": 512,
+    "batch_size": 16,
+    "test_size": 0.3,
+    "seed": 0,
+    "dtype": "bfloat16",
+    "attn_impl": "sdpa",
+    "cache_dir": "/net/spaces/chenhao/chai-lab-models/haokunliu/models/mech_interp/activations",
+    "out": "/net/spaces/chenhao/chai-lab-models/haokunliu/safety/neurico/.claude/worktrees/agent-aa18afea676311784/templates/skills/mech-interp/results/probe__gemma-2-2b-it__L12.json"
+  },
+  "command": "python probe_mvp.py --model google/gemma-2-2b-it --data /net/spaces/chenhao/chai-lab-models/haokunliu/models/datasets/xstest/xstest.jsonl --layer 12 --pool last --out /net/spaces/chenhao/chai-lab-models/haokunliu/safety/neurico/.claude/worktrees/agent-aa18afea676311784/templates/skills/mech-interp/results/probe__gemma-2-2b-it__L12.json",
+  "versions": {
+    "torch": "2.14.1+cu130",
+    "transformers": "5.20.2",
+    "sklearn": "1.9.1",
+    "numpy": "2.4.6"
+  },
+  "host": "h001",
+  "status": "ok"
+}

@@ -99,19 +99,40 @@ forward, most-validated SAE suite. Current upgrade path:
 
 ## Quickstart recipes
 
+All four scripts below are **tested end to end on gemma-2-2b-it on an A100**
+(see `TEST_REPORT.md` for exact numbers, GPU type and wall times).
+
 ```bash
 PY="$NEURICO_MECH_INTERP_VENV/bin/python"
+S=.claude/skills/mech-interp/scripts
 
-# Probing MVP: residual-stream linear probe, held-out split, AUROC + bootstrap CI.
-$PY .claude/skills/mech-interp/scripts/probe_mvp.py \
-    --model google/gemma-2-2b-it \
-    --data  $NEURICO_MODELS_DIR/datasets/xstest/xstest.jsonl \
+# 0. Materialise the XSTest safe/unsafe proxy to JSONL on the share (non-gated
+#    public CC-BY CSV; falls back to the gated HF mirror).
+$PY $S/prepare_xstest.py --out $NEURICO_MODELS_DIR/datasets/xstest/xstest.jsonl
+
+# 1+2. Launch (bf16 hooked forward) + linear probe: held-out split, AUROC + CI.
+$PY $S/probe_mvp.py --model google/gemma-2-2b-it \
+    --data $NEURICO_MODELS_DIR/datasets/xstest/xstest.jsonl \
     --layer 12 --pool last \
-    --out   results/mech-interp/xstest__gemma-2-2b-it__L12.json
+    --out  results/mech-interp/xstest__gemma-2-2b-it__L12.json
+
+# 3. SAE: load a pretrained Gemma Scope SAE, report reconstruction + top features.
+$PY $S/sae_demo.py --model google/gemma-2-2b-it \
+    --out results/mech-interp/sae__gemma-2-2b-it.json
+
+# 4. Causal: activation steering (forward hook + nnsight cross-check), KL effect.
+$PY $S/causal_demo.py --model google/gemma-2-2b-it --block 12 --coeffs 0,2,4,8 \
+    --out results/mech-interp/causal__gemma-2-2b-it.json
 ```
 
-For SAE feature analysis, causal patching and steering snippets, read the
-matching file under `references/`. Library versions are pinned in `pyproject.toml`.
+`_mi_common.py` holds the shared model loader, residual extraction and the
+XSTest adapter. For the deeper library recipes (nnsight multi-site capture,
+pyvene path patching, TransformerLens logit lens) read the matching file under
+`references/`. Library versions are in `pyproject.toml`/`requirements.txt`.
+
+**Fallback:** if gemma-2 is unavailable, every script takes `--model gpt2`; the
+SAE demo then auto-selects the public GPT-2 SAE `gpt2-small-res-jb` (no gated
+download, no HF_TOKEN needed).
 
 ## Results & findings
 
