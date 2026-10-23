@@ -1141,7 +1141,13 @@ def test_unrestricted_idea_tools_keep_existing_full_log_behavior(tmp_path):
     assert result["text"] == seeded["log"].render_for_agent()
 
 
-def _begin_ranked_round(tmp_path, *, proposer_count=2, reviewer_count=2):
+def _begin_ranked_round(
+    tmp_path,
+    *,
+    proposer_count=2,
+    reviewer_count=2,
+    base_idea_number=18,
+):
     state = HitlRuntimeState(tmp_path)
     state.begin_next_autoresearch_action(
         {
@@ -1169,7 +1175,7 @@ def _begin_ranked_round(tmp_path, *, proposer_count=2, reviewer_count=2):
     }
     round_state = state.begin_proposal_round(
         **{key: value for key, value in identity.items() if key != "round_ordinal"},
-        base_idea_number=18,
+        base_idea_number=base_idea_number,
         proposer_count=proposer_count,
         reviewer_count=reviewer_count,
     )
@@ -1626,6 +1632,9 @@ def _prepare_ranked_tool_runtime(
     actor,
     hitl_stage,
     seed_idea_ids=(),
+    base_idea_number=1,
+    proposal_submission_validator=None,
+    phase_finish_validator=None,
 ):
     runtime = HitlRuntime(
         work_dir,
@@ -1638,16 +1647,20 @@ def _prepare_ranked_tool_runtime(
         hitl_stage=hitl_stage,
         command_profile=command_profile,
         actor=actor,
+        proposal_preparation_attempt_id="attempt_3",
         provenance={
             "parent_node_id": "parent",
             "attempt_id": "attempt_4",
             "proposal_task_id": task_id,
         },
         idea_visibility={
-            "base_idea_number": 1,
+            "base_idea_number": base_idea_number,
             "seed_idea_ids": list(seed_idea_ids),
         },
-        proposal_submission_validator=lambda: {"valid": True, "issues": []},
+        proposal_submission_validator=(
+            proposal_submission_validator or (lambda: {"valid": True, "issues": []})
+        ),
+        phase_finish_validator=phase_finish_validator,
     )
     return runtime
 
@@ -1917,6 +1930,7 @@ def test_ranked_profile_requires_matching_scope_actor_stage_and_provenance(
             hitl_stage="review",
             command_profile="proposal_verifier",
             actor="proposal_verifier",
+            proposal_preparation_attempt_id="attempt_3",
             provenance={
                 "parent_node_id": "parent",
                 "attempt_id": "attempt_4",
@@ -1938,6 +1952,7 @@ def test_ranked_profile_requires_matching_scope_actor_stage_and_provenance(
             hitl_stage="proposal",
             command_profile="proposal_candidate",
             actor="autoresearch_proposer",
+            proposal_preparation_attempt_id="attempt_3",
             provenance={
                 "parent_node_id": "parent",
                 "attempt_id": "attempt_4",
@@ -1964,6 +1979,7 @@ def test_ranked_profile_adds_existing_time_budget_command_only_when_active(
         hitl_stage="proposal",
         command_profile="proposal_candidate",
         actor="autoresearch_proposer",
+        proposal_preparation_attempt_id="attempt_3",
         provenance={
             "parent_node_id": "parent",
             "attempt_id": "attempt_4",
@@ -2026,3 +2042,467 @@ def test_scoped_runtime_requires_exact_validated_task_id(tmp_path, tool_scope):
             manager=object(),
             tool_scope=tool_scope,
         )
+
+
+def _record_ranked_candidate(
+    work_dir,
+    task_id,
+    premise_id,
+    proposal,
+    *,
+    fake_hitl_tool_servers,
+):
+    runtime = _prepare_ranked_tool_runtime(
+        work_dir,
+        task_id=task_id,
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+        base_idea_number=1,
+    )
+    try:
+        return runtime.submit_proposal_payload(
+            {
+                "proposal_type": "exploitation",
+                "premises": [premise_id],
+                "proposal": proposal,
+            }
+        )
+    finally:
+        runtime.clear_idea_tool_context()
+
+
+def test_ranked_role_finish_contracts_create_state_referenced_semantic_ideas(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    base = _append_ranked_session_base_idea(tmp_path)
+    state, identity, _round_state = _begin_ranked_round(
+        tmp_path,
+        base_idea_number=1,
+    )
+
+    first = _record_ranked_candidate(
+        tmp_path,
+        "r1-p1",
+        base["idea_id"],
+        "Change only the optimizer schedule and measure the fixed score.",
+        fake_hitl_tool_servers=fake_hitl_tool_servers,
+    )
+    second = _record_ranked_candidate(
+        tmp_path,
+        "r1-p2",
+        base["idea_id"],
+        "Change only the feature normalization and measure the fixed score.",
+        fake_hitl_tool_servers=fake_hitl_tool_servers,
+    )
+    assert first["status"] == second["status"] == "recorded"
+    candidates = [first["proposal_idea_id"], second["proposal_idea_id"]]
+    round_state = state.proposal_round_snapshot(**identity)
+    assert [
+        round_state["tasks"][task_id]["result_idea_id"] for task_id in ("r1-p1", "r1-p2")
+    ] == candidates
+
+    round_state = state.advance_proposal_round(**identity, expected_stage="proposing")
+    verification_ids = []
+    for ordinal, candidate_id in enumerate(candidates, start=1):
+        runtime = _prepare_ranked_tool_runtime(
+            tmp_path,
+            task_id=f"r1-v{ordinal}",
+            command_profile="proposal_verifier",
+            actor="proposal_verifier",
+            hitl_stage="review",
+            seed_idea_ids=[candidate_id],
+            base_idea_number=1,
+        )
+        try:
+            result = runtime.finish_ranked_proposal_task(
+                {
+                    "premises": [base["idea_id"], candidate_id],
+                    "assessment": f"Scientific assessment for candidate {ordinal}.",
+                }
+            )
+            verification_ids.append(result["idea_id"])
+        finally:
+            runtime.clear_idea_tool_context()
+
+    state.advance_proposal_round(**identity, expected_stage="verifying")
+    reviewer = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-r1",
+        command_profile="proposal_reviewer",
+        actor="proposal_reviewer",
+        hitl_stage="review",
+        seed_idea_ids=[*candidates, *verification_ids],
+        base_idea_number=1,
+    )
+    try:
+        review = reviewer.finish_ranked_proposal_task(
+            {
+                "ranking": [candidates[1], candidates[0]],
+                "premises": [
+                    base["idea_id"],
+                    candidates[1],
+                    verification_ids[0],
+                ],
+                "assessment": "The second candidate has clearer attributable research value.",
+            }
+        )
+    finally:
+        reviewer.clear_idea_tool_context()
+
+    records = {record["idea_id"]: record for record in HitlIdeaLog(tmp_path).records()}
+    for ordinal, verification_id in enumerate(verification_ids):
+        record = records[verification_id]
+        assert record["idea_category"] == "proposal_verification"
+        assert record["actor"] == "proposal_verifier"
+        assert record["premises"] == [base["idea_id"], candidates[ordinal]]
+        assert record["proposal_task_id"] == f"r1-v{ordinal + 1}"
+        assert "ranking" not in record
+    review_record = records[review["idea_id"]]
+    assert review_record["idea_category"] == "proposal_review"
+    assert review_record["actor"] == "proposal_reviewer"
+    assert review_record["ranking"] == [candidates[1], candidates[0]]
+    assert review_record["premises"] == [
+        base["idea_id"],
+        *candidates,
+        *verification_ids,
+    ]
+    assert review_record["proposal_task_id"] == "r1-r1"
+    round_state = state.proposal_round_snapshot(**identity)
+    assert round_state["tasks"]["r1-r1"]["result_idea_id"] == review["idea_id"]
+
+
+@pytest.mark.parametrize(
+    ("profile", "actor", "task_id", "payload", "message"),
+    [
+        (
+            "proposal_candidate",
+            "autoresearch_proposer",
+            "r1-p1",
+            {
+                "proposal_type": "exploitation",
+                "premises": ["I1"],
+                "proposal": "One isolated change.",
+                "score": 1,
+            },
+            "unsupported field",
+        ),
+        (
+            "proposal_verifier",
+            "proposal_verifier",
+            "r1-v1",
+            {"premises": [], "assessment": ""},
+            "non-empty `assessment`",
+        ),
+        (
+            "proposal_reviewer",
+            "proposal_reviewer",
+            "r1-r1",
+            {"ranking": ["I2"], "premises": [], "assessment": "Partial panel."},
+            "every current-round candidate",
+        ),
+    ],
+)
+def test_ranked_finish_rejects_invalid_role_output_without_creating_intent(
+    tmp_path,
+    fake_hitl_tool_servers,
+    profile,
+    actor,
+    task_id,
+    payload,
+    message,
+):
+    base = _append_ranked_session_base_idea(tmp_path)
+    state, identity, _round_state = _begin_ranked_round(tmp_path, base_idea_number=1)
+    seeds = []
+    if profile != "proposal_candidate":
+        first = _record_ranked_candidate(
+            tmp_path,
+            "r1-p1",
+            base["idea_id"],
+            "Candidate one.",
+            fake_hitl_tool_servers=fake_hitl_tool_servers,
+        )
+        second = _record_ranked_candidate(
+            tmp_path,
+            "r1-p2",
+            base["idea_id"],
+            "Candidate two.",
+            fake_hitl_tool_servers=fake_hitl_tool_servers,
+        )
+        candidate_ids = [first["proposal_idea_id"], second["proposal_idea_id"]]
+        state.advance_proposal_round(**identity, expected_stage="proposing")
+        if profile == "proposal_verifier":
+            seeds = [candidate_ids[0]]
+        else:
+            verification_ids = []
+            for ordinal, candidate_id in enumerate(candidate_ids, start=1):
+                _finalize_synthetic_task(
+                    state,
+                    identity,
+                    f"r1-v{ordinal}",
+                    "verifier",
+                    f"I{20 + ordinal}",
+                )
+                verification_ids.append(f"I{20 + ordinal}")
+            state.advance_proposal_round(**identity, expected_stage="verifying")
+            seeds = [*candidate_ids, *verification_ids]
+
+    runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id=task_id,
+        command_profile=profile,
+        actor=actor,
+        hitl_stage="proposal" if profile == "proposal_candidate" else "review",
+        seed_idea_ids=seeds,
+        base_idea_number=1,
+    )
+    try:
+        with pytest.raises(HitlValidationError, match=message):
+            if profile == "proposal_candidate":
+                runtime.submit_proposal_payload(payload)
+            else:
+                runtime.finish_ranked_proposal_task(payload)
+    finally:
+        runtime.clear_idea_tool_context()
+    task = state.proposal_round_snapshot(**identity)["tasks"][task_id]
+    assert task["result_idea_id"] is None
+    assert "pending_finalization" not in task
+
+
+def test_ranked_candidate_finalization_recovers_crash_before_idea_append(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+):
+    base = _append_ranked_session_base_idea(tmp_path)
+    state, identity, _round_state = _begin_ranked_round(tmp_path, base_idea_number=1)
+    payload = {
+        "proposal_type": "exploitation",
+        "premises": [base["idea_id"]],
+        "proposal": "Change only the optimizer schedule.",
+    }
+    first_runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-p1",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+        base_idea_number=1,
+    )
+    original_append = first_runtime.log.append
+    monkeypatch.setattr(
+        first_runtime.log,
+        "append",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("crash before append")),
+    )
+    with pytest.raises(RuntimeError, match="crash before append"):
+        first_runtime.submit_proposal_payload(payload)
+    first_runtime.clear_idea_tool_context()
+    task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+    assert task["pending_finalization"] == payload
+    assert task["result_idea_id"] is None
+    monkeypatch.setattr(first_runtime.log, "append", original_append)
+
+    retry_runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-p1",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+        base_idea_number=1,
+    )
+    try:
+        result = retry_runtime.submit_proposal_payload(payload)
+    finally:
+        retry_runtime.clear_idea_tool_context()
+    assert result["status"] == "recorded"
+    assert (
+        state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]["result_idea_id"]
+        == result["proposal_idea_id"]
+    )
+
+
+def test_ranked_finish_rejects_workspace_change_before_state_intent(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    base = _append_ranked_session_base_idea(tmp_path)
+    state, identity, _round_state = _begin_ranked_round(tmp_path, base_idea_number=1)
+    runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-p1",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+        base_idea_number=1,
+        proposal_submission_validator=lambda: {
+            "valid": False,
+            "issues": ["public workspace changed"],
+        },
+    )
+    try:
+        with pytest.raises(HitlValidationError, match="read-only workspace boundary"):
+            runtime.submit_proposal_payload(
+                {
+                    "proposal_type": "exploitation",
+                    "premises": [base["idea_id"]],
+                    "proposal": "One controlled intervention.",
+                }
+            )
+    finally:
+        runtime.clear_idea_tool_context()
+
+    task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+    assert task["result_idea_id"] is None
+    assert "pending_finalization" not in task
+
+
+def test_ranked_candidate_finalization_recovers_crash_after_idea_append(
+    tmp_path,
+    monkeypatch,
+    fake_hitl_tool_servers,
+):
+    base = _append_ranked_session_base_idea(tmp_path)
+    state, identity, _round_state = _begin_ranked_round(tmp_path, base_idea_number=1)
+    payload = {
+        "proposal_type": "exploration",
+        "premises": [base["idea_id"]],
+        "proposal": "Test one alternate representation.",
+    }
+    original_complete = HitlRuntimeState.complete_proposal_task_finalization
+    calls = {"count": 0}
+
+    def fail_once(self, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("crash after append")
+        return original_complete(self, **kwargs)
+
+    monkeypatch.setattr(HitlRuntimeState, "complete_proposal_task_finalization", fail_once)
+    first_runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-p1",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+        base_idea_number=1,
+    )
+    with pytest.raises(RuntimeError, match="crash after append"):
+        first_runtime.submit_proposal_payload(payload)
+    first_runtime.clear_idea_tool_context()
+    records_after_crash = HitlIdeaLog(tmp_path).records()
+    assert len(records_after_crash) == 2
+    task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+    assert "pending_finalization" in task
+    assert task["result_idea_id"] is None
+
+    retry_runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-p1",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+        base_idea_number=1,
+    )
+    try:
+        result = retry_runtime.submit_proposal_payload(payload)
+    finally:
+        retry_runtime.clear_idea_tool_context()
+    assert len(HitlIdeaLog(tmp_path).records()) == 2
+    assert result["proposal_idea_id"] == records_after_crash[-1]["idea_id"]
+
+
+def test_ranked_task_identical_retry_is_stable_and_terminal_session_rejects_mutation(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    base = _append_ranked_session_base_idea(tmp_path)
+    _state, _identity, _round_state = _begin_ranked_round(tmp_path, base_idea_number=1)
+    runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-p1",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+        base_idea_number=1,
+    )
+    payload = {
+        "proposal_type": "exploitation",
+        "premises": [base["idea_id"]],
+        "proposal": "One controlled intervention.",
+    }
+    try:
+        first = runtime.submit_proposal_payload(payload)
+        second = runtime.submit_proposal_payload(dict(payload))
+        assert second == first
+        with pytest.raises(HitlValidationError, match="different result"):
+            runtime.submit_proposal_payload({**payload, "proposal": "A conflicting result."})
+        with pytest.raises(HitlValidationError, match="already complete"):
+            runtime.log_reported_payload(
+                {
+                    "idea_type": "evidence",
+                    "idea_category": "other",
+                    "premises": [base["idea_id"]],
+                    "context": "Late mutation.",
+                    "related_artifacts": [],
+                    "evidence": "This must not be recorded after task completion.",
+                }
+            )
+    finally:
+        runtime.clear_idea_tool_context()
+    assert len(HitlIdeaLog(tmp_path).records()) == 2
+
+
+def test_unreferenced_ranked_idea_never_completes_task_state(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    base = _append_ranked_session_base_idea(tmp_path)
+    state, identity, _round_state = _begin_ranked_round(tmp_path, base_idea_number=1)
+    HitlIdeaLog(tmp_path).append(
+        {
+            "pipeline_stage": "experiment_runner",
+            "hitl_stage": "proposal",
+            "idea_type": "proposal",
+            "proposal_type": "exploitation",
+            "level": "C",
+            "actor": "autoresearch_proposer",
+            "parent_node_id": "parent",
+            "attempt_id": "attempt_4",
+            "proposal_task_id": "r1-p1",
+            "premises": [base["idea_id"]],
+            "context": "Orphaned candidate record.",
+            "related_artifacts": [],
+            "proposal": "This record is not authorized by task state.",
+            "raised": False,
+        }
+    )
+
+    task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+    assert task["result_idea_id"] is None
+    assert "pending_finalization" not in task
+
+    runtime = _prepare_ranked_tool_runtime(
+        tmp_path,
+        task_id="r1-p1",
+        command_profile="proposal_candidate",
+        actor="autoresearch_proposer",
+        hitl_stage="proposal",
+        base_idea_number=1,
+    )
+    try:
+        with pytest.raises(HitlValidationError, match="unreferenced terminal idea"):
+            runtime.submit_proposal_payload(
+                {
+                    "proposal_type": "exploitation",
+                    "premises": [base["idea_id"]],
+                    "proposal": "A new output must not adopt the orphaned idea.",
+                }
+            )
+    finally:
+        runtime.clear_idea_tool_context()
+    task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
+    assert task["result_idea_id"] is None
+    assert "pending_finalization" not in task

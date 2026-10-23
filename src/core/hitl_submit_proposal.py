@@ -28,8 +28,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = HitlArgumentParser(
         prog="hitl-submit-proposal",
         description=(
-            "Submit the current AutoResearch proposal to NeuriCo HITL runtime and wait "
-            "for admission feedback or approval."
+            "Submit the current AutoResearch proposal to NeuriCo HITL runtime for "
+            "candidate recording or admission review."
         ),
     )
     parser.add_argument(
@@ -69,6 +69,13 @@ def main(argv: List[str] | None = None) -> int:
 
     status = str(response.get("status", "")).strip()
     proposal_idea_id = str(response.get("proposal_idea_id", "")).strip()
+    if status == "recorded":
+        print("HITL_PROPOSAL_RECORDED")
+        if proposal_idea_id:
+            print(f"idea_id: {proposal_idea_id}")
+        print("instruction:")
+        print(str(response.get("instruction", "")).strip())
+        return 0
     if status == "approved":
         print("HITL_PROPOSAL_APPROVED")
         if proposal_idea_id:
