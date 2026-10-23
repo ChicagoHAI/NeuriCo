@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import itertools
 import json
 import subprocess
@@ -15,6 +16,8 @@ import cli.hitl_launcher as hitl_launcher  # noqa: E402
 import cli.hitl_run_worker as hitl_run_worker  # noqa: E402
 import agents.autoresearch_proposer as autoresearch_proposer  # noqa: E402
 import agents.proposal_assessment as proposal_assessment  # noqa: E402
+import core.hitl_finish_proposal_review as hitl_finish_proposal_review  # noqa: E402
+import core.hitl_finish_proposal_verification as hitl_finish_proposal_verification  # noqa: E402
 from core.hitl import (  # noqa: E402
     HitlIdeaLog,
     HitlRuntime,
@@ -4187,13 +4190,20 @@ def test_proposal_verifier_prompt_is_scientific_and_uses_minimal_finish_contract
         templates_dir=Path(__file__).resolve().parents[1] / "templates",
         hitl_mode="auto",
     )
+    flat_prompt = " ".join(prompt.split())
 
     assert "Assigned proposal idea: I24" in prompt
     assert "hitl-finish-proposal-verification" in prompt
-    assert '"premises"' in prompt
-    assert '"assessment"' in prompt
+    assert "```bash" in prompt
+    assert "```json" not in prompt
+    assert "<<'ASSESSMENT'" in prompt
+    assert "through standard input exactly as shown" in flat_prompt
+    assert '--premise "I<N>"' in prompt
+    assert "or omit it when there are no additional findings" in flat_prompt
+    assert "HITL_PROPOSAL_VERIFICATION_RECORDED" in prompt
+    assert "retry the corrected command in this same worker session" in flat_prompt
     assert "Do not return pass/fail" in prompt
-    assert "Do not repeat I24" in prompt
+    assert "Do not cite I24 this way" in flat_prompt
     assert "ranking" in prompt
     assert '"proposal_idea_id"' not in prompt
 
@@ -4205,11 +4215,140 @@ def test_proposal_reviewer_prompt_preserves_derived_pair_order_and_minimal_contr
         templates_dir=Path(__file__).resolve().parents[1] / "templates",
         hitl_mode="auto",
     )
+    flat_prompt = " ".join(prompt.split())
 
     assert prompt.index("- I24 -> I34") < prompt.index("- I21 -> I31")
     assert prompt.index("- I21 -> I31") < prompt.index("- I27 -> I37")
     assert "hitl-finish-proposal-review" in prompt
-    assert '"ranking": ["I24", "I21", "I27"]' in prompt
-    assert '"premises"' in prompt
-    assert '"assessment"' in prompt
+    assert "```bash" in prompt
+    assert "```json" not in prompt
+    assert prompt.count('--rank "I24"') == 1
+    assert prompt.count('--rank "I21"') == 1
+    assert prompt.count('--rank "I27"') == 1
+    assert prompt.index('--rank "I24"') < prompt.index('--rank "I21"')
+    assert prompt.index('--rank "I21"') < prompt.index('--rank "I27"')
+    assert "<<'ASSESSMENT'" in prompt
+    assert "through standard input exactly as shown" in flat_prompt
+    assert '--premise "I<N>"' in prompt
+    assert "or omit it when there are no additional findings" in flat_prompt
+    assert "HITL_PROPOSAL_REVIEW_RECORDED" in prompt
+    assert "retry the corrected command in this same worker session" in flat_prompt
+    assert "Reorder the example lines" in flat_prompt
     assert '"proposal_task_id"' not in prompt
+
+
+def test_proposal_verification_command_maps_arguments_and_stdin_to_runtime(
+    monkeypatch,
+    capsys,
+):
+    observed = {}
+
+    def post_to_runtime(endpoint, payload):
+        observed["endpoint"] = endpoint
+        observed["payload"] = payload
+        return {
+            "status": "recorded",
+            "idea_id": "I40",
+            "instruction": "Stop verification now.",
+        }
+
+    monkeypatch.setattr(
+        hitl_finish_proposal_verification.sys,
+        "stdin",
+        io.StringIO("The intervention is attributable and feasible.\n"),
+    )
+    monkeypatch.setattr(
+        hitl_finish_proposal_verification,
+        "post_to_runtime",
+        post_to_runtime,
+    )
+
+    exit_code = hitl_finish_proposal_verification.main([])
+
+    assert exit_code == 0
+    assert observed == {
+        "endpoint": "/proposal/task/finish",
+        "payload": {
+            "premises": [],
+            "assessment": "The intervention is attributable and feasible.\n",
+        },
+    }
+    assert "HITL_PROPOSAL_VERIFICATION_RECORDED" in capsys.readouterr().out
+
+
+def test_proposal_review_command_maps_ordered_arguments_and_stdin_to_runtime(
+    monkeypatch,
+    capsys,
+):
+    observed = {}
+
+    def post_to_runtime(endpoint, payload):
+        observed["endpoint"] = endpoint
+        observed["payload"] = payload
+        return {
+            "status": "recorded",
+            "idea_id": "I41",
+            "instruction": "Stop review now.",
+        }
+
+    monkeypatch.setattr(
+        hitl_finish_proposal_review.sys,
+        "stdin",
+        io.StringIO("I24 has the strongest expected research value.\n"),
+    )
+    monkeypatch.setattr(
+        hitl_finish_proposal_review,
+        "post_to_runtime",
+        post_to_runtime,
+    )
+
+    exit_code = hitl_finish_proposal_review.main(
+        [
+            "--rank",
+            "I24",
+            "--rank",
+            "I21",
+            "--rank",
+            "I27",
+            "--premise",
+            "I33",
+            "--premise",
+            "I38",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed == {
+        "endpoint": "/proposal/task/finish",
+        "payload": {
+            "ranking": ["I24", "I21", "I27"],
+            "premises": ["I33", "I38"],
+            "assessment": "I24 has the strongest expected research value.\n",
+        },
+    }
+    assert "HITL_PROPOSAL_REVIEW_RECORDED" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("command", "argv"),
+    [
+        (hitl_finish_proposal_verification, []),
+        (hitl_finish_proposal_review, ["--rank", "I24"]),
+    ],
+)
+def test_proposal_assessment_commands_reject_empty_stdin_before_runtime(
+    monkeypatch,
+    capsys,
+    command,
+    argv,
+):
+    def unexpected_post(_endpoint, _payload):
+        raise AssertionError("empty assessment must not reach runtime")
+
+    monkeypatch.setattr(command.sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(command, "post_to_runtime", unexpected_post)
+
+    assert command.main(argv) == 2
+    output = capsys.readouterr().out
+    assert "HITL_COMMAND_ERROR" in output
+    assert "assessment must be provided on standard input" in output

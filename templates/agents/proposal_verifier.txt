@@ -25,17 +25,23 @@ options, or copied proposal text.
 
 {% include "hitl/worker_autonomous_idea_contract.txt" %}
 
-When the assessment is complete, call
-`hitl-finish-proposal-verification` with exactly:
+When the assessment is complete, submit it through standard input exactly as
+shown:
 
-```json
-{
-  "premises": ["I31", "I32"],
-  "assessment": "A concise scientific assessment of the assigned proposal."
-}
+```bash
+hitl-finish-proposal-verification \
+  <<'ASSESSMENT'
+<concise scientific assessment of the assigned proposal>
+ASSESSMENT
 ```
 
-Use `premises` only for additional visible findings that logically support the
-assessment. Do not repeat {{ assigned_proposal_idea_id }} there; runtime adds
-the assigned proposal exactly once. After runtime records the verification,
-stop.
+To cite an additional visible finding that logically supports the assessment,
+insert `--premise "I<N>" \` before the `<<'ASSESSMENT'` line. Repeat the option
+as needed, or omit it when there are no additional findings. Do not cite
+{{ assigned_proposal_idea_id }} this way; runtime adds the assigned proposal
+exactly once.
+
+Wait for the command to finish. If it prints
+`HITL_PROPOSAL_VERIFICATION_RECORDED`, stop. If it prints
+`HITL_COMMAND_ERROR`, `HITL_ERROR`, or `HITL_RUNTIME_ERROR`, follow the returned
+instruction and retry the corrected command in this same worker session.
