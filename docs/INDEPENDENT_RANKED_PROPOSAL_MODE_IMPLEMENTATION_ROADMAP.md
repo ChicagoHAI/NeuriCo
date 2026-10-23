@@ -87,7 +87,7 @@ Keep existing regression tests in their current files.
 ### Phase A: Foundations
 
 - [x] Step 1 — Freeze current single-mode behavior
-- [ ] Step 2 — Add the configuration value object
+- [x] Step 2 — Add the configuration value object
 - [ ] Step 3 — Transport configuration internally
 - [ ] Step 4 — Add pure proposal-round algorithms
 - [ ] Step 5 — Extend the idea schema
