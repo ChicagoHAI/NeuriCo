@@ -947,6 +947,7 @@ class HitlRuntimeState:
         parent_node_sha: str,
         preparation_attempt_id: str,
         candidate_attempt_id: str,
+        workspace_fingerprint: str,
         base_idea_number: int,
         proposer_count: int,
         reviewer_count: int,
@@ -963,6 +964,9 @@ class HitlRuntimeState:
             raise HitlRuntimeStateError("Proposal round idea boundary must be non-negative")
         if base_idea_number < 0:
             raise HitlRuntimeStateError("Proposal round idea boundary must be non-negative")
+        live_fingerprint = str(workspace_fingerprint).strip()
+        if not live_fingerprint:
+            raise HitlRuntimeStateError("Proposal round requires a workspace fingerprint")
         from core.hitl_proposal_round import normalize_proposal_mode_config
 
         try:
@@ -983,7 +987,9 @@ class HitlRuntimeState:
             if existing is not None:
                 round_state = self._validate_proposal_round_shape(existing)
                 if (
-                    round_state.get("candidate_attempt_id") == candidate
+                    str(action.get("workspace_fingerprint", "")).strip()
+                    == live_fingerprint
+                    and round_state.get("candidate_attempt_id") == candidate
                     and round_state.get("round_ordinal") == 1
                     and round_state.get("base_idea_number") == base_idea_number
                     and round_state.get("proposer_count") == config.proposer_count
@@ -1000,6 +1006,7 @@ class HitlRuntimeState:
                 proposer_count=int(config.proposer_count),
                 reviewer_count=int(config.reviewer_count),
             )
+            action["workspace_fingerprint"] = live_fingerprint
             action["proposal_round"] = round_state
             self._state["next_autoresearch_action"] = action
             self._save_unlocked()

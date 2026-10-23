@@ -1189,6 +1189,7 @@ def _begin_ranked_round(
     }
     round_state = state.begin_proposal_round(
         **{key: value for key, value in identity.items() if key != "round_ordinal"},
+        workspace_fingerprint="ranked-fingerprint",
         base_idea_number=base_idea_number,
         proposer_count=proposer_count,
         reviewer_count=reviewer_count,
@@ -1357,9 +1358,14 @@ def test_proposal_round_begin_is_idempotent_but_conflicting_config_is_rejected(t
     state, identity, original = _begin_ranked_round(tmp_path)
     begin_identity = {key: value for key, value in identity.items() if key != "round_ordinal"}
 
+    assert state.snapshot()["next_autoresearch_action"]["workspace_fingerprint"] == (
+        "ranked-fingerprint"
+    )
+
     assert (
         state.begin_proposal_round(
             **begin_identity,
+            workspace_fingerprint="ranked-fingerprint",
             base_idea_number=18,
             proposer_count=2,
             reviewer_count=2,
@@ -1369,10 +1375,28 @@ def test_proposal_round_begin_is_idempotent_but_conflicting_config_is_rejected(t
     with pytest.raises(HitlRuntimeStateError, match="different proposal round"):
         state.begin_proposal_round(
             **begin_identity,
+            workspace_fingerprint="ranked-fingerprint",
             base_idea_number=19,
             proposer_count=2,
             reviewer_count=2,
         )
+
+
+def test_proposal_round_existing_boundary_rejects_a_different_fingerprint(tmp_path):
+    state, identity, _original = _begin_ranked_round(tmp_path)
+    before = state.snapshot()["next_autoresearch_action"]
+    begin_identity = {key: value for key, value in identity.items() if key != "round_ordinal"}
+
+    with pytest.raises(HitlRuntimeStateError, match="different proposal round"):
+        state.begin_proposal_round(
+            **begin_identity,
+            workspace_fingerprint="different-live-fingerprint",
+            base_idea_number=18,
+            proposer_count=2,
+            reviewer_count=2,
+        )
+
+    assert state.snapshot()["next_autoresearch_action"] == before
 
 
 def test_task_provider_failures_are_task_local_and_clear_on_clean_result(tmp_path):

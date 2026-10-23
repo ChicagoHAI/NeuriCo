@@ -4308,6 +4308,7 @@ class HitlAutoResearchController:
             parent_node_sha=parent_sha,
             preparation_attempt_id=preparation_attempt_id,
             candidate_attempt_id=attempt_dir.name,
+            workspace_fingerprint=str(action.get("workspace_fingerprint", "")),
             base_idea_number=base_idea_number,
             proposer_count=config.proposer_count,
             reviewer_count=config.reviewer_count,

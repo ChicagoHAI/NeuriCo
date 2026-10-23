@@ -80,6 +80,7 @@ def _ranked_candidate_runtime(
         parent_node_sha="parent",
         preparation_attempt_id="attempt_3",
         candidate_attempt_id="attempt_4",
+        workspace_fingerprint="fingerprint",
         base_idea_number=1,
         proposer_count=2,
         reviewer_count=2,
