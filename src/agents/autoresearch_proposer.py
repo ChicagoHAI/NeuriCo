@@ -15,6 +15,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 
 # Add parent directory to path for imports
@@ -22,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.compute_backend import get_runtime_compute_backend
 from core.security import sanitize_text
-from core.agent_runner import run_prebuilt_cli_agent
+from core.agent_runner import run_prebuilt_cli_agent, write_agent_console
 from core.agent_cli import (
     CLI_COMMANDS,
     append_prompt_block,
@@ -279,6 +280,8 @@ def run_autoresearch_proposer(
     env_extra: Optional[Dict[str, str]] = None,
     launch_dir: Optional[Path] = None,
     candidate_recording: bool = False,
+    cancel_event: Optional[threading.Event] = None,
+    output_prefix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Launch the AutoResearch proposer agent.
@@ -305,14 +308,17 @@ def run_autoresearch_proposer(
     if candidate_recording and not hitl_submission:
         raise ValueError("Candidate recording requires a scoped HITL proposal task.")
 
-    print("🧭 Starting AutoResearch Proposal Generator")
-    print(f"   Provider: {provider}")
-    print(f"   Work dir: {work_dir}")
-    print(f"   Parent node: {parent_sha}")
-    print(f"   Attempt dir: {attempt_dir}")
+    def announce(text: str = "", *, end: str = "\n") -> None:
+        write_agent_console(text, prefix=output_prefix, end=end)
+
+    announce("🧭 Starting AutoResearch Proposal Generator")
+    announce(f"   Provider: {provider}")
+    announce(f"   Work dir: {work_dir}")
+    announce(f"   Parent node: {parent_sha}")
+    announce(f"   Attempt dir: {attempt_dir}")
     timeout_label = "disabled" if timeout is None else f"{timeout}s ({timeout // 60} minutes)"
-    print(f"   Timeout: {timeout_label}")
-    print("=" * 80)
+    announce(f"   Timeout: {timeout_label}")
+    announce("=" * 80)
 
     prompt = generate_autoresearch_proposal_prompt(
         idea=idea,
@@ -341,21 +347,21 @@ def run_autoresearch_proposer(
 
     prompt_file = artifact_dir / "proposer_prompt.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
-    print(f"   Prompt saved to: {prompt_file}")
-    print(f"   Prompt length: {len(prompt)} characters")
+    announce(f"   Prompt saved to: {prompt_file}")
+    announce(f"   Prompt length: {len(prompt)} characters")
 
     cmd = build_agent_command(provider, full_permissions=full_permissions)
 
     transcript_file = artifact_dir / f"proposer_{provider}_transcript.jsonl"
 
-    print(f"▶️  Launching {provider} CLI proposer...")
-    print(f"   Command: {cmd}")
+    announce(f"▶️  Launching {provider} CLI proposer...")
+    announce(f"   Command: {cmd}")
     if not hitl_submission:
-        print(f"   Proposal: {proposal_path}")
+        announce(f"   Proposal: {proposal_path}")
     else:
-        print("   Proposal: submitted directly to HITL runtime")
-    print(f"   Transcript: {transcript_file}")
-    print()
+        announce("   Proposal: submitted directly to HITL runtime")
+    announce(f"   Transcript: {transcript_file}")
+    announce()
 
     env = build_agent_environment(provider, env_extra)
 
@@ -383,11 +389,13 @@ def run_autoresearch_proposer(
                 timeout=timeout,
                 provider=provider,
                 defer_provider_failure_to_runtime=True,
+                cancel_event=cancel_event,
+                output_prefix=output_prefix,
             )
             return_code = launch["return_code"]
             if launch["timed_out"]:
                 error = f"AutoResearch proposer timed out after {timeout}s"
-                print(f"\n⏱️  {error}")
+                announce(f"\n⏱️  {error}")
         else:
             with open(transcript_file, "w", encoding="utf-8") as transcript_f:
                 process = subprocess.Popen(
@@ -408,7 +416,7 @@ def run_autoresearch_proposer(
                 for line in iter(process.stdout.readline, ""):
                     if line:
                         sanitized_line = sanitize_text(line)
-                        print(sanitized_line, end="")
+                        announce(sanitized_line, end="")
                         transcript_f.write(sanitized_line)
 
                 return_code = process.wait(timeout=timeout)
@@ -416,10 +424,10 @@ def run_autoresearch_proposer(
     except subprocess.TimeoutExpired:
         process.kill()
         error = f"AutoResearch proposer timed out after {timeout}s"
-        print(f"\n⏱️  {error}")
+        announce(f"\n⏱️  {error}")
     except Exception as e:
         error = f"AutoResearch proposer error: {e}"
-        print(f"\n❌ {error}")
+        announce(f"\n❌ {error}")
         raise
 
     elapsed = time.time() - start_time
@@ -435,9 +443,9 @@ def run_autoresearch_proposer(
         error = f"proposal.md was not created at {proposal_path}"
 
     if success:
-        print(f"✅ AutoResearch proposal generated in {elapsed:.1f}s")
+        announce(f"✅ AutoResearch proposal generated in {elapsed:.1f}s")
     else:
-        print(
+        announce(
             f"⚠️  AutoResearch proposer finished with issues "
             f"(return_code={return_code}, error={error})"
         )
@@ -455,6 +463,8 @@ def run_autoresearch_proposer(
     }
     if hitl_submission:
         result["provider_process_failed"] = bool(launch.get("provider_process_failed"))
+        if cancel_event is not None:
+            result["cancelled"] = bool(launch.get("cancelled"))
     return result
 
 

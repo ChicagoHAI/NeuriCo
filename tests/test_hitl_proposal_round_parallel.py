@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -9,7 +12,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from core.hitl import HitlIdeaLog, HitlRuntime  # noqa: E402
+import core.hitl_proposal_round as proposal_round  # noqa: E402
+from core.hitl import HitlIdeaLog, HitlRuntime, HitlValidationError  # noqa: E402
+from core.hitl_proposal_round import run_parallel_proposal_stage  # noqa: E402
 from core.hitl_runtime_state import HitlRuntimeState  # noqa: E402
 
 
@@ -31,7 +36,12 @@ def fake_hitl_tool_server(monkeypatch):
     monkeypatch.setattr("core.hitl.http.server.ThreadingHTTPServer", FakeToolServer)
 
 
-def _ranked_candidate_runtime(tmp_path: Path):
+def _ranked_candidate_runtime(
+    tmp_path: Path,
+    *,
+    cancel_event: threading.Event | None = None,
+    boundary_validator=None,
+):
     base = HitlIdeaLog(tmp_path).append(
         {
             "pipeline_stage": "experiment_runner",
@@ -101,7 +111,12 @@ def _ranked_candidate_runtime(tmp_path: Path):
             "base_idea_number": 1,
             "seed_idea_ids": [],
         },
-        proposal_submission_validator=lambda: {"valid": True, "issues": []},
+        proposal_submission_validator=(
+            boundary_validator
+            if boundary_validator is not None
+            else lambda: {"valid": True, "issues": []}
+        ),
+        ranked_cancel_event=cancel_event,
     )
     return runtime, state, identity, base
 
@@ -146,7 +161,7 @@ def test_committed_ranked_result_wins_over_late_local_cancellation(
     assert "consecutive_provider_failures" not in task
 
 
-def test_local_cancellation_of_incomplete_ranked_task_requests_relaunch_without_failure_count(
+def test_local_cancellation_of_incomplete_ranked_task_stops_without_failure_count(
     tmp_path,
     fake_hitl_tool_server,
 ):
@@ -161,7 +176,169 @@ def test_local_cancellation_of_incomplete_ranked_task_requests_relaunch_without_
         runtime.clear_idea_tool_context()
 
     assert result["complete"] is False
-    assert result["replacement"] is True
+    assert result["replacement"] is False
+    assert result["cancelled"] is True
     task = state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"]
     assert task["result_idea_id"] is None
     assert "consecutive_provider_failures" not in task
+
+
+def test_parallel_stage_overlaps_tasks_and_joins_cancelled_siblings():
+    started = threading.Barrier(3)
+    cleaned = []
+    cleaned_lock = threading.Lock()
+
+    def run_task(task_id, cancel_event):
+        started.wait(timeout=2)
+        try:
+            if task_id == "r1-p1":
+                raise RuntimeError("first invalidation")
+            assert cancel_event.wait(timeout=2)
+            return task_id
+        finally:
+            time.sleep(0.02)
+            with cleaned_lock:
+                cleaned.append(task_id)
+
+    with pytest.raises(RuntimeError, match="first invalidation"):
+        run_parallel_proposal_stage(["r1-p1", "r1-p2", "r1-p3"], run_task)
+
+    assert sorted(cleaned) == ["r1-p1", "r1-p2", "r1-p3"]
+
+
+def test_parallel_stage_cancels_tasks_that_have_not_started(monkeypatch):
+    real_executor = ThreadPoolExecutor
+
+    def single_worker_executor(*_args, **_kwargs):
+        return real_executor(max_workers=1)
+
+    monkeypatch.setattr(proposal_round, "ThreadPoolExecutor", single_worker_executor)
+    started = []
+
+    def run_task(task_id, _cancel_event):
+        started.append(task_id)
+        raise RuntimeError("queued task invalidation")
+
+    with pytest.raises(RuntimeError, match="queued task invalidation"):
+        run_parallel_proposal_stage(["r1-p1", "r1-p2", "r1-p3"], run_task)
+
+    assert started == ["r1-p1"]
+
+
+def test_ranked_cancellation_blocks_new_mutating_tool_calls(
+    tmp_path,
+    fake_hitl_tool_server,
+):
+    cancel_event = threading.Event()
+    runtime, state, identity, base = _ranked_candidate_runtime(
+        tmp_path,
+        cancel_event=cancel_event,
+    )
+    before = HitlIdeaLog(tmp_path).records()
+    cancel_event.set()
+    try:
+        with pytest.raises(HitlValidationError, match="stage was cancelled"):
+            runtime.log_reported_payload(
+                {
+                    "idea_type": "evidence",
+                    "idea_category": "constraint_or_risk",
+                    "premises": [base["idea_id"]],
+                    "context": "This must not be recorded.",
+                    "related_artifacts": [],
+                    "evidence": "Cancellation closed the mutation gate.",
+                }
+            )
+        with pytest.raises(HitlValidationError, match="stage was cancelled"):
+            runtime.finish_ranked_proposal_task(
+                {
+                    "proposal_type": "exploitation",
+                    "premises": [base["idea_id"]],
+                    "proposal": "This must not be recorded.",
+                }
+            )
+    finally:
+        runtime.clear_idea_tool_context()
+
+    assert HitlIdeaLog(tmp_path).records() == before
+    assert state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"][
+        "result_idea_id"
+    ] is None
+
+
+def test_ranked_workspace_violation_signals_stage_cancellation(
+    tmp_path,
+    fake_hitl_tool_server,
+):
+    cancel_event = threading.Event()
+    runtime, _state, _identity, base = _ranked_candidate_runtime(
+        tmp_path,
+        cancel_event=cancel_event,
+        boundary_validator=lambda: {"valid": False, "issues": ["changed file"]},
+    )
+    try:
+        with pytest.raises(HitlValidationError, match="proposal_task_workspace_boundary"):
+            runtime.finish_ranked_proposal_task(
+                {
+                    "proposal_type": "exploitation",
+                    "premises": [base["idea_id"]],
+                    "proposal": "A proposal against an invalid boundary.",
+                }
+            )
+        assert cancel_event.is_set()
+    finally:
+        runtime.clear_idea_tool_context()
+
+
+def test_ranked_cleanup_waits_for_handler_that_passed_cancellation_gate(
+    tmp_path,
+    fake_hitl_tool_server,
+    monkeypatch,
+):
+    cancel_event = threading.Event()
+    runtime, state, identity, base = _ranked_candidate_runtime(
+        tmp_path,
+        cancel_event=cancel_event,
+    )
+    append_entered = threading.Event()
+    allow_append = threading.Event()
+    finish_done = threading.Event()
+    cleanup_done = threading.Event()
+    original_append = runtime.log.append
+
+    def blocking_append(*args, **kwargs):
+        append_entered.set()
+        assert allow_append.wait(timeout=2)
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.log, "append", blocking_append)
+
+    def finish_task():
+        runtime.finish_ranked_proposal_task(
+            {
+                "proposal_type": "exploitation",
+                "premises": [base["idea_id"]],
+                "proposal": "Finish the mutation that already holds the gate.",
+            }
+        )
+        finish_done.set()
+
+    finish_thread = threading.Thread(target=finish_task)
+    finish_thread.start()
+    assert append_entered.wait(timeout=2)
+    cancel_event.set()
+
+    cleanup_thread = threading.Thread(
+        target=lambda: (runtime.clear_idea_tool_context(), cleanup_done.set())
+    )
+    cleanup_thread.start()
+    assert not cleanup_done.wait(timeout=0.05)
+
+    allow_append.set()
+    finish_thread.join(timeout=2)
+    cleanup_thread.join(timeout=2)
+
+    assert finish_done.is_set()
+    assert cleanup_done.is_set()
+    assert state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"][
+        "result_idea_id"
+    ] is not None

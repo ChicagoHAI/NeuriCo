@@ -1575,6 +1575,7 @@ class HitlRuntime:
         baseline_construction: bool = False,
         baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
         proposal_preparation_attempt_id: Optional[str] = None,
+        ranked_cancel_event: Optional[threading.Event] = None,
     ) -> None:
         if hitl_stage not in HITL_STAGES:
             raise HitlValidationError(f"Invalid HITL idea tool hitl_stage: {hitl_stage}")
@@ -1589,6 +1590,7 @@ class HitlRuntime:
                 self.tool_scope is not None
                 or idea_visibility is not None
                 or normalized_preparation_attempt_id
+                or ranked_cancel_event is not None
             ):
                 raise HitlValidationError(
                     "Scoped proposal tools require a closed ranked command profile."
@@ -1688,6 +1690,11 @@ class HitlRuntime:
             **(
                 {"proposal_preparation_attempt_id": normalized_preparation_attempt_id}
                 if profile != "default"
+                else {}
+            ),
+            **(
+                {"ranked_cancel_event": ranked_cancel_event}
+                if ranked_cancel_event is not None
                 else {}
             ),
             "idea_visibility": dict(idea_visibility) if idea_visibility is not None else None,
@@ -2088,6 +2095,9 @@ class HitlRuntime:
         return env
 
     def clear_idea_tool_context(self) -> None:
+        ranked_session = str(self._tool_context.get("command_profile", "")) in (
+            _RANKED_COMMAND_PROFILES
+        )
         self.stop_idea_tool_server()
         # A stopped worker can unwind before its asynchronous scorer finishes
         # observing the shared stop request. Keep recovery behind that existing
@@ -2103,6 +2113,12 @@ class HitlRuntime:
                 break
             for thread in active:
                 thread.join()
+        if ranked_session:
+            # Stopping the server prevents new requests. Acquiring the ranked
+            # task's existing mutation gate then proves that any handler which
+            # passed its cancellation check has finished before rollback.
+            with self._tool_lock:
+                pass
         self._tool_context = {}
         self._phase_finish_result = None
         self._phase_finish_request_key = ""
@@ -2294,8 +2310,17 @@ class HitlRuntime:
             raise HitlValidationError(
                 "Proposal task finalization is missing its workspace boundary validator."
             )
-        validation = validator()
+        try:
+            validation = validator()
+        except BaseException:
+            cancel_event = self._tool_context.get("ranked_cancel_event")
+            if isinstance(cancel_event, threading.Event):
+                cancel_event.set()
+            raise
         if not isinstance(validation, dict) or not bool(validation.get("valid")):
+            cancel_event = self._tool_context.get("ranked_cancel_event")
+            if isinstance(cancel_event, threading.Event):
+                cancel_event.set()
             issues = validation.get("issues", []) if isinstance(validation, dict) else []
             if not isinstance(issues, list):
                 issues = [str(issues)]
@@ -2306,6 +2331,17 @@ class HitlRuntime:
                 "its read-only workspace boundary."
                 + (f"\n{details}" if details else "")
                 + "\nRestore the task workspace boundary, then retry the same finish command."
+            )
+
+    def _ranked_stage_cancelled(self) -> bool:
+        cancel_event = self._tool_context.get("ranked_cancel_event")
+        return isinstance(cancel_event, threading.Event) and cancel_event.is_set()
+
+    def _reject_cancelled_ranked_mutation(self) -> None:
+        if self._ranked_stage_cancelled():
+            raise HitlValidationError(
+                "This ranked proposal stage was cancelled. Do not issue further "
+                "mutating commands from this worker session."
             )
 
     @staticmethod
@@ -2505,6 +2541,7 @@ class HitlRuntime:
         from core.hitl_runtime_state import HitlRuntimeStateError
 
         with self._tool_lock:
+            self._reject_cancelled_ranked_mutation()
             task_context = self._ranked_task_state_context()
             role = str(task_context["role"])
             self._validate_ranked_task_workspace(role)
@@ -2587,6 +2624,13 @@ class HitlRuntime:
         """Validate or replay one durable ranked task without launching an agent."""
 
         with self._tool_lock:
+            if self._ranked_stage_cancelled():
+                return {
+                    "status": "cancelled",
+                    "complete": False,
+                    "cancelled": True,
+                    "idea_id": None,
+                }
             task_context = self._ranked_task_state_context(
                 allow_completed_prior_stage=True,
             )
@@ -2725,7 +2769,11 @@ class HitlRuntime:
     ) -> Dict[str, Any]:
         """Resolve one ranked provider exit without global worker continuation state."""
 
-        from core.hitl_run_control import HitlRunStopRequested, hitl_run_stop_requested
+        from core.hitl_run_control import (
+            HitlRunStopRequested,
+            hitl_run_stop_requested,
+            raise_if_hitl_run_stop_requested,
+        )
 
         with self._tool_lock:
             task_context = self._ranked_task_state_context()
@@ -2765,8 +2813,19 @@ class HitlRuntime:
                     ),
                 }
 
-            if result.get("stopped") or hitl_run_stop_requested():
+            if hitl_run_stop_requested():
+                raise_if_hitl_run_stop_requested()
+            if result.get("stopped"):
                 raise HitlRunStopRequested("HITL run stop requested by the user.")
+
+            if result.get("cancelled") or self._ranked_stage_cancelled():
+                return {
+                    "status": "cancelled",
+                    "complete": False,
+                    "replacement": False,
+                    "cancelled": True,
+                    "idea_id": None,
+                }
 
             failed = _provider_failure_counter_update(result)
             if failed is not None:
@@ -2802,6 +2861,7 @@ class HitlRuntime:
 
     def log_reported_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
+            self._reject_cancelled_ranked_mutation()
             if self._tool_context.get("ranked_task_terminal"):
                 raise HitlValidationError(
                     "This proposal task is already complete. Stop this worker session."

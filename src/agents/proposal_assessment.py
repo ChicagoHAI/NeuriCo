@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
@@ -119,6 +120,8 @@ def run_proposal_assessment(
     env_extra: Dict[str, str],
     timeout: Optional[int] = 900,
     full_permissions: bool = True,
+    cancel_event: Optional[threading.Event] = None,
+    output_prefix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Launch one verifier or reviewer provider attempt through the shared runner."""
 
@@ -143,6 +146,8 @@ def run_proposal_assessment(
         timeout=timeout,
         provider=provider,
         defer_provider_failure_to_runtime=True,
+        cancel_event=cancel_event,
+        output_prefix=output_prefix,
     )
     return {
         **result,
@@ -163,6 +168,8 @@ def run_proposal_verifier(
     hitl_mode: str = "full",
     timeout: Optional[int] = 900,
     full_permissions: bool = True,
+    cancel_event: Optional[threading.Event] = None,
+    output_prefix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Launch one proposal verifier with the fixed verifier contract."""
 
@@ -179,6 +186,8 @@ def run_proposal_verifier(
         env_extra=env_extra,
         timeout=timeout,
         full_permissions=full_permissions,
+        cancel_event=cancel_event,
+        output_prefix=output_prefix,
     )
 
 
@@ -194,6 +203,8 @@ def run_proposal_reviewer(
     hitl_mode: str = "full",
     timeout: Optional[int] = 900,
     full_permissions: bool = True,
+    cancel_event: Optional[threading.Event] = None,
+    output_prefix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Launch one proposal reviewer with its derived presentation order."""
 
@@ -210,4 +221,6 @@ def run_proposal_reviewer(
         env_extra=env_extra,
         timeout=timeout,
         full_permissions=full_permissions,
+        cancel_event=cancel_event,
+        output_prefix=output_prefix,
     )

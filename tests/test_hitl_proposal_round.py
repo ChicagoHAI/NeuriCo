@@ -2298,7 +2298,7 @@ def test_ranked_non_admission_opens_a_fresh_round(tmp_path, monkeypatch, rejecti
 
     monkeypatch.setattr(
         controller,
-        "_run_serial_independent_ranked_proposal_round",
+        "_run_independent_ranked_proposal_round",
         fake_round,
     )
     monkeypatch.setattr(
@@ -3590,7 +3590,7 @@ def test_proposal_assessment_launcher_uses_unique_attempt_artifacts(
     assert calls[0]["transcript_file"] != calls[1]["transcript_file"]
 
 
-def _prepare_serial_ranked_proposer_controller(
+def _prepare_ranked_proposer_controller(
     tmp_path,
     *,
     proposer_count=2,
@@ -3685,27 +3685,31 @@ def _prepare_serial_ranked_proposer_controller(
     return controller, state, attempt_dir, base, whiteboard_path
 
 
-def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
+def test_parallel_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
     tmp_path,
     monkeypatch,
     fake_hitl_tool_servers,
 ):
     controller, state, attempt_dir, base, _whiteboard_path = (
-        _prepare_serial_ranked_proposer_controller(
+        _prepare_ranked_proposer_controller(
             tmp_path,
             proposer_count=3,
             reviewer_count=2,
         )
     )
-    task_runtimes = []
+    task_runtimes = {}
     observations = {}
     verifier_observations = {}
     launches = []
+    proposer_barrier = threading.Barrier(3)
+    verifier_barrier = threading.Barrier(3)
+    reviewer_barrier = threading.Barrier(2)
+    stage_tool_surfaces = {"proposer": [], "verifier": [], "reviewer": []}
     original_runtime_factory = controller._new_ranked_task_runtime
 
     def tracked_runtime(task_id):
         runtime = original_runtime_factory(task_id)
-        task_runtimes.append(runtime)
+        task_runtimes[task_id] = runtime
         return runtime
 
     def fake_generator(
@@ -3716,8 +3720,12 @@ def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
         _attempt_history,
         **kwargs,
     ):
-        runtime = task_runtimes[-1]
-        task_id = runtime.tool_scope
+        task_id = kwargs["output_prefix"]
+        runtime = task_runtimes[task_id]
+        stage_tool_surfaces["proposer"].append(
+            (kwargs["env_extra"]["NEURICO_HITL_URL"], runtime._tool_token)
+        )
+        proposer_barrier.wait(timeout=3)
         if task_id == "r1-p1":
             tasks_at_first_launch = state.snapshot()["next_autoresearch_action"][
                 "proposal_round"
@@ -3760,10 +3768,14 @@ def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
         return _ranked_launch_result()
 
     def fake_assessment_runner(**request):
-        runtime = task_runtimes[-1]
-        task_id = runtime.tool_scope
+        task_id = request["output_prefix"]
+        runtime = task_runtimes[task_id]
         role = request["role"]
         if role == "verifier":
+            stage_tool_surfaces["verifier"].append(
+                (request["env_extra"]["NEURICO_HITL_URL"], runtime._tool_token)
+            )
+            verifier_barrier.wait(timeout=3)
             assigned_id = request["assigned_proposal_idea_id"]
             visible_before = _visible_ids(runtime.view_ideas_for_tool()["ideas"])
             own_note_id = None
@@ -3794,6 +3806,10 @@ def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
             return _ranked_launch_result()
 
         assert role == "reviewer"
+        stage_tool_surfaces["reviewer"].append(
+            (request["env_extra"]["NEURICO_HITL_URL"], runtime._tool_token)
+        )
+        reviewer_barrier.wait(timeout=3)
         current_round = state.snapshot()["next_autoresearch_action"]["proposal_round"]
         canonical_ids = [
             current_round["tasks"][f"r1-p{ordinal}"]["result_idea_id"]
@@ -3841,7 +3857,7 @@ def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
     controller.proposal_assessment_runner = fake_assessment_runner
 
     reviewer_observations = {}
-    round_state, aggregate = controller._run_serial_independent_ranked_proposal_round(
+    round_state, aggregate = controller._run_independent_ranked_proposal_round(
         parent_sha="parent",
         attempt_dir=attempt_dir,
         attempt_history=[],
@@ -3860,11 +3876,14 @@ def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
     ]
     candidate_ids = [round_state["tasks"][f"r1-p{ordinal}"]["result_idea_id"] for ordinal in range(1, 4)]
     assert len(set(candidate_ids)) == 3
-    candidates = [
+    candidates = sorted(
+        [
         record
         for record in HitlIdeaLog(tmp_path).records()
         if record.get("idea_id") in candidate_ids
-    ]
+        ],
+        key=lambda record: record["proposal_task_id"],
+    )
     assert [record["proposal_task_id"] for record in candidates] == [
         "r1-p1",
         "r1-p2",
@@ -3877,13 +3896,17 @@ def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
     assert first_note_id not in observations["r1-p2"]["visible_before"]
     assert all(launch["attempt_dir"] == attempt_dir for launch in launches)
     assert all(launch["candidate_recording"] is True for launch in launches)
-    assert [Path(launch["launch_dir"]).name for launch in launches] == [
+    assert sorted(Path(launch["launch_dir"]).name for launch in launches) == [
         "launch_1",
         "launch_1",
         "launch_1",
     ]
     assert len({Path(launch["launch_dir"]) for launch in launches}) == 3
     assert all(Path(launch["launch_dir"]).is_dir() for launch in launches)
+    assert all(
+        len(set(stage_tool_surfaces[role])) == expected
+        for role, expected in {"proposer": 3, "verifier": 3, "reviewer": 2}.items()
+    )
     first_verifier_note_id = verifier_observations["r1-v1"]["own_note_id"]
     verification_ids = [
         round_state["tasks"][f"r1-v{ordinal}"]["result_idea_id"]
@@ -3983,25 +4006,26 @@ def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
 
 
 @pytest.mark.parametrize("mutation", ["public", "whiteboard"])
-def test_serial_ranked_proposer_stage_rejects_shared_boundary_mutation_after_finish(
+def test_parallel_ranked_proposer_stage_rejects_shared_boundary_mutation_after_finish(
     tmp_path,
     monkeypatch,
     fake_hitl_tool_servers,
     mutation,
 ):
     controller, state, attempt_dir, base, whiteboard_path = (
-        _prepare_serial_ranked_proposer_controller(tmp_path)
+        _prepare_ranked_proposer_controller(tmp_path)
     )
-    task_runtimes = []
+    task_runtimes = {}
     original_runtime_factory = controller._new_ranked_task_runtime
 
     def tracked_runtime(task_id):
         runtime = original_runtime_factory(task_id)
-        task_runtimes.append(runtime)
+        task_runtimes[task_id] = runtime
         return runtime
 
-    def fake_generator(*_args, **_kwargs):
-        runtime = task_runtimes[-1]
+    def fake_generator(*_args, **kwargs):
+        task_id = kwargs["output_prefix"]
+        runtime = task_runtimes[task_id]
         runtime.submit_proposal_payload(
             {
                 "proposal_type": "exploitation",
@@ -4009,17 +4033,18 @@ def test_serial_ranked_proposer_stage_rejects_shared_boundary_mutation_after_fin
                 "proposal": "Record before attempting an invalid workspace mutation.",
             }
         )
-        if mutation == "public":
-            (tmp_path / "unauthorized.txt").write_text("changed\n", encoding="utf-8")
-        else:
-            whiteboard_path.write_text('{"tips": [{"id": "T1"}]}\n', encoding="utf-8")
+        if task_id == "r1-p1":
+            if mutation == "public":
+                (tmp_path / "unauthorized.txt").write_text("changed\n", encoding="utf-8")
+            else:
+                whiteboard_path.write_text('{"tips": [{"id": "T1"}]}\n', encoding="utf-8")
         return _ranked_launch_result()
 
     monkeypatch.setattr(controller, "_new_ranked_task_runtime", tracked_runtime)
     controller.proposal_generator = fake_generator
 
     with pytest.raises(HitlValidationError, match="proposal_task_workspace_boundary"):
-        controller._run_serial_independent_ranked_proposal_round(
+        controller._run_independent_ranked_proposal_round(
             parent_sha="parent",
             attempt_dir=attempt_dir,
             attempt_history=[],
@@ -4028,7 +4053,6 @@ def test_serial_ranked_proposer_stage_rejects_shared_boundary_mutation_after_fin
     round_state = state.snapshot()["next_autoresearch_action"]["proposal_round"]
     assert round_state["stage"] == "proposing"
     assert round_state["tasks"]["r1-p1"]["result_idea_id"] is not None
-    assert round_state["tasks"]["r1-p2"]["result_idea_id"] is None
 
 
 def test_independent_candidate_prompt_freezes_whiteboard_and_single_prompt_does_not(

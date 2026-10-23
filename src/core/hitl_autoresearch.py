@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import threading
 
 from core.autoresearch import (
     AGENT_LOCAL_PATTERNS,
@@ -4102,6 +4103,7 @@ class HitlAutoResearchController:
         preparation_attempt_id: str,
         candidate_attempt_id: str,
         boundary_validator: Callable[[], Dict[str, Any]],
+        cancel_event: Optional[threading.Event] = None,
     ) -> tuple[HitlRuntime, list[tuple[str, str]]]:
         """Build the one canonical authenticated context for a ranked task."""
 
@@ -4155,32 +4157,37 @@ class HitlAutoResearchController:
 
         hitl_stage, command_profile, actor = profile
         task_runtime = self._new_ranked_task_runtime(task_id)
-        task_runtime.prepare_idea_tool_context(
-            hitl_stage=hitl_stage,
-            command_profile=command_profile,
-            actor=actor,
-            proposal_preparation_attempt_id=preparation_attempt_id,
-            provenance={
-                "parent_node_id": parent_sha,
-                "attempt_id": candidate_attempt_id,
-                "proposal_task_id": task_id,
-            },
-            idea_visibility={
-                "base_idea_number": round_state["base_idea_number"],
-                "seed_idea_ids": seed_idea_ids,
-                **(
-                    {"proposal_verification_pairs": presentation_pairs}
-                    if role == "reviewer"
-                    else {}
+        try:
+            task_runtime.prepare_idea_tool_context(
+                hitl_stage=hitl_stage,
+                command_profile=command_profile,
+                actor=actor,
+                proposal_preparation_attempt_id=preparation_attempt_id,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": candidate_attempt_id,
+                    "proposal_task_id": task_id,
+                },
+                idea_visibility={
+                    "base_idea_number": round_state["base_idea_number"],
+                    "seed_idea_ids": seed_idea_ids,
+                    **(
+                        {"proposal_verification_pairs": presentation_pairs}
+                        if role == "reviewer"
+                        else {}
+                    ),
+                },
+                proposal_submission_validator=(
+                    boundary_validator if role == "proposer" else None
                 ),
-            },
-            proposal_submission_validator=(
-                boundary_validator if role == "proposer" else None
-            ),
-            phase_finish_validator=(
-                boundary_validator if role != "proposer" else None
-            ),
-        )
+                phase_finish_validator=(
+                    boundary_validator if role != "proposer" else None
+                ),
+                ranked_cancel_event=cancel_event,
+            )
+        except BaseException:
+            task_runtime.clear_idea_tool_context()
+            raise
         return task_runtime, presentation_pairs
 
     def _apply_ranked_proposal_selection(
@@ -4248,7 +4255,7 @@ class HitlAutoResearchController:
             "proposal_round": next_state,
         }
 
-    def _run_serial_independent_ranked_proposal_round(
+    def _run_independent_ranked_proposal_round(
         self,
         *,
         parent_sha: str,
@@ -4256,7 +4263,7 @@ class HitlAutoResearchController:
         attempt_history: list[Dict[str, Any]],
         boundary_validator: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> tuple[Dict[str, Any], KemenyYoungResult]:
-        """Run or resume the durable serial stages of one ranked proposal round."""
+        """Run or resume the durable stage-local tasks of one ranked proposal round."""
 
         from core.agent_runner import next_attempt_number
         from core.hitl_proposal_round import (
@@ -4264,6 +4271,7 @@ class HitlAutoResearchController:
             proposal_round_results,
             proposal_selection_decision_record,
             proposal_task_id,
+            run_parallel_proposal_stage,
         )
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
@@ -4344,6 +4352,7 @@ class HitlAutoResearchController:
         def task_runtime_for(
             role: str,
             task_id: str,
+            cancel_event: Optional[threading.Event] = None,
         ) -> tuple[HitlRuntime, list[tuple[str, str]], Dict[str, Any]]:
             current_round = state.proposal_round_snapshot(**identity)
             task_runtime, presentation_pairs = self._prepare_ranked_task_runtime(
@@ -4354,8 +4363,20 @@ class HitlAutoResearchController:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=attempt_dir.name,
                 boundary_validator=boundary_validator,
+                cancel_event=cancel_event,
             )
             return task_runtime, presentation_pairs, current_round
+
+        def cancelled_launch_result() -> Dict[str, Any]:
+            return {
+                "success": False,
+                "return_code": None,
+                "timed_out": False,
+                "stopped": False,
+                "cancelled": True,
+                "background_processes_terminated": False,
+                "provider_process_failed": False,
+            }
 
         def validate_completed_role(role: str, count: int) -> None:
             for ordinal in range(1, count + 1):
@@ -4379,16 +4400,25 @@ class HitlAutoResearchController:
                 "Generate one independent proposal candidate and submit it through "
                 "hitl-submit-proposal. Stop after runtime records the candidate."
             )
-            for ordinal in range(1, config.proposer_count + 1):
+            proposer_task_ids = [
+                proposal_task_id(int(identity["round_ordinal"]), "proposer", ordinal)
+                for ordinal in range(1, config.proposer_count + 1)
+            ]
+
+            def run_proposer_task(
+                task_id: str,
+                cancel_event: threading.Event,
+            ) -> Dict[str, Any]:
                 raise_if_hitl_run_stop_requested()
-                task_id = proposal_task_id(
-                    int(identity["round_ordinal"]), "proposer", ordinal
+                task_runtime, _pairs, _current = task_runtime_for(
+                    "proposer",
+                    task_id,
+                    cancel_event,
                 )
-                task_runtime, _pairs, _current = task_runtime_for("proposer", task_id)
                 try:
                     reconciled = task_runtime.reconcile_ranked_proposal_task()
-                    if reconciled.get("complete"):
-                        continue
+                    if reconciled.get("complete") or reconciled.get("cancelled"):
+                        return reconciled
                     task_dir = round_dir / task_id
 
                     def launch_worker(
@@ -4401,6 +4431,9 @@ class HitlAutoResearchController:
                             raise RuntimeError(
                                 "Ranked proposal tasks must not record global worker continuation."
                             )
+                        raise_if_hitl_run_stop_requested()
+                        if cancel_event.is_set():
+                            return cancelled_launch_result()
                         launch_number = next_attempt_number(
                             task_dir,
                             lambda attempt: f"launch_{attempt}",
@@ -4415,6 +4448,8 @@ class HitlAutoResearchController:
                             env_extra=task_runtime.idea_tool_env(),
                             launch_dir=launch_dir,
                             candidate_recording=True,
+                            cancel_event=cancel_event,
+                            output_prefix=task_id,
                         )
 
                     _result, finish = run_worker_with_replacements(
@@ -4435,10 +4470,15 @@ class HitlAutoResearchController:
                     )
                 finally:
                     task_runtime.clear_idea_tool_context()
+                if finish.get("cancelled"):
+                    return finish
                 if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
                     raise RuntimeError(
                         "Ranked proposal task ended without a recorded candidate."
                     )
+                return finish
+
+            run_parallel_proposal_stage(proposer_task_ids, run_proposer_task)
             require_boundary("Ranked proposal stage")
             round_state = state.advance_proposal_round(
                 **identity,
@@ -4456,20 +4496,29 @@ class HitlAutoResearchController:
                 "Complete the scientific assessment of the assigned proposal and finish "
                 "through hitl-finish-proposal-verification."
             )
-            for ordinal in range(1, config.proposer_count + 1):
+            verifier_task_ids = [
+                proposal_task_id(int(identity["round_ordinal"]), "verifier", ordinal)
+                for ordinal in range(1, config.proposer_count + 1)
+            ]
+
+            def run_verifier_task(
+                task_id: str,
+                cancel_event: threading.Event,
+            ) -> Dict[str, Any]:
                 raise_if_hitl_run_stop_requested()
-                task_id = proposal_task_id(
-                    int(identity["round_ordinal"]), "verifier", ordinal
+                task_runtime, _pairs, current_round = task_runtime_for(
+                    "verifier",
+                    task_id,
+                    cancel_event,
                 )
-                task_runtime, _pairs, current_round = task_runtime_for("verifier", task_id)
                 task = current_round["tasks"][task_id]
                 assigned_proposal_id = str(
                     task.get("assigned_proposal_idea_id") or ""
                 ).strip()
                 try:
                     reconciled = task_runtime.reconcile_ranked_proposal_task()
-                    if reconciled.get("complete"):
-                        continue
+                    if reconciled.get("complete") or reconciled.get("cancelled"):
+                        return reconciled
 
                     def launch_verifier(
                         prompt: str,
@@ -4481,12 +4530,17 @@ class HitlAutoResearchController:
                             raise RuntimeError(
                                 "Ranked proposal tasks must not record global worker continuation."
                             )
+                        raise_if_hitl_run_stop_requested()
+                        if cancel_event.is_set():
+                            return cancelled_launch_result()
                         return self.proposal_assessment_runner(
                             role="verifier",
                             assigned_proposal_idea_id=assigned_proposal_id,
                             task_dir=round_dir / task_id,
                             prompt_suffix=prompt,
                             env_extra=task_runtime.idea_tool_env(),
+                            cancel_event=cancel_event,
+                            output_prefix=task_id,
                         )
 
                     _result, finish = run_worker_with_replacements(
@@ -4507,10 +4561,15 @@ class HitlAutoResearchController:
                     )
                 finally:
                     task_runtime.clear_idea_tool_context()
+                if finish.get("cancelled"):
+                    return finish
                 if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
                     raise RuntimeError(
                         "Ranked verifier task ended without a recorded assessment."
                     )
+                return finish
+
+            run_parallel_proposal_stage(verifier_task_ids, run_verifier_task)
             require_boundary("Ranked verifier stage")
             round_state = state.advance_proposal_round(
                 **identity,
@@ -4528,18 +4587,25 @@ class HitlAutoResearchController:
                 "Complete the independent comparative review and finish through "
                 "hitl-finish-proposal-review with one complete ranking."
             )
-            for ordinal in range(1, config.reviewer_count + 1):
+            reviewer_task_ids = [
+                proposal_task_id(int(identity["round_ordinal"]), "reviewer", ordinal)
+                for ordinal in range(1, config.reviewer_count + 1)
+            ]
+
+            def run_reviewer_task(
+                task_id: str,
+                cancel_event: threading.Event,
+            ) -> Dict[str, Any]:
                 raise_if_hitl_run_stop_requested()
-                task_id = proposal_task_id(
-                    int(identity["round_ordinal"]), "reviewer", ordinal
-                )
                 task_runtime, presentation_pairs, _current = task_runtime_for(
-                    "reviewer", task_id
+                    "reviewer",
+                    task_id,
+                    cancel_event,
                 )
                 try:
                     reconciled = task_runtime.reconcile_ranked_proposal_task()
-                    if reconciled.get("complete"):
-                        continue
+                    if reconciled.get("complete") or reconciled.get("cancelled"):
+                        return reconciled
 
                     def launch_reviewer(
                         prompt: str,
@@ -4551,12 +4617,17 @@ class HitlAutoResearchController:
                             raise RuntimeError(
                                 "Ranked proposal tasks must not record global worker continuation."
                             )
+                        raise_if_hitl_run_stop_requested()
+                        if cancel_event.is_set():
+                            return cancelled_launch_result()
                         return self.proposal_assessment_runner(
                             role="reviewer",
                             candidate_verification_pairs=presentation_pairs,
                             task_dir=round_dir / task_id,
                             prompt_suffix=prompt,
                             env_extra=task_runtime.idea_tool_env(),
+                            cancel_event=cancel_event,
+                            output_prefix=task_id,
                         )
 
                     _result, finish = run_worker_with_replacements(
@@ -4577,10 +4648,15 @@ class HitlAutoResearchController:
                     )
                 finally:
                     task_runtime.clear_idea_tool_context()
+                if finish.get("cancelled"):
+                    return finish
                 if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
                     raise RuntimeError(
                         "Ranked reviewer task ended without a recorded review."
                     )
+                return finish
+
+            run_parallel_proposal_stage(reviewer_task_ids, run_reviewer_task)
             require_boundary("Ranked reviewer stage")
             round_state = state.advance_proposal_round(
                 **identity,
@@ -4680,7 +4756,7 @@ class HitlAutoResearchController:
         )
         while True:
             raise_if_hitl_run_stop_requested()
-            round_state, _aggregate = self._run_serial_independent_ranked_proposal_round(
+            round_state, _aggregate = self._run_independent_ranked_proposal_round(
                 parent_sha=parent_sha,
                 attempt_dir=attempt_dir,
                 attempt_history=attempt_history,
@@ -5139,6 +5215,8 @@ class HitlAutoResearchController:
         env_extra: Optional[Dict[str, str]] = None,
         launch_dir: Optional[Path] = None,
         candidate_recording: bool = False,
+        cancel_event: Optional[threading.Event] = None,
+        output_prefix: str = "",
     ) -> Any:
         return invoke_proposal_generator(
             self.proposal_generator,
@@ -5151,6 +5229,8 @@ class HitlAutoResearchController:
             env_extra=env_extra,
             launch_dir=launch_dir,
             candidate_recording=candidate_recording,
+            cancel_event=cancel_event,
+            output_prefix=output_prefix,
         )
 
     def _proposal_hitl_runtime(self) -> HitlRuntime:
@@ -5346,6 +5426,8 @@ def run_hitl_autoresearch_loop(
         env_extra: Optional[Dict[str, str]] = None,
         launch_dir: Optional[Path] = None,
         candidate_recording: bool = False,
+        cancel_event: Optional[threading.Event] = None,
+        output_prefix: Optional[str] = None,
     ) -> Dict[str, Any]:
         return run_autoresearch_proposer(
             idea=idea_payload,
@@ -5361,6 +5443,8 @@ def run_hitl_autoresearch_loop(
             env_extra=env_extra,
             launch_dir=launch_dir,
             candidate_recording=candidate_recording,
+            cancel_event=cancel_event,
+            output_prefix=output_prefix,
         )
 
     def hitl_comment_mode(

@@ -6,9 +6,11 @@ import hashlib
 import itertools
 import json
 import re
+import threading
 from collections.abc import Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar, cast
 
 SINGLE_PROPOSAL_MODE = "single"
 INDEPENDENT_RANKED_PROPOSAL_MODE = "independent_ranked"
@@ -22,6 +24,8 @@ MIN_REVIEWER_COUNT = 2
 MAX_REVIEWER_COUNT = 9
 PROPOSAL_ROUND_SCHEMA_VERSION = 1
 KEMENY_YOUNG_ALGORITHM = "kemeny_young_complete_rankings_v1"
+
+_T = TypeVar("_T")
 
 _TASK_ROLE_MARKERS = {
     "proposer": "p",
@@ -60,6 +64,73 @@ class KemenyYoungResult:
     source_review_idea_ids: tuple[str, ...]
     candidate_proposal_idea_ids: tuple[str, ...]
     optimal_rankings: tuple[tuple[str, ...], ...]
+
+
+def run_parallel_proposal_stage(
+    task_ids: Sequence[str],
+    run_task: Callable[[str, threading.Event], _T],
+) -> dict[str, _T]:
+    """Run one bounded proposal stage and settle every sibling before raising."""
+
+    ordered_ids = tuple(str(task_id).strip() for task_id in task_ids)
+    if not ordered_ids or any(not task_id for task_id in ordered_ids):
+        raise ValueError("Parallel proposal stage requires nonempty task IDs.")
+    if len(set(ordered_ids)) != len(ordered_ids):
+        raise ValueError("Parallel proposal stage task IDs must be distinct.")
+    if len(ordered_ids) > MAX_REVIEWER_COUNT:
+        raise ValueError("Parallel proposal stage exceeds the ranked task bound.")
+
+    from core.hitl_run_control import (
+        HitlRunStopRequested,
+        raise_if_hitl_run_stop_requested,
+    )
+
+    cancel_event = threading.Event()
+    skipped = object()
+    results: dict[str, _T] = {}
+    first_failure: BaseException | None = None
+
+    def invoke(task_id: str) -> _T | object:
+        raise_if_hitl_run_stop_requested()
+        if cancel_event.is_set():
+            return skipped
+        try:
+            return run_task(task_id, cancel_event)
+        except BaseException as exc:
+            # Signal siblings before the executor can reuse this worker thread
+            # for a queued task. The coordinator below still owns reporting the
+            # first failure and joining every submitted future.
+            if not isinstance(exc, HitlRunStopRequested):
+                cancel_event.set()
+            raise
+
+    with ThreadPoolExecutor(
+        max_workers=len(ordered_ids),
+        thread_name_prefix="neurico-proposal",
+    ) as executor:
+        futures: dict[Future[_T | object], str] = {
+            executor.submit(invoke, task_id): task_id for task_id in ordered_ids
+        }
+        for future in as_completed(futures):
+            task_id = futures[future]
+            if future.cancelled():
+                continue
+            try:
+                result = future.result()
+                if result is not skipped:
+                    results[task_id] = cast(_T, result)
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+                    if not isinstance(exc, HitlRunStopRequested):
+                        cancel_event.set()
+                    for sibling in futures:
+                        if sibling is not future:
+                            sibling.cancel()
+
+    if first_failure is not None:
+        raise first_failure
+    return {task_id: results[task_id] for task_id in ordered_ids if task_id in results}
 
 
 def normalize_proposal_mode_config(

@@ -72,6 +72,28 @@ def test_omitting_local_cancellation_preserves_existing_result_contract(tmp_path
     assert "cancelled" not in result
 
 
+def test_ranked_console_output_is_task_prefixed_but_logs_remain_raw(tmp_path, capsys):
+    result = _run_agent(
+        tmp_path,
+        command_argv=[
+            sys.executable,
+            "-c",
+            "print('first line'); print('second line')",
+        ],
+        output_prefix="r1-p1",
+    )
+
+    assert result["success"] is True
+    assert capsys.readouterr().out.splitlines() == [
+        "[r1-p1] first line",
+        "[r1-p1] second line",
+    ]
+    assert Path(result["log_file"]).read_text(encoding="utf-8").splitlines() == [
+        "first line",
+        "second line",
+    ]
+
+
 def test_global_stop_precedes_simultaneous_local_cancellation(tmp_path, monkeypatch):
     cancel_event = threading.Event()
     cancel_event.set()

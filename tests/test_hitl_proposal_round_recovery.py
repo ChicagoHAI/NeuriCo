@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -404,7 +405,7 @@ def _seed_stage(controller, state, identity, base, target: str):
         ("selected", [], 0),
     ],
 )
-def test_serial_ranked_round_resumes_each_durable_stage_without_relaunching_completed_tasks(
+def test_parallel_ranked_round_resumes_each_durable_stage_without_relaunching_completed_tasks(
     tmp_path,
     monkeypatch,
     fake_hitl_tool_servers,
@@ -416,18 +417,19 @@ def test_serial_ranked_round_resumes_each_durable_stage_without_relaunching_comp
         tmp_path
     )
     _seed_stage(controller, state, identity, base, start)
-    task_runtimes = []
+    task_runtimes = {}
     launches = []
     original_factory = controller._new_ranked_task_runtime
 
     def tracked_runtime(task_id):
         runtime = original_factory(task_id)
-        task_runtimes.append(runtime)
+        task_runtimes[task_id] = runtime
         return runtime
 
-    def proposal_generator(*_args, **_kwargs):
-        runtime = task_runtimes[-1]
-        launches.append(runtime.tool_scope)
+    def proposal_generator(*_args, **kwargs):
+        task_id = kwargs["output_prefix"]
+        runtime = task_runtimes[task_id]
+        launches.append(task_id)
         runtime.finish_ranked_proposal_task(
             {
                 "proposal_type": "exploitation",
@@ -445,8 +447,9 @@ def test_serial_ranked_round_resumes_each_durable_stage_without_relaunching_comp
         }
 
     def assessment_runner(**request):
-        runtime = task_runtimes[-1]
-        launches.append(runtime.tool_scope)
+        task_id = request["output_prefix"]
+        runtime = task_runtimes[task_id]
+        launches.append(task_id)
         if request["role"] == "verifier":
             payload = {
                 "premises": [base["idea_id"]],
@@ -473,7 +476,7 @@ def test_serial_ranked_round_resumes_each_durable_stage_without_relaunching_comp
     controller.proposal_generator = proposal_generator
     controller.proposal_assessment_runner = assessment_runner
 
-    round_state, _aggregate = controller._run_serial_independent_ranked_proposal_round(
+    round_state, _aggregate = controller._run_independent_ranked_proposal_round(
         parent_sha="parent",
         attempt_dir=attempt_dir,
         attempt_history=[],
@@ -481,7 +484,7 @@ def test_serial_ranked_round_resumes_each_durable_stage_without_relaunching_comp
     )
 
     assert round_state["stage"] == "selected"
-    assert launches == expected_launches
+    assert sorted(launches) == sorted(expected_launches)
     assert manager.calls == expected_manager_calls
     terminal_records = [
         record
@@ -523,7 +526,7 @@ def test_ranked_recovery_rejects_unreferenced_terminal_idea_before_agent_launch(
     )
 
     with pytest.raises(HitlValidationError, match="unreferenced terminal idea"):
-        controller._run_serial_independent_ranked_proposal_round(
+        controller._run_independent_ranked_proposal_round(
             parent_sha="parent",
             attempt_dir=attempt_dir,
             attempt_history=[],
@@ -551,27 +554,43 @@ def test_ranked_recovery_preserves_task_provider_failure_count(
             failed=True,
         )
     launches = []
-    controller.proposal_generator = lambda *_args, **_kwargs: (
-        launches.append("r1-p1")
-        or {
-            "success": False,
-            "return_code": 1,
-            "timed_out": False,
-            "stopped": False,
-            "background_processes_terminated": False,
-            "provider_process_failed": True,
-        }
-    )
+    first_failure_returned = threading.Event()
 
-    with pytest.raises(HitlRunStopRequested, match="three consecutive provider"):
-        controller._run_serial_independent_ranked_proposal_round(
+    def failed_generator(*_args, **kwargs):
+        task_id = kwargs["output_prefix"]
+        launches.append(task_id)
+        if task_id == "r1-p1":
+            first_failure_returned.set()
+            return {
+                "success": False,
+                "return_code": 1,
+                "timed_out": False,
+                "stopped": False,
+                "background_processes_terminated": False,
+                "provider_process_failed": True,
+            }
+        first_failure_returned.wait(timeout=2)
+        return {
+            "success": False,
+            "return_code": None,
+            "timed_out": False,
+            "stopped": True,
+            "background_processes_terminated": False,
+            "provider_process_failed": False,
+        }
+
+    controller.proposal_generator = failed_generator
+
+    with pytest.raises(HitlRunStopRequested, match="stop requested|three consecutive provider"):
+        controller._run_independent_ranked_proposal_round(
             parent_sha="parent",
             attempt_dir=attempt_dir,
             attempt_history=[],
             boundary_validator=lambda: {"valid": True, "issues": []},
         )
 
-    assert launches == ["r1-p1"]
+    assert launches.count("r1-p1") == 1
+    assert launches.count("r1-p2") <= 1
     assert state.proposal_round_snapshot(**identity)["tasks"]["r1-p1"][
         "consecutive_provider_failures"
     ] == 3
@@ -622,7 +641,7 @@ def test_ranked_recovery_rejects_state_reference_with_wrong_task_provenance(
     )
 
     with pytest.raises(HitlValidationError, match="mismatched provenance"):
-        controller._run_serial_independent_ranked_proposal_round(
+        controller._run_independent_ranked_proposal_round(
             parent_sha="parent",
             attempt_dir=attempt_dir,
             attempt_history=[],

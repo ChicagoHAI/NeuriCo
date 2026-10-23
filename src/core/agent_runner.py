@@ -46,6 +46,25 @@ from core.security import remove_github_credentials, sanitize_text
 from core.hitl_util import utc_now
 
 
+_AGENT_CONSOLE_LOCK = threading.Lock()
+
+
+def write_agent_console(
+    text: str = "",
+    *,
+    prefix: Optional[str] = None,
+    end: str = "\n",
+) -> None:
+    """Write one agent console line atomically, with an optional task label."""
+
+    rendered = str(text)
+    if prefix:
+        lines = rendered.splitlines(keepends=True)
+        rendered = "".join(f"[{prefix}] {line}" for line in lines) or f"[{prefix}] "
+    with _AGENT_CONSOLE_LOCK:
+        print(rendered, end=end)
+
+
 class RunTracker:
     """
     Tracks a single agent invocation via .neurico/runs/<run_id>/.
@@ -233,6 +252,7 @@ def run_prebuilt_cli_agent(
     provider: Optional[str] = None,
     defer_provider_failure_to_runtime: bool = False,
     cancel_event: Optional[threading.Event] = None,
+    output_prefix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute a caller-constructed CLI command with streaming capture.
@@ -341,7 +361,7 @@ def run_prebuilt_cli_agent(
                     return
                 if line is None:
                     continue
-                print(line, end="")
+                write_agent_console(line, prefix=output_prefix, end="")
                 log_f.write(line)
                 transcript_f.write(line)
 
