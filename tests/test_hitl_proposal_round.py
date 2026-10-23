@@ -28,6 +28,7 @@ from core.hitl_proposal_round import (  # noqa: E402
     ProposalModeConfig,
     ProposalTaskIdentity,
     aggregate_kemeny_young,
+    aggregate_proposal_round_reviews,
     canonical_candidate_order,
     normalize_proposal_mode_config,
     parse_proposal_task_id,
@@ -2939,7 +2940,7 @@ def _prepare_serial_ranked_proposer_controller(
     return controller, state, attempt_dir, base, whiteboard_path
 
 
-def test_serial_ranked_proposer_and_verifier_stages_preserve_task_boundaries(
+def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
     tmp_path,
     monkeypatch,
     fake_hitl_tool_servers,
@@ -3014,34 +3015,78 @@ def test_serial_ranked_proposer_and_verifier_stages_preserve_task_boundaries(
         return _ranked_launch_result()
 
     def fake_assessment_runner(**request):
-        assert request["role"] == "verifier"
         runtime = task_runtimes[-1]
         task_id = runtime.tool_scope
-        assigned_id = request["assigned_proposal_idea_id"]
-        visible_before = _visible_ids(runtime.view_ideas_for_tool()["ideas"])
+        role = request["role"]
+        if role == "verifier":
+            assigned_id = request["assigned_proposal_idea_id"]
+            visible_before = _visible_ids(runtime.view_ideas_for_tool()["ideas"])
+            own_note_id = None
+            if task_id == "r1-v1":
+                own_note = runtime.log_reported_payload(
+                    {
+                        "idea_type": "evidence",
+                        "idea_category": "constraint_or_risk",
+                        "premises": [assigned_id],
+                        "context": "A task-local verification finding.",
+                        "related_artifacts": [],
+                        "evidence": "The proposed intervention may have one confound.",
+                    }
+                )
+                own_note_id = own_note["idea_id"]
+                assert own_note_id in _visible_ids(runtime.view_ideas_for_tool()["ideas"])
+            verifier_observations[task_id] = {
+                "assigned_id": assigned_id,
+                "visible_before": visible_before,
+                "own_note_id": own_note_id,
+            }
+            runtime.finish_ranked_proposal_task(
+                {
+                    "premises": [base["idea_id"]],
+                    "assessment": "The proposal is feasible, but attribution depends on keeping evaluation fixed.",
+                }
+            )
+            return _ranked_launch_result()
+
+        assert role == "reviewer"
+        current_round = state.snapshot()["next_autoresearch_action"]["proposal_round"]
+        canonical_ids = [
+            current_round["tasks"][f"r1-p{ordinal}"]["result_idea_id"]
+            for ordinal in range(1, 4)
+        ]
+        rendered = runtime.view_ideas_for_tool()
+        visible_before = _visible_ids(rendered["ideas"])
+        rendered_pair_lines = [
+            f"- {candidate_id} -> {verification_id}"
+            for candidate_id, verification_id in request["candidate_verification_pairs"]
+        ]
+        assert [rendered["text"].index(line) for line in rendered_pair_lines] == sorted(
+            rendered["text"].index(line) for line in rendered_pair_lines
+        )
         own_note_id = None
-        if task_id == "r1-v1":
+        if task_id == "r1-r1":
             own_note = runtime.log_reported_payload(
                 {
                     "idea_type": "evidence",
                     "idea_category": "constraint_or_risk",
-                    "premises": [assigned_id],
-                    "context": "A task-local verification finding.",
+                    "premises": [canonical_ids[0]],
+                    "context": "A task-local comparative observation.",
                     "related_artifacts": [],
-                    "evidence": "The proposed intervention may have one confound.",
+                    "evidence": "Candidate one carries an additional implementation risk.",
                 }
             )
             own_note_id = own_note["idea_id"]
-            assert own_note_id in _visible_ids(runtime.view_ideas_for_tool()["ideas"])
-        verifier_observations[task_id] = {
-            "assigned_id": assigned_id,
+        reviewer_observations[task_id] = {
+            "pairs": request["candidate_verification_pairs"],
             "visible_before": visible_before,
             "own_note_id": own_note_id,
+            "ranking": [canonical_ids[1], canonical_ids[0], canonical_ids[2]],
         }
         runtime.finish_ranked_proposal_task(
             {
+                "ranking": reviewer_observations[task_id]["ranking"],
                 "premises": [base["idea_id"]],
-                "assessment": "The proposal is feasible, but attribution depends on keeping evaluation fixed.",
+                "assessment": "Candidate two offers the clearest attributable experiment.",
             }
         )
         return _ranked_launch_result()
@@ -3050,13 +3095,14 @@ def test_serial_ranked_proposer_and_verifier_stages_preserve_task_boundaries(
     controller.proposal_generator = fake_generator
     controller.proposal_assessment_runner = fake_assessment_runner
 
-    round_state = controller._run_serial_independent_ranked_proposal_round(
+    reviewer_observations = {}
+    round_state, aggregate = controller._run_serial_independent_ranked_proposal_round(
         parent_sha="parent",
         attempt_dir=attempt_dir,
         attempt_history=[],
     )
 
-    assert round_state["stage"] == "reviewing"
+    assert round_state["stage"] == "manager_selection"
     assert list(round_state["tasks"]) == [
         "r1-p1",
         "r1-p2",
@@ -3116,9 +3162,68 @@ def test_serial_ranked_proposer_and_verifier_stages_preserve_task_boundaries(
         assert "ranking" not in verification
         assert "decision" not in verification
         assert "proposal" not in verification
+    expected_pairs = dict(zip(candidate_ids, verification_ids, strict=True))
+    reviewer_note_id = reviewer_observations["r1-r1"]["own_note_id"]
+    review_ids = []
+    for ordinal in range(1, 3):
+        task_id = f"r1-r{ordinal}"
+        observation = reviewer_observations[task_id]
+        expected_order = reviewer_presentation_order(
+            parent_node_id="parent",
+            candidate_attempt_id="attempt_4",
+            reviewer_task_id=task_id,
+            canonical_candidate_ids=candidate_ids,
+        )
+        assert observation["pairs"] == [
+            (candidate_id, expected_pairs[candidate_id]) for candidate_id in expected_order
+        ]
+        assert set(observation["visible_before"]) == {
+            base["idea_id"],
+            *candidate_ids,
+            *verification_ids,
+        }
+        assert first_note_id not in observation["visible_before"]
+        assert first_verifier_note_id not in observation["visible_before"]
+        if ordinal == 2:
+            assert reviewer_note_id not in observation["visible_before"]
+        review_id = round_state["tasks"][task_id]["result_idea_id"]
+        review_ids.append(review_id)
+        review = records_by_id[review_id]
+        assert review["ranking"] == observation["ranking"]
+        for required_id in [*candidate_ids, *verification_ids]:
+            assert review["premises"].count(required_id) == 1
+    expected_aggregate = aggregate_kemeny_young(
+        [
+            reviewer_observations["r1-r1"]["ranking"],
+            reviewer_observations["r1-r2"]["ranking"],
+        ],
+        canonical_candidate_ids=candidate_ids,
+        source_review_idea_ids=review_ids,
+    )
+    assert aggregate == expected_aggregate
+    assert (
+        aggregate_proposal_round_reviews(
+            round_state,
+            list(reversed(HitlIdeaLog(tmp_path).records())),
+        )
+        == expected_aggregate
+    )
+    unreferenced_review = dict(records_by_id[review_ids[0]])
+    unreferenced_review.pop("idea_id")
+    unreferenced_review.pop("timestamp")
+    unreferenced_review["evidence"] = "An unreferenced duplicate review must not affect aggregation."
+    HitlIdeaLog(tmp_path).append(
+        unreferenced_review,
+        proposal_review_candidate_ids=candidate_ids,
+    )
+    assert (
+        aggregate_proposal_round_reviews(round_state, HitlIdeaLog(tmp_path).records())
+        == expected_aggregate
+    )
     snapshot = state.snapshot()
     assert snapshot["pending_worker_command"] is None
     assert snapshot["worker_continuation"] is None
+    assert "aggregate" not in snapshot["next_autoresearch_action"]["proposal_round"]
 
 
 @pytest.mark.parametrize("mutation", ["public", "whiteboard"])
@@ -3214,3 +3319,20 @@ def test_proposal_verifier_prompt_is_scientific_and_uses_minimal_finish_contract
     assert "Do not repeat I24" in prompt
     assert "ranking" in prompt
     assert '"proposal_idea_id"' not in prompt
+
+
+def test_proposal_reviewer_prompt_preserves_derived_pair_order_and_minimal_contract():
+    pairs = [("I24", "I34"), ("I21", "I31"), ("I27", "I37")]
+    prompt = proposal_assessment.generate_proposal_reviewer_prompt(
+        candidate_verification_pairs=pairs,
+        templates_dir=Path(__file__).resolve().parents[1] / "templates",
+        hitl_mode="auto",
+    )
+
+    assert prompt.index("- I24 -> I34") < prompt.index("- I21 -> I31")
+    assert prompt.index("- I21 -> I31") < prompt.index("- I27 -> I37")
+    assert "hitl-finish-proposal-review" in prompt
+    assert '"ranking": ["I24", "I21", "I27"]' in prompt
+    assert '"premises"' in prompt
+    assert '"assessment"' in prompt
+    assert '"proposal_task_id"' not in prompt

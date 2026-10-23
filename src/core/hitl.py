@@ -2259,54 +2259,12 @@ class HitlRuntime:
     def _ranked_round_results(round_state: Dict[str, Any]) -> Dict[str, List[str]]:
         """Derive canonical candidates and their assigned verifications."""
 
-        from core.hitl_proposal_round import canonical_candidate_order, parse_proposal_task_id
+        from core.hitl_proposal_round import proposal_round_results
 
-        round_ordinal = int(round_state["round_ordinal"])
-        tasks = round_state.get("tasks", {})
-        proposer_results = {
-            task_id: str(task.get("result_idea_id") or "").strip()
-            for task_id, task in tasks.items()
-            if isinstance(task, dict) and task.get("role") == "proposer"
-        }
         try:
-            candidate_ids = list(
-                canonical_candidate_order(
-                    proposer_results,
-                    round_ordinal=round_ordinal,
-                )
-            )
+            return proposal_round_results(round_state)
         except ValueError as exc:
             raise HitlValidationError(str(exc)) from exc
-        verifier_entries = []
-        for task_id, task in tasks.items():
-            if not isinstance(task, dict) or task.get("role") != "verifier":
-                continue
-            try:
-                task_identity = parse_proposal_task_id(task_id)
-            except ValueError as exc:
-                raise HitlValidationError(str(exc)) from exc
-            verification_id = str(task.get("result_idea_id") or "").strip()
-            assigned_id = str(task.get("assigned_proposal_idea_id") or "").strip()
-            if not verification_id or not assigned_id:
-                raise HitlValidationError(
-                    "Proposal review requires every assigned verification to be complete."
-                )
-            verifier_entries.append((task_identity.ordinal, assigned_id, verification_id))
-        verifier_entries.sort(key=lambda item: item[0])
-        expected_ordinals = list(range(1, len(candidate_ids) + 1))
-        if [ordinal for ordinal, _assigned, _result in verifier_entries] != expected_ordinals:
-            raise HitlValidationError(
-                "Proposal review requires one ordered verification per candidate."
-            )
-        assigned_ids = [assigned for _ordinal, assigned, _result in verifier_entries]
-        if assigned_ids != candidate_ids:
-            raise HitlValidationError(
-                "Proposal verification assignments do not match the candidate set."
-            )
-        return {
-            "candidate_ids": candidate_ids,
-            "verification_ids": [result for _ordinal, _assigned, result in verifier_entries],
-        }
 
     def _validate_ranked_task_workspace(self, role: str) -> None:
         validator_name = (

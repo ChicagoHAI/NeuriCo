@@ -101,7 +101,7 @@ Keep existing regression tests in their current files.
 - [x] Step 10 — Add the serial ranked worker lifecycle
 - [x] Step 11 — Implement the serial proposer stage
 - [x] Step 12 — Implement the serial verifier stage
-- [ ] Step 13 — Implement the serial reviewer stage and aggregation
+- [x] Step 13 — Implement the serial reviewer stage and aggregation
 - [ ] Step 14 — Add manager selection and new-round handling
 - [ ] Step 15 — Rejoin existing admission and execution
 

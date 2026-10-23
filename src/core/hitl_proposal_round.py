@@ -247,6 +247,105 @@ def reviewer_presentation_order(
     return tuple(candidate_id for _digest, _index, candidate_id in decorated)
 
 
+def proposal_round_results(round_state: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Derive canonical candidates and assigned verifications from task state."""
+
+    if not isinstance(round_state, Mapping):
+        raise ValueError("Proposal round state must be a mapping.")
+    round_ordinal = round_state.get("round_ordinal")
+    _require_positive_ordinal(round_ordinal, "round_ordinal")
+    tasks = round_state.get("tasks")
+    if not isinstance(tasks, Mapping):
+        raise ValueError("Proposal round tasks must be a mapping.")
+    proposer_results = {
+        str(task_id): str(task.get("result_idea_id") or "").strip()
+        for task_id, task in tasks.items()
+        if isinstance(task, Mapping) and task.get("role") == "proposer"
+    }
+    candidate_ids = list(
+        canonical_candidate_order(
+            proposer_results,
+            round_ordinal=round_ordinal,
+        )
+    )
+    verifier_entries = []
+    for task_id, task in tasks.items():
+        if not isinstance(task, Mapping) or task.get("role") != "verifier":
+            continue
+        identity = parse_proposal_task_id(task_id)
+        if identity.round_ordinal != round_ordinal or identity.role != "verifier":
+            raise ValueError("Proposal verification task belongs to another round or role.")
+        verification_id = str(task.get("result_idea_id") or "").strip()
+        assigned_id = str(task.get("assigned_proposal_idea_id") or "").strip()
+        if not verification_id or not assigned_id:
+            raise ValueError("Proposal review requires every assigned verification to be complete.")
+        verifier_entries.append((identity.ordinal, assigned_id, verification_id))
+    verifier_entries.sort(key=lambda item: item[0])
+    expected_ordinals = list(range(1, len(candidate_ids) + 1))
+    if [ordinal for ordinal, _assigned, _result in verifier_entries] != expected_ordinals:
+        raise ValueError("Proposal review requires one ordered verification per candidate.")
+    assigned_ids = [assigned for _ordinal, assigned, _result in verifier_entries]
+    if assigned_ids != candidate_ids:
+        raise ValueError("Proposal verification assignments do not match the candidate set.")
+    return {
+        "candidate_ids": candidate_ids,
+        "verification_ids": [result for _ordinal, _assigned, result in verifier_entries],
+    }
+
+
+def aggregate_proposal_round_reviews(
+    round_state: Mapping[str, Any],
+    idea_records: Sequence[Mapping[str, Any]],
+) -> KemenyYoungResult:
+    """Aggregate only review ideas referenced by completed reviewer tasks."""
+
+    results = proposal_round_results(round_state)
+    round_ordinal = int(round_state["round_ordinal"])
+    tasks = round_state["tasks"]
+    reviewer_entries = []
+    for task_id, task in tasks.items():
+        if not isinstance(task, Mapping) or task.get("role") != "reviewer":
+            continue
+        identity = parse_proposal_task_id(task_id)
+        if identity.round_ordinal != round_ordinal or identity.role != "reviewer":
+            raise ValueError("Proposal review task belongs to another round or role.")
+        review_id = _require_identifier(task.get("result_idea_id"), "proposal review idea ID")
+        reviewer_entries.append((identity.ordinal, task_id, review_id))
+    reviewer_entries.sort(key=lambda item: item[0])
+    expected_ordinals = list(range(1, len(reviewer_entries) + 1))
+    if [ordinal for ordinal, _task_id, _review_id in reviewer_entries] != expected_ordinals:
+        raise ValueError("Proposal reviewer task ordinals must be contiguous and one-based.")
+    records_by_id: dict[str, Mapping[str, Any]] = {}
+    for record in idea_records:
+        idea_id = str(record.get("idea_id", "")).strip()
+        if not idea_id:
+            continue
+        if idea_id in records_by_id:
+            raise ValueError(f"Finalized HITL idea ID is duplicated: {idea_id}.")
+        records_by_id[idea_id] = record
+    rankings = []
+    review_ids = []
+    for _ordinal, task_id, review_id in reviewer_entries:
+        record = records_by_id.get(review_id)
+        if (
+            record is None
+            or record.get("idea_type") != "evidence"
+            or record.get("idea_category") != "proposal_review"
+            or record.get("proposal_task_id") != task_id
+        ):
+            raise ValueError("Completed reviewer task references an invalid proposal review idea.")
+        ranking = record.get("ranking")
+        if isinstance(ranking, (str, bytes)) or not isinstance(ranking, Sequence):
+            raise ValueError("Completed proposal review idea has no complete ranking.")
+        rankings.append(ranking)
+        review_ids.append(review_id)
+    return aggregate_kemeny_young(
+        rankings,
+        canonical_candidate_ids=results["candidate_ids"],
+        source_review_idea_ids=review_ids,
+    )
+
+
 def aggregate_kemeny_young(
     reviewer_rankings: Sequence[Sequence[str]],
     *,

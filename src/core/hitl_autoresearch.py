@@ -70,6 +70,7 @@ from core.hitl_paths import (
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_proposal_round import (
     INDEPENDENT_RANKED_PROPOSAL_MODE,
+    KemenyYoungResult,
     ProposalModeConfig,
     normalize_proposal_mode_config,
 )
@@ -4031,11 +4032,16 @@ class HitlAutoResearchController:
         parent_sha: str,
         attempt_dir: Path,
         attempt_history: list[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+    ) -> tuple[Dict[str, Any], KemenyYoungResult]:
         """Run the implemented serial stages of one independent-ranked round."""
 
         from core.agent_runner import next_attempt_number
-        from core.hitl_proposal_round import proposal_task_id
+        from core.hitl_proposal_round import (
+            aggregate_proposal_round_reviews,
+            proposal_round_results,
+            proposal_task_id,
+            reviewer_presentation_order,
+        )
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
         config = self.proposal_mode_config
@@ -4271,7 +4277,121 @@ class HitlAutoResearchController:
                 "Ranked verifier stage changed its shared read-only boundary: "
                 + "; ".join(str(issue) for issue in boundary.get("issues", []))
             )
-        return state.advance_proposal_round(**identity, expected_stage="verifying")
+        round_state = state.advance_proposal_round(
+            **identity,
+            expected_stage="verifying",
+        )
+        dependencies = proposal_round_results(round_state)
+        verification_by_candidate = dict(
+            zip(
+                dependencies["candidate_ids"],
+                dependencies["verification_ids"],
+                strict=True,
+            )
+        )
+        for ordinal in range(1, config.reviewer_count + 1):
+            raise_if_hitl_run_stop_requested()
+            task_id = proposal_task_id(int(round_state["round_ordinal"]), "reviewer", ordinal)
+            current_round = state.proposal_round_snapshot(**identity)
+            task = current_round["tasks"].get(task_id)
+            if not isinstance(task, dict) or task.get("role") != "reviewer":
+                raise RuntimeError("Ranked reviewer task set is invalid.")
+            if task.get("result_idea_id") is not None:
+                continue
+            presentation = reviewer_presentation_order(
+                parent_node_id=parent_sha,
+                candidate_attempt_id=attempt_dir.name,
+                reviewer_task_id=task_id,
+                canonical_candidate_ids=dependencies["candidate_ids"],
+            )
+            presentation_pairs = [
+                (candidate_id, verification_by_candidate[candidate_id])
+                for candidate_id in presentation
+            ]
+
+            task_runtime = self._new_ranked_task_runtime(task_id)
+            task_runtime.prepare_idea_tool_context(
+                hitl_stage="review",
+                command_profile="proposal_reviewer",
+                actor="proposal_reviewer",
+                proposal_preparation_attempt_id=preparation_attempt_id,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": attempt_dir.name,
+                    "proposal_task_id": task_id,
+                },
+                idea_visibility={
+                    "base_idea_number": round_state["base_idea_number"],
+                    "seed_idea_ids": [
+                        *dependencies["candidate_ids"],
+                        *dependencies["verification_ids"],
+                    ],
+                    "proposal_verification_pairs": presentation_pairs,
+                },
+                phase_finish_validator=boundary_validator,
+            )
+            task_dir = round_dir / task_id
+            task_prompt = (
+                "Complete the independent comparative review and finish through "
+                "hitl-finish-proposal-review with one complete ranking."
+            )
+
+            def launch_reviewer(
+                prompt: str,
+                _log_prefix: str,
+                *,
+                record_continuation: bool,
+            ) -> Dict[str, Any]:
+                if record_continuation:
+                    raise RuntimeError(
+                        "Ranked proposal tasks must not record global worker continuation."
+                    )
+                return self.proposal_assessment_runner(
+                    role="reviewer",
+                    candidate_verification_pairs=presentation_pairs,
+                    task_dir=task_dir,
+                    prompt_suffix=prompt,
+                    env_extra=task_runtime.idea_tool_env(),
+                )
+
+            try:
+                _result, finish = run_worker_with_replacements(
+                    runtime=task_runtime,
+                    launch_worker=launch_reviewer,
+                    prompt=task_prompt,
+                    log_prefix=task_id,
+                    phase="review",
+                    worker_name=f"Proposal reviewer {task_id}",
+                    record_continuation=False,
+                    result_after_exit=lambda result: (
+                        task_runtime.ranked_task_result_after_worker_exit(
+                            result,
+                            replacement_prompt=task_prompt,
+                            worker_name=f"Proposal reviewer {task_id}",
+                        )
+                    ),
+                )
+            finally:
+                task_runtime.clear_idea_tool_context()
+            if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
+                raise RuntimeError("Ranked reviewer task ended without a recorded review.")
+
+        raise_if_hitl_run_stop_requested()
+        boundary = boundary_validator()
+        if not bool(boundary.get("valid")):
+            raise RuntimeError(
+                "Ranked reviewer stage changed its shared read-only boundary: "
+                + "; ".join(str(issue) for issue in boundary.get("issues", []))
+            )
+        round_state = state.advance_proposal_round(
+            **identity,
+            expected_stage="reviewing",
+        )
+        aggregate = aggregate_proposal_round_reviews(
+            round_state,
+            owner.log.records(),
+        )
+        return round_state, aggregate
 
     def _run_candidate_experiment_hitl(
         self,
@@ -4866,7 +4986,7 @@ def run_hitl_autoresearch_loop(
     This is the production integration point used by runner.py in Phase 6.
     """
     from agents.autoresearch_proposer import run_autoresearch_proposer
-    from agents.proposal_assessment import run_proposal_verifier
+    from agents.proposal_assessment import run_proposal_reviewer, run_proposal_verifier
     from agents.comment_handler import build_comment_handler_launch
     from core.agent_runner import run_prebuilt_cli_agent
     from core.scorer import run_scorer
@@ -4966,9 +5086,13 @@ def run_hitl_autoresearch_loop(
 
     def proposal_assessment_runner(**request: Any) -> Dict[str, Any]:
         role = str(request.pop("role", "")).strip()
-        if role != "verifier":
+        runners = {
+            "verifier": run_proposal_verifier,
+            "reviewer": run_proposal_reviewer,
+        }
+        if role not in runners:
             raise RuntimeError(f"Unsupported proposal assessment role: {role}")
-        return run_proposal_verifier(
+        return runners[role](
             work_dir=work_dir,
             provider=provider,
             templates_dir=templates_dir,

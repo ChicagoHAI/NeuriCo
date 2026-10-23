@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shlex
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from core.agent_cli import (
     CLI_COMMANDS,
@@ -44,6 +44,51 @@ def generate_proposal_verifier_prompt(
     )
     return environment.get_template("agents/proposal_verifier.txt").render(
         assigned_proposal_idea_id=proposal_idea_id,
+        pipeline_stage="experiment_runner",
+        hitl_stage="review",
+        allow_raised_ideas=False,
+        hitl_mode=str(hitl_mode),
+    )
+
+
+def generate_proposal_reviewer_prompt(
+    *,
+    candidate_verification_pairs: Sequence[tuple[str, str]],
+    templates_dir: Optional[Path] = None,
+    hitl_mode: str = "full",
+) -> str:
+    """Render one reviewer prompt in its deterministic presentation order."""
+
+    from jinja2 import Environment, FileSystemLoader
+
+    if isinstance(candidate_verification_pairs, (str, bytes)):
+        raise ValueError("Proposal reviewer requires candidate-verification pairs")
+    pairs = [
+        (str(candidate_id).strip(), str(verification_id).strip())
+        for candidate_id, verification_id in candidate_verification_pairs
+    ]
+    if not pairs or any(not all(pair) for pair in pairs):
+        raise ValueError("Proposal reviewer requires complete candidate-verification pairs")
+    if len({candidate_id for candidate_id, _verification_id in pairs}) != len(pairs) or len(
+        {verification_id for _candidate_id, verification_id in pairs}
+    ) != len(pairs):
+        raise ValueError("Proposal reviewer candidate-verification pairs must be distinct")
+    root = (
+        Path(templates_dir)
+        if templates_dir is not None
+        else Path(__file__).resolve().parents[2] / "templates"
+    )
+    template_path = root / "agents" / "proposal_reviewer.txt"
+    if not template_path.is_file():
+        raise FileNotFoundError(f"Proposal reviewer template not found: {template_path}")
+    environment = Environment(
+        loader=FileSystemLoader(str(root)),
+        autoescape=False,
+        trim_blocks=True,
+        lstrip_blocks=True,
+    )
+    return environment.get_template("agents/proposal_reviewer.txt").render(
+        candidate_verification_pairs=pairs,
         pipeline_stage="experiment_runner",
         hitl_stage="review",
         allow_raised_ideas=False,
@@ -123,6 +168,37 @@ def run_proposal_verifier(
 
     prompt = generate_proposal_verifier_prompt(
         assigned_proposal_idea_id=assigned_proposal_idea_id,
+        templates_dir=templates_dir,
+        hitl_mode=hitl_mode,
+    )
+    return run_proposal_assessment(
+        prompt=append_prompt_block(prompt, prompt_suffix),
+        work_dir=work_dir,
+        task_dir=task_dir,
+        provider=provider,
+        env_extra=env_extra,
+        timeout=timeout,
+        full_permissions=full_permissions,
+    )
+
+
+def run_proposal_reviewer(
+    *,
+    candidate_verification_pairs: Sequence[tuple[str, str]],
+    work_dir: Path,
+    task_dir: Path,
+    provider: str,
+    env_extra: Dict[str, str],
+    templates_dir: Optional[Path] = None,
+    prompt_suffix: str = "",
+    hitl_mode: str = "full",
+    timeout: Optional[int] = 900,
+    full_permissions: bool = True,
+) -> Dict[str, Any]:
+    """Launch one proposal reviewer with its derived presentation order."""
+
+    prompt = generate_proposal_reviewer_prompt(
+        candidate_verification_pairs=candidate_verification_pairs,
         templates_dir=templates_dir,
         hitl_mode=hitl_mode,
     )
