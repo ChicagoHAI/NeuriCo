@@ -62,6 +62,16 @@ def test_local_cancellation_before_start_does_not_create_provider_process(
     assert Path(result["transcript_file"]).read_text(encoding="utf-8") == ""
 
 
+def test_omitting_local_cancellation_preserves_existing_result_contract(tmp_path):
+    result = _run_agent(
+        tmp_path,
+        command_argv=[sys.executable, "-c", "raise SystemExit(0)"],
+    )
+
+    assert result["success"] is True
+    assert "cancelled" not in result
+
+
 def test_global_stop_precedes_simultaneous_local_cancellation(tmp_path, monkeypatch):
     cancel_event = threading.Event()
     cancel_event.set()

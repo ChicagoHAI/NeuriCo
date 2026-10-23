@@ -414,7 +414,7 @@ def run_prebuilt_cli_agent(
         and not cancelled
         and not background_processes_terminated
     )
-    return {
+    result = {
         "success": success,
         "return_code": return_code,
         "elapsed_time": elapsed,
@@ -422,10 +422,12 @@ def run_prebuilt_cli_agent(
         "transcript_file": str(transcript_file),
         "timed_out": timed_out,
         "stopped": stopped,
-        "cancelled": cancelled,
         "background_processes_terminated": background_processes_terminated,
         "provider_process_failed": provider_process_failed,
     }
+    if cancel_event is not None:
+        result["cancelled"] = cancelled
+    return result
 
 
 def _terminate_process_group(process: subprocess.Popen) -> None:
