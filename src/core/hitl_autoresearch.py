@@ -4026,6 +4026,71 @@ class HitlAutoResearchController:
             tool_scope=task_id,
         )
 
+    def _apply_ranked_proposal_selection(
+        self,
+        *,
+        identity: Dict[str, Any],
+        aggregate: KemenyYoungResult,
+        selection: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Record and apply one durable manager choice without a second proposal."""
+
+        from core.hitl_proposal_round import (
+            aggregate_proposal_round_reviews,
+            proposal_selection_decision_record,
+        )
+
+        state = HitlRuntimeState(self.work_dir)
+        round_state = state.proposal_round_snapshot(**identity)
+        reproduced = aggregate_proposal_round_reviews(
+            round_state,
+            self._proposal_hitl_runtime().log.records(),
+        )
+        if reproduced != aggregate:
+            raise RuntimeError(
+                "Proposal review aggregation changed before manager selection was applied."
+            )
+        if round_state.get("selection") != selection:
+            raise RuntimeError("Recorded manager choice changed before it could be applied.")
+        decision_payload = proposal_selection_decision_record(
+            round_state=round_state,
+            aggregate=reproduced,
+            parent_node_id=identity["parent_node_sha"],
+        )
+        decision = self._proposal_hitl_runtime().log.append(
+            decision_payload,
+            idempotent=True,
+        )
+        recorded_decision_id = str(selection.get("decision_idea_id") or "").strip()
+        if recorded_decision_id and recorded_decision_id != decision["idea_id"]:
+            raise RuntimeError(
+                "Recorded proposal choice references a different manager decision idea."
+            )
+        recorded_selection = state.record_proposal_selection_decision(
+            **identity,
+            choice=str(selection["choice"]),
+            proposal_idea_id=selection.get("proposal_idea_id"),
+            decision_idea_id=decision["idea_id"],
+        )
+        if recorded_selection["choice"] == "select":
+            next_state = state.complete_proposal_selection(**identity)
+        else:
+            idea_numbers = [
+                int(idea_id[1:])
+                for record in self._proposal_hitl_runtime().log.records()
+                if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+                and idea_id[1:].isdigit()
+            ]
+            next_state = state.begin_next_proposal_round(
+                **identity,
+                base_idea_number=max(idea_numbers, default=0),
+            )
+        return {
+            "selection": recorded_selection,
+            "decision_idea_id": decision["idea_id"],
+            "proposal_round": next_state,
+        }
+
     def _run_serial_independent_ranked_proposal_round(
         self,
         *,
@@ -4391,7 +4456,39 @@ class HitlAutoResearchController:
             round_state,
             owner.log.records(),
         )
-        return round_state, aggregate
+        manager = owner.manager
+        begin_selection = getattr(manager, "begin_proposal_selection", None)
+        if not callable(begin_selection):
+            raise RuntimeError("No HITL manager proposal-selection boundary is configured.")
+        candidate_verification_pairs = list(
+            zip(
+                dependencies["candidate_ids"],
+                dependencies["verification_ids"],
+                strict=True,
+            )
+        )
+        prompt = _load_hitl_template(
+            "manager_select_proposal.txt",
+            parent_node_id=parent_sha,
+            candidate_verification_pairs=candidate_verification_pairs,
+            review_idea_ids=list(aggregate.source_review_idea_ids),
+            aggregation_algorithm=aggregate.algorithm,
+            optimal_rankings=[list(ranking) for ranking in aggregate.optimal_rankings],
+        )
+        selection_result = begin_selection(
+            prompt,
+            **identity,
+            boundary_validator=boundary_validator,
+            on_decision=lambda selection: self._apply_ranked_proposal_selection(
+                identity=identity,
+                aggregate=aggregate,
+                selection=selection,
+            ),
+        )
+        selected_round = selection_result.get("proposal_round")
+        if not isinstance(selected_round, dict):
+            raise RuntimeError("Manager proposal selection did not return proposal round state.")
+        return selected_round, aggregate
 
     def _run_candidate_experiment_hitl(
         self,

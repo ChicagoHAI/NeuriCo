@@ -92,6 +92,8 @@ class HitlManagerToolExecutor:
             "view_node": self._view_node,
             "select_frontier": self._select_frontier,
             "prune_frontier": self._prune_frontier,
+            "select_proposal": self._select_proposal,
+            "request_new_proposal_round": self._request_new_proposal_round,
             "call_additional_agent": self._call_additional_agent,
             "proceed_to_proposal": self._proceed_to_proposal,
             "ask_human": self._ask_human,
@@ -188,6 +190,15 @@ class HitlManagerToolExecutor:
         if not node_sha:
             return "Error: prune_frontier requires node_sha. Call list_frontier, then retry."
         return self.manager.prune_frontier(node_sha, str(args.get("reason", "")).strip())
+
+    def _select_proposal(self, args: Dict[str, Any]) -> str:
+        return self.manager.select_proposal(
+            str(args.get("proposal_idea_id", "")),
+            str(args.get("reason", "")),
+        )
+
+    def _request_new_proposal_round(self, args: Dict[str, Any]) -> str:
+        return self.manager.request_new_proposal_round(str(args.get("reason", "")))
 
     def _call_additional_agent(self, args: Dict[str, Any]) -> str:
         return self.manager.call_additional_agent(
@@ -453,6 +464,9 @@ class HitlManager:
             "finalize_frontier_decision",
         }
     )
+    _PROPOSAL_SELECTION_TOOL_NAMES = frozenset(
+        {"select_proposal", "request_new_proposal_round"}
+    )
 
     def _current_hitl_mode(self) -> HitlMode:
         pending = self.runtime_state.pending_worker_command()
@@ -483,15 +497,25 @@ class HitlManager:
         names = set(self._GENERAL_TOOL_NAMES)
         snapshot = self.runtime_state.snapshot()
         action = snapshot.get("next_autoresearch_action")
-        if isinstance(action, dict) and action.get("status") != "resolved":
+        if isinstance(action, dict):
             kind = str(action.get("kind", "")).strip()
-            if kind in {"prune_frontier", "select_frontier"}:
+            proposal_round = action.get("proposal_round")
+            if (
+                kind == "prepare_proposal"
+                and action.get("status") == "resolved"
+                and isinstance(proposal_round, dict)
+                and proposal_round.get("stage") == "manager_selection"
+            ):
+                names.update(self._PROPOSAL_SELECTION_TOOL_NAMES)
+                return names
+            if action.get("status") == "resolved":
+                action = None
+            elif kind in {"prune_frontier", "select_frontier"}:
                 names.add(kind)
                 return names
-            if kind == "prepare_proposal" and action.get("status") == "pending":
+            elif kind == "prepare_proposal" and action.get("status") == "pending":
                 names.update({"call_additional_agent", "proceed_to_proposal"})
                 return names
-
         pending = snapshot.get("pending_worker_command")
         if not isinstance(pending, dict) or pending.get("status") != "pending":
             return names
@@ -529,6 +553,11 @@ class HitlManager:
             }:
                 return name
         return ""
+
+    @classmethod
+    def _is_proposal_selection_boundary(cls, tools: List[Dict[str, Any]]) -> bool:
+        names = {str(tool.get("name", "")).strip() for tool in tools}
+        return cls._PROPOSAL_SELECTION_TOOL_NAMES <= names
 
     @staticmethod
     def _scoring_handoff_instruction(tools: List[Dict[str, Any]]) -> str:
@@ -570,6 +599,13 @@ class HitlManager:
                 f"{scoring_handoff} Direct assistant text does not advance the action."
             )
         else:
+            if cls._is_proposal_selection_boundary(tools):
+                lines.append(
+                    "The proposal-selection action remains unresolved until either "
+                    "`select_proposal` or `request_new_proposal_round` succeeds. Direct "
+                    "assistant text does not complete the action."
+                )
+                return "\n".join(lines)
             if {"call_additional_agent", "proceed_to_proposal"} <= set(names):
                 lines.append(
                     "The proposal-preparation action remains unresolved until either "
@@ -601,6 +637,13 @@ class HitlManager:
                 f"{scoring_handoff} Direct assistant text cannot advance it."
             )
         names = {str(tool.get("name", "")).strip() for tool in tools}
+        if self._is_proposal_selection_boundary(tools):
+            return (
+                native_retry
+                + "The proposal-selection action remains unresolved. Inspect the current "
+                "proposal, verification, and review ideas, then call either "
+                "`select_proposal` or `request_new_proposal_round`."
+            )
         if {"call_additional_agent", "proceed_to_proposal"} <= names:
             return (
                 native_retry
@@ -781,21 +824,34 @@ class HitlManager:
         """Give a stale manager call a precise runtime-owned retry direction."""
         snapshot = self.runtime_state.snapshot()
         action = snapshot.get("next_autoresearch_action")
-        if isinstance(action, dict) and action.get("status") != "resolved":
+        if isinstance(action, dict):
             kind = str(action.get("kind", "")).strip()
-            if kind in {"prune_frontier", "select_frontier"}:
+            proposal_round = action.get("proposal_round")
+            if (
+                kind == "prepare_proposal"
+                and action.get("status") == "resolved"
+                and isinstance(proposal_round, dict)
+                and proposal_round.get("stage") == "manager_selection"
+            ):
+                return (
+                    f"Error: {tool_name} is unavailable at this runtime boundary. "
+                    "Runtime is waiting for proposal selection; call either "
+                    "select_proposal or request_new_proposal_round."
+                )
+            if action.get("status") == "resolved":
+                action = None
+            elif kind in {"prune_frontier", "select_frontier"}:
                 return (
                     f"Error: {tool_name} is unavailable at this runtime boundary. "
                     f"Runtime is waiting for {kind}. Inspect the frontier if needed, "
                     f"then call {kind} with the required rationale."
                 )
-            if kind == "prepare_proposal":
+            elif kind == "prepare_proposal":
                 return (
                     f"Error: {tool_name} is unavailable at this runtime boundary. "
                     "Runtime is preparing the next proposal; call either "
                     "call_additional_agent or proceed_to_proposal."
                 )
-
         pending = snapshot.get("pending_worker_command")
         if isinstance(pending, dict) and pending.get("status") == "pending":
             expected = str(pending.get("manager_finalizer", "")).strip()
@@ -1886,6 +1942,152 @@ class HitlManager:
             )
         return "Runtime recorded the frontier pruning choice. The waiting controller will apply it."
 
+    def _proposal_selection_round(
+        self,
+    ) -> tuple[Dict[str, Any], Dict[str, Any], Any]:
+        """Validate and derive the active nested proposal-selection boundary."""
+
+        from core.hitl import HitlIdeaLog
+        from core.hitl_proposal_round import aggregate_proposal_round_reviews
+
+        identity = getattr(self, "_proposal_selection_identity", None)
+        if not isinstance(identity, dict):
+            raise HitlRuntimeStateError(
+                "Runtime has not attached proposal selection for this boundary"
+            )
+        action = self.runtime_state.snapshot().get("next_autoresearch_action")
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip()
+            != identity["parent_node_sha"]
+            or str(action.get("attempt_id", "")).strip()
+            != identity["preparation_attempt_id"]
+        ):
+            raise HitlRuntimeStateError(
+                "Proposal selection belongs to another preparation boundary"
+            )
+        round_state = self.runtime_state.proposal_round_snapshot(**identity)
+        if round_state.get("stage") != "manager_selection":
+            raise HitlRuntimeStateError("Proposal selection stage is no longer active")
+        aggregate = aggregate_proposal_round_reviews(
+            round_state,
+            HitlIdeaLog(self.work_dir).records(),
+        )
+        return identity, round_state, aggregate
+
+    def _signal_proposal_selection_failure(self, exc: BaseException) -> None:
+        """Wake the attached controller without adding failure workflow state."""
+
+        self._proposal_selection_error = exc
+        event = getattr(self, "_proposal_selection_event", None)
+        if isinstance(event, threading.Event):
+            event.set()
+
+    def _record_proposal_selection(
+        self,
+        *,
+        choice: str,
+        reason: str,
+        proposal_idea_id: str = "",
+    ) -> str:
+        normalized_reason = str(reason).strip()
+        candidate_id = str(proposal_idea_id).strip()
+        if not normalized_reason:
+            tool_name = (
+                "select_proposal" if choice == "select" else "request_new_proposal_round"
+            )
+            return f"Error: {tool_name} requires a non-empty reason. Retry with reason."
+        if not isinstance(getattr(self, "_proposal_selection_identity", None), dict):
+            return (
+                "Error: runtime has not attached the waiting proposal-selection "
+                "controller. Preserve the same choice and retry after runtime recovers it."
+            )
+        try:
+            identity, _round_state, aggregate = self._proposal_selection_round()
+        except Exception as exc:
+            self._signal_proposal_selection_failure(exc)
+            return (
+                f"Error: runtime could not validate proposal selection: {exc}. "
+                "The waiting controller will roll back this attempt."
+            )
+        if choice == "select" and candidate_id not in aggregate.candidate_proposal_idea_ids:
+            return (
+                "Error: proposal_idea_id must identify a current-round candidate. "
+                "Inspect the listed proposal ideas and retry."
+            )
+        boundary_validator = getattr(self, "_proposal_selection_boundary_validator", None)
+        if not callable(boundary_validator):
+            exc = HitlRuntimeStateError(
+                "Runtime has not attached the proposal-selection workspace boundary"
+            )
+            self._signal_proposal_selection_failure(exc)
+            return (
+                f"Error: {exc}. The waiting controller will roll back this attempt."
+            )
+        try:
+            boundary = boundary_validator()
+        except Exception as exc:
+            failure = RuntimeError(
+                f"Proposal-selection boundary validation failed: {exc}"
+            )
+            self._signal_proposal_selection_failure(failure)
+            return (
+                f"Error: {failure}. The waiting controller will roll back this attempt."
+            )
+        if not isinstance(boundary, dict) or not bool(boundary.get("valid")):
+            issues = boundary.get("issues", []) if isinstance(boundary, dict) else []
+            detail = "; ".join(
+                str(issue) for issue in issues if str(issue).strip()
+            ) or "the shared public workspace or whiteboard changed"
+            failure = RuntimeError(
+                f"Proposal-selection boundary is invalid: {detail}"
+            )
+            self._signal_proposal_selection_failure(failure)
+            return (
+                f"Error: {failure}. The waiting controller will roll back this attempt."
+            )
+        try:
+            self.runtime_state.record_proposal_selection_choice(
+                **identity,
+                choice=choice,
+                proposal_idea_id=candidate_id or None,
+                reason=normalized_reason,
+            )
+        except HitlRuntimeStateError as exc:
+            return (
+                f"Error: runtime could not record this proposal choice: {exc}. "
+                "If runtime already recorded a choice, retry that exact choice and reason."
+            )
+        event = getattr(self, "_proposal_selection_event", None)
+        if isinstance(event, threading.Event):
+            event.set()
+        return "Runtime recorded the proposal choice. The waiting controller will apply it."
+
+    def select_proposal(self, proposal_idea_id: str, reason: str) -> str:
+        """Record one current-round proposal choice for the waiting controller."""
+
+        candidate_id = str(proposal_idea_id).strip()
+        if not candidate_id:
+            return (
+                "Error: select_proposal requires proposal_idea_id. "
+                "Inspect the listed proposal ideas and retry."
+            )
+        return self._record_proposal_selection(
+            choice="select",
+            proposal_idea_id=candidate_id,
+            reason=reason,
+        )
+
+    def request_new_proposal_round(self, reason: str) -> str:
+        """Record a request to replace the reviewed round."""
+
+        return self._record_proposal_selection(
+            choice="new_round",
+            reason=reason,
+        )
+
     def call_additional_agent(
         self,
         agent: str,
@@ -2225,6 +2427,69 @@ class HitlManager:
                     )
             threading.Event().wait(0.1)
 
+    def begin_proposal_selection(
+        self,
+        prompt: str,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        on_decision: Callable[[Dict[str, Any]], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Wait for and apply one manager choice for a completed proposal panel."""
+
+        identity = {
+            "parent_node_sha": str(parent_node_sha).strip(),
+            "preparation_attempt_id": str(preparation_attempt_id).strip(),
+            "candidate_attempt_id": str(candidate_attempt_id).strip(),
+            "round_ordinal": round_ordinal,
+        }
+        if (
+            not identity["parent_node_sha"]
+            or not identity["preparation_attempt_id"]
+            or not identity["candidate_attempt_id"]
+            or isinstance(round_ordinal, bool)
+            or not isinstance(round_ordinal, int)
+            or round_ordinal < 1
+            or not callable(boundary_validator)
+            or not callable(on_decision)
+        ):
+            raise HitlRuntimeStateError(
+                "Proposal selection requires its complete round identity, boundary, and callback"
+            )
+        round_state = self.runtime_state.proposal_round_snapshot(**identity)
+        if round_state.get("stage") != "manager_selection":
+            raise HitlRuntimeStateError("Proposal selection requires manager-selection stage")
+
+        self._proposal_selection_identity = identity
+        self._proposal_selection_boundary_validator = boundary_validator
+        self._proposal_selection_event = threading.Event()
+        self._proposal_selection_error = None
+        try:
+            if isinstance(round_state.get("selection"), dict):
+                return on_decision(dict(round_state["selection"]))
+            self.notify_runtime(prompt, runtime_action_kind="proposal_selection")
+            while True:
+                from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+                raise_if_hitl_run_stop_requested()
+                error = self._proposal_selection_error
+                if isinstance(error, BaseException):
+                    raise error
+                current = self.runtime_state.proposal_round_snapshot(**identity)
+                selection = current.get("selection")
+                if isinstance(selection, dict):
+                    return on_decision(dict(selection))
+                self._proposal_selection_event.wait(0.1)
+                self._proposal_selection_event.clear()
+        finally:
+            self._proposal_selection_identity = None
+            self._proposal_selection_boundary_validator = None
+            self._proposal_selection_event = None
+            self._proposal_selection_error = None
+
     def begin_frontier_pruning(
         self, prompt: str, pruner: Callable[[str, str], Dict[str, Any]]
     ) -> Dict[str, Any]:
@@ -2448,6 +2713,18 @@ class HitlManager:
                     and pending_action.get("status") == "pending"
                 )
                 if (
+                    turn.runtime_action_kind == "proposal_selection"
+                    and isinstance(pending_action, dict)
+                    and pending_action.get("kind") == "prepare_proposal"
+                    and pending_action.get("status") == "resolved"
+                ):
+                    proposal_round = pending_action.get("proposal_round")
+                    action_is_pending = bool(
+                        isinstance(proposal_round, dict)
+                        and proposal_round.get("stage") == "manager_selection"
+                        and proposal_round.get("selection") is None
+                    )
+                if (
                     self._generation_is_current(turn.generation)
                     and turn.requires_worker_resolution
                     and not self._defer_current_turn
@@ -2541,6 +2818,14 @@ class HitlManager:
             return
 
         action_kind = turn.runtime_action_kind.strip()
+        if action_kind == "proposal_selection":
+            reason = (
+                f"{failure} The proposal-selection boundary was not completed; "
+                "restart HITL AutoResearch to retry it."
+            )
+            self._signal_proposal_selection_failure(RuntimeError(reason))
+            self.channel.send(reason, kind="system")
+            return
         if action_kind:
             boundary = {
                 "select_frontier": "frontier selection",

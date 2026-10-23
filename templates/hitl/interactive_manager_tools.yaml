@@ -157,6 +157,36 @@ tools:
         required: true
     returns: Updated active frontier state, or a retryable error.
 
+  - name: select_proposal
+    description: |
+      Select one completed proposal from the current independent-ranked round.
+      This is available only at the runtime-managed proposal-selection boundary.
+      Runtime records the choice first; the waiting controller then records the
+      manager decision and advances the round.
+    parameters:
+      proposal_idea_id:
+        type: string
+        description: Exact proposal idea id from the current reviewed round.
+        required: true
+      reason:
+        type: string
+        description: Scientific rationale for selecting this proposal.
+        required: true
+    returns: Confirmation that runtime recorded the proposal choice, or retry feedback.
+
+  - name: request_new_proposal_round
+    description: |
+      Reject the current proposal panel and request another independent-ranked
+      round. This is available only at the runtime-managed proposal-selection
+      boundary. Runtime records the choice first; the waiting controller then
+      records the manager decision and creates the next round.
+    parameters:
+      reason:
+        type: string
+        description: Scientific rationale for requesting a new proposal panel.
+        required: true
+    returns: Confirmation that runtime recorded the new-round choice, or retry feedback.
+
   - name: call_additional_agent
     description: |
       Request one allowlisted agent before the next AutoResearch proposal. This

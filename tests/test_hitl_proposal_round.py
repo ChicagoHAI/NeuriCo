@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from core.hitl import (  # noqa: E402
     visible_ranked_idea_records,
 )
 from core.hitl_autoresearch import HitlAutoResearchController  # noqa: E402
+from core.hitl_manager_react import HitlManager  # noqa: E402
 from core.hitl_paths import hitl_launch_requests_dir  # noqa: E402
 from core.hitl_whiteboard import hitl_whiteboard_path  # noqa: E402
 from core.hitl_proposal_round import (  # noqa: E402
@@ -33,6 +35,7 @@ from core.hitl_proposal_round import (  # noqa: E402
     normalize_proposal_mode_config,
     parse_proposal_task_id,
     proposal_task_id,
+    proposal_selection_decision_record,
     reviewer_presentation_order,
     validate_proposal_task_id,
 )
@@ -1537,6 +1540,7 @@ def test_selection_updates_are_idempotent_and_conflicting_updates_are_rejected(t
         )
         == decision
     )
+    assert state.record_proposal_selection_choice(**arguments) == decision
     with pytest.raises(HitlRuntimeStateError, match="different decision idea"):
         state.record_proposal_selection_decision(
             **identity,
@@ -1615,6 +1619,379 @@ def test_round_state_stays_nested_without_generic_patch_or_derived_aggregate(tmp
     assert "proposal_round" in action
     assert "aggregate" not in action["proposal_round"]
     assert action["proposal_round"] == state.proposal_round_snapshot(**identity)
+
+
+def _begin_logged_manager_selection_round(tmp_path):
+    log, _premise, proposals, verifications = _seed_ranked_proposal_records(tmp_path)
+    candidate_ids = [proposal["idea_id"] for proposal in proposals]
+    reviews = [
+        log.append(
+            _proposal_review_record(
+                proposals,
+                verifications,
+                ranking=ranking,
+                task_id=f"r1-r{ordinal}",
+            ),
+            idempotent=True,
+            proposal_review_candidate_ids=candidate_ids,
+        )
+        for ordinal, ranking in enumerate(
+            (candidate_ids, list(reversed(candidate_ids))),
+            start=1,
+        )
+    ]
+    state, identity, _round_state = _begin_ranked_round(
+        tmp_path,
+        base_idea_number=0,
+    )
+    for ordinal, proposal in enumerate(proposals, start=1):
+        _finalize_synthetic_task(
+            state,
+            identity,
+            f"r1-p{ordinal}",
+            "proposer",
+            proposal["idea_id"],
+        )
+    state.advance_proposal_round(**identity, expected_stage="proposing")
+    for ordinal, verification in enumerate(verifications, start=1):
+        _finalize_synthetic_task(
+            state,
+            identity,
+            f"r1-v{ordinal}",
+            "verifier",
+            verification["idea_id"],
+        )
+    state.advance_proposal_round(**identity, expected_stage="verifying")
+    for ordinal, review in enumerate(reviews, start=1):
+        _finalize_synthetic_task(
+            state,
+            identity,
+            f"r1-r{ordinal}",
+            "reviewer",
+            review["idea_id"],
+        )
+    round_state = state.advance_proposal_round(**identity, expected_stage="reviewing")
+    aggregate = aggregate_proposal_round_reviews(round_state, log.records())
+    return state, identity, round_state, aggregate, proposals, reviews
+
+
+def _proposal_selection_manager(tmp_path, state):
+    manager = HitlManager.__new__(HitlManager)
+    manager.work_dir = tmp_path
+    manager.runtime_state = state
+    manager.tool_definitions = HitlManager._load_tools()
+    return manager
+
+
+def test_manager_proposal_selection_tools_are_boundary_scoped_and_require_native_completion(
+    tmp_path,
+):
+    idle_dir = tmp_path / "idle"
+    idle_manager = _proposal_selection_manager(idle_dir, HitlRuntimeState(idle_dir))
+    assert not (
+        {"select_proposal", "request_new_proposal_round"}
+        & idle_manager._available_tool_names()
+    )
+    state, identity, _round_state, _aggregate, proposals, _reviews = (
+        _begin_logged_manager_selection_round(tmp_path)
+    )
+    manager = _proposal_selection_manager(tmp_path, state)
+
+    tools = manager._tools_for_current_runtime_boundary()
+    names = {tool["name"] for tool in tools}
+    assert {"select_proposal", "request_new_proposal_round"} <= names
+    instruction = manager._runtime_tool_boundary_instruction(tools)
+    reminder = manager._unresolved_request_reminder()
+    assert "either `select_proposal` or `request_new_proposal_round`" in instruction
+    assert "either `select_proposal` or `request_new_proposal_round`" in reminder
+    assert state.pending_worker_command() is None
+
+    state.record_proposal_selection_choice(
+        **identity,
+        choice="select",
+        proposal_idea_id=proposals[0]["idea_id"],
+        reason="Candidate one is preferred.",
+    )
+    state.record_proposal_selection_decision(
+        **identity,
+        choice="select",
+        proposal_idea_id=proposals[0]["idea_id"],
+        decision_idea_id="I999",
+    )
+    state.complete_proposal_selection(**identity)
+    assert not (
+        {"select_proposal", "request_new_proposal_round"}
+        & manager._available_tool_names()
+    )
+
+
+def test_manager_selection_retries_invalid_input_and_records_nonfirst_choice(tmp_path):
+    state, identity, _round_state, _aggregate, proposals, _reviews = (
+        _begin_logged_manager_selection_round(tmp_path)
+    )
+    manager = _proposal_selection_manager(tmp_path, state)
+    responses = []
+
+    def notify(_prompt, **_kwargs):
+        responses.append(manager.select_proposal("I999", "Unknown candidate."))
+        responses.append(manager.select_proposal(proposals[1]["idea_id"], ""))
+        responses.append(
+            manager.select_proposal(
+                proposals[1]["idea_id"],
+                "Candidate two offers the more informative controlled experiment.",
+            )
+        )
+        responses.append(
+            manager.select_proposal(
+                proposals[1]["idea_id"],
+                "Candidate two offers the more informative controlled experiment.",
+            )
+        )
+        responses.append(
+            manager.request_new_proposal_round("A conflicting late choice.")
+        )
+
+    manager.notify_runtime = notify
+    result = manager.begin_proposal_selection(
+        "Select one proposal.",
+        **identity,
+        boundary_validator=lambda: {"valid": True, "issues": []},
+        on_decision=lambda selection: selection,
+    )
+
+    assert responses[0].startswith("Error:")
+    assert "current-round candidate" in responses[0]
+    assert responses[1].startswith("Error:")
+    assert responses[2].startswith("Runtime recorded")
+    assert responses[3].startswith("Runtime recorded")
+    assert responses[4].startswith("Error:")
+    assert "different manager choice" in responses[4]
+    assert result["choice"] == "select"
+    assert result["proposal_idea_id"] == proposals[1]["idea_id"]
+    assert state.pending_worker_command() is None
+
+
+def test_manager_selection_boundary_change_wakes_controller_without_recording_choice(tmp_path):
+    state, identity, _round_state, _aggregate, proposals, _reviews = (
+        _begin_logged_manager_selection_round(tmp_path)
+    )
+    manager = _proposal_selection_manager(tmp_path, state)
+    responses = []
+    manager.notify_runtime = lambda _prompt, **_kwargs: responses.append(
+        manager.select_proposal(proposals[0]["idea_id"], "Choose candidate one.")
+    )
+
+    with pytest.raises(RuntimeError, match="Proposal-selection boundary is invalid"):
+        manager.begin_proposal_selection(
+            "Select one proposal.",
+            **identity,
+            boundary_validator=lambda: {
+                "valid": False,
+                "issues": ["the whiteboard changed"],
+            },
+            on_decision=lambda selection: selection,
+        )
+
+    assert responses[0].startswith("Error:")
+    assert state.proposal_round_snapshot(**identity)["selection"] is None
+
+
+def test_manager_selection_backend_failure_is_a_nondurable_controller_signal(tmp_path):
+    state, _identity, _round_state, _aggregate, _proposals, _reviews = (
+        _begin_logged_manager_selection_round(tmp_path)
+    )
+    manager = _proposal_selection_manager(tmp_path, state)
+    manager._proposal_selection_event = threading.Event()
+    manager._proposal_selection_error = None
+
+    class Channel:
+        messages = []
+
+        @classmethod
+        def send(cls, message, **_kwargs):
+            cls.messages.append(message)
+
+    class Turn:
+        request_key = ""
+        runtime_action_kind = "proposal_selection"
+
+    manager.channel = Channel()
+    before = state.snapshot()
+    manager._cancel_backend_failed_runtime_request(Turn(), RuntimeError("backend failed"))
+
+    assert manager._proposal_selection_event.is_set()
+    assert isinstance(manager._proposal_selection_error, RuntimeError)
+    assert "boundary was not completed" in str(manager._proposal_selection_error)
+    assert state.snapshot() == before
+
+
+def test_recorded_manager_choice_replays_without_notifying_manager(tmp_path):
+    state, identity, _round_state, _aggregate, proposals, _reviews = (
+        _begin_logged_manager_selection_round(tmp_path)
+    )
+    state.record_proposal_selection_choice(
+        **identity,
+        choice="select",
+        proposal_idea_id=proposals[0]["idea_id"],
+        reason="Candidate one is preferred.",
+    )
+    manager = _proposal_selection_manager(tmp_path, state)
+    manager.notify_runtime = lambda *_args, **_kwargs: pytest.fail(
+        "a recorded choice must replay without another manager turn"
+    )
+
+    result = manager.begin_proposal_selection(
+        "Select one proposal.",
+        **identity,
+        boundary_validator=lambda: {"valid": True, "issues": []},
+        on_decision=lambda selection: selection,
+    )
+
+    assert result["proposal_idea_id"] == proposals[0]["idea_id"]
+
+
+def test_manager_can_request_new_proposal_round_through_selection_boundary(tmp_path):
+    state, identity, _round_state, _aggregate, _proposals, _reviews = (
+        _begin_logged_manager_selection_round(tmp_path)
+    )
+    manager = _proposal_selection_manager(tmp_path, state)
+    responses = []
+    manager.notify_runtime = lambda _prompt, **_kwargs: responses.append(
+        manager.request_new_proposal_round(
+            "The panel shares an unresolved attribution problem."
+        )
+    )
+
+    result = manager.begin_proposal_selection(
+        "Select one proposal or request another round.",
+        **identity,
+        boundary_validator=lambda: {"valid": True, "issues": []},
+        on_decision=lambda selection: selection,
+    )
+
+    assert responses == [
+        "Runtime recorded the proposal choice. The waiting controller will apply it."
+    ]
+    assert result == {
+        "choice": "new_round",
+        "reason": "The panel shares an unresolved attribution problem.",
+        "decision_idea_id": None,
+    }
+
+
+def test_proposal_selection_decision_contract_uses_minimal_premises_and_stable_options(
+    tmp_path,
+):
+    state, identity, _round_state, aggregate, proposals, reviews = (
+        _begin_logged_manager_selection_round(tmp_path)
+    )
+    state.record_proposal_selection_choice(
+        **identity,
+        choice="select",
+        proposal_idea_id=proposals[1]["idea_id"],
+        reason="Candidate two is worth the next experiment.",
+    )
+    round_state = state.proposal_round_snapshot(**identity)
+
+    record = proposal_selection_decision_record(
+        round_state=round_state,
+        aggregate=aggregate,
+        parent_node_id="parent",
+    )
+
+    assert record["premises"] == [
+        *(review["idea_id"] for review in reviews),
+        proposals[1]["idea_id"],
+    ]
+    assert record["options"] == [
+        f"Select proposal {proposals[0]['idea_id']}.",
+        f"Select proposal {proposals[1]['idea_id']}.",
+        "Generate another proposal round.",
+    ]
+    assert record["decision"] == "O2"
+    assert record["manager_feedback"] == "Candidate two is worth the next experiment."
+    assert "proposal_task_id" not in record
+
+
+def _selection_controller(tmp_path):
+    controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
+    controller.work_dir = tmp_path
+    controller.hitl_runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+    )
+    return controller
+
+
+def test_controller_applies_new_round_choice_after_recording_manager_decision(tmp_path):
+    state, identity, _round_state, aggregate, _proposals, reviews = (
+        _begin_logged_manager_selection_round(tmp_path)
+    )
+    selection = state.record_proposal_selection_choice(
+        **identity,
+        choice="new_round",
+        reason="Every candidate omitted the same necessary control.",
+    )
+
+    result = _selection_controller(tmp_path)._apply_ranked_proposal_selection(
+        identity=identity,
+        aggregate=aggregate,
+        selection=selection,
+    )
+
+    assert result["proposal_round"]["round_ordinal"] == 2
+    assert result["proposal_round"]["stage"] == "proposing"
+    decision = next(
+        record
+        for record in HitlIdeaLog(tmp_path).records()
+        if record["idea_id"] == result["decision_idea_id"]
+    )
+    assert decision["decision"] == "O3"
+    assert decision["premises"] == [review["idea_id"] for review in reviews]
+    assert result["proposal_round"]["base_idea_number"] == int(
+        result["decision_idea_id"][1:]
+    )
+
+
+def test_controller_replays_persisted_selection_decision_without_duplicate_idea(tmp_path):
+    state, identity, round_state, aggregate, proposals, _reviews = (
+        _begin_logged_manager_selection_round(tmp_path)
+    )
+    selection = state.record_proposal_selection_choice(
+        **identity,
+        choice="select",
+        proposal_idea_id=proposals[0]["idea_id"],
+        reason="Candidate one is the most informative next experiment.",
+    )
+    round_state = state.proposal_round_snapshot(**identity)
+    log = HitlIdeaLog(tmp_path)
+    decision = log.append(
+        proposal_selection_decision_record(
+            round_state=round_state,
+            aggregate=aggregate,
+            parent_node_id="parent",
+        ),
+        idempotent=True,
+    )
+    selection = state.record_proposal_selection_decision(
+        **identity,
+        choice="select",
+        proposal_idea_id=proposals[0]["idea_id"],
+        decision_idea_id=decision["idea_id"],
+    )
+    before_count = len(log.records())
+
+    result = _selection_controller(tmp_path)._apply_ranked_proposal_selection(
+        identity=identity,
+        aggregate=aggregate,
+        selection=selection,
+    )
+
+    assert result["proposal_round"]["stage"] == "selected"
+    assert result["decision_idea_id"] == decision["idea_id"]
+    assert len(log.records()) == before_count
 
 
 def _append_ranked_session_base_idea(work_dir):
@@ -2885,21 +3262,56 @@ def _prepare_serial_ranked_proposer_controller(
     *,
     proposer_count=2,
     reviewer_count=2,
+    selection_choice="select",
 ):
     attempt_dir = tmp_path / "logs/experiment-autoresearch/parent/attempt_4"
     attempt_dir.mkdir(parents=True)
-    runtime = HitlRuntime(
-        tmp_path,
-        "experiment_runner",
-        channel=object(),
-        manager=object(),
-        use_hitl_autoresearch_whiteboard=True,
-    )
     whiteboard_path = hitl_whiteboard_path(tmp_path)
     whiteboard_path.parent.mkdir(parents=True, exist_ok=True)
     whiteboard_path.write_text('{"tips": []}\n', encoding="utf-8")
     base = _append_ranked_session_base_idea(tmp_path)
     state = HitlRuntimeState(tmp_path)
+
+    class SelectionManager:
+        def __init__(self):
+            self.prompts = []
+
+        def begin_proposal_selection(
+            self,
+            prompt,
+            *,
+            boundary_validator,
+            on_decision,
+            **identity,
+        ):
+            self.prompts.append(prompt)
+            assert boundary_validator()["valid"] is True
+            current = state.proposal_round_snapshot(**identity)
+            if current.get("selection") is None:
+                if selection_choice == "select":
+                    candidate_id = current["tasks"]["r1-p2"]["result_idea_id"]
+                    state.record_proposal_selection_choice(
+                        **identity,
+                        choice="select",
+                        proposal_idea_id=candidate_id,
+                        reason="Candidate two has the strongest expected research value.",
+                    )
+                else:
+                    state.record_proposal_selection_choice(
+                        **identity,
+                        choice="new_round",
+                        reason="The panel exposed a shared missing control.",
+                    )
+                current = state.proposal_round_snapshot(**identity)
+            return on_decision(dict(current["selection"]))
+
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=SelectionManager(),
+        use_hitl_autoresearch_whiteboard=True,
+    )
     scope = state.workspace_guard_scope()
     fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(tmp_path, scope=scope)
     state.begin_next_autoresearch_action(
@@ -3102,7 +3514,7 @@ def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
         attempt_history=[],
     )
 
-    assert round_state["stage"] == "manager_selection"
+    assert round_state["stage"] == "selected"
     assert list(round_state["tasks"]) == [
         "r1-p1",
         "r1-p2",
@@ -3220,6 +3632,17 @@ def test_serial_ranked_proposal_round_preserves_task_boundaries_and_aggregates(
         aggregate_proposal_round_reviews(round_state, HitlIdeaLog(tmp_path).records())
         == expected_aggregate
     )
+    selection = round_state["selection"]
+    assert selection["proposal_idea_id"] == candidate_ids[1]
+    decision = records_by_id[selection["decision_idea_id"]]
+    assert decision["idea_category"] == "method_choice"
+    assert decision["decision"] == "O2"
+    assert decision["premises"] == [*review_ids, candidate_ids[1]]
+    assert "proposal_task_id" not in decision
+    manager_prompt = controller.hitl_runtime.manager.prompts[0]
+    assert manager_prompt.index(candidate_ids[0]) < manager_prompt.index(candidate_ids[1])
+    assert manager_prompt.index(candidate_ids[1]) < manager_prompt.index(candidate_ids[2])
+    assert all(review_id in manager_prompt for review_id in review_ids)
     snapshot = state.snapshot()
     assert snapshot["pending_worker_command"] is None
     assert snapshot["worker_continuation"] is None

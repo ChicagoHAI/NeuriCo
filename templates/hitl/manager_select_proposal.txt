@@ -1,0 +1,24 @@
+Runtime has completed one independent-ranked AutoResearch proposal round.
+
+Selected parent node: {{ parent_node_id }}
+
+Candidates in canonical proposer order:
+{% for candidate_id, verification_id in candidate_verification_pairs %}
+- {{ candidate_id }} -> verification {{ verification_id }}
+{% endfor %}
+
+Independent review conclusions in reviewer order:
+{% for review_id in review_idea_ids %}
+- {{ review_id }}
+{% endfor %}
+
+Exact {{ aggregation_algorithm }} recommendation:
+{% for ranking in optimal_rankings %}
+- {{ ranking | join(" > ") }}
+{% endfor %}
+
+The aggregate is a recommendation, not an automatic selection. Inspect the
+listed ideas with `hitl-view-ideas` as needed. Select one current proposal with
+`select_proposal`, or request a fresh panel with
+`request_new_proposal_round`. In either case, provide a concrete scientific
+reason. Direct assistant text does not complete this boundary.

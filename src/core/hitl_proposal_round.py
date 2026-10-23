@@ -293,15 +293,16 @@ def proposal_round_results(round_state: Mapping[str, Any]) -> dict[str, list[str
     }
 
 
-def aggregate_proposal_round_reviews(
+def _proposal_round_reviewer_entries(
     round_state: Mapping[str, Any],
-    idea_records: Sequence[Mapping[str, Any]],
-) -> KemenyYoungResult:
-    """Aggregate only review ideas referenced by completed reviewer tasks."""
+) -> list[tuple[int, str, str]]:
+    """Return completed reviewer tasks in durable task order."""
 
-    results = proposal_round_results(round_state)
-    round_ordinal = int(round_state["round_ordinal"])
-    tasks = round_state["tasks"]
+    round_ordinal = round_state.get("round_ordinal")
+    _require_positive_ordinal(round_ordinal, "round_ordinal")
+    tasks = round_state.get("tasks")
+    if not isinstance(tasks, Mapping):
+        raise ValueError("Proposal round tasks must be a mapping.")
     reviewer_entries = []
     for task_id, task in tasks.items():
         if not isinstance(task, Mapping) or task.get("role") != "reviewer":
@@ -315,6 +316,17 @@ def aggregate_proposal_round_reviews(
     expected_ordinals = list(range(1, len(reviewer_entries) + 1))
     if [ordinal for ordinal, _task_id, _review_id in reviewer_entries] != expected_ordinals:
         raise ValueError("Proposal reviewer task ordinals must be contiguous and one-based.")
+    return reviewer_entries
+
+
+def aggregate_proposal_round_reviews(
+    round_state: Mapping[str, Any],
+    idea_records: Sequence[Mapping[str, Any]],
+) -> KemenyYoungResult:
+    """Aggregate only review ideas referenced by completed reviewer tasks."""
+
+    results = proposal_round_results(round_state)
+    reviewer_entries = _proposal_round_reviewer_entries(round_state)
     records_by_id: dict[str, Mapping[str, Any]] = {}
     for record in idea_records:
         idea_id = str(record.get("idea_id", "")).strip()
@@ -344,6 +356,73 @@ def aggregate_proposal_round_reviews(
         canonical_candidate_ids=results["candidate_ids"],
         source_review_idea_ids=review_ids,
     )
+
+
+def proposal_selection_decision_record(
+    *,
+    round_state: Mapping[str, Any],
+    aggregate: KemenyYoungResult,
+    parent_node_id: str,
+) -> dict[str, Any]:
+    """Build the manager-authored decision for one recorded round choice."""
+
+    if round_state.get("stage") != "manager_selection":
+        raise ValueError("Proposal selection decision requires manager-selection stage.")
+    selection = round_state.get("selection")
+    if not isinstance(selection, Mapping):
+        raise ValueError("Proposal selection decision requires a recorded manager choice.")
+    results = proposal_round_results(round_state)
+    candidate_ids = tuple(results["candidate_ids"])
+    review_ids = tuple(
+        review_id for _ordinal, _task_id, review_id in _proposal_round_reviewer_entries(round_state)
+    )
+    if aggregate.candidate_proposal_idea_ids != candidate_ids:
+        raise ValueError("Proposal selection aggregate does not match the current candidates.")
+    if aggregate.source_review_idea_ids != review_ids:
+        raise ValueError("Proposal selection aggregate does not match the current reviews.")
+
+    choice = str(selection.get("choice", "")).strip()
+    selected_id = str(selection.get("proposal_idea_id", "")).strip()
+    reason = str(selection.get("reason", "")).strip()
+    if choice not in {"select", "new_round"} or not reason:
+        raise ValueError("Proposal selection choice is incomplete.")
+    if choice == "select" and selected_id not in candidate_ids:
+        raise ValueError("Selected proposal is not a current-round candidate.")
+    if choice == "new_round" and selected_id:
+        raise ValueError("A new-round choice must not select a proposal.")
+
+    options = [f"Select proposal {candidate_id}." for candidate_id in candidate_ids]
+    options.append("Generate another proposal round.")
+    decision_index = candidate_ids.index(selected_id) if choice == "select" else len(candidate_ids)
+    candidate_attempt_id = _require_identifier(
+        round_state.get("candidate_attempt_id"),
+        "candidate_attempt_id",
+    )
+    parent_id = _require_identifier(parent_node_id, "parent_node_id")
+    return {
+        "pipeline_stage": "experiment_runner",
+        "hitl_stage": "proposal",
+        "idea_type": "decision",
+        "idea_category": "method_choice",
+        "level": "B",
+        "actor": "manager",
+        "premises": [*review_ids, *([selected_id] if selected_id else [])],
+        "context": (
+            "Manager chose how AutoResearch should proceed after independent "
+            "proposal review."
+        ),
+        "related_artifacts": [],
+        "decision_needed": (
+            "Which current proposal should proceed, or should another proposal round "
+            "be generated?"
+        ),
+        "options": options,
+        "decision": f"O{decision_index + 1}",
+        "manager_feedback": reason,
+        "raised": False,
+        "parent_node_id": parent_id,
+        "attempt_id": candidate_attempt_id,
+    }
 
 
 def aggregate_kemeny_young(

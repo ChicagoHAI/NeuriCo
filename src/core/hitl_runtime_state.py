@@ -1301,7 +1301,15 @@ class HitlRuntimeState:
                 }
             existing = round_state.get("selection")
             if existing is not None:
-                if existing == selection:
+                comparable_existing = (
+                    {key: value for key, value in existing.items() if key != "decision_idea_id"}
+                    if isinstance(existing, dict)
+                    else existing
+                )
+                comparable_selection = {
+                    key: value for key, value in selection.items() if key != "decision_idea_id"
+                }
+                if comparable_existing == comparable_selection:
                     return self._copy(existing)
                 raise HitlRuntimeStateError(
                     "Proposal round already records a different manager choice"
