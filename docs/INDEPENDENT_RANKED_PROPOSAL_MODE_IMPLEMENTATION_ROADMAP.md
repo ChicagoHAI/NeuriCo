@@ -119,6 +119,10 @@ Keep existing regression tests in their current files.
 - [x] Step 19 — Add interface controls and status
 - [x] Step 20 — Run final regression and interruption qualification
 
+### Phase F: Smoke-test correction
+
+- [ ] Step 21 — Bind the first ranked round to the restored live workspace
+
 ## 5. Phase A — Foundations with no ranked agents
 
 ### Step 1 — Freeze current single-mode behavior
@@ -865,7 +869,60 @@ Gate:
 - no temporary feature flag, duplicate state, alternate recovery path, or
   implementation-only contract remains.
 
-## 10. Required verification at every checkpoint
+## 10. Phase F — Smoke-test correction
+
+### Step 21 — Bind the first ranked round to the restored live workspace
+
+Purpose:
+
+Correct the ranked-only use of the proposal-preparation fingerprint after a
+prepared checkpoint restore. Git and artifact snapshots restore durable
+content, while `HitlWorkspaceWriteGuard` fingerprints describe one live
+filesystem instance and can change across restoration.
+
+Main mechanisms reused:
+
+- `_restore_prepared_checkpoint` remains the durable content restore;
+- evaluator sealing remains the last runtime-owned public transition before
+  proposal work;
+- `HitlRuntimeState` continues to provide the locked atomic transition;
+- the existing `workspace_fingerprint` field remains the only durable public
+  fingerprint;
+- the existing physical-attempt rollback handles interruption before the
+  transition and mismatch after it.
+
+Work:
+
+- add the current live fingerprint to `begin_proposal_round`;
+- when round one is absent, atomically update the enclosing action's existing
+  fingerprint and create the round in one state write;
+- on an idempotent retry, require the supplied fingerprint to equal the stored
+  fingerprint and never rebase an existing round;
+- compute the live fingerprint after restoration and evaluator sealing;
+- capture the existing shared public and whiteboard guards only after the
+  first-round transition is durable;
+- leave recovery, rollback, checkpoint restoration, fingerprint calculation,
+  single mode, and replacement-round boundaries unchanged.
+
+Tests:
+
+- reproduce content-equivalent checkpoint restoration with a changed live
+  fingerprint using the real checkpoint implementation;
+- prove round creation and fingerprint binding are atomic and idempotent;
+- prove a different fingerprint cannot replace an existing round boundary;
+- prove unchanged ranked recovery resumes while public or whiteboard mutation
+  rolls back;
+- prove replacement rounds retain the same boundary;
+- run the complete standard test suite before another live smoke test.
+
+Gate:
+
+- a restored prepared workspace can start the first ranked round;
+- no ranked task launches before the new live boundary is durable and checked;
+- an existing round can never adopt a new fingerprint;
+- no new state field, recovery path, or single-mode behavior is introduced.
+
+## 11. Required verification at every checkpoint
 
 At minimum:
 
@@ -882,7 +939,7 @@ A test failure, unexplained warning, leaked provider process, changed
 single-mode record, or state field not justified by the design blocks the next
 step.
 
-## 11. Implementation completion record
+## 12. Implementation completion record
 
 For every checked step, record in its implementation change:
 

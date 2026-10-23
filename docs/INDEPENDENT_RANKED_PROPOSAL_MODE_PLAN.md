@@ -52,7 +52,7 @@ The implementation must preserve these rules:
 1. `_prepare_next_proposal` creates or resumes the proposal-preparation boundary.
 2. The manager may call additional preparation agents or proceed.
 3. The resolved `prepare_proposal` action retains the prepared checkpoint,
-   workspace fingerprint and any recorded scope, parent node,
+   the latest live workspace fingerprint and its recorded scope, parent node,
    preparation-attempt identity, decision and result, and any applicable
    artifact-snapshot reference. Current NeuriCo releases and discards the
    preparation rollback descriptor after successful preparation.
@@ -271,7 +271,7 @@ The enclosing action already owns:
 
 - parent node;
 - prepared checkpoint;
-- workspace fingerprint;
+- the workspace-fingerprint field and scope used by the active boundary;
 - preparation recovery.
 
 The nested `candidate_attempt_id` is the local `attempt_N` component for the
@@ -1646,13 +1646,26 @@ provider starts. Do not capture a separate starting state for each task. A
 later task must never accept a workspace change made by an earlier task as its
 baseline.
 
-First, compute the public workspace fingerprint with the enclosing preparation
-action's existing `workspace_fingerprint_scope` and require it to equal that
-action's existing `workspace_fingerprint`. Then capture one
-`HitlWorkspaceWriteGuard` public guard and one existing
-`HitlWorkspaceWriteGuard.capture_paths(...)` guard for the hidden AutoResearch
-whiteboard path. Together these two in-memory guards are the ranked attempt's
-shared read-only boundary.
+Checkpoint and artifact-snapshot restoration establish the durable prepared
+content, but the existing workspace fingerprint is a live filesystem-mutation
+boundary and is not portable across restoration. After the physical-attempt
+boundary exists and evaluator sealing is complete, compute the current public
+workspace fingerprint with the enclosing preparation action's existing
+`workspace_fingerprint_scope`. Atomically store that fingerprint while creating
+the first `proposal_round`. This follows the existing NeuriCo transition pattern
+that records the live fingerprint when it opens the next resumable boundary.
+
+Immediately reread and require the current public fingerprint to equal the
+stored value. Then capture one `HitlWorkspaceWriteGuard` public guard and one
+existing `HitlWorkspaceWriteGuard.capture_paths(...)` guard for the hidden
+AutoResearch whiteboard path. Together these two in-memory guards are the
+ranked attempt's shared read-only boundary.
+
+If `proposal_round` already exists, never replace the stored fingerprint. An
+idempotent first-round retry requires the supplied live fingerprint to equal the
+stored value, and re-entry validates that value before recapturing temporary
+guards. An interruption before the atomic first-round transition uses the
+existing physical-attempt rollback and retry behavior.
 
 All proposer, verifier, and reviewer sessions receive validators backed by
 that same boundary. The guards are temporary enforcement objects, not durable
@@ -1678,10 +1691,12 @@ workspace even if the task that caused the change cannot be identified.
 
 ### 17.2 Restart validation
 
-The existing preparation fingerprint is the durable public-workspace
-baseline. The existing physical-attempt whiteboard Git snapshot is the durable
-whiteboard baseline. Do not persist another fingerprint, file manifest, or
-whiteboard copy in `proposal_round`.
+The prepared checkpoint and optional artifact snapshot are the durable prepared
+content boundary. The enclosing preparation action's existing
+`workspace_fingerprint` field becomes the durable live-workspace boundary when
+the first proposal round is created. The existing physical-attempt whiteboard
+Git snapshot is the durable whiteboard baseline. Do not persist another
+fingerprint, file manifest, or whiteboard copy in `proposal_round`.
 
 Add one narrow read-only `HitlGitStateStore` check that compares the current
 hidden AutoResearch whiteboard with the existing rollback boundary addressed
@@ -2263,9 +2278,11 @@ The proposal content contract remains unchanged.
 - pass normalized proposal-mode configuration;
 - preserve current single admission loop;
 - dispatch independent mode to the proposal-round coordinator;
-- validate the preparation fingerprint, capture one shared public and
-  whiteboard boundary before any ranked launch, and share it across all ranked
-  task sessions and replacement proposal rounds in the candidate attempt;
+- after prepared-checkpoint restoration and evaluator sealing, atomically bind
+  the live public fingerprint to creation of the first proposal round, then
+  capture one shared public and whiteboard boundary before any ranked launch;
+- share that boundary across all ranked task sessions and replacement proposal
+  rounds in the candidate attempt without rebasing it;
 - recheck that shared boundary at ranked mutating tools, provider exit, stage
   barriers, manager selection, and before a replacement proposal round starts;
 - use legality-only selected-proposal review after manager selection;
@@ -2593,8 +2610,8 @@ gates pass.
   changed, created, or deleted file relative to the existing attempt boundary;
 - that comparison does not modify the worktree or create, advance, restore, or
   delete the whiteboard Git ref;
-- after restart, public workspace mismatch against the preparation fingerprint
-  fails closed;
+- after restart, public workspace mismatch against the live fingerprint stored
+  by the first-round transition fails closed;
 - after restart, hidden-whiteboard mismatch against the candidate attempt's
   existing whiteboard rollback boundary fails closed even when that boundary
   still exists;
@@ -2781,9 +2798,10 @@ The mechanism is complete when:
 9. Full HITL preserves human approval of the selected proposal.
 10. The selected proposal enters the existing experiment workflow without a new integration stage.
 11. Parallel agents cannot overwrite one another's command surfaces, prompts, logs, or transcripts.
-12. One read-only boundary is captured before any ranked task starts; public
-    workspace and whiteboard mutations invalidate the round, including after
-    restart validation against the existing durable baselines.
+12. After restoration, the first-round transition atomically records the live
+    public fingerprint before one read-only boundary is captured; public
+    workspace and whiteboard mutations then invalidate the round, including
+    after restart validation against the existing durable baselines.
 13. Recovery replays state-owned pending finalizations idempotently and
     relaunches only tasks with neither a result nor an intent.
 14. Each role's idea boundary is derived from the round-start boundary, task ownership, and premise closure.
