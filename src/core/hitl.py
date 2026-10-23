@@ -2174,7 +2174,11 @@ class HitlRuntime:
             _validate_premises(normalized, visible_ids)
         return normalized
 
-    def _ranked_task_state_context(self) -> Dict[str, Any]:
+    def _ranked_task_state_context(
+        self,
+        *,
+        allow_completed_prior_stage: bool = False,
+    ) -> Dict[str, Any]:
         """Resolve one authenticated ranked task from durable round state."""
 
         from core.hitl_proposal_round import parse_proposal_task_id
@@ -2214,13 +2218,28 @@ class HitlRuntime:
             round_state = state.proposal_round_snapshot(**identity)
         except HitlRuntimeStateError as exc:
             raise HitlValidationError(str(exc)) from exc
-        if round_state.get("stage") != profile_spec["round_stage"]:
-            raise HitlValidationError(
-                "Proposal task finalization does not match the active round stage."
-            )
         task = round_state.get("tasks", {}).get(task_id)
         if not isinstance(task, dict) or task.get("role") != role:
             raise HitlValidationError("No matching proposal task exists in the active round.")
+        active_stage = str(round_state.get("stage", ""))
+        expected_stage = str(profile_spec["round_stage"])
+        if active_stage != expected_stage:
+            stage_order = {
+                "proposing": 0,
+                "verifying": 1,
+                "reviewing": 2,
+                "manager_selection": 3,
+                "selected": 4,
+            }
+            completed_prior_stage = bool(
+                allow_completed_prior_stage
+                and task.get("result_idea_id") is not None
+                and stage_order.get(active_stage, -1) > stage_order.get(expected_stage, -1)
+            )
+            if not completed_prior_stage:
+                raise HitlValidationError(
+                    "Proposal task finalization does not match the active round stage."
+                )
         visibility = self._tool_context.get("idea_visibility")
         if not isinstance(visibility, dict) or visibility.get(
             "base_idea_number"
@@ -2562,6 +2581,66 @@ class HitlRuntime:
                 "status": "recorded",
                 "idea_id": logged["idea_id"],
                 "instruction": self._ranked_task_instruction(role),
+            }
+
+    def reconcile_ranked_proposal_task(self) -> Dict[str, Any]:
+        """Validate or replay one durable ranked task without launching an agent."""
+
+        with self._tool_lock:
+            task_context = self._ranked_task_state_context(
+                allow_completed_prior_stage=True,
+            )
+            role = str(task_context["role"])
+            self._validate_ranked_task_workspace(role)
+            result_idea_id = str(
+                task_context["task"].get("result_idea_id") or ""
+            ).strip()
+            pending = task_context["task"].get("pending_finalization")
+            terminal_results = self._unreferenced_ranked_task_results(role)
+            if result_idea_id:
+                if pending is not None:
+                    raise HitlValidationError(
+                        "Completed proposal task still owns a pending finalization intent."
+                    )
+                unreferenced = [
+                    record
+                    for record in terminal_results
+                    if str(record.get("idea_id", "")).strip() != result_idea_id
+                ]
+                if unreferenced:
+                    raise HitlValidationError(
+                        "Proposal task has an unreferenced terminal idea. Runtime will not "
+                        "adopt idea-log content into task state."
+                    )
+                record = self._validate_ranked_task_result_reference(task_context)
+                self._tool_context["ranked_task_terminal"] = True
+                return {
+                    "status": "recorded",
+                    "complete": True,
+                    "idea_id": record["idea_id"],
+                }
+
+            if pending is not None:
+                if not isinstance(pending, dict) or not pending:
+                    raise HitlValidationError(
+                        "Proposal task has an invalid pending finalization intent."
+                    )
+                finalized = self.finish_ranked_proposal_task(dict(pending))
+                return {
+                    "status": "recorded",
+                    "complete": True,
+                    "idea_id": finalized["idea_id"],
+                }
+
+            if terminal_results:
+                raise HitlValidationError(
+                    "Proposal task has an unreferenced terminal idea. Runtime will not "
+                    "adopt idea-log content into task state."
+                )
+            return {
+                "status": "incomplete",
+                "complete": False,
+                "idea_id": None,
             }
 
     def _validate_ranked_task_result_reference(

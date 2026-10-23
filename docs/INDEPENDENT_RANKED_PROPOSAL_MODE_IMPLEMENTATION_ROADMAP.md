@@ -107,7 +107,7 @@ Keep existing regression tests in their current files.
 
 ### Phase C: Recovery
 
-- [ ] Step 16 — Add serial round and task recovery
+- [x] Step 16 — Add serial round and task recovery
 
 ### Phase D: Concurrency
 

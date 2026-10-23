@@ -59,7 +59,7 @@ from core.hitl_artifact_snapshots import (
     validate_hitl_artifact_snapshot,
 )
 from core.hitl_git import delete_git_ref
-from core.hitl_git_state import HitlGitStateStore
+from core.hitl_git_state import HitlGitStateError, HitlGitStateStore
 from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_paths import (
     hitl_artifact_contract_path,
@@ -1800,6 +1800,49 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             frontier_transition=frontier_transition,
         )
     preparation_action = runtime_state.snapshot().get("next_autoresearch_action")
+    ranked_round_present = bool(
+        isinstance(preparation_action, dict)
+        and "proposal_round" in preparation_action
+    )
+    ranked_round_is_exact = False
+    if ranked_round_present and isinstance(preparation_action, dict):
+        raw_round = preparation_action.get("proposal_round")
+        if isinstance(raw_round, dict):
+            try:
+                round_ordinal = int(raw_round.get("round_ordinal"))
+                durable_round = runtime_state.proposal_round_snapshot(
+                    parent_node_sha=str(
+                        preparation_action.get("parent_node_sha", "")
+                    ).strip(),
+                    preparation_attempt_id=str(
+                        preparation_action.get("attempt_id", "")
+                    ).strip(),
+                    candidate_attempt_id=attempt_dir.name,
+                    round_ordinal=round_ordinal,
+                )
+                whiteboard_is_frozen = HitlGitStateStore(
+                    work_dir
+                ).hitl_autoresearch_whiteboard_matches_attempt_boundary(marker)
+            except (
+                HitlRuntimeStateError,
+                HitlGitStateError,
+                OSError,
+                TypeError,
+                ValueError,
+            ):
+                pass
+            else:
+                prepared_sha = _resolved_proposal_base(preparation_action)
+                ranked_round_is_exact = bool(
+                    preparation_action.get("status") == "resolved"
+                    and str(preparation_action.get("parent_node_sha", "")).strip()
+                    == current_best_sha
+                    and attempt_dir.parent.name == current_best_sha
+                    and durable_round == raw_round
+                    and whiteboard_is_frozen
+                    and prepared_sha
+                    and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
+                )
     preparation_metadata_is_exact = (
         isinstance(preparation_action, dict)
         and preparation_action.get("kind") == "prepare_proposal"
@@ -1807,8 +1850,12 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         in {"pending", "decision_recorded", "resolved", "cancelled"}
         and str(preparation_action.get("parent_node_sha", "")).strip()
         == current_best_sha
-        and str(preparation_action.get("attempt_id", "")).strip()
-        == attempt_dir.name
+        and (
+            ranked_round_is_exact
+            if ranked_round_present
+            else str(preparation_action.get("attempt_id", "")).strip()
+            == attempt_dir.name
+        )
         and isinstance(preparation_action.get("additional_agent_ordinal"), int)
         and int(preparation_action["additional_agent_ordinal"]) >= 1
         and bool(str(preparation_action.get("workspace_fingerprint", "")).strip())
@@ -1829,7 +1876,8 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         else {}
     )
     dynamic_agent_request = (
-        isinstance(pending_request, dict)
+        not ranked_round_present
+        and isinstance(pending_request, dict)
         and pending_request.get("pipeline_stage") == "resource_finder"
     )
     dynamic_agent_matches_attempt = (
@@ -1920,19 +1968,25 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             scope=pending_request.get("workspace_fingerprint_scope"),
         )
     )
-    preparation_is_exact = bool(
-        preparation_metadata_is_exact
-        and (
-            preparation_workspace_is_exact
-            or preparation_recovery_is_exact
-            or (
-                preparation_action.get("status") in {"decision_recorded", "resolved"}
-                and (resumable_agent_request or approved_agent_workspace_is_exact)
+    if ranked_round_present:
+        preparation_is_exact = bool(
+            preparation_metadata_is_exact and preparation_workspace_is_exact
+        )
+    else:
+        preparation_is_exact = bool(
+            preparation_metadata_is_exact
+            and (
+                preparation_workspace_is_exact
+                or preparation_recovery_is_exact
+                or (
+                    preparation_action.get("status") in {"decision_recorded", "resolved"}
+                    and (resumable_agent_request or approved_agent_workspace_is_exact)
+                )
             )
         )
-    )
     if (
-        worker_command_requires_resume(pending_request)
+        not ranked_round_present
+        and worker_command_requires_resume(pending_request)
         and isinstance(continuation, dict)
         and continuation_provenance == pending_provenance
         and str(continuation_provenance.get("attempt_id", "")).strip() == attempt_dir.name
@@ -4038,6 +4092,97 @@ class HitlAutoResearchController:
             tool_scope=task_id,
         )
 
+    def _prepare_ranked_task_runtime(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        round_state: Dict[str, Any],
+        parent_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        boundary_validator: Callable[[], Dict[str, Any]],
+    ) -> tuple[HitlRuntime, list[tuple[str, str]]]:
+        """Build the one canonical authenticated context for a ranked task."""
+
+        from core.hitl_proposal_round import (
+            proposal_round_results,
+            reviewer_presentation_order,
+        )
+
+        task = round_state.get("tasks", {}).get(task_id)
+        if not isinstance(task, dict) or task.get("role") != role:
+            raise RuntimeError("Ranked proposal task set is invalid.")
+        profile = {
+            "proposer": ("proposal", "proposal_candidate", "autoresearch_proposer"),
+            "verifier": ("review", "proposal_verifier", "proposal_verifier"),
+            "reviewer": ("review", "proposal_reviewer", "proposal_reviewer"),
+        }.get(role)
+        if profile is None:
+            raise RuntimeError("Ranked proposal task role is invalid.")
+
+        presentation_pairs: list[tuple[str, str]] = []
+        if role == "proposer":
+            seed_idea_ids: list[str] = []
+        elif role == "verifier":
+            assigned_id = str(task.get("assigned_proposal_idea_id") or "").strip()
+            if not assigned_id:
+                raise RuntimeError("Ranked verifier task has no assigned proposal.")
+            seed_idea_ids = [assigned_id]
+        else:
+            dependencies = proposal_round_results(round_state)
+            verification_by_candidate = dict(
+                zip(
+                    dependencies["candidate_ids"],
+                    dependencies["verification_ids"],
+                    strict=True,
+                )
+            )
+            presentation = reviewer_presentation_order(
+                parent_node_id=parent_sha,
+                candidate_attempt_id=candidate_attempt_id,
+                reviewer_task_id=task_id,
+                canonical_candidate_ids=dependencies["candidate_ids"],
+            )
+            presentation_pairs = [
+                (candidate_id, verification_by_candidate[candidate_id])
+                for candidate_id in presentation
+            ]
+            seed_idea_ids = [
+                *dependencies["candidate_ids"],
+                *dependencies["verification_ids"],
+            ]
+
+        hitl_stage, command_profile, actor = profile
+        task_runtime = self._new_ranked_task_runtime(task_id)
+        task_runtime.prepare_idea_tool_context(
+            hitl_stage=hitl_stage,
+            command_profile=command_profile,
+            actor=actor,
+            proposal_preparation_attempt_id=preparation_attempt_id,
+            provenance={
+                "parent_node_id": parent_sha,
+                "attempt_id": candidate_attempt_id,
+                "proposal_task_id": task_id,
+            },
+            idea_visibility={
+                "base_idea_number": round_state["base_idea_number"],
+                "seed_idea_ids": seed_idea_ids,
+                **(
+                    {"proposal_verification_pairs": presentation_pairs}
+                    if role == "reviewer"
+                    else {}
+                ),
+            },
+            proposal_submission_validator=(
+                boundary_validator if role == "proposer" else None
+            ),
+            phase_finish_validator=(
+                boundary_validator if role != "proposer" else None
+            ),
+        )
+        return task_runtime, presentation_pairs
+
     def _apply_ranked_proposal_selection(
         self,
         *,
@@ -4109,15 +4254,16 @@ class HitlAutoResearchController:
         parent_sha: str,
         attempt_dir: Path,
         attempt_history: list[Dict[str, Any]],
+        boundary_validator: Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> tuple[Dict[str, Any], KemenyYoungResult]:
-        """Run the implemented serial stages of one independent-ranked round."""
+        """Run or resume the durable serial stages of one ranked proposal round."""
 
         from core.agent_runner import next_attempt_number
         from core.hitl_proposal_round import (
             aggregate_proposal_round_reviews,
             proposal_round_results,
+            proposal_selection_decision_record,
             proposal_task_id,
-            reviewer_presentation_order,
         )
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
@@ -4134,10 +4280,11 @@ class HitlAutoResearchController:
         if not isinstance(action, dict):
             raise RuntimeError("Ranked proposer stage has no proposal preparation state.")
         preparation_attempt_id = str(action.get("attempt_id", "")).strip()
-        boundary_validator = self._capture_ranked_proposal_boundary(
-            parent_sha=parent_sha,
-            preparation_attempt_id=preparation_attempt_id,
-        )
+        if boundary_validator is None:
+            boundary_validator = self._capture_ranked_proposal_boundary(
+                parent_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+            )
         existing_round = action.get("proposal_round")
         if isinstance(existing_round, dict):
             base_idea_number = existing_round.get("base_idea_number")
@@ -4163,311 +4310,317 @@ class HitlAutoResearchController:
             "candidate_attempt_id": attempt_dir.name,
             "round_ordinal": int(round_state["round_ordinal"]),
         }
-        if round_state.get("stage") not in {"proposing", "verifying"}:
-            raise RuntimeError("Ranked proposer stage does not own the current round stage.")
+        if round_state.get("stage") not in {
+            "proposing",
+            "verifying",
+            "reviewing",
+            "manager_selection",
+            "selected",
+        }:
+            raise RuntimeError("Ranked proposal round has an invalid stage.")
 
-        task_prompt = (
-            "Generate one independent proposal candidate and submit it through "
-            "hitl-submit-proposal. Stop after runtime records the candidate."
-        )
         round_dir = (
             Path(attempt_dir)
             / "proposal_round"
             / f"r{round_state['round_ordinal']}"
         )
-        for ordinal in range(1, config.proposer_count + 1):
+        def require_boundary(label: str) -> None:
             raise_if_hitl_run_stop_requested()
-            task_id = proposal_task_id(int(round_state["round_ordinal"]), "proposer", ordinal)
+            boundary = boundary_validator()
+            if not bool(boundary.get("valid")):
+                raise RuntimeError(
+                    f"{label} changed its shared read-only boundary: "
+                    + "; ".join(str(issue) for issue in boundary.get("issues", []))
+                )
+
+        stage_order = {
+            "proposing": 0,
+            "verifying": 1,
+            "reviewing": 2,
+            "manager_selection": 3,
+            "selected": 4,
+        }
+
+        def task_runtime_for(
+            role: str,
+            task_id: str,
+        ) -> tuple[HitlRuntime, list[tuple[str, str]], Dict[str, Any]]:
             current_round = state.proposal_round_snapshot(**identity)
-            task = current_round["tasks"].get(task_id)
-            if not isinstance(task, dict) or task.get("role") != "proposer":
-                raise RuntimeError("Ranked proposer task set is invalid.")
-            if task.get("result_idea_id") is not None:
-                continue
-
-            task_runtime = self._new_ranked_task_runtime(task_id)
-            task_runtime.prepare_idea_tool_context(
-                hitl_stage="proposal",
-                command_profile="proposal_candidate",
-                actor="autoresearch_proposer",
-                proposal_preparation_attempt_id=preparation_attempt_id,
-                provenance={
-                    "parent_node_id": parent_sha,
-                    "attempt_id": attempt_dir.name,
-                    "proposal_task_id": task_id,
-                },
-                idea_visibility={
-                    "base_idea_number": round_state["base_idea_number"],
-                    "seed_idea_ids": [],
-                },
-                proposal_submission_validator=boundary_validator,
+            task_runtime, presentation_pairs = self._prepare_ranked_task_runtime(
+                task_id=task_id,
+                role=role,
+                round_state=current_round,
+                parent_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+                boundary_validator=boundary_validator,
             )
-            task_dir = round_dir / task_id
+            return task_runtime, presentation_pairs, current_round
 
-            def launch_worker(
-                prompt: str,
-                _log_prefix: str,
-                *,
-                record_continuation: bool,
-            ) -> Dict[str, Any]:
-                if record_continuation:
+        def validate_completed_role(role: str, count: int) -> None:
+            for ordinal in range(1, count + 1):
+                task_id = proposal_task_id(
+                    int(identity["round_ordinal"]),
+                    role,
+                    ordinal,
+                )
+                task_runtime, _pairs, _current = task_runtime_for(role, task_id)
+                try:
+                    result = task_runtime.reconcile_ranked_proposal_task()
+                finally:
+                    task_runtime.clear_idea_tool_context()
+                if not result.get("complete"):
                     raise RuntimeError(
-                        "Ranked proposal tasks must not record global worker continuation."
+                        f"Completed ranked {role} stage contains an incomplete task."
                     )
-                launch_number = next_attempt_number(
-                    task_dir,
-                    lambda attempt: f"launch_{attempt}",
-                )
-                launch_dir = task_dir / f"launch_{launch_number}"
-                launch_dir.mkdir(parents=True)
-                return self._call_proposal_generator(
-                    parent_sha=parent_sha,
-                    attempt_dir=attempt_dir,
-                    attempt_history=attempt_history,
-                    prompt_suffix=prompt,
-                    env_extra=task_runtime.idea_tool_env(),
-                    launch_dir=launch_dir,
-                    candidate_recording=True,
-                )
 
-            try:
-                _result, finish = run_worker_with_replacements(
-                    runtime=task_runtime,
-                    launch_worker=launch_worker,
-                    prompt=task_prompt,
-                    log_prefix=task_id,
-                    phase="proposal",
-                    worker_name=f"Independent proposal generator {task_id}",
-                    record_continuation=False,
-                    result_after_exit=lambda result: (
-                        task_runtime.ranked_task_result_after_worker_exit(
-                            result,
-                            replacement_prompt=task_prompt,
-                            worker_name=f"Independent proposal generator {task_id}",
-                        )
-                    ),
-                )
-            finally:
-                task_runtime.clear_idea_tool_context()
-            if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
-                raise RuntimeError("Ranked proposal task ended without a recorded candidate.")
-
-        raise_if_hitl_run_stop_requested()
-        boundary = boundary_validator()
-        if not bool(boundary.get("valid")):
-            raise RuntimeError(
-                "Ranked proposal stage changed its shared read-only boundary: "
-                + "; ".join(str(issue) for issue in boundary.get("issues", []))
-            )
         if round_state.get("stage") == "proposing":
+            task_prompt = (
+                "Generate one independent proposal candidate and submit it through "
+                "hitl-submit-proposal. Stop after runtime records the candidate."
+            )
+            for ordinal in range(1, config.proposer_count + 1):
+                raise_if_hitl_run_stop_requested()
+                task_id = proposal_task_id(
+                    int(identity["round_ordinal"]), "proposer", ordinal
+                )
+                task_runtime, _pairs, _current = task_runtime_for("proposer", task_id)
+                try:
+                    reconciled = task_runtime.reconcile_ranked_proposal_task()
+                    if reconciled.get("complete"):
+                        continue
+                    task_dir = round_dir / task_id
+
+                    def launch_worker(
+                        prompt: str,
+                        _log_prefix: str,
+                        *,
+                        record_continuation: bool,
+                    ) -> Dict[str, Any]:
+                        if record_continuation:
+                            raise RuntimeError(
+                                "Ranked proposal tasks must not record global worker continuation."
+                            )
+                        launch_number = next_attempt_number(
+                            task_dir,
+                            lambda attempt: f"launch_{attempt}",
+                        )
+                        launch_dir = task_dir / f"launch_{launch_number}"
+                        launch_dir.mkdir(parents=True)
+                        return self._call_proposal_generator(
+                            parent_sha=parent_sha,
+                            attempt_dir=attempt_dir,
+                            attempt_history=attempt_history,
+                            prompt_suffix=prompt,
+                            env_extra=task_runtime.idea_tool_env(),
+                            launch_dir=launch_dir,
+                            candidate_recording=True,
+                        )
+
+                    _result, finish = run_worker_with_replacements(
+                        runtime=task_runtime,
+                        launch_worker=launch_worker,
+                        prompt=task_prompt,
+                        log_prefix=task_id,
+                        phase="proposal",
+                        worker_name=f"Independent proposal generator {task_id}",
+                        record_continuation=False,
+                        result_after_exit=lambda result: (
+                            task_runtime.ranked_task_result_after_worker_exit(
+                                result,
+                                replacement_prompt=task_prompt,
+                                worker_name=f"Independent proposal generator {task_id}",
+                            )
+                        ),
+                    )
+                finally:
+                    task_runtime.clear_idea_tool_context()
+                if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
+                    raise RuntimeError(
+                        "Ranked proposal task ended without a recorded candidate."
+                    )
+            require_boundary("Ranked proposal stage")
             round_state = state.advance_proposal_round(
                 **identity,
                 expected_stage="proposing",
             )
         else:
+            validate_completed_role("proposer", int(config.proposer_count))
+            require_boundary("Ranked proposal recovery")
             round_state = state.proposal_round_snapshot(**identity)
 
-        if self.proposal_assessment_runner is None:
-            raise RuntimeError("No ranked proposal assessment runner is configured.")
-        for ordinal in range(1, config.proposer_count + 1):
-            raise_if_hitl_run_stop_requested()
-            task_id = proposal_task_id(int(round_state["round_ordinal"]), "verifier", ordinal)
-            current_round = state.proposal_round_snapshot(**identity)
-            task = current_round["tasks"].get(task_id)
-            if not isinstance(task, dict) or task.get("role") != "verifier":
-                raise RuntimeError("Ranked verifier task set is invalid.")
-            assigned_proposal_id = str(
-                task.get("assigned_proposal_idea_id") or ""
-            ).strip()
-            if not assigned_proposal_id:
-                raise RuntimeError("Ranked verifier task has no assigned proposal.")
-            if task.get("result_idea_id") is not None:
-                continue
-
-            task_runtime = self._new_ranked_task_runtime(task_id)
-            task_runtime.prepare_idea_tool_context(
-                hitl_stage="review",
-                command_profile="proposal_verifier",
-                actor="proposal_verifier",
-                proposal_preparation_attempt_id=preparation_attempt_id,
-                provenance={
-                    "parent_node_id": parent_sha,
-                    "attempt_id": attempt_dir.name,
-                    "proposal_task_id": task_id,
-                },
-                idea_visibility={
-                    "base_idea_number": round_state["base_idea_number"],
-                    "seed_idea_ids": [assigned_proposal_id],
-                },
-                phase_finish_validator=boundary_validator,
-            )
-            task_dir = round_dir / task_id
+        if round_state.get("stage") == "verifying":
+            if self.proposal_assessment_runner is None:
+                raise RuntimeError("No ranked proposal assessment runner is configured.")
             task_prompt = (
                 "Complete the scientific assessment of the assigned proposal and finish "
                 "through hitl-finish-proposal-verification."
             )
-
-            def launch_verifier(
-                prompt: str,
-                _log_prefix: str,
-                *,
-                record_continuation: bool,
-            ) -> Dict[str, Any]:
-                if record_continuation:
-                    raise RuntimeError(
-                        "Ranked proposal tasks must not record global worker continuation."
-                    )
-                return self.proposal_assessment_runner(
-                    role="verifier",
-                    assigned_proposal_idea_id=assigned_proposal_id,
-                    task_dir=task_dir,
-                    prompt_suffix=prompt,
-                    env_extra=task_runtime.idea_tool_env(),
+            for ordinal in range(1, config.proposer_count + 1):
+                raise_if_hitl_run_stop_requested()
+                task_id = proposal_task_id(
+                    int(identity["round_ordinal"]), "verifier", ordinal
                 )
+                task_runtime, _pairs, current_round = task_runtime_for("verifier", task_id)
+                task = current_round["tasks"][task_id]
+                assigned_proposal_id = str(
+                    task.get("assigned_proposal_idea_id") or ""
+                ).strip()
+                try:
+                    reconciled = task_runtime.reconcile_ranked_proposal_task()
+                    if reconciled.get("complete"):
+                        continue
 
-            try:
-                _result, finish = run_worker_with_replacements(
-                    runtime=task_runtime,
-                    launch_worker=launch_verifier,
-                    prompt=task_prompt,
-                    log_prefix=task_id,
-                    phase="review",
-                    worker_name=f"Proposal verifier {task_id}",
-                    record_continuation=False,
-                    result_after_exit=lambda result: (
-                        task_runtime.ranked_task_result_after_worker_exit(
-                            result,
-                            replacement_prompt=task_prompt,
-                            worker_name=f"Proposal verifier {task_id}",
+                    def launch_verifier(
+                        prompt: str,
+                        _log_prefix: str,
+                        *,
+                        record_continuation: bool,
+                    ) -> Dict[str, Any]:
+                        if record_continuation:
+                            raise RuntimeError(
+                                "Ranked proposal tasks must not record global worker continuation."
+                            )
+                        return self.proposal_assessment_runner(
+                            role="verifier",
+                            assigned_proposal_idea_id=assigned_proposal_id,
+                            task_dir=round_dir / task_id,
+                            prompt_suffix=prompt,
+                            env_extra=task_runtime.idea_tool_env(),
                         )
-                    ),
-                )
-            finally:
-                task_runtime.clear_idea_tool_context()
-            if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
-                raise RuntimeError("Ranked verifier task ended without a recorded assessment.")
 
-        raise_if_hitl_run_stop_requested()
-        boundary = boundary_validator()
-        if not bool(boundary.get("valid")):
-            raise RuntimeError(
-                "Ranked verifier stage changed its shared read-only boundary: "
-                + "; ".join(str(issue) for issue in boundary.get("issues", []))
+                    _result, finish = run_worker_with_replacements(
+                        runtime=task_runtime,
+                        launch_worker=launch_verifier,
+                        prompt=task_prompt,
+                        log_prefix=task_id,
+                        phase="review",
+                        worker_name=f"Proposal verifier {task_id}",
+                        record_continuation=False,
+                        result_after_exit=lambda result: (
+                            task_runtime.ranked_task_result_after_worker_exit(
+                                result,
+                                replacement_prompt=task_prompt,
+                                worker_name=f"Proposal verifier {task_id}",
+                            )
+                        ),
+                    )
+                finally:
+                    task_runtime.clear_idea_tool_context()
+                if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
+                    raise RuntimeError(
+                        "Ranked verifier task ended without a recorded assessment."
+                    )
+            require_boundary("Ranked verifier stage")
+            round_state = state.advance_proposal_round(
+                **identity,
+                expected_stage="verifying",
             )
-        round_state = state.advance_proposal_round(
-            **identity,
-            expected_stage="verifying",
-        )
-        dependencies = proposal_round_results(round_state)
-        verification_by_candidate = dict(
-            zip(
-                dependencies["candidate_ids"],
-                dependencies["verification_ids"],
-                strict=True,
-            )
-        )
-        for ordinal in range(1, config.reviewer_count + 1):
-            raise_if_hitl_run_stop_requested()
-            task_id = proposal_task_id(int(round_state["round_ordinal"]), "reviewer", ordinal)
-            current_round = state.proposal_round_snapshot(**identity)
-            task = current_round["tasks"].get(task_id)
-            if not isinstance(task, dict) or task.get("role") != "reviewer":
-                raise RuntimeError("Ranked reviewer task set is invalid.")
-            if task.get("result_idea_id") is not None:
-                continue
-            presentation = reviewer_presentation_order(
-                parent_node_id=parent_sha,
-                candidate_attempt_id=attempt_dir.name,
-                reviewer_task_id=task_id,
-                canonical_candidate_ids=dependencies["candidate_ids"],
-            )
-            presentation_pairs = [
-                (candidate_id, verification_by_candidate[candidate_id])
-                for candidate_id in presentation
-            ]
+        elif stage_order[str(round_state.get("stage"))] > stage_order["verifying"]:
+            validate_completed_role("verifier", int(config.proposer_count))
+            require_boundary("Ranked verifier recovery")
+            round_state = state.proposal_round_snapshot(**identity)
 
-            task_runtime = self._new_ranked_task_runtime(task_id)
-            task_runtime.prepare_idea_tool_context(
-                hitl_stage="review",
-                command_profile="proposal_reviewer",
-                actor="proposal_reviewer",
-                proposal_preparation_attempt_id=preparation_attempt_id,
-                provenance={
-                    "parent_node_id": parent_sha,
-                    "attempt_id": attempt_dir.name,
-                    "proposal_task_id": task_id,
-                },
-                idea_visibility={
-                    "base_idea_number": round_state["base_idea_number"],
-                    "seed_idea_ids": [
-                        *dependencies["candidate_ids"],
-                        *dependencies["verification_ids"],
-                    ],
-                    "proposal_verification_pairs": presentation_pairs,
-                },
-                phase_finish_validator=boundary_validator,
-            )
-            task_dir = round_dir / task_id
+        if round_state.get("stage") == "reviewing":
+            if self.proposal_assessment_runner is None:
+                raise RuntimeError("No ranked proposal assessment runner is configured.")
             task_prompt = (
                 "Complete the independent comparative review and finish through "
                 "hitl-finish-proposal-review with one complete ranking."
             )
-
-            def launch_reviewer(
-                prompt: str,
-                _log_prefix: str,
-                *,
-                record_continuation: bool,
-            ) -> Dict[str, Any]:
-                if record_continuation:
-                    raise RuntimeError(
-                        "Ranked proposal tasks must not record global worker continuation."
-                    )
-                return self.proposal_assessment_runner(
-                    role="reviewer",
-                    candidate_verification_pairs=presentation_pairs,
-                    task_dir=task_dir,
-                    prompt_suffix=prompt,
-                    env_extra=task_runtime.idea_tool_env(),
+            for ordinal in range(1, config.reviewer_count + 1):
+                raise_if_hitl_run_stop_requested()
+                task_id = proposal_task_id(
+                    int(identity["round_ordinal"]), "reviewer", ordinal
                 )
+                task_runtime, presentation_pairs, _current = task_runtime_for(
+                    "reviewer", task_id
+                )
+                try:
+                    reconciled = task_runtime.reconcile_ranked_proposal_task()
+                    if reconciled.get("complete"):
+                        continue
 
-            try:
-                _result, finish = run_worker_with_replacements(
-                    runtime=task_runtime,
-                    launch_worker=launch_reviewer,
-                    prompt=task_prompt,
-                    log_prefix=task_id,
-                    phase="review",
-                    worker_name=f"Proposal reviewer {task_id}",
-                    record_continuation=False,
-                    result_after_exit=lambda result: (
-                        task_runtime.ranked_task_result_after_worker_exit(
-                            result,
-                            replacement_prompt=task_prompt,
-                            worker_name=f"Proposal reviewer {task_id}",
+                    def launch_reviewer(
+                        prompt: str,
+                        _log_prefix: str,
+                        *,
+                        record_continuation: bool,
+                    ) -> Dict[str, Any]:
+                        if record_continuation:
+                            raise RuntimeError(
+                                "Ranked proposal tasks must not record global worker continuation."
+                            )
+                        return self.proposal_assessment_runner(
+                            role="reviewer",
+                            candidate_verification_pairs=presentation_pairs,
+                            task_dir=round_dir / task_id,
+                            prompt_suffix=prompt,
+                            env_extra=task_runtime.idea_tool_env(),
                         )
-                    ),
-                )
-            finally:
-                task_runtime.clear_idea_tool_context()
-            if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
-                raise RuntimeError("Ranked reviewer task ended without a recorded review.")
 
-        raise_if_hitl_run_stop_requested()
-        boundary = boundary_validator()
-        if not bool(boundary.get("valid")):
-            raise RuntimeError(
-                "Ranked reviewer stage changed its shared read-only boundary: "
-                + "; ".join(str(issue) for issue in boundary.get("issues", []))
+                    _result, finish = run_worker_with_replacements(
+                        runtime=task_runtime,
+                        launch_worker=launch_reviewer,
+                        prompt=task_prompt,
+                        log_prefix=task_id,
+                        phase="review",
+                        worker_name=f"Proposal reviewer {task_id}",
+                        record_continuation=False,
+                        result_after_exit=lambda result: (
+                            task_runtime.ranked_task_result_after_worker_exit(
+                                result,
+                                replacement_prompt=task_prompt,
+                                worker_name=f"Proposal reviewer {task_id}",
+                            )
+                        ),
+                    )
+                finally:
+                    task_runtime.clear_idea_tool_context()
+                if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
+                    raise RuntimeError(
+                        "Ranked reviewer task ended without a recorded review."
+                    )
+            require_boundary("Ranked reviewer stage")
+            round_state = state.advance_proposal_round(
+                **identity,
+                expected_stage="reviewing",
             )
-        round_state = state.advance_proposal_round(
-            **identity,
-            expected_stage="reviewing",
-        )
+        elif stage_order[str(round_state.get("stage"))] > stage_order["reviewing"]:
+            validate_completed_role("reviewer", int(config.reviewer_count))
+            require_boundary("Ranked reviewer recovery")
+            round_state = state.proposal_round_snapshot(**identity)
+
+        dependencies = proposal_round_results(round_state)
         aggregate = aggregate_proposal_round_reviews(
             round_state,
             owner.log.records(),
         )
+        if round_state.get("stage") == "selected":
+            selection = round_state.get("selection")
+            if not isinstance(selection, dict):
+                raise RuntimeError("Selected proposal round has no durable manager choice.")
+            decision_round = dict(round_state)
+            decision_round["stage"] = "manager_selection"
+            expected_decision = proposal_selection_decision_record(
+                round_state=decision_round,
+                aggregate=aggregate,
+                parent_node_id=parent_sha,
+            )
+            decision_id = str(selection.get("decision_idea_id") or "").strip()
+            matches = [
+                record
+                for record in owner.log.records()
+                if str(record.get("idea_id", "")).strip() == decision_id
+            ]
+            if len(matches) != 1 or HitlIdeaLog.logical_payload(
+                matches[0]
+            ) != HitlIdeaLog.logical_payload(expected_decision):
+                raise RuntimeError(
+                    "Selected proposal references an invalid manager decision idea."
+                )
+            return round_state, aggregate
+
         manager = owner.manager
         begin_selection = getattr(manager, "begin_proposal_selection", None)
         if not callable(begin_selection):
@@ -4515,12 +4668,23 @@ class HitlAutoResearchController:
 
         runtime = self._proposal_hitl_runtime()
         state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        preparation_attempt_id = (
+            str(action.get("attempt_id", "")).strip()
+            if isinstance(action, dict)
+            else ""
+        )
+        boundary_validator = self._capture_ranked_proposal_boundary(
+            parent_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+        )
         while True:
             raise_if_hitl_run_stop_requested()
             round_state, _aggregate = self._run_serial_independent_ranked_proposal_round(
                 parent_sha=parent_sha,
                 attempt_dir=attempt_dir,
                 attempt_history=attempt_history,
+                boundary_validator=boundary_validator,
             )
             if round_state.get("stage") == "proposing":
                 continue
@@ -4536,16 +4700,6 @@ class HitlAutoResearchController:
             if not proposal_idea_id or not selection_decision_id:
                 raise RuntimeError("Selected proposal is missing its durable manager decision.")
 
-            action = state.snapshot().get("next_autoresearch_action")
-            preparation_attempt_id = (
-                str(action.get("attempt_id", "")).strip()
-                if isinstance(action, dict)
-                else ""
-            )
-            boundary_validator = self._capture_ranked_proposal_boundary(
-                parent_sha=parent_sha,
-                preparation_attempt_id=preparation_attempt_id,
-            )
             boundary = boundary_validator()
             if not bool(boundary.get("valid")):
                 raise RuntimeError(
