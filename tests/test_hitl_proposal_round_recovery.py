@@ -15,6 +15,7 @@ from core.hitl import HitlIdeaLog, HitlRuntime, HitlValidationError  # noqa: E40
 from core.hitl_autoresearch import (  # noqa: E402
     HitlAutoResearchController,
     _begin_hitl_autoresearch_attempt_state,
+    _restore_prepared_checkpoint,
     recover_interrupted_hitl_attempt_if_needed,
 )
 from core.hitl_frontier import HitlFrontierStore  # noqa: E402
@@ -209,6 +210,112 @@ def test_ranked_recovery_fails_closed_for_missing_prepared_checkpoint(tmp_path):
 
     with pytest.raises(RuntimeError, match="missing prepared workspace checkpoint"):
         recover_interrupted_hitl_attempt_if_needed(tmp_path)
+
+
+def test_ranked_round_binds_live_fingerprint_after_prepared_restore(
+    tmp_path,
+    fake_hitl_tool_servers,
+):
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("baseline\n", encoding="utf-8")
+    checkpoint = CheckpointManager(tmp_path).create_checkpoint("ranked restored root")
+    frontier = HitlFrontierStore(tmp_path)
+    frontier.initialize_root(
+        node_sha=checkpoint.sha,
+        plan_text="plan\n",
+        objective_score={"results": {}},
+        reason_for_acceptance="root",
+    )
+    history_root = tmp_path / "logs" / "experiment-autoresearch"
+    frontier.configure_autoresearch_run(
+        history_root=history_root,
+        lineage_source_sha=checkpoint.sha,
+        last_iteration=0,
+    )
+    whiteboard = hitl_whiteboard_path(tmp_path)
+    whiteboard.parent.mkdir(parents=True, exist_ok=True)
+    whiteboard.write_text('{"tips": []}\n', encoding="utf-8")
+    attempt_dir = AttemptHistoryManager(history_root, "idea").next_attempt_dir(
+        checkpoint.sha
+    )
+    state = _resolved_preparation(
+        tmp_path,
+        parent_sha=checkpoint.sha,
+        preparation_attempt_id="attempt_3",
+        proposal_base_sha=checkpoint.sha,
+    )
+    preparation_fingerprint = state.snapshot()["next_autoresearch_action"][
+        "workspace_fingerprint"
+    ]
+
+    baseline.write_text("temporary change\n", encoding="utf-8")
+    assert _restore_prepared_checkpoint(
+        tmp_path,
+        parent_sha=checkpoint.sha,
+        prepared_sha=checkpoint.sha,
+    ) == checkpoint.sha
+    assert baseline.read_text(encoding="utf-8") == "baseline\n"
+    _begin_hitl_autoresearch_attempt_state(tmp_path, attempt_dir)
+    runtime = HitlRuntime(
+        tmp_path,
+        "experiment_runner",
+        channel=object(),
+        manager=object(),
+        use_hitl_autoresearch_whiteboard=True,
+    )
+    controller = HitlAutoResearchController(
+        idea={"idea": {"title": "Ranked restored boundary"}},
+        idea_id="idea",
+        work_dir=tmp_path,
+        history_root=history_root,
+        proposal_generator=lambda *_args, **_kwargs: {},
+        scorer=lambda *_args, **_kwargs: {},
+        checkpoint_manager=object(),
+        history_manager=object(),
+        hitl_runtime=runtime,
+        proposal_mode_config=ProposalModeConfig(
+            mode="independent_ranked",
+            proposer_count=2,
+            reviewer_count=2,
+        ),
+    )
+    restored_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+        tmp_path,
+        scope=state.workspace_guard_scope(),
+    )
+    assert restored_fingerprint != preparation_fingerprint
+
+    round_state = controller._begin_or_resume_ranked_proposal_round(
+        parent_sha=checkpoint.sha,
+        attempt_dir=attempt_dir,
+    )
+
+    assert round_state["stage"] == "proposing"
+    action = state.snapshot()["next_autoresearch_action"]
+    assert action["workspace_fingerprint"] == restored_fingerprint
+    assert action["workspace_fingerprint"] != preparation_fingerprint
+    assert controller._capture_ranked_proposal_boundary(
+        parent_sha=checkpoint.sha,
+        preparation_attempt_id="attempt_3",
+    )()["valid"] is True
+
+    baseline.write_text("late mutation\n", encoding="utf-8")
+    resumed = controller._begin_or_resume_ranked_proposal_round(
+        parent_sha=checkpoint.sha,
+        attempt_dir=attempt_dir,
+    )
+    assert resumed == round_state
+    assert state.snapshot()["next_autoresearch_action"][
+        "workspace_fingerprint"
+    ] == restored_fingerprint
+    with pytest.raises(
+        RuntimeError,
+        match="workspace no longer matches its approved boundary",
+    ):
+        controller._capture_ranked_proposal_boundary(
+            parent_sha=checkpoint.sha,
+            preparation_attempt_id="attempt_3",
+        )
 
 
 class _SelectionManager:

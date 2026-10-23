@@ -4079,6 +4079,62 @@ class HitlAutoResearchController:
 
         return require_unchanged
 
+    def _begin_or_resume_ranked_proposal_round(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Dict[str, Any]:
+        """Open round one on the current live workspace, or resume its durable round."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        config = self.proposal_mode_config
+        if config.mode != INDEPENDENT_RANKED_PROPOSAL_MODE:
+            raise RuntimeError("Ranked proposer stage requires independent-ranked mode.")
+        if config.proposer_count is None or config.reviewer_count is None:
+            raise RuntimeError("Ranked proposer stage requires proposer and reviewer counts.")
+
+        owner = self._proposal_hitl_runtime()
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict):
+            raise RuntimeError("Ranked proposer stage has no proposal preparation state.")
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        existing_round = action.get("proposal_round")
+        if existing_round is not None:
+            if not isinstance(existing_round, dict):
+                raise RuntimeError("Ranked proposal round state is invalid.")
+            round_ordinal = existing_round.get("round_ordinal")
+            if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
+                raise RuntimeError("Ranked proposal round state is invalid.")
+            return state.proposal_round_snapshot(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+                round_ordinal=round_ordinal,
+            )
+
+        idea_numbers = [
+            int(idea_id[1:])
+            for record in owner.log.records()
+            if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+            and idea_id[1:].isdigit()
+        ]
+        workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=action.get("workspace_fingerprint_scope"),
+        )
+        return state.begin_proposal_round(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+            workspace_fingerprint=workspace_fingerprint,
+            base_idea_number=max(idea_numbers, default=0),
+            proposer_count=config.proposer_count,
+            reviewer_count=config.reviewer_count,
+        )
+
     def _new_ranked_task_runtime(self, task_id: str) -> HitlRuntime:
         """Create one isolated tool runtime for one ranked proposal task."""
 
@@ -4288,31 +4344,15 @@ class HitlAutoResearchController:
         if not isinstance(action, dict):
             raise RuntimeError("Ranked proposer stage has no proposal preparation state.")
         preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        round_state = self._begin_or_resume_ranked_proposal_round(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
         if boundary_validator is None:
             boundary_validator = self._capture_ranked_proposal_boundary(
                 parent_sha=parent_sha,
                 preparation_attempt_id=preparation_attempt_id,
             )
-        existing_round = action.get("proposal_round")
-        if isinstance(existing_round, dict):
-            base_idea_number = existing_round.get("base_idea_number")
-        else:
-            idea_numbers = [
-                int(idea_id[1:])
-                for record in owner.log.records()
-                if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
-                and idea_id[1:].isdigit()
-            ]
-            base_idea_number = max(idea_numbers, default=0)
-        round_state = state.begin_proposal_round(
-            parent_node_sha=parent_sha,
-            preparation_attempt_id=preparation_attempt_id,
-            candidate_attempt_id=attempt_dir.name,
-            workspace_fingerprint=str(action.get("workspace_fingerprint", "")),
-            base_idea_number=base_idea_number,
-            proposer_count=config.proposer_count,
-            reviewer_count=config.reviewer_count,
-        )
         identity = {
             "parent_node_sha": parent_sha,
             "preparation_attempt_id": preparation_attempt_id,
@@ -4750,6 +4790,10 @@ class HitlAutoResearchController:
             str(action.get("attempt_id", "")).strip()
             if isinstance(action, dict)
             else ""
+        )
+        self._begin_or_resume_ranked_proposal_round(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
         )
         boundary_validator = self._capture_ranked_proposal_boundary(
             parent_sha=parent_sha,

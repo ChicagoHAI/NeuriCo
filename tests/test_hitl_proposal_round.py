@@ -1978,6 +1978,11 @@ def _prepare_selected_ranked_round(tmp_path, *, hitl_mode="auto"):
     controller = HitlAutoResearchController.__new__(HitlAutoResearchController)
     controller.work_dir = tmp_path
     controller.hitl_runtime = runtime
+    controller.proposal_mode_config = ProposalModeConfig(
+        mode="independent_ranked",
+        proposer_count=2,
+        reviewer_count=2,
+    )
     selection = state.record_proposal_selection_choice(
         **identity,
         choice="select",
