@@ -245,4 +245,3 @@ def test_terminal_status_displays_ranked_panel_counts():
     )
 
     assert "Proposals: Independent ranked (3 proposers, 4 reviewers)" in rendered
-
