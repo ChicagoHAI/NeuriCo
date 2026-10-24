@@ -27,6 +27,10 @@ from core.hitl_paths import (
     hitl_state_dir,
     hitl_stop_request_path,
 )
+from core.hitl_proposal_round import (
+    INDEPENDENT_RANKED_PROPOSAL_MODE,
+    normalize_proposal_mode_config,
+)
 from core.hitl_whiteboard import hitl_whiteboard_path
 from core.whiteboard import MAX_TIP_CONTENT_CHARS
 
@@ -283,6 +287,97 @@ class HitlWorkspaceView:
         path = self.work_dir / ".neurico" / "pipeline_state.json"
         return _read_object(path, "pipeline state") if path.exists() else {}
 
+    @staticmethod
+    def _ranked_proposal_status(next_action: Dict[str, Any]) -> Dict[str, Any]:
+        """Derive interface progress from the authoritative nested round."""
+        round_state = next_action.get("proposal_round")
+        if (
+            next_action.get("kind") != "prepare_proposal"
+            or next_action.get("status") != "resolved"
+            or not isinstance(round_state, dict)
+        ):
+            return {}
+        try:
+            config = normalize_proposal_mode_config(
+                INDEPENDENT_RANKED_PROPOSAL_MODE,
+                proposer_count=round_state.get("proposer_count"),
+                reviewer_count=round_state.get("reviewer_count"),
+            )
+        except ValueError as exc:
+            raise HitlWorkspaceViewError(
+                f"Invalid ranked proposal round configuration: {exc}"
+            ) from exc
+        tasks = round_state.get("tasks")
+        if not isinstance(tasks, dict):
+            raise HitlWorkspaceViewError("Ranked proposal round tasks must be an object.")
+
+        stage = str(round_state.get("stage", "")).strip()
+        stages = {
+            "proposing": (
+                "proposer",
+                int(config.proposer_count or 0),
+                "Generating proposals",
+                "Independent proposers are developing candidate experiments.",
+                "Verification begins after every proposal is complete.",
+            ),
+            "verifying": (
+                "verifier",
+                int(config.proposer_count or 0),
+                "Verifying proposals",
+                "Independent verifiers are assessing the candidate experiments.",
+                "Ranking begins after every verification is complete.",
+            ),
+            "reviewing": (
+                "reviewer",
+                int(config.reviewer_count or 0),
+                "Ranking proposals",
+                "Independent reviewers are ranking the verified candidates.",
+                "The rankings are aggregated after every review is complete.",
+            ),
+        }
+        if stage in stages:
+            role, total, label, detail, next_step = stages[stage]
+            completed = sum(
+                1
+                for task in tasks.values()
+                if isinstance(task, dict)
+                and task.get("role") == role
+                and bool(str(task.get("result_idea_id") or "").strip())
+            )
+        elif stage == "manager_selection":
+            total = 1
+            completed = 1 if isinstance(round_state.get("selection"), dict) else 0
+            label = "Recording proposal selection" if completed else "Selecting proposal"
+            detail = (
+                "The manager's proposal selection is being recorded."
+                if completed
+                else "The manager is selecting from the aggregated ranking."
+            )
+            next_step = "The selected proposal enters the existing admission path."
+        elif stage == "selected":
+            total = completed = 1
+            label = "Proposal selected"
+            detail = "The selected proposal is entering the existing admission path."
+            next_step = "The existing proposal workflow continues automatically."
+        else:
+            raise HitlWorkspaceViewError(
+                f"Ranked proposal round has an invalid stage: {stage or '<missing>'}."
+            )
+        return {
+            "proposal_mode": INDEPENDENT_RANKED_PROPOSAL_MODE,
+            "proposer_count": config.proposer_count,
+            "reviewer_count": config.reviewer_count,
+            "proposal_round_stage": stage,
+            "proposal_progress": {
+                "completed": completed,
+                "total": total,
+            },
+            "title": label,
+            "phase_label": f"{label} ({completed}/{total})",
+            "detail": detail,
+            "next_action": next_step,
+        }
+
     def _live_status(
         self,
         runtime: Dict[str, Any],
@@ -317,6 +412,7 @@ class HitlWorkspaceView:
         continuation = continuation if isinstance(continuation, dict) else {}
         next_action = runtime.get("next_autoresearch_action")
         next_action = next_action if isinstance(next_action, dict) else {}
+        ranked_proposal = self._ranked_proposal_status(next_action)
         frontier_transition = runtime.get("frontier_decision_transition")
         frontier_transition = frontier_transition if isinstance(frontier_transition, dict) else {}
         root_transition = runtime.get("initial_root_publication_transition")
@@ -388,7 +484,7 @@ class HitlWorkspaceView:
             visible_stage = stage_label if display_stage is None else display_stage
             visible_phase = phase_label if display_phase is None else display_phase
             label = " · ".join(part for part in (visible_stage, visible_phase) if part) or title
-            return {
+            result = {
                 "state": state,
                 "active": active,
                 "can_launch": not active,
@@ -419,6 +515,20 @@ class HitlWorkspaceView:
                 "next_action": next_step,
                 "reason": str(record.get("reason", "")) if isinstance(record, dict) else "",
             }
+            if ranked_proposal:
+                result.update(
+                    {
+                        key: ranked_proposal[key]
+                        for key in (
+                            "proposal_mode",
+                            "proposer_count",
+                            "reviewer_count",
+                            "proposal_round_stage",
+                            "proposal_progress",
+                        )
+                    }
+                )
+            return result
 
         human_request = unresolved and bool(
             pending.get("human_request_record_id")
@@ -480,6 +590,8 @@ class HitlWorkspaceView:
         def durable_boundary_labels() -> tuple[str, str]:
             if unresolved:
                 return pending_labels()
+            if ranked_proposal:
+                return "Experiment", str(ranked_proposal["phase_label"])
             if action_status in {"pending", "decision_recorded"}:
                 kind = str(next_action.get("kind", "")).strip()
                 if kind == "prune_frontier":
@@ -512,6 +624,7 @@ class HitlWorkspaceView:
 
         has_pending_work = bool(
             unresolved
+            or ranked_proposal
             or action_status in {"pending", "decision_recorded"}
             or frontier_status not in {"", "completed"}
             or root_status not in {"", "completed"}
@@ -540,6 +653,7 @@ class HitlWorkspaceView:
                     display_phase="",
                 )
             if launch_state in {"starting", "running"}:
+                interrupted_stage, interrupted_phase = durable_boundary_labels()
                 return projected(
                     "interrupted",
                     "Research interrupted",
@@ -547,8 +661,12 @@ class HitlWorkspaceView:
                     next_step="Continue from the latest recoverable progress.",
                     record=launch_status,
                     active=False,
-                    display_stage="Interrupted",
-                    display_phase="",
+                    display_stage=(
+                        interrupted_stage if ranked_proposal else "Interrupted"
+                    ),
+                    display_phase=(
+                        f"{interrupted_phase} interrupted" if ranked_proposal else ""
+                    ),
                 )
             if launch_state == "stopped":
                 exhausted = launch_status.get("reason") == "budget_exhausted"
@@ -632,6 +750,8 @@ class HitlWorkspaceView:
                     record = cleanup
                 elif continuation_status:
                     record = continuation
+                else:
+                    record = next_action
                 paused_stage, paused_phase = durable_boundary_labels()
                 return projected(
                     "paused",
@@ -763,6 +883,19 @@ class HitlWorkspaceView:
                 record=pending,
                 display_stage=review_stage,
                 display_phase=review_phase,
+            )
+
+        if ranked_proposal:
+            return projected(
+                "saving"
+                if ranked_proposal["proposal_round_stage"] == "selected"
+                else "researching",
+                str(ranked_proposal["title"]),
+                str(ranked_proposal["detail"]),
+                next_step=str(ranked_proposal["next_action"]),
+                record=next_action,
+                display_stage="Experiment",
+                display_phase=str(ranked_proposal["phase_label"]),
             )
 
         if action_status in {"pending", "decision_recorded"}:
@@ -1110,14 +1243,20 @@ class HitlWorkspaceView:
         log = HitlIdeaLog(self.work_dir)
         records = log.records()
         seen: set[str] = set()
+        validated_records: List[Dict[str, Any]] = []
         for record in records:
             try:
-                HitlIdeaLog.validate(record, existing_ids=seen)
+                HitlIdeaLog.validate(
+                    record,
+                    existing_ids=seen,
+                    existing_records=validated_records,
+                )
             except HitlValidationError as exc:
                 raise HitlWorkspaceViewError(
                     f"Invalid finalized HITL idea {record.get('idea_id', '<unknown>')}: {exc}"
                 ) from exc
             seen.add(str(record["idea_id"]))
+            validated_records.append(record)
         return records
 
     def _frontier(self) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:

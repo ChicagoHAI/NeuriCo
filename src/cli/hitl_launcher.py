@@ -24,6 +24,11 @@ from core.hitl_lock import (
 from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_mode import normalize_hitl_mode
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path
+from core.hitl_proposal_round import (
+    INDEPENDENT_RANKED_PROPOSAL_MODE,
+    normalize_proposal_mode_config,
+    require_managed_autoresearch_proposal_mode,
+)
 from core.hitl_run_control import request_hitl_run_stop
 from core.hitl_util import atomic_write_json, utc_now
 from core.hitl_workspace_view import HitlWorkspaceView
@@ -125,6 +130,16 @@ class HitlRunController:
             if style not in {"auto", "neurips", "icml", "acl"}:
                 raise ValueError("Choose a supported paper style.")
         hitl_mode = normalize_hitl_mode(payload.get("hitl_mode")).value
+        proposal_mode_config = require_managed_autoresearch_proposal_mode(
+            normalize_proposal_mode_config(
+                payload.get("proposal_mode"),
+                proposer_count=payload.get("proposer_count"),
+                reviewer_count=payload.get("reviewer_count"),
+            ),
+            managed_autoresearch=(
+                operation == "research" and workflow == "autoresearch"
+            ),
+        )
 
         with self._lock:
             external_owner = active_hitl_workspace_run(self.work_dir)
@@ -188,7 +203,7 @@ class HitlRunController:
                 mode = "continue" if continuation else "fresh"
             request_id = uuid.uuid4().hex
             request = {
-                "version": 4,
+                "version": 5,
                 "request_id": request_id,
                 "idea_id": self.idea_id,
                 "work_dir": str(self.work_dir.resolve()),
@@ -201,9 +216,13 @@ class HitlRunController:
                 "operation": operation,
                 "workflow": workflow,
                 "hitl_mode": hitl_mode,
+                "proposal_mode": proposal_mode_config.mode,
                 "interface": self.interface,
                 "created_at": utc_now(),
             }
+            if proposal_mode_config.mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
+                request["proposer_count"] = proposal_mode_config.proposer_count
+                request["reviewer_count"] = proposal_mode_config.reviewer_count
             if operation == "construct_baseline":
                 request["write_paper"] = False
                 request["paper_style"] = None

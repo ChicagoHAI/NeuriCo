@@ -36,6 +36,14 @@ from core.hitl_lock import (
     select_hitl_manager_provider,
 )
 from core.hitl_manager_react import HitlManager
+from core.hitl_proposal_round import (
+    INDEPENDENT_RANKED_PROPOSAL_MODE,
+    MAX_PROPOSER_COUNT,
+    MAX_REVIEWER_COUNT,
+    MIN_PROPOSER_COUNT,
+    MIN_REVIEWER_COUNT,
+    SINGLE_PROPOSAL_MODE,
+)
 from core.hitl_runtime_state import HitlResolutionReplyStaleError
 
 _RESOLUTION_REPLY = "resolution_reply"
@@ -1018,9 +1026,35 @@ class HitlTerminalChannel(UserChannel):
                 "Auto [Y] (Y/n): ", default=True, cancellable=True
             )
             hitl_mode = "auto" if auto else "full"
+            proposal_mode = SINGLE_PROPOSAL_MODE
+            proposer_count = None
+            reviewer_count = None
             iterations = 1
             time_limit_seconds = None
             if operation == "research" and workflow == "autoresearch":
+                proposal_choice = self._read_choice(
+                    "Proposals [single] (single/ranked): ",
+                    "single",
+                    {"single", "ranked"},
+                    "Choose single or ranked.",
+                    cancellable=True,
+                )
+                if proposal_choice == "ranked":
+                    proposal_mode = INDEPENDENT_RANKED_PROPOSAL_MODE
+                    proposer_count = self._read_integer(
+                        "Proposers [3] (2-5): ",
+                        3,
+                        minimum=MIN_PROPOSER_COUNT,
+                        maximum=MAX_PROPOSER_COUNT,
+                        cancellable=True,
+                    )
+                    reviewer_count = self._read_integer(
+                        "Reviewers [3] (2-9): ",
+                        3,
+                        minimum=MIN_REVIEWER_COUNT,
+                        maximum=MAX_REVIEWER_COUNT,
+                        cancellable=True,
+                    )
                 iterations = self._read_integer(
                     "Iterations [2] (1-100): ",
                     2,
@@ -1075,6 +1109,16 @@ class HitlTerminalChannel(UserChannel):
                         {
                             "iterations": iterations,
                             "time_limit_seconds": time_limit_seconds,
+                            "proposal_mode": proposal_mode,
+                            **(
+                                {
+                                    "proposer_count": proposer_count,
+                                    "reviewer_count": reviewer_count,
+                                }
+                                if proposal_mode
+                                == INDEPENDENT_RANKED_PROPOSAL_MODE
+                                else {}
+                            ),
                         }
                         if operation == "research" and workflow == "autoresearch"
                         else {}

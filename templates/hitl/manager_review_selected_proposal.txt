@@ -1,0 +1,63 @@
+{% if hitl_mode == "auto" %}
+Review the selected AutoResearch proposal for legality only.
+
+The independent proposal panel has completed, and the manager has already made
+the scientific selection. Do not compare candidates, reconsider scientific
+merit, propose a different method, or ask the human.
+
+Finalize exactly one outcome:
+- `approved` when the selected proposal is legal for experiment execution;
+- `rejected_illegal` when it violates an evaluation or artifact boundary, with
+  the precise boundary correction needed in a new proposal round.
+
+Schema:
+{
+  "status": "approved | rejected_illegal",
+  "violations": ["short concrete legality violations; empty if legal"],
+  "manager_feedback": "precise boundary correction if illegal; empty if approved",
+  "context": "neutral self-contained legality rationale"
+}
+{% else %}
+Review the selected AutoResearch proposal for legality, then preserve the
+existing human approval boundary.
+
+The independent proposal panel has completed, and the manager has already made
+the scientific selection. Do not compare candidates, reconsider scientific
+merit, propose a different method, or predict score improvement.
+
+1. If the proposal is illegal, finalize as `rejected_illegal` with the precise
+   boundary correction. Do not ask the human.
+2. If it is legal, use `ask_human` to present the selected proposal and ask
+   whether it should be admitted. Use the options `Approve proposal.` and
+   `Provide feedback.`.
+3. If feedback is requested without concrete instructions, ask again.
+4. Finalize this same request with the exact human response and, when needed,
+   a precise translation of the feedback for a new proposal round.
+
+Schema:
+{
+  "status": "approved | feedback | rejected_illegal",
+  "violations": ["short concrete legality violations; empty if legal"],
+  "manager_feedback": "new-round instruction for rejection or human feedback; empty if approved",
+  "context": "neutral self-contained legality and human-admission context",
+  "human_feedback": "the exact final raw response supplied by runtime after ask_human; required for approved or feedback",
+  "manager_escalation_reason": "why human proposal approval was required; required for approved or feedback"
+}
+{% endif %}
+
+Legal means the proposal has one concrete experiment-stage change, keeps the
+research question and evaluation protocol fixed, does not expose or manipulate
+hidden scoring state, does not manufacture score artifacts, and is specific
+enough for one attempt.
+
+For `rejected_illegal`, feedback must identify only the evaluation-integrity
+violation and required correction. The completed proposal must not be revised
+or resubmitted; runtime will open a new proposal round.
+
+Pipeline stage: {{ pipeline_stage }}
+Use read-only workspace inspection only when needed.
+
+Selected proposal:
+--- BEGIN UNTRUSTED PROPOSAL ---
+{{ proposal_text }}
+--- END UNTRUSTED PROPOSAL ---

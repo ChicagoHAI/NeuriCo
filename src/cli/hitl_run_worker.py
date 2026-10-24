@@ -20,6 +20,11 @@ from core.config_loader import ConfigLoader  # noqa: E402
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path  # noqa: E402
 from core.hitl_lock import HitlWorkspaceRunActiveError, hitl_workspace_run_lease  # noqa: E402
 from core.hitl_mode import normalize_hitl_mode  # noqa: E402
+from core.hitl_proposal_round import (  # noqa: E402
+    INDEPENDENT_RANKED_PROPOSAL_MODE,
+    normalize_proposal_mode_config,
+    require_managed_autoresearch_proposal_mode,
+)
 from core.hitl_run_control import (  # noqa: E402
     HitlRunStopControl,
     HitlRunStopRequested,
@@ -63,7 +68,7 @@ def _claim_request(path: Path) -> Path:
 
 def _load_request(path: Path) -> Dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or value.get("version") not in {1, 2, 3, 4}:
+    if not isinstance(value, dict) or value.get("version") not in {1, 2, 3, 4, 5}:
         raise ValueError("Unsupported HITL launch request.")
     required = (
         "request_id",
@@ -84,10 +89,12 @@ def _load_request(path: Path) -> Dict[str, Any]:
         raise ValueError("HITL launch request has an unsupported source interface.")
     if value["version"] == 2 and not str(value.get("hitl_mode", "")).strip():
         raise ValueError("HITL launch request is missing its HITL mode.")
-    if value["version"] in {3, 4} and not str(value.get("workflow", "")).strip():
+    if value["version"] in {3, 4, 5} and not str(value.get("workflow", "")).strip():
         raise ValueError("HITL launch request is missing its research workflow.")
-    if value["version"] == 4 and not str(value.get("operation", "")).strip():
+    if value["version"] in {4, 5} and not str(value.get("operation", "")).strip():
         raise ValueError("HITL launch request is missing its operation.")
+    if value["version"] == 5 and not str(value.get("proposal_mode", "")).strip():
+        raise ValueError("HITL launch request is missing its proposal mode.")
     value["workflow"] = str(value.get("workflow", "autoresearch")).strip().lower()
     if value["workflow"] not in {"ordinary", "autoresearch"}:
         raise ValueError("HITL launch request has an unsupported research workflow.")
@@ -105,6 +112,23 @@ def _load_request(path: Path) -> Dict[str, Any]:
     ):
         raise ValueError("A run time limit is supported only for managed AutoResearch.")
     value["hitl_mode"] = normalize_hitl_mode(value.get("hitl_mode")).value
+    proposal_mode_config = require_managed_autoresearch_proposal_mode(
+        normalize_proposal_mode_config(
+            value.get("proposal_mode"),
+            proposer_count=value.get("proposer_count"),
+            reviewer_count=value.get("reviewer_count"),
+        ),
+        managed_autoresearch=(
+            value["operation"] == "research" and value["workflow"] == "autoresearch"
+        ),
+    )
+    value["proposal_mode"] = proposal_mode_config.mode
+    if proposal_mode_config.mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
+        value["proposer_count"] = proposal_mode_config.proposer_count
+        value["reviewer_count"] = proposal_mode_config.reviewer_count
+    else:
+        value.pop("proposer_count", None)
+        value.pop("reviewer_count", None)
 
     identity = _REQUEST_NAME.fullmatch(path.name)
     if identity is None:
@@ -232,6 +256,11 @@ def main() -> int:
         work_dir = Path(str(request["work_dir"])).resolve()
         hitl_mode = normalize_hitl_mode(request.get("hitl_mode")).value
         request["hitl_mode"] = hitl_mode
+        proposal_mode_config = normalize_proposal_mode_config(
+            request.get("proposal_mode"),
+            proposer_count=request.get("proposer_count"),
+            reviewer_count=request.get("reviewer_count"),
+        )
         project_root = PROJECT_ROOT.resolve()
         _load_project_environment(project_root)
         request_id = str(request["request_id"])
@@ -302,6 +331,7 @@ def main() -> int:
                     "paper_style": request.get("paper_style") or None,
                     "hitl_mode": hitl_mode,
                     "hitl_work_dir": work_dir,
+                    "proposal_mode_config": proposal_mode_config,
                 }
                 if request.get("operation") == "construct_baseline":
                     run_args["hitl_construct_baseline"] = str(request["interface"])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -69,10 +70,21 @@ def invoke_proposal_generator(
     attempt_history: list[Dict[str, Any]],
     prompt_suffix: str = "",
     env_extra: Optional[Dict[str, str]] = None,
+    launch_dir: Optional[Path] = None,
+    candidate_recording: bool = False,
+    cancel_event: Optional[threading.Event] = None,
+    output_prefix: str = "",
 ) -> Any:
     args = (idea, work_dir, parent_sha, attempt_dir, attempt_history)
     kwargs: Dict[str, Any] = {}
-    if prompt_suffix or env_extra:
+    if (
+        prompt_suffix
+        or env_extra
+        or launch_dir is not None
+        or candidate_recording
+        or cancel_event is not None
+        or output_prefix
+    ):
         signature = inspect.signature(generator)
         accepts_kwargs = any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD
@@ -92,6 +104,34 @@ def invoke_proposal_generator(
                     "accepts env_extra."
                 )
             kwargs["env_extra"] = env_extra
+        if launch_dir is not None:
+            if "launch_dir" not in signature.parameters and not accepts_kwargs:
+                raise TypeError(
+                    "Ranked proposal generation requires a proposal generator that "
+                    "accepts launch_dir."
+                )
+            kwargs["launch_dir"] = launch_dir
+        if candidate_recording:
+            if "candidate_recording" not in signature.parameters and not accepts_kwargs:
+                raise TypeError(
+                    "Ranked proposal generation requires a proposal generator that "
+                    "accepts candidate_recording."
+                )
+            kwargs["candidate_recording"] = True
+        if cancel_event is not None:
+            if "cancel_event" not in signature.parameters and not accepts_kwargs:
+                raise TypeError(
+                    "Parallel ranked proposal generation requires a proposal generator "
+                    "that accepts cancel_event."
+                )
+            kwargs["cancel_event"] = cancel_event
+        if output_prefix:
+            if "output_prefix" not in signature.parameters and not accepts_kwargs:
+                raise TypeError(
+                    "Parallel ranked proposal generation requires a proposal generator "
+                    "that accepts output_prefix."
+                )
+            kwargs["output_prefix"] = output_prefix
     return generator(*args, **kwargs)
 
 

@@ -22,7 +22,7 @@ import threading
 import secrets
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_mode import HitlMode, normalize_hitl_mode
@@ -49,7 +49,12 @@ PIPELINE_STAGES = {
     "scorer",
     "paper_writer",
 }
-HITL_WORKER_ACTORS = PIPELINE_STAGES | {"autoresearch_proposer", "comment_handler"}
+HITL_WORKER_ACTORS = PIPELINE_STAGES | {
+    "autoresearch_proposer",
+    "comment_handler",
+    "proposal_verifier",
+    "proposal_reviewer",
+}
 HITL_STAGES = {"plan", "execution", "proposal", "review"}
 LEVELS = {"A", "B", "C"}
 IDEA_TYPES = {"decision", "evidence", "proposal"}
@@ -63,7 +68,47 @@ _WORKER_COMMAND_MODULES = {
     "hitl-finish-phase": "hitl_finish_phase.py",
     "hitl-resume-worker-request": "hitl_resume_worker_request.py",
     "hitl-submit-proposal": "hitl_submit_proposal.py",
+    "hitl-finish-proposal-verification": "hitl_finish_proposal_verification.py",
+    "hitl-finish-proposal-review": "hitl_finish_proposal_review.py",
     "view_current_frontier": "hitl_view_current_frontier.py",
+}
+_RANKED_COMMAND_PROFILES = {
+    "proposal_candidate": {
+        "role": "proposer",
+        "actor": "autoresearch_proposer",
+        "hitl_stage": "proposal",
+        "round_stage": "proposing",
+        "commands": {
+            "hitl-view-ideas",
+            "hitl-report-idea",
+            "view_current_frontier",
+            "hitl-submit-proposal",
+        },
+    },
+    "proposal_verifier": {
+        "role": "verifier",
+        "actor": "proposal_verifier",
+        "hitl_stage": "review",
+        "round_stages": frozenset({"proposing", "verifying"}),
+        "commands": {
+            "hitl-view-ideas",
+            "hitl-report-idea",
+            "view_current_frontier",
+            "hitl-finish-proposal-verification",
+        },
+    },
+    "proposal_reviewer": {
+        "role": "reviewer",
+        "actor": "proposal_reviewer",
+        "hitl_stage": "review",
+        "round_stage": "reviewing",
+        "commands": {
+            "hitl-view-ideas",
+            "hitl-report-idea",
+            "view_current_frontier",
+            "hitl-finish-proposal-review",
+        },
+    },
 }
 PROPOSAL_KINDS = {"exploitation", "exploration"}
 EVIDENCE_IDEA_CATEGORIES = {
@@ -72,8 +117,11 @@ EVIDENCE_IDEA_CATEGORIES = {
     "implementation_fact",
     "experiment_result",
     "constraint_or_risk",
+    "proposal_verification",
+    "proposal_review",
     "other",
 }
+RANKED_RESULT_EVIDENCE_CATEGORIES = {"proposal_verification", "proposal_review"}
 DECISION_IDEA_CATEGORIES = {
     "dataset_choice",
     "search_strategy",
@@ -105,6 +153,7 @@ IDEA_RECORD_FIELD_ORDER = [
     "actor",
     "parent_node_id",
     "attempt_id",
+    "proposal_task_id",
     "premises",
     "worker_context",
     "context",
@@ -114,6 +163,7 @@ IDEA_RECORD_FIELD_ORDER = [
     "proposal",
     "decision_needed",
     "evidence",
+    "ranking",
     "options",
     "decision",
     "human_feedback",
@@ -122,11 +172,24 @@ IDEA_RECORD_FIELD_ORDER = [
     "worker_escalation_reason",
     "manager_escalation_reason",
 ]
-RUNTIME_PROVENANCE_FIELDS = ("parent_node_id", "attempt_id")
+RUNTIME_PROVENANCE_FIELDS = ("parent_node_id", "attempt_id", "proposal_task_id")
 
 
 def _now() -> str:
     return utc_now(timespec="seconds")
+
+
+def _provider_failure_counter_update(result: Dict[str, Any]) -> Optional[bool]:
+    """Return the existing HITL provider-counter update for one launch result."""
+
+    if "provider_process_failed" not in result:
+        return None
+    failed = bool(result.get("provider_process_failed"))
+    if failed:
+        return True
+    if result.get("return_code") == 0:
+        return False
+    return None
 
 
 def _compact_json(obj: Any) -> str:
@@ -286,6 +349,131 @@ def _validate_premises(premises: List[str], existing_ids: Optional[set[str]]) ->
         )
 
 
+def visible_ranked_idea_records(
+    records: Iterable[Dict[str, Any]],
+    *,
+    parent_node_id: str,
+    candidate_attempt_id: str,
+    base_idea_number: int,
+    proposal_task_id: str,
+    role: str,
+    seed_idea_ids: Iterable[str] = (),
+) -> List[Dict[str, Any]]:
+    """Derive one ranked task's visible records from the authoritative idea log."""
+
+    from core.hitl_proposal_round import parse_proposal_task_id
+
+    if not str(parent_node_id).strip() or not str(candidate_attempt_id).strip():
+        raise HitlValidationError("Ranked idea visibility requires parent and attempt identity.")
+    if isinstance(base_idea_number, bool) or not isinstance(base_idea_number, int):
+        raise HitlValidationError("Ranked idea visibility requires an integer idea boundary.")
+    if base_idea_number < 0:
+        raise HitlValidationError("Ranked idea visibility boundary must be non-negative.")
+    try:
+        task_identity = parse_proposal_task_id(proposal_task_id)
+    except ValueError as exc:
+        raise HitlValidationError(str(exc)) from exc
+    if role not in {"proposer", "verifier", "reviewer"} or task_identity.role != role:
+        raise HitlValidationError("Ranked idea visibility role does not match its task ID.")
+
+    all_records = list(records)
+    records_by_id = {
+        str(record.get("idea_id", "")).strip(): record
+        for record in all_records
+        if str(record.get("idea_id", "")).strip()
+    }
+    base_ids = set()
+    for idea_id in records_by_id:
+        if not idea_id.startswith("I") or not idea_id[1:].isdigit():
+            raise HitlValidationError("Finalized HITL idea has an invalid runtime idea ID.")
+        if int(idea_id[1:]) <= base_idea_number:
+            base_ids.add(idea_id)
+
+    own_ids = {
+        idea_id
+        for idea_id, record in records_by_id.items()
+        if str(record.get("parent_node_id", "")) == str(parent_node_id)
+        and str(record.get("attempt_id", "")) == str(candidate_attempt_id)
+        and str(record.get("proposal_task_id", "")) == proposal_task_id
+    }
+    seeds = _normalize_premises(list(seed_idea_ids))
+    if role == "proposer" and seeds:
+        raise HitlValidationError("Proposer idea visibility must not include result seeds.")
+    if role in {"verifier", "reviewer"} and not seeds:
+        raise HitlValidationError(f"{role.capitalize()} idea visibility requires result seeds.")
+
+    closure_ids = set()
+    pending = list(seeds)
+    while pending:
+        idea_id = pending.pop()
+        if idea_id in closure_ids:
+            continue
+        record = records_by_id.get(idea_id)
+        if record is None:
+            raise HitlValidationError(
+                "Ranked idea visibility references an unavailable finalized idea."
+            )
+        closure_ids.add(idea_id)
+        pending.extend(_normalize_premises(record.get("premises")))
+
+    visible_ids = base_ids | own_ids | closure_ids
+    return [
+        record
+        for record in all_records
+        if str(record.get("idea_id", "")).strip() in visible_ids
+    ]
+
+
+def _normalize_proposal_ranking(value: Any) -> List[str]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise HitlValidationError("Proposal review evidence requires a non-empty ranking.")
+    ranking: List[str] = []
+    seen = set()
+    for item in value:
+        candidate_id = str(item).strip()
+        if not candidate_id.startswith("I") or not candidate_id[1:].isdigit():
+            raise HitlValidationError(
+                f"Proposal review ranking contains an invalid idea id: {candidate_id or '<empty>'}"
+            )
+        if candidate_id in seen:
+            raise HitlValidationError(
+                f"Proposal review ranking contains a duplicate candidate: {candidate_id}"
+            )
+        seen.add(candidate_id)
+        ranking.append(candidate_id)
+    return ranking
+
+
+def _validate_proposal_ranking_candidates(
+    ranking: List[str],
+    *,
+    existing_records: Optional[Iterable[Dict[str, Any]]],
+    expected_candidate_ids: Optional[Iterable[str]],
+) -> None:
+    if existing_records is not None:
+        records_by_id = {
+            str(record.get("idea_id", "")).strip(): record for record in existing_records
+        }
+        invalid = [
+            candidate_id
+            for candidate_id in ranking
+            if candidate_id not in records_by_id
+            or records_by_id[candidate_id].get("idea_type") != "proposal"
+        ]
+        if invalid:
+            raise HitlValidationError(
+                "Proposal review ranking contains unknown proposal candidate(s): "
+                + ", ".join(invalid)
+            )
+    if expected_candidate_ids is None:
+        return
+    expected = _normalize_proposal_ranking(list(expected_candidate_ids))
+    if len(ranking) != len(expected) or set(ranking) != set(expected):
+        raise HitlValidationError(
+            "Proposal review ranking must contain every current-round candidate exactly once."
+        )
+
+
 def _validate_idea_category(idea_type: str, idea_category: Any) -> str:
     category = str(idea_category or "").strip()
     allowed = IDEA_CATEGORIES_BY_TYPE.get(idea_type, set())
@@ -437,7 +625,13 @@ class HitlIdeaLog:
         self.path = hitl_idea_log_path(self.work_dir)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def append(self, idea: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+    def append(
+        self,
+        idea: Dict[str, Any],
+        *,
+        idempotent: bool = False,
+        proposal_review_candidate_ids: Optional[Iterable[str]] = None,
+    ) -> Dict[str, Any]:
         """Finalize one idea, optionally treating an identical retry as a no-op.
 
         Runtime finalizers use ``idempotent=True`` because an interrupted process
@@ -479,7 +673,18 @@ class HitlIdeaLog:
                             "Add the selected action as an option, then retry."
                         )
                     record["decision"] = selected["decision"]
-            self.validate(record, existing_ids=known_ids)
+            if (
+                record.get("idea_type") == "evidence"
+                and record.get("idea_category") == "proposal_review"
+            ):
+                record["ranking"] = _normalize_proposal_ranking(record.get("ranking"))
+            self.validate(
+                record,
+                existing_ids=known_ids,
+                existing_records=existing_records,
+                proposal_review_candidate_ids=proposal_review_candidate_ids,
+                require_proposal_review_candidates=True,
+            )
             ordered = _ordered_idea_record(record)
             existing = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
             addition = _compact_json(ordered) + "\n"
@@ -531,6 +736,11 @@ class HitlIdeaLog:
         payload["premises"] = _normalize_premises(payload["premises"])
         if payload.get("idea_type") == "decision" and "options" in payload:
             payload["options"] = _normalize_options(payload["options"])
+        if (
+            payload.get("idea_type") == "evidence"
+            and payload.get("idea_category") == "proposal_review"
+        ):
+            payload["ranking"] = _normalize_proposal_ranking(payload.get("ranking"))
         return payload
 
     def find_equivalent(self, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -561,55 +771,112 @@ class HitlIdeaLog:
             return []
         return read_jsonl(self.path)
 
-    def render_for_agent(self, *, idea_id: Optional[str] = None) -> str:
-        all_records = self.records()
-        if not all_records:
+    def render_for_agent(
+        self,
+        *,
+        idea_id: Optional[str] = None,
+        records: Optional[Iterable[Dict[str, Any]]] = None,
+        proposal_verification_pairs: Optional[Sequence[tuple[str, str]]] = None,
+    ) -> str:
+        visible_records = self.records() if records is None else list(records)
+        if not visible_records:
             return "No finalized HITL ideas have been recorded yet."
-        records = all_records
+        rendered_records = visible_records
         if idea_id:
-            records = [record for record in all_records if record.get("idea_id") == idea_id]
-            if not records:
+            rendered_records = [
+                record for record in visible_records if record.get("idea_id") == idea_id
+            ]
+            if not rendered_records:
                 raise HitlValidationError(f"No finalized HITL idea exists with id {idea_id}.")
         record_ids = [
             str(record.get("idea_id", "")).strip()
-            for record in all_records
+            for record in visible_records
             if str(record.get("idea_id", "")).strip()
         ]
         used_by: Dict[str, List[str]] = {idea_id: [] for idea_id in record_ids}
-        for record in all_records:
+        for record in visible_records:
             record_id = str(record.get("idea_id", "")).strip()
             for premise in _normalize_premises(record.get("premises")):
-                used_by.setdefault(premise, []).append(record_id)
+                if premise in used_by:
+                    used_by[premise].append(record_id)
 
         if idea_id:
             blocks = [f"Finalized HITL idea: {idea_id}"]
         else:
             roots = [
                 record_id
-                for record_id, record in zip(record_ids, all_records)
+                for record_id, record in zip(record_ids, visible_records)
                 if not _normalize_premises(record.get("premises"))
             ]
             leaves = [record_id for record_id in record_ids if not used_by.get(record_id)]
             evidence_count = sum(
-                1 for record in all_records if record.get("idea_type") == "evidence"
+                1 for record in visible_records if record.get("idea_type") == "evidence"
             )
             decision_count = sum(
-                1 for record in all_records if record.get("idea_type") == "decision"
+                1 for record in visible_records if record.get("idea_type") == "decision"
             )
             proposal_count = sum(
-                1 for record in all_records if record.get("idea_type") == "proposal"
+                1 for record in visible_records if record.get("idea_type") == "proposal"
             )
             blocks = [
-                f"Finalized HITL ideas: {len(all_records)}",
+                f"Finalized HITL ideas: {len(visible_records)}",
                 f"Evidence: {evidence_count}",
                 f"Decision: {decision_count}",
                 f"Proposal: {proposal_count}",
                 f"Roots: {', '.join(roots) if roots else 'none'}",
                 f"Leaves: {', '.join(leaves) if leaves else 'none'}",
-                "",
-                "Chronological ideas:",
             ]
-        for record in records:
+            if proposal_verification_pairs:
+                records_by_id = {
+                    str(record.get("idea_id", "")).strip(): record
+                    for record in visible_records
+                }
+                ordered_pair_ids: List[str] = []
+                seen_pair_ids = set()
+                normalized_pairs: List[tuple[str, str]] = []
+                for proposal_id, verification_id in proposal_verification_pairs:
+                    pair = (str(proposal_id).strip(), str(verification_id).strip())
+                    if not all(pair) or any(item not in records_by_id for item in pair):
+                        raise HitlValidationError(
+                            "Reviewer proposal-verification mapping references an unavailable idea."
+                        )
+                    if any(item in seen_pair_ids for item in pair):
+                        raise HitlValidationError(
+                            "Reviewer proposal-verification mapping contains a duplicate idea."
+                        )
+                    normalized_pairs.append(pair)
+                    ordered_pair_ids.extend(pair)
+                    seen_pair_ids.update(pair)
+                pair_positions = [
+                    index
+                    for index, record in enumerate(visible_records)
+                    if str(record.get("idea_id", "")).strip() in seen_pair_ids
+                ]
+                insert_at = min(pair_positions)
+                remaining = [
+                    record
+                    for record in visible_records
+                    if str(record.get("idea_id", "")).strip() not in seen_pair_ids
+                ]
+                before_count = sum(
+                    1
+                    for record in visible_records[:insert_at]
+                    if str(record.get("idea_id", "")).strip() not in seen_pair_ids
+                )
+                rendered_records = [
+                    *remaining[:before_count],
+                    *(records_by_id[item] for item in ordered_pair_ids),
+                    *remaining[before_count:],
+                ]
+                blocks.extend(["", "Proposal and verification pairs, in presentation order:"])
+                blocks.extend(
+                    f"- {proposal_id} -> {verification_id}"
+                    for proposal_id, verification_id in normalized_pairs
+                )
+                blocks.extend(["", "Ideas in presentation order:"])
+            else:
+                blocks.extend(["", "Chronological ideas:"])
+        for record in rendered_records:
             record_id = str(record.get("idea_id", "")).strip()
             idea_type = str(record.get("idea_type", "")).strip()
             category = str(record.get("idea_category", "")).strip()
@@ -621,6 +888,7 @@ class HitlIdeaLog:
                 f"{record_id} [{idea_type}/{category}] level={level} actor={actor} stage={stage}"
             )
             for key in (
+                "proposal_task_id",
                 "context",
                 "proposal_type",
                 "proposal",
@@ -634,6 +902,9 @@ class HitlIdeaLog:
                 value = record.get(key)
                 if value is not None and str(value).strip():
                     blocks.append(f"{key}: {value}")
+            ranking = record.get("ranking")
+            if isinstance(ranking, list) and ranking:
+                blocks.append(f"ranking: {', '.join(str(item) for item in ranking)}")
             options = record.get("options")
             if isinstance(options, list) and options:
                 blocks.append("options:")
@@ -656,6 +927,9 @@ class HitlIdeaLog:
         record: Dict[str, Any],
         *,
         existing_ids: Optional[set[str]] = None,
+        existing_records: Optional[Iterable[Dict[str, Any]]] = None,
+        proposal_review_candidate_ids: Optional[Iterable[str]] = None,
+        require_proposal_review_candidates: bool = False,
     ) -> None:
         required = [
             "idea_id",
@@ -697,6 +971,33 @@ class HitlIdeaLog:
             raise HitlValidationError(
                 "C-level HITL ideas must be finalized by a recognized HITL worker actor"
             )
+        proposal_task_id = str(record.get("proposal_task_id", "")).strip()
+        ranked_actor_roles = {
+            "autoresearch_proposer": "proposer",
+            "proposal_verifier": "verifier",
+            "proposal_reviewer": "reviewer",
+        }
+        if proposal_task_id:
+            from core.hitl_proposal_round import parse_proposal_task_id
+
+            try:
+                task_identity = parse_proposal_task_id(proposal_task_id)
+            except ValueError as exc:
+                raise HitlValidationError(str(exc)) from exc
+            if actor not in ranked_actor_roles or ranked_actor_roles[actor] != task_identity.role:
+                raise HitlValidationError(
+                    "Proposal task provenance does not match the finalized idea actor."
+                )
+            if not str(record.get("parent_node_id", "")).strip() or not str(
+                record.get("attempt_id", "")
+            ).strip():
+                raise HitlValidationError(
+                    "Proposal task provenance requires parent_node_id and attempt_id."
+                )
+        elif actor in {"proposal_verifier", "proposal_reviewer"}:
+            raise HitlValidationError(
+                "Proposal verifier and reviewer ideas require proposal_task_id provenance."
+            )
         for field in ("basis", "human_basis"):
             if field in record:
                 raise HitlValidationError(
@@ -711,6 +1012,8 @@ class HitlIdeaLog:
                 raise HitlValidationError("Decision idea must not include evidence")
             if "proposal" in record:
                 raise HitlValidationError("Decision idea must not include proposal fields")
+            if "ranking" in record:
+                raise HitlValidationError("Decision idea must not include ranking")
             if not premises:
                 raise HitlValidationError("Decision idea requires at least one finalized premise")
             if "decision_needed" not in record or not str(record["decision_needed"]).strip():
@@ -741,7 +1044,9 @@ class HitlIdeaLog:
                         "A/B option-based decision must be an option id or CUSTOM"
                     )
         elif record["idea_type"] == "evidence":
-            _validate_idea_category(record["idea_type"], record.get("idea_category"))
+            category = _validate_idea_category(
+                record["idea_type"], record.get("idea_category")
+            )
             if "proposal" in record:
                 raise HitlValidationError("Evidence idea must not include proposal fields")
             forbidden = [
@@ -755,10 +1060,56 @@ class HitlIdeaLog:
                 )
             if "evidence" not in record or not str(record["evidence"]).strip():
                 raise HitlValidationError("Evidence idea requires non-empty evidence")
+            if category == "proposal_verification":
+                if actor != "proposal_verifier":
+                    raise HitlValidationError(
+                        "Proposal verification evidence must be finalized by proposal_verifier."
+                    )
+                if "ranking" in record:
+                    raise HitlValidationError(
+                        "Proposal verification evidence must not include ranking."
+                    )
+            elif category == "proposal_review":
+                if actor != "proposal_reviewer":
+                    raise HitlValidationError(
+                        "Proposal review evidence must be finalized by proposal_reviewer."
+                    )
+                ranking = _normalize_proposal_ranking(record.get("ranking"))
+                if require_proposal_review_candidates and proposal_review_candidate_ids is None:
+                    raise HitlValidationError(
+                        "Runtime must supply the current-round candidates for proposal review."
+                    )
+                _validate_proposal_ranking_candidates(
+                    ranking,
+                    existing_records=existing_records,
+                    expected_candidate_ids=proposal_review_candidate_ids,
+                )
+                missing_candidate_premises = [
+                    candidate_id for candidate_id in ranking if candidate_id not in premises
+                ]
+                if missing_candidate_premises:
+                    raise HitlValidationError(
+                        "Proposal review evidence must cite every ranked proposal as a premise."
+                    )
+            elif "ranking" in record:
+                raise HitlValidationError(
+                    "Ranking is valid only on proposal_review evidence."
+                )
+            if category in RANKED_RESULT_EVIDENCE_CATEGORIES and record["hitl_stage"] != "review":
+                raise HitlValidationError(
+                    "Proposal verification and review evidence must use the review HITL stage."
+                )
         else:
             forbidden = [
                 field
-                for field in ("idea_category", "decision_needed", "options", "decision", "evidence")
+                for field in (
+                    "idea_category",
+                    "decision_needed",
+                    "options",
+                    "decision",
+                    "evidence",
+                    "ranking",
+                )
                 if field in record and record.get(field) not in (None, "", [])
             ]
             if forbidden:
@@ -780,6 +1131,7 @@ class HitlIdeaLog:
 class HitlPaths:
     work_dir: Path
     pipeline_stage: str
+    tool_scope: Optional[str] = None
 
     @property
     def plan_path(self) -> Path:
@@ -799,7 +1151,8 @@ class HitlPaths:
 
     @property
     def tool_bin_dir(self) -> Path:
-        return self.hitl_dir / "bin"
+        root = self.hitl_dir / "bin"
+        return root / self.tool_scope if self.tool_scope else root
 
     @property
     def report_idea_command(self) -> Path:
@@ -899,6 +1252,7 @@ class HitlRuntime:
         config: Optional[Dict[str, Any]] = None,
         use_hitl_autoresearch_whiteboard: bool = False,
         hitl_mode: HitlMode | str = HitlMode.FULL,
+        tool_scope: Optional[str] = None,
     ):
         if pipeline_stage not in PIPELINE_STAGES:
             raise ValueError(f"Unsupported HITL pipeline stage: {pipeline_stage}")
@@ -906,7 +1260,16 @@ class HitlRuntime:
         self.pipeline_stage = pipeline_stage
         self.use_hitl_autoresearch_whiteboard = use_hitl_autoresearch_whiteboard
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
-        self.paths = HitlPaths(self.work_dir, pipeline_stage)
+        normalized_tool_scope = str(tool_scope or "").strip() or None
+        if normalized_tool_scope is not None:
+            from core.hitl_proposal_round import parse_proposal_task_id
+
+            try:
+                parse_proposal_task_id(normalized_tool_scope)
+            except ValueError as exc:
+                raise ValueError("HITL tool scope must be a validated proposal task ID.") from exc
+        self.tool_scope = normalized_tool_scope
+        self.paths = HitlPaths(self.work_dir, pipeline_stage, normalized_tool_scope)
         self.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
         self.paths.hitl_dir.mkdir(parents=True, exist_ok=True)
         self.log = HitlIdeaLog(self.work_dir)
@@ -1196,8 +1559,10 @@ class HitlRuntime:
         self,
         *,
         hitl_stage: str,
+        command_profile: str = "default",
         actor: Optional[str] = None,
         provenance: Optional[Dict[str, Any]] = None,
+        idea_visibility: Optional[Dict[str, Any]] = None,
         requires_human_approval: Optional[bool] = None,
         allow_scoring_approval: bool = False,
         proposal_submission_validator: Optional[Callable[[], Dict[str, Any]]] = None,
@@ -1209,9 +1574,65 @@ class HitlRuntime:
         worker_prompt_contexts: Optional[Dict[str, str]] = None,
         baseline_construction: bool = False,
         baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
+        proposal_preparation_attempt_id: Optional[str] = None,
+        ranked_cancel_event: Optional[threading.Event] = None,
     ) -> None:
         if hitl_stage not in HITL_STAGES:
             raise HitlValidationError(f"Invalid HITL idea tool hitl_stage: {hitl_stage}")
+        profile = str(command_profile).strip()
+        if profile != "default" and profile not in _RANKED_COMMAND_PROFILES:
+            raise HitlValidationError(f"Invalid HITL worker command profile: {profile}")
+        normalized_actor = str(actor or self.pipeline_stage).strip()
+        normalized_provenance = dict(provenance or {})
+        normalized_preparation_attempt_id = str(proposal_preparation_attempt_id or "").strip()
+        if profile == "default":
+            if (
+                self.tool_scope is not None
+                or idea_visibility is not None
+                or normalized_preparation_attempt_id
+                or ranked_cancel_event is not None
+            ):
+                raise HitlValidationError(
+                    "Scoped proposal tools require a closed ranked command profile."
+                )
+        else:
+            from core.hitl_proposal_round import parse_proposal_task_id
+
+            profile_spec = _RANKED_COMMAND_PROFILES[profile]
+            if self.pipeline_stage != "experiment_runner" or self.tool_scope is None:
+                raise HitlValidationError(
+                    "Ranked command profiles require a scoped experiment-runner runtime."
+                )
+            if normalized_actor != profile_spec["actor"]:
+                raise HitlValidationError(
+                    "Ranked command profile does not match its worker actor."
+                )
+            if hitl_stage != profile_spec["hitl_stage"]:
+                raise HitlValidationError(
+                    "Ranked command profile does not match its HITL stage."
+                )
+            task_id = str(normalized_provenance.get("proposal_task_id", "")).strip()
+            try:
+                task_identity = parse_proposal_task_id(task_id)
+            except ValueError as exc:
+                raise HitlValidationError(str(exc)) from exc
+            if (
+                task_id != self.tool_scope
+                or task_identity.role != profile_spec["role"]
+                or not str(normalized_provenance.get("parent_node_id", "")).strip()
+                or not str(normalized_provenance.get("attempt_id", "")).strip()
+            ):
+                raise HitlValidationError(
+                    "Ranked command profile does not match its runtime provenance."
+                )
+            if not isinstance(idea_visibility, dict):
+                raise HitlValidationError(
+                    "Ranked command profiles require derived idea visibility inputs."
+                )
+            if not normalized_preparation_attempt_id:
+                raise HitlValidationError(
+                    "Ranked command profiles require their proposal preparation attempt."
+                )
         if worker_prompt_contexts is not None:
             required_context_phases = {"plan", "execution", "review"}
             missing_contexts = sorted(
@@ -1241,22 +1662,42 @@ class HitlRuntime:
                 scope=self._workspace_guard_scope(),
             )
             proposal_submission_validator = proposal_guard.require_unchanged
-        allowed_worker_commands = self._worker_commands_for_stage(hitl_stage)
+        allowed_worker_commands = (
+            self._worker_commands_for_stage(hitl_stage)
+            if profile == "default"
+            else set(_RANKED_COMMAND_PROFILES[profile]["commands"])
+        )
         if self._time_budget_command_available():
             allowed_worker_commands.add("hitl-time-budget")
-        from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
+        if profile == "default":
+            from core.hitl_runtime_state import (
+                HitlRuntimeState,
+                worker_command_requires_resume,
+            )
 
-        pending_command = HitlRuntimeState(self.work_dir).pending_worker_command()
-        if worker_command_requires_resume(pending_command):
-            allowed_worker_commands.add("hitl-resume-worker-request")
+            pending_command = HitlRuntimeState(self.work_dir).pending_worker_command()
+            if worker_command_requires_resume(pending_command):
+                allowed_worker_commands.add("hitl-resume-worker-request")
 
         self._tool_context = {
             "work_dir": str(self.work_dir.resolve()),
             "pipeline_stage": self.pipeline_stage,
             "hitl_stage": hitl_stage,
-            "actor": actor or self.pipeline_stage,
+            "command_profile": profile,
+            "actor": normalized_actor,
             "level": "C",
-            "provenance": provenance or {},
+            "provenance": normalized_provenance,
+            **(
+                {"proposal_preparation_attempt_id": normalized_preparation_attempt_id}
+                if profile != "default"
+                else {}
+            ),
+            **(
+                {"ranked_cancel_event": ranked_cancel_event}
+                if ranked_cancel_event is not None
+                else {}
+            ),
+            "idea_visibility": dict(idea_visibility) if idea_visibility is not None else None,
             "requires_human_approval": requires_human_approval,
             "hitl_mode": self.hitl_mode.value,
             "allow_scoring_approval": allow_scoring_approval,
@@ -1363,6 +1804,7 @@ class HitlRuntime:
         method is deliberately the only in-session transition path so a worker
         cannot receive execution instructions while plan guards remain active.
         """
+        self._require_default_worker_state("worker stage transitions")
         from_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
         allowed = {"plan": {"execution"}, "execution": {"review"}}
         if to_stage not in allowed.get(from_stage, set()):
@@ -1404,6 +1846,7 @@ class HitlRuntime:
         return commands
 
     def _enable_worker_command(self, command_name: str) -> None:
+        self._require_default_worker_state("dynamic worker commands")
         if command_name not in _WORKER_COMMAND_MODULES:
             raise HitlValidationError(f"Unknown HITL worker command: {command_name}")
         commands = self._tool_context.get("allowed_worker_commands")
@@ -1433,6 +1876,33 @@ class HitlRuntime:
             "Follow the current runtime instruction and retry only with an available command."
         )
 
+    def _require_default_worker_state(self, operation: str) -> None:
+        profile = str(self._tool_context.get("command_profile", "default"))
+        if profile != "default":
+            raise HitlValidationError(
+                f"Ranked proposal task sessions do not use global {operation}."
+            )
+
+    def require_ranked_task_session_boundary(self) -> None:
+        """Require ordinary worker lifecycle state to be terminal before ranked tasks."""
+
+        from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
+
+        state = HitlRuntimeState(self.work_dir)
+        pending = state.pending_worker_command()
+        continuation = state.worker_continuation()
+        status = str((pending or {}).get("status", "")).strip()
+        if worker_command_requires_resume(pending) or (
+            isinstance(pending, dict) and status not in {"resolved", "cancelled"}
+        ):
+            raise HitlValidationError(
+                "Ranked proposal tasks cannot start while an ordinary worker request is unresolved."
+            )
+        if isinstance(continuation, dict):
+            raise HitlValidationError(
+                "Ranked proposal tasks cannot start while an ordinary worker continuation exists."
+            )
+
     def register_worker_prompt(self, prompt_block: str) -> None:
         """Persist the runtime-owned continuation point for the active worker.
 
@@ -1440,6 +1910,7 @@ class HitlRuntime:
         The worker never owns this state: runtime records the exact already-rendered
         prompt and may launch a continuation worker against the same tool server.
         """
+        self._require_default_worker_state("worker continuation state")
         prompt = _require_text(prompt_block, "prompt_block", "HITL worker continuation")
         from core.hitl_runtime_state import HitlRuntimeState
 
@@ -1463,6 +1934,7 @@ class HitlRuntime:
         hitl_stage: Optional[str] = None,
         status: Optional[str] = None,
     ) -> None:
+        self._require_default_worker_state("worker continuation state")
         updates: Dict[str, Any] = {}
         if prompt_block:
             updates["prompt_block"] = prompt_block
@@ -1476,6 +1948,7 @@ class HitlRuntime:
             HitlRuntimeState(self.work_dir).update_worker_continuation(**updates)
 
     def _clear_worker_continuation(self) -> None:
+        self._require_default_worker_state("worker continuation state")
         from core.hitl_runtime_state import HitlRuntimeState
 
         HitlRuntimeState(self.work_dir).clear_worker_continuation()
@@ -1494,6 +1967,7 @@ class HitlRuntime:
 
     def worker_continuation(self) -> Optional[Dict[str, Any]]:
         """Return the runtime-owned replacement-worker state, when present."""
+        self._require_default_worker_state("worker continuation state")
         from core.hitl_runtime_state import HitlRuntimeState
 
         continuation = HitlRuntimeState(self.work_dir).worker_continuation()
@@ -1501,10 +1975,9 @@ class HitlRuntime:
 
     def _record_worker_provider_result(self, result: Dict[str, Any]) -> None:
         """Stop after the active continuation exhausts its provider attempts."""
-        if "provider_process_failed" not in result:
-            return
-        failed = bool(result.get("provider_process_failed"))
-        if not failed and result.get("return_code") != 0:
+        self._require_default_worker_state("worker provider-failure state")
+        failed = _provider_failure_counter_update(result)
+        if failed is None:
             return
 
         from core.hitl_runtime_state import HitlRuntimeState
@@ -1512,6 +1985,10 @@ class HitlRuntime:
         failures = HitlRuntimeState(self.work_dir).record_worker_provider_result(
             failed=failed
         )
+        self._stop_after_provider_failure_threshold(failures)
+
+    @staticmethod
+    def _stop_after_provider_failure_threshold(failures: int) -> None:
         if failures < MAX_CONSECUTIVE_PROVIDER_FAILURES:
             return
 
@@ -1529,6 +2006,7 @@ class HitlRuntime:
 
     def resolved_worker_response(self) -> Optional[Dict[str, Any]]:
         """Return the response retained for an idempotent worker-command retry."""
+        self._require_default_worker_state("pending worker state")
         from core.hitl_runtime_state import HitlRuntimeState
 
         pending = HitlRuntimeState(self.work_dir).pending_worker_command()
@@ -1559,6 +2037,7 @@ class HitlRuntime:
         result: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """Reconnect a replacement worker to one durable held command."""
+        self._require_default_worker_state("pending worker state")
         from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
 
         state = HitlRuntimeState(self.work_dir)
@@ -1603,6 +2082,10 @@ class HitlRuntime:
     def idea_tool_env(self, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         env = dict(base_env or os.environ)
         env["PYTHONUNBUFFERED"] = "1"
+        if str(self._tool_context.get("command_profile", "")) in _RANKED_COMMAND_PROFILES:
+            # Ranked proposal tasks are read-only. Match NeuriCo's Docker
+            # runtime so importing workspace modules cannot create bytecode.
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["NEURICO_HITL_URL"] = self._tool_url
         env["NEURICO_HITL_TOKEN"] = self._tool_token
         env["NEURICO_PROJECT_ROOT"] = str(Path(__file__).resolve().parents[2])
@@ -1616,6 +2099,9 @@ class HitlRuntime:
         return env
 
     def clear_idea_tool_context(self) -> None:
+        ranked_session = str(self._tool_context.get("command_profile", "")) in (
+            _RANKED_COMMAND_PROFILES
+        )
         self.stop_idea_tool_server()
         # A stopped worker can unwind before its asynchronous scorer finishes
         # observing the shared stop request. Keep recovery behind that existing
@@ -1631,6 +2117,12 @@ class HitlRuntime:
                 break
             for thread in active:
                 thread.join()
+        if ranked_session:
+            # Stopping the server prevents new requests. Acquiring the ranked
+            # task's existing mutation gate then proves that any handler which
+            # passed its cancellation check has finished before rollback.
+            with self._tool_lock:
+                pass
         self._tool_context = {}
         self._phase_finish_result = None
         self._phase_finish_request_key = ""
@@ -1663,15 +2155,739 @@ class HitlRuntime:
         self._tool_url = ""
         self._tool_token = ""
 
+    def _visible_idea_records_for_tool(self) -> List[Dict[str, Any]]:
+        records = self.log.records()
+        visibility = self._tool_context.get("idea_visibility")
+        if visibility is None:
+            return records
+        if not isinstance(visibility, dict):
+            raise HitlValidationError("Ranked idea visibility context must be an object.")
+        provenance = self._tool_context.get("provenance")
+        if not isinstance(provenance, dict):
+            raise HitlValidationError("Ranked idea visibility requires runtime provenance.")
+        profile = str(self._tool_context.get("command_profile", ""))
+        profile_spec = _RANKED_COMMAND_PROFILES.get(profile)
+        if profile_spec is None:
+            raise HitlValidationError(
+                "Ranked idea visibility requires a closed ranked command profile."
+            )
+        return visible_ranked_idea_records(
+            records,
+            parent_node_id=provenance.get("parent_node_id", ""),
+            candidate_attempt_id=provenance.get("attempt_id", ""),
+            base_idea_number=visibility.get("base_idea_number"),
+            proposal_task_id=provenance.get("proposal_task_id", ""),
+            role=str(profile_spec["role"]),
+            seed_idea_ids=visibility.get("seed_idea_ids", ()),
+        )
+
+    def validate_visible_idea_premises(self, premises: Any) -> List[str]:
+        """Validate premises against the same records exposed by the idea tools."""
+
+        normalized = _normalize_premises(premises)
+        if self._tool_context.get("idea_visibility") is not None:
+            visible_ids = {
+                str(record.get("idea_id", "")).strip()
+                for record in self._visible_idea_records_for_tool()
+                if str(record.get("idea_id", "")).strip()
+            }
+            _validate_premises(normalized, visible_ids)
+        return normalized
+
+    def _ranked_task_state_context(
+        self,
+        *,
+        allow_completed_prior_stage: bool = False,
+    ) -> Dict[str, Any]:
+        """Resolve one authenticated ranked task from durable round state."""
+
+        from core.hitl_proposal_round import parse_proposal_task_id
+        from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+
+        profile = str(self._tool_context.get("command_profile", ""))
+        profile_spec = _RANKED_COMMAND_PROFILES.get(profile)
+        if profile_spec is None or self.tool_scope is None:
+            raise HitlValidationError(
+                "Proposal task finalization requires a scoped ranked command profile."
+            )
+        provenance = self._tool_context.get("provenance")
+        if not isinstance(provenance, dict):
+            raise HitlValidationError("Proposal task finalization requires runtime provenance.")
+        task_id = str(provenance.get("proposal_task_id", "")).strip()
+        try:
+            task_identity = parse_proposal_task_id(task_id)
+        except ValueError as exc:
+            raise HitlValidationError(str(exc)) from exc
+        role = str(profile_spec["role"])
+        if task_id != self.tool_scope or task_identity.role != role:
+            raise HitlValidationError(
+                "Proposal task finalization does not match its authenticated task session."
+            )
+        identity = {
+            "parent_node_sha": str(provenance.get("parent_node_id", "")).strip(),
+            "preparation_attempt_id": str(
+                self._tool_context.get("proposal_preparation_attempt_id", "")
+            ).strip(),
+            "candidate_attempt_id": str(provenance.get("attempt_id", "")).strip(),
+            "round_ordinal": task_identity.round_ordinal,
+        }
+        if not all(str(value).strip() for value in identity.values()):
+            raise HitlValidationError("Proposal task finalization has incomplete round identity.")
+        state = HitlRuntimeState(self.work_dir)
+        try:
+            round_state = state.proposal_round_snapshot(**identity)
+        except HitlRuntimeStateError as exc:
+            raise HitlValidationError(str(exc)) from exc
+        task = round_state.get("tasks", {}).get(task_id)
+        if not isinstance(task, dict) or task.get("role") != role:
+            raise HitlValidationError("No matching proposal task exists in the active round.")
+        active_stage = str(round_state.get("stage", ""))
+        expected_stages = profile_spec.get("round_stages")
+        if expected_stages is None:
+            expected_stages = frozenset({str(profile_spec["round_stage"])})
+        if active_stage not in expected_stages:
+            stage_order = {
+                "proposing": 0,
+                "verifying": 1,
+                "reviewing": 2,
+                "manager_selection": 3,
+                "selected": 4,
+            }
+            completed_prior_stage = bool(
+                allow_completed_prior_stage
+                and task.get("result_idea_id") is not None
+                and stage_order.get(active_stage, -1)
+                > max(stage_order.get(str(stage), -1) for stage in expected_stages)
+            )
+            if not completed_prior_stage:
+                raise HitlValidationError(
+                    "Proposal task finalization does not match the active round stage."
+                )
+        visibility = self._tool_context.get("idea_visibility")
+        if not isinstance(visibility, dict) or visibility.get(
+            "base_idea_number"
+        ) != round_state.get("base_idea_number"):
+            raise HitlValidationError(
+                "Proposal task idea visibility does not match the active round boundary."
+            )
+        seed_idea_ids = _normalize_premises(visibility.get("seed_idea_ids"))
+        if role == "proposer":
+            expected_seed_ids: List[str] = []
+        elif role == "verifier":
+            assigned_id = str(task.get("assigned_proposal_idea_id") or "").strip()
+            expected_seed_ids = [assigned_id] if assigned_id else []
+        else:
+            dependencies = self._ranked_round_results(round_state)
+            expected_seed_ids = [
+                *dependencies["candidate_ids"],
+                *dependencies["verification_ids"],
+            ]
+        if len(seed_idea_ids) != len(expected_seed_ids) or set(seed_idea_ids) != set(
+            expected_seed_ids
+        ):
+            raise HitlValidationError(
+                "Proposal task idea visibility does not match its runtime-owned dependencies."
+            )
+        return {
+            "state": state,
+            "identity": identity,
+            "round_state": round_state,
+            "task": task,
+            "task_id": task_id,
+            "role": role,
+        }
+
+    @staticmethod
+    def _ranked_round_results(round_state: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Derive canonical candidates and their assigned verifications."""
+
+        from core.hitl_proposal_round import proposal_round_results
+
+        try:
+            return proposal_round_results(round_state)
+        except ValueError as exc:
+            raise HitlValidationError(str(exc)) from exc
+
+    def _validate_ranked_task_workspace(self, role: str) -> None:
+        validator_name = (
+            "proposal_submission_validator" if role == "proposer" else "phase_finish_validator"
+        )
+        validator = self._tool_context.get(validator_name)
+        if not callable(validator):
+            raise HitlValidationError(
+                "Proposal task finalization is missing its workspace boundary validator."
+            )
+        try:
+            validation = validator()
+        except BaseException:
+            cancel_event = self._tool_context.get("ranked_cancel_event")
+            if isinstance(cancel_event, threading.Event):
+                cancel_event.set()
+            raise
+        if not isinstance(validation, dict) or not bool(validation.get("valid")):
+            cancel_event = self._tool_context.get("ranked_cancel_event")
+            if isinstance(cancel_event, threading.Event):
+                cancel_event.set()
+            issues = validation.get("issues", []) if isinstance(validation, dict) else []
+            if not isinstance(issues, list):
+                issues = [str(issues)]
+            details = "\n".join(f"- {str(issue)}" for issue in issues if str(issue).strip())
+            raise HitlValidationError(
+                "HITL_ERROR proposal_task_workspace_boundary\n"
+                "Runtime rejected this conclusion because the ranked proposal task changed "
+                "its read-only workspace boundary."
+                + (f"\n{details}" if details else "")
+                + "\nRestore the task workspace boundary, then retry the same finish command."
+            )
+
+    def _ranked_stage_cancelled(self) -> bool:
+        cancel_event = self._tool_context.get("ranked_cancel_event")
+        return isinstance(cancel_event, threading.Event) and cancel_event.is_set()
+
+    def _reject_cancelled_ranked_mutation(self) -> None:
+        if self._ranked_stage_cancelled():
+            raise HitlValidationError(
+                "This ranked proposal stage was cancelled. Do not issue further "
+                "mutating commands from this worker session."
+            )
+
+    @staticmethod
+    def _require_exact_payload_fields(
+        payload: Dict[str, Any],
+        *,
+        fields: set[str],
+        context: str,
+    ) -> None:
+        unexpected = sorted(set(payload) - fields)
+        missing = sorted(fields - set(payload))
+        if missing:
+            raise HitlValidationError(
+                f"{context} is missing required field(s): {', '.join(missing)}."
+            )
+        if unexpected:
+            raise HitlValidationError(
+                f"{context} contains unsupported field(s): {', '.join(unexpected)}."
+            )
+
+    def _normalize_ranked_task_output(
+        self,
+        payload: Dict[str, Any],
+        task_context: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], Dict[str, List[str]]]:
+        if not isinstance(payload, dict):
+            raise HitlValidationError("Proposal task finish payload must be a JSON object.")
+        role = str(task_context["role"])
+        dependencies: Dict[str, List[str]] = {
+            "candidate_ids": [],
+            "verification_ids": [],
+        }
+        if role == "proposer":
+            self._require_exact_payload_fields(
+                payload,
+                fields={"proposal_type", "premises", "proposal"},
+                context="Proposal candidate output",
+            )
+            record = self._record_from_proposal_tool_payload(payload)
+            premises = self.validate_visible_idea_premises(record.get("premises"))
+            if not premises:
+                raise HitlValidationError(
+                    "Proposal candidate output requires at least one finalized premise."
+                )
+            return {
+                "proposal_type": record["proposal_type"],
+                "premises": premises,
+                "proposal": record["proposal"],
+            }, dependencies
+
+        if role == "verifier":
+            self._require_exact_payload_fields(
+                payload,
+                fields={"premises", "assessment"},
+                context="Proposal verification output",
+            )
+            supplied_premises = self.validate_visible_idea_premises(payload.get("premises"))
+            assigned_id = str(task_context["task"].get("assigned_proposal_idea_id") or "").strip()
+            if not assigned_id:
+                raise HitlValidationError("Proposal verifier task has no assigned proposal.")
+            dependencies["candidate_ids"] = [assigned_id]
+            return {
+                "premises": [premise for premise in supplied_premises if premise != assigned_id],
+                "assessment": _require_text(
+                    payload.get("assessment"),
+                    "assessment",
+                    "Proposal verification output",
+                ),
+            }, dependencies
+
+        if role == "reviewer":
+            self._require_exact_payload_fields(
+                payload,
+                fields={"ranking", "premises", "assessment"},
+                context="Proposal review output",
+            )
+            dependencies = self._ranked_round_results(task_context["round_state"])
+            ranking = _normalize_proposal_ranking(payload.get("ranking"))
+            _validate_proposal_ranking_candidates(
+                ranking,
+                existing_records=self.log.records(),
+                expected_candidate_ids=dependencies["candidate_ids"],
+            )
+            supplied_premises = self.validate_visible_idea_premises(payload.get("premises"))
+            mandatory = set([*dependencies["candidate_ids"], *dependencies["verification_ids"]])
+            return {
+                "ranking": ranking,
+                "premises": [premise for premise in supplied_premises if premise not in mandatory],
+                "assessment": _require_text(
+                    payload.get("assessment"),
+                    "assessment",
+                    "Proposal review output",
+                ),
+            }, dependencies
+
+        raise HitlValidationError("Unsupported proposal task role.")
+
+    def _ranked_task_result_record(
+        self,
+        *,
+        role: str,
+        normalized_output: Dict[str, Any],
+        dependencies: Dict[str, List[str]],
+    ) -> Dict[str, Any]:
+        provenance = self._tool_context.get("provenance")
+        if role == "proposer":
+            return self._record_from_proposal_tool_payload(normalized_output)
+        if role == "verifier":
+            record: Dict[str, Any] = {
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "review",
+                "idea_type": "evidence",
+                "idea_category": "proposal_verification",
+                "level": "C",
+                "actor": "proposal_verifier",
+                "premises": _normalize_premises(
+                    [
+                        *normalized_output["premises"],
+                        *dependencies["candidate_ids"],
+                    ]
+                ),
+                "context": "Scientific verification of one proposal candidate.",
+                "related_artifacts": [],
+                "evidence": normalized_output["assessment"],
+                "raised": False,
+            }
+        elif role == "reviewer":
+            record = {
+                "pipeline_stage": "experiment_runner",
+                "hitl_stage": "review",
+                "idea_type": "evidence",
+                "idea_category": "proposal_review",
+                "level": "C",
+                "actor": "proposal_reviewer",
+                "premises": _normalize_premises(
+                    [
+                        *normalized_output["premises"],
+                        *dependencies["candidate_ids"],
+                        *dependencies["verification_ids"],
+                    ]
+                ),
+                "context": "Independent comparative review of current proposal candidates.",
+                "related_artifacts": [],
+                "evidence": normalized_output["assessment"],
+                "ranking": normalized_output["ranking"],
+                "raised": False,
+            }
+        else:
+            raise HitlValidationError("Unsupported proposal task role.")
+        _apply_runtime_provenance(record, provenance)
+        return record
+
+    def _idea_record_by_id(self, idea_id: str) -> Optional[Dict[str, Any]]:
+        matches = [record for record in self.log.records() if record.get("idea_id") == idea_id]
+        if len(matches) > 1:
+            raise HitlValidationError(f"Finalized HITL idea ID is duplicated: {idea_id}.")
+        return matches[0] if matches else None
+
+    def _unreferenced_ranked_task_results(self, role: str) -> List[Dict[str, Any]]:
+        provenance = _runtime_provenance(self._tool_context.get("provenance"))
+        actor = {
+            "proposer": "autoresearch_proposer",
+            "verifier": "proposal_verifier",
+            "reviewer": "proposal_reviewer",
+        }[role]
+        return [
+            record
+            for record in self.log.records()
+            if record.get("actor") == actor
+            and all(str(record.get(key, "")) == value for key, value in provenance.items())
+            and (
+                (role == "proposer" and record.get("idea_type") == "proposal")
+                or (
+                    role == "verifier"
+                    and record.get("idea_type") == "evidence"
+                    and record.get("idea_category") == "proposal_verification"
+                )
+                or (
+                    role == "reviewer"
+                    and record.get("idea_type") == "evidence"
+                    and record.get("idea_category") == "proposal_review"
+                )
+            )
+        ]
+
+    @staticmethod
+    def _ranked_task_instruction(role: str) -> str:
+        return {
+            "proposer": "The proposal candidate is recorded. Stop proposal generation now.",
+            "verifier": "The proposal verification is recorded. Stop verification now.",
+            "reviewer": "The proposal review is recorded. Stop review now.",
+        }[role]
+
+    def finish_ranked_proposal_task(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Commit one authenticated ranked-task result through durable state first."""
+
+        from core.hitl_runtime_state import HitlRuntimeStateError
+
+        with self._tool_lock:
+            self._reject_cancelled_ranked_mutation()
+            task_context = self._ranked_task_state_context()
+            role = str(task_context["role"])
+            self._validate_ranked_task_workspace(role)
+            normalized_output, dependencies = self._normalize_ranked_task_output(
+                payload,
+                task_context,
+            )
+            result_record = self._ranked_task_result_record(
+                role=role,
+                normalized_output=normalized_output,
+                dependencies=dependencies,
+            )
+            result_idea_id = str(task_context["task"].get("result_idea_id") or "").strip()
+            if result_idea_id:
+                existing = self._idea_record_by_id(result_idea_id)
+                if existing is None:
+                    raise HitlValidationError(
+                        "Completed proposal task references a missing finalized idea."
+                    )
+                if HitlIdeaLog.logical_payload(existing) != HitlIdeaLog.logical_payload(
+                    result_record
+                ):
+                    raise HitlValidationError(
+                        "Proposal task is already complete with a different result."
+                    )
+                self._tool_context["ranked_task_terminal"] = True
+                return {
+                    "status": "recorded",
+                    "idea_id": result_idea_id,
+                    "instruction": self._ranked_task_instruction(role),
+                }
+
+            state = task_context["state"]
+            state_args = {
+                **task_context["identity"],
+                "proposal_task_id": task_context["task_id"],
+                "role": role,
+            }
+            if task_context["task"].get("pending_finalization") is None:
+                if self._unreferenced_ranked_task_results(role):
+                    raise HitlValidationError(
+                        "Proposal task has an unreferenced terminal idea. Runtime will not "
+                        "adopt idea-log content into task state."
+                    )
+            try:
+                intent = state.begin_proposal_task_finalization(
+                    **state_args,
+                    normalized_output=normalized_output,
+                )
+            except HitlRuntimeStateError as exc:
+                raise HitlValidationError(str(exc)) from exc
+            result_record = self._ranked_task_result_record(
+                role=role,
+                normalized_output=intent,
+                dependencies=dependencies,
+            )
+            logged = self.log.append(
+                result_record,
+                idempotent=True,
+                proposal_review_candidate_ids=(
+                    dependencies["candidate_ids"] if role == "reviewer" else None
+                ),
+            )
+            try:
+                state.complete_proposal_task_finalization(
+                    **state_args,
+                    normalized_output=intent,
+                    result_idea_id=logged["idea_id"],
+                )
+            except HitlRuntimeStateError as exc:
+                raise HitlValidationError(str(exc)) from exc
+            self._tool_context["ranked_task_terminal"] = True
+            return {
+                "status": "recorded",
+                "idea_id": logged["idea_id"],
+                "instruction": self._ranked_task_instruction(role),
+            }
+
+    def reconcile_ranked_proposal_task(self) -> Dict[str, Any]:
+        """Validate or replay one durable ranked task without launching an agent."""
+
+        with self._tool_lock:
+            if self._ranked_stage_cancelled():
+                return {
+                    "status": "cancelled",
+                    "complete": False,
+                    "cancelled": True,
+                    "idea_id": None,
+                }
+            task_context = self._ranked_task_state_context(
+                allow_completed_prior_stage=True,
+            )
+            role = str(task_context["role"])
+            self._validate_ranked_task_workspace(role)
+            result_idea_id = str(
+                task_context["task"].get("result_idea_id") or ""
+            ).strip()
+            pending = task_context["task"].get("pending_finalization")
+            terminal_results = self._unreferenced_ranked_task_results(role)
+            if result_idea_id:
+                if pending is not None:
+                    raise HitlValidationError(
+                        "Completed proposal task still owns a pending finalization intent."
+                    )
+                unreferenced = [
+                    record
+                    for record in terminal_results
+                    if str(record.get("idea_id", "")).strip() != result_idea_id
+                ]
+                if unreferenced:
+                    raise HitlValidationError(
+                        "Proposal task has an unreferenced terminal idea. Runtime will not "
+                        "adopt idea-log content into task state."
+                    )
+                record = self._validate_ranked_task_result_reference(task_context)
+                self._tool_context["ranked_task_terminal"] = True
+                return {
+                    "status": "recorded",
+                    "complete": True,
+                    "idea_id": record["idea_id"],
+                }
+
+            if pending is not None:
+                if not isinstance(pending, dict) or not pending:
+                    raise HitlValidationError(
+                        "Proposal task has an invalid pending finalization intent."
+                    )
+                finalized = self.finish_ranked_proposal_task(dict(pending))
+                return {
+                    "status": "recorded",
+                    "complete": True,
+                    "idea_id": finalized["idea_id"],
+                }
+
+            if terminal_results:
+                raise HitlValidationError(
+                    "Proposal task has an unreferenced terminal idea. Runtime will not "
+                    "adopt idea-log content into task state."
+                )
+            return {
+                "status": "incomplete",
+                "complete": False,
+                "idea_id": None,
+            }
+
+    def _validate_ranked_task_result_reference(
+        self,
+        task_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        idea_id = str(task_context["task"].get("result_idea_id") or "").strip()
+        record = self._idea_record_by_id(idea_id)
+        if record is None:
+            raise HitlValidationError(
+                "Completed proposal task references a missing finalized idea."
+            )
+        provenance = _runtime_provenance(self._tool_context.get("provenance"))
+        if any(str(record.get(key, "")) != value for key, value in provenance.items()):
+            raise HitlValidationError(
+                "Completed proposal task references an idea with mismatched provenance."
+            )
+        role = str(task_context["role"])
+        terminal_shape = {
+            "proposer": ("proposal", "proposal", None),
+            "verifier": ("review", "evidence", "proposal_verification"),
+            "reviewer": ("review", "evidence", "proposal_review"),
+        }[role]
+        if (
+            record.get("hitl_stage") != terminal_shape[0]
+            or record.get("idea_type") != terminal_shape[1]
+            or (
+                terminal_shape[2] is not None
+                and record.get("idea_category") != terminal_shape[2]
+            )
+        ):
+            raise HitlValidationError(
+                "Completed proposal task references an idea with the wrong role schema."
+            )
+        dependencies = (
+            self._ranked_round_results(task_context["round_state"])
+            if role == "reviewer"
+            else {"candidate_ids": [], "verification_ids": []}
+        )
+        records = self.log.records()
+        existing_ids = {
+            str(candidate.get("idea_id", "")).strip()
+            for candidate in records
+            if str(candidate.get("idea_id", "")).strip() != idea_id
+        }
+        HitlIdeaLog.validate(
+            record,
+            existing_ids=existing_ids,
+            existing_records=records,
+            proposal_review_candidate_ids=(
+                dependencies["candidate_ids"] if role == "reviewer" else None
+            ),
+            require_proposal_review_candidates=role == "reviewer",
+        )
+        premises = _normalize_premises(record.get("premises"))
+        if role == "verifier":
+            assigned_id = str(
+                task_context["task"].get("assigned_proposal_idea_id") or ""
+            ).strip()
+            if not assigned_id or assigned_id not in premises:
+                raise HitlValidationError(
+                    "Completed proposal verification does not cite its assigned proposal."
+                )
+        elif role == "reviewer":
+            missing_verifications = [
+                verification_id
+                for verification_id in dependencies["verification_ids"]
+                if verification_id not in premises
+            ]
+            if missing_verifications:
+                raise HitlValidationError(
+                    "Completed proposal review does not cite every current verification."
+                )
+        return record
+
+    def ranked_task_result_after_worker_exit(
+        self,
+        result: Dict[str, Any],
+        *,
+        replacement_prompt: str,
+        worker_name: str,
+    ) -> Dict[str, Any]:
+        """Resolve one ranked provider exit without global worker continuation state."""
+
+        from core.hitl_run_control import (
+            HitlRunStopRequested,
+            hitl_run_stop_requested,
+            raise_if_hitl_run_stop_requested,
+        )
+
+        with self._tool_lock:
+            task_context = self._ranked_task_state_context()
+            role = str(task_context["role"])
+            self._validate_ranked_task_workspace(role)
+            if task_context["task"].get("result_idea_id") is not None:
+                record = self._validate_ranked_task_result_reference(task_context)
+                self._tool_context["ranked_task_terminal"] = True
+                return {
+                    "status": "recorded",
+                    "complete": True,
+                    "replacement": False,
+                    "idea_id": record["idea_id"],
+                    "worker_exit_warning": (
+                        f"{worker_name} exited after its ranked task result was recorded. "
+                        "Runtime retained the durable result."
+                        if not result.get("success")
+                        else ""
+                    ),
+                }
+
+            pending = task_context["task"].get("pending_finalization")
+            if pending is not None:
+                if not isinstance(pending, dict) or not pending:
+                    raise HitlValidationError(
+                        "Proposal task has an invalid pending finalization intent."
+                    )
+                finalized = self.finish_ranked_proposal_task(dict(pending))
+                return {
+                    "status": "recorded",
+                    "complete": True,
+                    "replacement": False,
+                    "idea_id": finalized["idea_id"],
+                    "worker_exit_warning": (
+                        f"{worker_name} exited while its result commit was pending. "
+                        "Runtime completed the durable commit without relaunching the worker."
+                    ),
+                }
+
+            if hitl_run_stop_requested():
+                raise_if_hitl_run_stop_requested()
+            if result.get("stopped"):
+                raise HitlRunStopRequested("HITL run stop requested by the user.")
+
+            if result.get("cancelled") or self._ranked_stage_cancelled():
+                return {
+                    "status": "cancelled",
+                    "complete": False,
+                    "replacement": False,
+                    "cancelled": True,
+                    "idea_id": None,
+                }
+
+            failed = _provider_failure_counter_update(result)
+            if failed is not None:
+                state_args = {
+                    **task_context["identity"],
+                    "proposal_task_id": task_context["task_id"],
+                    "role": role,
+                }
+                failures = task_context["state"].record_proposal_task_provider_result(
+                    **state_args,
+                    failed=failed,
+                )
+                self._stop_after_provider_failure_threshold(failures)
+
+            prompt_block = self._replacement_prompt_after_worker_exit(
+                _require_text(
+                    replacement_prompt,
+                    "replacement_prompt",
+                    "Ranked proposal task replacement",
+                ),
+                result,
+            )
+            return {
+                "status": "replacement",
+                "complete": False,
+                "replacement": True,
+                "prompt_block": prompt_block,
+                "worker_exit_warning": (
+                    f"{worker_name} exited before recording a ranked task result. Runtime "
+                    "will relaunch the same logical task from its reproducible prompt."
+                ),
+            }
+
     def log_reported_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
+            self._reject_cancelled_ranked_mutation()
+            if self._tool_context.get("ranked_task_terminal"):
+                raise HitlValidationError(
+                    "This proposal task is already complete. Stop this worker session."
+                )
             record = self._record_from_tool_payload(payload, raised=False)
+            self.validate_visible_idea_premises(record.get("premises"))
             existing = self.log.find_equivalent(record)
             if existing is not None:
                 return existing
             return self.log.append(record)
 
     def submit_proposal_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if self._tool_context.get("command_profile") == "proposal_candidate":
+            result = self.finish_ranked_proposal_task(payload)
+            return {
+                "status": result["status"],
+                "proposal_idea_id": result["idea_id"],
+                "instruction": result["instruction"],
+            }
         if not self._worker_request_lock.acquire(blocking=False):
             raise HitlActiveWorkerRequestError(self._pending_worker_command())
         try:
@@ -1783,6 +2999,295 @@ class HitlRuntime:
                 )
             return result
 
+    def _terminal_ranked_proposal_admission(
+        self,
+        *,
+        proposal_record: Dict[str, Any],
+        manager_selection_decision_idea_id: str,
+    ) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Recover a completed legality/human review for one selected proposal."""
+
+        proposal_id = str(proposal_record["idea_id"])
+        legality_question = (
+            "Is this AutoResearch proposal legal for admission review?"
+            if self.hitl_mode is HitlMode.AUTO
+            else "Is this AutoResearch proposal legal to show to the human for approval?"
+        )
+        records = self.log.records()
+        legality_record = next(
+            (
+                record
+                for record in reversed(records)
+                if record.get("idea_type") == "decision"
+                and record.get("idea_category") == "artifact_boundary_choice"
+                and record.get("level") == "B"
+                and record.get("actor") == "manager"
+                and record.get("decision_needed") == legality_question
+                and proposal_id in _normalize_premises(record.get("premises"))
+            ),
+            None,
+        )
+        if legality_record is None:
+            return None
+        common = {
+            "proposal_idea_id": proposal_id,
+            "manager_idea_id": legality_record["idea_id"],
+            "manager_admission_idea_id": manager_selection_decision_idea_id,
+        }
+        if legality_record.get("decision") == "O2":
+            return legality_record, {
+                **common,
+                "status": "feedback",
+                "feedback": str(legality_record.get("manager_feedback", "")).strip(),
+                "instruction": (
+                    "The selected proposal is illegal. Runtime will open a new proposal round."
+                ),
+            }
+        if self.hitl_mode is HitlMode.AUTO:
+            return legality_record, {
+                **common,
+                "status": "approved",
+                "instruction": "The selected proposal is admitted for execution.",
+                "proposal": proposal_record["proposal"],
+            }
+        human_record = next(
+            (
+                record
+                for record in reversed(records)
+                if record.get("idea_type") == "decision"
+                and record.get("level") == "A"
+                and record.get("actor") == "human"
+                and record.get("decision_needed")
+                == "Should this AutoResearch proposal be admitted to experiment execution?"
+                and proposal_id in _normalize_premises(record.get("premises"))
+                and legality_record["idea_id"]
+                in _normalize_premises(record.get("premises"))
+            ),
+            None,
+        )
+        if human_record is None:
+            return None
+        if human_record.get("decision") == "O1":
+            return legality_record, {
+                **common,
+                "status": "approved",
+                "instruction": "The selected proposal is admitted for execution.",
+                "proposal": proposal_record["proposal"],
+                "human_idea_id": human_record["idea_id"],
+            }
+        return legality_record, {
+            **common,
+            "status": "feedback",
+            "feedback": str(human_record.get("manager_feedback", "")).strip(),
+            "human_feedback": str(human_record.get("human_feedback", "")).strip(),
+            "instruction": (
+                "The human rejected the selected proposal. Runtime will open a new proposal round."
+            ),
+            "human_idea_id": human_record["idea_id"],
+        }
+
+    def review_selected_ranked_proposal(
+        self,
+        *,
+        proposal_idea_id: str,
+        manager_selection_decision_idea_id: str,
+        proposal_review_path: Path,
+    ) -> Dict[str, Any]:
+        """Run the existing manager/human admission boundary for a selected proposal."""
+
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            with self._tool_lock:
+                proposal_id = _require_text(
+                    proposal_idea_id,
+                    "proposal_idea_id",
+                    "Selected ranked proposal review",
+                )
+                selection_decision_id = _require_text(
+                    manager_selection_decision_idea_id,
+                    "manager_selection_decision_idea_id",
+                    "Selected ranked proposal review",
+                )
+                proposal_record = self._proposal_record(proposal_id)
+                if proposal_record is None:
+                    raise HitlValidationError(
+                        "Selected ranked proposal review requires a finalized proposal idea."
+                    )
+                from core.hitl_runtime_state import HitlRuntimeState
+
+                action = HitlRuntimeState(self.work_dir).snapshot().get(
+                    "next_autoresearch_action"
+                )
+                round_state = action.get("proposal_round") if isinstance(action, dict) else None
+                selection = (
+                    round_state.get("selection") if isinstance(round_state, dict) else None
+                )
+                if (
+                    not isinstance(action, dict)
+                    or action.get("kind") != "prepare_proposal"
+                    or action.get("status") != "resolved"
+                    or not isinstance(round_state, dict)
+                    or round_state.get("stage") != "selected"
+                    or not isinstance(selection, dict)
+                    or selection.get("choice") != "select"
+                    or selection.get("proposal_idea_id") != proposal_id
+                    or selection.get("decision_idea_id") != selection_decision_id
+                    or proposal_record.get("parent_node_id")
+                    != action.get("parent_node_sha")
+                    or proposal_record.get("attempt_id")
+                    != round_state.get("candidate_attempt_id")
+                ):
+                    raise HitlValidationError(
+                        "Selected ranked proposal review does not match current round state."
+                    )
+                selection_record = next(
+                    (
+                        record
+                        for record in self.log.records()
+                        if record.get("idea_id") == selection_decision_id
+                    ),
+                    None,
+                )
+                if not isinstance(selection_record, dict):
+                    raise HitlValidationError(
+                        "Selected ranked proposal review requires its exact manager selection decision."
+                    )
+                from core.hitl_proposal_round import (
+                    aggregate_proposal_round_reviews,
+                    proposal_selection_decision_record,
+                )
+
+                expected_round = dict(round_state)
+                expected_round["stage"] = "manager_selection"
+                try:
+                    aggregate = aggregate_proposal_round_reviews(
+                        expected_round,
+                        self.log.records(),
+                    )
+                    expected_selection = proposal_selection_decision_record(
+                        round_state=expected_round,
+                        aggregate=aggregate,
+                        parent_node_id=str(action["parent_node_sha"]),
+                    )
+                except ValueError as exc:
+                    raise HitlValidationError(str(exc)) from exc
+                if HitlIdeaLog.logical_payload(
+                    selection_record
+                ) != HitlIdeaLog.logical_payload(expected_selection):
+                    raise HitlValidationError(
+                        "Selected ranked proposal review requires its exact manager selection decision."
+                    )
+
+                terminal = self._terminal_ranked_proposal_admission(
+                    proposal_record=proposal_record,
+                    manager_selection_decision_idea_id=selection_decision_id,
+                )
+                if terminal is not None:
+                    manager_record, admission = terminal
+                    self._write_proposal_review_artifact(
+                        proposal_record=proposal_record,
+                        manager_record=manager_record,
+                        admission=admission,
+                        proposal_review_path=proposal_review_path,
+                    )
+                    return admission
+
+                finalized: Dict[str, Dict[str, Any]] = {}
+
+                def persist_admission(review: Dict[str, Any]) -> Dict[str, Any]:
+                    manager_record = self._log_proposal_manager_review(
+                        proposal_record=proposal_record,
+                        review=review,
+                    )
+                    if review["status"] == "rejected_illegal":
+                        admission = {
+                            "status": "feedback",
+                            "feedback": str(review["manager_feedback"]).strip(),
+                            "instruction": (
+                                "The selected proposal is illegal. Runtime will open a new "
+                                "proposal round."
+                            ),
+                            "proposal_idea_id": proposal_id,
+                            "manager_idea_id": manager_record["idea_id"],
+                            "manager_admission_idea_id": selection_decision_id,
+                        }
+                    elif self.hitl_mode is HitlMode.AUTO:
+                        admission = {
+                            "status": "approved",
+                            "instruction": (
+                                "The selected proposal is admitted for execution."
+                            ),
+                            "proposal_idea_id": proposal_id,
+                            "manager_idea_id": manager_record["idea_id"],
+                            "manager_admission_idea_id": selection_decision_id,
+                            "proposal": proposal_record["proposal"],
+                        }
+                    else:
+                        admission = self._finalize_proposal_human_admission(
+                            proposal_record=proposal_record,
+                            manager_record=manager_record,
+                            review=review,
+                        )
+                        admission["manager_admission_idea_id"] = selection_decision_id
+                    finalized["result"] = admission
+                    self._write_proposal_review_artifact(
+                        proposal_record=proposal_record,
+                        manager_record=manager_record,
+                        admission=admission,
+                        proposal_review_path=proposal_review_path,
+                    )
+                    return review
+
+                request_key = hashlib.sha256(
+                    (
+                        "selected_ranked_proposal_admission_v1:"
+                        + _compact_json(
+                            {
+                                "parent_node_id": proposal_record.get("parent_node_id"),
+                                "candidate_attempt_id": round_state.get(
+                                    "candidate_attempt_id"
+                                ),
+                                "proposal_idea_id": proposal_id,
+                                "manager_selection_decision_idea_id": selection_decision_id,
+                            }
+                        )
+                    ).encode("utf-8")
+                ).hexdigest()
+                self.manager.review_proposal(
+                    pipeline_stage=self.pipeline_stage,
+                    proposal_text=str(proposal_record["proposal"]),
+                    on_finalize=persist_admission,
+                    request_context={
+                        "proposal_idea_id": proposal_id,
+                        "manager_selection_decision_idea_id": selection_decision_id,
+                        "candidate_attempt_id": round_state["candidate_attempt_id"],
+                    },
+                    hitl_mode=self.hitl_mode,
+                    legality_only=True,
+                    request_key=request_key,
+                )
+                result = finalized.get("result")
+                if result is None:
+                    terminal = self._terminal_ranked_proposal_admission(
+                        proposal_record=proposal_record,
+                        manager_selection_decision_idea_id=selection_decision_id,
+                    )
+                    if terminal is None:
+                        raise RuntimeError(
+                            "Selected proposal review finalized without admission records."
+                        )
+                    manager_record, result = terminal
+                    self._write_proposal_review_artifact(
+                        proposal_record=proposal_record,
+                        manager_record=manager_record,
+                        admission=result,
+                        proposal_review_path=proposal_review_path,
+                    )
+                return dict(result)
+        finally:
+            self._worker_request_lock.release()
+
     @staticmethod
     def _proposal_submission_key(record: Dict[str, Any]) -> str:
         """Identify one proposal command retry without exposing runtime request ids."""
@@ -1807,9 +3312,12 @@ class HitlRuntime:
         proposal_record: Dict[str, Any],
         manager_record: Dict[str, Any],
         admission: Dict[str, Any],
+        proposal_review_path: Optional[Path] = None,
     ) -> None:
         """Materialize the runtime-owned public review trace for one proposal."""
-        raw_path = str(self._tool_context.get("proposal_review_path", "")).strip()
+        raw_path = str(
+            proposal_review_path or self._tool_context.get("proposal_review_path", "")
+        ).strip()
         if not raw_path:
             return
         path = Path(raw_path)
@@ -1980,6 +3488,7 @@ class HitlRuntime:
         *,
         worker_name: str,
     ) -> Dict[str, Any]:
+        self._require_default_worker_state("proposal worker continuation state")
         self._join_live_worker_request_handler()
         cancelled = self._cancelled_worker_command_result(
             result,
@@ -2104,16 +3613,31 @@ class HitlRuntime:
 
     def view_ideas_for_tool(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         with self._tool_lock:
+            visible_records = self._visible_idea_records_for_tool()
+            visibility = self._tool_context.get("idea_visibility")
+            proposal_verification_pairs = (
+                visibility.get("proposal_verification_pairs")
+                if isinstance(visibility, dict)
+                else None
+            )
             idea_id = str((payload or {}).get("idea_id", "")).strip()
             if idea_id:
                 try:
+                    selected_records = [
+                        record
+                        for record in visible_records
+                        if record.get("idea_id") == idea_id
+                    ]
+                    if visibility is not None and not selected_records:
+                        raise HitlValidationError(
+                            f"No finalized HITL idea exists with id {idea_id}."
+                        )
                     return {
-                        "ideas": [
-                            record
-                            for record in self.log.records()
-                            if record.get("idea_id") == idea_id
-                        ],
-                        "text": self.log.render_for_agent(idea_id=idea_id),
+                        "ideas": selected_records,
+                        "text": self.log.render_for_agent(
+                            idea_id=idea_id,
+                            records=visible_records,
+                        ),
                     }
                 except HitlValidationError as exc:
                     raise HitlValidationError(
@@ -2122,18 +3646,25 @@ class HitlRuntime:
                         "Run `hitl-view-ideas` to inspect available finalized idea ids, then retry."
                     ) from exc
             return {
-                "ideas": self.log.records(),
-                "text": self.log.render_for_agent(),
+                "ideas": visible_records,
+                "text": self.log.render_for_agent(
+                    records=visible_records,
+                    proposal_verification_pairs=proposal_verification_pairs,
+                ),
             }
 
     def view_current_frontier_for_tool(self) -> Dict[str, Any]:
+        profile = str(self._tool_context.get("command_profile", "default"))
         if (
             self.pipeline_stage != "experiment_runner"
-            or self._tool_context.get("hitl_stage") != "proposal"
+            or (
+                self._tool_context.get("hitl_stage") != "proposal"
+                and profile not in {"proposal_verifier", "proposal_reviewer"}
+            )
         ):
             raise HitlValidationError(
                 "HITL_ERROR frontier_wrong_context\n"
-                "`view_current_frontier` is available only during AutoResearch HITL proposal generation.\n"
+                "`view_current_frontier` is available only during AutoResearch HITL proposal work.\n"
                 "Continue with the command appropriate for the current HITL phase."
             )
         from core.hitl_frontier import HitlFrontierStore
@@ -3579,6 +5110,7 @@ class HitlRuntime:
         live tool-server and request state and gives a continuation worker the runtime
         prompt that the lost worker should have continued from.
         """
+        self._require_default_worker_state("worker exit continuation state")
         self._join_live_worker_request_handler()
         cancelled = self._cancelled_worker_command_result(
             result,
@@ -3799,14 +5331,21 @@ class HitlRuntime:
             raise HitlValidationError(f"Invalid HITL tool idea_type: {idea_type}")
         hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
         actor = str(self._tool_context.get("actor", self.pipeline_stage))
+        idea_category = _validate_idea_category(
+            idea_type,
+            payload.get("idea_category"),
+        )
+        if idea_type == "evidence" and idea_category in RANKED_RESULT_EVIDENCE_CATEGORIES:
+            raise HitlValidationError(
+                "HITL_ERROR reserved_idea_category\n"
+                "Proposal verification and review results must be finalized through their "
+                "role-specific finish command."
+            )
         record: Dict[str, Any] = {
             "pipeline_stage": self.pipeline_stage,
             "hitl_stage": hitl_stage,
             "idea_type": idea_type,
-            "idea_category": _validate_idea_category(
-                idea_type,
-                payload.get("idea_category"),
-            ),
+            "idea_category": idea_category,
             "level": "C",
             "actor": actor,
             "premises": _with_runtime_premises(
@@ -4257,6 +5796,28 @@ class HitlRuntime:
                                 "status": result.get("status"),
                                 "proposal_idea_id": result.get("proposal_idea_id", ""),
                                 "feedback": result.get("feedback", ""),
+                                "instruction": result.get("instruction", ""),
+                            },
+                        )
+                        return
+                    if self.path == "/proposal/task/finish":
+                        profile = str(runtime._tool_context.get("command_profile", ""))
+                        command = {
+                            "proposal_verifier": "hitl-finish-proposal-verification",
+                            "proposal_reviewer": "hitl-finish-proposal-review",
+                        }.get(profile)
+                        if command is None:
+                            raise HitlValidationError(
+                                "Proposal task finish is unavailable in this worker session."
+                            )
+                        runtime._require_worker_command(command)
+                        result = runtime.finish_ranked_proposal_task(payload)
+                        self._send_json(
+                            200,
+                            {
+                                "ok": True,
+                                "status": result.get("status"),
+                                "idea_id": result.get("idea_id", ""),
                                 "instruction": result.get("instruction", ""),
                             },
                         )

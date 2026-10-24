@@ -149,6 +149,32 @@ class HitlGitStateStore:
             ref=HITL_AUTORESEARCH_WHITEBOARD_REF,
         )
 
+    def hitl_autoresearch_whiteboard_matches_attempt_boundary(
+        self,
+        attempt_id: str,
+    ) -> bool:
+        """Compare the current hidden whiteboard with an attempt boundary.
+
+        Recovery uses this as a read-only integrity check.  It deliberately
+        does not restore the file or move the whiteboard history ref.
+        """
+
+        boundary = self._find_whiteboard_attempt_boundary(
+            attempt_id,
+            ref=HITL_AUTORESEARCH_WHITEBOARD_REF,
+        )
+        path = HITL_AUTORESEARCH_WHITEBOARD_STATE_PATH
+        recorded = self._run_git("ls-tree", "-r", "--name-only", boundary, "--", path)
+        current_path = self.work_dir / path
+        if not recorded.strip():
+            return not current_path.exists()
+        if not current_path.is_file():
+            return False
+        return current_path.read_bytes() == self._run_git_bytes(
+            "show",
+            f"{boundary}:{path}",
+        )
+
     def restore(self, snapshot: HitlGitSnapshot | str) -> None:
         ref = snapshot.ref if isinstance(snapshot, HitlGitSnapshot) else str(snapshot)
         commit = self._rev_parse(ref)
