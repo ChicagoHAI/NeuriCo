@@ -1677,18 +1677,32 @@ class AutoResearchController:
         failure_stage = "scoring seal"
         try:
             sealed_dir = seal_scoring_files(self.work_dir)
-            failure_stage = "proposal/comment stage"
+            failure_stage = "proposal stage"
             proposal_result = self._call_proposal_generator(
                 parent_sha=parent_sha,
                 attempt_dir=attempt_dir,
                 attempt_history=attempt_history,
             )
+            if isinstance(proposal_result, dict) and not proposal_result.get("success", False):
+                raise RuntimeError(
+                    proposal_result.get("error")
+                    or "Proposal generator did not complete successfully "
+                    f"(return_code={proposal_result.get('return_code')})."
+                )
             proposal = self._resolve_proposal_text(attempt_dir, proposal_result)
             self.history.write_proposal(attempt_dir, proposal)
+            failure_stage = "comment stage"
             comment_result = self.comment_mode(self._idea_with_comments(proposal), self.work_dir)
+            if not comment_result.get("success", False):
+                raise RuntimeError(
+                    comment_result.get("error")
+                    or "Comment handler did not complete successfully "
+                    f"(return_code={comment_result.get('return_code')})."
+                )
         except Exception as exc:
             pre_scoring_error = f"AutoResearch {failure_stage} failed: {exc}"
             comment_result = {
+                **(comment_result if isinstance(comment_result, dict) else {}),
                 "success": False,
                 "error": pre_scoring_error,
             }
