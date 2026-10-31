@@ -2178,6 +2178,32 @@ class HitlRuntimeState:
                 raise HitlRuntimeStateError("No matching proposal discussion task exists")
             return self._copy(task)
 
+    def active_proposal_discussion_task_snapshot(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        discussion_task_id: str,
+    ) -> Dict[str, Any]:
+        """Return one task and session only while that task is authorized to act."""
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            _action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            task = self._active_proposal_discussion_task_unlocked(
+                session,
+                discussion_task_id=discussion_task_id,
+            )
+            return {
+                "session": self._copy(session),
+                "task": self._copy(task),
+            }
+
     def record_proposal_discussion_task_provider_result(
         self,
         *,
