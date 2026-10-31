@@ -37,9 +37,16 @@ from core.hitl_lock import (
 )
 from core.hitl_manager_react import HitlManager
 from core.hitl_proposal_round import (
+    COLLABORATIVE_PROPOSAL_MODE,
+    DEFAULT_COLLABORATIVE_DISCUSSION_ROUNDS,
+    DEFAULT_COLLABORATIVE_PARTICIPANT_COUNT,
     INDEPENDENT_RANKED_PROPOSAL_MODE,
+    MAX_COLLABORATIVE_DISCUSSION_ROUNDS,
+    MAX_COLLABORATIVE_PARTICIPANT_COUNT,
     MAX_PROPOSER_COUNT,
     MAX_REVIEWER_COUNT,
+    MIN_COLLABORATIVE_DISCUSSION_ROUNDS,
+    MIN_COLLABORATIVE_PARTICIPANT_COUNT,
     MIN_PROPOSER_COUNT,
     MIN_REVIEWER_COUNT,
     SINGLE_PROPOSAL_MODE,
@@ -1029,14 +1036,16 @@ class HitlTerminalChannel(UserChannel):
             proposal_mode = SINGLE_PROPOSAL_MODE
             proposer_count = None
             reviewer_count = None
+            participant_count = None
+            discussion_rounds = None
             iterations = 1
             time_limit_seconds = None
             if operation == "research" and workflow == "autoresearch":
                 proposal_choice = self._read_choice(
-                    "Proposals [single] (single/ranked): ",
+                    "Proposals [single] (single/ranked/collaborative): ",
                     "single",
-                    {"single", "ranked"},
-                    "Choose single or ranked.",
+                    {"single", "ranked", "collaborative"},
+                    "Choose single, ranked, or collaborative.",
                     cancellable=True,
                 )
                 if proposal_choice == "ranked":
@@ -1053,6 +1062,22 @@ class HitlTerminalChannel(UserChannel):
                         3,
                         minimum=MIN_REVIEWER_COUNT,
                         maximum=MAX_REVIEWER_COUNT,
+                        cancellable=True,
+                    )
+                elif proposal_choice == "collaborative":
+                    proposal_mode = COLLABORATIVE_PROPOSAL_MODE
+                    participant_count = self._read_integer(
+                        "Participants [5] (3-10, including lead): ",
+                        DEFAULT_COLLABORATIVE_PARTICIPANT_COUNT,
+                        minimum=MIN_COLLABORATIVE_PARTICIPANT_COUNT,
+                        maximum=MAX_COLLABORATIVE_PARTICIPANT_COUNT,
+                        cancellable=True,
+                    )
+                    discussion_rounds = self._read_integer(
+                        "Response rounds [3] (1-10): ",
+                        DEFAULT_COLLABORATIVE_DISCUSSION_ROUNDS,
+                        minimum=MIN_COLLABORATIVE_DISCUSSION_ROUNDS,
+                        maximum=MAX_COLLABORATIVE_DISCUSSION_ROUNDS,
                         cancellable=True,
                     )
                 iterations = self._read_integer(
@@ -1117,6 +1142,14 @@ class HitlTerminalChannel(UserChannel):
                                 }
                                 if proposal_mode
                                 == INDEPENDENT_RANKED_PROPOSAL_MODE
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "participant_count": participant_count,
+                                    "discussion_rounds": discussion_rounds,
+                                }
+                                if proposal_mode == COLLABORATIVE_PROPOSAL_MODE
                                 else {}
                             ),
                         }

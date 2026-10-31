@@ -27,7 +27,9 @@ from core.hitl_paths import (
     hitl_state_dir,
     hitl_stop_request_path,
 )
+from core.hitl_proposal_discussion import proposal_discussion_task_id
 from core.hitl_proposal_round import (
+    COLLABORATIVE_PROPOSAL_MODE,
     INDEPENDENT_RANKED_PROPOSAL_MODE,
     normalize_proposal_mode_config,
 )
@@ -378,6 +380,156 @@ class HitlWorkspaceView:
             "next_action": next_step,
         }
 
+    @staticmethod
+    def _collaborative_proposal_status(next_action: Dict[str, Any]) -> Dict[str, Any]:
+        """Derive meeting progress from the authoritative discussion session."""
+
+        session = next_action.get("proposal_discussion")
+        if (
+            next_action.get("kind") != "prepare_proposal"
+            or next_action.get("status") != "resolved"
+            or not isinstance(session, dict)
+        ):
+            return {}
+        try:
+            config = normalize_proposal_mode_config(
+                COLLABORATIVE_PROPOSAL_MODE,
+                participant_count=session.get("participant_count"),
+                discussion_rounds=session.get("max_response_rounds"),
+            )
+        except ValueError as exc:
+            raise HitlWorkspaceViewError(
+                f"Invalid collaborative proposal configuration: {exc}"
+            ) from exc
+        tasks = session.get("tasks")
+        if not isinstance(tasks, dict):
+            raise HitlWorkspaceViewError(
+                "Collaborative proposal discussion tasks must be an object."
+            )
+        participant_count = int(config.participant_count or 0)
+        maximum_rounds = int(config.discussion_rounds or 0)
+        round_ordinal = session.get("round_ordinal")
+        if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
+            raise HitlWorkspaceViewError(
+                "Collaborative proposal discussion round must be an integer."
+            )
+        phase = str(session.get("phase", "")).strip()
+        if (
+            phase in {"initial", "opening"}
+            and round_ordinal != 0
+        ) or (
+            phase in {"response", "decision", "final_writing", "reopen_pending"}
+            and not 1 <= round_ordinal <= maximum_rounds
+        ):
+            raise HitlWorkspaceViewError(
+                "Collaborative proposal discussion has an invalid round for its phase."
+            )
+
+        def completed(task_ids: List[str]) -> int:
+            count = 0
+            for task_id in task_ids:
+                task = tasks.get(task_id)
+                if not isinstance(task, dict):
+                    raise HitlWorkspaceViewError(
+                        "Collaborative proposal discussion is missing an active task."
+                    )
+                if bool(str(task.get("result_record_id") or "").strip()):
+                    count += 1
+            return count
+
+        if phase == "initial":
+            task_ids = [
+                proposal_discussion_task_id(
+                    "initial",
+                    participant_ordinal=ordinal,
+                )
+                for ordinal in range(1, participant_count + 1)
+            ]
+            total = participant_count
+            complete = completed(task_ids)
+            title = "Developing initial directions"
+            phase_label = f"Initial contributions ({complete}/{total})"
+            detail = "Participants are independently developing possible experiments."
+            next_step = "The lead opens the shared discussion after every contribution is ready."
+        elif phase == "opening":
+            total = 1
+            complete = completed(
+                [proposal_discussion_task_id("opening", participant_ordinal=1)]
+            )
+            title = "Opening proposal discussion"
+            phase_label = f"Lead opening ({complete}/1)"
+            detail = "The lead is framing the shared discussion from the initial directions."
+            next_step = "The other participants respond in the first discussion round."
+        elif phase == "response":
+            task_ids = [
+                proposal_discussion_task_id(
+                    "response",
+                    participant_ordinal=ordinal,
+                    round_ordinal=round_ordinal,
+                )
+                for ordinal in range(2, participant_count + 1)
+            ]
+            total = participant_count - 1
+            complete = completed(task_ids)
+            title = f"Discussing proposal directions · Round {round_ordinal}"
+            phase_label = f"Response round {round_ordinal} ({complete}/{total})"
+            detail = "Participants are responding to the lead and the published meeting record."
+            next_step = (
+                "The lead writes the proposal after this round."
+                if round_ordinal == maximum_rounds
+                else "The lead decides whether to continue or write the proposal."
+            )
+        elif phase == "decision":
+            total = 1
+            complete = completed(
+                [
+                    proposal_discussion_task_id(
+                        "decision",
+                        participant_ordinal=1,
+                        round_ordinal=round_ordinal,
+                    )
+                ]
+            )
+            title = "Choosing whether to continue discussion"
+            phase_label = f"Lead decision after round {round_ordinal} ({complete}/1)"
+            detail = "The lead is deciding whether another response round is useful."
+            next_step = "Discussion continues, or the lead writes the proposal."
+        elif phase == "final_writing":
+            total = 1
+            complete = 0
+            title = "Writing final proposal"
+            phase_label = "Final proposal writing"
+            detail = "The lead is writing one proposal through the existing admission workflow."
+            next_step = "The manager reviews the proposal next."
+        elif phase == "reopen_pending":
+            total = 1
+            complete = 0
+            title = "Reopening proposal discussion"
+            phase_label = "Reopening handoff"
+            detail = "Accepted manager feedback is being transferred back to the meeting."
+            next_step = "The participants resume within the remaining shared round allowance."
+        else:
+            raise HitlWorkspaceViewError(
+                "Collaborative proposal discussion has an invalid phase: "
+                f"{phase or '<missing>'}."
+            )
+        return {
+            "proposal_mode": COLLABORATIVE_PROPOSAL_MODE,
+            "participant_count": config.participant_count,
+            "discussion_rounds": config.discussion_rounds,
+            "proposal_discussion_phase": phase,
+            "discussion_round_ordinal": round_ordinal,
+            "discussion_rounds_remaining": max(0, maximum_rounds - round_ordinal),
+            "proposal_progress": {
+                "completed": complete,
+                "total": total,
+            },
+            "title": title,
+            "phase_label": phase_label,
+            "detail": detail,
+            "next_action": next_step,
+        }
+
     def _live_status(
         self,
         runtime: Dict[str, Any],
@@ -413,6 +565,12 @@ class HitlWorkspaceView:
         next_action = runtime.get("next_autoresearch_action")
         next_action = next_action if isinstance(next_action, dict) else {}
         ranked_proposal = self._ranked_proposal_status(next_action)
+        collaborative_proposal = self._collaborative_proposal_status(next_action)
+        if ranked_proposal and collaborative_proposal:
+            raise HitlWorkspaceViewError(
+                "Proposal preparation cannot contain ranked and collaborative state."
+            )
+        proposal_status = collaborative_proposal or ranked_proposal
         frontier_transition = runtime.get("frontier_decision_transition")
         frontier_transition = frontier_transition if isinstance(frontier_transition, dict) else {}
         root_transition = runtime.get("initial_root_publication_transition")
@@ -515,17 +673,23 @@ class HitlWorkspaceView:
                 "next_action": next_step,
                 "reason": str(record.get("reason", "")) if isinstance(record, dict) else "",
             }
-            if ranked_proposal:
+            if proposal_status:
                 result.update(
                     {
-                        key: ranked_proposal[key]
+                        key: proposal_status[key]
                         for key in (
                             "proposal_mode",
                             "proposer_count",
                             "reviewer_count",
+                            "participant_count",
+                            "discussion_rounds",
                             "proposal_round_stage",
+                            "proposal_discussion_phase",
+                            "discussion_round_ordinal",
+                            "discussion_rounds_remaining",
                             "proposal_progress",
                         )
+                        if key in proposal_status
                     }
                 )
             return result
@@ -539,6 +703,13 @@ class HitlWorkspaceView:
         root_status = str(root_transition.get("status", "")).strip()
         cleanup_pending = str(cleanup.get("status", "")).strip() == "pending"
         continuation_status = str(continuation.get("status", "")).strip()
+        proposal_display_status = proposal_status
+        if (
+            collaborative_proposal.get("proposal_discussion_phase") == "final_writing"
+            and continuation_status
+            and phase in {"plan", "execution", "review"}
+        ):
+            proposal_display_status = ranked_proposal
         launch_status = self._launch_status()
         launch_state = str(launch_status.get("status", "")).strip()
         github_publication = launch_status.get("github_publication")
@@ -590,8 +761,8 @@ class HitlWorkspaceView:
         def durable_boundary_labels() -> tuple[str, str]:
             if unresolved:
                 return pending_labels()
-            if ranked_proposal:
-                return "Experiment", str(ranked_proposal["phase_label"])
+            if proposal_display_status:
+                return "Experiment", str(proposal_display_status["phase_label"])
             if action_status in {"pending", "decision_recorded"}:
                 kind = str(next_action.get("kind", "")).strip()
                 if kind == "prune_frontier":
@@ -624,7 +795,7 @@ class HitlWorkspaceView:
 
         has_pending_work = bool(
             unresolved
-            or ranked_proposal
+            or proposal_status
             or action_status in {"pending", "decision_recorded"}
             or frontier_status not in {"", "completed"}
             or root_status not in {"", "completed"}
@@ -662,10 +833,12 @@ class HitlWorkspaceView:
                     record=launch_status,
                     active=False,
                     display_stage=(
-                        interrupted_stage if ranked_proposal else "Interrupted"
+                        interrupted_stage if proposal_display_status else "Interrupted"
                     ),
                     display_phase=(
-                        f"{interrupted_phase} interrupted" if ranked_proposal else ""
+                        f"{interrupted_phase} interrupted"
+                        if proposal_display_status
+                        else ""
                     ),
                 )
             if launch_state == "stopped":
@@ -885,17 +1058,17 @@ class HitlWorkspaceView:
                 display_phase=review_phase,
             )
 
-        if ranked_proposal:
+        if proposal_display_status:
             return projected(
                 "saving"
-                if ranked_proposal["proposal_round_stage"] == "selected"
+                if proposal_display_status.get("proposal_round_stage") == "selected"
                 else "researching",
-                str(ranked_proposal["title"]),
-                str(ranked_proposal["detail"]),
-                next_step=str(ranked_proposal["next_action"]),
+                str(proposal_display_status["title"]),
+                str(proposal_display_status["detail"]),
+                next_step=str(proposal_display_status["next_action"]),
                 record=next_action,
                 display_stage="Experiment",
-                display_phase=str(ranked_proposal["phase_label"]),
+                display_phase=str(proposal_display_status["phase_label"]),
             )
 
         if action_status in {"pending", "decision_recorded"}:
