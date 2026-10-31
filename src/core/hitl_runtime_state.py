@@ -15,6 +15,14 @@ from typing import Any, Dict, Iterator, Optional
 
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_paths import hitl_runtime_state_path, hitl_state_dir
+from core.hitl_proposal_discussion import (
+    PROPOSAL_DISCUSSION_SCHEMA_VERSION,
+    normalize_proposal_discussion_record,
+    parse_reopen_discussion_record_id,
+    proposal_discussion_task_id,
+    reopen_discussion_record_id,
+    validate_proposal_discussion_task_id,
+)
 from core.hitl_proposal_round import PROPOSAL_ROUND_SCHEMA_VERSION
 from core.hitl_util import atomic_write_json, utc_now
 
@@ -49,6 +57,10 @@ _PROPOSAL_ROLE_STAGES = {
     "verifier": frozenset({"proposing", "verifying"}),
     "reviewer": frozenset({"reviewing"}),
 }
+_PROPOSAL_DISCUSSION_PHASES = frozenset(
+    {"initial", "opening", "response", "decision", "final_writing", "reopen_pending"}
+)
+_FULL_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def worker_command_requires_resume(command: Any) -> bool:
@@ -872,6 +884,10 @@ class HitlRuntimeState:
             parent_node_sha=parent,
             preparation_attempt_id=preparation,
         )
+        if action.get("proposal_discussion") is not None:
+            raise HitlRuntimeStateError(
+                "Proposal preparation cannot own ranked and collaborative state together"
+            )
         round_state = self._validate_proposal_round_shape(action.get("proposal_round"))
         if (
             str(round_state.get("candidate_attempt_id", "")).strip() != candidate
@@ -983,6 +999,10 @@ class HitlRuntimeState:
                 parent_node_sha=parent,
                 preparation_attempt_id=preparation,
             )
+            if action.get("proposal_discussion") is not None:
+                raise HitlRuntimeStateError(
+                    "Proposal preparation cannot own ranked and collaborative state together"
+                )
             existing = action.get("proposal_round")
             if existing is not None:
                 round_state = self._validate_proposal_round_shape(existing)
@@ -1558,6 +1578,1036 @@ class HitlRuntimeState:
             self._state["next_autoresearch_action"] = action
             self._save_unlocked()
             return self._copy(next_round)
+
+    @staticmethod
+    def _proposal_discussion_identity(
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+    ) -> tuple[str, str, str]:
+        parent = str(parent_node_sha).strip()
+        preparation = str(preparation_attempt_id).strip()
+        candidate = str(candidate_attempt_id).strip()
+        if not parent or not preparation:
+            raise HitlRuntimeStateError(
+                "Proposal discussion requires parent and preparation identity"
+            )
+        if _LOCAL_ATTEMPT_ID.fullmatch(candidate) is None:
+            raise HitlRuntimeStateError(
+                "Proposal discussion candidate_attempt_id must be the local attempt_N component"
+            )
+        return parent, preparation, candidate
+
+    @staticmethod
+    def _normalized_whiteboard_boundary_sha(value: Any) -> str:
+        normalized = str(value).strip()
+        if _FULL_GIT_SHA.fullmatch(normalized) is None:
+            raise HitlRuntimeStateError(
+                "Proposal discussion whiteboard boundary must be a full lowercase commit SHA"
+            )
+        return normalized
+
+    @staticmethod
+    def _proposal_discussion_response_ids(
+        round_ordinal: int,
+        participant_count: int,
+    ) -> list[str]:
+        return [
+            proposal_discussion_task_id(
+                "response",
+                participant_ordinal=ordinal,
+                round_ordinal=round_ordinal,
+            )
+            for ordinal in range(2, participant_count + 1)
+        ]
+
+    @staticmethod
+    def _new_proposal_discussion(
+        *,
+        candidate_attempt_id: str,
+        base_idea_number: int,
+        whiteboard_boundary_sha: str,
+        participant_count: int,
+        max_response_rounds: int,
+    ) -> Dict[str, Any]:
+        return {
+            "version": PROPOSAL_DISCUSSION_SCHEMA_VERSION,
+            "candidate_attempt_id": candidate_attempt_id,
+            "phase": "initial",
+            "base_idea_number": base_idea_number,
+            "whiteboard_boundary_sha": whiteboard_boundary_sha,
+            "participant_count": participant_count,
+            "max_response_rounds": max_response_rounds,
+            "round_ordinal": 0,
+            "tasks": {
+                proposal_discussion_task_id(
+                    "initial",
+                    participant_ordinal=ordinal,
+                ): {
+                    "kind": "contribution",
+                    "result_record_id": None,
+                }
+                for ordinal in range(1, participant_count + 1)
+            },
+        }
+
+    @staticmethod
+    def _proposal_discussion_expected_task_ids(
+        session: Dict[str, Any],
+    ) -> list[str]:
+        participant_count = int(session["participant_count"])
+        round_ordinal = int(session["round_ordinal"])
+        phase = str(session["phase"])
+        task_ids = [
+            proposal_discussion_task_id(
+                "initial",
+                participant_ordinal=ordinal,
+            )
+            for ordinal in range(1, participant_count + 1)
+        ]
+        if phase == "initial":
+            return task_ids
+        task_ids.append(proposal_discussion_task_id("opening", participant_ordinal=1))
+        if phase == "opening":
+            return task_ids
+        for ordinal in range(1, round_ordinal + 1):
+            task_ids.extend(
+                HitlRuntimeState._proposal_discussion_response_ids(
+                    ordinal,
+                    participant_count,
+                )
+            )
+            if ordinal < round_ordinal:
+                task_ids.append(
+                    proposal_discussion_task_id(
+                        "decision",
+                        participant_ordinal=1,
+                        round_ordinal=ordinal,
+                    )
+                )
+        if phase == "decision" or (
+            phase in {"final_writing", "reopen_pending"}
+            and round_ordinal < int(session["max_response_rounds"])
+        ):
+            task_ids.append(
+                proposal_discussion_task_id(
+                    "decision",
+                    participant_ordinal=1,
+                    round_ordinal=round_ordinal,
+                )
+            )
+        return task_ids
+
+    @staticmethod
+    def _proposal_discussion_task_complete(task: Any) -> bool:
+        if not isinstance(task, dict):
+            return False
+        record_id = task.get("result_record_id")
+        return bool(
+            isinstance(record_id, str)
+            and record_id.strip()
+            and task.get("pending_finalization") is None
+        )
+
+    @staticmethod
+    def _validate_proposal_discussion_task_shape(
+        task_id: str,
+        task: Any,
+        *,
+        participant_count: int,
+        max_response_rounds: int,
+    ) -> Dict[str, Any]:
+        if not isinstance(task, dict):
+            raise HitlRuntimeStateError("Proposal discussion task must be an object")
+        try:
+            identity = validate_proposal_discussion_task_id(
+                task_id,
+                participant_count=participant_count,
+                max_response_rounds=max_response_rounds,
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        expected_kind = "decision" if identity.phase == "decision" else "contribution"
+        allowed_keys = {
+            "kind",
+            "result_record_id",
+            "pending_finalization",
+            "consecutive_provider_failures",
+            "choice",
+        }
+        if set(task) - allowed_keys:
+            raise HitlRuntimeStateError("Proposal discussion task contains unsupported fields")
+        if task.get("kind") != expected_kind or "result_record_id" not in task:
+            raise HitlRuntimeStateError("Proposal discussion task kind is invalid")
+        result_record_id = task.get("result_record_id")
+        if result_record_id is not None and result_record_id != task_id:
+            raise HitlRuntimeStateError(
+                "Proposal discussion task result reference does not match its task ID"
+            )
+        pending = task.get("pending_finalization")
+        if "pending_finalization" in task and pending is None:
+            raise HitlRuntimeStateError(
+                "Proposal discussion task must omit an empty finalization intent"
+            )
+        if pending is not None:
+            if result_record_id is not None:
+                raise HitlRuntimeStateError(
+                    "Completed proposal discussion task cannot retain finalization intent"
+                )
+            try:
+                normalized = normalize_proposal_discussion_record(
+                    task_id,
+                    expected_kind,
+                    pending,
+                )["result"]
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            if pending != normalized:
+                raise HitlRuntimeStateError(
+                    "Proposal discussion task finalization intent is not normalized"
+                )
+        failures = task.get("consecutive_provider_failures")
+        if "consecutive_provider_failures" in task and failures is None:
+            raise HitlRuntimeStateError(
+                "Proposal discussion task must omit an empty provider-failure counter"
+            )
+        if failures is not None:
+            if (
+                isinstance(failures, bool)
+                or not isinstance(failures, int)
+                or failures < 1
+                or result_record_id is not None
+                or pending is not None
+            ):
+                raise HitlRuntimeStateError(
+                    "Proposal discussion provider-failure counter is invalid"
+                )
+        choice = task.get("choice")
+        if "choice" in task and choice is None:
+            raise HitlRuntimeStateError(
+                "Proposal discussion task must omit an empty scheduling choice"
+            )
+        if expected_kind == "decision" and result_record_id is not None:
+            if choice not in {"continue", "finalize"}:
+                raise HitlRuntimeStateError(
+                    "Completed proposal discussion decision requires its scheduling choice"
+                )
+        elif choice is not None:
+            raise HitlRuntimeStateError(
+                "Only a completed proposal discussion decision retains a choice"
+            )
+        if result_record_id is not None and (
+            "pending_finalization" in task or "consecutive_provider_failures" in task
+        ):
+            raise HitlRuntimeStateError(
+                "Completed proposal discussion task contains transient state"
+            )
+        return task
+
+    @staticmethod
+    def _validate_proposal_discussion_shape(session: Any) -> Dict[str, Any]:
+        if not isinstance(session, dict):
+            raise HitlRuntimeStateError("Proposal discussion state is missing")
+        required_keys = {
+            "version",
+            "candidate_attempt_id",
+            "phase",
+            "base_idea_number",
+            "whiteboard_boundary_sha",
+            "participant_count",
+            "max_response_rounds",
+            "round_ordinal",
+            "tasks",
+        }
+        phase = str(session.get("phase", ""))
+        expected_keys = required_keys | ({"reopen_handoff"} if phase == "reopen_pending" else set())
+        if set(session) != expected_keys:
+            raise HitlRuntimeStateError(
+                "Proposal discussion state contains missing or unsupported fields"
+            )
+        if session.get("version") != PROPOSAL_DISCUSSION_SCHEMA_VERSION:
+            raise HitlRuntimeStateError("Unsupported proposal discussion schema version")
+        if _LOCAL_ATTEMPT_ID.fullmatch(
+            str(session.get("candidate_attempt_id", ""))
+        ) is None:
+            raise HitlRuntimeStateError("Proposal discussion candidate attempt is invalid")
+        if phase not in _PROPOSAL_DISCUSSION_PHASES:
+            raise HitlRuntimeStateError("Proposal discussion phase is invalid")
+        base_idea_number = session.get("base_idea_number")
+        if (
+            isinstance(base_idea_number, bool)
+            or not isinstance(base_idea_number, int)
+            or base_idea_number < 0
+        ):
+            raise HitlRuntimeStateError("Proposal discussion idea boundary is invalid")
+        HitlRuntimeState._normalized_whiteboard_boundary_sha(
+            session.get("whiteboard_boundary_sha")
+        )
+        from core.hitl_proposal_round import normalize_proposal_mode_config
+
+        try:
+            config = normalize_proposal_mode_config(
+                "collaborative",
+                participant_count=session.get("participant_count"),
+                discussion_rounds=session.get("max_response_rounds"),
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        participant_count = int(config.participant_count)
+        max_response_rounds = int(config.discussion_rounds)
+        round_ordinal = session.get("round_ordinal")
+        if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
+            raise HitlRuntimeStateError("Proposal discussion round ordinal is invalid")
+        if phase in {"initial", "opening"}:
+            if round_ordinal != 0:
+                raise HitlRuntimeStateError(
+                    "Proposal discussion has a round before member responses begin"
+                )
+        elif round_ordinal < 1 or round_ordinal > max_response_rounds:
+            raise HitlRuntimeStateError("Proposal discussion round ordinal is invalid")
+        tasks = session.get("tasks")
+        if not isinstance(tasks, dict):
+            raise HitlRuntimeStateError("Proposal discussion tasks must be an object")
+        expected_task_ids = HitlRuntimeState._proposal_discussion_expected_task_ids(session)
+        if set(tasks) != set(expected_task_ids):
+            raise HitlRuntimeStateError(
+                "Proposal discussion task set does not match its phase"
+            )
+        for task_id in expected_task_ids:
+            HitlRuntimeState._validate_proposal_discussion_task_shape(
+                task_id,
+                tasks[task_id],
+                participant_count=participant_count,
+                max_response_rounds=max_response_rounds,
+            )
+        initial_ids = [
+            proposal_discussion_task_id("initial", participant_ordinal=ordinal)
+            for ordinal in range(1, participant_count + 1)
+        ]
+        if phase != "initial" and not all(
+            HitlRuntimeState._proposal_discussion_task_complete(tasks[task_id])
+            for task_id in initial_ids
+        ):
+            raise HitlRuntimeStateError(
+                "Proposal discussion advanced before initial contributions completed"
+            )
+        if phase not in {"initial", "opening"}:
+            opening_id = proposal_discussion_task_id("opening", participant_ordinal=1)
+            if not HitlRuntimeState._proposal_discussion_task_complete(tasks[opening_id]):
+                raise HitlRuntimeStateError(
+                    "Proposal discussion advanced before the lead opening completed"
+                )
+        if round_ordinal:
+            for ordinal in range(1, round_ordinal):
+                prior_ids = HitlRuntimeState._proposal_discussion_response_ids(
+                    ordinal,
+                    participant_count,
+                )
+                prior_ids.append(
+                    proposal_discussion_task_id(
+                        "decision",
+                        participant_ordinal=1,
+                        round_ordinal=ordinal,
+                    )
+                )
+                if not all(
+                    HitlRuntimeState._proposal_discussion_task_complete(tasks[task_id])
+                    for task_id in prior_ids
+                ):
+                    raise HitlRuntimeStateError(
+                        "Proposal discussion has an incomplete earlier response round"
+                    )
+            current_response_ids = HitlRuntimeState._proposal_discussion_response_ids(
+                round_ordinal,
+                participant_count,
+            )
+            if phase != "response" and not all(
+                HitlRuntimeState._proposal_discussion_task_complete(tasks[task_id])
+                for task_id in current_response_ids
+            ):
+                raise HitlRuntimeStateError(
+                    "Proposal discussion advanced before member responses completed"
+                )
+            if phase in {"final_writing", "reopen_pending"} and round_ordinal < max_response_rounds:
+                decision_id = proposal_discussion_task_id(
+                    "decision",
+                    participant_ordinal=1,
+                    round_ordinal=round_ordinal,
+                )
+                decision = tasks[decision_id]
+                if (
+                    not HitlRuntimeState._proposal_discussion_task_complete(decision)
+                    or decision.get("choice") != "finalize"
+                ):
+                    raise HitlRuntimeStateError(
+                        "Proposal discussion final writing requires a finalized lead decision"
+                    )
+        handoff = session.get("reopen_handoff")
+        if phase == "reopen_pending":
+            if round_ordinal >= max_response_rounds or not isinstance(handoff, dict):
+                raise HitlRuntimeStateError("Proposal discussion reopen handoff is invalid")
+            expected_handoff_keys = {
+                "worker_request_key",
+                "proposal_idea_id",
+                "feedback_ref",
+                "reopen_record_id",
+            }
+            if set(handoff) != expected_handoff_keys:
+                raise HitlRuntimeStateError("Proposal discussion reopen handoff is invalid")
+            if not str(handoff.get("worker_request_key", "")).strip():
+                raise HitlRuntimeStateError("Proposal discussion reopen request key is invalid")
+            if _IDEA_ID.fullmatch(str(handoff.get("proposal_idea_id", ""))) is None:
+                raise HitlRuntimeStateError("Proposal discussion reopen proposal ID is invalid")
+            if not str(handoff.get("feedback_ref", "")).strip():
+                raise HitlRuntimeStateError("Proposal discussion feedback reference is invalid")
+            if handoff.get("reopen_record_id") != reopen_discussion_record_id(
+                round_ordinal + 1
+            ):
+                raise HitlRuntimeStateError("Proposal discussion reopen record is invalid")
+        return session
+
+    def _proposal_discussion_unlocked(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        expected_phase: Optional[str] = None,
+        expected_round_ordinal: Optional[int] = None,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        parent, preparation, candidate = self._proposal_discussion_identity(
+            parent_node_sha=parent_node_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=candidate_attempt_id,
+        )
+        action = self._proposal_preparation_unlocked(
+            parent_node_sha=parent,
+            preparation_attempt_id=preparation,
+        )
+        if action.get("proposal_round") is not None:
+            raise HitlRuntimeStateError(
+                "Proposal preparation cannot own ranked and collaborative state together"
+            )
+        if not str(action.get("workspace_fingerprint", "")).strip():
+            raise HitlRuntimeStateError(
+                "Proposal discussion preparation has no workspace fingerprint"
+            )
+        session = self._validate_proposal_discussion_shape(
+            action.get("proposal_discussion")
+        )
+        if session.get("candidate_attempt_id") != candidate:
+            raise HitlRuntimeStateError("Proposal discussion identity is stale")
+        if expected_phase is not None and session.get("phase") != expected_phase:
+            raise HitlRuntimeStateError("Proposal discussion phase is stale")
+        if (
+            expected_round_ordinal is not None
+            and session.get("round_ordinal") != expected_round_ordinal
+        ):
+            raise HitlRuntimeStateError("Proposal discussion round is stale")
+        return action, session
+
+    @staticmethod
+    def _active_proposal_discussion_task_unlocked(
+        session: Dict[str, Any],
+        *,
+        discussion_task_id: str,
+    ) -> Dict[str, Any]:
+        try:
+            identity = validate_proposal_discussion_task_id(
+                discussion_task_id,
+                participant_count=int(session["participant_count"]),
+                max_response_rounds=int(session["max_response_rounds"]),
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        phase = str(session["phase"])
+        if identity.phase != phase:
+            raise HitlRuntimeStateError("Proposal discussion task is not active")
+        task = session["tasks"].get(discussion_task_id)
+        if not isinstance(task, dict):
+            raise HitlRuntimeStateError("No matching proposal discussion task exists")
+        if phase == "response":
+            active_id = next(
+                (
+                    task_id
+                    for task_id in HitlRuntimeState._proposal_discussion_response_ids(
+                        int(session["round_ordinal"]),
+                        int(session["participant_count"]),
+                    )
+                    if not HitlRuntimeState._proposal_discussion_task_complete(
+                        session["tasks"][task_id]
+                    )
+                ),
+                None,
+            )
+            if active_id != discussion_task_id:
+                raise HitlRuntimeStateError("Proposal discussion response task is not next")
+        if HitlRuntimeState._proposal_discussion_task_complete(task):
+            raise HitlRuntimeStateError("Proposal discussion task is already complete")
+        return task
+
+    def begin_proposal_discussion(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        workspace_fingerprint: str,
+        base_idea_number: int,
+        whiteboard_boundary_sha: str,
+        participant_count: int,
+        max_response_rounds: int,
+    ) -> Dict[str, Any]:
+        """Create one collaborative session beneath a resolved proposal preparation."""
+
+        parent, preparation, candidate = self._proposal_discussion_identity(
+            parent_node_sha=parent_node_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=candidate_attempt_id,
+        )
+        if (
+            isinstance(base_idea_number, bool)
+            or not isinstance(base_idea_number, int)
+            or base_idea_number < 0
+        ):
+            raise HitlRuntimeStateError(
+                "Proposal discussion idea boundary must be non-negative"
+            )
+        live_fingerprint = str(workspace_fingerprint).strip()
+        if not live_fingerprint:
+            raise HitlRuntimeStateError(
+                "Proposal discussion requires a workspace fingerprint"
+            )
+        whiteboard_sha = self._normalized_whiteboard_boundary_sha(
+            whiteboard_boundary_sha
+        )
+        from core.hitl_proposal_round import normalize_proposal_mode_config
+
+        try:
+            config = normalize_proposal_mode_config(
+                "collaborative",
+                participant_count=participant_count,
+                discussion_rounds=max_response_rounds,
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._proposal_preparation_unlocked(
+                parent_node_sha=parent,
+                preparation_attempt_id=preparation,
+            )
+            if action.get("proposal_round") is not None:
+                raise HitlRuntimeStateError(
+                    "Proposal preparation cannot own ranked and collaborative state together"
+                )
+            existing = action.get("proposal_discussion")
+            if existing is not None:
+                session = self._validate_proposal_discussion_shape(existing)
+                if (
+                    str(action.get("workspace_fingerprint", "")).strip()
+                    == live_fingerprint
+                    and session.get("candidate_attempt_id") == candidate
+                    and session.get("base_idea_number") == base_idea_number
+                    and (
+                        session.get("phase") != "initial"
+                        or session.get("whiteboard_boundary_sha") == whiteboard_sha
+                    )
+                    and session.get("participant_count") == config.participant_count
+                    and session.get("max_response_rounds") == config.discussion_rounds
+                ):
+                    return self._copy(session)
+                raise HitlRuntimeStateError(
+                    "Proposal preparation already owns a different proposal discussion"
+                )
+            session = self._new_proposal_discussion(
+                candidate_attempt_id=candidate,
+                base_idea_number=base_idea_number,
+                whiteboard_boundary_sha=whiteboard_sha,
+                participant_count=int(config.participant_count),
+                max_response_rounds=int(config.discussion_rounds),
+            )
+            action["workspace_fingerprint"] = live_fingerprint
+            action["proposal_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
+
+    def proposal_discussion_snapshot(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            _action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            return self._copy(session)
+
+    def proposal_discussion_task_snapshot(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        discussion_task_id: str,
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            _action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            try:
+                validate_proposal_discussion_task_id(
+                    discussion_task_id,
+                    participant_count=int(session["participant_count"]),
+                    max_response_rounds=int(session["max_response_rounds"]),
+                )
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            task = session["tasks"].get(discussion_task_id)
+            if not isinstance(task, dict):
+                raise HitlRuntimeStateError("No matching proposal discussion task exists")
+            return self._copy(task)
+
+    def record_proposal_discussion_task_provider_result(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        discussion_task_id: str,
+        failed: bool,
+    ) -> int:
+        if not isinstance(failed, bool):
+            raise HitlRuntimeStateError(
+                "Proposal discussion provider result requires failed=true/false"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            task = self._active_proposal_discussion_task_unlocked(
+                session,
+                discussion_task_id=discussion_task_id,
+            )
+            if task.get("pending_finalization") is not None:
+                raise HitlRuntimeStateError(
+                    "Provider result applies only before discussion task finalization"
+                )
+            if failed:
+                prior = task.get("consecutive_provider_failures", 0)
+                if isinstance(prior, bool) or not isinstance(prior, int) or prior < 0:
+                    raise HitlRuntimeStateError(
+                        "Proposal discussion provider-failure counter is invalid"
+                    )
+                count = prior + 1
+                task["consecutive_provider_failures"] = count
+            else:
+                count = 0
+                task.pop("consecutive_provider_failures", None)
+            action["proposal_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return count
+
+    def begin_proposal_discussion_task_finalization(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        discussion_task_id: str,
+        normalized_output: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            task = self._active_proposal_discussion_task_unlocked(
+                session,
+                discussion_task_id=discussion_task_id,
+            )
+            try:
+                intent = normalize_proposal_discussion_record(
+                    discussion_task_id,
+                    task["kind"],
+                    normalized_output,
+                )["result"]
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            existing = task.get("pending_finalization")
+            if existing is not None:
+                if existing == intent:
+                    return self._copy(existing)
+                raise HitlRuntimeStateError(
+                    "Proposal discussion task already owns a different finalization intent"
+                )
+            task["pending_finalization"] = intent
+            task.pop("consecutive_provider_failures", None)
+            action["proposal_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(intent)
+
+    def complete_proposal_discussion_task_finalization(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        discussion_task_id: str,
+        normalized_output: Dict[str, Any],
+        result_record_id: str,
+    ) -> Dict[str, Any]:
+        record_id = str(result_record_id).strip()
+        if record_id != discussion_task_id:
+            raise HitlRuntimeStateError(
+                "Proposal discussion result record must match its task ID"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            task = session["tasks"].get(discussion_task_id)
+            if not isinstance(task, dict):
+                raise HitlRuntimeStateError("No matching proposal discussion task exists")
+            try:
+                intent = normalize_proposal_discussion_record(
+                    discussion_task_id,
+                    task["kind"],
+                    normalized_output,
+                )["result"]
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            if task.get("result_record_id") is not None:
+                if task.get("result_record_id") == record_id and (
+                    task.get("kind") != "decision"
+                    or task.get("choice") == intent.get("choice")
+                ):
+                    return self._copy(task)
+                raise HitlRuntimeStateError(
+                    "Proposal discussion task already references a different result"
+                )
+            self._active_proposal_discussion_task_unlocked(
+                session,
+                discussion_task_id=discussion_task_id,
+            )
+            if task.get("pending_finalization") != intent:
+                raise HitlRuntimeStateError(
+                    "Proposal discussion task has no matching finalization intent"
+                )
+            task["result_record_id"] = record_id
+            if task.get("kind") == "decision":
+                task["choice"] = intent["choice"]
+            task.pop("pending_finalization", None)
+            task.pop("consecutive_provider_failures", None)
+            action["proposal_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(task)
+
+    def advance_proposal_discussion(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        expected_phase: str,
+        round_ordinal: int,
+    ) -> Dict[str, Any]:
+        if expected_phase not in {"initial", "opening", "response"}:
+            raise HitlRuntimeStateError(
+                "Proposal discussion cannot advance from this phase"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            current_phase = str(session["phase"])
+            current_round = int(session["round_ordinal"])
+            if expected_phase == "initial" and current_phase == "opening" and current_round == 0:
+                return self._copy(session)
+            if expected_phase == "opening" and current_phase == "response" and current_round == 1:
+                return self._copy(session)
+            if (
+                expected_phase == "response"
+                and current_round == round_ordinal
+                and current_phase in {"decision", "final_writing"}
+            ):
+                return self._copy(session)
+            if current_phase != expected_phase or current_round != round_ordinal:
+                raise HitlRuntimeStateError("Proposal discussion advance identity is stale")
+            if expected_phase == "initial":
+                active_ids = [
+                    proposal_discussion_task_id("initial", participant_ordinal=ordinal)
+                    for ordinal in range(1, int(session["participant_count"]) + 1)
+                ]
+            elif expected_phase == "opening":
+                active_ids = [
+                    proposal_discussion_task_id("opening", participant_ordinal=1)
+                ]
+            else:
+                active_ids = self._proposal_discussion_response_ids(
+                    current_round,
+                    int(session["participant_count"]),
+                )
+            if not all(
+                self._proposal_discussion_task_complete(session["tasks"][task_id])
+                for task_id in active_ids
+            ):
+                raise HitlRuntimeStateError(
+                    "Proposal discussion cannot advance before every active task completes"
+                )
+            if expected_phase == "initial":
+                opening_id = proposal_discussion_task_id("opening", participant_ordinal=1)
+                session["tasks"][opening_id] = {
+                    "kind": "contribution",
+                    "result_record_id": None,
+                }
+                session["phase"] = "opening"
+            elif expected_phase == "opening":
+                session["round_ordinal"] = 1
+                for task_id in self._proposal_discussion_response_ids(
+                    1,
+                    int(session["participant_count"]),
+                ):
+                    session["tasks"][task_id] = {
+                        "kind": "contribution",
+                        "result_record_id": None,
+                    }
+                session["phase"] = "response"
+            elif current_round == int(session["max_response_rounds"]):
+                session["phase"] = "final_writing"
+            else:
+                decision_id = proposal_discussion_task_id(
+                    "decision",
+                    participant_ordinal=1,
+                    round_ordinal=current_round,
+                )
+                session["tasks"][decision_id] = {
+                    "kind": "decision",
+                    "result_record_id": None,
+                }
+                session["phase"] = "decision"
+            self._validate_proposal_discussion_shape(session)
+            action["proposal_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
+
+    def apply_proposal_discussion_decision(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        choice: str,
+    ) -> Dict[str, Any]:
+        normalized_choice = str(choice).strip().lower()
+        if normalized_choice not in {"continue", "finalize"}:
+            raise HitlRuntimeStateError(
+                "Proposal discussion decision must be continue or finalize"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            if (
+                normalized_choice == "continue"
+                and session["phase"] == "response"
+                and session["round_ordinal"] == round_ordinal + 1
+            ) or (
+                normalized_choice == "finalize"
+                and session["phase"] == "final_writing"
+                and session["round_ordinal"] == round_ordinal
+            ):
+                return self._copy(session)
+            if session["phase"] != "decision" or session["round_ordinal"] != round_ordinal:
+                raise HitlRuntimeStateError("Proposal discussion decision identity is stale")
+            decision_id = proposal_discussion_task_id(
+                "decision",
+                participant_ordinal=1,
+                round_ordinal=round_ordinal,
+            )
+            decision = session["tasks"].get(decision_id)
+            if (
+                not self._proposal_discussion_task_complete(decision)
+                or decision.get("choice") != normalized_choice
+            ):
+                raise HitlRuntimeStateError(
+                    "Proposal discussion decision is not durably ready"
+                )
+            if normalized_choice == "continue":
+                next_round = round_ordinal + 1
+                if next_round > int(session["max_response_rounds"]):
+                    raise HitlRuntimeStateError(
+                        "Proposal discussion cannot continue beyond its round limit"
+                    )
+                for task_id in self._proposal_discussion_response_ids(
+                    next_round,
+                    int(session["participant_count"]),
+                ):
+                    session["tasks"][task_id] = {
+                        "kind": "contribution",
+                        "result_record_id": None,
+                    }
+                session["round_ordinal"] = next_round
+                session["phase"] = "response"
+            else:
+                session["phase"] = "final_writing"
+            self._validate_proposal_discussion_shape(session)
+            action["proposal_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
+
+    def begin_proposal_discussion_reopen(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        worker_request_key: str,
+        proposal_idea_id: str,
+        feedback_ref: str,
+        reopen_record_id: str,
+    ) -> Dict[str, Any]:
+        handoff = {
+            "worker_request_key": str(worker_request_key).strip(),
+            "proposal_idea_id": str(proposal_idea_id).strip(),
+            "feedback_ref": str(feedback_ref).strip(),
+            "reopen_record_id": str(reopen_record_id).strip(),
+        }
+        if (
+            not handoff["worker_request_key"]
+            or _IDEA_ID.fullmatch(handoff["proposal_idea_id"]) is None
+            or not handoff["feedback_ref"]
+        ):
+            raise HitlRuntimeStateError("Proposal discussion reopen identity is invalid")
+        try:
+            reopen_identity = parse_reopen_discussion_record_id(
+                handoff["reopen_record_id"]
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            if session["phase"] == "reopen_pending":
+                if session.get("reopen_handoff") == handoff:
+                    return self._copy(session)
+                raise HitlRuntimeStateError(
+                    "Proposal discussion already owns a different reopen handoff"
+                )
+            if session["phase"] != "final_writing":
+                raise HitlRuntimeStateError(
+                    "Proposal discussion can reopen only from final writing"
+                )
+            next_round = int(session["round_ordinal"]) + 1
+            if (
+                next_round > int(session["max_response_rounds"])
+                or reopen_identity.round_ordinal != next_round
+            ):
+                raise HitlRuntimeStateError(
+                    "Proposal discussion reopen exceeds or mismatches its round limit"
+                )
+            session["phase"] = "reopen_pending"
+            session["reopen_handoff"] = handoff
+            self._validate_proposal_discussion_shape(session)
+            action["proposal_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
+
+    def apply_proposal_discussion_reopen(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        reopen_record_id: str,
+        whiteboard_boundary_sha: str,
+    ) -> Dict[str, Any]:
+        normalized_record_id = str(reopen_record_id).strip()
+        try:
+            reopen_identity = parse_reopen_discussion_record_id(
+                normalized_record_id
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        whiteboard_sha = self._normalized_whiteboard_boundary_sha(
+            whiteboard_boundary_sha
+        )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            if (
+                session["phase"] == "response"
+                and session["round_ordinal"] == reopen_identity.round_ordinal
+                and session["whiteboard_boundary_sha"] == whiteboard_sha
+            ):
+                return self._copy(session)
+            if (
+                session["phase"] != "reopen_pending"
+                or not isinstance(session.get("reopen_handoff"), dict)
+                or session["reopen_handoff"].get("reopen_record_id")
+                != normalized_record_id
+                or reopen_identity.round_ordinal != int(session["round_ordinal"]) + 1
+            ):
+                raise HitlRuntimeStateError(
+                    "Proposal discussion reopen handoff identity is stale"
+                )
+            next_round = reopen_identity.round_ordinal
+            for task_id in self._proposal_discussion_response_ids(
+                next_round,
+                int(session["participant_count"]),
+            ):
+                session["tasks"][task_id] = {
+                    "kind": "contribution",
+                    "result_record_id": None,
+                }
+            session["round_ordinal"] = next_round
+            session["phase"] = "response"
+            session["whiteboard_boundary_sha"] = whiteboard_sha
+            session.pop("reopen_handoff", None)
+            self._validate_proposal_discussion_shape(session)
+            action["proposal_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
 
     def begin_next_autoresearch_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
         kind = str(action.get("kind", "")).strip()
