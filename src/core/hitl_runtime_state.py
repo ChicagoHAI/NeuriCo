@@ -1821,7 +1821,9 @@ class HitlRuntimeState:
             "tasks",
         }
         phase = str(session.get("phase", ""))
-        expected_keys = required_keys | ({"reopen_handoff"} if phase == "reopen_pending" else set())
+        expected_keys = required_keys | (
+            {"reopen_handoff"} if phase == "reopen_pending" else set()
+        )
         if set(session) != expected_keys:
             raise HitlRuntimeStateError(
                 "Proposal discussion state contains missing or unsupported fields"
@@ -1953,7 +1955,10 @@ class HitlRuntimeState:
                 "feedback_ref",
                 "reopen_record_id",
             }
-            if set(handoff) != expected_handoff_keys:
+            if frozenset(handoff) not in {
+                frozenset(expected_handoff_keys),
+                frozenset({*expected_handoff_keys, "pending_finalization"}),
+            }:
                 raise HitlRuntimeStateError("Proposal discussion reopen handoff is invalid")
             if not str(handoff.get("worker_request_key", "")).strip():
                 raise HitlRuntimeStateError("Proposal discussion reopen request key is invalid")
@@ -1965,6 +1970,20 @@ class HitlRuntimeState:
                 round_ordinal + 1
             ):
                 raise HitlRuntimeStateError("Proposal discussion reopen record is invalid")
+            pending = handoff.get("pending_finalization")
+            if pending is not None:
+                try:
+                    normalized = normalize_proposal_discussion_record(
+                        handoff["reopen_record_id"],
+                        "reopen",
+                        pending,
+                    )["result"]
+                except ValueError as exc:
+                    raise HitlRuntimeStateError(str(exc)) from exc
+                if pending != normalized:
+                    raise HitlRuntimeStateError(
+                        "Proposal discussion reopen finalization is not normalized"
+                    )
         return session
 
     def _proposal_discussion_unlocked(
@@ -2512,6 +2531,49 @@ class HitlRuntimeState:
             self._save_unlocked()
             return self._copy(session)
 
+    def _require_proposal_discussion_reopen_owner_unlocked(
+        self,
+        *,
+        parent_node_sha: str,
+        candidate_attempt_id: str,
+        worker_request_key: str,
+        proposal_idea_id: str,
+    ) -> None:
+        command = self._state.get("pending_worker_command")
+        if (
+            not isinstance(command, dict)
+            or command.get("request_key") != worker_request_key
+            or command.get("kind") != "proposal"
+            or command.get("status") != "resolved"
+            or command.get("proposal_idea_id") != proposal_idea_id
+            or not isinstance(command.get("response"), dict)
+            or str(command["response"].get("status", "")).strip()
+            not in {"feedback", "rejected_illegal"}
+        ):
+            raise HitlRuntimeStateError(
+                "Proposal discussion reopen no longer owns its feedback request"
+            )
+        continuation = self._state.get("worker_continuation")
+        provenance = (
+            continuation.get("provenance")
+            if isinstance(continuation, dict)
+            else None
+        )
+        if (
+            not isinstance(continuation, dict)
+            or continuation.get("pipeline_stage") != "experiment_runner"
+            or continuation.get("hitl_stage") != "proposal"
+            or continuation.get("actor") != "autoresearch_proposer"
+            or not isinstance(provenance, dict)
+            or str(provenance.get("parent_node_id", "")).strip()
+            != str(parent_node_sha).strip()
+            or str(provenance.get("attempt_id", "")).strip()
+            != str(candidate_attempt_id).strip()
+        ):
+            raise HitlRuntimeStateError(
+                "Proposal discussion reopen no longer owns its proposer continuation"
+            )
+
     def begin_proposal_discussion_reopen(
         self,
         *,
@@ -2522,12 +2584,22 @@ class HitlRuntimeState:
         proposal_idea_id: str,
         feedback_ref: str,
         reopen_record_id: str,
+        result: Dict[str, Any],
     ) -> Dict[str, Any]:
+        try:
+            normalized_result = normalize_proposal_discussion_record(
+                reopen_record_id,
+                "reopen",
+                result,
+            )["result"]
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
         handoff = {
             "worker_request_key": str(worker_request_key).strip(),
             "proposal_idea_id": str(proposal_idea_id).strip(),
             "feedback_ref": str(feedback_ref).strip(),
             "reopen_record_id": str(reopen_record_id).strip(),
+            "pending_finalization": normalized_result,
         }
         if (
             not handoff["worker_request_key"]
@@ -2548,8 +2620,27 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
             )
+            self._require_proposal_discussion_reopen_owner_unlocked(
+                parent_node_sha=parent_node_sha,
+                candidate_attempt_id=candidate_attempt_id,
+                worker_request_key=handoff["worker_request_key"],
+                proposal_idea_id=handoff["proposal_idea_id"],
+            )
             if session["phase"] == "reopen_pending":
-                if session.get("reopen_handoff") == handoff:
+                existing_handoff = session.get("reopen_handoff")
+                stable_keys = {
+                    "worker_request_key",
+                    "proposal_idea_id",
+                    "feedback_ref",
+                    "reopen_record_id",
+                }
+                if isinstance(existing_handoff, dict) and all(
+                    existing_handoff.get(key) == handoff[key]
+                    for key in stable_keys
+                ) and existing_handoff.get(
+                    "pending_finalization",
+                    normalized_result,
+                ) == normalized_result:
                     return self._copy(session)
                 raise HitlRuntimeStateError(
                     "Proposal discussion already owns a different reopen handoff"
@@ -2568,6 +2659,55 @@ class HitlRuntimeState:
                 )
             session["phase"] = "reopen_pending"
             session["reopen_handoff"] = handoff
+            self._validate_proposal_discussion_shape(session)
+            action["proposal_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
+
+    def complete_proposal_discussion_reopen_finalization(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        reopen_record_id: str,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Commit the public reopen record reference after its idempotent append."""
+
+        try:
+            normalized_result = normalize_proposal_discussion_record(
+                reopen_record_id,
+                "reopen",
+                result,
+            )["result"]
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._proposal_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            handoff = session.get("reopen_handoff")
+            if (
+                session.get("phase") != "reopen_pending"
+                or not isinstance(handoff, dict)
+                or handoff.get("reopen_record_id") != str(reopen_record_id).strip()
+            ):
+                raise HitlRuntimeStateError(
+                    "Proposal discussion reopen finalization identity is stale"
+                )
+            pending = handoff.get("pending_finalization")
+            if pending is None:
+                return self._copy(session)
+            if pending != normalized_result:
+                raise HitlRuntimeStateError(
+                    "Proposal discussion reopen finalization conflicts with durable intent"
+                )
+            handoff.pop("pending_finalization", None)
             self._validate_proposal_discussion_shape(session)
             action["proposal_discussion"] = session
             self._state["next_autoresearch_action"] = action
@@ -2609,6 +2749,7 @@ class HitlRuntimeState:
             if (
                 session["phase"] != "reopen_pending"
                 or not isinstance(session.get("reopen_handoff"), dict)
+                or session["reopen_handoff"].get("pending_finalization") is not None
                 or session["reopen_handoff"].get("reopen_record_id")
                 != normalized_record_id
                 or reopen_identity.round_ordinal != int(session["round_ordinal"]) + 1
@@ -2616,6 +2757,13 @@ class HitlRuntimeState:
                 raise HitlRuntimeStateError(
                     "Proposal discussion reopen handoff identity is stale"
                 )
+            handoff = session["reopen_handoff"]
+            self._require_proposal_discussion_reopen_owner_unlocked(
+                parent_node_sha=parent_node_sha,
+                candidate_attempt_id=candidate_attempt_id,
+                worker_request_key=handoff["worker_request_key"],
+                proposal_idea_id=handoff["proposal_idea_id"],
+            )
             next_round = reopen_identity.round_ordinal
             for task_id in self._proposal_discussion_response_ids(
                 next_round,
@@ -2631,6 +2779,8 @@ class HitlRuntimeState:
             session.pop("reopen_handoff", None)
             self._validate_proposal_discussion_shape(session)
             action["proposal_discussion"] = session
+            self._state["pending_worker_command"] = None
+            self._state["worker_continuation"] = None
             self._state["next_autoresearch_action"] = action
             self._save_unlocked()
             return self._copy(session)

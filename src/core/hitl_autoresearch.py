@@ -3334,6 +3334,7 @@ class HitlAutoResearchController:
                 attempt_dir=recovery.removed_attempt_dir,
                 proposal_review_path=recovery.removed_attempt_dir / "proposal_review.json",
             )
+            reopen_transfer: Optional[Dict[str, str]] = None
             try:
                 proposal_result = self._call_proposal_generator(
                     parent_sha=parent_sha,
@@ -3348,9 +3349,37 @@ class HitlAutoResearchController:
                     worker_name="Recovered AutoResearch proposal generator",
                 )
                 _raise_if_hitl_worker_stopped(proposal_result)
+                if submission.get("reopen_discussion"):
+                    reopen_transfer = runtime.prepare_proposal_discussion_reopen_transfer(
+                        str(submission.get("reopen_record_id", ""))
+                    )
             finally:
                 runtime.clear_idea_tool_context()
-            if submission.get("status") != "approved":
+            if reopen_transfer is not None:
+                action = HitlRuntimeState(self.work_dir).snapshot().get(
+                    "next_autoresearch_action"
+                )
+                if not isinstance(action, dict):
+                    raise RuntimeError(
+                        "Recovered discussion reopening lost proposal preparation state."
+                    )
+                HitlRuntimeState(self.work_dir).apply_proposal_discussion_reopen(
+                    parent_node_sha=parent_sha,
+                    preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
+                    candidate_attempt_id=recovery.removed_attempt_dir.name,
+                    reopen_record_id=reopen_transfer["reopen_record_id"],
+                    whiteboard_boundary_sha=reopen_transfer[
+                        "whiteboard_boundary_sha"
+                    ],
+                )
+                proposal, proposal_idea_id = (
+                    self._run_collaborative_proposal_admission_loop(
+                        parent_sha=parent_sha,
+                        attempt_dir=recovery.removed_attempt_dir,
+                        attempt_history=self._attempt_history_for(parent_sha),
+                    )
+                )
+            elif submission.get("status") != "approved":
                 return self._discard_unscored_hitl_attempt(
                     parent_sha=parent_sha,
                     attempt_dir=recovery.removed_attempt_dir,
@@ -3365,8 +3394,9 @@ class HitlAutoResearchController:
                     ),
                     terminal_failure=bool(submission.get("hitl_terminal_failure")),
                 )
-            proposal = str(submission.get("proposal", "")).strip()
-            proposal_idea_id = str(submission.get("proposal_idea_id", "")).strip()
+            else:
+                proposal = str(submission.get("proposal", "")).strip()
+                proposal_idea_id = str(submission.get("proposal_idea_id", "")).strip()
         else:
             proposal = self._proposal_text_for(proposal_idea_id)
 
@@ -3981,7 +4011,8 @@ class HitlAutoResearchController:
         parent_sha: str,
         attempt_dir: Path,
         attempt_history: list[Dict[str, Any]],
-    ) -> tuple[str, str]:
+        allow_discussion_reopen: bool = False,
+    ) -> tuple[str, str] | Dict[str, str]:
         runtime = self._proposal_hitl_runtime()
         self._prepare_proposal_owner_tool_context(
             runtime,
@@ -4020,6 +4051,14 @@ class HitlAutoResearchController:
                     worker_name="AutoResearch proposal generator",
                 )
                 _raise_if_hitl_worker_stopped(proposal_result)
+            if submission.get("reopen_discussion"):
+                if not allow_discussion_reopen:
+                    raise RuntimeError(
+                        "Proposal discussion reopening is unavailable in this proposal mode."
+                    )
+                return runtime.prepare_proposal_discussion_reopen_transfer(
+                    str(submission.get("reopen_record_id", ""))
+                )
         finally:
             runtime.clear_idea_tool_context()
         if submission.get("status") != "approved":
@@ -4409,9 +4448,48 @@ class HitlAutoResearchController:
         attempt_dir: Path,
         attempt_history: list[Dict[str, Any]],
     ) -> tuple[str, str]:
-        """Run one durable proposal discussion, then use ordinary admission."""
+        """Alternate bounded discussion segments with ordinary final writing."""
 
-        from core.hitl_proposal_discussion import proposal_discussion_task_id
+        while True:
+            self._run_collaborative_proposal_discussion_segment(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+            )
+            outcome = self._run_proposal_admission_loop(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+                attempt_history=attempt_history,
+                allow_discussion_reopen=True,
+            )
+            if isinstance(outcome, tuple):
+                return outcome
+            state = HitlRuntimeState(self.work_dir)
+            action = state.snapshot().get("next_autoresearch_action")
+            if not isinstance(action, dict):
+                raise RuntimeError(
+                    "Collaborative discussion reopening lost proposal preparation state."
+                )
+            state.apply_proposal_discussion_reopen(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
+                candidate_attempt_id=attempt_dir.name,
+                reopen_record_id=outcome["reopen_record_id"],
+                whiteboard_boundary_sha=outcome["whiteboard_boundary_sha"],
+            )
+
+    def _run_collaborative_proposal_discussion_segment(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> None:
+        """Run the active bounded discussion segment to final writing."""
+
+        from core.hitl_proposal_discussion import (
+            ProposalDiscussionRecordStore,
+            proposal_discussion_reopen_source_idea_ids,
+            proposal_discussion_task_id,
+        )
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
         owner = self._proposal_hitl_runtime()
@@ -4447,7 +4525,11 @@ class HitlAutoResearchController:
                 and task.get("pending_finalization") is None
             )
 
-        def run_task(task_id: str) -> None:
+        def run_task(
+            task_id: str,
+            *,
+            seed_idea_ids: Sequence[str] = (),
+        ) -> None:
             if task_complete(task_id):
                 return
             raise_if_hitl_run_stop_requested()
@@ -4464,6 +4546,7 @@ class HitlAutoResearchController:
                 preparation_attempt_id=preparation_attempt_id,
                 attempt_dir=attempt_dir,
                 boundary_validator=boundary_validator,
+                seed_idea_ids=seed_idea_ids,
             )
             self._require_proposal_discussion_boundary(
                 boundary_validator,
@@ -4519,13 +4602,19 @@ class HitlAutoResearchController:
                 )
                 continue
             if phase == "response":
+                records = ProposalDiscussionRecordStore(attempt_dir).records()
+                seed_idea_ids = proposal_discussion_reopen_source_idea_ids(
+                    session,
+                    records,
+                )
                 for ordinal in range(2, participant_count + 1):
                     run_task(
                         proposal_discussion_task_id(
                             "response",
                             participant_ordinal=ordinal,
                             round_ordinal=round_ordinal,
-                        )
+                        ),
+                        seed_idea_ids=seed_idea_ids,
                     )
                 self._require_proposal_discussion_boundary(
                     boundary_validator,
@@ -4555,11 +4644,7 @@ class HitlAutoResearchController:
                 f"Collaborative proposal discussion cannot run from phase {phase}."
             )
 
-        return self._run_proposal_admission_loop(
-            parent_sha=parent_sha,
-            attempt_dir=attempt_dir,
-            attempt_history=attempt_history,
-        )
+        return None
 
     def _new_discussion_task_runtime(self, task_id: str) -> HitlRuntime:
         """Create one isolated tool runtime for one finite discussion task."""
@@ -5977,6 +6062,7 @@ class HitlAutoResearchController:
             from core.hitl_proposal_discussion import (
                 ProposalDiscussionRecordStore,
                 prepare_proposal_discussion_prompt,
+                proposal_discussion_reopen_source_idea_ids,
             )
             from core.hitl_run_control import (
                 current_hitl_run_budget_prompt,
@@ -5984,6 +6070,9 @@ class HitlAutoResearchController:
             )
 
             raise_if_hitl_run_stop_requested()
+            self._proposal_hitl_runtime().register_proposal_discussion_prompt_template(
+                prompt_template
+            )
             current = HitlRuntimeState(self.work_dir).proposal_discussion_snapshot(
                 **identity
             )
@@ -5996,6 +6085,19 @@ class HitlAutoResearchController:
                 include_attempt_history=False,
                 hitl_autoresearch_whiteboard=True,
             )
+            store = ProposalDiscussionRecordStore(attempt_dir)
+            source_ids = proposal_discussion_reopen_source_idea_ids(
+                current,
+                store.records(),
+            )
+            ideas_by_id = {
+                str(record.get("idea_id", "")): record
+                for record in self._proposal_hitl_runtime().log.records()
+            }
+            if any(idea_id not in ideas_by_id for idea_id in source_ids):
+                raise RuntimeError(
+                    "Proposal discussion reopening references an unavailable finalized idea."
+                )
 
             def summarize(
                 background: Dict[str, Any],
@@ -6026,13 +6128,15 @@ class HitlAutoResearchController:
                 return value
 
             return prepare_proposal_discussion_prompt(
-                store=ProposalDiscussionRecordStore(attempt_dir),
+                store=store,
                 session=current,
                 prompt_template=prompt_template,
                 public_background=public_background,
                 runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
                 summarize=summarize if callable(summarize_method) else None,
                 current_session=current_session,
+                allow_reopen=True,
+                reopen_source_ideas=[ideas_by_id[idea_id] for idea_id in source_ids],
             )
 
         return build

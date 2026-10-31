@@ -73,6 +73,7 @@ _WORKER_COMMAND_MODULES = {
     "hitl-finish-discussion-turn": "hitl_finish_discussion_turn.py",
     "hitl-decide-discussion": "hitl_decide_discussion.py",
     "hitl-view-discussion": "hitl_view_discussion.py",
+    "hitl-reopen-discussion": "hitl_reopen_discussion.py",
     "view_current_frontier": "hitl_view_current_frontier.py",
 }
 _RANKED_COMMAND_PROFILES = {
@@ -1977,7 +1978,9 @@ class HitlRuntime:
             else set(profile_spec["commands"])
         )
         if normalized_discussion_final_owner:
-            allowed_worker_commands.add("hitl-view-discussion")
+            allowed_worker_commands.update(
+                {"hitl-view-discussion", "hitl-reopen-discussion"}
+            )
         if self._time_budget_command_available():
             allowed_worker_commands.add("hitl-time-budget")
         if not _is_closed_scoped_task_profile(profile):
@@ -4124,11 +4127,21 @@ class HitlRuntime:
                 and decision_needed
                 == "Should this AutoResearch proposal be admitted to experiment execution?"
             ):
+                manager_idea_id = next(
+                    (
+                        idea_id
+                        for idea_id in premises
+                        if idea_id != proposal_id
+                    ),
+                    "",
+                )
                 if record.get("decision") == "O1":
                     return {
                         "status": "approved",
                         "instruction": "The proposal is already admitted. Stop proposal generation now.",
                         "proposal_idea_id": proposal_id,
+                        "manager_idea_id": manager_idea_id,
+                        "human_idea_id": record.get("idea_id", ""),
                         "proposal": proposal_record.get("proposal", ""),
                     }
                 return {
@@ -4140,6 +4153,8 @@ class HitlRuntime:
                         "the returned feedback, then submit that new proposal in this same session."
                     ),
                     "proposal_idea_id": proposal_id,
+                    "manager_idea_id": manager_idea_id,
+                    "human_idea_id": record.get("idea_id", ""),
                 }
             if (
                 record.get("level") == "B"
@@ -4147,11 +4162,21 @@ class HitlRuntime:
                 and decision_needed
                 == "Should this AutoResearch proposal be admitted to experiment execution?"
             ):
+                manager_idea_id = next(
+                    (
+                        idea_id
+                        for idea_id in premises
+                        if idea_id != proposal_id
+                    ),
+                    "",
+                )
                 if record.get("decision") == "O1":
                     return {
                         "status": "approved",
                         "instruction": "The proposal is already admitted. Stop proposal generation now.",
                         "proposal_idea_id": proposal_id,
+                        "manager_idea_id": manager_idea_id,
+                        "manager_admission_idea_id": record.get("idea_id", ""),
                         "proposal": proposal_record.get("proposal", ""),
                     }
                 return {
@@ -4162,6 +4187,8 @@ class HitlRuntime:
                         "the returned feedback, then submit that new proposal in this same session."
                     ),
                     "proposal_idea_id": proposal_id,
+                    "manager_idea_id": manager_idea_id,
+                    "manager_admission_idea_id": record.get("idea_id", ""),
                 }
             if (
                 record.get("level") == "B"
@@ -4181,6 +4208,7 @@ class HitlRuntime:
                         "the returned feedback, then submit that new proposal in this same session."
                     ),
                     "proposal_idea_id": proposal_id,
+                    "manager_idea_id": record.get("idea_id", ""),
                 }
         return None
 
@@ -4199,6 +4227,38 @@ class HitlRuntime:
         )
         if cancelled is not None:
             return cancelled
+        if bool(self._tool_context.get("proposal_discussion_final_owner")):
+            task_context = self._proposal_discussion_final_owner_state_context()
+            session = task_context["session"]
+            handoff = session.get("reopen_handoff")
+            if session.get("phase") == "reopen_pending":
+                if (
+                    not isinstance(handoff, dict)
+                    or handoff.get("pending_finalization") is not None
+                    or not str(handoff.get("reopen_record_id", "")).strip()
+                ):
+                    return {
+                        "success": False,
+                        "hitl": True,
+                        "phase": "proposal",
+                        "error": (
+                            "Collaborative discussion reopening has an incomplete durable "
+                            "finalization and cannot transfer ownership."
+                        ),
+                    }
+                return {
+                    "status": "reopen_discussion",
+                    "complete": True,
+                    "replacement": False,
+                    "reopen_discussion": True,
+                    "reopen_record_id": handoff["reopen_record_id"],
+                    "worker_exit_warning": (
+                        f"{worker_name} exited after returning proposal feedback to the "
+                        "collaborative discussion. Runtime retained the accepted handoff."
+                        if not result.get("success")
+                        else ""
+                    ),
+                }
         submitted = self._proposal_submit_result
         if submitted and submitted.get("status") == "approved":
             validator = self._tool_context.get("proposal_submission_validator")
@@ -4313,6 +4373,287 @@ class HitlRuntime:
             ),
         }
 
+    def _proposal_feedback_source_for_reopen(
+        self,
+        task_context: Dict[str, Any],
+    ) -> Dict[str, str]:
+        """Resolve the exact runtime-owned feedback interaction for reopening."""
+
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        state = HitlRuntimeState(self.work_dir)
+        pending = state.pending_worker_command()
+        continuation = state.worker_continuation()
+        session = task_context["session"]
+        handoff = session.get("reopen_handoff")
+        if session.get("phase") == "reopen_pending" and isinstance(handoff, dict):
+            request_key = str(handoff.get("worker_request_key", "")).strip()
+            proposal_id = str(handoff.get("proposal_idea_id", "")).strip()
+            feedback_ref = str(handoff.get("feedback_ref", "")).strip()
+        else:
+            request_key = str((pending or {}).get("request_key", "")).strip()
+            proposal_id = str((pending or {}).get("proposal_idea_id", "")).strip()
+            admission = self._proposal_submit_result
+            if not isinstance(admission, dict) and proposal_id:
+                proposal_record = self._proposal_record(proposal_id)
+                if proposal_record is not None:
+                    admission = self._terminal_proposal_admission(proposal_record)
+            if (
+                not isinstance(admission, dict)
+                or admission.get("status") != "feedback"
+                or str(admission.get("proposal_idea_id", "")).strip() != proposal_id
+            ):
+                raise HitlValidationError(
+                    "HITL_ERROR discussion_reopen_unavailable\n"
+                    "The current proposer does not own completed proposal feedback. "
+                    "Submit or revise the proposal through the existing workflow."
+                )
+            feedback_ref = next(
+                (
+                    str(admission.get(field, "")).strip()
+                    for field in (
+                        "human_idea_id",
+                        "manager_admission_idea_id",
+                        "manager_idea_id",
+                    )
+                    if str(admission.get(field, "")).strip()
+                ),
+                "",
+            )
+
+        response = pending.get("response") if isinstance(pending, dict) else None
+        provenance = (
+            continuation.get("provenance")
+            if isinstance(continuation, dict)
+            else None
+        )
+        identity = task_context["identity"]
+        if (
+            not request_key
+            or not proposal_id
+            or not feedback_ref
+            or not isinstance(pending, dict)
+            or pending.get("request_key") != request_key
+            or pending.get("kind") != "proposal"
+            or pending.get("status") != "resolved"
+            or pending.get("proposal_idea_id") != proposal_id
+            or not isinstance(response, dict)
+            or str(response.get("status", "")).strip()
+            not in {"feedback", "rejected_illegal"}
+            or not isinstance(continuation, dict)
+            or continuation.get("pipeline_stage") != "experiment_runner"
+            or continuation.get("hitl_stage") != "proposal"
+            or continuation.get("actor") != "autoresearch_proposer"
+            or not isinstance(provenance, dict)
+            or str(provenance.get("parent_node_id", "")).strip()
+            != identity["parent_node_sha"]
+            or str(provenance.get("attempt_id", "")).strip()
+            != identity["candidate_attempt_id"]
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR discussion_reopen_stale\n"
+                "The completed feedback no longer owns this proposer continuation. "
+                "Follow the current proposal instruction instead."
+            )
+
+        proposal_records = [
+            record
+            for record in self.log.records()
+            if record.get("idea_type") == "proposal"
+            and record.get("parent_node_id") == identity["parent_node_sha"]
+            and record.get("attempt_id") == identity["candidate_attempt_id"]
+        ]
+        if not proposal_records or proposal_records[-1].get("idea_id") != proposal_id:
+            raise HitlValidationError(
+                "HITL_ERROR discussion_reopen_superseded\n"
+                "A newer proposal superseded the feedback that could reopen discussion."
+            )
+        feedback_record = next(
+            (
+                record
+                for record in self.log.records()
+                if record.get("idea_id") == feedback_ref
+            ),
+            None,
+        )
+        if (
+            not isinstance(feedback_record, dict)
+            or proposal_id not in _normalize_premises(feedback_record.get("premises"))
+            or not (
+                str(feedback_record.get("manager_feedback", "")).strip()
+                or str(feedback_record.get("human_feedback", "")).strip()
+            )
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR discussion_reopen_feedback\n"
+                "The proposal feedback reference is missing or no longer matches the proposal."
+            )
+        return {
+            "worker_request_key": request_key,
+            "proposal_idea_id": proposal_id,
+            "feedback_ref": feedback_ref,
+        }
+
+    def reopen_proposal_discussion(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Record an eligible final owner's handoff back to bounded discussion."""
+
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            with self._tool_lock:
+                from core.hitl_proposal_discussion import (
+                    ProposalDiscussionRecordStore,
+                    normalize_proposal_discussion_record,
+                    reopen_discussion_record_id,
+                )
+                from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+
+                task_context = self._proposal_discussion_final_owner_state_context()
+                session = task_context["session"]
+                next_round = int(session["round_ordinal"]) + 1
+                if next_round > int(session["max_response_rounds"]):
+                    raise HitlValidationError(
+                        "HITL_ERROR discussion_round_limit\n"
+                        "This meeting has used all configured response rounds. Revise and "
+                        "submit a new proposal through the existing proposer workflow."
+                    )
+                if not isinstance(payload, dict) or set(payload) != {"reason"}:
+                    raise HitlValidationError(
+                        "Discussion reopening requires exactly one nonempty reason."
+                    )
+                source = self._proposal_feedback_source_for_reopen(task_context)
+                record_id = reopen_discussion_record_id(next_round)
+                try:
+                    result = normalize_proposal_discussion_record(
+                        record_id,
+                        "reopen",
+                        {
+                            "reason": payload.get("reason"),
+                            "proposal_idea_id": source["proposal_idea_id"],
+                            "feedback_ref": source["feedback_ref"],
+                        },
+                    )["result"]
+                except ValueError as exc:
+                    raise HitlValidationError(str(exc)) from exc
+
+                validator = self._tool_context.get("proposal_submission_validator")
+                if callable(validator):
+                    validation = validator()
+                    if not bool(validation.get("valid")):
+                        issues = validation.get("issues", [])
+                        if not isinstance(issues, list):
+                            issues = [str(issues)]
+                        raise HitlValidationError(
+                            "HITL_ERROR proposal_workspace_boundary\n"
+                            "Runtime rejected discussion reopening because final writing "
+                            "changed public workspace files:\n"
+                            + "\n".join(
+                                f"- {str(issue)}"
+                                for issue in issues
+                                if str(issue).strip()
+                            )
+                        )
+                if session.get("phase") == "final_writing":
+                    self._validate_proposal_discussion_reopen_capacity(
+                        task_context=task_context,
+                        record_id=record_id,
+                        result=result,
+                    )
+
+                state = HitlRuntimeState(self.work_dir)
+                try:
+                    state.begin_proposal_discussion_reopen(
+                        **task_context["identity"],
+                        worker_request_key=source["worker_request_key"],
+                        proposal_idea_id=source["proposal_idea_id"],
+                        feedback_ref=source["feedback_ref"],
+                        reopen_record_id=record_id,
+                        result=result,
+                    )
+                    ProposalDiscussionRecordStore(
+                        Path(self._tool_context["proposal_discussion_attempt_dir"])
+                    ).append(
+                        record_id=record_id,
+                        kind="reopen",
+                        result=result,
+                    )
+                    state.complete_proposal_discussion_reopen_finalization(
+                        **task_context["identity"],
+                        reopen_record_id=record_id,
+                        result=result,
+                    )
+                except HitlRuntimeStateError as exc:
+                    raise HitlValidationError(str(exc)) from exc
+
+                commands = self._tool_context.get("allowed_worker_commands")
+                if isinstance(commands, set):
+                    commands.discard("hitl-report-idea")
+                    commands.discard("hitl-submit-proposal")
+                    self._write_idea_tool_commands()
+                self._tool_context["proposal_discussion_reopen_record_id"] = record_id
+                return {
+                    "status": "recorded",
+                    "record_id": record_id,
+                    "instruction": (
+                        "Runtime recorded the handoff. Stop this proposer session now; "
+                        "the same meeting will continue after runtime settles this process."
+                    ),
+                }
+        finally:
+            self._worker_request_lock.release()
+
+    def prepare_proposal_discussion_reopen_transfer(
+        self,
+        reopen_record_id: str,
+    ) -> Dict[str, str]:
+        """Validate the settled proposer boundary before atomic ownership transfer."""
+
+        with self._tool_lock:
+            task_context = self._proposal_discussion_final_owner_state_context()
+            session = task_context["session"]
+            handoff = session.get("reopen_handoff")
+            record_id = str(reopen_record_id).strip()
+            if (
+                session.get("phase") != "reopen_pending"
+                or not isinstance(handoff, dict)
+                or handoff.get("pending_finalization") is not None
+                or handoff.get("reopen_record_id") != record_id
+            ):
+                raise HitlValidationError(
+                    "Collaborative discussion reopening is not ready to transfer ownership."
+                )
+            validator = self._tool_context.get("proposal_submission_validator")
+            if callable(validator):
+                validation = validator()
+                if not bool(validation.get("valid")):
+                    issues = validation.get("issues", [])
+                    if not isinstance(issues, list):
+                        issues = [str(issues)]
+                    raise HitlValidationError(
+                        "HITL_ERROR proposal_workspace_boundary\n"
+                        "Runtime cannot transfer discussion ownership because final writing "
+                        "changed public workspace files:\n"
+                        + "\n".join(
+                            f"- {str(issue)}"
+                            for issue in issues
+                            if str(issue).strip()
+                        )
+                    )
+            from core.hitl_git_state import HitlGitStateStore
+
+            git_state = HitlGitStateStore(self.work_dir)
+            whiteboard_sha = git_state.hitl_autoresearch_whiteboard_history_sha()
+            if not git_state.hitl_autoresearch_whiteboard_matches_commit(
+                whiteboard_sha
+            ):
+                raise HitlValidationError(
+                    "The live whiteboard does not match its current canonical history."
+                )
+            return {
+                "reopen_record_id": record_id,
+                "whiteboard_boundary_sha": whiteboard_sha,
+            }
+
     def view_ideas_for_tool(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         with self._tool_lock:
             visible_records = self._visible_idea_records_for_tool()
@@ -4408,6 +4749,11 @@ class HitlRuntime:
 
         if not bool(self._tool_context.get("proposal_discussion_final_owner")):
             return self._discussion_task_state_context()
+        return self._proposal_discussion_final_owner_state_context()
+
+    def _proposal_discussion_final_owner_state_context(self) -> Dict[str, Any]:
+        """Return the exact collaborative session owned by this final proposer."""
+
         if (
             str(self._tool_context.get("command_profile", "")) != "default"
             or self.tool_scope is not None
@@ -4440,7 +4786,7 @@ class HitlRuntime:
             )
         except HitlRuntimeStateError as exc:
             raise HitlValidationError(str(exc)) from exc
-        if session.get("phase") != "final_writing":
+        if session.get("phase") not in {"final_writing", "reopen_pending"}:
             raise HitlValidationError(
                 "Proposal discussion records are not owned by the active final writer."
             )
@@ -4480,6 +4826,125 @@ class HitlRuntime:
             except RuntimeError as exc:
                 raise HitlValidationError(str(exc)) from exc
 
+    def register_proposal_discussion_prompt_template(self, prompt_template: str) -> None:
+        """Retain the current final-owner template for reopen capacity validation."""
+
+        from core.hitl_proposal_discussion import PROPOSAL_DISCUSSION_CONTEXT_MARKER
+
+        with self._tool_lock:
+            self._proposal_discussion_final_owner_state_context()
+            template = str(prompt_template)
+            if template.count(PROPOSAL_DISCUSSION_CONTEXT_MARKER) != 1:
+                raise HitlValidationError(
+                    "Collaborative final writing requires one discussion context marker."
+                )
+            self._tool_context["proposal_discussion_prompt_template"] = template
+
+    def _validate_proposal_discussion_reopen_capacity(
+        self,
+        *,
+        task_context: Dict[str, Any],
+        record_id: str,
+        result: Dict[str, Any],
+    ) -> None:
+        """Verify one more bounded turn and later final writing fit before handoff."""
+
+        from agents.autoresearch_proposer import collect_public_proposal_context
+        from core.hitl_proposal_discussion import (
+            MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS,
+            prepare_proposal_discussion_prompt,
+            proposal_discussion_task_id,
+        )
+        from core.hitl_run_control import current_hitl_run_budget_prompt
+
+        prompt_template = str(
+            self._tool_context.get("proposal_discussion_prompt_template", "")
+        )
+        if not prompt_template:
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_unavailable\n"
+                "Runtime cannot verify another meeting round from this proposer launch. "
+                "Revise directly through the existing proposal workflow."
+            )
+        projected = json.loads(json.dumps(task_context["session"]))
+        next_round = int(projected["round_ordinal"]) + 1
+        projected["phase"] = "response"
+        projected["round_ordinal"] = next_round
+        projected.pop("reopen_handoff", None)
+        for ordinal in range(2, int(projected["participant_count"]) + 1):
+            projected["tasks"][
+                proposal_discussion_task_id(
+                    "response",
+                    participant_ordinal=ordinal,
+                    round_ordinal=next_round,
+                )
+            ] = {
+                "kind": "contribution",
+                "result_record_id": None,
+            }
+
+        idea_ids = [result["proposal_idea_id"], result["feedback_ref"]]
+        ideas_by_id = {
+            str(record.get("idea_id", "")): record for record in self.log.records()
+        }
+        if any(idea_id not in ideas_by_id for idea_id in idea_ids):
+            raise HitlValidationError(
+                "Proposal discussion reopening references an unavailable finalized idea."
+            )
+        summarize_method = getattr(
+            self.manager,
+            "summarize_proposal_discussion",
+            None,
+        )
+
+        def summarize(
+            background: Dict[str, Any],
+            prior_summary: str,
+            records: List[Dict[str, Any]],
+        ) -> str:
+            if not callable(summarize_method):
+                raise ValueError(
+                    "Proposal discussion compaction requires the configured HITL manager."
+                )
+            return str(
+                summarize_method(
+                    public_background=background,
+                    prior_summary=prior_summary,
+                    records=records,
+                )
+            )
+
+        additional_record = {
+            "record_id": record_id,
+            "kind": "reopen",
+            "result": dict(result),
+        }
+        public_background = collect_public_proposal_context(
+            self.work_dir,
+            include_attempt_history=False,
+            hitl_autoresearch_whiteboard=True,
+        )
+        try:
+            prepare_proposal_discussion_prompt(
+                store=self._proposal_discussion_record_store(),
+                session=projected,
+                prompt_template=prompt_template,
+                public_background=public_background,
+                runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
+                summarize=summarize if callable(summarize_method) else None,
+                allow_reopen=True,
+                additional_records=[additional_record],
+                reopen_source_ideas=[ideas_by_id[idea_id] for idea_id in idea_ids],
+                reserve_tokens=MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS,
+                persist_cache=False,
+            )
+        except ValueError as exc:
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_too_large\n"
+                "Another response round would exceed the verified meeting context budget. "
+                "Revise directly through the existing proposal workflow."
+            ) from exc
+
     def prepare_proposal_discussion_prompt(
         self,
         *,
@@ -4488,7 +4953,10 @@ class HitlRuntime:
     ) -> str:
         """Prepare bounded public meeting context for the active finite task."""
 
-        from core.hitl_proposal_discussion import prepare_proposal_discussion_prompt
+        from core.hitl_proposal_discussion import (
+            prepare_proposal_discussion_prompt,
+            proposal_discussion_reopen_source_idea_ids,
+        )
         from core.hitl_run_control import (
             current_hitl_run_budget_prompt,
             raise_if_hitl_run_stop_requested,
@@ -4527,6 +4995,18 @@ class HitlRuntime:
                 return dict(self._discussion_task_state_context()["session"])
 
         raise_if_hitl_run_stop_requested()
+        records = store.records()
+        source_ids = proposal_discussion_reopen_source_idea_ids(
+            task_context["session"],
+            records,
+        )
+        ideas_by_id = {
+            str(record.get("idea_id", "")): record for record in self.log.records()
+        }
+        if any(idea_id not in ideas_by_id for idea_id in source_ids):
+            raise HitlValidationError(
+                "Proposal discussion reopening references an unavailable finalized idea."
+            )
         return prepare_proposal_discussion_prompt(
             store=store,
             session=task_context["session"],
@@ -4535,6 +5015,7 @@ class HitlRuntime:
             runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
             summarize=summarize if callable(summarize_method) else None,
             current_session=current_session,
+            reopen_source_ideas=[ideas_by_id[idea_id] for idea_id in source_ids],
         )
 
     def view_current_frontier_for_tool(self) -> Dict[str, Any]:
@@ -6722,6 +7203,19 @@ class HitlRuntime:
                     if self.path == "/discussion/decision":
                         runtime._require_worker_command("hitl-decide-discussion")
                         result = runtime.finish_proposal_discussion_task(payload)
+                        self._send_json(
+                            200,
+                            {
+                                "ok": True,
+                                "status": result.get("status"),
+                                "record_id": result.get("record_id", ""),
+                                "instruction": result.get("instruction", ""),
+                            },
+                        )
+                        return
+                    if self.path == "/discussion/reopen":
+                        runtime._require_worker_command("hitl-reopen-discussion")
+                        result = runtime.reopen_proposal_discussion(payload)
                         self._send_json(
                             200,
                             {

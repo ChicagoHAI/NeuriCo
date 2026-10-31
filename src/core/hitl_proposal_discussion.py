@@ -336,6 +336,35 @@ def permitted_proposal_discussion_record_ids(
     return tuple(sorted(set(permitted), key=proposal_discussion_record_sort_key))
 
 
+def proposal_discussion_reopen_source_idea_ids(
+    session: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return authoritative idea references for the latest visible reopening."""
+
+    permitted = set(permitted_proposal_discussion_record_ids(session, records))
+    reopen_records = [
+        record
+        for record in records
+        if record.get("kind") == "reopen" and record.get("record_id") in permitted
+    ]
+    if not reopen_records:
+        return ()
+    latest = max(
+        reopen_records,
+        key=lambda record: parse_reopen_discussion_record_id(
+            record.get("record_id")
+        ).round_ordinal,
+    )
+    result = latest.get("result")
+    if not isinstance(result, Mapping):
+        raise ValueError("Proposal discussion reopen record result is invalid.")
+    return (
+        _require_text(result.get("proposal_idea_id"), "proposal_idea_id"),
+        _require_text(result.get("feedback_ref"), "feedback_ref"),
+    )
+
+
 def protected_proposal_discussion_record_ids(
     session: Mapping[str, Any],
     permitted_record_ids: Sequence[str],
@@ -629,18 +658,49 @@ def prepare_proposal_discussion_prompt(
         Callable[[Mapping[str, Any], str, list[dict[str, Any]]], str]
     ] = None,
     current_session: Optional[Callable[[], Mapping[str, Any]]] = None,
+    allow_reopen: bool = False,
+    additional_records: Sequence[Mapping[str, Any]] = (),
+    reopen_source_ideas: Sequence[Mapping[str, Any]] = (),
+    reserve_tokens: int = 0,
+    persist_cache: bool = True,
 ) -> str:
     """Build one bounded prompt while retaining canonical meeting records."""
 
     if str(prompt_template).count(PROPOSAL_DISCUSSION_CONTEXT_MARKER) != 1:
         raise ValueError("Proposal discussion prompt requires one context marker.")
     session_snapshot = dict(session)
+    if isinstance(reserve_tokens, bool) or not isinstance(reserve_tokens, int):
+        raise ValueError("Proposal discussion token reserve must be an integer.")
+    if reserve_tokens < 0:
+        raise ValueError("Proposal discussion token reserve must be nonnegative.")
     all_records = store.records()
+    known_ids = {record["record_id"] for record in all_records}
+    for raw_record in additional_records:
+        normalized = normalize_proposal_discussion_record(
+            raw_record.get("record_id"),
+            raw_record.get("kind"),
+            raw_record.get("result"),
+        )
+        if normalized != dict(raw_record):
+            raise ValueError("Projected proposal discussion record is not canonical.")
+        if normalized["record_id"] in known_ids:
+            raise ValueError("Projected proposal discussion record already exists.")
+        known_ids.add(normalized["record_id"])
+        all_records.append(normalized)
     permitted_ids = permitted_proposal_discussion_record_ids(
         session_snapshot,
         all_records,
     )
-    permitted_records = store.ordered_records(permitted_ids)
+    records_by_id = {record["record_id"]: record for record in all_records}
+    missing = [record_id for record_id in permitted_ids if record_id not in records_by_id]
+    if missing:
+        raise RuntimeError(
+            "Required proposal discussion records are missing: " + ", ".join(missing)
+        )
+    permitted_records = sorted(
+        (records_by_id[record_id] for record_id in permitted_ids),
+        key=lambda record: proposal_discussion_record_sort_key(record["record_id"]),
+    )
     protected_ids = protected_proposal_discussion_record_ids(
         session_snapshot,
         permitted_ids,
@@ -663,6 +723,8 @@ def prepare_proposal_discussion_prompt(
             summary=summary,
             source_record_ids=source_record_ids,
             original_records=originals,
+            allow_reopen=allow_reopen,
+            reopen_source_ideas=reopen_source_ideas,
         )
         return str(prompt_template).replace(PROPOSAL_DISCUSSION_CONTEXT_MARKER, context)
 
@@ -672,7 +734,7 @@ def prepare_proposal_discussion_prompt(
                 "prompt": prompt,
                 "runtime_budget": str(runtime_budget_prompt),
             }
-        ) + PROPOSAL_DISCUSSION_PROVIDER_OVERHEAD_TOKENS
+        ) + PROPOSAL_DISCUSSION_PROVIDER_OVERHEAD_TOKENS + reserve_tokens
 
     full_prompt = assemble(originals=permitted_records)
     if measured_tokens(full_prompt) <= PROPOSAL_DISCUSSION_COMPACTION_TRIGGER_TOKENS:
@@ -741,7 +803,8 @@ def prepare_proposal_discussion_prompt(
         if permitted_proposal_discussion_record_ids(live_session, live_records) != permitted_ids:
             raise RuntimeError("Proposal discussion publication changed during compaction.")
         store.ordered_records(covered_ids)
-    store.write_context_cache(combined_summary, covered_ids)
+    if persist_cache:
+        store.write_context_cache(combined_summary, covered_ids)
     return candidate_prompt
 
 
@@ -750,6 +813,8 @@ def render_proposal_discussion_context(
     summary: str,
     source_record_ids: Sequence[str],
     original_records: Sequence[Mapping[str, Any]],
+    allow_reopen: bool = False,
+    reopen_source_ideas: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     from core.hitl import _load_hitl_template
 
@@ -758,6 +823,8 @@ def render_proposal_discussion_context(
         discussion_summary=str(summary).strip(),
         summary_source_record_ids=list(source_record_ids),
         original_discussion_records=[dict(record) for record in original_records],
+        allow_reopen=bool(allow_reopen),
+        reopen_source_ideas=[dict(record) for record in reopen_source_ideas],
     ).strip()
 
 
