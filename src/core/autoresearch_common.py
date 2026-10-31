@@ -74,6 +74,7 @@ def invoke_proposal_generator(
     candidate_recording: bool = False,
     cancel_event: Optional[threading.Event] = None,
     output_prefix: str = "",
+    prompt_builder: Optional[Callable[[str], str]] = None,
 ) -> Any:
     args = (idea, work_dir, parent_sha, attempt_dir, attempt_history)
     kwargs: Dict[str, Any] = {}
@@ -84,6 +85,7 @@ def invoke_proposal_generator(
         or candidate_recording
         or cancel_event is not None
         or output_prefix
+        or prompt_builder is not None
     ):
         signature = inspect.signature(generator)
         accepts_kwargs = any(
@@ -132,6 +134,13 @@ def invoke_proposal_generator(
                     "that accepts output_prefix."
                 )
             kwargs["output_prefix"] = output_prefix
+        if prompt_builder is not None:
+            if "prompt_builder" not in signature.parameters and not accepts_kwargs:
+                raise TypeError(
+                    "Collaborative proposal generation requires a proposal generator "
+                    "that accepts prompt_builder."
+                )
+            kwargs["prompt_builder"] = prompt_builder
     return generator(*args, **kwargs)
 
 

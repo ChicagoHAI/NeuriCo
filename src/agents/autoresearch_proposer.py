@@ -9,7 +9,7 @@ files.
 """
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 import json
 import os
 import shlex
@@ -282,6 +282,7 @@ def run_autoresearch_proposer(
     candidate_recording: bool = False,
     cancel_event: Optional[threading.Event] = None,
     output_prefix: Optional[str] = None,
+    prompt_builder: Optional[Callable[[str], str]] = None,
 ) -> Dict[str, Any]:
     """
     Launch the AutoResearch proposer agent.
@@ -336,7 +337,17 @@ def run_autoresearch_proposer(
         hitl_mode=str((env_extra or {}).get("NEURICO_HITL_MODE", "full")),
         candidate_recording=candidate_recording,
     )
-    prompt = append_prompt_block(prompt, prompt_suffix)
+    if prompt_builder is None:
+        prompt = append_prompt_block(prompt, prompt_suffix)
+    else:
+        from core.hitl_proposal_discussion import PROPOSAL_DISCUSSION_CONTEXT_MARKER
+
+        prompt_template = append_prompt_block(
+            prompt,
+            PROPOSAL_DISCUSSION_CONTEXT_MARKER,
+        )
+        prompt_template = append_prompt_block(prompt_template, prompt_suffix)
+        prompt = prompt_builder(prompt_template)
     if len(prompt) > MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS:
         raise AutoResearchProposerPromptTooLargeError(
             "AutoResearch proposer prompt exceeds NeuriCo's safe internal limit after "

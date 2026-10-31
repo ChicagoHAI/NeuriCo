@@ -163,8 +163,37 @@ class HitlGitStateStore:
             attempt_id,
             ref=HITL_AUTORESEARCH_WHITEBOARD_REF,
         )
+        return self.hitl_autoresearch_whiteboard_matches_commit(boundary)
+
+    def hitl_autoresearch_whiteboard_attempt_boundary_sha(self, attempt_id: str) -> str:
+        """Return the retained canonical whiteboard commit for one attempt start."""
+
+        return self._find_whiteboard_attempt_boundary(
+            attempt_id,
+            ref=HITL_AUTORESEARCH_WHITEBOARD_REF,
+        )
+
+    def hitl_autoresearch_whiteboard_history_sha(self) -> str:
+        """Return the current canonical whiteboard history commit without moving it."""
+
+        return self._rev_parse(HITL_AUTORESEARCH_WHITEBOARD_REF)
+
+    def hitl_autoresearch_whiteboard_history_contains(self, commit_sha: str) -> bool:
+        """Return whether an exact commit remains in canonical whiteboard history."""
+
+        commit = self._require_commit_sha(commit_sha)
+        return commit in set(
+            self._run_git("rev-list", HITL_AUTORESEARCH_WHITEBOARD_REF).splitlines()
+        )
+
+    def hitl_autoresearch_whiteboard_matches_commit(self, commit_sha: str) -> bool:
+        """Compare live whiteboard bytes with one retained history commit."""
+
+        commit = self._require_commit_sha(commit_sha)
+        if not self.hitl_autoresearch_whiteboard_history_contains(commit):
+            return False
         path = HITL_AUTORESEARCH_WHITEBOARD_STATE_PATH
-        recorded = self._run_git("ls-tree", "-r", "--name-only", boundary, "--", path)
+        recorded = self._run_git("ls-tree", "-r", "--name-only", commit, "--", path)
         current_path = self.work_dir / path
         if not recorded.strip():
             return not current_path.exists()
@@ -172,7 +201,7 @@ class HitlGitStateStore:
             return False
         return current_path.read_bytes() == self._run_git_bytes(
             "show",
-            f"{boundary}:{path}",
+            f"{commit}:{path}",
         )
 
     def restore(self, snapshot: HitlGitSnapshot | str) -> None:
@@ -432,6 +461,13 @@ class HitlGitStateStore:
     def _autoresearch_hitl_rollback_ref(self, attempt_id: str) -> str:
         safe_attempt_id = self._require_attempt_id(attempt_id)
         return f"{AUTORESEARCH_HITL_ROLLBACK_REF_PREFIX}/{safe_attempt_id}"
+
+    @staticmethod
+    def _require_commit_sha(value: str) -> str:
+        commit = str(value).strip()
+        if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+            raise HitlGitStateError("HITL Git commit SHA must be 40 lowercase hex characters.")
+        return commit
 
     def _rev_parse(self, ref: str) -> str:
         return self._run_git("rev-parse", "--verify", ref).strip()

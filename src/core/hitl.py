@@ -1792,6 +1792,7 @@ class HitlRuntime:
         baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
         proposal_preparation_attempt_id: Optional[str] = None,
         proposal_discussion_attempt_dir: Optional[Path] = None,
+        proposal_discussion_final_owner: bool = False,
         scoped_task_cancel_event: Optional[threading.Event] = None,
     ) -> None:
         if hitl_stage not in HITL_STAGES:
@@ -1803,19 +1804,36 @@ class HitlRuntime:
         normalized_actor = str(actor or self.pipeline_stage).strip()
         normalized_provenance = dict(provenance or {})
         normalized_preparation_attempt_id = str(proposal_preparation_attempt_id or "").strip()
+        normalized_discussion_final_owner = bool(proposal_discussion_final_owner)
         normalized_discussion_attempt_dir = (
             Path(proposal_discussion_attempt_dir).resolve()
             if proposal_discussion_attempt_dir is not None
             else None
         )
         if profile == "default":
-            if (
-                self.tool_scope is not None
-                or idea_visibility is not None
-                or normalized_preparation_attempt_id
-                or normalized_discussion_attempt_dir is not None
-                or scoped_task_cancel_event is not None
-            ):
+            if self.tool_scope is not None or idea_visibility is not None or scoped_task_cancel_event is not None:
+                raise HitlValidationError(
+                    "Scoped proposal tools require a closed ranked command profile."
+                )
+            if normalized_discussion_final_owner:
+                if (
+                    self.pipeline_stage != "experiment_runner"
+                    or hitl_stage != "proposal"
+                    or normalized_actor != "autoresearch_proposer"
+                    or not normalized_preparation_attempt_id
+                    or normalized_discussion_attempt_dir is None
+                    or not str(normalized_provenance.get("parent_node_id", "")).strip()
+                    or not str(normalized_provenance.get("attempt_id", "")).strip()
+                    or not normalized_discussion_attempt_dir.is_relative_to(
+                        self.work_dir.resolve()
+                    )
+                    or normalized_discussion_attempt_dir.name
+                    != str(normalized_provenance.get("attempt_id", "")).strip()
+                ):
+                    raise HitlValidationError(
+                        "Collaborative final-owner tools require their proposal discussion identity."
+                    )
+            elif normalized_preparation_attempt_id or normalized_discussion_attempt_dir is not None:
                 raise HitlValidationError(
                     "Scoped proposal tools require a closed ranked command profile."
                 )
@@ -1958,6 +1976,8 @@ class HitlRuntime:
             if profile == "default"
             else set(profile_spec["commands"])
         )
+        if normalized_discussion_final_owner:
+            allowed_worker_commands.add("hitl-view-discussion")
         if self._time_budget_command_available():
             allowed_worker_commands.add("hitl-time-budget")
         if not _is_closed_scoped_task_profile(profile):
@@ -1980,7 +2000,7 @@ class HitlRuntime:
             "provenance": normalized_provenance,
             **(
                 {"proposal_preparation_attempt_id": normalized_preparation_attempt_id}
-                if profile != "default"
+                if profile != "default" or normalized_discussion_final_owner
                 else {}
             ),
             **(
@@ -1988,6 +2008,7 @@ class HitlRuntime:
                 if normalized_discussion_attempt_dir is not None
                 else {}
             ),
+            "proposal_discussion_final_owner": normalized_discussion_final_owner,
             **(
                 {"scoped_task_cancel_event": scoped_task_cancel_event}
                 if scoped_task_cancel_event is not None
@@ -4341,7 +4362,7 @@ class HitlRuntime:
         """Read only the public meeting records authorized by durable state."""
 
         with self._tool_lock:
-            task_context = self._discussion_task_state_context()
+            task_context = self._proposal_discussion_reader_state_context()
             store = self._proposal_discussion_record_store()
             permitted = self._permitted_proposal_discussion_record_ids(
                 task_context["session"],
@@ -4381,6 +4402,49 @@ class HitlRuntime:
             if result["next_offset"] is not None:
                 lines.append(f"next_offset: {result['next_offset']}")
             return {**result, "text": "\n".join(lines)}
+
+    def _proposal_discussion_reader_state_context(self) -> Dict[str, Any]:
+        """Authorize either one finite task or the matching final proposal owner."""
+
+        if not bool(self._tool_context.get("proposal_discussion_final_owner")):
+            return self._discussion_task_state_context()
+        if (
+            str(self._tool_context.get("command_profile", "")) != "default"
+            or self.tool_scope is not None
+            or self._tool_context.get("hitl_stage") != "proposal"
+        ):
+            raise HitlValidationError(
+                "Proposal discussion reading does not match the final-owner session."
+            )
+        provenance = self._tool_context.get("provenance")
+        if not isinstance(provenance, dict):
+            raise HitlValidationError(
+                "Collaborative final-owner access requires runtime provenance."
+            )
+        identity = {
+            "parent_node_sha": str(provenance.get("parent_node_id", "")).strip(),
+            "preparation_attempt_id": str(
+                self._tool_context.get("proposal_preparation_attempt_id", "")
+            ).strip(),
+            "candidate_attempt_id": str(provenance.get("attempt_id", "")).strip(),
+        }
+        if not all(identity.values()):
+            raise HitlValidationError(
+                "Collaborative final-owner access has incomplete identity."
+            )
+        from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+
+        try:
+            session = HitlRuntimeState(self.work_dir).proposal_discussion_snapshot(
+                **identity
+            )
+        except HitlRuntimeStateError as exc:
+            raise HitlValidationError(str(exc)) from exc
+        if session.get("phase") != "final_writing":
+            raise HitlValidationError(
+                "Proposal discussion records are not owned by the active final writer."
+            )
+        return {"identity": identity, "session": session}
 
     @staticmethod
     def _permitted_proposal_discussion_record_ids(
