@@ -4292,7 +4292,7 @@ class HitlAutoResearchController:
                 phase_finish_validator=(
                     boundary_validator if role != "proposer" else None
                 ),
-                ranked_cancel_event=cancel_event,
+                scoped_task_cancel_event=cancel_event,
             )
         except BaseException:
             task_runtime.clear_idea_tool_context()
@@ -4395,7 +4395,7 @@ class HitlAutoResearchController:
             raise RuntimeError("Ranked proposer stage requires proposer and reviewer counts.")
 
         owner = self._proposal_hitl_runtime()
-        owner.require_ranked_task_session_boundary()
+        owner.require_scoped_task_session_boundary()
         state = HitlRuntimeState(self.work_dir)
         action = state.snapshot().get("next_autoresearch_action")
         if not isinstance(action, dict):

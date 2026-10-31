@@ -110,6 +110,42 @@ _RANKED_COMMAND_PROFILES = {
         },
     },
 }
+
+
+def _closed_scoped_task_profile_spec(profile: Any) -> Optional[Dict[str, Any]]:
+    """Return the closed scoped-task contract for one worker profile."""
+
+    spec = _RANKED_COMMAND_PROFILES.get(str(profile).strip())
+    if spec is None:
+        return None
+    return {**spec, "scope_kind": "ranked"}
+
+
+def _is_closed_scoped_task_profile(profile: Any) -> bool:
+    return _closed_scoped_task_profile_spec(profile) is not None
+
+
+def _parse_tool_scope_kind(value: str) -> str:
+    """Classify one exact scoped-task identity without weakening either parser."""
+
+    from core.hitl_proposal_round import parse_proposal_task_id
+
+    try:
+        parse_proposal_task_id(value)
+        return "ranked"
+    except ValueError:
+        pass
+    from core.hitl_proposal_discussion import parse_proposal_discussion_task_id
+
+    try:
+        parse_proposal_discussion_task_id(value)
+        return "discussion"
+    except ValueError as exc:
+        raise ValueError(
+            "HITL tool scope must be a validated ranked or discussion task ID."
+        ) from exc
+
+
 PROPOSAL_KINDS = {"exploitation", "exploration"}
 EVIDENCE_IDEA_CATEGORIES = {
     "paper_finding",
@@ -1411,14 +1447,11 @@ class HitlRuntime:
         self.use_hitl_autoresearch_whiteboard = use_hitl_autoresearch_whiteboard
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
         normalized_tool_scope = str(tool_scope or "").strip() or None
+        tool_scope_kind: Optional[str] = None
         if normalized_tool_scope is not None:
-            from core.hitl_proposal_round import parse_proposal_task_id
-
-            try:
-                parse_proposal_task_id(normalized_tool_scope)
-            except ValueError as exc:
-                raise ValueError("HITL tool scope must be a validated proposal task ID.") from exc
+            tool_scope_kind = _parse_tool_scope_kind(normalized_tool_scope)
         self.tool_scope = normalized_tool_scope
+        self._tool_scope_kind = tool_scope_kind
         self.paths = HitlPaths(self.work_dir, pipeline_stage, normalized_tool_scope)
         self.paths.plan_path.parent.mkdir(parents=True, exist_ok=True)
         self.paths.hitl_dir.mkdir(parents=True, exist_ok=True)
@@ -1725,12 +1758,13 @@ class HitlRuntime:
         baseline_construction: bool = False,
         baseline_candidate_manifest: Optional[Dict[str, Any]] = None,
         proposal_preparation_attempt_id: Optional[str] = None,
-        ranked_cancel_event: Optional[threading.Event] = None,
+        scoped_task_cancel_event: Optional[threading.Event] = None,
     ) -> None:
         if hitl_stage not in HITL_STAGES:
             raise HitlValidationError(f"Invalid HITL idea tool hitl_stage: {hitl_stage}")
         profile = str(command_profile).strip()
-        if profile != "default" and profile not in _RANKED_COMMAND_PROFILES:
+        profile_spec = _closed_scoped_task_profile_spec(profile)
+        if profile != "default" and profile_spec is None:
             raise HitlValidationError(f"Invalid HITL worker command profile: {profile}")
         normalized_actor = str(actor or self.pipeline_stage).strip()
         normalized_provenance = dict(provenance or {})
@@ -1740,7 +1774,7 @@ class HitlRuntime:
                 self.tool_scope is not None
                 or idea_visibility is not None
                 or normalized_preparation_attempt_id
-                or ranked_cancel_event is not None
+                or scoped_task_cancel_event is not None
             ):
                 raise HitlValidationError(
                     "Scoped proposal tools require a closed ranked command profile."
@@ -1748,10 +1782,13 @@ class HitlRuntime:
         else:
             from core.hitl_proposal_round import parse_proposal_task_id
 
-            profile_spec = _RANKED_COMMAND_PROFILES[profile]
             if self.pipeline_stage != "experiment_runner" or self.tool_scope is None:
                 raise HitlValidationError(
                     "Ranked command profiles require a scoped experiment-runner runtime."
+                )
+            if profile_spec["scope_kind"] != "ranked" or self._tool_scope_kind != "ranked":
+                raise HitlValidationError(
+                    "Ranked command profile requires a ranked proposal task scope."
                 )
             if normalized_actor != profile_spec["actor"]:
                 raise HitlValidationError(
@@ -1815,11 +1852,11 @@ class HitlRuntime:
         allowed_worker_commands = (
             self._worker_commands_for_stage(hitl_stage)
             if profile == "default"
-            else set(_RANKED_COMMAND_PROFILES[profile]["commands"])
+            else set(profile_spec["commands"])
         )
         if self._time_budget_command_available():
             allowed_worker_commands.add("hitl-time-budget")
-        if profile == "default":
+        if not _is_closed_scoped_task_profile(profile):
             from core.hitl_runtime_state import (
                 HitlRuntimeState,
                 worker_command_requires_resume,
@@ -1843,8 +1880,8 @@ class HitlRuntime:
                 else {}
             ),
             **(
-                {"ranked_cancel_event": ranked_cancel_event}
-                if ranked_cancel_event is not None
+                {"scoped_task_cancel_event": scoped_task_cancel_event}
+                if scoped_task_cancel_event is not None
                 else {}
             ),
             "idea_visibility": dict(idea_visibility) if idea_visibility is not None else None,
@@ -2030,11 +2067,11 @@ class HitlRuntime:
         profile = str(self._tool_context.get("command_profile", "default"))
         if profile != "default":
             raise HitlValidationError(
-                f"Ranked proposal task sessions do not use global {operation}."
+                f"Scoped proposal task sessions do not use global {operation}."
             )
 
-    def require_ranked_task_session_boundary(self) -> None:
-        """Require ordinary worker lifecycle state to be terminal before ranked tasks."""
+    def require_scoped_task_session_boundary(self) -> None:
+        """Require ordinary worker lifecycle state to be terminal before scoped tasks."""
 
         from core.hitl_runtime_state import HitlRuntimeState, worker_command_requires_resume
 
@@ -2046,11 +2083,11 @@ class HitlRuntime:
             isinstance(pending, dict) and status not in {"resolved", "cancelled"}
         ):
             raise HitlValidationError(
-                "Ranked proposal tasks cannot start while an ordinary worker request is unresolved."
+                "Scoped proposal tasks cannot start while an ordinary worker request is unresolved."
             )
         if isinstance(continuation, dict):
             raise HitlValidationError(
-                "Ranked proposal tasks cannot start while an ordinary worker continuation exists."
+                "Scoped proposal tasks cannot start while an ordinary worker continuation exists."
             )
 
     def register_worker_prompt(self, prompt_block: str) -> None:
@@ -2232,8 +2269,10 @@ class HitlRuntime:
     def idea_tool_env(self, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         env = dict(base_env or os.environ)
         env["PYTHONUNBUFFERED"] = "1"
-        if str(self._tool_context.get("command_profile", "")) in _RANKED_COMMAND_PROFILES:
-            # Ranked proposal tasks are read-only. Match NeuriCo's Docker
+        if _is_closed_scoped_task_profile(
+            self._tool_context.get("command_profile", "")
+        ):
+            # Scoped proposal tasks are read-only. Match NeuriCo's Docker
             # runtime so importing workspace modules cannot create bytecode.
             env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["NEURICO_HITL_URL"] = self._tool_url
@@ -2249,8 +2288,8 @@ class HitlRuntime:
         return env
 
     def clear_idea_tool_context(self) -> None:
-        ranked_session = str(self._tool_context.get("command_profile", "")) in (
-            _RANKED_COMMAND_PROFILES
+        scoped_task_session = _is_closed_scoped_task_profile(
+            self._tool_context.get("command_profile", "")
         )
         self.stop_idea_tool_server()
         # A stopped worker can unwind before its asynchronous scorer finishes
@@ -2267,8 +2306,8 @@ class HitlRuntime:
                 break
             for thread in active:
                 thread.join()
-        if ranked_session:
-            # Stopping the server prevents new requests. Acquiring the ranked
+        if scoped_task_session:
+            # Stopping the server prevents new requests. Acquiring the scoped
             # task's existing mutation gate then proves that any handler which
             # passed its cancellation check has finished before rollback.
             with self._tool_lock:
@@ -2470,12 +2509,12 @@ class HitlRuntime:
         try:
             validation = validator()
         except BaseException:
-            cancel_event = self._tool_context.get("ranked_cancel_event")
+            cancel_event = self._tool_context.get("scoped_task_cancel_event")
             if isinstance(cancel_event, threading.Event):
                 cancel_event.set()
             raise
         if not isinstance(validation, dict) or not bool(validation.get("valid")):
-            cancel_event = self._tool_context.get("ranked_cancel_event")
+            cancel_event = self._tool_context.get("scoped_task_cancel_event")
             if isinstance(cancel_event, threading.Event):
                 cancel_event.set()
             issues = validation.get("issues", []) if isinstance(validation, dict) else []
@@ -2490,14 +2529,14 @@ class HitlRuntime:
                 + "\nRestore the task workspace boundary, then retry the same finish command."
             )
 
-    def _ranked_stage_cancelled(self) -> bool:
-        cancel_event = self._tool_context.get("ranked_cancel_event")
+    def _scoped_task_cancelled(self) -> bool:
+        cancel_event = self._tool_context.get("scoped_task_cancel_event")
         return isinstance(cancel_event, threading.Event) and cancel_event.is_set()
 
-    def _reject_cancelled_ranked_mutation(self) -> None:
-        if self._ranked_stage_cancelled():
+    def _reject_cancelled_scoped_task_mutation(self) -> None:
+        if self._scoped_task_cancelled():
             raise HitlValidationError(
-                "This ranked proposal stage was cancelled. Do not issue further "
+                "This scoped proposal stage was cancelled. Do not issue further "
                 "mutating commands from this worker session."
             )
 
@@ -2698,7 +2737,7 @@ class HitlRuntime:
         from core.hitl_runtime_state import HitlRuntimeStateError
 
         with self._tool_lock:
-            self._reject_cancelled_ranked_mutation()
+            self._reject_cancelled_scoped_task_mutation()
             task_context = self._ranked_task_state_context()
             role = str(task_context["role"])
             self._validate_ranked_task_workspace(role)
@@ -2724,7 +2763,7 @@ class HitlRuntime:
                     raise HitlValidationError(
                         "Proposal task is already complete with a different result."
                     )
-                self._tool_context["ranked_task_terminal"] = True
+                self._tool_context["scoped_task_terminal"] = True
                 return {
                     "status": "recorded",
                     "idea_id": result_idea_id,
@@ -2770,7 +2809,7 @@ class HitlRuntime:
                 )
             except HitlRuntimeStateError as exc:
                 raise HitlValidationError(str(exc)) from exc
-            self._tool_context["ranked_task_terminal"] = True
+            self._tool_context["scoped_task_terminal"] = True
             return {
                 "status": "recorded",
                 "idea_id": logged["idea_id"],
@@ -2781,7 +2820,7 @@ class HitlRuntime:
         """Validate or replay one durable ranked task without launching an agent."""
 
         with self._tool_lock:
-            if self._ranked_stage_cancelled():
+            if self._scoped_task_cancelled():
                 return {
                     "status": "cancelled",
                     "complete": False,
@@ -2814,7 +2853,7 @@ class HitlRuntime:
                         "adopt idea-log content into task state."
                     )
                 record = self._validate_ranked_task_result_reference(task_context)
-                self._tool_context["ranked_task_terminal"] = True
+                self._tool_context["scoped_task_terminal"] = True
                 return {
                     "status": "recorded",
                     "complete": True,
@@ -2938,7 +2977,7 @@ class HitlRuntime:
             self._validate_ranked_task_workspace(role)
             if task_context["task"].get("result_idea_id") is not None:
                 record = self._validate_ranked_task_result_reference(task_context)
-                self._tool_context["ranked_task_terminal"] = True
+                self._tool_context["scoped_task_terminal"] = True
                 return {
                     "status": "recorded",
                     "complete": True,
@@ -2975,7 +3014,7 @@ class HitlRuntime:
             if result.get("stopped"):
                 raise HitlRunStopRequested("HITL run stop requested by the user.")
 
-            if result.get("cancelled") or self._ranked_stage_cancelled():
+            if result.get("cancelled") or self._scoped_task_cancelled():
                 return {
                     "status": "cancelled",
                     "complete": False,
@@ -3018,8 +3057,8 @@ class HitlRuntime:
 
     def log_reported_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
-            self._reject_cancelled_ranked_mutation()
-            if self._tool_context.get("ranked_task_terminal"):
+            self._reject_cancelled_scoped_task_mutation()
+            if self._tool_context.get("scoped_task_terminal"):
                 raise HitlValidationError(
                     "This proposal task is already complete. Stop this worker session."
                 )
