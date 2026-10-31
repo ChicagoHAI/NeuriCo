@@ -3152,6 +3152,61 @@ class HitlRuntime:
                 "instruction": "The discussion task is recorded. Stop this worker session.",
             }
 
+    def reconcile_proposal_discussion_task(self) -> Dict[str, Any]:
+        """Validate or replay one durable discussion task without launching an agent."""
+
+        with self._tool_lock:
+            if self._scoped_task_cancelled():
+                return {
+                    "status": "cancelled",
+                    "complete": False,
+                    "cancelled": True,
+                    "record_id": None,
+                }
+            task_context = self._discussion_task_state_context(allow_completed=True)
+            self._validate_discussion_task_workspace()
+            task = task_context["task"]
+            result_record_id = str(task.get("result_record_id") or "").strip()
+            pending = task.get("pending_finalization")
+            matching_records = [
+                record
+                for record in self._proposal_discussion_record_store().records()
+                if record.get("record_id") == task_context["task_id"]
+            ]
+            if result_record_id:
+                if pending is not None:
+                    raise HitlValidationError(
+                        "Completed discussion task still owns a pending finalization intent."
+                    )
+                record = self._validate_discussion_result_reference(task_context)
+                self._tool_context["scoped_task_terminal"] = True
+                return {
+                    "status": "recorded",
+                    "complete": True,
+                    "record_id": record["record_id"],
+                }
+            if pending is not None:
+                if not isinstance(pending, dict) or not pending:
+                    raise HitlValidationError(
+                        "Discussion task has an invalid pending finalization intent."
+                    )
+                finalized = self.finish_proposal_discussion_task(dict(pending))
+                return {
+                    "status": "recorded",
+                    "complete": True,
+                    "record_id": finalized["record_id"],
+                }
+            if matching_records:
+                raise HitlValidationError(
+                    "Discussion task has an unreferenced public result. Runtime will not "
+                    "adopt artifact content into task state."
+                )
+            return {
+                "status": "incomplete",
+                "complete": False,
+                "record_id": None,
+            }
+
     def proposal_discussion_task_result_after_worker_exit(
         self,
         result: Dict[str, Any],
@@ -4653,6 +4708,69 @@ class HitlRuntime:
                 "reopen_record_id": record_id,
                 "whiteboard_boundary_sha": whiteboard_sha,
             }
+
+    def reconcile_proposal_discussion_reopen(self) -> Dict[str, str]:
+        """Finish only the durable reopen finalization accepted before restart."""
+
+        with self._tool_lock:
+            from core.hitl_proposal_discussion import ProposalDiscussionRecordStore
+            from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+
+            task_context = self._proposal_discussion_final_owner_state_context()
+            session = task_context["session"]
+            handoff = session.get("reopen_handoff")
+            if session.get("phase") != "reopen_pending" or not isinstance(
+                handoff, dict
+            ):
+                raise HitlValidationError(
+                    "Collaborative discussion has no accepted reopen handoff to recover."
+                )
+            record_id = str(handoff.get("reopen_record_id", "")).strip()
+            store = ProposalDiscussionRecordStore(
+                Path(self._tool_context["proposal_discussion_attempt_dir"])
+            )
+            pending = handoff.get("pending_finalization")
+            if pending is not None:
+                if not isinstance(pending, dict) or not pending:
+                    raise HitlValidationError(
+                        "Proposal discussion reopen has an invalid finalization intent."
+                    )
+                try:
+                    record = store.append(
+                        record_id=record_id,
+                        kind="reopen",
+                        result=pending,
+                    )
+                    HitlRuntimeState(
+                        self.work_dir
+                    ).complete_proposal_discussion_reopen_finalization(
+                        **task_context["identity"],
+                        reopen_record_id=record_id,
+                        result=record["result"],
+                    )
+                except (HitlRuntimeStateError, RuntimeError, ValueError) as exc:
+                    raise HitlValidationError(str(exc)) from exc
+            else:
+                matches = [
+                    record
+                    for record in store.records()
+                    if record.get("record_id") == record_id
+                ]
+                if len(matches) != 1:
+                    raise HitlValidationError(
+                        "Proposal discussion reopen references a missing public record."
+                    )
+                result = matches[0].get("result")
+                if (
+                    not isinstance(result, dict)
+                    or result.get("proposal_idea_id")
+                    != handoff.get("proposal_idea_id")
+                    or result.get("feedback_ref") != handoff.get("feedback_ref")
+                ):
+                    raise HitlValidationError(
+                        "Proposal discussion reopen record does not match its durable handoff."
+                    )
+            return {"reopen_record_id": record_id}
 
     def view_ideas_for_tool(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         with self._tool_lock:

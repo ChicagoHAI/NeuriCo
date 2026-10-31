@@ -1115,6 +1115,14 @@ def _archive_failed_hitl_attempt(
                     dirs_exist_ok=True,
                     symlinks=True,
                 )
+        discussion = Path(source_attempt_dir) / "proposal_discussion"
+        if discussion.is_dir() and not discussion.is_symlink():
+            shutil.copytree(
+                discussion,
+                archive_dir / "proposal_discussion",
+                dirs_exist_ok=True,
+                symlinks=True,
+            )
     return archive_dir
 
 
@@ -1847,9 +1855,145 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                     and prepared_sha
                     and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
                 )
+    discussion_present = bool(
+        isinstance(preparation_action, dict)
+        and "proposal_discussion" in preparation_action
+    )
+    discussion_is_exact = False
+    discussion_phase: Optional[str] = None
+    if discussion_present and isinstance(preparation_action, dict):
+        raw_session = preparation_action.get("proposal_discussion")
+        if isinstance(raw_session, dict) and not ranked_round_present:
+            try:
+                from core.hitl_proposal_discussion import (
+                    ProposalDiscussionRecordStore,
+                    permitted_proposal_discussion_record_ids,
+                )
+
+                durable_session = runtime_state.proposal_discussion_snapshot(
+                    parent_node_sha=str(
+                        preparation_action.get("parent_node_sha", "")
+                    ).strip(),
+                    preparation_attempt_id=str(
+                        preparation_action.get("attempt_id", "")
+                    ).strip(),
+                    candidate_attempt_id=attempt_dir.name,
+                )
+                discussion_phase = str(durable_session.get("phase", "")).strip()
+                record_store = ProposalDiscussionRecordStore(attempt_dir)
+                records = record_store.records()
+                records_by_id = {
+                    str(record.get("record_id", "")).strip(): record
+                    for record in records
+                }
+                record_store.ordered_records(
+                    permitted_proposal_discussion_record_ids(
+                        durable_session,
+                        records,
+                    )
+                )
+                for task_id, task in durable_session["tasks"].items():
+                    record = records_by_id.get(task_id)
+                    result_record_id = str(
+                        task.get("result_record_id") or ""
+                    ).strip()
+                    pending = task.get("pending_finalization")
+                    if result_record_id:
+                        if record is None or result_record_id != task_id:
+                            raise RuntimeError(
+                                "Proposal discussion task result record is missing."
+                            )
+                    elif pending is not None:
+                        if record is not None and record.get("result") != pending:
+                            raise RuntimeError(
+                                "Proposal discussion task record conflicts with durable intent."
+                            )
+                    elif record is not None:
+                        raise RuntimeError(
+                            "Proposal discussion contains an unreferenced task record."
+                        )
+
+                git_state = HitlGitStateStore(work_dir)
+                if discussion_phase in {"initial", "opening", "response", "decision"}:
+                    whiteboard_sha = str(
+                        durable_session.get("whiteboard_boundary_sha", "")
+                    ).strip()
+                    whiteboard_is_exact = bool(
+                        git_state.hitl_autoresearch_whiteboard_history_contains(
+                            whiteboard_sha
+                        )
+                        and git_state.hitl_autoresearch_whiteboard_matches_commit(
+                            whiteboard_sha
+                        )
+                    )
+                elif discussion_phase == "final_writing":
+                    whiteboard_is_exact = True
+                elif discussion_phase == "reopen_pending":
+                    handoff = durable_session.get("reopen_handoff")
+                    if not isinstance(handoff, dict):
+                        raise RuntimeError(
+                            "Proposal discussion reopen handoff is missing."
+                        )
+                    reopen_record = records_by_id.get(
+                        str(handoff.get("reopen_record_id", "")).strip()
+                    )
+                    pending = handoff.get("pending_finalization")
+                    if pending is not None:
+                        if (
+                            reopen_record is not None
+                            and reopen_record.get("result") != pending
+                        ):
+                            raise RuntimeError(
+                                "Proposal discussion reopen record conflicts with durable intent."
+                            )
+                    elif (
+                        not isinstance(reopen_record, dict)
+                        or reopen_record.get("result", {}).get("proposal_idea_id")
+                        != handoff.get("proposal_idea_id")
+                        or reopen_record.get("result", {}).get("feedback_ref")
+                        != handoff.get("feedback_ref")
+                    ):
+                        raise RuntimeError(
+                            "Proposal discussion reopen record does not match its handoff."
+                        )
+                    current_whiteboard_sha = (
+                        git_state.hitl_autoresearch_whiteboard_history_sha()
+                    )
+                    whiteboard_is_exact = (
+                        git_state.hitl_autoresearch_whiteboard_matches_commit(
+                            current_whiteboard_sha
+                        )
+                    )
+                else:
+                    whiteboard_is_exact = False
+            except (
+                HitlRuntimeStateError,
+                HitlGitStateError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ):
+                pass
+            else:
+                prepared_sha = _resolved_proposal_base(preparation_action)
+                discussion_is_exact = bool(
+                    preparation_action.get("status") == "resolved"
+                    and str(preparation_action.get("parent_node_sha", "")).strip()
+                    == current_best_sha
+                    and attempt_dir.parent.name == current_best_sha
+                    and durable_session == raw_session
+                    and whiteboard_is_exact
+                    and prepared_sha
+                    and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
+                )
     ordinary_worker_recovery_allowed = bool(
-        not ranked_round_present
+        (
+            not ranked_round_present
+            and not discussion_present
+        )
         or (ranked_round_is_exact and ranked_round_stage == "selected")
+        or (discussion_is_exact and discussion_phase == "final_writing")
     )
     preparation_metadata_is_exact = (
         isinstance(preparation_action, dict)
@@ -1861,8 +2005,12 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and (
             ranked_round_is_exact
             if ranked_round_present
-            else str(preparation_action.get("attempt_id", "")).strip()
-            == attempt_dir.name
+            else (
+                discussion_is_exact
+                if discussion_present
+                else str(preparation_action.get("attempt_id", "")).strip()
+                == attempt_dir.name
+            )
         )
         and isinstance(preparation_action.get("additional_agent_ordinal"), int)
         and int(preparation_action["additional_agent_ordinal"]) >= 1
@@ -1885,6 +2033,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
     )
     dynamic_agent_request = (
         not ranked_round_present
+        and not discussion_present
         and isinstance(pending_request, dict)
         and pending_request.get("pipeline_stage") == "resource_finder"
     )
@@ -1976,7 +2125,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             scope=pending_request.get("workspace_fingerprint_scope"),
         )
     )
-    if ranked_round_present:
+    if ranked_round_present or discussion_present:
         preparation_is_exact = bool(
             preparation_metadata_is_exact and preparation_workspace_is_exact
         )
@@ -2001,6 +2150,12 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and str(continuation_provenance.get("parent_node_id", "")).strip()
         == current_best_sha
         and (not dynamic_agent_request or resumable_agent_request)
+        and (
+            not discussion_present
+            or str(continuation.get("hitl_stage", "")).strip()
+            in {"plan", "execution", "review"}
+            or preparation_workspace_is_exact
+        )
     ):
         return HitlRecoveryResult(
             marker=marker,
@@ -4451,6 +4606,15 @@ class HitlAutoResearchController:
         """Alternate bounded discussion segments with ordinary final writing."""
 
         while True:
+            session = self._begin_or_resume_proposal_discussion(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+            )
+            if session.get("phase") == "reopen_pending":
+                self._recover_collaborative_proposal_reopen(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                )
             self._run_collaborative_proposal_discussion_segment(
                 parent_sha=parent_sha,
                 attempt_dir=attempt_dir,
@@ -4477,6 +4641,49 @@ class HitlAutoResearchController:
                 whiteboard_boundary_sha=outcome["whiteboard_boundary_sha"],
             )
 
+    def _recover_collaborative_proposal_reopen(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> None:
+        """Replay an accepted reopen handoff before any proposer is relaunched."""
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict):
+            raise RuntimeError(
+                "Collaborative discussion reopening lost proposal preparation state."
+            )
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        runtime = self._proposal_hitl_runtime()
+        runtime.prepare_idea_tool_context(
+            hitl_stage="proposal",
+            actor="autoresearch_proposer",
+            provenance={
+                "parent_node_id": parent_sha,
+                "attempt_id": attempt_dir.name,
+            },
+            proposal_review_path=attempt_dir / "proposal_review.json",
+            proposal_preparation_attempt_id=preparation_attempt_id,
+            proposal_discussion_attempt_dir=attempt_dir,
+            proposal_discussion_final_owner=True,
+        )
+        try:
+            reconciled = runtime.reconcile_proposal_discussion_reopen()
+            transfer = runtime.prepare_proposal_discussion_reopen_transfer(
+                reconciled["reopen_record_id"]
+            )
+        finally:
+            runtime.clear_idea_tool_context()
+        state.apply_proposal_discussion_reopen(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+            reopen_record_id=transfer["reopen_record_id"],
+            whiteboard_boundary_sha=transfer["whiteboard_boundary_sha"],
+        )
+
     def _run_collaborative_proposal_discussion_segment(
         self,
         *,
@@ -4499,6 +4706,14 @@ class HitlAutoResearchController:
             parent_sha=parent_sha,
             attempt_dir=attempt_dir,
         )
+        if session.get("phase") == "final_writing":
+            owner.require_scoped_task_session_boundary()
+            return
+        if session.get("phase") == "reopen_pending":
+            raise RuntimeError(
+                "Collaborative discussion reopening must transfer ownership before "
+                "discussion tasks resume."
+            )
         action = state.snapshot().get("next_autoresearch_action")
         if not isinstance(action, dict):
             raise RuntimeError("Collaborative proposal discussion has no preparation state.")
@@ -4517,21 +4732,11 @@ class HitlAutoResearchController:
         def refresh() -> Dict[str, Any]:
             return state.proposal_discussion_snapshot(**identity)
 
-        def task_complete(task_id: str) -> bool:
-            task = refresh().get("tasks", {}).get(task_id)
-            return bool(
-                isinstance(task, dict)
-                and task.get("result_record_id") == task_id
-                and task.get("pending_finalization") is None
-            )
-
         def run_task(
             task_id: str,
             *,
             seed_idea_ids: Sequence[str] = (),
         ) -> None:
-            if task_complete(task_id):
-                return
             raise_if_hitl_run_stop_requested()
             owner.require_scoped_task_session_boundary()
             current = refresh()
@@ -4561,10 +4766,6 @@ class HitlAutoResearchController:
             round_ordinal = int(session["round_ordinal"])
             if phase == "final_writing":
                 owner.require_scoped_task_session_boundary()
-                self._require_proposal_discussion_boundary(
-                    boundary_validator,
-                    "Proposal discussion final-writing handoff",
-                )
                 break
             if phase == "initial":
                 for ordinal in range(1, participant_count + 1):
@@ -4743,6 +4944,10 @@ class HitlAutoResearchController:
         )
         task_prompt = f"Complete {task_identity.display_label} through its required HITL command."
         try:
+            reconciled = task_runtime.reconcile_proposal_discussion_task()
+            if reconciled.get("complete") or reconciled.get("cancelled"):
+                return reconciled
+
             def launch_worker(
                 prompt: str,
                 _log_prefix: str,
