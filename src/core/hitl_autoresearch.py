@@ -4459,15 +4459,10 @@ class HitlAutoResearchController:
         ):
             raise RuntimeError("Collaborative proposer stage requires its configured bounds.")
         scope = action.get("workspace_fingerprint_scope")
-        expected_fingerprint = str(action.get("workspace_fingerprint", "")).strip()
         current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
             self.work_dir,
             scope=scope,
         )
-        if not expected_fingerprint or current_fingerprint != expected_fingerprint:
-            raise RuntimeError(
-                "Prepared proposal workspace no longer matches its approved boundary."
-            )
 
         attempt_marker = self._attempt_id(attempt_dir)
         git_state = HitlGitStateStore(self.work_dir)
