@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import hashlib
 import inspect
 import json
@@ -4202,6 +4202,162 @@ class HitlAutoResearchController:
             tool_scope=task_id,
         )
 
+    def _new_discussion_task_runtime(self, task_id: str) -> HitlRuntime:
+        """Create one isolated tool runtime for one finite discussion task."""
+
+        owner = self._proposal_hitl_runtime()
+        return HitlRuntime(
+            self.work_dir,
+            "experiment_runner",
+            channel=owner.channel,
+            manager=owner.manager,
+            use_hitl_autoresearch_whiteboard=True,
+            hitl_mode=self.hitl_mode,
+            tool_scope=task_id,
+        )
+
+    def _prepare_discussion_task_runtime(
+        self,
+        *,
+        task_id: str,
+        session: Dict[str, Any],
+        parent_sha: str,
+        preparation_attempt_id: str,
+        attempt_dir: Path,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        seed_idea_ids: Sequence[str] = (),
+        cancel_event: Optional[threading.Event] = None,
+    ) -> HitlRuntime:
+        """Bind one finite participant runtime to authoritative meeting state."""
+
+        from core.hitl_proposal_discussion import parse_proposal_discussion_task_id
+
+        identity = parse_proposal_discussion_task_id(task_id)
+        profile = (
+            "proposal_discussion_decision"
+            if identity.phase == "decision"
+            else "proposal_discussion_turn"
+        )
+        task = session.get("tasks", {}).get(task_id)
+        if not isinstance(task, dict):
+            raise RuntimeError("Proposal discussion task set is invalid.")
+        task_runtime = self._new_discussion_task_runtime(task_id)
+        try:
+            task_runtime.prepare_idea_tool_context(
+                hitl_stage="proposal",
+                command_profile=profile,
+                actor="autoresearch_proposer",
+                proposal_preparation_attempt_id=preparation_attempt_id,
+                proposal_discussion_attempt_dir=attempt_dir,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": attempt_dir.name,
+                    "discussion_turn_id": task_id,
+                },
+                idea_visibility={
+                    "base_idea_number": session["base_idea_number"],
+                    "whiteboard_boundary_sha": session["whiteboard_boundary_sha"],
+                    "seed_idea_ids": list(seed_idea_ids),
+                },
+                phase_finish_validator=boundary_validator,
+                scoped_task_cancel_event=cancel_event,
+            )
+        except BaseException:
+            task_runtime.clear_idea_tool_context()
+            raise
+        return task_runtime
+
+    def _run_proposal_discussion_task(
+        self,
+        *,
+        task_id: str,
+        session: Dict[str, Any],
+        parent_sha: str,
+        preparation_attempt_id: str,
+        attempt_dir: Path,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        seed_idea_ids: Sequence[str] = (),
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
+        """Run one logical discussion task through finite replacements."""
+
+        if self.proposal_assessment_runner is None:
+            raise RuntimeError("Proposal discussion requires its configured agent runner.")
+        from core.hitl_proposal_discussion import parse_proposal_discussion_task_id
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        task_identity = parse_proposal_discussion_task_id(task_id)
+        task_runtime = self._prepare_discussion_task_runtime(
+            task_id=task_id,
+            session=session,
+            parent_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            attempt_dir=attempt_dir,
+            boundary_validator=boundary_validator,
+            seed_idea_ids=seed_idea_ids,
+            cancel_event=cancel_event,
+        )
+        task_prompt = f"Complete {task_identity.display_label} through its required HITL command."
+        try:
+            def launch_worker(
+                prompt: str,
+                _log_prefix: str,
+                *,
+                record_continuation: bool,
+            ) -> Dict[str, Any]:
+                if record_continuation:
+                    raise RuntimeError(
+                        "Proposal discussion tasks must not record global worker continuation."
+                    )
+                raise_if_hitl_run_stop_requested()
+                if cancel_event is not None and cancel_event.is_set():
+                    return {
+                        "success": False,
+                        "return_code": None,
+                        "timed_out": False,
+                        "stopped": False,
+                        "cancelled": True,
+                        "background_processes_terminated": False,
+                        "provider_process_failed": False,
+                    }
+                return self.proposal_assessment_runner(
+                    role="discussion",
+                    idea=self.idea,
+                    discussion_task_id=task_id,
+                    discussion_records=(
+                        task_runtime.proposal_discussion_records_for_prompt()
+                    ),
+                    task_dir=attempt_dir / "proposal_discussion" / "tasks" / task_id,
+                    prompt_suffix=prompt,
+                    env_extra=task_runtime.idea_tool_env(),
+                    cancel_event=cancel_event,
+                    output_prefix=task_id,
+                )
+
+            _result, finish = run_worker_with_replacements(
+                runtime=task_runtime,
+                launch_worker=launch_worker,
+                prompt=task_prompt,
+                log_prefix=task_id.replace("/", "_"),
+                phase="proposal",
+                worker_name=task_identity.display_label,
+                record_continuation=False,
+                result_after_exit=lambda result: (
+                    task_runtime.proposal_discussion_task_result_after_worker_exit(
+                        result,
+                        replacement_prompt=task_prompt,
+                        worker_name=task_identity.display_label,
+                    )
+                ),
+            )
+        finally:
+            task_runtime.clear_idea_tool_context()
+        if finish.get("cancelled"):
+            return finish
+        if not finish.get("complete") or not str(finish.get("record_id", "")).strip():
+            raise RuntimeError("Proposal discussion task ended without a recorded result.")
+        return finish
+
     def _prepare_ranked_task_runtime(
         self,
         *,
@@ -5532,6 +5688,7 @@ def run_hitl_autoresearch_loop(
     This is the production integration point used by runner.py in Phase 6.
     """
     from agents.autoresearch_proposer import run_autoresearch_proposer
+    from agents.proposal_discussion import run_proposal_discussion_task
     from agents.proposal_assessment import run_proposal_reviewer, run_proposal_verifier
     from agents.comment_handler import build_comment_handler_launch
     from core.agent_runner import run_prebuilt_cli_agent
@@ -5637,6 +5794,7 @@ def run_hitl_autoresearch_loop(
     def proposal_assessment_runner(**request: Any) -> Dict[str, Any]:
         role = str(request.pop("role", "")).strip()
         runners = {
+            "discussion": run_proposal_discussion_task,
             "verifier": run_proposal_verifier,
             "reviewer": run_proposal_reviewer,
         }

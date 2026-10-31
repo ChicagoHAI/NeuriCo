@@ -4340,27 +4340,13 @@ class HitlRuntime:
     ) -> Dict[str, Any]:
         """Read only the public meeting records authorized by durable state."""
 
-        from core.hitl_proposal_discussion import (
-            parse_reopen_discussion_record_id,
-            published_proposal_discussion_task_ids,
-        )
-
         with self._tool_lock:
             task_context = self._discussion_task_state_context()
-            session = task_context["session"]
             store = self._proposal_discussion_record_store()
-            permitted = list(published_proposal_discussion_task_ids(session))
-            current_round = int(session.get("round_ordinal", 0))
-            for record in store.records():
-                if record.get("kind") != "reopen":
-                    continue
-                try:
-                    reopen = parse_reopen_discussion_record_id(record.get("record_id"))
-                except ValueError as exc:
-                    raise HitlValidationError(str(exc)) from exc
-                if reopen.round_ordinal <= current_round:
-                    permitted.append(reopen.record_id)
-
+            permitted = self._permitted_proposal_discussion_record_ids(
+                task_context["session"],
+                store.records(),
+            )
             request = dict(payload or {})
             unexpected = set(request) - {"record_id", "offset", "limit"}
             if unexpected:
@@ -4395,6 +4381,47 @@ class HitlRuntime:
             if result["next_offset"] is not None:
                 lines.append(f"next_offset: {result['next_offset']}")
             return {**result, "text": "\n".join(lines)}
+
+    @staticmethod
+    def _permitted_proposal_discussion_record_ids(
+        session: Dict[str, Any],
+        records: Iterable[Dict[str, Any]],
+    ) -> List[str]:
+        """Derive readable public records without treating artifacts as state."""
+
+        from core.hitl_proposal_discussion import (
+            parse_reopen_discussion_record_id,
+            published_proposal_discussion_task_ids,
+        )
+
+        permitted = list(published_proposal_discussion_task_ids(session))
+        current_round = int(session.get("round_ordinal", 0))
+        for record in records:
+            if record.get("kind") != "reopen":
+                continue
+            try:
+                reopen = parse_reopen_discussion_record_id(record.get("record_id"))
+            except ValueError as exc:
+                raise HitlValidationError(str(exc)) from exc
+            if reopen.round_ordinal <= current_round:
+                permitted.append(reopen.record_id)
+        return permitted
+
+    def proposal_discussion_records_for_prompt(self) -> List[Dict[str, Any]]:
+        """Return complete records authorized for the active finite task."""
+
+        with self._tool_lock:
+            task_context = self._discussion_task_state_context()
+            store = self._proposal_discussion_record_store()
+            records = store.records()
+            permitted = self._permitted_proposal_discussion_record_ids(
+                task_context["session"],
+                records,
+            )
+            try:
+                return store.ordered_records(permitted)
+            except RuntimeError as exc:
+                raise HitlValidationError(str(exc)) from exc
 
     def view_current_frontier_for_tool(self) -> Dict[str, Any]:
         profile = str(self._tool_context.get("command_profile", "default"))
