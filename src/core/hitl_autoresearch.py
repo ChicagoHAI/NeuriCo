@@ -4697,6 +4697,10 @@ class HitlAutoResearchController:
             proposal_discussion_reopen_source_idea_ids,
             proposal_discussion_task_id,
         )
+        from core.hitl_proposal_round import (
+            MAX_COLLABORATIVE_PARTICIPANT_COUNT,
+            run_parallel_proposal_stage,
+        )
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
         owner = self._proposal_hitl_runtime()
@@ -4736,6 +4740,7 @@ class HitlAutoResearchController:
             task_id: str,
             *,
             seed_idea_ids: Sequence[str] = (),
+            cancel_event: Optional[threading.Event] = None,
         ) -> None:
             raise_if_hitl_run_stop_requested()
             owner.require_scoped_task_session_boundary()
@@ -4752,6 +4757,7 @@ class HitlAutoResearchController:
                 attempt_dir=attempt_dir,
                 boundary_validator=boundary_validator,
                 seed_idea_ids=seed_idea_ids,
+                cancel_event=cancel_event,
             )
             self._require_proposal_discussion_boundary(
                 boundary_validator,
@@ -4768,13 +4774,25 @@ class HitlAutoResearchController:
                 owner.require_scoped_task_session_boundary()
                 break
             if phase == "initial":
-                for ordinal in range(1, participant_count + 1):
-                    run_task(
-                        proposal_discussion_task_id(
-                            "initial",
-                            participant_ordinal=ordinal,
-                        )
+                initial_task_ids = [
+                    proposal_discussion_task_id(
+                        "initial",
+                        participant_ordinal=ordinal,
                     )
+                    for ordinal in range(1, participant_count + 1)
+                ]
+
+                def run_initial_task(
+                    task_id: str,
+                    cancel_event: threading.Event,
+                ) -> None:
+                    run_task(task_id, cancel_event=cancel_event)
+
+                run_parallel_proposal_stage(
+                    initial_task_ids,
+                    run_initial_task,
+                    maximum_tasks=MAX_COLLABORATIVE_PARTICIPANT_COUNT,
+                )
                 self._require_proposal_discussion_boundary(
                     boundary_validator,
                     "Proposal discussion initial stage",

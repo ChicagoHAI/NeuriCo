@@ -79,16 +79,27 @@ class KemenyYoungResult:
 def run_parallel_proposal_stage(
     task_ids: Sequence[str],
     run_task: Callable[[str, threading.Event], _T],
+    *,
+    maximum_tasks: int = MAX_REVIEWER_COUNT,
 ) -> dict[str, _T]:
     """Run one bounded proposal stage and settle every sibling before raising."""
 
+    if (
+        isinstance(maximum_tasks, bool)
+        or not isinstance(maximum_tasks, int)
+        or not 1 <= maximum_tasks <= MAX_COLLABORATIVE_PARTICIPANT_COUNT
+    ):
+        raise ValueError(
+            "Parallel proposal stage maximum must be between 1 and "
+            f"{MAX_COLLABORATIVE_PARTICIPANT_COUNT}."
+        )
     ordered_ids = tuple(str(task_id).strip() for task_id in task_ids)
     if not ordered_ids or any(not task_id for task_id in ordered_ids):
         raise ValueError("Parallel proposal stage requires nonempty task IDs.")
     if len(set(ordered_ids)) != len(ordered_ids):
         raise ValueError("Parallel proposal stage task IDs must be distinct.")
-    if len(ordered_ids) > MAX_REVIEWER_COUNT:
-        raise ValueError("Parallel proposal stage exceeds the ranked task bound.")
+    if len(ordered_ids) > maximum_tasks:
+        raise ValueError("Parallel proposal stage exceeds its task bound.")
 
     from core.hitl_run_control import (
         HitlRunStopRequested,
