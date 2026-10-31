@@ -256,6 +256,56 @@ def proposal_discussion_record_sort_key(record_id: Any) -> tuple[int, int, int, 
     return (2, task.round_ordinal, 2, 1)
 
 
+def published_proposal_discussion_task_ids(
+    session: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Derive public task IDs from one authoritative discussion snapshot."""
+
+    if not isinstance(session, Mapping):
+        raise ValueError("Proposal discussion state must be an object.")
+    phase = str(session.get("phase", "")).strip()
+    if phase not in {
+        "initial",
+        "opening",
+        "response",
+        "decision",
+        "final_writing",
+        "reopen_pending",
+    }:
+        raise ValueError("Proposal discussion phase is invalid.")
+    participant_count = session.get("participant_count")
+    max_response_rounds = session.get("max_response_rounds")
+    _require_collaborative_bounds(participant_count, max_response_rounds)
+    tasks = session.get("tasks")
+    if not isinstance(tasks, Mapping):
+        raise ValueError("Proposal discussion tasks must be an object.")
+
+    published: list[str] = []
+    for task_id, task in tasks.items():
+        identity = validate_proposal_discussion_task_id(
+            task_id,
+            participant_count=participant_count,
+            max_response_rounds=max_response_rounds,
+        )
+        if not isinstance(task, Mapping):
+            raise ValueError("Proposal discussion task must be an object.")
+        result_record_id = task.get("result_record_id")
+        complete = (
+            isinstance(result_record_id, str)
+            and result_record_id == task_id
+            and task.get("pending_finalization") is None
+        )
+        if not complete:
+            continue
+        # Initial contributions are revealed together only after the state
+        # advances. Before that boundary, each participant sees only its own
+        # discussion ideas through participant ownership.
+        if phase == "initial" and identity.phase == "initial":
+            continue
+        published.append(task_id)
+    return tuple(sorted(published, key=proposal_discussion_record_sort_key))
+
+
 class ProposalDiscussionRecordStore:
     """Append-only public meeting records for one physical AutoResearch attempt."""
 

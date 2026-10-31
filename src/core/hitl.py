@@ -154,6 +154,7 @@ IDEA_RECORD_FIELD_ORDER = [
     "parent_node_id",
     "attempt_id",
     "proposal_task_id",
+    "discussion_turn_id",
     "premises",
     "worker_context",
     "context",
@@ -172,7 +173,12 @@ IDEA_RECORD_FIELD_ORDER = [
     "worker_escalation_reason",
     "manager_escalation_reason",
 ]
-RUNTIME_PROVENANCE_FIELDS = ("parent_node_id", "attempt_id", "proposal_task_id")
+RUNTIME_PROVENANCE_FIELDS = (
+    "parent_node_id",
+    "attempt_id",
+    "proposal_task_id",
+    "discussion_turn_id",
+)
 
 
 def _now() -> str:
@@ -417,6 +423,125 @@ def visible_ranked_idea_records(
         pending.extend(_normalize_premises(record.get("premises")))
 
     visible_ids = base_ids | own_ids | closure_ids
+    return [
+        record
+        for record in all_records
+        if str(record.get("idea_id", "")).strip() in visible_ids
+    ]
+
+
+def visible_discussion_idea_records(
+    records: Iterable[Dict[str, Any]],
+    *,
+    parent_node_id: str,
+    candidate_attempt_id: str,
+    discussion_turn_id: str,
+    discussion_state: Dict[str, Any],
+    seed_idea_ids: Iterable[str] = (),
+) -> List[Dict[str, Any]]:
+    """Derive one collaborative turn's visible records from the idea log."""
+
+    from core.hitl_proposal_discussion import (
+        published_proposal_discussion_task_ids,
+        validate_proposal_discussion_task_id,
+    )
+
+    if not str(parent_node_id).strip() or not str(candidate_attempt_id).strip():
+        raise HitlValidationError(
+            "Discussion idea visibility requires parent and attempt identity."
+        )
+    if not isinstance(discussion_state, dict):
+        raise HitlValidationError("Discussion idea visibility requires meeting state.")
+    if str(discussion_state.get("candidate_attempt_id", "")) != str(
+        candidate_attempt_id
+    ):
+        raise HitlValidationError(
+            "Discussion idea visibility does not match its physical attempt."
+        )
+    base_idea_number = discussion_state.get("base_idea_number")
+    if isinstance(base_idea_number, bool) or not isinstance(base_idea_number, int):
+        raise HitlValidationError(
+            "Discussion idea visibility requires an integer idea boundary."
+        )
+    if base_idea_number < 0:
+        raise HitlValidationError(
+            "Discussion idea visibility boundary must be non-negative."
+        )
+    participant_count = discussion_state.get("participant_count")
+    max_response_rounds = discussion_state.get("max_response_rounds")
+    try:
+        current_turn = validate_proposal_discussion_task_id(
+            discussion_turn_id,
+            participant_count=participant_count,
+            max_response_rounds=max_response_rounds,
+        )
+        published_turn_ids = set(
+            published_proposal_discussion_task_ids(discussion_state)
+        )
+    except ValueError as exc:
+        raise HitlValidationError(str(exc)) from exc
+    tasks = discussion_state.get("tasks")
+    if not isinstance(tasks, dict) or discussion_turn_id not in tasks:
+        raise HitlValidationError(
+            "Discussion idea visibility does not match a meeting task."
+        )
+
+    all_records = list(records)
+    records_by_id = {
+        str(record.get("idea_id", "")).strip(): record
+        for record in all_records
+        if str(record.get("idea_id", "")).strip()
+    }
+    base_ids: set[str] = set()
+    for idea_id in records_by_id:
+        if not idea_id.startswith("I") or not idea_id[1:].isdigit():
+            raise HitlValidationError("Finalized HITL idea has an invalid runtime idea ID.")
+        if int(idea_id[1:]) <= base_idea_number:
+            base_ids.add(idea_id)
+
+    own_ids: set[str] = set()
+    published_ids: set[str] = set()
+    for idea_id, record in records_by_id.items():
+        if (
+            str(record.get("parent_node_id", "")) != str(parent_node_id)
+            or str(record.get("attempt_id", "")) != str(candidate_attempt_id)
+        ):
+            continue
+        record_turn_id = str(record.get("discussion_turn_id", "")).strip()
+        if not record_turn_id or record_turn_id not in tasks:
+            continue
+        try:
+            record_turn = validate_proposal_discussion_task_id(
+                record_turn_id,
+                participant_count=participant_count,
+                max_response_rounds=max_response_rounds,
+            )
+        except ValueError as exc:
+            raise HitlValidationError(str(exc)) from exc
+        if record_turn.participant_ordinal == current_turn.participant_ordinal:
+            own_ids.add(idea_id)
+        if record_turn_id in published_turn_ids:
+            published_ids.add(idea_id)
+
+    closure_ids: set[str] = set()
+    pending = [
+        *_normalize_premises(list(seed_idea_ids)),
+        *own_ids,
+        *published_ids,
+    ]
+    while pending:
+        idea_id = pending.pop()
+        if idea_id in closure_ids:
+            continue
+        record = records_by_id.get(idea_id)
+        if record is None:
+            raise HitlValidationError(
+                "Discussion idea visibility references an unavailable finalized idea."
+            )
+        closure_ids.add(idea_id)
+        pending.extend(_normalize_premises(record.get("premises")))
+
+    visible_ids = base_ids | closure_ids
     return [
         record
         for record in all_records
@@ -889,6 +1014,7 @@ class HitlIdeaLog:
             )
             for key in (
                 "proposal_task_id",
+                "discussion_turn_id",
                 "context",
                 "proposal_type",
                 "proposal",
@@ -972,6 +1098,11 @@ class HitlIdeaLog:
                 "C-level HITL ideas must be finalized by a recognized HITL worker actor"
             )
         proposal_task_id = str(record.get("proposal_task_id", "")).strip()
+        discussion_turn_id = str(record.get("discussion_turn_id", "")).strip()
+        if proposal_task_id and discussion_turn_id:
+            raise HitlValidationError(
+                "HITL idea cannot have ranked and discussion task provenance together."
+            )
         ranked_actor_roles = {
             "autoresearch_proposer": "proposer",
             "proposal_verifier": "verifier",
@@ -998,6 +1129,25 @@ class HitlIdeaLog:
             raise HitlValidationError(
                 "Proposal verifier and reviewer ideas require proposal_task_id provenance."
             )
+        if discussion_turn_id:
+            from core.hitl_proposal_discussion import (
+                parse_proposal_discussion_task_id,
+            )
+
+            try:
+                parse_proposal_discussion_task_id(discussion_turn_id)
+            except ValueError as exc:
+                raise HitlValidationError(str(exc)) from exc
+            if actor != "autoresearch_proposer":
+                raise HitlValidationError(
+                    "Discussion turn provenance requires the autoresearch proposer actor."
+                )
+            if not str(record.get("parent_node_id", "")).strip() or not str(
+                record.get("attempt_id", "")
+            ).strip():
+                raise HitlValidationError(
+                    "Discussion turn provenance requires parent_node_id and attempt_id."
+                )
         for field in ("basis", "human_basis"):
             if field in record:
                 raise HitlValidationError(
