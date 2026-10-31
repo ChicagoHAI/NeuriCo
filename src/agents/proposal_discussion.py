@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from agents.autoresearch_proposer import (
     _generate_compute_backend_section,
@@ -12,21 +12,47 @@ from agents.autoresearch_proposer import (
 )
 from agents.proposal_assessment import run_proposal_assessment
 from core.agent_cli import append_prompt_block
-from core.hitl_proposal_discussion import parse_proposal_discussion_task_id
+from core.hitl_proposal_discussion import (
+    PROPOSAL_DISCUSSION_CONTEXT_MARKER,
+    parse_proposal_discussion_task_id,
+    render_proposal_discussion_context,
+)
 
 
-def generate_proposal_discussion_prompt(
+def _proposal_discussion_prompt_inputs(
     *,
     idea: Dict[str, Any],
     work_dir: Path,
-    discussion_task_id: str,
-    discussion_records: Sequence[Dict[str, Any]],
-    templates_dir: Optional[Path] = None,
-    hitl_mode: str = "full",
-    provider: str = "claude",
-) -> str:
-    """Render one phase-specific finite discussion task."""
+    provider: str,
+) -> Dict[str, Any]:
+    context = collect_public_proposal_context(
+        Path(work_dir),
+        include_attempt_history=False,
+        hitl_autoresearch_whiteboard=True,
+    )
+    whiteboard = context.pop(
+        "whiteboard_active_tips_md",
+        "_(whiteboard has no active tips)_\n",
+    )
+    return {
+        "public_context": context,
+        "whiteboard_active_tips_md": whiteboard,
+        "compute_backend_section": _generate_compute_backend_section(
+            idea.get("idea", idea),
+            provider=provider,
+        ),
+    }
 
+
+def _render_proposal_discussion_prompt(
+    *,
+    idea: Dict[str, Any],
+    discussion_task_id: str,
+    discussion_context: str,
+    prompt_inputs: Dict[str, Any],
+    templates_dir: Optional[Path],
+    hitl_mode: str,
+) -> str:
     from jinja2 import Environment, FileSystemLoader
 
     identity = parse_proposal_discussion_task_id(discussion_task_id)
@@ -38,15 +64,6 @@ def generate_proposal_discussion_prompt(
     template_path = root / "agents" / "autoresearch_proposal_discussion.txt"
     if not template_path.is_file():
         raise FileNotFoundError(f"Proposal discussion template not found: {template_path}")
-    context = collect_public_proposal_context(
-        Path(work_dir),
-        include_attempt_history=False,
-        hitl_autoresearch_whiteboard=True,
-    )
-    whiteboard = context.pop(
-        "whiteboard_active_tips_md",
-        "_(whiteboard has no active tips)_\n",
-    )
     environment = Environment(
         loader=FileSystemLoader(str(root)),
         autoescape=False,
@@ -64,13 +81,42 @@ def generate_proposal_discussion_prompt(
         participant_ordinal=identity.participant_ordinal,
         task_phase=identity.phase,
         task_label=identity.display_label,
-        public_context=context,
-        whiteboard_active_tips_md=whiteboard,
-        discussion_records=list(discussion_records),
-        compute_backend_section=_generate_compute_backend_section(
-            idea.get("idea", idea),
-            provider=provider,
-        ),
+        public_context=prompt_inputs["public_context"],
+        whiteboard_active_tips_md=prompt_inputs["whiteboard_active_tips_md"],
+        discussion_context=discussion_context,
+        compute_backend_section=prompt_inputs["compute_backend_section"],
+    )
+
+
+def generate_proposal_discussion_prompt(
+    *,
+    idea: Dict[str, Any],
+    work_dir: Path,
+    discussion_task_id: str,
+    discussion_records: Sequence[Dict[str, Any]],
+    templates_dir: Optional[Path] = None,
+    hitl_mode: str = "full",
+    provider: str = "claude",
+) -> str:
+    """Render one phase-specific finite discussion task."""
+
+    prompt_inputs = _proposal_discussion_prompt_inputs(
+        idea=idea,
+        work_dir=work_dir,
+        provider=provider,
+    )
+    discussion_context = render_proposal_discussion_context(
+        summary="",
+        source_record_ids=(),
+        original_records=discussion_records,
+    )
+    return _render_proposal_discussion_prompt(
+        idea=idea,
+        discussion_task_id=discussion_task_id,
+        discussion_context=discussion_context,
+        prompt_inputs=prompt_inputs,
+        templates_dir=templates_dir,
+        hitl_mode=hitl_mode,
     )
 
 
@@ -79,7 +125,8 @@ def run_proposal_discussion_task(
     idea: Dict[str, Any],
     work_dir: Path,
     discussion_task_id: str,
-    discussion_records: Sequence[Dict[str, Any]],
+    discussion_records: Sequence[Dict[str, Any]] = (),
+    prompt_builder: Optional[Callable[[str, Dict[str, Any]], str]] = None,
     task_dir: Path,
     provider: str,
     env_extra: Dict[str, str],
@@ -93,17 +140,36 @@ def run_proposal_discussion_task(
 ) -> Dict[str, Any]:
     """Launch one finite participant process from reproducible public context."""
 
-    prompt = generate_proposal_discussion_prompt(
+    prompt_inputs = _proposal_discussion_prompt_inputs(
         idea=idea,
         work_dir=work_dir,
-        discussion_task_id=discussion_task_id,
-        discussion_records=discussion_records,
-        templates_dir=templates_dir,
-        hitl_mode=hitl_mode,
         provider=provider,
     )
+    if prompt_builder is None:
+        discussion_context = render_proposal_discussion_context(
+            summary="",
+            source_record_ids=(),
+            original_records=discussion_records,
+        )
+    else:
+        discussion_context = PROPOSAL_DISCUSSION_CONTEXT_MARKER
+    prompt = _render_proposal_discussion_prompt(
+        idea=idea,
+        discussion_task_id=discussion_task_id,
+        discussion_context=discussion_context,
+        prompt_inputs=prompt_inputs,
+        templates_dir=templates_dir,
+        hitl_mode=hitl_mode,
+    )
+    prompt = append_prompt_block(prompt, prompt_suffix)
+    if prompt_builder is not None:
+        public_background = dict(prompt_inputs["public_context"])
+        public_background["whiteboard_active_tips_md"] = prompt_inputs[
+            "whiteboard_active_tips_md"
+        ]
+        prompt = prompt_builder(prompt, public_background)
     return run_proposal_assessment(
-        prompt=append_prompt_block(prompt, prompt_suffix),
+        prompt=prompt,
         work_dir=work_dir,
         task_dir=task_dir,
         provider=provider,

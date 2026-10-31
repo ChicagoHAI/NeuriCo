@@ -40,8 +40,53 @@ def _line(record: Dict[str, Any]) -> str:
     return json.dumps(record, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
 
 
+def estimate_compact_json_tokens(value: Any) -> int:
+    """Estimate one compact JSON value using NeuriCo's existing convention."""
+
+    rendered = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return max(1, len(rendered) // 4)
+
+
 def _estimate_tokens(records: List[Dict[str, Any]]) -> int:
     return max(1, len("\n".join(_line(record) for record in records)) // 4) if records else 0
+
+
+def bounded_record_chunks(
+    records: List[Dict[str, Any]],
+    *,
+    token_limit: int,
+) -> List[List[Dict[str, Any]]]:
+    """Partition whole records using the manager's existing compact-JSON bound."""
+
+    return _bounded_record_chunks_by_chars(
+        records,
+        limit=max(1, int(token_limit)) * 4,
+    )
+
+
+def _bounded_record_chunks_by_chars(
+    records: List[Dict[str, Any]],
+    *,
+    limit: int,
+) -> List[List[Dict[str, Any]]]:
+    chunks: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    current_size = 0
+    for record in records:
+        size = len(_line(record)) + 1
+        if current and current_size + size > limit:
+            chunks.append(current)
+            current, current_size = [], 0
+        current.append(record)
+        current_size += size
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _project_tool_result(content: str) -> tuple[str, bool]:
@@ -339,7 +384,7 @@ class HitlManagerContext:
             COMPACTION_SUMMARY_MAX_INPUT_TOKENS,
             max(COMPACTION_SUMMARY_MIN_INPUT_TOKENS, self.context_tokens // 4),
         )
-        for chunk in self._chunks(oldest, limit=chunk_token_budget * 4):
+        for chunk in bounded_record_chunks(oldest, token_limit=chunk_token_budget):
             rendered = self._render(chunk)
             summary = str(summarize(rendered, research_state)).strip()
             if not summary:
@@ -370,19 +415,9 @@ class HitlManagerContext:
 
     @staticmethod
     def _chunks(records: List[Dict[str, Any]], *, limit: int) -> List[List[Dict[str, Any]]]:
-        chunks: List[List[Dict[str, Any]]] = []
-        current: List[Dict[str, Any]] = []
-        current_size = 0
-        for record in records:
-            size = len(_line(record)) + 1
-            if current and current_size + size > limit:
-                chunks.append(current)
-                current, current_size = [], 0
-            current.append(record)
-            current_size += size
-        if current:
-            chunks.append(current)
-        return chunks
+        # Kept for compatibility with callers/tests that exercise the existing
+        # character-bound helper directly.
+        return _bounded_record_chunks_by_chars(records, limit=limit)
 
     @classmethod
     def _select_start(

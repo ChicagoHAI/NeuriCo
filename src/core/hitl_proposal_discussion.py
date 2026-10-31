@@ -6,9 +6,14 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from core.hitl_lock import exclusive_file_lock
+from core.hitl_manager_context import (
+    COMPACTION_SUMMARY_MAX_INPUT_TOKENS,
+    bounded_record_chunks,
+    estimate_compact_json_tokens,
+)
 from core.hitl_proposal_round import (
     MAX_COLLABORATIVE_DISCUSSION_ROUNDS,
     MAX_COLLABORATIVE_PARTICIPANT_COUNT,
@@ -19,8 +24,16 @@ from core.hitl_util import atomic_write_text, read_jsonl_objects
 
 
 PROPOSAL_DISCUSSION_SCHEMA_VERSION = 1
+PROPOSAL_DISCUSSION_CONTEXT_SCHEMA_VERSION = 1
 MAX_DISCUSSION_RECORD_PAGE = 100
 MAX_DISCUSSION_READ_LINES = 200
+PROPOSAL_DISCUSSION_CONTEXT_MARKER = "__NEURICO_PROPOSAL_DISCUSSION_CONTEXT__"
+PROPOSAL_DISCUSSION_WORKER_CONTEXT_TOKENS = 258_400
+PROPOSAL_DISCUSSION_COMPACTION_TRIGGER_TOKENS = 180_880
+PROPOSAL_DISCUSSION_SUMMARY_TARGET_TOKENS = 1_600
+# Largest observed difference between the saved compact-JSON prompt estimate
+# and first-call input in the verified 30 October 2026 Codex worker audit.
+PROPOSAL_DISCUSSION_PROVIDER_OVERHEAD_TOKENS = 18_089
 
 _INITIAL_TASK_ID = re.compile(r"^initial/p(?P<participant>0[1-9]|10)$")
 _OPENING_TASK_ID = re.compile(r"^opening/p01$")
@@ -306,12 +319,89 @@ def published_proposal_discussion_task_ids(
     return tuple(sorted(published, key=proposal_discussion_record_sort_key))
 
 
+def permitted_proposal_discussion_record_ids(
+    session: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Derive all public meeting records visible at one session snapshot."""
+
+    permitted = list(published_proposal_discussion_task_ids(session))
+    current_round = int(session.get("round_ordinal", 0))
+    for record in records:
+        if record.get("kind") != "reopen":
+            continue
+        reopen = parse_reopen_discussion_record_id(record.get("record_id"))
+        if reopen.round_ordinal <= current_round:
+            permitted.append(reopen.record_id)
+    return tuple(sorted(set(permitted), key=proposal_discussion_record_sort_key))
+
+
+def protected_proposal_discussion_record_ids(
+    session: Mapping[str, Any],
+    permitted_record_ids: Sequence[str],
+) -> tuple[str, ...]:
+    """Select the recent original suffix that meeting compaction cannot replace."""
+
+    phase = str(session.get("phase", "")).strip()
+    round_ordinal = int(session.get("round_ordinal", 0))
+    permitted = _normalize_record_references(permitted_record_ids)
+    if phase in {"initial", "opening"}:
+        return permitted
+
+    protected: list[str] = []
+    for record_id in permitted:
+        try:
+            task = parse_proposal_discussion_task_id(record_id)
+        except ValueError:
+            reopen = parse_reopen_discussion_record_id(record_id)
+            if reopen.round_ordinal == round_ordinal or (
+                phase == "response"
+                and reopen.round_ordinal == round_ordinal - 1
+            ):
+                protected.append(record_id)
+            continue
+        if (
+            task.phase == "initial"
+            and phase == "response"
+            and round_ordinal == 1
+        ):
+            protected.append(record_id)
+            continue
+        if task.phase == "opening" and (
+            round_ordinal == 1
+            or (phase == "response" and round_ordinal == 2)
+        ):
+            protected.append(record_id)
+            continue
+        if task.phase == "response" and (
+            task.round_ordinal == round_ordinal
+            or (phase == "response" and task.round_ordinal == round_ordinal - 1)
+        ):
+            protected.append(record_id)
+            continue
+        if (
+            phase == "response"
+            and task.phase == "decision"
+            and task.round_ordinal == round_ordinal - 1
+        ):
+            protected.append(record_id)
+            continue
+        if (
+            phase in {"decision", "final_writing", "reopen_pending"}
+            and task.phase == "decision"
+            and task.round_ordinal == round_ordinal
+        ):
+            protected.append(record_id)
+    return tuple(protected)
+
+
 class ProposalDiscussionRecordStore:
     """Append-only public meeting records for one physical AutoResearch attempt."""
 
     def __init__(self, attempt_dir: Path):
         self.root = Path(attempt_dir) / "proposal_discussion"
         self.path = self.root / "discussion.jsonl"
+        self.context_path = self.root / "context.json"
         self.lock_path = self.root / "discussion.lock"
 
     def records(self) -> list[dict[str, Any]]:
@@ -470,6 +560,205 @@ class ProposalDiscussionRecordStore:
                 for line_number, line in enumerate(selected, start=normalized_offset)
             ),
         }
+
+    def read_context_cache(self) -> Optional[dict[str, Any]]:
+        """Read a valid replaceable summary cache, or ignore an unusable cache."""
+
+        try:
+            value = json.loads(self.context_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, dict) or set(value) != {
+            "version",
+            "summary",
+            "source_record_ids",
+        }:
+            return None
+        if value.get("version") != PROPOSAL_DISCUSSION_CONTEXT_SCHEMA_VERSION:
+            return None
+        summary = value.get("summary")
+        references = value.get("source_record_ids")
+        if (
+            not isinstance(summary, str)
+            or not summary.strip()
+            or not isinstance(references, list)
+            or not references
+            or any(not isinstance(item, str) or not item.strip() for item in references)
+        ):
+            return None
+        try:
+            normalized = list(_normalize_record_references(references))
+        except ValueError:
+            return None
+        if normalized != references:
+            return None
+        return {
+            "version": PROPOSAL_DISCUSSION_CONTEXT_SCHEMA_VERSION,
+            "summary": summary.strip(),
+            "source_record_ids": normalized,
+        }
+
+    def write_context_cache(self, summary: str, source_record_ids: Sequence[str]) -> None:
+        """Atomically replace the derived meeting-summary cache."""
+
+        normalized_summary = str(summary).strip()
+        references = list(_normalize_record_references(source_record_ids))
+        if not normalized_summary or not references:
+            raise ValueError("Proposal discussion context cache requires summary and sources.")
+        payload = {
+            "version": PROPOSAL_DISCUSSION_CONTEXT_SCHEMA_VERSION,
+            "summary": normalized_summary,
+            "source_record_ids": references,
+        }
+        self.root.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            self.context_path,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            + "\n",
+        )
+
+
+def prepare_proposal_discussion_prompt(
+    *,
+    store: ProposalDiscussionRecordStore,
+    session: Mapping[str, Any],
+    prompt_template: str,
+    public_background: Mapping[str, Any],
+    runtime_budget_prompt: str = "",
+    summarize: Optional[
+        Callable[[Mapping[str, Any], str, list[dict[str, Any]]], str]
+    ] = None,
+    current_session: Optional[Callable[[], Mapping[str, Any]]] = None,
+) -> str:
+    """Build one bounded prompt while retaining canonical meeting records."""
+
+    if str(prompt_template).count(PROPOSAL_DISCUSSION_CONTEXT_MARKER) != 1:
+        raise ValueError("Proposal discussion prompt requires one context marker.")
+    session_snapshot = dict(session)
+    all_records = store.records()
+    permitted_ids = permitted_proposal_discussion_record_ids(
+        session_snapshot,
+        all_records,
+    )
+    permitted_records = store.ordered_records(permitted_ids)
+    protected_ids = protected_proposal_discussion_record_ids(
+        session_snapshot,
+        permitted_ids,
+    )
+    protected_set = set(protected_ids)
+    eligible_records = [
+        record for record in permitted_records if record["record_id"] not in protected_set
+    ]
+    protected_records = [
+        record for record in permitted_records if record["record_id"] in protected_set
+    ]
+
+    def assemble(
+        *,
+        summary: str = "",
+        source_record_ids: Sequence[str] = (),
+        originals: Sequence[Mapping[str, Any]],
+    ) -> str:
+        context = render_proposal_discussion_context(
+            summary=summary,
+            source_record_ids=source_record_ids,
+            original_records=originals,
+        )
+        return str(prompt_template).replace(PROPOSAL_DISCUSSION_CONTEXT_MARKER, context)
+
+    def measured_tokens(prompt: str) -> int:
+        return estimate_compact_json_tokens(
+            {
+                "prompt": prompt,
+                "runtime_budget": str(runtime_budget_prompt),
+            }
+        ) + PROPOSAL_DISCUSSION_PROVIDER_OVERHEAD_TOKENS
+
+    full_prompt = assemble(originals=permitted_records)
+    if measured_tokens(full_prompt) <= PROPOSAL_DISCUSSION_COMPACTION_TRIGGER_TOKENS:
+        return full_prompt
+
+    eligible_ids = [record["record_id"] for record in eligible_records]
+    cache = store.read_context_cache()
+    if cache is not None:
+        cached_ids = list(cache["source_record_ids"])
+        if cached_ids != eligible_ids[: len(cached_ids)]:
+            cache = None
+
+    cached_ids = list(cache["source_record_ids"]) if cache is not None else []
+    cached_summary = str(cache["summary"]) if cache is not None else ""
+    uncovered_records = eligible_records[len(cached_ids) :]
+
+    def fallback_prompt() -> str:
+        originals = [*uncovered_records, *protected_records]
+        prompt = assemble(
+            summary=cached_summary,
+            source_record_ids=cached_ids,
+            originals=originals,
+        )
+        if measured_tokens(prompt) > PROPOSAL_DISCUSSION_WORKER_CONTEXT_TOKENS:
+            raise ValueError(
+                "Proposal discussion input exceeds the verified worker context budget."
+            )
+        return prompt
+
+    if not eligible_records or not uncovered_records:
+        return fallback_prompt()
+    if summarize is None:
+        return fallback_prompt()
+
+    summaries: list[str] = []
+    covered_ids = list(cached_ids)
+    chunks = bounded_record_chunks(
+        uncovered_records,
+        token_limit=COMPACTION_SUMMARY_MAX_INPUT_TOKENS,
+    )
+    try:
+        for index, chunk in enumerate(chunks):
+            prior = cached_summary if index == 0 else ""
+            summary = str(summarize(public_background, prior, chunk)).strip()
+            if not summary:
+                return fallback_prompt()
+            summaries.append(summary)
+            covered_ids.extend(str(record["record_id"]) for record in chunk)
+    except ValueError:
+        return fallback_prompt()
+
+    combined_summary = "\n\n".join(summaries)
+    candidate_prompt = assemble(
+        summary=combined_summary,
+        source_record_ids=covered_ids,
+        originals=protected_records,
+    )
+    if measured_tokens(candidate_prompt) > PROPOSAL_DISCUSSION_WORKER_CONTEXT_TOKENS:
+        return fallback_prompt()
+
+    if current_session is not None:
+        live_session = dict(current_session())
+        if live_session != session_snapshot:
+            raise RuntimeError("Proposal discussion changed while its context was prepared.")
+        live_records = store.records()
+        if permitted_proposal_discussion_record_ids(live_session, live_records) != permitted_ids:
+            raise RuntimeError("Proposal discussion publication changed during compaction.")
+        store.ordered_records(covered_ids)
+    store.write_context_cache(combined_summary, covered_ids)
+    return candidate_prompt
+
+
+def render_proposal_discussion_context(
+    *,
+    summary: str,
+    source_record_ids: Sequence[str],
+    original_records: Sequence[Mapping[str, Any]],
+) -> str:
+    from core.hitl import _load_hitl_template
+
+    return _load_hitl_template(
+        "worker_proposal_discussion_context.txt",
+        discussion_summary=str(summary).strip(),
+        summary_source_record_ids=list(source_record_ids),
+        original_discussion_records=[dict(record) for record in original_records],
+    ).strip()
 
 
 def _normalize_contribution_result(result: Any) -> dict[str, Any]:

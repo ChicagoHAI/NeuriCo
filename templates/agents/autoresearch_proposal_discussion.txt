@@ -25,11 +25,7 @@ Active whiteboard tips are read-only:
 
 {{ compute_backend_section }}
 
-Published meeting records visible to this task:
-
-```json
-{{ discussion_records | tojson(indent=2) }}
-```
+{{ discussion_context }}
 
 {% if task_phase == "initial" %}
 Form an independent experimental direction. Do not assume another participant's

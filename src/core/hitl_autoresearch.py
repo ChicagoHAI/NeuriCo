@@ -4324,8 +4324,14 @@ class HitlAutoResearchController:
                     role="discussion",
                     idea=self.idea,
                     discussion_task_id=task_id,
-                    discussion_records=(
-                        task_runtime.proposal_discussion_records_for_prompt()
+                    discussion_records=(),
+                    prompt_builder=(
+                        lambda prompt_template, public_background: (
+                            task_runtime.prepare_proposal_discussion_prompt(
+                                prompt_template=prompt_template,
+                                public_background=public_background,
+                            )
+                        )
                     ),
                     task_dir=attempt_dir / "proposal_discussion" / "tasks" / task_id,
                     prompt_suffix=prompt,

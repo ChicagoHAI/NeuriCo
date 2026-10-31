@@ -4390,22 +4390,15 @@ class HitlRuntime:
         """Derive readable public records without treating artifacts as state."""
 
         from core.hitl_proposal_discussion import (
-            parse_reopen_discussion_record_id,
-            published_proposal_discussion_task_ids,
+            permitted_proposal_discussion_record_ids,
         )
 
-        permitted = list(published_proposal_discussion_task_ids(session))
-        current_round = int(session.get("round_ordinal", 0))
-        for record in records:
-            if record.get("kind") != "reopen":
-                continue
-            try:
-                reopen = parse_reopen_discussion_record_id(record.get("record_id"))
-            except ValueError as exc:
-                raise HitlValidationError(str(exc)) from exc
-            if reopen.round_ordinal <= current_round:
-                permitted.append(reopen.record_id)
-        return permitted
+        try:
+            return list(
+                permitted_proposal_discussion_record_ids(session, list(records))
+            )
+        except ValueError as exc:
+            raise HitlValidationError(str(exc)) from exc
 
     def proposal_discussion_records_for_prompt(self) -> List[Dict[str, Any]]:
         """Return complete records authorized for the active finite task."""
@@ -4422,6 +4415,63 @@ class HitlRuntime:
                 return store.ordered_records(permitted)
             except RuntimeError as exc:
                 raise HitlValidationError(str(exc)) from exc
+
+    def prepare_proposal_discussion_prompt(
+        self,
+        *,
+        prompt_template: str,
+        public_background: Dict[str, Any],
+    ) -> str:
+        """Prepare bounded public meeting context for the active finite task."""
+
+        from core.hitl_proposal_discussion import prepare_proposal_discussion_prompt
+        from core.hitl_run_control import (
+            current_hitl_run_budget_prompt,
+            raise_if_hitl_run_stop_requested,
+        )
+
+        with self._tool_lock:
+            task_context = self._discussion_task_state_context()
+            store = self._proposal_discussion_record_store()
+
+        summarize_method = getattr(
+            self.manager,
+            "summarize_proposal_discussion",
+            None,
+        )
+
+        def summarize(
+            background: Dict[str, Any],
+            prior_summary: str,
+            records: List[Dict[str, Any]],
+        ) -> str:
+            if not callable(summarize_method):
+                raise ValueError(
+                    "Proposal discussion compaction requires the configured HITL manager."
+                )
+            return str(
+                summarize_method(
+                    public_background=background,
+                    prior_summary=prior_summary,
+                    records=records,
+                )
+            )
+
+        def current_session() -> Dict[str, Any]:
+            raise_if_hitl_run_stop_requested()
+            with self._tool_lock:
+                return dict(self._discussion_task_state_context()["session"])
+
+        raise_if_hitl_run_stop_requested()
+        return prepare_proposal_discussion_prompt(
+            store=store,
+            session=task_context["session"],
+            prompt_template=prompt_template,
+            public_background=public_background,
+            runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
+            summarize=summarize if callable(summarize_method) else None,
+            current_session=current_session,
+        )
 
     def view_current_frontier_for_tool(self) -> Dict[str, Any]:
         profile = str(self._tool_context.get("command_profile", "default"))
