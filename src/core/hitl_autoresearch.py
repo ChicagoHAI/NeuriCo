@@ -70,6 +70,7 @@ from core.hitl_paths import (
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_proposal_round import (
+    COLLABORATIVE_PROPOSAL_MODE,
     INDEPENDENT_RANKED_PROPOSAL_MODE,
     KemenyYoungResult,
     ProposalModeConfig,
@@ -3783,6 +3784,11 @@ class HitlAutoResearchController:
                     parent_sha=parent_sha,
                     attempt_dir=attempt_dir,
                     attempt_history=attempt_history,
+                )
+            elif proposal_mode.mode == COLLABORATIVE_PROPOSAL_MODE:
+                raise RuntimeError(
+                    "Collaborative proposal mode is not available until its controller "
+                    "workflow is installed."
                 )
             else:
                 proposal, proposal_idea_id = self._run_proposal_admission_loop(

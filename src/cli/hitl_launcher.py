@@ -25,6 +25,7 @@ from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_mode import normalize_hitl_mode
 from core.hitl_paths import hitl_launch_requests_dir, hitl_launch_status_path
 from core.hitl_proposal_round import (
+    COLLABORATIVE_PROPOSAL_MODE,
     INDEPENDENT_RANKED_PROPOSAL_MODE,
     normalize_proposal_mode_config,
     require_managed_autoresearch_proposal_mode,
@@ -135,6 +136,8 @@ class HitlRunController:
                 payload.get("proposal_mode"),
                 proposer_count=payload.get("proposer_count"),
                 reviewer_count=payload.get("reviewer_count"),
+                participant_count=payload.get("participant_count"),
+                discussion_rounds=payload.get("discussion_rounds"),
             ),
             managed_autoresearch=(
                 operation == "research" and workflow == "autoresearch"
@@ -203,7 +206,11 @@ class HitlRunController:
                 mode = "continue" if continuation else "fresh"
             request_id = uuid.uuid4().hex
             request = {
-                "version": 5,
+                "version": (
+                    6
+                    if proposal_mode_config.mode == COLLABORATIVE_PROPOSAL_MODE
+                    else 5
+                ),
                 "request_id": request_id,
                 "idea_id": self.idea_id,
                 "work_dir": str(self.work_dir.resolve()),
@@ -223,6 +230,9 @@ class HitlRunController:
             if proposal_mode_config.mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
                 request["proposer_count"] = proposal_mode_config.proposer_count
                 request["reviewer_count"] = proposal_mode_config.reviewer_count
+            elif proposal_mode_config.mode == COLLABORATIVE_PROPOSAL_MODE:
+                request["participant_count"] = proposal_mode_config.participant_count
+                request["discussion_rounds"] = proposal_mode_config.discussion_rounds
             if operation == "construct_baseline":
                 request["write_paper"] = False
                 request["paper_style"] = None

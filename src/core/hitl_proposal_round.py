@@ -14,14 +14,22 @@ from typing import Any, Callable, Optional, TypeVar, cast
 
 SINGLE_PROPOSAL_MODE = "single"
 INDEPENDENT_RANKED_PROPOSAL_MODE = "independent_ranked"
+COLLABORATIVE_PROPOSAL_MODE = "collaborative"
 PROPOSAL_MODES = {
     SINGLE_PROPOSAL_MODE,
     INDEPENDENT_RANKED_PROPOSAL_MODE,
+    COLLABORATIVE_PROPOSAL_MODE,
 }
 MIN_PROPOSER_COUNT = 2
 MAX_PROPOSER_COUNT = 5
 MIN_REVIEWER_COUNT = 2
 MAX_REVIEWER_COUNT = 9
+DEFAULT_COLLABORATIVE_PARTICIPANT_COUNT = 5
+MIN_COLLABORATIVE_PARTICIPANT_COUNT = 3
+MAX_COLLABORATIVE_PARTICIPANT_COUNT = 10
+DEFAULT_COLLABORATIVE_DISCUSSION_ROUNDS = 3
+MIN_COLLABORATIVE_DISCUSSION_ROUNDS = 1
+MAX_COLLABORATIVE_DISCUSSION_ROUNDS = 10
 PROPOSAL_ROUND_SCHEMA_VERSION = 1
 KEMENY_YOUNG_ALGORITHM = "kemeny_young_complete_rankings_v1"
 
@@ -45,6 +53,8 @@ class ProposalModeConfig:
     mode: str
     proposer_count: Optional[int] = None
     reviewer_count: Optional[int] = None
+    participant_count: Optional[int] = None
+    discussion_rounds: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +148,8 @@ def normalize_proposal_mode_config(
     *,
     proposer_count: Any = None,
     reviewer_count: Any = None,
+    participant_count: Any = None,
+    discussion_rounds: Any = None,
 ) -> ProposalModeConfig:
     """Normalize and validate the complete proposal-mode configuration."""
 
@@ -147,10 +159,17 @@ def normalize_proposal_mode_config(
                 "Proposer and reviewer counts must not be supplied separately with a "
                 "ProposalModeConfig."
             )
+        if participant_count is not None or discussion_rounds is not None:
+            raise ValueError(
+                "Participant count and discussion rounds must not be supplied separately "
+                "with a ProposalModeConfig."
+            )
         normalized = normalize_proposal_mode_config(
             proposal_mode.mode,
             proposer_count=proposal_mode.proposer_count,
             reviewer_count=proposal_mode.reviewer_count,
+            participant_count=proposal_mode.participant_count,
+            discussion_rounds=proposal_mode.discussion_rounds,
         )
         return proposal_mode if normalized == proposal_mode else normalized
 
@@ -159,32 +178,79 @@ def normalize_proposal_mode_config(
     elif isinstance(proposal_mode, str) and proposal_mode.strip():
         mode = proposal_mode.strip().lower()
     else:
-        raise ValueError("Proposal mode must be 'single' or 'independent_ranked'.")
+        raise ValueError(
+            "Proposal mode must be 'single', 'independent_ranked', or 'collaborative'."
+        )
 
     if mode not in PROPOSAL_MODES:
-        raise ValueError("Proposal mode must be 'single' or 'independent_ranked'.")
+        raise ValueError(
+            "Proposal mode must be 'single', 'independent_ranked', or 'collaborative'."
+        )
 
     if mode == SINGLE_PROPOSAL_MODE:
         if proposer_count is not None or reviewer_count is not None:
             raise ValueError("Single proposal mode does not accept proposer or reviewer counts.")
+        if participant_count is not None or discussion_rounds is not None:
+            raise ValueError(
+                "Single proposal mode does not accept participant count or discussion rounds."
+            )
         return ProposalModeConfig(mode=mode)
 
-    _require_count(
-        proposer_count,
-        field_name="proposer_count",
-        minimum=MIN_PROPOSER_COUNT,
-        maximum=MAX_PROPOSER_COUNT,
+    if mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
+        if participant_count is not None or discussion_rounds is not None:
+            raise ValueError(
+                "Independent-ranked proposal mode does not accept collaborative counts."
+            )
+        _require_count(
+            proposer_count,
+            field_name="proposer_count",
+            minimum=MIN_PROPOSER_COUNT,
+            maximum=MAX_PROPOSER_COUNT,
+            mode_label="Independent-ranked proposal mode",
+        )
+        _require_count(
+            reviewer_count,
+            field_name="reviewer_count",
+            minimum=MIN_REVIEWER_COUNT,
+            maximum=MAX_REVIEWER_COUNT,
+            mode_label="Independent-ranked proposal mode",
+        )
+        return ProposalModeConfig(
+            mode=mode,
+            proposer_count=proposer_count,
+            reviewer_count=reviewer_count,
+        )
+
+    if proposer_count is not None or reviewer_count is not None:
+        raise ValueError("Collaborative proposal mode does not accept ranked counts.")
+    participants = (
+        DEFAULT_COLLABORATIVE_PARTICIPANT_COUNT
+        if participant_count is None
+        else participant_count
+    )
+    rounds = (
+        DEFAULT_COLLABORATIVE_DISCUSSION_ROUNDS
+        if discussion_rounds is None
+        else discussion_rounds
     )
     _require_count(
-        reviewer_count,
-        field_name="reviewer_count",
-        minimum=MIN_REVIEWER_COUNT,
-        maximum=MAX_REVIEWER_COUNT,
+        participants,
+        field_name="participant_count",
+        minimum=MIN_COLLABORATIVE_PARTICIPANT_COUNT,
+        maximum=MAX_COLLABORATIVE_PARTICIPANT_COUNT,
+        mode_label="Collaborative proposal mode",
+    )
+    _require_count(
+        rounds,
+        field_name="discussion_rounds",
+        minimum=MIN_COLLABORATIVE_DISCUSSION_ROUNDS,
+        maximum=MAX_COLLABORATIVE_DISCUSSION_ROUNDS,
+        mode_label="Collaborative proposal mode",
     )
     return ProposalModeConfig(
         mode=mode,
-        proposer_count=proposer_count,
-        reviewer_count=reviewer_count,
+        participant_count=participants,
+        discussion_rounds=rounds,
     )
 
 
@@ -193,12 +259,17 @@ def require_managed_autoresearch_proposal_mode(
     *,
     managed_autoresearch: bool,
 ) -> ProposalModeConfig:
-    """Reject ranked mode outside managed HITL AutoResearch."""
+    """Reject non-single proposal modes outside managed HITL AutoResearch."""
 
     normalized = normalize_proposal_mode_config(config)
     if normalized.mode == INDEPENDENT_RANKED_PROPOSAL_MODE and not managed_autoresearch:
         raise ValueError(
             "Independent-ranked proposal mode is valid only for managed HITL "
+            "AutoResearch proposal generation."
+        )
+    if normalized.mode == COLLABORATIVE_PROPOSAL_MODE and not managed_autoresearch:
+        raise ValueError(
+            "Collaborative proposal mode is valid only for managed HITL "
             "AutoResearch proposal generation."
         )
     return normalized
@@ -561,11 +632,17 @@ def aggregate_kemeny_young(
     )
 
 
-def _require_count(value: Any, *, field_name: str, minimum: int, maximum: int) -> None:
+def _require_count(
+    value: Any,
+    *,
+    field_name: str,
+    minimum: int,
+    maximum: int,
+    mode_label: str,
+) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(
-            f"Independent-ranked proposal mode requires integer {field_name} "
-            f"between {minimum} and {maximum}."
+            f"{mode_label} requires integer {field_name} between {minimum} and {maximum}."
         )
     if value < minimum or value > maximum:
         raise ValueError(f"{field_name} must be between {minimum} and {maximum}.")
