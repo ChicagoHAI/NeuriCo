@@ -4969,7 +4969,6 @@ class HitlRuntime:
 
         from agents.autoresearch_proposer import collect_public_proposal_context
         from core.hitl_proposal_discussion import (
-            MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS,
             prepare_proposal_discussion_prompt,
             proposal_discussion_task_id,
         )
