@@ -4699,20 +4699,19 @@ class HitlAutoResearchController:
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
         owner = self._proposal_hitl_runtime()
-        owner.require_scoped_task_session_boundary()
         state = HitlRuntimeState(self.work_dir)
         session = self._begin_or_resume_proposal_discussion(
             parent_sha=parent_sha,
             attempt_dir=attempt_dir,
         )
         if session.get("phase") == "final_writing":
-            owner.require_scoped_task_session_boundary()
             return
         if session.get("phase") == "reopen_pending":
             raise RuntimeError(
                 "Collaborative discussion reopening must transfer ownership before "
                 "discussion tasks resume."
             )
+        owner.require_scoped_task_session_boundary()
         action = state.snapshot().get("next_autoresearch_action")
         if not isinstance(action, dict):
             raise RuntimeError("Collaborative proposal discussion has no preparation state.")
@@ -4773,7 +4772,6 @@ class HitlAutoResearchController:
                     records,
                 )
             if phase == "final_writing":
-                owner.require_scoped_task_session_boundary()
                 break
             if phase == "initial":
                 initial_task_ids = [
