@@ -4765,6 +4765,13 @@ class HitlAutoResearchController:
             phase = str(session["phase"])
             participant_count = int(session["participant_count"])
             round_ordinal = int(session["round_ordinal"])
+            seed_idea_ids: Sequence[str] = ()
+            if phase in {"response", "decision"}:
+                records = ProposalDiscussionRecordStore(attempt_dir).records()
+                seed_idea_ids = proposal_discussion_reopen_source_idea_ids(
+                    session,
+                    records,
+                )
             if phase == "final_writing":
                 owner.require_scoped_task_session_boundary()
                 break
@@ -4816,11 +4823,6 @@ class HitlAutoResearchController:
                 )
                 continue
             if phase == "response":
-                records = ProposalDiscussionRecordStore(attempt_dir).records()
-                seed_idea_ids = proposal_discussion_reopen_source_idea_ids(
-                    session,
-                    records,
-                )
                 for ordinal in range(2, participant_count + 1):
                     run_task(
                         proposal_discussion_task_id(
@@ -4846,7 +4848,7 @@ class HitlAutoResearchController:
                     participant_ordinal=1,
                     round_ordinal=round_ordinal,
                 )
-                run_task(decision_id)
+                run_task(decision_id, seed_idea_ids=seed_idea_ids)
                 decision = refresh()["tasks"][decision_id]
                 state.apply_proposal_discussion_decision(
                     **identity,
