@@ -6276,7 +6276,10 @@ class HitlAutoResearchController:
         summarize_method = getattr(manager, "summarize_proposal_discussion", None)
 
         def build(prompt_template: str) -> str:
-            from agents.autoresearch_proposer import collect_public_proposal_context
+            from agents.autoresearch_proposer import (
+                MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+                collect_public_proposal_context,
+            )
             from core.hitl_proposal_discussion import (
                 ProposalDiscussionRecordStore,
                 prepare_proposal_discussion_prompt,
@@ -6355,6 +6358,7 @@ class HitlAutoResearchController:
                 current_session=current_session,
                 allow_reopen=True,
                 reopen_source_ideas=[ideas_by_id[idea_id] for idea_id in source_ids],
+                maximum_prompt_chars=MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
             )
 
         return build

@@ -662,6 +662,7 @@ def prepare_proposal_discussion_prompt(
     additional_records: Sequence[Mapping[str, Any]] = (),
     reopen_source_ideas: Sequence[Mapping[str, Any]] = (),
     reserve_tokens: int = 0,
+    maximum_prompt_chars: Optional[int] = None,
     persist_cache: bool = True,
 ) -> str:
     """Build one bounded prompt while retaining canonical meeting records."""
@@ -673,6 +674,15 @@ def prepare_proposal_discussion_prompt(
         raise ValueError("Proposal discussion token reserve must be an integer.")
     if reserve_tokens < 0:
         raise ValueError("Proposal discussion token reserve must be nonnegative.")
+    if maximum_prompt_chars is not None:
+        if (
+            isinstance(maximum_prompt_chars, bool)
+            or not isinstance(maximum_prompt_chars, int)
+            or maximum_prompt_chars <= 0
+        ):
+            raise ValueError(
+                "Proposal discussion character budget must be a positive integer."
+            )
     all_records = store.records()
     known_ids = {record["record_id"] for record in all_records}
     for raw_record in additional_records:
@@ -736,8 +746,25 @@ def prepare_proposal_discussion_prompt(
             }
         ) + PROPOSAL_DISCUSSION_PROVIDER_OVERHEAD_TOKENS + reserve_tokens
 
+    reserved_prompt_chars = reserve_tokens * 4
+
+    def fits_character_budget(prompt: str) -> bool:
+        return maximum_prompt_chars is None or (
+            len(prompt) + reserved_prompt_chars <= maximum_prompt_chars
+        )
+
+    def fits_hard_limits(prompt: str) -> bool:
+        return (
+            measured_tokens(prompt) <= PROPOSAL_DISCUSSION_WORKER_CONTEXT_TOKENS
+            and fits_character_budget(prompt)
+        )
+
     full_prompt = assemble(originals=permitted_records)
-    if measured_tokens(full_prompt) <= PROPOSAL_DISCUSSION_COMPACTION_TRIGGER_TOKENS:
+    if (
+        measured_tokens(full_prompt)
+        <= PROPOSAL_DISCUSSION_COMPACTION_TRIGGER_TOKENS
+        and fits_character_budget(full_prompt)
+    ):
         return full_prompt
 
     eligible_ids = [record["record_id"] for record in eligible_records]
@@ -758,9 +785,10 @@ def prepare_proposal_discussion_prompt(
             source_record_ids=cached_ids,
             originals=originals,
         )
-        if measured_tokens(prompt) > PROPOSAL_DISCUSSION_WORKER_CONTEXT_TOKENS:
+        if not fits_hard_limits(prompt):
             raise ValueError(
-                "Proposal discussion input exceeds the verified worker context budget."
+                "Proposal discussion input exceeds the verified worker context or "
+                "proposer prompt budget."
             )
         return prompt
 
@@ -792,7 +820,7 @@ def prepare_proposal_discussion_prompt(
         source_record_ids=covered_ids,
         originals=protected_records,
     )
-    if measured_tokens(candidate_prompt) > PROPOSAL_DISCUSSION_WORKER_CONTEXT_TOKENS:
+    if not fits_hard_limits(candidate_prompt):
         return fallback_prompt()
 
     if current_session is not None:

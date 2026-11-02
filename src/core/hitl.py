@@ -4967,7 +4967,10 @@ class HitlRuntime:
     ) -> None:
         """Verify one more bounded turn and later final writing fit before handoff."""
 
-        from agents.autoresearch_proposer import collect_public_proposal_context
+        from agents.autoresearch_proposer import (
+            MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+            collect_public_proposal_context,
+        )
         from core.hitl_proposal_discussion import (
             prepare_proposal_discussion_prompt,
             proposal_discussion_task_id,
@@ -5053,6 +5056,7 @@ class HitlRuntime:
                 additional_records=[additional_record],
                 reopen_source_ideas=[ideas_by_id[idea_id] for idea_id in idea_ids],
                 reserve_tokens=MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS,
+                maximum_prompt_chars=MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
                 persist_cache=False,
             )
         except ValueError as exc:
