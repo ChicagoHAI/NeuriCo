@@ -4281,38 +4281,17 @@ class HitlRuntime:
     ) -> Dict[str, Any]:
         self._require_default_worker_state("proposal worker continuation state")
         self._join_live_worker_request_handler()
-        cancelled = self._cancelled_worker_command_result(
-            result,
-            phase="proposal",
-            worker_name=worker_name,
-        )
-        if cancelled is not None:
-            return cancelled
         if bool(self._tool_context.get("proposal_discussion_final_owner")):
             task_context = self._proposal_discussion_final_owner_state_context()
             session = task_context["session"]
-            handoff = session.get("reopen_handoff")
             if session.get("phase") == "reopen_pending":
-                if (
-                    not isinstance(handoff, dict)
-                    or handoff.get("pending_finalization") is not None
-                    or not str(handoff.get("reopen_record_id", "")).strip()
-                ):
-                    return {
-                        "success": False,
-                        "hitl": True,
-                        "phase": "proposal",
-                        "error": (
-                            "Collaborative discussion reopening has an incomplete durable "
-                            "finalization and cannot transfer ownership."
-                        ),
-                    }
+                reconciled = self.reconcile_proposal_discussion_reopen()
                 return {
                     "status": "reopen_discussion",
                     "complete": True,
                     "replacement": False,
                     "reopen_discussion": True,
-                    "reopen_record_id": handoff["reopen_record_id"],
+                    "reopen_record_id": reconciled["reopen_record_id"],
                     "worker_exit_warning": (
                         f"{worker_name} exited after returning proposal feedback to the "
                         "collaborative discussion. Runtime retained the accepted handoff."
@@ -4320,6 +4299,13 @@ class HitlRuntime:
                         else ""
                     ),
                 }
+        cancelled = self._cancelled_worker_command_result(
+            result,
+            phase="proposal",
+            worker_name=worker_name,
+        )
+        if cancelled is not None:
+            return cancelled
         submitted = self._proposal_submit_result
         if submitted and submitted.get("status") == "approved":
             validator = self._tool_context.get("proposal_submission_validator")
@@ -4716,7 +4702,7 @@ class HitlRuntime:
             }
 
     def reconcile_proposal_discussion_reopen(self) -> Dict[str, str]:
-        """Finish only the durable reopen finalization accepted before restart."""
+        """Finish a durable reopen accepted before worker exit or restart."""
 
         with self._tool_lock:
             from core.hitl_proposal_discussion import ProposalDiscussionRecordStore
