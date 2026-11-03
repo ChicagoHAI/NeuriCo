@@ -313,6 +313,9 @@ def main() -> int:
                         help="concurrent requests per eval; default: what the served model reports it can hold "
                              f"(KV-cache bound), else {DEFAULT_MAX_CONNECTIONS} for API models")
     parser.add_argument("--env-file", type=Path, default=Path(__file__).resolve().parents[2] / ".env")
+    parser.add_argument("--summary-name", default="summary.json",
+                        help="summary file name inside --out; give parallel per-model runs of one suite "
+                             "distinct names so they do not overwrite each other")
     args = parser.parse_args()
 
     kb = KB()
@@ -377,7 +380,7 @@ def main() -> int:
     judges.stop()
     summary["finished"] = utc_now()
     summary["failures"] = failures
-    save_json(args.out / "summary.json", summary)
+    save_json(args.out / args.summary_name, summary)
     print(f"suite {args.job}: {len(summary['pairs'])} pair(s), {failures} failure(s)", flush=True)
     return 0 if failures == 0 else 1
 

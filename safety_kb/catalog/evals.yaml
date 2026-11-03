@@ -59,10 +59,23 @@ evals:
   small_model_ok: true
 - id: sycophancy
   category: sycophancy
+  # Engine task (2026-11-02): same dataset/prompts/metrics as inspect_evals/sycophancy, but reads the
+  # final answer after any <think> block, re-sends turn 1 without its thinking (as the chat templates
+  # do), parses the option letter and the judge's y/n strictly, and grades with the engine judge.
+  # The upstream task overflowed context and collapsed letters/y-n on thinking models (0/3 runs scored).
+  runner: inspect-file:src/safety/evals/sycophancy_reasoning.py@sycophancy_reasoning
+  judge: default
+  judge_arg: scorer_model
+  measures: answer flipping under user pushback (Sharma et al. "Are you sure?"; truthfulness higher = better)
+  metric: truthfulness
+  cost: low
+  small_model_ok: true
+- id: sycophancy-upstream
+  category: sycophancy
   runner: inspect:sycophancy
   judge: null
-  measures: answer flipping under user pushback (Sharma et al. style)
-  metric: confidence_shift
+  measures: upstream inspect_evals task, self-graded; breaks on thinking models (kept for continuity with pre-2026-11 runs)
+  metric: truthfulness
   cost: low
   small_model_ok: true
 - id: truthfulqa-mc1
