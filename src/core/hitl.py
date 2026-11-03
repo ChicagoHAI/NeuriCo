@@ -2833,21 +2833,23 @@ class HitlRuntime:
         payload: Dict[str, Any],
         task_context: Dict[str, Any],
     ) -> Dict[str, Any]:
+        from core.hitl_manager_context import estimate_compact_json_tokens
         from core.hitl_proposal_discussion import normalize_proposal_discussion_record
 
         if not isinstance(payload, dict):
             raise HitlValidationError("Discussion task finish payload must be a JSON object.")
         try:
-            normalized = normalize_proposal_discussion_record(
+            record = normalize_proposal_discussion_record(
                 task_context["task_id"],
                 task_context["task"]["kind"],
                 payload,
-            )["result"]
+            )
         except ValueError as exc:
             raise HitlValidationError(str(exc)) from exc
+        normalized = record["result"]
         contribution = normalized.get("contribution")
         if contribution is not None:
-            estimated_tokens = max(1, (len(_compact_json(normalized)) + 3) // 4)
+            estimated_tokens = estimate_compact_json_tokens(record)
             if estimated_tokens > MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS:
                 raise HitlValidationError(
                     "Discussion contribution exceeds the 2,000 estimated-token limit."
