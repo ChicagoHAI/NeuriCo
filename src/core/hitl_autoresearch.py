@@ -1902,6 +1902,15 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                             raise RuntimeError(
                                 "Proposal discussion task result record is missing."
                             )
+                        if (
+                            record["kind"] == "decision"
+                            and record["result"].get("choice")
+                            != task.get("choice")
+                        ):
+                            raise RuntimeError(
+                                "Proposal discussion decision does not match durable "
+                                "scheduling state."
+                            )
                     elif pending is not None:
                         if record is not None and record.get("result") != pending:
                             raise RuntimeError(
