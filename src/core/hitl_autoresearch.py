@@ -42,6 +42,7 @@ from core.autoresearch_common import (
 )
 from core.hitl import (
     HitlIdeaLog,
+    HitlProposalDiscussionCapacityError,
     HitlRuntime,
     _load_hitl_template,
     log_frontier_decision_record,
@@ -4941,6 +4942,7 @@ class HitlAutoResearchController:
 
         if self.proposal_assessment_runner is None:
             raise RuntimeError("Proposal discussion requires its configured agent runner.")
+        from agents.proposal_discussion import proposal_discussion_task_prompt_suffix
         from core.hitl_proposal_discussion import parse_proposal_discussion_task_id
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
@@ -4955,7 +4957,7 @@ class HitlAutoResearchController:
             seed_idea_ids=seed_idea_ids,
             cancel_event=cancel_event,
         )
-        task_prompt = f"Complete {task_identity.display_label} through its required HITL command."
+        task_prompt = proposal_discussion_task_prompt_suffix(task_id)
         try:
             reconciled = task_runtime.reconcile_proposal_discussion_task()
             if reconciled.get("complete") or reconciled.get("cancelled"):
@@ -4982,25 +4984,29 @@ class HitlAutoResearchController:
                         "background_processes_terminated": False,
                         "provider_process_failed": False,
                     }
-                return self.proposal_assessment_runner(
-                    role="discussion",
-                    idea=self.idea,
-                    discussion_task_id=task_id,
-                    discussion_records=(),
-                    prompt_builder=(
-                        lambda prompt_template, public_background: (
-                            task_runtime.prepare_proposal_discussion_prompt(
-                                prompt_template=prompt_template,
-                                public_background=public_background,
+                try:
+                    return self.proposal_assessment_runner(
+                        role="discussion",
+                        idea=self.idea,
+                        discussion_task_id=task_id,
+                        discussion_records=(),
+                        prompt_builder=(
+                            lambda prompt_template, public_background, capacity_templates: (
+                                task_runtime.prepare_proposal_discussion_prompt(
+                                    prompt_template=prompt_template,
+                                    public_background=public_background,
+                                    capacity_prompt_templates=capacity_templates,
+                                )
                             )
-                        )
-                    ),
-                    task_dir=attempt_dir / "proposal_discussion" / "tasks" / task_id,
-                    prompt_suffix=prompt,
-                    env_extra=task_runtime.idea_tool_env(),
-                    cancel_event=cancel_event,
-                    output_prefix=task_id,
-                )
+                        ),
+                        task_dir=attempt_dir / "proposal_discussion" / "tasks" / task_id,
+                        prompt_suffix=prompt,
+                        env_extra=task_runtime.idea_tool_env(),
+                        cancel_event=cancel_event,
+                        output_prefix=task_id,
+                    )
+                except HitlProposalDiscussionCapacityError as exc:
+                    raise HitlTerminalRuntimeError(str(exc)) from exc
 
             _result, finish = run_worker_with_replacements(
                 runtime=task_runtime,

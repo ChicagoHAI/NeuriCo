@@ -15,8 +15,10 @@ from core.agent_cli import append_prompt_block
 from core.hitl_proposal_discussion import (
     PROPOSAL_DISCUSSION_CONTEXT_MARKER,
     parse_proposal_discussion_task_id,
+    proposal_discussion_task_id,
     render_proposal_discussion_context,
 )
+from core.hitl_proposal_round import MAX_COLLABORATIVE_PARTICIPANT_COUNT
 
 
 def _proposal_discussion_prompt_inputs(
@@ -120,13 +122,69 @@ def generate_proposal_discussion_prompt(
     )
 
 
+def proposal_discussion_task_prompt_suffix(task_id: str) -> str:
+    """Return the controller-owned completion instruction for one finite task."""
+
+    identity = parse_proposal_discussion_task_id(task_id)
+    return f"Complete {identity.display_label} through its required HITL command."
+
+
+def _proposal_discussion_capacity_templates(
+    *,
+    idea: Dict[str, Any],
+    discussion_task_id: str,
+    prompt_inputs: Dict[str, Any],
+    templates_dir: Optional[Path],
+    hitl_mode: str,
+) -> tuple[str, ...]:
+    """Render conservative future task templates for segment capacity validation."""
+
+    identity = parse_proposal_discussion_task_id(discussion_task_id)
+    if identity.phase == "initial":
+        task_ids = (
+            proposal_discussion_task_id("opening", participant_ordinal=1),
+            proposal_discussion_task_id(
+                "response",
+                participant_ordinal=MAX_COLLABORATIVE_PARTICIPANT_COUNT,
+                round_ordinal=1,
+            ),
+        )
+    elif identity.phase == "decision":
+        task_ids = (
+            proposal_discussion_task_id(
+                "response",
+                participant_ordinal=MAX_COLLABORATIVE_PARTICIPANT_COUNT,
+                round_ordinal=identity.round_ordinal + 1,
+            ),
+        )
+    else:
+        return ()
+
+    return tuple(
+        append_prompt_block(
+            _render_proposal_discussion_prompt(
+                idea=idea,
+                discussion_task_id=task_id,
+                discussion_context=PROPOSAL_DISCUSSION_CONTEXT_MARKER,
+                prompt_inputs=prompt_inputs,
+                templates_dir=templates_dir,
+                hitl_mode=hitl_mode,
+            ),
+            proposal_discussion_task_prompt_suffix(task_id),
+        )
+        for task_id in task_ids
+    )
+
+
 def run_proposal_discussion_task(
     *,
     idea: Dict[str, Any],
     work_dir: Path,
     discussion_task_id: str,
     discussion_records: Sequence[Dict[str, Any]] = (),
-    prompt_builder: Optional[Callable[[str, Dict[str, Any]], str]] = None,
+    prompt_builder: Optional[
+        Callable[[str, Dict[str, Any], Sequence[str]], str]
+    ] = None,
     task_dir: Path,
     provider: str,
     env_extra: Dict[str, str],
@@ -167,7 +225,17 @@ def run_proposal_discussion_task(
         public_background["whiteboard_active_tips_md"] = prompt_inputs[
             "whiteboard_active_tips_md"
         ]
-        prompt = prompt_builder(prompt, public_background)
+        prompt = prompt_builder(
+            prompt,
+            public_background,
+            _proposal_discussion_capacity_templates(
+                idea=idea,
+                discussion_task_id=discussion_task_id,
+                prompt_inputs=prompt_inputs,
+                templates_dir=templates_dir,
+                hitl_mode=hitl_mode,
+            ),
+        )
     return run_proposal_assessment(
         prompt=prompt,
         work_dir=work_dir,

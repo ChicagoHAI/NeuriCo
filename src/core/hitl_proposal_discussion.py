@@ -365,6 +365,130 @@ def proposal_discussion_reopen_source_idea_ids(
     )
 
 
+def project_initial_proposal_discussion_segment(
+    session: Mapping[str, Any],
+) -> tuple[tuple[dict[str, Any], int], tuple[dict[str, Any], int]]:
+    """Project the mandatory opening and first response round without persisting it."""
+
+    projected = json.loads(json.dumps(dict(session)))
+    if projected.get("phase") != "initial" or projected.get("round_ordinal") != 0:
+        raise ValueError("Initial discussion capacity requires the initial meeting phase.")
+    participant_count = projected.get("participant_count")
+    max_response_rounds = projected.get("max_response_rounds")
+    _require_collaborative_bounds(participant_count, max_response_rounds)
+    tasks = projected.get("tasks")
+    if not isinstance(tasks, dict):
+        raise ValueError("Proposal discussion tasks must be an object.")
+
+    initial_ids = [
+        proposal_discussion_task_id("initial", participant_ordinal=ordinal)
+        for ordinal in range(1, participant_count + 1)
+    ]
+    opening_id = proposal_discussion_task_id("opening", participant_ordinal=1)
+    tasks.setdefault(
+        opening_id,
+        {"kind": "contribution", "result_record_id": None},
+    )
+    projected["phase"] = "opening"
+    opening_missing = sum(
+        1
+        for task_id in initial_ids
+        if not (
+            isinstance(tasks.get(task_id), Mapping)
+            and tasks[task_id].get("result_record_id") == task_id
+            and tasks[task_id].get("pending_finalization") is None
+        )
+    )
+    opening_projection = (json.loads(json.dumps(projected)), opening_missing)
+
+    required_ids = [*initial_ids, opening_id]
+    for ordinal in range(2, participant_count + 1):
+        task_id = proposal_discussion_task_id(
+            "response",
+            participant_ordinal=ordinal,
+            round_ordinal=1,
+        )
+        tasks.setdefault(
+            task_id,
+            {"kind": "contribution", "result_record_id": None},
+        )
+        required_ids.append(task_id)
+    projected["phase"] = "response"
+    projected["round_ordinal"] = 1
+    missing = sum(
+        1
+        for task_id in required_ids
+        if not (
+            isinstance(tasks.get(task_id), Mapping)
+            and tasks[task_id].get("result_record_id") == task_id
+            and tasks[task_id].get("pending_finalization") is None
+        )
+    )
+    return opening_projection, (projected, missing)
+
+
+def project_next_proposal_discussion_response(
+    session: Mapping[str, Any],
+    *,
+    decision_result: Optional[Mapping[str, Any]] = None,
+) -> tuple[dict[str, Any], int, tuple[dict[str, Any], ...]]:
+    """Project one accepted continuation or reopening without changing runtime state."""
+
+    projected = json.loads(json.dumps(dict(session)))
+    participant_count = projected.get("participant_count")
+    max_response_rounds = projected.get("max_response_rounds")
+    _require_collaborative_bounds(participant_count, max_response_rounds)
+    tasks = projected.get("tasks")
+    if not isinstance(tasks, dict):
+        raise ValueError("Proposal discussion tasks must be an object.")
+    current_round = projected.get("round_ordinal")
+    if isinstance(current_round, bool) or not isinstance(current_round, int):
+        raise ValueError("Proposal discussion round must be an integer.")
+    next_round = current_round + 1
+    if next_round > max_response_rounds:
+        raise ValueError("Proposal discussion cannot continue beyond its round limit.")
+
+    additional_records: tuple[dict[str, Any], ...] = ()
+    if decision_result is not None:
+        if projected.get("phase") != "decision":
+            raise ValueError("Discussion continuation requires the lead decision phase.")
+        decision_id = proposal_discussion_task_id(
+            "decision",
+            participant_ordinal=1,
+            round_ordinal=current_round,
+        )
+        normalized = normalize_proposal_discussion_record(
+            decision_id,
+            "decision",
+            decision_result,
+        )
+        if normalized["result"].get("choice") != "continue":
+            raise ValueError("Discussion capacity projection requires a continue decision.")
+        task = tasks.get(decision_id)
+        if not isinstance(task, dict) or task.get("kind") != "decision":
+            raise ValueError("Proposal discussion decision task is missing.")
+        task["result_record_id"] = decision_id
+        task["choice"] = "continue"
+        task.pop("pending_finalization", None)
+        additional_records = (normalized,)
+    elif projected.get("phase") != "final_writing":
+        raise ValueError("Discussion reopening requires final proposal writing.")
+
+    missing = 0
+    for ordinal in range(2, participant_count + 1):
+        task_id = proposal_discussion_task_id(
+            "response",
+            participant_ordinal=ordinal,
+            round_ordinal=next_round,
+        )
+        tasks[task_id] = {"kind": "contribution", "result_record_id": None}
+        missing += 1
+    projected["phase"] = "response"
+    projected["round_ordinal"] = next_round
+    projected.pop("reopen_handoff", None)
+    return projected, missing, additional_records
+
+
 def protected_proposal_discussion_record_ids(
     session: Mapping[str, Any],
     permitted_record_ids: Sequence[str],

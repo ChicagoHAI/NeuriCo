@@ -786,6 +786,10 @@ class HitlValidationError(ValueError):
     """Raised when a HITL idea is malformed."""
 
 
+class HitlProposalDiscussionCapacityError(HitlValidationError):
+    """Raised when a discussion cannot enter its mandatory first segment."""
+
+
 class HitlActiveWorkerRequestError(RuntimeError):
     """Raised when another worker command arrives while one is unresolved."""
 
@@ -3119,6 +3123,14 @@ class HitlRuntime:
                     "Discussion task has an unreferenced public result. Runtime will not "
                     "adopt artifact content into task state."
                 )
+            if (
+                task.get("pending_finalization") is None
+                and normalized.get("choice") == "continue"
+            ):
+                self._validate_proposal_discussion_continue_capacity(
+                    task_context=task_context,
+                    result=normalized,
+                )
             state_args = {
                 **task_context["identity"],
                 "discussion_task_id": task_context["task_id"],
@@ -4963,58 +4975,41 @@ class HitlRuntime:
                 )
             self._tool_context["proposal_discussion_prompt_template"] = template
 
-    def _validate_proposal_discussion_reopen_capacity(
+    def _require_proposal_discussion_capacity(
         self,
         *,
-        task_context: Dict[str, Any],
-        record_id: str,
-        result: Dict[str, Any],
+        projected_session: Dict[str, Any],
+        prompt_templates: Sequence[str],
+        public_background: Dict[str, Any],
+        reserve_contributions: int,
+        additional_records: Sequence[Dict[str, Any]] = (),
+        reopen_source_ideas: Sequence[Dict[str, Any]] = (),
+        allow_reopen: bool = False,
+        maximum_prompt_chars: Optional[int] = None,
     ) -> None:
-        """Verify one more bounded turn and later final writing fit before handoff."""
+        """Check one projected segment using the canonical prompt budget logic."""
 
-        from agents.autoresearch_proposer import (
-            MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
-            collect_public_proposal_context,
-        )
         from core.hitl_proposal_discussion import (
+            PROPOSAL_DISCUSSION_CONTEXT_MARKER,
             prepare_proposal_discussion_prompt,
-            proposal_discussion_task_id,
         )
         from core.hitl_run_control import current_hitl_run_budget_prompt
 
-        prompt_template = str(
-            self._tool_context.get("proposal_discussion_prompt_template", "")
-        )
-        if not prompt_template:
-            raise HitlValidationError(
-                "HITL_ERROR discussion_context_unavailable\n"
-                "Runtime cannot verify another meeting round from this proposer launch. "
-                "Revise directly through the existing proposal workflow."
+        templates = tuple(str(template) for template in prompt_templates)
+        if not templates or any(
+            template.count(PROPOSAL_DISCUSSION_CONTEXT_MARKER) != 1
+            for template in templates
+        ):
+            raise ValueError(
+                "Proposal discussion capacity requires its exact prompt templates."
             )
-        projected = json.loads(json.dumps(task_context["session"]))
-        next_round = int(projected["round_ordinal"]) + 1
-        projected["phase"] = "response"
-        projected["round_ordinal"] = next_round
-        projected.pop("reopen_handoff", None)
-        for ordinal in range(2, int(projected["participant_count"]) + 1):
-            projected["tasks"][
-                proposal_discussion_task_id(
-                    "response",
-                    participant_ordinal=ordinal,
-                    round_ordinal=next_round,
-                )
-            ] = {
-                "kind": "contribution",
-                "result_record_id": None,
-            }
-
-        idea_ids = [result["proposal_idea_id"], result["feedback_ref"]]
-        ideas_by_id = {
-            str(record.get("idea_id", "")): record for record in self.log.records()
-        }
-        if any(idea_id not in ideas_by_id for idea_id in idea_ids):
-            raise HitlValidationError(
-                "Proposal discussion reopening references an unavailable finalized idea."
+        if (
+            isinstance(reserve_contributions, bool)
+            or not isinstance(reserve_contributions, int)
+            or reserve_contributions < 0
+        ):
+            raise ValueError(
+                "Proposal discussion contribution reserve must be nonnegative."
             )
         summarize_method = getattr(
             self.manager,
@@ -5039,6 +5034,111 @@ class HitlRuntime:
                 )
             )
 
+        reserve_tokens = (
+            reserve_contributions * MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS
+        )
+        for template in templates:
+            prepare_proposal_discussion_prompt(
+                store=self._proposal_discussion_record_store(),
+                session=projected_session,
+                prompt_template=template,
+                public_background=public_background,
+                runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
+                summarize=summarize if callable(summarize_method) else None,
+                allow_reopen=allow_reopen,
+                additional_records=additional_records,
+                reopen_source_ideas=reopen_source_ideas,
+                reserve_tokens=reserve_tokens,
+                maximum_prompt_chars=maximum_prompt_chars,
+                persist_cache=False,
+            )
+
+    def _validate_proposal_discussion_continue_capacity(
+        self,
+        *,
+        task_context: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> None:
+        """Reject a lead continuation before it commits an over-capacity round."""
+
+        from core.hitl_proposal_discussion import (
+            project_next_proposal_discussion_response,
+        )
+
+        templates = self._tool_context.get(
+            "proposal_discussion_capacity_prompt_templates"
+        )
+        public_background = self._tool_context.get(
+            "proposal_discussion_public_background"
+        )
+        if not isinstance(templates, tuple) or not isinstance(public_background, dict):
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_unavailable\n"
+                "Runtime cannot verify another response round from this lead session. "
+                "Choose finalize instead."
+            )
+        try:
+            projected, missing, additional = (
+                project_next_proposal_discussion_response(
+                    task_context["session"],
+                    decision_result=result,
+                )
+            )
+            self._require_proposal_discussion_capacity(
+                projected_session=projected,
+                prompt_templates=templates,
+                public_background=public_background,
+                reserve_contributions=missing,
+                additional_records=additional,
+            )
+        except ValueError as exc:
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_too_large\n"
+                "Another response round would exceed the verified meeting context budget. "
+                "Choose finalize instead."
+            ) from exc
+
+    def _validate_proposal_discussion_reopen_capacity(
+        self,
+        *,
+        task_context: Dict[str, Any],
+        record_id: str,
+        result: Dict[str, Any],
+    ) -> None:
+        """Verify one more bounded turn and later final writing fit before handoff."""
+
+        from agents.autoresearch_proposer import (
+            MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+            collect_public_proposal_context,
+        )
+        from core.hitl_proposal_discussion import (
+            project_next_proposal_discussion_response,
+        )
+
+        prompt_template = str(
+            self._tool_context.get("proposal_discussion_prompt_template", "")
+        )
+        if not prompt_template:
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_unavailable\n"
+                "Runtime cannot verify another meeting round from this proposer launch. "
+                "Revise directly through the existing proposal workflow."
+            )
+        try:
+            projected, missing, _additional = (
+                project_next_proposal_discussion_response(task_context["session"])
+            )
+        except ValueError as exc:
+            raise HitlValidationError(str(exc)) from exc
+
+        idea_ids = [result["proposal_idea_id"], result["feedback_ref"]]
+        ideas_by_id = {
+            str(record.get("idea_id", "")): record for record in self.log.records()
+        }
+        if any(idea_id not in ideas_by_id for idea_id in idea_ids):
+            raise HitlValidationError(
+                "Proposal discussion reopening references an unavailable finalized idea."
+            )
         additional_record = {
             "record_id": record_id,
             "kind": "reopen",
@@ -5050,19 +5150,15 @@ class HitlRuntime:
             hitl_autoresearch_whiteboard=True,
         )
         try:
-            prepare_proposal_discussion_prompt(
-                store=self._proposal_discussion_record_store(),
-                session=projected,
-                prompt_template=prompt_template,
+            self._require_proposal_discussion_capacity(
+                projected_session=projected,
+                prompt_templates=(prompt_template,),
                 public_background=public_background,
-                runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
-                summarize=summarize if callable(summarize_method) else None,
+                reserve_contributions=missing,
                 allow_reopen=True,
                 additional_records=[additional_record],
                 reopen_source_ideas=[ideas_by_id[idea_id] for idea_id in idea_ids],
-                reserve_tokens=MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS,
                 maximum_prompt_chars=MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
-                persist_cache=False,
             )
         except ValueError as exc:
             raise HitlValidationError(
@@ -5076,11 +5172,14 @@ class HitlRuntime:
         *,
         prompt_template: str,
         public_background: Dict[str, Any],
+        capacity_prompt_templates: Sequence[str] = (),
     ) -> str:
         """Prepare bounded public meeting context for the active finite task."""
 
         from core.hitl_proposal_discussion import (
+            parse_proposal_discussion_task_id,
             prepare_proposal_discussion_prompt,
+            project_initial_proposal_discussion_segment,
             proposal_discussion_reopen_source_idea_ids,
         )
         from core.hitl_run_control import (
@@ -5091,6 +5190,23 @@ class HitlRuntime:
         with self._tool_lock:
             task_context = self._discussion_task_state_context()
             store = self._proposal_discussion_record_store()
+            capacity_templates = tuple(
+                str(template) for template in capacity_prompt_templates
+            )
+            task_phase = str(
+                parse_proposal_discussion_task_id(task_context["task_id"]).phase
+            )
+            if task_phase in {"initial", "decision"} and not capacity_templates:
+                raise HitlValidationError(
+                    "HITL_ERROR discussion_context_unavailable\n"
+                    "Runtime cannot verify the next mandatory discussion segment."
+                )
+            self._tool_context[
+                "proposal_discussion_capacity_prompt_templates"
+            ] = capacity_templates
+            self._tool_context["proposal_discussion_public_background"] = dict(
+                public_background
+            )
 
         summarize_method = getattr(
             self.manager,
@@ -5133,6 +5249,32 @@ class HitlRuntime:
             raise HitlValidationError(
                 "Proposal discussion reopening references an unavailable finalized idea."
             )
+        if task_phase == "initial":
+            try:
+                opening, response = project_initial_proposal_discussion_segment(
+                    task_context["session"]
+                )
+                if len(capacity_templates) != 2:
+                    raise ValueError(
+                        "Initial discussion capacity requires opening and response templates."
+                    )
+                for (projected, missing), template in zip(
+                    (opening, response),
+                    capacity_templates,
+                    strict=True,
+                ):
+                    self._require_proposal_discussion_capacity(
+                        projected_session=projected,
+                        prompt_templates=(template,),
+                        public_background=public_background,
+                        reserve_contributions=missing,
+                    )
+            except ValueError as exc:
+                raise HitlProposalDiscussionCapacityError(
+                    "HITL_ERROR discussion_context_too_large\n"
+                    "The mandatory first response segment would exceed the verified "
+                    "meeting context budget."
+                ) from exc
         return prepare_proposal_discussion_prompt(
             store=store,
             session=task_context["session"],
