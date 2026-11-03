@@ -267,6 +267,8 @@ FOCUS ON:
 - Papers that combine computation and experiment (most valuable for our workflow)
 - Review articles that synthesize the state of knowledge
 
+{% include "agents/cross_domain_discovery.txt" %}
+
 STEP 3: Download and Organize Papers
 ─────────────────────────────────────────────────────────────────────────────
 
