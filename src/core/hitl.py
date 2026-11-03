@@ -1825,9 +1825,6 @@ class HitlRuntime:
                     or normalized_discussion_attempt_dir is None
                     or not str(normalized_provenance.get("parent_node_id", "")).strip()
                     or not str(normalized_provenance.get("attempt_id", "")).strip()
-                    or not normalized_discussion_attempt_dir.is_relative_to(
-                        self.work_dir.resolve()
-                    )
                     or normalized_discussion_attempt_dir.name
                     != str(normalized_provenance.get("attempt_id", "")).strip()
                 ):
@@ -1925,12 +1922,14 @@ class HitlRuntime:
                 raise HitlValidationError(
                     "Discussion command profiles require their proposal preparation attempt."
                 )
-            if normalized_discussion_attempt_dir is None or not (
-                normalized_discussion_attempt_dir == self.work_dir.resolve()
-                or normalized_discussion_attempt_dir.is_relative_to(self.work_dir.resolve())
+            if (
+                normalized_discussion_attempt_dir is None
+                or normalized_discussion_attempt_dir.name
+                != str(normalized_provenance.get("attempt_id", "")).strip()
             ):
                 raise HitlValidationError(
-                    "Discussion command profiles require an in-workspace attempt directory."
+                    "Discussion command profiles require their matching proposal attempt "
+                    "directory."
                 )
             if not callable(phase_finish_validator):
                 raise HitlValidationError(
