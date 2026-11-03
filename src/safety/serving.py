@@ -55,7 +55,15 @@ class Endpoint:
         return out
 
 
-def free_port(start: int = 8400, end: int = 8499) -> int:
+def free_port(start: Optional[int] = None, end: Optional[int] = None) -> int:
+    # Several Slurm jobs can share a node and start servers in the same second, before either
+    # has bound its port; NEURICO_VLLM_PORT_BASE (or a base derived from SLURM_JOB_ID) keeps
+    # their probe ranges apart.
+    if start is None:
+        base = os.environ.get("NEURICO_VLLM_PORT_BASE")
+        job = os.environ.get("SLURM_JOB_ID")
+        start = int(base) if base else (8400 + (int(job) % 40) * 25 if job and job.isdigit() else 8400)
+    end = end if end is not None else start + 25
     for port in range(start, end):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             if sock.connect_ex(("127.0.0.1", port)) != 0:
