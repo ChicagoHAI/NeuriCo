@@ -730,12 +730,17 @@ class HitlWorkspaceView:
         cleanup_pending = str(cleanup.get("status", "")).strip() == "pending"
         continuation_status = str(continuation.get("status", "")).strip()
         proposal_display_status = proposal_status
+        proposal_handoff_complete = bool(
+            ranked_proposal.get("proposal_round_stage") == "selected"
+            or collaborative_proposal.get("proposal_discussion_phase")
+            == "final_writing"
+        )
         if (
-            collaborative_proposal.get("proposal_discussion_phase") == "final_writing"
+            proposal_handoff_complete
             and continuation_status
             and phase in {"plan", "execution", "review"}
         ):
-            proposal_display_status = ranked_proposal
+            proposal_display_status = {}
         launch_status = self._launch_status()
         launch_state = str(launch_status.get("status", "")).strip()
         github_publication = launch_status.get("github_publication")
