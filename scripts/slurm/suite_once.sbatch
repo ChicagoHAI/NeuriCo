@@ -30,7 +30,7 @@ done
 CACHE="${LOCAL_SCRATCH:-$S}/.cache"
 mkdir -p "$CACHE"
 export XDG_CACHE_HOME="$CACHE" VLLM_CACHE_ROOT="$CACHE/vllm" TORCHINDUCTOR_CACHE_DIR="$CACHE/torchinductor" TRITON_CACHE_DIR="$CACHE/triton"
-export NEURICO_VLLM_STARTUP_TIMEOUT=2700
+export NEURICO_VLLM_STARTUP_TIMEOUT="${NEURICO_VLLM_STARTUP_TIMEOUT:-2700}"
 PY="$S/safety_venv/bin/python"
 echo "node $(hostname) job=$SLURM_JOB_ID gpus=${CUDA_VISIBLE_DEVICES:-} suite=$SUITE model=$MODEL started $(date -Is)"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader
