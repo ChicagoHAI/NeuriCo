@@ -3628,6 +3628,7 @@ class HitlRuntime:
 
     def log_reported_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
+            self._require_active_proposal_discussion_final_owner_mutation()
             self._reject_cancelled_scoped_task_mutation()
             if self._tool_context.get("scoped_task_terminal"):
                 raise HitlValidationError(
@@ -3657,6 +3658,7 @@ class HitlRuntime:
 
     def _submit_proposal_payload_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
+            self._require_active_proposal_discussion_final_owner_mutation()
             validator = self._tool_context.get("proposal_submission_validator")
             if callable(validator):
                 validation = validator()
@@ -4909,6 +4911,20 @@ class HitlRuntime:
                 "Proposal discussion records are not owned by the active final writer."
             )
         return {"identity": identity, "session": session}
+
+    def _require_active_proposal_discussion_final_owner_mutation(self) -> None:
+        """Reject final-proposer writes after discussion ownership is transferred."""
+
+        if not bool(self._tool_context.get("proposal_discussion_final_owner")):
+            return
+        task_context = self._proposal_discussion_final_owner_state_context()
+        if task_context["session"].get("phase") != "final_writing":
+            raise HitlValidationError(
+                "HITL_ERROR proposal_discussion_ownership_transferred\n"
+                "This proposer has already returned control to the collaborative "
+                "discussion. Stop this worker session; do not report more ideas or "
+                "submit another proposal."
+            )
 
     @staticmethod
     def _permitted_proposal_discussion_record_ids(
