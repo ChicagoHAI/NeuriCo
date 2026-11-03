@@ -650,7 +650,7 @@
         ? icon("▶", runActionTitle, () => { state.runPanel = !state.runPanel; render(); }, "toolbar-action")
         : null;
     return q("header", { class: "topbar" }, [
-      q("div", { class: "brand" }, [q("span", { class: "workspace-mark", text: "▱" }), q("span", { class: "workspace-title", text: workspace }), q("span", { class: "page-label", text: state.route === "conversation" ? "Conversation" : "Research" })]),
+      q("div", { class: "brand" }, [q("span", { class: "workspace-mark", text: "▱" }), q("span", { class: "workspace-title", text: workspace })]),
       q("div", { class: "topbar-spacer" }),
       workspaceStatus(),
       runIsActive && Number.isFinite(live.budget_deadline_at)
@@ -699,7 +699,7 @@
     const stage = live?.stage_label || "";
     const step = live?.phase_label || "";
     const label = live?.label || title;
-    const tooltip = [live?.detail, live?.next_action].filter(Boolean).join(" ");
+    const tooltip = [label, live?.detail, live?.next_action].filter(Boolean).join("\n");
     const text = stage
       ? [q("span", { class: "workspace-state-stage", text: stage }), step ? q("span", { class: "workspace-state-step", text: step }) : null]
       : [q("span", { class: "workspace-state-stage", text: label })];
