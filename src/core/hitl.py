@@ -8,7 +8,7 @@ updates the plan, and resumes from the current workspace state.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import csv
 import json
 import logging
@@ -2436,8 +2436,11 @@ class HitlRuntime:
         return env
 
     def clear_idea_tool_context(self) -> None:
-        scoped_task_session = _is_closed_scoped_task_profile(
-            self._tool_context.get("command_profile", "")
+        mutation_gated_session = (
+            _is_closed_scoped_task_profile(
+                self._tool_context.get("command_profile", "")
+            )
+            or bool(self._tool_context.get("proposal_discussion_final_owner"))
         )
         self.stop_idea_tool_server()
         # A stopped worker can unwind before its asynchronous scorer finishes
@@ -2454,18 +2457,17 @@ class HitlRuntime:
                 break
             for thread in active:
                 thread.join()
-        if scoped_task_session:
-            # Stopping the server prevents new requests. Acquiring the scoped
-            # task's existing mutation gate then proves that any handler which
-            # passed its cancellation check has finished before rollback.
-            with self._tool_lock:
-                pass
-        self._tool_context = {}
-        self._phase_finish_result = None
-        self._phase_finish_request_key = ""
-        self._phase_finish_response = None
-        self._proposal_submit_result = None
-        self._raised_idea_results = {}
+        gate = self._tool_lock if mutation_gated_session else nullcontext()
+        with gate:
+            # A handler which passed the HTTP entry check must either finish
+            # before this revocation or revalidate against the cleared command
+            # surface at its mutation point.
+            self._tool_context = {}
+            self._phase_finish_result = None
+            self._phase_finish_request_key = ""
+            self._phase_finish_response = None
+            self._proposal_submit_result = None
+            self._raised_idea_results = {}
 
     def reload_manager_after_state_restore(self) -> None:
         """Refresh long-lived manager caches after private HITL rollback."""
@@ -3629,6 +3631,7 @@ class HitlRuntime:
     def log_reported_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
             self._require_active_proposal_discussion_final_owner_mutation()
+            self._require_worker_command("hitl-report-idea")
             self._reject_cancelled_scoped_task_mutation()
             if self._tool_context.get("scoped_task_terminal"):
                 raise HitlValidationError(
@@ -3659,6 +3662,7 @@ class HitlRuntime:
     def _submit_proposal_payload_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
             self._require_active_proposal_discussion_final_owner_mutation()
+            self._require_worker_command("hitl-submit-proposal")
             validator = self._tool_context.get("proposal_submission_validator")
             if callable(validator):
                 validation = validator()
