@@ -319,20 +319,57 @@ def published_proposal_discussion_task_ids(
     return tuple(sorted(published, key=proposal_discussion_record_sort_key))
 
 
+def required_proposal_discussion_reopen_record_ids(
+    session: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Derive applied reopen records from authoritative meeting progression."""
+
+    current_round = session.get("round_ordinal")
+    max_response_rounds = session.get("max_response_rounds")
+    participant_count = session.get("participant_count")
+    _require_collaborative_bounds(participant_count, max_response_rounds)
+    _require_ordinal(
+        current_round,
+        field_name="round_ordinal",
+        minimum=0,
+        maximum=max_response_rounds,
+    )
+    tasks = session.get("tasks")
+    if not isinstance(tasks, Mapping):
+        raise ValueError("Proposal discussion tasks must be an object.")
+
+    required: list[str] = []
+    for round_ordinal in range(1, current_round):
+        decision_id = proposal_discussion_task_id(
+            "decision",
+            participant_ordinal=1,
+            round_ordinal=round_ordinal,
+        )
+        decision = tasks.get(decision_id)
+        if (
+            not isinstance(decision, Mapping)
+            or decision.get("kind") != "decision"
+            or decision.get("result_record_id") != decision_id
+            or decision.get("pending_finalization") is not None
+            or decision.get("choice") not in {"continue", "finalize"}
+        ):
+            raise ValueError(
+                "Proposal discussion prior-round decision is incomplete."
+            )
+        if decision.get("choice") == "finalize":
+            required.append(reopen_discussion_record_id(round_ordinal + 1))
+    return tuple(required)
+
+
 def permitted_proposal_discussion_record_ids(
     session: Mapping[str, Any],
-    records: Sequence[Mapping[str, Any]],
 ) -> tuple[str, ...]:
-    """Derive all public meeting records visible at one session snapshot."""
+    """Derive public meeting record IDs from authoritative session state."""
 
-    permitted = list(published_proposal_discussion_task_ids(session))
-    current_round = int(session.get("round_ordinal", 0))
-    for record in records:
-        if record.get("kind") != "reopen":
-            continue
-        reopen = parse_reopen_discussion_record_id(record.get("record_id"))
-        if reopen.round_ordinal <= current_round:
-            permitted.append(reopen.record_id)
+    permitted = [
+        *published_proposal_discussion_task_ids(session),
+        *required_proposal_discussion_reopen_record_ids(session),
+    ]
     return tuple(sorted(set(permitted), key=proposal_discussion_record_sort_key))
 
 
@@ -342,20 +379,20 @@ def proposal_discussion_reopen_source_idea_ids(
 ) -> tuple[str, ...]:
     """Return authoritative idea references for the latest visible reopening."""
 
-    permitted = set(permitted_proposal_discussion_record_ids(session, records))
-    reopen_records = [
-        record
-        for record in records
-        if record.get("kind") == "reopen" and record.get("record_id") in permitted
-    ]
-    if not reopen_records:
+    required_ids = required_proposal_discussion_reopen_record_ids(session)
+    if not required_ids:
         return ()
-    latest = max(
-        reopen_records,
-        key=lambda record: parse_reopen_discussion_record_id(
-            record.get("record_id")
-        ).round_ordinal,
-    )
+    records_by_id = {
+        str(record.get("record_id", "")).strip(): record for record in records
+    }
+    missing = [record_id for record_id in required_ids if record_id not in records_by_id]
+    if missing:
+        raise RuntimeError(
+            "Required proposal discussion records are missing: " + ", ".join(missing)
+        )
+    latest = records_by_id[required_ids[-1]]
+    if latest.get("kind") != "reopen":
+        raise RuntimeError("Required proposal discussion reopen record is invalid.")
     result = latest.get("result")
     if not isinstance(result, Mapping):
         raise ValueError("Proposal discussion reopen record result is invalid.")
@@ -821,10 +858,7 @@ def prepare_proposal_discussion_prompt(
             raise ValueError("Projected proposal discussion record already exists.")
         known_ids.add(normalized["record_id"])
         all_records.append(normalized)
-    permitted_ids = permitted_proposal_discussion_record_ids(
-        session_snapshot,
-        all_records,
-    )
+    permitted_ids = permitted_proposal_discussion_record_ids(session_snapshot)
     records_by_id = {record["record_id"]: record for record in all_records}
     missing = [record_id for record_id in permitted_ids if record_id not in records_by_id]
     if missing:
@@ -951,10 +985,9 @@ def prepare_proposal_discussion_prompt(
         live_session = dict(current_session())
         if live_session != session_snapshot:
             raise RuntimeError("Proposal discussion changed while its context was prepared.")
-        live_records = store.records()
-        if permitted_proposal_discussion_record_ids(live_session, live_records) != permitted_ids:
+        if permitted_proposal_discussion_record_ids(live_session) != permitted_ids:
             raise RuntimeError("Proposal discussion publication changed during compaction.")
-        store.ordered_records(covered_ids)
+        store.ordered_records(permitted_ids)
     if persist_cache:
         store.write_context_cache(combined_summary, covered_ids)
     return candidate_prompt

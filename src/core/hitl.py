@@ -4828,7 +4828,6 @@ class HitlRuntime:
             store = self._proposal_discussion_record_store()
             permitted = self._permitted_proposal_discussion_record_ids(
                 task_context["session"],
-                store.records(),
             )
             request = dict(payload or {})
             unexpected = set(request) - {"record_id", "offset", "limit"}
@@ -4930,7 +4929,6 @@ class HitlRuntime:
     @staticmethod
     def _permitted_proposal_discussion_record_ids(
         session: Dict[str, Any],
-        records: Iterable[Dict[str, Any]],
     ) -> List[str]:
         """Derive readable public records without treating artifacts as state."""
 
@@ -4939,9 +4937,7 @@ class HitlRuntime:
         )
 
         try:
-            return list(
-                permitted_proposal_discussion_record_ids(session, list(records))
-            )
+            return list(permitted_proposal_discussion_record_ids(session))
         except ValueError as exc:
             raise HitlValidationError(str(exc)) from exc
 
@@ -4951,10 +4947,8 @@ class HitlRuntime:
         with self._tool_lock:
             task_context = self._discussion_task_state_context()
             store = self._proposal_discussion_record_store()
-            records = store.records()
             permitted = self._permitted_proposal_discussion_record_ids(
                 task_context["session"],
-                records,
             )
             try:
                 return store.ordered_records(permitted)

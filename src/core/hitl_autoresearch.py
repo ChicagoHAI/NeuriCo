@@ -1888,10 +1888,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                     for record in records
                 }
                 record_store.ordered_records(
-                    permitted_proposal_discussion_record_ids(
-                        durable_session,
-                        records,
-                    )
+                    permitted_proposal_discussion_record_ids(durable_session)
                 )
                 for task_id, task in durable_session["tasks"].items():
                     record = records_by_id.get(task_id)
