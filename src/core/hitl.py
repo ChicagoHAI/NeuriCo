@@ -3131,6 +3131,14 @@ class HitlRuntime:
                     task_context=task_context,
                     result=normalized,
                 )
+            if (
+                task.get("pending_finalization") is None
+                and normalized.get("choice") == "finalize"
+            ):
+                self._validate_proposal_discussion_finalize_capacity(
+                    task_context=task_context,
+                    result=normalized,
+                )
             state_args = {
                 **task_context["identity"],
                 "discussion_task_id": task_context["task_id"],
@@ -4980,6 +4988,7 @@ class HitlRuntime:
         reopen_source_ideas: Sequence[Dict[str, Any]] = (),
         allow_reopen: bool = False,
         maximum_prompt_chars: Optional[int] = None,
+        record_store: Optional[Any] = None,
     ) -> None:
         """Check one projected segment using the canonical prompt budget logic."""
 
@@ -5031,9 +5040,10 @@ class HitlRuntime:
         reserve_tokens = (
             reserve_contributions * MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS
         )
+        store = record_store or self._proposal_discussion_record_store()
         for template in templates:
             prepare_proposal_discussion_prompt(
-                store=self._proposal_discussion_record_store(),
+                store=store,
                 session=projected_session,
                 prompt_template=template,
                 public_background=public_background,
@@ -5055,8 +5065,12 @@ class HitlRuntime:
     ) -> None:
         """Reject a lead continuation before it commits an over-capacity round."""
 
+        from agents.autoresearch_proposer import (
+            MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+        )
         from core.hitl_proposal_discussion import (
             project_next_proposal_discussion_response,
+            project_proposal_discussion_final_writing,
         )
 
         templates = self._tool_context.get(
@@ -5065,7 +5079,15 @@ class HitlRuntime:
         public_background = self._tool_context.get(
             "proposal_discussion_public_background"
         )
-        if not isinstance(templates, tuple) or not isinstance(public_background, dict):
+        final_template = self._tool_context.get(
+            "proposal_discussion_final_prompt_template"
+        )
+        if (
+            not isinstance(templates, tuple)
+            or not isinstance(public_background, dict)
+            or not isinstance(final_template, str)
+            or not final_template
+        ):
             raise HitlValidationError(
                 "HITL_ERROR discussion_context_unavailable\n"
                 "Runtime cannot verify another response round from this lead session. "
@@ -5085,11 +5107,70 @@ class HitlRuntime:
                 reserve_contributions=missing,
                 additional_records=additional,
             )
+            final_projected, _ = project_proposal_discussion_final_writing(projected)
+            self._require_proposal_discussion_capacity(
+                projected_session=final_projected,
+                prompt_templates=(final_template,),
+                public_background=public_background,
+                reserve_contributions=missing,
+                additional_records=additional,
+                maximum_prompt_chars=MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+            )
         except ValueError as exc:
             raise HitlValidationError(
                 "HITL_ERROR discussion_context_too_large\n"
                 "Another response round would exceed the verified meeting context budget. "
                 "Choose finalize instead."
+            ) from exc
+
+    def _validate_proposal_discussion_finalize_capacity(
+        self,
+        *,
+        task_context: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> None:
+        """Reject final writing before committing a prompt that cannot launch."""
+
+        from agents.autoresearch_proposer import (
+            MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+        )
+        from core.hitl_proposal_discussion import (
+            project_proposal_discussion_final_writing,
+        )
+
+        public_background = self._tool_context.get(
+            "proposal_discussion_public_background"
+        )
+        final_template = self._tool_context.get(
+            "proposal_discussion_final_prompt_template"
+        )
+        if (
+            not isinstance(public_background, dict)
+            or not isinstance(final_template, str)
+            or not final_template
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_unavailable\n"
+                "Runtime cannot verify formal proposal writing from this lead session."
+            )
+        try:
+            projected, additional = project_proposal_discussion_final_writing(
+                task_context["session"],
+                decision_result=result,
+            )
+            self._require_proposal_discussion_capacity(
+                projected_session=projected,
+                prompt_templates=(final_template,),
+                public_background=public_background,
+                reserve_contributions=0,
+                additional_records=additional,
+                maximum_prompt_chars=MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+            )
+        except ValueError as exc:
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_too_large\n"
+                "Formal proposal writing would exceed the verified context budget. "
+                "Shorten the final decision explanation and retry."
             ) from exc
 
     def _validate_proposal_discussion_reopen_capacity(
@@ -5167,13 +5248,19 @@ class HitlRuntime:
         prompt_template: str,
         public_background: Dict[str, Any],
         capacity_prompt_templates: Sequence[str] = (),
+        final_prompt_template: str = "",
     ) -> str:
         """Prepare bounded public meeting context for the active finite task."""
 
+        from agents.autoresearch_proposer import (
+            MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+        )
         from core.hitl_proposal_discussion import (
+            PROPOSAL_DISCUSSION_CONTEXT_MARKER,
             parse_proposal_discussion_task_id,
             prepare_proposal_discussion_prompt,
             project_initial_proposal_discussion_segment,
+            project_proposal_discussion_final_writing,
             proposal_discussion_reopen_source_idea_ids,
         )
         from core.hitl_run_control import (
@@ -5187,17 +5274,25 @@ class HitlRuntime:
             capacity_templates = tuple(
                 str(template) for template in capacity_prompt_templates
             )
+            formal_template = str(final_prompt_template)
             task_phase = str(
                 parse_proposal_discussion_task_id(task_context["task_id"]).phase
             )
-            if task_phase in {"initial", "decision"} and not capacity_templates:
+            if task_phase in {"initial", "decision"} and (
+                not capacity_templates
+                or formal_template.count(PROPOSAL_DISCUSSION_CONTEXT_MARKER) != 1
+            ):
                 raise HitlValidationError(
                     "HITL_ERROR discussion_context_unavailable\n"
-                    "Runtime cannot verify the next mandatory discussion segment."
+                    "Runtime cannot verify the next mandatory discussion segment and "
+                    "formal proposal writing."
                 )
             self._tool_context[
                 "proposal_discussion_capacity_prompt_templates"
             ] = capacity_templates
+            self._tool_context[
+                "proposal_discussion_final_prompt_template"
+            ] = formal_template
             self._tool_context["proposal_discussion_public_background"] = dict(
                 public_background
             )
@@ -5263,6 +5358,16 @@ class HitlRuntime:
                         public_background=public_background,
                         reserve_contributions=missing,
                     )
+                final_projected, _ = project_proposal_discussion_final_writing(
+                    response[0]
+                )
+                self._require_proposal_discussion_capacity(
+                    projected_session=final_projected,
+                    prompt_templates=(formal_template,),
+                    public_background=public_background,
+                    reserve_contributions=response[1],
+                    maximum_prompt_chars=MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+                )
             except ValueError as exc:
                 raise HitlProposalDiscussionCapacityError(
                     "HITL_ERROR discussion_context_too_large\n"

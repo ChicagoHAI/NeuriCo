@@ -107,6 +107,7 @@ from core.scoring_seal import (
 
 HitlCommentModeHook = Callable[..., Dict[str, Any]]
 AdditionalAgentHook = Callable[..., Dict[str, Any]]
+ProposalPromptTemplateHook = Callable[..., str]
 MAX_ACTIVE_HITL_FRONTIER_NODES = 10
 
 
@@ -2541,6 +2542,7 @@ class HitlAutoResearchController:
         proposal_mode_config: Optional[ProposalModeConfig] = None,
         additional_agent_runner: Optional[AdditionalAgentHook] = None,
         proposal_assessment_runner: Optional[Callable[..., Dict[str, Any]]] = None,
+        proposal_prompt_template_renderer: Optional[ProposalPromptTemplateHook] = None,
     ):
         self.idea = idea
         self.idea_id = idea_id
@@ -2566,6 +2568,7 @@ class HitlAutoResearchController:
         )
         self.additional_agent_runner = additional_agent_runner
         self.proposal_assessment_runner = proposal_assessment_runner
+        self.proposal_prompt_template_renderer = proposal_prompt_template_renderer
 
     def run(self, iterations: int) -> AutoResearchRunResult:
         """
@@ -4611,6 +4614,7 @@ class HitlAutoResearchController:
             self._run_collaborative_proposal_discussion_segment(
                 parent_sha=parent_sha,
                 attempt_dir=attempt_dir,
+                attempt_history=attempt_history,
             )
             outcome = self._run_proposal_admission_loop(
                 parent_sha=parent_sha,
@@ -4677,11 +4681,59 @@ class HitlAutoResearchController:
             whiteboard_boundary_sha=transfer["whiteboard_boundary_sha"],
         )
 
+    def _validate_automatic_final_writing_capacity(
+        self,
+        *,
+        session: Dict[str, Any],
+        attempt_dir: Path,
+        final_prompt_template: str,
+    ) -> None:
+        """Validate the exact formal prompt before a capped meeting advances."""
+
+        from agents.autoresearch_proposer import (
+            MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+            collect_public_proposal_context,
+        )
+        from core.hitl_proposal_discussion import (
+            ProposalDiscussionRecordStore,
+            project_proposal_discussion_final_writing,
+        )
+
+        if (
+            session.get("phase") != "response"
+            or session.get("round_ordinal") != session.get("max_response_rounds")
+        ):
+            raise RuntimeError(
+                "Automatic final-writing validation requires the completed last round."
+            )
+        projected, additional = project_proposal_discussion_final_writing(session)
+        public_background = collect_public_proposal_context(
+            self.work_dir,
+            include_attempt_history=False,
+            hitl_autoresearch_whiteboard=True,
+        )
+        try:
+            self._proposal_hitl_runtime()._require_proposal_discussion_capacity(
+                projected_session=projected,
+                prompt_templates=(final_prompt_template,),
+                public_background=public_background,
+                reserve_contributions=0,
+                additional_records=additional,
+                maximum_prompt_chars=MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+                record_store=ProposalDiscussionRecordStore(attempt_dir),
+            )
+        except ValueError as exc:
+            raise HitlTerminalRuntimeError(
+                "Formal proposal writing exceeds the verified context budget after "
+                "the final discussion round."
+            ) from exc
+
     def _run_collaborative_proposal_discussion_segment(
         self,
         *,
         parent_sha: str,
         attempt_dir: Path,
+        attempt_history: Optional[list[Dict[str, Any]]] = None,
     ) -> None:
         """Run the active bounded discussion segment to final writing."""
 
@@ -4710,6 +4762,16 @@ class HitlAutoResearchController:
                 "discussion tasks resume."
             )
         owner.require_scoped_task_session_boundary()
+        renderer = getattr(self, "proposal_prompt_template_renderer", None)
+        if renderer is None:
+            raise RuntimeError(
+                "Collaborative proposal generation requires its formal prompt renderer."
+            )
+        final_prompt_template = renderer(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            attempt_history=attempt_history or [],
+        )
         action = state.snapshot().get("next_autoresearch_action")
         if not isinstance(action, dict):
             raise RuntimeError("Collaborative proposal discussion has no preparation state.")
@@ -4750,6 +4812,7 @@ class HitlAutoResearchController:
                 boundary_validator=boundary_validator,
                 seed_idea_ids=seed_idea_ids,
                 cancel_event=cancel_event,
+                final_prompt_template=final_prompt_template,
             )
             self._require_proposal_discussion_boundary(
                 boundary_validator,
@@ -4827,6 +4890,12 @@ class HitlAutoResearchController:
                             round_ordinal=round_ordinal,
                         ),
                         seed_idea_ids=seed_idea_ids,
+                    )
+                if round_ordinal == int(session["max_response_rounds"]):
+                    self._validate_automatic_final_writing_capacity(
+                        session=refresh(),
+                        attempt_dir=attempt_dir,
+                        final_prompt_template=final_prompt_template,
                     )
                 self._require_proposal_discussion_boundary(
                     boundary_validator,
@@ -4934,6 +5003,7 @@ class HitlAutoResearchController:
         boundary_validator: Callable[[], Dict[str, Any]],
         seed_idea_ids: Sequence[str] = (),
         cancel_event: Optional[threading.Event] = None,
+        final_prompt_template: str = "",
     ) -> Dict[str, Any]:
         """Run one logical discussion task through finite replacements."""
 
@@ -4993,6 +5063,7 @@ class HitlAutoResearchController:
                                     prompt_template=prompt_template,
                                     public_background=public_background,
                                     capacity_prompt_templates=capacity_templates,
+                                    final_prompt_template=final_prompt_template,
                                 )
                             )
                         ),
@@ -6541,7 +6612,11 @@ def run_hitl_autoresearch_loop(
 
     This is the production integration point used by runner.py in Phase 6.
     """
-    from agents.autoresearch_proposer import run_autoresearch_proposer
+    from agents.autoresearch_proposer import (
+        compose_autoresearch_proposer_prompt_template,
+        generate_autoresearch_proposal_prompt,
+        run_autoresearch_proposer,
+    )
     from agents.proposal_discussion import run_proposal_discussion_task
     from agents.proposal_assessment import run_proposal_reviewer, run_proposal_verifier
     from agents.comment_handler import build_comment_handler_launch
@@ -6584,6 +6659,32 @@ def run_hitl_autoresearch_loop(
             cancel_event=cancel_event,
             output_prefix=output_prefix,
             prompt_builder=prompt_builder,
+        )
+
+    def proposal_prompt_template_renderer(
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_history: list[Dict[str, Any]],
+    ) -> str:
+        prompt = generate_autoresearch_proposal_prompt(
+            idea=idea,
+            work_dir=work_dir,
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            templates_dir=Path(templates_dir),
+            provider=provider,
+            attempt_history=attempt_history,
+            hitl_idea_reporting=True,
+            hitl_submission=True,
+            hitl_autoresearch_whiteboard=True,
+            hitl_mode=normalize_hitl_mode(hitl_mode).value,
+            candidate_recording=False,
+        )
+        return compose_autoresearch_proposer_prompt_template(
+            prompt,
+            "",
+            include_discussion_context=True,
         )
 
     def hitl_comment_mode(
@@ -6715,5 +6816,6 @@ def run_hitl_autoresearch_loop(
         proposal_mode_config=selected_proposal_mode,
         additional_agent_runner=additional_agent_runner,
         proposal_assessment_runner=proposal_assessment_runner,
+        proposal_prompt_template_renderer=proposal_prompt_template_renderer,
     )
     return controller.run(iterations=iterations)

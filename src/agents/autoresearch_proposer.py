@@ -61,6 +61,25 @@ class AutoResearchProposerPromptTooLargeError(RuntimeError):
     """Raised before provider launch when a proposer prompt is not safely bounded."""
 
 
+def compose_autoresearch_proposer_prompt_template(
+    prompt: str,
+    prompt_suffix: str,
+    *,
+    include_discussion_context: bool,
+) -> str:
+    """Compose the exact runtime template used before meeting context insertion."""
+
+    prepared = str(prompt)
+    if include_discussion_context:
+        from core.hitl_proposal_discussion import PROPOSAL_DISCUSSION_CONTEXT_MARKER
+
+        prepared = append_prompt_block(
+            prepared,
+            PROPOSAL_DISCUSSION_CONTEXT_MARKER,
+        )
+    return append_prompt_block(prepared, prompt_suffix)
+
+
 def _generate_compute_backend_section(idea_spec: Dict[str, Any], provider: str = "claude") -> str:
     """Return proposer-only backend constraints for explicit remote backends."""
     backend = get_runtime_compute_backend(idea_spec)
@@ -337,17 +356,13 @@ def run_autoresearch_proposer(
         hitl_mode=str((env_extra or {}).get("NEURICO_HITL_MODE", "full")),
         candidate_recording=candidate_recording,
     )
-    if prompt_builder is None:
-        prompt = append_prompt_block(prompt, prompt_suffix)
-    else:
-        from core.hitl_proposal_discussion import PROPOSAL_DISCUSSION_CONTEXT_MARKER
-
-        prompt_template = append_prompt_block(
-            prompt,
-            PROPOSAL_DISCUSSION_CONTEXT_MARKER,
-        )
-        prompt_template = append_prompt_block(prompt_template, prompt_suffix)
-        prompt = prompt_builder(prompt_template)
+    prompt = compose_autoresearch_proposer_prompt_template(
+        prompt,
+        prompt_suffix,
+        include_discussion_context=prompt_builder is not None,
+    )
+    if prompt_builder is not None:
+        prompt = prompt_builder(prompt)
     if len(prompt) > MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS:
         raise AutoResearchProposerPromptTooLargeError(
             "AutoResearch proposer prompt exceeds NeuriCo's safe internal limit after "

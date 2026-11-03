@@ -526,6 +526,54 @@ def project_next_proposal_discussion_response(
     return projected, missing, additional_records
 
 
+def project_proposal_discussion_final_writing(
+    session: Mapping[str, Any],
+    *,
+    decision_result: Optional[Mapping[str, Any]] = None,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+    """Project final-writing ownership without changing durable discussion state."""
+
+    projected = json.loads(json.dumps(dict(session)))
+    phase = projected.get("phase")
+    round_ordinal = projected.get("round_ordinal")
+    if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
+        raise ValueError("Proposal discussion round must be an integer.")
+    tasks = projected.get("tasks")
+    if not isinstance(tasks, dict):
+        raise ValueError("Proposal discussion tasks must be an object.")
+
+    additional_records: tuple[dict[str, Any], ...] = ()
+    if decision_result is not None:
+        if phase != "decision":
+            raise ValueError("Discussion finalization requires the lead decision phase.")
+        decision_id = proposal_discussion_task_id(
+            "decision",
+            participant_ordinal=1,
+            round_ordinal=round_ordinal,
+        )
+        normalized = normalize_proposal_discussion_record(
+            decision_id,
+            "decision",
+            decision_result,
+        )
+        if normalized["result"].get("choice") != "finalize":
+            raise ValueError("Discussion finalization requires a finalize decision.")
+        task = tasks.get(decision_id)
+        if not isinstance(task, dict) or task.get("kind") != "decision":
+            raise ValueError("Proposal discussion decision task is missing.")
+        task["result_record_id"] = decision_id
+        task["choice"] = "finalize"
+        task.pop("pending_finalization", None)
+        additional_records = (normalized,)
+    elif phase != "response":
+        raise ValueError(
+            "Automatic final writing requires a proposal discussion response phase."
+        )
+
+    projected["phase"] = "final_writing"
+    return projected, additional_records
+
+
 def protected_proposal_discussion_record_ids(
     session: Mapping[str, Any],
     permitted_record_ids: Sequence[str],
