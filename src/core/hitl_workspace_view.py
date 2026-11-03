@@ -315,13 +315,6 @@ class HitlWorkspaceView:
 
         stage = str(round_state.get("stage", "")).strip()
         stages = {
-            "proposing": (
-                "proposer",
-                int(config.proposer_count or 0),
-                "Generating proposals",
-                "Independent proposers are developing candidate experiments.",
-                "Verification begins after every proposal is complete.",
-            ),
             "verifying": (
                 "verifier",
                 int(config.proposer_count or 0),
@@ -337,15 +330,46 @@ class HitlWorkspaceView:
                 "The rankings are aggregated after every review is complete.",
             ),
         }
-        if stage in stages:
-            role, total, label, detail, next_step = stages[stage]
-            completed = sum(
+
+        def completed_for_role(role: str) -> int:
+            return sum(
                 1
                 for task in tasks.values()
                 if isinstance(task, dict)
                 and task.get("role") == role
                 and bool(str(task.get("result_idea_id") or "").strip())
             )
+
+        if stage == "proposing":
+            total = int(config.proposer_count or 0)
+            completed = completed_for_role("proposer")
+            verification_started = any(
+                isinstance(task, dict) and task.get("role") == "verifier"
+                for task in tasks.values()
+            )
+            if verification_started:
+                verified = completed_for_role("verifier")
+                label = "Generating and verifying proposals"
+                phase_label = (
+                    f"Proposals ({completed}/{total}) · "
+                    f"Verifications ({verified}/{total})"
+                )
+                detail = (
+                    "Completed proposals are verified immediately; proposal generation "
+                    "and verification may overlap."
+                )
+                next_step = (
+                    "Ranking begins after every proposal and verification is complete."
+                )
+            else:
+                label = "Generating proposals"
+                phase_label = f"{label} ({completed}/{total})"
+                detail = "Independent proposers are developing candidate experiments."
+                next_step = "Each completed proposal enters verification immediately."
+        elif stage in stages:
+            role, total, label, detail, next_step = stages[stage]
+            completed = completed_for_role(role)
+            phase_label = f"{label} ({completed}/{total})"
         elif stage == "manager_selection":
             total = 1
             completed = 1 if isinstance(round_state.get("selection"), dict) else 0
@@ -356,11 +380,13 @@ class HitlWorkspaceView:
                 else "The manager is selecting from the aggregated ranking."
             )
             next_step = "The selected proposal enters the existing admission path."
+            phase_label = f"{label} ({completed}/{total})"
         elif stage == "selected":
             total = completed = 1
             label = "Proposal selected"
             detail = "The selected proposal is entering the existing admission path."
             next_step = "The existing proposal workflow continues automatically."
+            phase_label = f"{label} ({completed}/{total})"
         else:
             raise HitlWorkspaceViewError(
                 f"Ranked proposal round has an invalid stage: {stage or '<missing>'}."
@@ -375,7 +401,7 @@ class HitlWorkspaceView:
                 "total": total,
             },
             "title": label,
-            "phase_label": f"{label} ({completed}/{total})",
+            "phase_label": phase_label,
             "detail": detail,
             "next_action": next_step,
         }
