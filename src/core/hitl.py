@@ -2182,10 +2182,19 @@ class HitlRuntime:
             raised_idea,
             provenance=self._tool_context.get("provenance"),
         )
+        result = self._normalize_raised_resolution(logged)
+        self._raised_idea_results[request_key] = dict(result)
+        return result
+
+    def _normalize_raised_resolution(
+        self,
+        resolution: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Convert a manager raised-idea resolution into a worker continuation."""
         feedback = str(
-            logged.get("manager_feedback")
-            or logged.get("human_feedback")
-            or logged.get("decision")
+            resolution.get("manager_feedback")
+            or resolution.get("human_feedback")
+            or resolution.get("decision")
             or ""
         ).strip()
         hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
@@ -2207,14 +2216,12 @@ class HitlRuntime:
             hitl_stage=hitl_stage,
             status="running",
         )
-        result = {
-            "idea_id": logged.get("idea_id"),
-            "decision": logged.get("decision", ""),
+        return {
+            "idea_id": resolution.get("idea_id"),
+            "decision": resolution.get("decision", ""),
             "feedback": feedback,
             "prompt_block": prompt_block,
         }
-        self._raised_idea_results[request_key] = dict(result)
-        return result
 
     def log_frontier_decision(
         self,
@@ -3079,6 +3086,8 @@ class HitlRuntime:
             response = pending.get("response")
             if not isinstance(response, dict):
                 raise HitlValidationError("Resolved HITL worker request has no runtime response.")
+            if kind == "raised_idea":
+                return self._normalize_raised_resolution(response)
             if (
                 kind == "phase_finish"
                 and str(response.get("status", "")).strip() == "feedback"

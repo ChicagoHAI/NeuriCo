@@ -47,6 +47,8 @@ def worker_command_requires_resume(command: Any) -> bool:
     response = command.get("response")
     if not isinstance(response, dict):
         return False
+    if command.get("kind") == "raised_idea":
+        return bool(str(response.get("manager_feedback", "")).strip())
     return (
         str(response.get("status", "")).strip() == "feedback"
         and not bool(response.get("final"))
