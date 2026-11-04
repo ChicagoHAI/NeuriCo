@@ -305,17 +305,24 @@ class HitlTerminalUI:
         context = str(idea.get("context", "")).strip()
         if idea_type == "decision":
             selected = str(idea.get("decision", "")).strip()
-            for option in idea.get("options") or []:
-                if isinstance(option, str):
-                    option_id = option_text = option
-                elif isinstance(option, dict):
-                    option_id = str(option.get("option_id", "")).strip()
-                    option_text = str(option.get("text", "")).strip()
-                else:
-                    continue
-                if selected in {option_id, option_text}:
-                    selected = option_text or selected
-                    break
+            if selected == "CUSTOM":
+                selected = (
+                    str(idea.get("human_feedback", "")).strip()
+                    or str(idea.get("manager_feedback", "")).strip()
+                    or selected
+                )
+            else:
+                for option in idea.get("options") or []:
+                    if isinstance(option, str):
+                        option_id = option_text = option
+                    elif isinstance(option, dict):
+                        option_id = str(option.get("option_id", "")).strip()
+                        option_text = str(option.get("text", "")).strip()
+                    else:
+                        continue
+                    if selected in {option_id, option_text}:
+                        selected = option_text or selected
+                        break
             section("Decision", selected or idea.get("decision_needed") or context)
             question = str(idea.get("decision_needed", "")).strip()
             if question and question != selected:

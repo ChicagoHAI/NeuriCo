@@ -990,7 +990,18 @@
     drawGraph(main, entries, "Node", [["#76cbb1", "selected"], ["#8eb9e9", "frontier"], ["#71807b", "retained"], ["#e88e7c", "rejected attempt"]]);
   }
   function renderWhiteboard(main) { title(main, "Whiteboard"); const tips = state.snapshot?.whiteboard?.tips || []; if (!tips.length) { main.append(q("p", { class: "empty", text: "No cross-attempt notes recorded." })); return; } tips.forEach((tip) => main.append(q("section", { class: "section whiteboard-tip" }, [q("h2", { text: `${tip.id} ${tip.status || "active"} ${tip.category || "note"}` }), md(tip.content), ...(tip.affects?.length ? [q("div", { class: "artifact-inline", text: tip.affects.join(" · ") })] : [])]))); }
-  function optionText(record) { const choice = String(record?.decision || "").trim(); const selected = (record?.options || []).find((option) => { const id = typeof option === "string" ? option : option.option_id; const text = typeof option === "string" ? option : option.text; return choice && (choice === id || choice === text); }); return typeof selected === "string" ? selected : selected?.text || ""; }
+  function optionText(record) {
+    const choice = String(record?.decision || "").trim();
+    if (choice === "CUSTOM") {
+      return String(record?.human_feedback || record?.manager_feedback || choice).trim();
+    }
+    const selected = (record?.options || []).find((option) => {
+      const id = typeof option === "string" ? option : option.option_id;
+      const text = typeof option === "string" ? option : option.text;
+      return choice && (choice === id || choice === text);
+    });
+    return typeof selected === "string" ? selected : selected?.text || "";
+  }
   function formatActivityTime(value) { const date = new Date(value); if (Number.isNaN(date.getTime())) return String(value || "").replace("T", " ").replace("Z", ""); return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date).replace(",", " at"); }
   function activityMeta(entry) { const r = entry.record || {}; if (entry.kind === "idea") return `${r.idea_id || ""} ${r.idea_type || "idea"} - Level ${r.level || "?"}`.trim(); if (entry.kind === "attempt") return `${shortSha(r.node_sha)} from ${shortSha(r.parent_node_sha)}`; if (entry.kind === "node") return `${shortSha(r.node_sha)}${r.selected ? " - selected" : r.active ? " - active" : ""}`; return `${r.id || "tip"} ${r.category || "note"}`; }
   function activitySummary(entry) { const r = entry.record || {}; if (entry.kind === "idea") { if (r.idea_type === "decision") return optionText(r) || r.decision_needed || r.context || "Decision recorded."; return r.evidence || r.proposal || r.context || "Finalized idea."; } return entry.kind === "attempt" ? r.reason_for_acceptance || r.reason_for_rejection || r.proposal_idea_id || "AutoResearch attempt." : entry.kind === "node" ? r.reason_for_acceptance || "Frontier node retained." : r.content || "Whiteboard update."; }
