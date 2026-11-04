@@ -4343,7 +4343,9 @@ class HitlRuntime:
                             200,
                             {
                                 "ok": True,
-                                "status": result.get("status"),
+                                "status": result.get("status") or "",
+                                "idea_id": result.get("idea_id") or "",
+                                "decision": result.get("decision") or "",
                                 "feedback": result.get("feedback", ""),
                                 "next_phase": result.get("next_phase", ""),
                                 "instruction": result.get("instruction", ""),

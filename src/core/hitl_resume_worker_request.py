@@ -19,10 +19,16 @@ def main(argv: List[str] | None = None) -> int:
     except HitlToolClientError as exc:
         return fail("hitl-resume-worker-request", exc)
 
-    status = str(response.get("status", "")).strip()
+    status = str(response.get("status") or "").strip()
+    idea_id = str(response.get("idea_id") or "").strip()
+    decision = str(response.get("decision") or "").strip()
     print("HITL_WORKER_REQUEST_RESUMED")
     if status:
         print(f"status: {status}")
+    if idea_id:
+        print(f"idea_id: {idea_id}")
+    if decision:
+        print(f"decision: {decision}")
     if response.get("feedback"):
         print("feedback:")
         print(str(response["feedback"]).strip())
