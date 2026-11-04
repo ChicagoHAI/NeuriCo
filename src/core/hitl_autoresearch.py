@@ -4566,6 +4566,88 @@ class HitlAutoResearchController:
             max_response_rounds=int(config.discussion_rounds),
         )
 
+    def _begin_or_resume_planning_discussion(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        admitted_proposal_idea_id: str,
+    ) -> Dict[str, Any]:
+        """Commit the post-admission planning boundary, or resume that session."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+        ):
+            raise RuntimeError(
+                "Collaborative planning requires its resolved proposal preparation."
+            )
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        existing = action.get("planning_discussion")
+        if existing is not None:
+            return state.planning_discussion_snapshot(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+            )
+
+        owner = self._proposal_hitl_runtime()
+        owner.require_scoped_task_session_boundary()
+        proposal_id = str(admitted_proposal_idea_id).strip()
+        proposal_record = next(
+            (
+                record
+                for record in owner.log.records()
+                if record.get("idea_id") == proposal_id
+            ),
+            None,
+        )
+        if (
+            not isinstance(proposal_record, dict)
+            or proposal_record.get("idea_type") != "proposal"
+            or proposal_record.get("parent_node_id") != parent_sha
+            or proposal_record.get("attempt_id") != attempt_dir.name
+        ):
+            raise RuntimeError(
+                "Collaborative planning requires the admitted proposal record for this attempt."
+            )
+
+        scope = action.get("workspace_fingerprint_scope")
+        workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=scope,
+        )
+        git_state = HitlGitStateStore(self.work_dir)
+        whiteboard_boundary_sha = git_state.hitl_autoresearch_whiteboard_history_sha()
+        if not git_state.hitl_autoresearch_whiteboard_matches_commit(
+            whiteboard_boundary_sha
+        ):
+            raise RuntimeError(
+                "Collaborative planning does not match its current whiteboard boundary."
+            )
+        idea_numbers = [
+            int(idea_id[1:])
+            for record in owner.log.records()
+            if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+            and idea_id[1:].isdigit()
+        ]
+        return state.begin_planning_discussion(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+            admitted_proposal_idea_id=proposal_id,
+            workspace_fingerprint=workspace_fingerprint,
+            workspace_fingerprint_scope=scope,
+            whiteboard_boundary_sha=whiteboard_boundary_sha,
+            base_idea_number=max(idea_numbers, default=0),
+        )
+
     def _capture_proposal_discussion_boundary(
         self,
         *,

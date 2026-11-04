@@ -19,6 +19,10 @@ from core.hitl_planning_mode import (
     PENDING_PLANNING_POLICY_FIELD,
     normalize_pending_planning_policy,
 )
+from core.hitl_planning_discussion import (
+    new_planning_discussion,
+    validate_initial_planning_discussion_shape,
+)
 from core.hitl_proposal_discussion import (
     PROPOSAL_DISCUSSION_SCHEMA_VERSION,
     normalize_proposal_discussion_record,
@@ -1604,11 +1608,15 @@ class HitlRuntimeState:
         return parent, preparation, candidate
 
     @staticmethod
-    def _normalized_whiteboard_boundary_sha(value: Any) -> str:
+    def _normalized_whiteboard_boundary_sha(
+        value: Any,
+        *,
+        subject: str = "Proposal discussion",
+    ) -> str:
         normalized = str(value).strip()
         if _FULL_GIT_SHA.fullmatch(normalized) is None:
             raise HitlRuntimeStateError(
-                "Proposal discussion whiteboard boundary must be a full lowercase commit SHA"
+                f"{subject} whiteboard boundary must be a full lowercase commit SHA"
             )
         return normalized
 
@@ -2787,6 +2795,268 @@ class HitlRuntimeState:
             self._state["worker_continuation"] = None
             self._state["next_autoresearch_action"] = action
             self._save_unlocked()
+            return self._copy(session)
+
+    @staticmethod
+    def _planning_discussion_identity(
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+    ) -> tuple[str, str, str]:
+        parent = str(parent_node_sha).strip()
+        preparation = str(preparation_attempt_id).strip()
+        candidate = str(candidate_attempt_id).strip()
+        if not parent or not preparation:
+            raise HitlRuntimeStateError(
+                "Planning discussion requires parent and preparation identity"
+            )
+        if _LOCAL_ATTEMPT_ID.fullmatch(candidate) is None:
+            raise HitlRuntimeStateError(
+                "Planning discussion candidate_attempt_id must be the local attempt_N component"
+            )
+        return parent, preparation, candidate
+
+    @staticmethod
+    def _require_terminal_proposal_for_planning(
+        action: Dict[str, Any],
+        *,
+        candidate_attempt_id: str,
+        admitted_proposal_idea_id: str,
+    ) -> None:
+        proposal_round = action.get("proposal_round")
+        proposal_discussion = action.get("proposal_discussion")
+        if proposal_round is not None and proposal_discussion is not None:
+            raise HitlRuntimeStateError(
+                "Proposal preparation cannot own ranked and collaborative state together"
+            )
+        if proposal_round is not None:
+            round_state = HitlRuntimeState._validate_proposal_round_shape(proposal_round)
+            selection = round_state.get("selection")
+            if (
+                round_state.get("candidate_attempt_id") != candidate_attempt_id
+                or round_state.get("stage") != "selected"
+                or not isinstance(selection, dict)
+                or selection.get("choice") != "select"
+                or selection.get("proposal_idea_id") != admitted_proposal_idea_id
+            ):
+                raise HitlRuntimeStateError(
+                    "Planning discussion requires the admitted ranked proposal selection"
+                )
+            return
+        if proposal_discussion is not None:
+            discussion = HitlRuntimeState._validate_proposal_discussion_shape(
+                proposal_discussion
+            )
+            if (
+                discussion.get("candidate_attempt_id") != candidate_attempt_id
+                or discussion.get("phase") != "final_writing"
+            ):
+                raise HitlRuntimeStateError(
+                    "Planning discussion requires terminal collaborative proposal state"
+                )
+
+    def _require_approved_proposal_handoff_unlocked(
+        self,
+        *,
+        action: Dict[str, Any],
+        candidate_attempt_id: str,
+        admitted_proposal_idea_id: str,
+    ) -> None:
+        command = self._state.get("pending_worker_command")
+        response = command.get("response") if isinstance(command, dict) else None
+        continuation = self._state.get("worker_continuation")
+        if (
+            not isinstance(command, dict)
+            or command.get("kind") != "proposal"
+            or command.get("pipeline_stage") != "experiment_runner"
+            or command.get("status") != "resolved"
+            or command.get("proposal_idea_id") != admitted_proposal_idea_id
+            or not isinstance(response, dict)
+            or response.get("status") != "approved"
+            or isinstance(continuation, dict)
+        ):
+            raise HitlRuntimeStateError(
+                "Planning discussion requires a settled approved proposal request"
+            )
+        request_attempt = str(command.get("candidate_attempt_id", "")).strip()
+        if request_attempt and request_attempt != candidate_attempt_id:
+            raise HitlRuntimeStateError(
+                "Approved proposal request belongs to a different candidate attempt"
+            )
+        proposal_round = action.get("proposal_round")
+        if isinstance(proposal_round, dict):
+            selection = proposal_round.get("selection")
+            if (
+                not isinstance(selection, dict)
+                or command.get("manager_selection_decision_idea_id")
+                != selection.get("decision_idea_id")
+            ):
+                raise HitlRuntimeStateError(
+                    "Approved ranked proposal request does not match its selection decision"
+                )
+
+    def _planning_discussion_unlocked(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        parent, preparation, candidate = self._planning_discussion_identity(
+            parent_node_sha=parent_node_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=candidate_attempt_id,
+        )
+        action = self._proposal_preparation_unlocked(
+            parent_node_sha=parent,
+            preparation_attempt_id=preparation,
+        )
+        try:
+            session = validate_initial_planning_discussion_shape(
+                action.get("planning_discussion")
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        if session.get("candidate_attempt_id") != candidate:
+            raise HitlRuntimeStateError("Planning discussion identity is stale")
+        if action.get(PENDING_PLANNING_POLICY_FIELD) is not None:
+            raise HitlRuntimeStateError(
+                "Planning policy cannot remain pending after session creation"
+            )
+        return action, session
+
+    def begin_planning_discussion(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        admitted_proposal_idea_id: str,
+        workspace_fingerprint: str,
+        workspace_fingerprint_scope: Optional[Dict[str, Any]],
+        whiteboard_boundary_sha: str,
+        base_idea_number: int,
+    ) -> Dict[str, Any]:
+        """Commit one planning session after the proposal handoff has settled."""
+
+        parent, preparation, candidate = self._planning_discussion_identity(
+            parent_node_sha=parent_node_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=candidate_attempt_id,
+        )
+        proposal_id = str(admitted_proposal_idea_id).strip()
+        if _IDEA_ID.fullmatch(proposal_id) is None:
+            raise HitlRuntimeStateError(
+                "Planning discussion requires an admitted proposal idea ID"
+            )
+        fingerprint = str(workspace_fingerprint).strip()
+        if not fingerprint:
+            raise HitlRuntimeStateError(
+                "Planning discussion requires a workspace fingerprint"
+            )
+        if workspace_fingerprint_scope is None:
+            fingerprint_scope = None
+        else:
+            from core.hitl_workspace_guard import WorkspaceGuardScope
+
+            try:
+                fingerprint_scope = WorkspaceGuardScope.from_value(
+                    workspace_fingerprint_scope
+                ).to_dict()
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+        whiteboard_sha = self._normalized_whiteboard_boundary_sha(
+            whiteboard_boundary_sha,
+            subject="Planning discussion",
+        )
+        if (
+            isinstance(base_idea_number, bool)
+            or not isinstance(base_idea_number, int)
+            or base_idea_number < int(proposal_id[1:])
+        ):
+            raise HitlRuntimeStateError(
+                "Planning discussion idea boundary must include the admitted proposal"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._proposal_preparation_unlocked(
+                parent_node_sha=parent,
+                preparation_attempt_id=preparation,
+            )
+            existing = action.get("planning_discussion")
+            if existing is not None:
+                try:
+                    session = validate_initial_planning_discussion_shape(existing)
+                except ValueError as exc:
+                    raise HitlRuntimeStateError(str(exc)) from exc
+                expected = {
+                    "candidate_attempt_id": candidate,
+                    "admitted_proposal_idea_id": proposal_id,
+                    "workspace_fingerprint": fingerprint,
+                    "workspace_fingerprint_scope": fingerprint_scope,
+                    "whiteboard_boundary_sha": whiteboard_sha,
+                    "base_idea_number": base_idea_number,
+                }
+                if all(session.get(key) == value for key, value in expected.items()):
+                    return self._copy(session)
+                raise HitlRuntimeStateError(
+                    "Proposal preparation already owns a different planning discussion"
+                )
+            policy = self._proposal_preparation_planning_policy(action)
+            if policy is None:
+                raise HitlRuntimeStateError(
+                    "Proposal preparation has no collaborative planning policy"
+                )
+            outer_scope = action.get("workspace_fingerprint_scope")
+            if outer_scope != fingerprint_scope:
+                raise HitlRuntimeStateError(
+                    "Planning discussion workspace scope changed after preparation"
+                )
+            self._require_terminal_proposal_for_planning(
+                action,
+                candidate_attempt_id=candidate,
+                admitted_proposal_idea_id=proposal_id,
+            )
+            self._require_approved_proposal_handoff_unlocked(
+                action=action,
+                candidate_attempt_id=candidate,
+                admitted_proposal_idea_id=proposal_id,
+            )
+            session = new_planning_discussion(
+                candidate_attempt_id=candidate,
+                admitted_proposal_idea_id=proposal_id,
+                participant_count=int(policy["participant_count"]),
+                max_response_rounds=int(policy["discussion_rounds"]),
+                workspace_fingerprint=fingerprint,
+                workspace_fingerprint_scope=fingerprint_scope,
+                whiteboard_boundary_sha=whiteboard_sha,
+                base_idea_number=base_idea_number,
+            )
+            try:
+                validate_initial_planning_discussion_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            action["planning_discussion"] = session
+            action.pop(PENDING_PLANNING_POLICY_FIELD, None)
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
+
+    def planning_discussion_snapshot(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            _action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
             return self._copy(session)
 
     @staticmethod
