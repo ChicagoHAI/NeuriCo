@@ -53,6 +53,12 @@ from core.compute_backend import (
     without_runtime_compute_backend,
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
+from core.hitl_planning_mode import (
+    COLLABORATIVE_PLANNING_MODE,
+    PlanningModeConfig,
+    normalize_planning_mode_config,
+    require_managed_autoresearch_planning_mode,
+)
 from core.hitl_proposal_round import (
     ProposalModeConfig,
     normalize_proposal_mode_config,
@@ -405,6 +411,7 @@ class ResearchRunner:
         hitl_mode: str = "full",
         hitl_work_dir: Optional[Path] = None,
         proposal_mode_config: Optional[ProposalModeConfig] = None,
+        planning_mode_config: Optional[PlanningModeConfig] = None,
         time_limit_seconds: Optional[int] = None,
         workspace_mode: Optional[str] = None,
         _hitl_host_scope: Optional[ExitStack] = None,
@@ -441,6 +448,8 @@ class ResearchRunner:
                 Internal to managed execution; GitHub publication cannot replace it.
             proposal_mode_config: Normalized proposal-generation policy for managed
                 HITL AutoResearch. Internal to managed execution.
+            planning_mode_config: Normalized planning policy for managed HITL
+                AutoResearch. Internal to managed execution.
             workspace_mode: Optional dependency-layout selection. ``native`` keeps
                 the historical root project; ``embedded`` isolates NeuriCo-owned
                 dependencies from an externally owned workspace root.
@@ -485,6 +494,16 @@ class ResearchRunner:
                 hitl_autoresearch or hitl_continue_autoresearch
             ),
         )
+        selected_planning_mode = require_managed_autoresearch_planning_mode(
+            normalize_planning_mode_config(planning_mode_config),
+            managed_autoresearch=bool(
+                hitl_autoresearch or hitl_continue_autoresearch
+            ),
+        )
+        if selected_planning_mode.mode == COLLABORATIVE_PLANNING_MODE:
+            raise RuntimeError(
+                "Collaborative planning mode is not available until its runtime is installed."
+            )
         if hitl_work_dir is not None and not hitl:
             raise ValueError("hitl_work_dir is valid only with a managed research entry mode.")
         selected_hitl_mode = normalize_hitl_mode(hitl_mode)
@@ -1086,6 +1105,7 @@ class ResearchRunner:
                         recovered_attempt=recovered_hitl_attempt,
                         hitl_mode=selected_hitl_mode,
                         proposal_mode_config=selected_proposal_mode,
+                        planning_mode_config=selected_planning_mode,
                     )
                 else:
                     from core.autoresearch import continue_from_current_best
@@ -1343,6 +1363,7 @@ class ResearchRunner:
                                 manager_config=hitl_host.manager.config,
                                 hitl_mode=selected_hitl_mode,
                                 proposal_mode_config=selected_proposal_mode,
+                                planning_mode_config=selected_planning_mode,
                             )
                         else:
                             autoresearch_result = continue_from_current_best(**continuation_args)

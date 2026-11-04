@@ -70,6 +70,10 @@ from core.hitl_paths import (
     hitl_stop_request_path,
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
+from core.hitl_planning_mode import (
+    PlanningModeConfig,
+    normalize_planning_mode_config,
+)
 from core.hitl_proposal_round import (
     COLLABORATIVE_PROPOSAL_MODE,
     INDEPENDENT_RANKED_PROPOSAL_MODE,
@@ -2379,6 +2383,7 @@ def continue_hitl_autoresearch(
     recovered_attempt: Optional[HitlRecoveryResult] = None,
     hitl_mode: HitlMode | str = HitlMode.FULL,
     proposal_mode_config: Optional[ProposalModeConfig] = None,
+    planning_mode_config: Optional[PlanningModeConfig] = None,
 ) -> Dict[str, Any]:
     """Continue only from the runtime-selected HITL frontier node."""
     print()
@@ -2394,6 +2399,7 @@ def continue_hitl_autoresearch(
     recovery = recovered_attempt or recover_interrupted_hitl_attempt_if_needed(work_dir)
     selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
     selected_proposal_mode = normalize_proposal_mode_config(proposal_mode_config)
+    selected_planning_mode = normalize_planning_mode_config(planning_mode_config)
     pending_worker_request = bool(
         recovery and recovery.recovery_classification == "pending_worker_request"
     )
@@ -2509,6 +2515,7 @@ def continue_hitl_autoresearch(
         else None,
         hitl_mode=selected_hitl_mode,
         proposal_mode_config=selected_proposal_mode,
+        planning_mode_config=selected_planning_mode,
     )
     payload = autoresearch_result_payload(result)
     payload["initial_sha"] = lineage_source_sha
@@ -2549,6 +2556,7 @@ class HitlAutoResearchController:
         pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
         proposal_mode_config: Optional[ProposalModeConfig] = None,
+        planning_mode_config: Optional[PlanningModeConfig] = None,
         additional_agent_runner: Optional[AdditionalAgentHook] = None,
         proposal_assessment_runner: Optional[Callable[..., Dict[str, Any]]] = None,
         proposal_prompt_template_renderer: Optional[ProposalPromptTemplateHook] = None,
@@ -2574,6 +2582,9 @@ class HitlAutoResearchController:
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
         self.proposal_mode_config = normalize_proposal_mode_config(
             proposal_mode_config
+        )
+        self.planning_mode_config = normalize_planning_mode_config(
+            planning_mode_config
         )
         self.additional_agent_runner = additional_agent_runner
         self.proposal_assessment_runner = proposal_assessment_runner
@@ -6615,6 +6626,7 @@ def run_hitl_autoresearch_loop(
     pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
     hitl_mode: HitlMode | str = HitlMode.FULL,
     proposal_mode_config: Optional[ProposalModeConfig] = None,
+    planning_mode_config: Optional[PlanningModeConfig] = None,
 ) -> AutoResearchRunResult:
     """
     Run AutoResearch with NeuriCo's real proposer, comment handler, and scorer.
@@ -6634,6 +6646,7 @@ def run_hitl_autoresearch_loop(
 
     work_dir = Path(work_dir)
     selected_proposal_mode = normalize_proposal_mode_config(proposal_mode_config)
+    selected_planning_mode = normalize_planning_mode_config(planning_mode_config)
     if templates_dir is None:
         templates_dir = Path(__file__).parent.parent.parent / "templates"
 
@@ -6823,6 +6836,7 @@ def run_hitl_autoresearch_loop(
         pending_hitl_recovery=pending_hitl_recovery,
         hitl_mode=hitl_mode,
         proposal_mode_config=selected_proposal_mode,
+        planning_mode_config=selected_planning_mode,
         additional_agent_runner=additional_agent_runner,
         proposal_assessment_runner=proposal_assessment_runner,
         proposal_prompt_template_renderer=proposal_prompt_template_renderer,
