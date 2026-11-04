@@ -43,6 +43,7 @@ from core.hitl import (
     HitlIdeaLog,
     HitlRuntime,
     _load_hitl_template,
+    _runtime_provenance,
     log_frontier_decision_record,
     validate_required_artifact_contract,
 )
@@ -1742,6 +1743,64 @@ def finalize_previous_budget_exhaustion_if_needed(
     return result
 
 
+def _pending_request_provenance_for_recovery(
+    pending_request: Any,
+    continuation: Any,
+    preparation_action: Any,
+) -> Dict[str, Any]:
+    """Read command provenance, with a bounded fallback for legacy raised ideas."""
+    if not isinstance(pending_request, dict):
+        return {}
+    if "provenance" in pending_request:
+        return dict(pending_request.get("provenance") or {})
+    if pending_request.get("kind") != "raised_idea":
+        return {}
+    raised_idea = pending_request.get("raised_idea")
+    if not isinstance(raised_idea, dict):
+        return {}
+
+    provenance: Dict[str, Any] = _runtime_provenance(raised_idea)
+    continuation_provenance = (
+        dict(continuation.get("provenance") or {})
+        if isinstance(continuation, dict)
+        else {}
+    )
+    proposal_idea_id = str(
+        continuation_provenance.get("proposal_idea_id", "")
+    ).strip()
+    premises = {
+        str(value).strip()
+        for value in raised_idea.get("premises") or []
+        if str(value).strip()
+    }
+    if proposal_idea_id and proposal_idea_id in premises:
+        provenance["proposal_idea_id"] = proposal_idea_id
+
+    if pending_request.get("pipeline_stage") == "resource_finder":
+        decision = (
+            preparation_action.get("decision")
+            if isinstance(preparation_action, dict)
+            else None
+        )
+        continuation_ordinal = str(
+            continuation_provenance.get("additional_agent_ordinal", "")
+        ).strip()
+        action_ordinal = str(
+            preparation_action.get("additional_agent_ordinal", "")
+            if isinstance(preparation_action, dict)
+            else ""
+        ).strip()
+        if (
+            isinstance(decision, dict)
+            and decision.get("choice") == "call_additional_agent"
+            and decision.get("agent") == "resource_finder"
+            and continuation_ordinal
+            and continuation_ordinal == action_ordinal
+        ):
+            provenance["additional_agent_ordinal"] = continuation_ordinal
+    return provenance
+
+
 def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlRecoveryResult]:
     """Recover a leftover HITL AutoResearch attempt before clean-workspace validation."""
     work_dir = Path(work_dir)
@@ -1817,10 +1876,10 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         if isinstance(continuation, dict)
         else {}
     )
-    pending_provenance = (
-        dict(pending_request.get("provenance") or {})
-        if isinstance(pending_request, dict)
-        else {}
+    pending_provenance = _pending_request_provenance_for_recovery(
+        pending_request,
+        continuation,
+        preparation_action,
     )
     dynamic_agent_request = (
         isinstance(pending_request, dict)
