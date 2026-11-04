@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from core.hitl_discussion import (
     DiscussionRecordStore,
+    discussion_record_sort_key,
     discussion_task_id,
     normalize_discussion_contribution_result,
     normalize_discussion_decision_result,
@@ -238,3 +239,49 @@ class PlanningDiscussionRecordStore(DiscussionRecordStore):
             record_public_text=_planning_record_public_text,
         )
         self.tasks_root = self.root / "tasks"
+
+
+def published_planning_discussion_task_ids(
+    session: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Derive public task IDs from one authoritative planning snapshot."""
+
+    if not isinstance(session, Mapping):
+        raise ValueError("Planning discussion state must be an object.")
+    phase = str(session.get("phase", "")).strip()
+    if phase not in PLANNING_DISCUSSION_PHASES:
+        raise ValueError("Planning discussion phase is invalid.")
+    participant_count = session.get("participant_count")
+    max_response_rounds = session.get("max_response_rounds")
+    tasks = session.get("tasks")
+    if not isinstance(tasks, Mapping):
+        raise ValueError("Planning discussion tasks must be an object.")
+
+    published: list[str] = []
+    for task_id, task in tasks.items():
+        identity = validate_planning_discussion_task_id(
+            task_id,
+            participant_count=participant_count,
+            max_response_rounds=max_response_rounds,
+        )
+        if not isinstance(task, Mapping):
+            raise ValueError("Planning discussion task must be an object.")
+        complete = (
+            isinstance(task.get("result_record_id"), str)
+            and task.get("result_record_id") == task_id
+            and task.get("pending_finalization") is None
+        )
+        if not complete:
+            continue
+        if phase == "initial" and identity.phase == "initial":
+            continue
+        published.append(task_id)
+    return tuple(sorted(published, key=discussion_record_sort_key))
+
+
+def permitted_planning_discussion_record_ids(
+    session: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Derive readable planning records from authoritative session state."""
+
+    return published_planning_discussion_task_ids(session)

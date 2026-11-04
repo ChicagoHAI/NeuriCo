@@ -22,6 +22,7 @@ from core.hitl_planning_mode import (
 from core.hitl_planning_discussion import (
     new_planning_discussion,
     validate_initial_planning_discussion_shape,
+    validate_planning_discussion_task_id,
 )
 from core.hitl_proposal_discussion import (
     PROPOSAL_DISCUSSION_SCHEMA_VERSION,
@@ -3058,6 +3059,77 @@ class HitlRuntimeState:
                 candidate_attempt_id=candidate_attempt_id,
             )
             return self._copy(session)
+
+    def planning_discussion_task_snapshot(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        discussion_task_id: str,
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            _action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            try:
+                validate_planning_discussion_task_id(
+                    discussion_task_id,
+                    participant_count=int(session["participant_count"]),
+                    max_response_rounds=int(session["max_response_rounds"]),
+                )
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            task = session["tasks"].get(discussion_task_id)
+            if not isinstance(task, dict):
+                raise HitlRuntimeStateError(
+                    "No matching planning discussion task exists"
+                )
+            return self._copy(task)
+
+    def active_planning_discussion_task_snapshot(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        discussion_task_id: str,
+    ) -> Dict[str, Any]:
+        """Return an initial planning task only while it remains active."""
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            _action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            try:
+                identity = validate_planning_discussion_task_id(
+                    discussion_task_id,
+                    participant_count=int(session["participant_count"]),
+                    max_response_rounds=int(session["max_response_rounds"]),
+                )
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            if identity.phase != session["phase"]:
+                raise HitlRuntimeStateError("Planning discussion task is not active")
+            task = session["tasks"].get(discussion_task_id)
+            if not isinstance(task, dict):
+                raise HitlRuntimeStateError(
+                    "No matching planning discussion task exists"
+                )
+            if task.get("result_record_id") is not None:
+                raise HitlRuntimeStateError(
+                    "Planning discussion task is already complete"
+                )
+            return {
+                "session": self._copy(session),
+                "task": self._copy(task),
+            }
 
     @staticmethod
     def _proposal_preparation_planning_policy(
