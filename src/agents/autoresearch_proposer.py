@@ -180,7 +180,14 @@ def generate_autoresearch_proposal_prompt(
         "_(whiteboard has no active tips)_\n",
     )
 
+    focused_autoresearch = False
+    if hitl_submission:
+        from core.pipeline_orchestrator import PipelineState
+
+        focused_autoresearch = PipelineState.read_focused_autoresearch(work_dir)
+
     prompt = template.render(
+        focused_autoresearch=focused_autoresearch,
         title=idea_spec.get("title", "Untitled Research"),
         domain=idea_spec.get("domain", ""),
         work_dir=str(work_dir),

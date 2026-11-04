@@ -1428,8 +1428,11 @@ class HitlManager:
             "proposal": proposal_text,
             **(request_context or {}),
         }
+        from core.pipeline_orchestrator import PipelineState
+
         prompt = _load_hitl_template(
             "manager_review_proposal.txt",
+            focused_autoresearch=PipelineState.read_focused_autoresearch(self.work_dir),
             pipeline_stage=pipeline_stage,
             proposal_text=proposal_text,
             hitl_mode=selected_mode.value,

@@ -38,6 +38,17 @@ Do not read, mention, modify, or infer from hidden scoring internals:
 - scoring/rule_maker_log.md
 - .scoring_sealed/
 
+{% if focused_autoresearch %}
+The candidate produced by this attempt must implement the proposed
+modification. Internal tests may guide implementation and choose settings
+that retain the modification.
+
+The parent may be used for comparison, but must not be selected as the
+final candidate instead of implementing the modification. Do not make
+retaining the modification conditional on beating the parent in an
+internal test.
+
+{% endif %}
 The existing NeuriCo comment handler will inspect and edit source files later.
 Your proposal should tell comment mode what targeted experiment-stage change to
 try next.
