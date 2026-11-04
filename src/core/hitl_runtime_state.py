@@ -15,6 +15,10 @@ from typing import Any, Dict, Iterator, Optional
 
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_paths import hitl_runtime_state_path, hitl_state_dir
+from core.hitl_planning_mode import (
+    PENDING_PLANNING_POLICY_FIELD,
+    normalize_pending_planning_policy,
+)
 from core.hitl_proposal_discussion import (
     PROPOSAL_DISCUSSION_SCHEMA_VERSION,
     normalize_proposal_discussion_record,
@@ -2785,15 +2789,35 @@ class HitlRuntimeState:
             self._save_unlocked()
             return self._copy(session)
 
+    @staticmethod
+    def _proposal_preparation_planning_policy(
+        action: Dict[str, Any],
+    ) -> Optional[Dict[str, int]]:
+        if PENDING_PLANNING_POLICY_FIELD not in action:
+            return None
+        try:
+            return normalize_pending_planning_policy(
+                action.get(PENDING_PLANNING_POLICY_FIELD)
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+
     def begin_next_autoresearch_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
         kind = str(action.get("kind", "")).strip()
         if not kind:
             raise HitlRuntimeStateError("AutoResearch next action requires kind")
+        planning_policy = (
+            self._proposal_preparation_planning_policy(action)
+            if kind == "prepare_proposal"
+            else None
+        )
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             existing = self._state.get("next_autoresearch_action")
             if isinstance(existing, dict) and existing:
                 if existing.get("kind") == kind:
+                    if kind == "prepare_proposal":
+                        self._proposal_preparation_planning_policy(existing)
                     if existing.get("status") == "cancelled":
                         existing["status"] = "pending"
                         existing.pop("cancellation_reason", None)
@@ -2803,6 +2827,8 @@ class HitlRuntimeState:
                     return self._copy(existing)
                 raise HitlRuntimeStateError("Another AutoResearch action is already pending")
             record = self._copy(action)
+            if planning_policy is not None:
+                record[PENDING_PLANNING_POLICY_FIELD] = planning_policy
             record["status"] = "pending"
             record["created_at"] = _now()
             self._state["next_autoresearch_action"] = record
@@ -2957,6 +2983,9 @@ class HitlRuntimeState:
                 raise HitlRuntimeStateError(
                     "No matching undecided proposal preparation accepts recovery state"
                 )
+            planning_policy = self._proposal_preparation_planning_policy(action)
+            if planning_policy is not None:
+                action[PENDING_PLANNING_POLICY_FIELD] = planning_policy
             existing = action.get("recovery")
             if existing is not None:
                 if not isinstance(existing, dict):
@@ -3158,6 +3187,7 @@ class HitlRuntimeState:
                 raise HitlRuntimeStateError(
                     "Resolved proposal preparation is not an approved additional-agent call"
                 )
+            planning_policy = self._proposal_preparation_planning_policy(action)
 
             command = self._state.get("pending_worker_command")
             response = command.get("response") if isinstance(command, dict) else None
@@ -3206,6 +3236,8 @@ class HitlRuntimeState:
                 next_action["proposal_artifact_snapshot_id"] = prepared_artifacts
             if fingerprint_scope is not None:
                 next_action["workspace_fingerprint_scope"] = fingerprint_scope
+            if planning_policy is not None:
+                next_action[PENDING_PLANNING_POLICY_FIELD] = planning_policy
             self._state["pending_worker_command"] = None
             self._state["worker_continuation"] = None
             self._state["next_autoresearch_action"] = next_action

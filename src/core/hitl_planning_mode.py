@@ -9,6 +9,7 @@ from typing import Any, Optional
 SINGLE_PLANNING_MODE = "single"
 COLLABORATIVE_PLANNING_MODE = "collaborative"
 PLANNING_MODES = {SINGLE_PLANNING_MODE, COLLABORATIVE_PLANNING_MODE}
+PENDING_PLANNING_POLICY_FIELD = "planning_policy"
 
 DEFAULT_COLLABORATIVE_PLANNING_PARTICIPANT_COUNT = 5
 MIN_COLLABORATIVE_PLANNING_PARTICIPANT_COUNT = 3
@@ -105,6 +106,27 @@ def require_managed_autoresearch_planning_mode(
     if normalized.mode == COLLABORATIVE_PLANNING_MODE and not managed_autoresearch:
         raise ValueError("Collaborative planning mode is valid only for managed HITL AutoResearch.")
     return normalized
+
+
+def normalize_pending_planning_policy(value: Any) -> dict[str, int]:
+    """Validate the collaborative counts stored on proposal preparation."""
+
+    if not isinstance(value, dict) or set(value) != {
+        "participant_count",
+        "discussion_rounds",
+    }:
+        raise ValueError(
+            "Pending planning policy must contain participant_count and discussion_rounds."
+        )
+    config = normalize_planning_mode_config(
+        COLLABORATIVE_PLANNING_MODE,
+        participant_count=value.get("participant_count"),
+        discussion_rounds=value.get("discussion_rounds"),
+    )
+    return {
+        "participant_count": int(config.participant_count),
+        "discussion_rounds": int(config.discussion_rounds),
+    }
 
 
 def _require_count(

@@ -71,8 +71,11 @@ from core.hitl_paths import (
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_planning_mode import (
+    COLLABORATIVE_PLANNING_MODE,
+    PENDING_PLANNING_POLICY_FIELD,
     PlanningModeConfig,
     normalize_planning_mode_config,
+    normalize_pending_planning_policy,
 )
 from core.hitl_proposal_round import (
     COLLABORATIVE_PROPOSAL_MODE,
@@ -2866,12 +2869,35 @@ class HitlAutoResearchController:
                     or dict(existing.get("result") or {}).get("proposal_base_sha")
                     or parent_sha
                 ).strip()
+                try:
+                    planning_policy = (
+                        normalize_pending_planning_policy(
+                            existing.get(PENDING_PLANNING_POLICY_FIELD)
+                        )
+                        if PENDING_PLANNING_POLICY_FIELD in existing
+                        else None
+                    )
+                except ValueError as exc:
+                    raise RuntimeError(str(exc)) from exc
             else:
                 preparation_attempt_id = attempt_id
                 ordinal = self._next_additional_agent_ordinal(attempt_dir)
                 workspace_fingerprint_scope = runtime_state.workspace_guard_scope()
                 workspace_fingerprint = ""
                 proposal_base_sha = parent_sha
+                planning_policy = None
+                planning_config = getattr(
+                    self,
+                    "planning_mode_config",
+                    PlanningModeConfig(mode="single"),
+                )
+                if planning_config.mode == COLLABORATIVE_PLANNING_MODE:
+                    planning_policy = normalize_pending_planning_policy(
+                        {
+                            "participant_count": planning_config.participant_count,
+                            "discussion_rounds": planning_config.discussion_rounds,
+                        }
+                    )
             preparation_dir = (
                 Path(attempt_dir)
                 if Path(attempt_dir).name == preparation_attempt_id
@@ -2956,13 +2982,36 @@ class HitlAutoResearchController:
                         prepared_sha=proposal_base_sha,
                     )
                     preparation_dir.mkdir(parents=True, exist_ok=True)
+                    if planning_policy is not None and not isinstance(existing, dict):
+                        workspace_fingerprint = (
+                            HitlWorkspaceWriteGuard.public_fingerprint(
+                                self.work_dir,
+                                scope=workspace_fingerprint_scope,
+                            )
+                        )
+                        action = {
+                            "kind": "prepare_proposal",
+                            "parent_node_sha": parent_sha,
+                            "attempt_id": preparation_attempt_id,
+                            "additional_agent_ordinal": ordinal,
+                            "workspace_fingerprint": workspace_fingerprint,
+                            "proposal_base_sha": proposal_base_sha,
+                        }
+                        if workspace_fingerprint_scope is not None:
+                            action["workspace_fingerprint_scope"] = (
+                                workspace_fingerprint_scope
+                            )
+                        action[PENDING_PLANNING_POLICY_FIELD] = planning_policy
+                        existing = runtime_state.begin_next_autoresearch_action(action)
                     preparation_rollback = HitlStageRollback.capture(
                         self.work_dir,
                         "HITL AutoResearch proposal-preparation boundary",
                     )
-                    workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
-                        self.work_dir,
-                        scope=workspace_fingerprint_scope,
+                    workspace_fingerprint = (
+                        HitlWorkspaceWriteGuard.public_fingerprint(
+                            self.work_dir,
+                            scope=workspace_fingerprint_scope,
+                        )
                     )
                     recovery = {
                         **preparation_rollback.descriptor(),
@@ -2987,7 +3036,9 @@ class HitlAutoResearchController:
                                 "recovery": recovery,
                             }
                             if workspace_fingerprint_scope is not None:
-                                action["workspace_fingerprint_scope"] = workspace_fingerprint_scope
+                                action["workspace_fingerprint_scope"] = (
+                                    workspace_fingerprint_scope
+                                )
                             existing = runtime_state.begin_next_autoresearch_action(action)
                     except Exception:
                         preparation_rollback.discard(cleanup_label="abandoned")
