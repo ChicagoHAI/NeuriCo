@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -194,6 +195,130 @@ def test_cancellation_requests_native_stop_and_terminates_detached_provider(
             raise AssertionError("Detached provider survived Harbor cancellation")
 
     asyncio.run(exercise())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="child subreapers are Linux-specific")
+@pytest.mark.parametrize("shutdown", ["cooperative", "forced", "hard_timeout"])
+def test_cancellation_retains_provider_started_during_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shutdown: str
+) -> None:
+    async def exercise() -> None:
+        ready_file = tmp_path / "worker.ready"
+        provider_pid_file = tmp_path / "provider.pid"
+        worker_script = tmp_path / "worker.py"
+        worker_script.write_text(
+            "\n".join(
+                [
+                    "import os, signal, subprocess, sys, time",
+                    "from pathlib import Path",
+                    f"ready_file = Path({str(ready_file)!r})",
+                    f"provider_pid_file = Path({str(provider_pid_file)!r})",
+                    f"shutdown = {shutdown!r}",
+                    "def launch_provider():",
+                    "    provider = subprocess.Popen(",
+                    "        [sys.executable, '-c',",
+                    "         'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'],",
+                    "        start_new_session=True,",
+                    "        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,",
+                    "    )",
+                    "    provider_pid_file.write_text(str(provider.pid))",
+                    "def interrupt(*_args):",
+                    "    launch_provider()",
+                    "    if shutdown == 'cooperative':",
+                    "        os._exit(0)",
+                    "    signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+                    "def terminate(*_args):",
+                    "    launch_provider()",
+                    "    os._exit(0)",
+                    "signal.signal(signal.SIGINT, interrupt)",
+                    "signal.signal(signal.SIGTERM, terminate)",
+                    "ready_file.write_text('yes')",
+                    "while True: time.sleep(0.01)",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "neurico_harbor_agent.process_control",
+            sys.executable,
+            str(worker_script),
+            start_new_session=True,
+        )
+        provider_pid = None
+        try:
+            deadline = time.monotonic() + 5
+            while not ready_file.is_file():
+                assert process.returncode is None, "Supervisor exited before worker startup"
+                if time.monotonic() >= deadline:
+                    raise AssertionError("Worker did not become ready")
+                await asyncio.sleep(0.01)
+            # Every provider starts in a signal handler, after the adapter's
+            # initial ownership snapshot. The cooperative case immediately
+            # exits its parent; the forced case keeps the manager stuck alive.
+            monkeypatch.setattr(agent_module, "_CANCELLATION_GRACE_SECONDS", 0.2)
+            await asyncio.wait_for(
+                _terminate_process_tree(
+                    process,
+                    request_cooperative_stop=shutdown != "hard_timeout",
+                ),
+                timeout=10,
+            )
+            assert process.returncode is not None
+            provider_pid = int(provider_pid_file.read_text())
+            with pytest.raises(ProcessLookupError):
+                os.kill(provider_pid, 0)
+        finally:
+            if process.returncode is None:
+                await _terminate_process_tree(process)
+            if provider_pid_file.is_file():
+                provider_pid = int(provider_pid_file.read_text())
+                try:
+                    os.killpg(provider_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="child subreapers are Linux-specific")
+@pytest.mark.parametrize("exit_code", [0, 1, 10, 124])
+def test_supervisor_preserves_manager_result_and_reaps_orphans(
+    tmp_path: Path, exit_code: int
+) -> None:
+    provider_pid_file = tmp_path / "provider.pid"
+    code = (
+        "import os, subprocess, sys; from pathlib import Path; "
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
+        "start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"Path({str(provider_pid_file)!r}).write_text(str(p.pid)); os._exit({exit_code})"
+    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "neurico_harbor_agent.process_control",
+                sys.executable,
+                "-c",
+                code,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == exit_code, result.stderr
+        provider_pid = int(provider_pid_file.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(provider_pid, 0)
+    finally:
+        if provider_pid_file.is_file():
+            try:
+                os.killpg(int(provider_pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def test_cancellation_during_child_spawn_is_honored_after_registration(

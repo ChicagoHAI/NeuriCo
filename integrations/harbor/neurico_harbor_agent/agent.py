@@ -6,7 +6,6 @@ import asyncio
 import codecs
 import os
 import signal
-import subprocess
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -46,6 +45,10 @@ from .runtime import (
     CodexInferenceConnection,
     HarborAutoResearchTask,
     build_autoresearch_environment,
+)
+from .process_control import (
+    owned_process_group_ids as _owned_process_group_ids,
+    signal_process_groups as _signal_process_groups,
 )
 
 ContentBlock = (
@@ -107,91 +110,6 @@ def _autoresearch_time_limit(environment: dict[str, str]) -> int | None:
     if seconds <= 0:
         raise ValueError("NEURICO_HARBOR_TIME_LIMIT_SECONDS must be a positive integer")
     return seconds
-
-
-def _linux_process_rows() -> list[tuple[int, int, int]]:
-    """Read PID, parent PID, and process group from Linux procfs."""
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return []
-    rows: list[tuple[int, int, int]] = []
-    try:
-        entries = list(proc.iterdir())
-    except OSError:
-        return []
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            stat_line = (entry / "stat").read_text(encoding="utf-8")
-            # The command name is parenthesized and may itself contain spaces.
-            fields = stat_line[stat_line.rfind(")") + 2 :].split()
-            rows.append((int(entry.name), int(fields[1]), int(fields[2])))
-        except (IndexError, OSError, ValueError):
-            continue
-    return rows
-
-
-def _process_rows() -> list[tuple[int, int, int]]:
-    """Return the process ancestry fields available on this POSIX host."""
-    linux_rows = _linux_process_rows()
-    if linux_rows:
-        return linux_rows
-    try:
-        process_table = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,pgid="],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
-
-    rows: list[tuple[int, int, int]] = []
-    for line in process_table.splitlines():
-        fields = line.split()
-        if len(fields) != 3:
-            continue
-        try:
-            rows.append(tuple(int(field) for field in fields))
-        except ValueError:
-            continue
-    return rows
-
-
-def _owned_process_group_ids(root_pid: int) -> set[int]:
-    """Return POSIX process groups currently descended from ``root_pid``."""
-    if os.name != "posix":
-        return set()
-    rows = _process_rows()
-    if not rows:
-        try:
-            return {os.getpgid(root_pid)}
-        except (ProcessLookupError, PermissionError):
-            return set()
-
-    descendants = {root_pid}
-    while True:
-        discovered = {pid for pid, parent_pid, _group_id in rows if parent_pid in descendants}
-        expanded = descendants | discovered
-        if expanded == descendants:
-            break
-        descendants = expanded
-    own_group = os.getpgrp()
-    return {
-        group_id
-        for pid, _parent_pid, group_id in rows
-        if pid in descendants and group_id > 1 and group_id != own_group
-    }
-
-
-def _signal_process_groups(process_groups: set[int], signum: signal.Signals) -> None:
-    """Signal only groups previously observed under the AutoResearch child."""
-    for group_id in sorted(process_groups, reverse=True):
-        try:
-            os.killpg(group_id, signum)
-        except (ProcessLookupError, PermissionError):
-            continue
 
 
 async def _terminate_process_tree(
@@ -276,6 +194,9 @@ async def run_autoresearch_process(
         )
 
         command = [
+            sys.executable,
+            "-m",
+            "neurico_harbor_agent.process_control",
             sys.executable,
             "-m",
             "neurico_harbor_agent.run_autoresearch",

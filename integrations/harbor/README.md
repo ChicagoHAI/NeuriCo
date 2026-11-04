@@ -40,7 +40,10 @@ for human input.
   process tree, including separately grouped provider processes, after a
   30-second grace period. ACP cancellation follows the same ownership boundary:
   it requests NeuriCo's native stop first, then terminates any surviving owned
-  groups. Harbor's ACP launcher does not
+  groups. A dedicated Linux supervisor retains orphaned provider processes
+  until cleanup finishes, including providers started during shutdown. It
+  remains independent of the manager so stalled manager cleanup cannot lose
+  process ownership. Harbor's ACP launcher does not
   currently expose its resolved hard deadline to the agent, so the Harbor
   timeout and the smaller NeuriCo budget are explicit paired job settings.
 - The requested Harbor model is advertised as an ACP session configuration
