@@ -2002,13 +2002,130 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                     and prepared_sha
                     and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
                 )
+    planning_discussion_present = bool(
+        isinstance(preparation_action, dict)
+        and "planning_discussion" in preparation_action
+    )
+    planning_discussion_is_exact = False
+    planning_discussion_phase: Optional[str] = None
+    if planning_discussion_present and isinstance(preparation_action, dict):
+        raw_planning = preparation_action.get("planning_discussion")
+        if isinstance(raw_planning, dict):
+            try:
+                from core.hitl_planning_discussion import (
+                    PlanningDiscussionRecordStore,
+                    permitted_planning_discussion_record_ids,
+                )
+
+                durable_planning = runtime_state.planning_discussion_snapshot(
+                    parent_node_sha=str(
+                        preparation_action.get("parent_node_sha", "")
+                    ).strip(),
+                    preparation_attempt_id=str(
+                        preparation_action.get("attempt_id", "")
+                    ).strip(),
+                    candidate_attempt_id=attempt_dir.name,
+                )
+                planning_discussion_phase = str(
+                    durable_planning.get("phase", "")
+                ).strip()
+                planning_store = PlanningDiscussionRecordStore(attempt_dir)
+                planning_records = planning_store.records()
+                planning_by_id = {
+                    str(record.get("record_id", "")).strip(): record
+                    for record in planning_records
+                }
+                planning_store.ordered_records(
+                    permitted_planning_discussion_record_ids(durable_planning)
+                )
+                for task_id, task in durable_planning["tasks"].items():
+                    record = planning_by_id.get(task_id)
+                    result_record_id = str(
+                        task.get("result_record_id") or ""
+                    ).strip()
+                    pending = task.get("pending_finalization")
+                    if result_record_id:
+                        if record is None or result_record_id != task_id:
+                            raise RuntimeError(
+                                "Planning discussion task result record is missing."
+                            )
+                        if (
+                            record["kind"] == "decision"
+                            and record["result"].get("choice")
+                            != task.get("choice")
+                        ):
+                            raise RuntimeError(
+                                "Planning discussion decision does not match durable "
+                                "scheduling state."
+                            )
+                    elif pending is not None:
+                        if record is not None and record.get("result") != pending:
+                            raise RuntimeError(
+                                "Planning discussion task record conflicts with durable intent."
+                            )
+                    elif record is not None:
+                        raise RuntimeError(
+                            "Planning discussion contains an unreferenced task record."
+                        )
+                git_state = HitlGitStateStore(work_dir)
+                if planning_discussion_phase in {
+                    "initial",
+                    "opening",
+                    "response",
+                    "decision",
+                }:
+                    whiteboard_sha = str(
+                        durable_planning.get("whiteboard_boundary_sha", "")
+                    ).strip()
+                    planning_whiteboard_is_exact = bool(
+                        git_state.hitl_autoresearch_whiteboard_history_contains(
+                            whiteboard_sha
+                        )
+                        and git_state.hitl_autoresearch_whiteboard_matches_commit(
+                            whiteboard_sha
+                        )
+                    )
+                else:
+                    planning_whiteboard_is_exact = (
+                        planning_discussion_phase == "final_writing"
+                    )
+            except (
+                HitlRuntimeStateError,
+                HitlGitStateError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ):
+                pass
+            else:
+                prepared_sha = _resolved_proposal_base(preparation_action)
+                planning_discussion_is_exact = bool(
+                    preparation_action.get("status") == "resolved"
+                    and str(preparation_action.get("parent_node_sha", "")).strip()
+                    == current_best_sha
+                    and attempt_dir.parent.name == current_best_sha
+                    and durable_planning == raw_planning
+                    and planning_whiteboard_is_exact
+                    and prepared_sha
+                    and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
+                )
+    coordination_present = bool(
+        ranked_round_present or discussion_present or planning_discussion_present
+    )
     ordinary_worker_recovery_allowed = bool(
-        (
-            not ranked_round_present
-            and not discussion_present
+        (not ranked_round_present or (ranked_round_is_exact and ranked_round_stage == "selected"))
+        and (
+            not discussion_present
+            or (discussion_is_exact and discussion_phase == "final_writing")
         )
-        or (ranked_round_is_exact and ranked_round_stage == "selected")
-        or (discussion_is_exact and discussion_phase == "final_writing")
+        and (
+            not planning_discussion_present
+            or (
+                planning_discussion_is_exact
+                and planning_discussion_phase == "final_writing"
+            )
+        )
     )
     preparation_metadata_is_exact = (
         isinstance(preparation_action, dict)
@@ -2018,12 +2135,14 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and str(preparation_action.get("parent_node_sha", "")).strip()
         == current_best_sha
         and (
-            ranked_round_is_exact
-            if ranked_round_present
-            else (
-                discussion_is_exact
-                if discussion_present
-                else str(preparation_action.get("attempt_id", "")).strip()
+            (not ranked_round_present or ranked_round_is_exact)
+            and (not discussion_present or discussion_is_exact)
+            and (
+                not planning_discussion_present or planning_discussion_is_exact
+            )
+            and (
+                coordination_present
+                or str(preparation_action.get("attempt_id", "")).strip()
                 == attempt_dir.name
             )
         )
@@ -2047,8 +2166,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         else {}
     )
     dynamic_agent_request = (
-        not ranked_round_present
-        and not discussion_present
+        not coordination_present
         and isinstance(pending_request, dict)
         and pending_request.get("pipeline_stage") == "resource_finder"
     )
@@ -2140,9 +2258,17 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             scope=pending_request.get("workspace_fingerprint_scope"),
         )
     )
-    if ranked_round_present or discussion_present:
+    if coordination_present:
         preparation_is_exact = bool(
-            preparation_metadata_is_exact and preparation_workspace_is_exact
+            preparation_metadata_is_exact
+            and (
+                preparation_workspace_is_exact
+                or (
+                    planning_discussion_is_exact
+                    and planning_discussion_phase == "final_writing"
+                    and preparation_recovery_is_exact
+                )
+            )
         )
     else:
         preparation_is_exact = bool(
@@ -2166,7 +2292,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         == current_best_sha
         and (not dynamic_agent_request or resumable_agent_request)
         and (
-            not discussion_present
+            not (discussion_present or planning_discussion_present)
             or str(continuation.get("hitl_stage", "")).strip()
             in {"plan", "execution", "review"}
             or preparation_workspace_is_exact
@@ -4062,6 +4188,18 @@ class HitlAutoResearchController:
                     attempt_dir=attempt_dir,
                     attempt_history=attempt_history,
                 )
+            preparation = HitlRuntimeState(self.work_dir).snapshot().get(
+                "next_autoresearch_action"
+            )
+            if isinstance(preparation, dict) and (
+                preparation.get("planning_discussion") is not None
+                or preparation.get(PENDING_PLANNING_POLICY_FIELD) is not None
+            ):
+                self._run_collaborative_planning_discussion(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                    admitted_proposal_idea_id=proposal_idea_id,
+                )
             comment_result = self._run_candidate_experiment_hitl(
                 proposal=proposal,
                 proposal_idea_id=proposal_idea_id,
@@ -5874,6 +6012,130 @@ class HitlAutoResearchController:
                 f"Collaborative planning cannot run from phase {phase}."
             )
 
+    def _collaborative_planning_final_session(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Return the terminal planning session for this physical attempt, if any."""
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict) or action.get("kind") != "prepare_proposal":
+            return None
+        discussion = action.get("planning_discussion")
+        if discussion is None:
+            return None
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        if (
+            action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+            or not preparation_attempt_id
+        ):
+            raise RuntimeError(
+                "Collaborative plan writing does not match its proposal preparation."
+            )
+        session = state.planning_discussion_snapshot(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=Path(attempt_dir).name,
+        )
+        if session.get("phase") != "final_writing":
+            raise RuntimeError(
+                "Ordinary plan writing cannot start before collaborative planning finishes."
+            )
+        return action, session
+
+    def _collaborative_planning_owner_prompt_builder(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Optional[Callable[[str], str]]:
+        """Compose canonical planning records with the ordinary plan prompt."""
+
+        final = self._collaborative_planning_final_session(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        if final is None:
+            return None
+        action, _session = final
+        identity = {
+            "parent_node_sha": parent_sha,
+            "preparation_attempt_id": str(action["attempt_id"]),
+            "candidate_attempt_id": Path(attempt_dir).name,
+        }
+        manager = self._proposal_hitl_runtime().manager
+        summarize_method = getattr(manager, "summarize_planning_discussion", None)
+
+        def build(prompt_template: str) -> str:
+            from agents.autoresearch_proposer import collect_public_proposal_context
+            from agents.planning_discussion import planning_final_owner_prompt_template
+            from core.hitl_planning_discussion import (
+                PlanningDiscussionRecordStore,
+                prepare_planning_discussion_prompt,
+            )
+            from core.hitl_run_control import (
+                current_hitl_run_budget_prompt,
+                raise_if_hitl_run_stop_requested,
+            )
+
+            raise_if_hitl_run_stop_requested()
+            current = HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
+                **identity
+            )
+            if current.get("phase") != "final_writing":
+                raise RuntimeError(
+                    "Collaborative planning final-owner context became stale."
+                )
+            background = collect_public_proposal_context(
+                self.work_dir,
+                include_attempt_history=False,
+                hitl_autoresearch_whiteboard=True,
+            )
+
+            def summarize(
+                public_background: Dict[str, Any],
+                prior_summary: str,
+                records: List[Dict[str, Any]],
+            ) -> str:
+                if not callable(summarize_method):
+                    raise ValueError(
+                        "Planning discussion compaction requires the configured HITL manager."
+                    )
+                return str(
+                    summarize_method(
+                        public_background=public_background,
+                        prior_summary=prior_summary,
+                        records=records,
+                    )
+                )
+
+            def current_session() -> Dict[str, Any]:
+                raise_if_hitl_run_stop_requested()
+                value = HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
+                    **identity
+                )
+                if value.get("phase") != "final_writing":
+                    raise RuntimeError(
+                        "Collaborative planning final-owner context became stale."
+                    )
+                return value
+
+            return prepare_planning_discussion_prompt(
+                store=PlanningDiscussionRecordStore(attempt_dir),
+                session=current,
+                prompt_template=planning_final_owner_prompt_template(prompt_template),
+                public_background=background,
+                runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
+                summarize=summarize if callable(summarize_method) else None,
+                current_session=current_session,
+            )
+
+        return build
+
     def _prepare_ranked_task_runtime(
         self,
         *,
@@ -6861,6 +7123,29 @@ class HitlAutoResearchController:
         if resume_pending and resumed_stage not in {"plan", "execution", "review"}:
             raise RuntimeError("Recovered HITL experiment has no valid worker stage.")
         initial_stage = resumed_stage if resume_pending else "plan"
+        planning_final = (
+            self._collaborative_planning_final_session(
+                parent_sha=parent_node_id,
+                attempt_dir=attempt_dir,
+            )
+            if initial_stage == "plan"
+            else None
+        )
+        planning_owner_context: Dict[str, Any] = {}
+        if planning_final is not None:
+            planning_action, planning_session = planning_final
+            if (
+                str(planning_session.get("admitted_proposal_idea_id", "")).strip()
+                != proposal_idea_id
+            ):
+                raise RuntimeError(
+                    "Collaborative planning final writing does not match the admitted proposal."
+                )
+            planning_owner_context = {
+                "proposal_preparation_attempt_id": str(planning_action["attempt_id"]),
+                "planning_discussion_attempt_dir": attempt_dir,
+                "planning_discussion_final_owner": True,
+            }
         runtime.prepare_idea_tool_context(
             hitl_stage=initial_stage,
             actor="comment_handler",
@@ -6870,6 +7155,7 @@ class HitlAutoResearchController:
             phase_finish_validator=lambda: validate_required_artifact_contract(self.work_dir),
             scoring_handler=score_in_background,
             scoring_repair_cleanup=clear_repairable_scoring_handoff,
+            **planning_owner_context,
         )
         try:
             prompt = (
@@ -6880,6 +7166,21 @@ class HitlAutoResearchController:
                     requires_human_approval=True,
                 )
             )
+            if not resume_pending:
+                planning_prompt_builder = (
+                    self._collaborative_planning_owner_prompt_builder(
+                        parent_sha=parent_node_id,
+                        attempt_dir=attempt_dir,
+                    )
+                )
+                if planning_prompt_builder is not None:
+                    try:
+                        prompt = planning_prompt_builder(prompt)
+                    except ValueError as exc:
+                        raise HitlTerminalRuntimeError(
+                            "Formal collaborative plan writing exceeds the verified "
+                            "worker context budget."
+                        ) from exc
             initial_context = (
                 "Reconnect to the runtime-held HITL request before doing any new work."
                 if resume_pending
