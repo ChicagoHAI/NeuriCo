@@ -17,6 +17,7 @@ MAX_DISCUSSION_PARTICIPANTS = 10
 MAX_DISCUSSION_ROUNDS = 10
 MAX_DISCUSSION_RECORD_PAGE = 100
 MAX_DISCUSSION_READ_LINES = 200
+MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS = 2_000
 
 _INITIAL_TASK_ID = re.compile(r"^initial/p(?P<participant>0[1-9]|10)$")
 _OPENING_TASK_ID = re.compile(r"^opening/p01$")
@@ -466,6 +467,198 @@ class DiscussionRecordStore:
             self.context_path,
             json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n",
         )
+
+
+def prepare_discussion_prompt(
+    *,
+    store: DiscussionRecordStore,
+    session: Mapping[str, Any],
+    prompt_template: str,
+    context_marker: str,
+    record_subject: str,
+    public_background: Mapping[str, Any],
+    normalize_record: Callable[[Any, Any, Any], dict[str, Any]],
+    permitted_record_ids: Callable[[Mapping[str, Any]], Sequence[str]],
+    protected_record_ids: Callable[[Mapping[str, Any], Sequence[str]], Sequence[str]],
+    render_context: Callable[[str, Sequence[str], Sequence[Mapping[str, Any]]], str],
+    worker_context_tokens: int,
+    compaction_trigger_tokens: int,
+    provider_overhead_tokens: int,
+    runtime_budget_prompt: str = "",
+    summarize: Optional[
+        Callable[[Mapping[str, Any], str, list[dict[str, Any]]], str]
+    ] = None,
+    current_session: Optional[Callable[[], Mapping[str, Any]]] = None,
+    additional_records: Sequence[Mapping[str, Any]] = (),
+    reserve_tokens: int = 0,
+    maximum_prompt_chars: Optional[int] = None,
+    persist_cache: bool = True,
+    prompt_budget_label: str = "prompt",
+) -> str:
+    """Build one bounded prompt while retaining canonical discussion records."""
+
+    from core.hitl_manager_context import (
+        COMPACTION_SUMMARY_MAX_INPUT_TOKENS,
+        bounded_record_chunks,
+        estimate_compact_json_tokens,
+    )
+
+    subject = str(record_subject).strip()
+    if not subject:
+        raise ValueError("Discussion prompt requires a record subject.")
+    budget_label = str(prompt_budget_label).strip()
+    if not budget_label:
+        raise ValueError("Discussion prompt requires a prompt budget label.")
+    if str(prompt_template).count(context_marker) != 1:
+        raise ValueError(f"{subject} prompt requires one context marker.")
+    session_snapshot = dict(session)
+    if isinstance(reserve_tokens, bool) or not isinstance(reserve_tokens, int):
+        raise ValueError(f"{subject} token reserve must be an integer.")
+    if reserve_tokens < 0:
+        raise ValueError(f"{subject} token reserve must be nonnegative.")
+    if maximum_prompt_chars is not None and (
+        isinstance(maximum_prompt_chars, bool)
+        or not isinstance(maximum_prompt_chars, int)
+        or maximum_prompt_chars <= 0
+    ):
+        raise ValueError(f"{subject} character budget must be a positive integer.")
+
+    all_records = store.records()
+    known_ids = {record["record_id"] for record in all_records}
+    for raw_record in additional_records:
+        normalized = normalize_record(
+            raw_record.get("record_id"),
+            raw_record.get("kind"),
+            raw_record.get("result"),
+        )
+        if normalized != dict(raw_record):
+            raise ValueError(f"Projected {subject.lower()} record is not canonical.")
+        if normalized["record_id"] in known_ids:
+            raise ValueError(f"Projected {subject.lower()} record already exists.")
+        known_ids.add(normalized["record_id"])
+        all_records.append(normalized)
+
+    permitted_ids = tuple(permitted_record_ids(session_snapshot))
+    records_by_id = {record["record_id"]: record for record in all_records}
+    missing = [record_id for record_id in permitted_ids if record_id not in records_by_id]
+    if missing:
+        raise RuntimeError(
+            f"Required {subject.lower()} records are missing: " + ", ".join(missing)
+        )
+    permitted_records = sorted(
+        (records_by_id[record_id] for record_id in permitted_ids),
+        key=lambda record: discussion_record_sort_key(record["record_id"]),
+    )
+    protected_ids = tuple(protected_record_ids(session_snapshot, permitted_ids))
+    protected_set = set(protected_ids)
+    eligible_records = [
+        record for record in permitted_records if record["record_id"] not in protected_set
+    ]
+    protected_records = [
+        record for record in permitted_records if record["record_id"] in protected_set
+    ]
+
+    def assemble(
+        *,
+        summary: str = "",
+        source_record_ids: Sequence[str] = (),
+        originals: Sequence[Mapping[str, Any]],
+    ) -> str:
+        context = render_context(summary, source_record_ids, originals)
+        return str(prompt_template).replace(context_marker, context)
+
+    def measured_tokens(prompt: str) -> int:
+        return (
+            estimate_compact_json_tokens(
+                {"prompt": prompt, "runtime_budget": str(runtime_budget_prompt)}
+            )
+            + provider_overhead_tokens
+            + reserve_tokens
+        )
+
+    reserved_prompt_chars = reserve_tokens * 4
+
+    def fits_character_budget(prompt: str) -> bool:
+        return maximum_prompt_chars is None or (
+            len(prompt) + reserved_prompt_chars <= maximum_prompt_chars
+        )
+
+    def fits_hard_limits(prompt: str) -> bool:
+        return measured_tokens(prompt) <= worker_context_tokens and fits_character_budget(
+            prompt
+        )
+
+    full_prompt = assemble(originals=permitted_records)
+    if (
+        measured_tokens(full_prompt) <= compaction_trigger_tokens
+        and fits_character_budget(full_prompt)
+    ):
+        return full_prompt
+
+    eligible_ids = [record["record_id"] for record in eligible_records]
+    cache = store.read_context_cache()
+    if cache is not None:
+        cached_ids = list(cache["source_record_ids"])
+        if cached_ids != eligible_ids[: len(cached_ids)]:
+            cache = None
+
+    cached_ids = list(cache["source_record_ids"]) if cache is not None else []
+    cached_summary = str(cache["summary"]) if cache is not None else ""
+    uncovered_records = eligible_records[len(cached_ids) :]
+
+    def fallback_prompt() -> str:
+        originals = [*uncovered_records, *protected_records]
+        prompt = assemble(
+            summary=cached_summary,
+            source_record_ids=cached_ids,
+            originals=originals,
+        )
+        if not fits_hard_limits(prompt):
+            raise ValueError(
+                f"{subject} input exceeds the verified worker context or "
+                f"{budget_label} prompt budget."
+            )
+        return prompt
+
+    if not eligible_records or not uncovered_records or summarize is None:
+        return fallback_prompt()
+
+    summaries: list[str] = []
+    covered_ids = list(cached_ids)
+    chunks = bounded_record_chunks(
+        uncovered_records,
+        token_limit=COMPACTION_SUMMARY_MAX_INPUT_TOKENS,
+    )
+    try:
+        for index, chunk in enumerate(chunks):
+            prior = cached_summary if index == 0 else ""
+            summary = str(summarize(public_background, prior, chunk)).strip()
+            if not summary:
+                return fallback_prompt()
+            summaries.append(summary)
+            covered_ids.extend(str(record["record_id"]) for record in chunk)
+    except ValueError:
+        return fallback_prompt()
+
+    combined_summary = "\n\n".join(summaries)
+    candidate_prompt = assemble(
+        summary=combined_summary,
+        source_record_ids=covered_ids,
+        originals=protected_records,
+    )
+    if not fits_hard_limits(candidate_prompt):
+        return fallback_prompt()
+
+    if current_session is not None:
+        live_session = dict(current_session())
+        if live_session != session_snapshot:
+            raise RuntimeError(f"{subject} changed while its context was prepared.")
+        if tuple(permitted_record_ids(live_session)) != permitted_ids:
+            raise RuntimeError(f"{subject} publication changed during compaction.")
+        store.ordered_records(permitted_ids)
+    if persist_cache:
+        store.write_context_cache(combined_summary, covered_ids)
+    return candidate_prompt
 
 
 def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from agents.autoresearch_proposer import (
     _generate_compute_backend_section,
@@ -14,26 +14,48 @@ from agents.proposal_assessment import run_proposal_assessment
 from core.agent_cli import append_prompt_block
 from core.hitl_discussion import parse_discussion_task_id
 from core.hitl_planning_discussion import render_planning_discussion_context
+from core.hitl_planning_discussion import (
+    PLANNING_DISCUSSION_CONTEXT_MARKER,
+)
 
 
-def generate_planning_discussion_prompt(
+def _planning_discussion_prompt_inputs(
     *,
     idea: Dict[str, Any],
     work_dir: Path,
+    provider: str,
+) -> Dict[str, Any]:
+    public_context = collect_public_proposal_context(
+        Path(work_dir),
+        include_attempt_history=False,
+        hitl_autoresearch_whiteboard=True,
+    )
+    whiteboard = public_context.pop(
+        "whiteboard_active_tips_md",
+        "_(whiteboard has no active tips)_\n",
+    )
+    return {
+        "public_context": public_context,
+        "whiteboard_active_tips_md": whiteboard,
+        "compute_backend_section": _generate_compute_backend_section(
+            idea.get("idea", idea),
+            provider=provider,
+        ),
+    }
+
+
+def _render_planning_discussion_prompt(
+    *,
+    idea: Dict[str, Any],
     approved_proposal: str,
     discussion_task_id: str,
-    discussion_records: Sequence[Dict[str, Any]],
-    templates_dir: Optional[Path] = None,
-    hitl_mode: str = "full",
-    provider: str = "claude",
+    discussion_context: str,
+    prompt_inputs: Dict[str, Any],
+    templates_dir: Optional[Path],
+    hitl_mode: str,
 ) -> str:
-    """Render one planning turn from public workspace and meeting context."""
-
     from jinja2 import Environment, FileSystemLoader
 
-    proposal = str(approved_proposal).strip()
-    if not proposal:
-        raise ValueError("Planning discussion requires the admitted proposal content")
     identity = parse_discussion_task_id(discussion_task_id)
     root = (
         Path(templates_dir)
@@ -45,15 +67,6 @@ def generate_planning_discussion_prompt(
         raise FileNotFoundError(
             f"Planning discussion template not found: {template_path}"
         )
-    public_context = collect_public_proposal_context(
-        Path(work_dir),
-        include_attempt_history=False,
-        hitl_autoresearch_whiteboard=True,
-    )
-    whiteboard = public_context.pop(
-        "whiteboard_active_tips_md",
-        "_(whiteboard has no active tips)_\n",
-    )
     environment = Environment(
         loader=FileSystemLoader(str(root)),
         autoescape=False,
@@ -71,18 +84,47 @@ def generate_planning_discussion_prompt(
         participant_ordinal=identity.participant_ordinal,
         task_phase=identity.phase,
         task_label=identity.display_label,
+        approved_proposal=approved_proposal,
+        public_context=prompt_inputs["public_context"],
+        whiteboard_active_tips_md=prompt_inputs["whiteboard_active_tips_md"],
+        discussion_context=discussion_context,
+        compute_backend_section=prompt_inputs["compute_backend_section"],
+    )
+
+
+def generate_planning_discussion_prompt(
+    *,
+    idea: Dict[str, Any],
+    work_dir: Path,
+    approved_proposal: str,
+    discussion_task_id: str,
+    discussion_records: Sequence[Dict[str, Any]],
+    templates_dir: Optional[Path] = None,
+    hitl_mode: str = "full",
+    provider: str = "claude",
+) -> str:
+    """Render one planning turn from public workspace and meeting context."""
+
+    proposal = str(approved_proposal).strip()
+    if not proposal:
+        raise ValueError("Planning discussion requires the admitted proposal content")
+    prompt_inputs = _planning_discussion_prompt_inputs(
+        idea=idea,
+        work_dir=work_dir,
+        provider=provider,
+    )
+    return _render_planning_discussion_prompt(
+        idea=idea,
         approved_proposal=proposal,
-        public_context=public_context,
-        whiteboard_active_tips_md=whiteboard,
+        discussion_task_id=discussion_task_id,
         discussion_context=render_planning_discussion_context(
             summary="",
             source_record_ids=(),
             original_records=discussion_records,
         ),
-        compute_backend_section=_generate_compute_backend_section(
-            idea.get("idea", idea),
-            provider=provider,
-        ),
+        prompt_inputs=prompt_inputs,
+        templates_dir=templates_dir,
+        hitl_mode=hitl_mode,
     )
 
 
@@ -93,6 +135,44 @@ def planning_discussion_task_prompt_suffix(task_id: str) -> str:
     return f"Complete {identity.display_label} through its required HITL command."
 
 
+def planning_discussion_prompt_template(
+    *,
+    idea: Dict[str, Any],
+    work_dir: Path,
+    approved_proposal: str,
+    discussion_task_id: str,
+    templates_dir: Optional[Path] = None,
+    hitl_mode: str = "full",
+    provider: str = "claude",
+) -> tuple[str, Dict[str, Any]]:
+    """Render one task with the exact runtime-owned context marker."""
+
+    proposal = str(approved_proposal).strip()
+    if not proposal:
+        raise ValueError("Planning discussion requires the admitted proposal content")
+    prompt_inputs = _planning_discussion_prompt_inputs(
+        idea=idea,
+        work_dir=work_dir,
+        provider=provider,
+    )
+    prompt = _render_planning_discussion_prompt(
+        idea=idea,
+        approved_proposal=proposal,
+        discussion_task_id=discussion_task_id,
+        discussion_context=PLANNING_DISCUSSION_CONTEXT_MARKER,
+        prompt_inputs=prompt_inputs,
+        templates_dir=templates_dir,
+        hitl_mode=hitl_mode,
+    )
+    return prompt, prompt_inputs
+
+
+def planning_final_owner_prompt_template(base_prompt: str) -> str:
+    """Compose the existing plan-owner prompt with one meeting-context slot."""
+
+    return append_prompt_block(str(base_prompt), PLANNING_DISCUSSION_CONTEXT_MARKER)
+
+
 def run_planning_discussion_task(
     *,
     idea: Dict[str, Any],
@@ -100,6 +180,7 @@ def run_planning_discussion_task(
     approved_proposal: str,
     discussion_task_id: str,
     discussion_records: Sequence[Dict[str, Any]],
+    prompt_builder: Optional[Callable[[str, Dict[str, Any]], str]] = None,
     task_dir: Path,
     provider: str,
     env_extra: Dict[str, str],
@@ -113,16 +194,32 @@ def run_planning_discussion_task(
 ) -> Dict[str, Any]:
     """Launch one finite planning participant through the established shell."""
 
-    prompt = generate_planning_discussion_prompt(
-        idea=idea,
-        work_dir=work_dir,
-        approved_proposal=approved_proposal,
-        discussion_task_id=discussion_task_id,
-        discussion_records=discussion_records,
-        templates_dir=templates_dir,
-        hitl_mode=hitl_mode,
-        provider=provider,
-    )
+    if prompt_builder is None:
+        prompt = generate_planning_discussion_prompt(
+            idea=idea,
+            work_dir=work_dir,
+            approved_proposal=approved_proposal,
+            discussion_task_id=discussion_task_id,
+            discussion_records=discussion_records,
+            templates_dir=templates_dir,
+            hitl_mode=hitl_mode,
+            provider=provider,
+        )
+    else:
+        prompt, prompt_inputs = planning_discussion_prompt_template(
+            idea=idea,
+            work_dir=work_dir,
+            approved_proposal=approved_proposal,
+            discussion_task_id=discussion_task_id,
+            templates_dir=templates_dir,
+            hitl_mode=hitl_mode,
+            provider=provider,
+        )
+        public_background = dict(prompt_inputs["public_context"])
+        public_background["whiteboard_active_tips_md"] = prompt_inputs[
+            "whiteboard_active_tips_md"
+        ]
+        prompt = prompt_builder(prompt, public_background)
     return run_proposal_assessment(
         prompt=append_prompt_block(prompt, prompt_suffix),
         work_dir=work_dir,

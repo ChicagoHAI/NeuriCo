@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from core.hitl_discussion import (
     DiscussionRecordStore,
@@ -13,6 +14,7 @@ from core.hitl_discussion import (
     normalize_discussion_contribution_result,
     normalize_discussion_decision_result,
     parse_discussion_task_id,
+    prepare_discussion_prompt,
 )
 from core.hitl_planning_mode import (
     COLLABORATIVE_PLANNING_MODE,
@@ -21,6 +23,7 @@ from core.hitl_planning_mode import (
 
 
 PLANNING_DISCUSSION_SCHEMA_VERSION = 1
+PLANNING_DISCUSSION_CONTEXT_MARKER = "__NEURICO_PLANNING_DISCUSSION_CONTEXT__"
 PLANNING_DISCUSSION_PHASES = frozenset(
     {"initial", "opening", "response", "decision", "final_writing", "reopen_pending"}
 )
@@ -131,8 +134,8 @@ def new_planning_discussion(
     }
 
 
-def validate_initial_planning_discussion_shape(session: Any) -> dict[str, Any]:
-    """Validate the initial planning phase, including durable task progress."""
+def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
+    """Validate the implemented planning phases and durable task progress."""
 
     if not isinstance(session, dict):
         raise ValueError("Planning discussion state is missing")
@@ -190,8 +193,9 @@ def validate_initial_planning_discussion_shape(session: Any) -> dict[str, Any]:
         or base_idea_number < int(proposal_id[1:])
     ):
         raise ValueError("Planning discussion idea boundary is invalid")
-    if session.get("phase") != "initial" or session.get("round_ordinal") != 0:
-        raise ValueError("New planning discussion must remain in its initial phase")
+    phase = session.get("phase")
+    if phase not in {"initial", "opening"} or session.get("round_ordinal") != 0:
+        raise ValueError("Planning discussion phase is not implemented")
     tasks = session.get("tasks")
     if not isinstance(tasks, dict):
         raise ValueError("Planning discussion tasks must be an object")
@@ -199,6 +203,9 @@ def validate_initial_planning_discussion_shape(session: Any) -> dict[str, Any]:
         planning_discussion_task_id("initial", participant_ordinal=ordinal)
         for ordinal in range(1, int(config.participant_count) + 1)
     }
+    opening_id = planning_discussion_task_id("opening", participant_ordinal=1)
+    if phase == "opening":
+        expected_ids.add(opening_id)
     if set(tasks) != expected_ids:
         raise ValueError("Planning discussion task set does not match its phase")
     for task_id in expected_ids:
@@ -208,10 +215,30 @@ def validate_initial_planning_discussion_shape(session: Any) -> dict[str, Any]:
             max_response_rounds=int(config.discussion_rounds),
         )
         task = tasks[task_id]
-        if identity.phase != "initial":
-            raise ValueError("New planning discussion task shape is invalid")
+        if identity.phase not in {"initial", phase}:
+            raise ValueError("Planning discussion task shape is invalid")
         validate_planning_discussion_task_shape(task_id, task)
+    if phase == "opening":
+        incomplete = [
+            task_id
+            for task_id in expected_ids
+            if task_id != opening_id
+            and tasks[task_id].get("result_record_id") != task_id
+        ]
+        if incomplete:
+            raise ValueError(
+                "Planning discussion cannot open before every initial contribution"
+            )
     return session
+
+
+def validate_initial_planning_discussion_shape(session: Any) -> dict[str, Any]:
+    """Require the exact initial shape used when a session is created."""
+
+    validated = validate_planning_discussion_shape(session)
+    if validated.get("phase") != "initial":
+        raise ValueError("New planning discussion must remain in its initial phase")
+    return validated
 
 
 def validate_planning_discussion_task_shape(
@@ -359,6 +386,127 @@ def permitted_planning_discussion_record_ids(
     """Derive readable planning records from authoritative session state."""
 
     return published_planning_discussion_task_ids(session)
+
+
+def project_initial_planning_discussion_segment(
+    session: Mapping[str, Any],
+) -> tuple[tuple[dict[str, Any], int], tuple[dict[str, Any], int]]:
+    """Project the mandatory opening and first response round."""
+
+    projected = json.loads(json.dumps(dict(session)))
+    if projected.get("phase") != "initial" or projected.get("round_ordinal") != 0:
+        raise ValueError("Initial discussion capacity requires the initial meeting phase.")
+    participant_count = projected.get("participant_count")
+    max_response_rounds = projected.get("max_response_rounds")
+    config = normalize_planning_mode_config(
+        COLLABORATIVE_PLANNING_MODE,
+        participant_count=participant_count,
+        discussion_rounds=max_response_rounds,
+    )
+    tasks = projected.get("tasks")
+    if not isinstance(tasks, dict):
+        raise ValueError("Planning discussion tasks must be an object.")
+    initial_ids = [
+        planning_discussion_task_id("initial", participant_ordinal=ordinal)
+        for ordinal in range(1, int(config.participant_count) + 1)
+    ]
+    opening_id = planning_discussion_task_id("opening", participant_ordinal=1)
+    tasks.setdefault(opening_id, {"kind": "contribution", "result_record_id": None})
+    projected["phase"] = "opening"
+    opening_missing = sum(
+        1
+        for task_id in initial_ids
+        if not (
+            isinstance(tasks.get(task_id), Mapping)
+            and tasks[task_id].get("result_record_id") == task_id
+            and tasks[task_id].get("pending_finalization") is None
+        )
+    )
+    opening_projection = (json.loads(json.dumps(projected)), opening_missing)
+
+    required_ids = [*initial_ids, opening_id]
+    for ordinal in range(2, int(config.participant_count) + 1):
+        task_id = planning_discussion_task_id(
+            "response",
+            participant_ordinal=ordinal,
+            round_ordinal=1,
+        )
+        tasks.setdefault(task_id, {"kind": "contribution", "result_record_id": None})
+        required_ids.append(task_id)
+    projected["phase"] = "response"
+    projected["round_ordinal"] = 1
+    missing = sum(
+        1
+        for task_id in required_ids
+        if not (
+            isinstance(tasks.get(task_id), Mapping)
+            and tasks[task_id].get("result_record_id") == task_id
+            and tasks[task_id].get("pending_finalization") is None
+        )
+    )
+    return opening_projection, (projected, missing)
+
+
+def prepare_planning_discussion_prompt(
+    *,
+    store: PlanningDiscussionRecordStore,
+    session: Mapping[str, Any],
+    prompt_template: str,
+    public_background: Mapping[str, Any],
+    runtime_budget_prompt: str = "",
+    summarize: Optional[
+        Callable[[Mapping[str, Any], str, list[dict[str, Any]]], str]
+    ] = None,
+    current_session: Optional[Callable[[], Mapping[str, Any]]] = None,
+    additional_records: Sequence[Mapping[str, Any]] = (),
+    reserve_tokens: int = 0,
+    maximum_prompt_chars: Optional[int] = None,
+    persist_cache: bool = True,
+) -> str:
+    """Apply the shared bounded-context engine to planning records."""
+
+    from core.hitl_proposal_discussion import (
+        PROPOSAL_DISCUSSION_COMPACTION_TRIGGER_TOKENS,
+        PROPOSAL_DISCUSSION_PROVIDER_OVERHEAD_TOKENS,
+        PROPOSAL_DISCUSSION_WORKER_CONTEXT_TOKENS,
+    )
+
+    def protected(
+        snapshot: Mapping[str, Any],
+        permitted: Sequence[str],
+    ) -> Sequence[str]:
+        if str(snapshot.get("phase", "")) in {"initial", "opening", "response"}:
+            return tuple(permitted)
+        return ()
+
+    return prepare_discussion_prompt(
+        store=store,
+        session=session,
+        prompt_template=prompt_template,
+        context_marker=PLANNING_DISCUSSION_CONTEXT_MARKER,
+        record_subject="Planning discussion",
+        public_background=public_background,
+        normalize_record=normalize_planning_discussion_record,
+        permitted_record_ids=permitted_planning_discussion_record_ids,
+        protected_record_ids=protected,
+        render_context=lambda summary, source_ids, originals: (
+            render_planning_discussion_context(
+                summary=summary,
+                source_record_ids=source_ids,
+                original_records=originals,
+            )
+        ),
+        worker_context_tokens=PROPOSAL_DISCUSSION_WORKER_CONTEXT_TOKENS,
+        compaction_trigger_tokens=PROPOSAL_DISCUSSION_COMPACTION_TRIGGER_TOKENS,
+        provider_overhead_tokens=PROPOSAL_DISCUSSION_PROVIDER_OVERHEAD_TOKENS,
+        runtime_budget_prompt=runtime_budget_prompt,
+        summarize=summarize,
+        current_session=current_session,
+        additional_records=additional_records,
+        reserve_tokens=reserve_tokens,
+        maximum_prompt_chars=maximum_prompt_chars,
+        persist_cache=persist_cache,
+    )
 
 
 def render_planning_discussion_context(

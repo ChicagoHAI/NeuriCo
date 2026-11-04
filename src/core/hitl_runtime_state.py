@@ -22,6 +22,7 @@ from core.hitl_planning_mode import (
 from core.hitl_planning_discussion import (
     new_planning_discussion,
     validate_initial_planning_discussion_shape,
+    validate_planning_discussion_shape,
     validate_planning_discussion_task_id,
 )
 from core.hitl_proposal_discussion import (
@@ -2914,7 +2915,7 @@ class HitlRuntimeState:
             preparation_attempt_id=preparation,
         )
         try:
-            session = validate_initial_planning_discussion_shape(
+            session = validate_planning_discussion_shape(
                 action.get("planning_discussion")
             )
         except ValueError as exc:
@@ -2988,7 +2989,7 @@ class HitlRuntimeState:
             existing = action.get("planning_discussion")
             if existing is not None:
                 try:
-                    session = validate_initial_planning_discussion_shape(existing)
+                    session = validate_planning_discussion_shape(existing)
                 except ValueError as exc:
                     raise HitlRuntimeStateError(str(exc)) from exc
                 expected = {
@@ -3058,6 +3059,58 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
             )
+            return self._copy(session)
+
+    def advance_planning_discussion_initial(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+    ) -> Dict[str, Any]:
+        """Publish the complete initial set and make the lead opening active."""
+
+        from core.hitl_planning_discussion import planning_discussion_task_id
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            if session.get("phase") == "opening":
+                return self._copy(session)
+            if session.get("phase") != "initial":
+                raise HitlRuntimeStateError(
+                    "Planning discussion initial phase is no longer active"
+                )
+            initial_ids = [
+                planning_discussion_task_id("initial", participant_ordinal=ordinal)
+                for ordinal in range(1, int(session["participant_count"]) + 1)
+            ]
+            if any(
+                session["tasks"][task_id].get("result_record_id") != task_id
+                for task_id in initial_ids
+            ):
+                raise HitlRuntimeStateError(
+                    "Planning discussion cannot open before every initial contribution"
+                )
+            opening_id = planning_discussion_task_id(
+                "opening", participant_ordinal=1
+            )
+            session["tasks"][opening_id] = {
+                "kind": "contribution",
+                "result_record_id": None,
+            }
+            session["phase"] = "opening"
+            try:
+                validate_planning_discussion_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            action["planning_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
             return self._copy(session)
 
     def planning_discussion_task_snapshot(

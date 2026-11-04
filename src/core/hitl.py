@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
+from core.hitl_discussion import MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS
 from core.hitl_lock import exclusive_file_lock
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_paths import (
@@ -166,7 +167,6 @@ _DISCUSSION_COMMAND_PROFILES = {
         },
     },
 }
-MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS = 2_000
 
 
 def _closed_scoped_task_profile_spec(profile: Any) -> Optional[Dict[str, Any]]:
@@ -5173,6 +5173,93 @@ class HitlRuntime:
                 )
             except (RuntimeError, ValueError) as exc:
                 raise HitlValidationError(str(exc)) from exc
+
+    def prepare_planning_discussion_prompt(
+        self,
+        *,
+        prompt_template: str,
+        public_background: Dict[str, Any],
+    ) -> str:
+        """Prepare bounded public meeting context for one planning turn."""
+
+        from core.hitl_planning_discussion import prepare_planning_discussion_prompt
+        from core.hitl_run_control import current_hitl_run_budget_prompt
+        from core.hitl_runtime_state import HitlRuntimeState
+
+        with self._tool_lock:
+            task_context = self._discussion_task_state_context()
+            if task_context.get("discussion_kind") != "planning":
+                raise HitlValidationError(
+                    "Planning discussion context requires a planning task session."
+                )
+
+            def current_session() -> Dict[str, Any]:
+                return HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
+                    **task_context["identity"]
+                )
+
+            try:
+                return prepare_planning_discussion_prompt(
+                    store=self._planning_discussion_record_store(),
+                    session=task_context["session"],
+                    prompt_template=prompt_template,
+                    public_background=public_background,
+                    runtime_budget_prompt=current_hitl_run_budget_prompt(
+                        self.work_dir
+                    ),
+                    current_session=current_session,
+                )
+            except (RuntimeError, ValueError) as exc:
+                raise HitlValidationError(str(exc)) from exc
+
+    def _require_planning_discussion_capacity(
+        self,
+        *,
+        projected_session: Dict[str, Any],
+        prompt_templates: Sequence[str],
+        public_background: Dict[str, Any],
+        reserve_contributions: int,
+        record_store: Optional[Any] = None,
+    ) -> None:
+        """Check one projected planning segment with the shared context budget."""
+
+        from core.hitl_planning_discussion import (
+            PLANNING_DISCUSSION_CONTEXT_MARKER,
+            prepare_planning_discussion_prompt,
+        )
+        from core.hitl_run_control import current_hitl_run_budget_prompt
+
+        templates = tuple(str(template) for template in prompt_templates)
+        if not templates or any(
+            template.count(PLANNING_DISCUSSION_CONTEXT_MARKER) != 1
+            for template in templates
+        ):
+            raise ValueError(
+                "Planning discussion capacity requires its exact prompt templates."
+            )
+        if (
+            isinstance(reserve_contributions, bool)
+            or not isinstance(reserve_contributions, int)
+            or reserve_contributions < 0
+        ):
+            raise ValueError(
+                "Planning discussion contribution reserve must be nonnegative."
+            )
+        reserve_tokens = (
+            reserve_contributions
+            * MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS
+        )
+        store = record_store or self._planning_discussion_record_store()
+        for template in templates:
+            prepare_planning_discussion_prompt(
+                store=store,
+                session=projected_session,
+                prompt_template=template,
+                public_background=public_background,
+                runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
+                reserve_tokens=reserve_tokens,
+                persist_cache=False,
+            )
 
     def register_proposal_discussion_prompt_template(self, prompt_template: str) -> None:
         """Retain the current final-owner template for reopen capacity validation."""

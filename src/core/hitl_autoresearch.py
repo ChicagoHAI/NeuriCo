@@ -2563,6 +2563,9 @@ class HitlAutoResearchController:
         additional_agent_runner: Optional[AdditionalAgentHook] = None,
         proposal_assessment_runner: Optional[Callable[..., Dict[str, Any]]] = None,
         proposal_prompt_template_renderer: Optional[ProposalPromptTemplateHook] = None,
+        planning_discussion_prompt_template_renderer: Optional[
+            Callable[..., tuple[str, Dict[str, Any]]]
+        ] = None,
     ):
         self.idea = idea
         self.idea_id = idea_id
@@ -2592,6 +2595,9 @@ class HitlAutoResearchController:
         self.additional_agent_runner = additional_agent_runner
         self.proposal_assessment_runner = proposal_assessment_runner
         self.proposal_prompt_template_renderer = proposal_prompt_template_renderer
+        self.planning_discussion_prompt_template_renderer = (
+            planning_discussion_prompt_template_renderer
+        )
 
     def run(self, iterations: int) -> AutoResearchRunResult:
         """
@@ -5480,8 +5486,12 @@ class HitlAutoResearchController:
                     idea=self.idea,
                     approved_proposal=str(proposal_record["proposal"]),
                     discussion_task_id=task_id,
-                    discussion_records=(
-                        task_runtime.planning_discussion_records_for_prompt()
+                    discussion_records=(),
+                    prompt_builder=lambda template, background: (
+                        task_runtime.prepare_planning_discussion_prompt(
+                            prompt_template=template,
+                            public_background=background,
+                        )
                     ),
                     task_dir=attempt_dir / "planning_discussion" / "tasks" / task_id,
                     prompt_suffix=prompt,
@@ -5514,6 +5524,182 @@ class HitlAutoResearchController:
         if not finish.get("complete") or not str(finish.get("record_id", "")).strip():
             raise RuntimeError("Planning discussion task ended without a recorded result.")
         return finish
+
+    def _require_initial_planning_discussion_capacity(
+        self,
+        *,
+        session: Dict[str, Any],
+        attempt_dir: Path,
+        approved_proposal: str,
+    ) -> None:
+        """Reserve the complete mandatory first segment before any participant runs."""
+
+        from agents.planning_discussion import (
+            planning_discussion_task_prompt_suffix,
+            planning_final_owner_prompt_template,
+        )
+        from core.agent_cli import append_prompt_block
+        from core.hitl_planning_discussion import (
+            PlanningDiscussionRecordStore,
+            planning_discussion_task_id,
+            project_initial_planning_discussion_segment,
+        )
+
+        renderer = self.planning_discussion_prompt_template_renderer
+        if not callable(renderer):
+            raise RuntimeError(
+                "Collaborative planning requires its prompt-template renderer."
+            )
+        participant_count = int(session["participant_count"])
+
+        def render(task_id: str) -> tuple[str, Dict[str, Any]]:
+            template, background = renderer(
+                approved_proposal=approved_proposal,
+                discussion_task_id=task_id,
+            )
+            return (
+                append_prompt_block(
+                    template,
+                    planning_discussion_task_prompt_suffix(task_id),
+                ),
+                background,
+            )
+
+        initial_id = planning_discussion_task_id(
+            "initial", participant_ordinal=participant_count
+        )
+        opening_id = planning_discussion_task_id("opening", participant_ordinal=1)
+        response_id = planning_discussion_task_id(
+            "response",
+            participant_ordinal=participant_count,
+            round_ordinal=1,
+        )
+        initial_template, background = render(initial_id)
+        opening_template, _ = render(opening_id)
+        response_template, _ = render(response_id)
+        opening_projection, response_projection = (
+            project_initial_planning_discussion_segment(session)
+        )
+        opening_session, opening_missing = opening_projection
+        response_session, response_missing = response_projection
+        unfinished_initial = sum(
+            1
+            for task_id, task in session["tasks"].items()
+            if task_id.startswith("initial/")
+            and task.get("result_record_id") != task_id
+        )
+        owner_prompt = planning_final_owner_prompt_template(
+            self._proposal_hitl_runtime().plan_prompt_block(
+                approved_proposal=approved_proposal,
+                requires_human_approval=True,
+            )
+        )
+        final_projection = json.loads(json.dumps(response_session))
+        final_projection["phase"] = "final_writing"
+        store = PlanningDiscussionRecordStore(attempt_dir)
+        runtime = self._proposal_hitl_runtime()
+        checks = (
+            (session, initial_template, unfinished_initial),
+            (opening_session, opening_template, opening_missing),
+            (response_session, response_template, response_missing),
+            (final_projection, owner_prompt, response_missing),
+        )
+        try:
+            for projected, template, reserve in checks:
+                runtime._require_planning_discussion_capacity(
+                    projected_session=projected,
+                    prompt_templates=(template,),
+                    public_background=background,
+                    reserve_contributions=reserve,
+                    record_store=store,
+                )
+        except ValueError as exc:
+            raise HitlTerminalRuntimeError(
+                "Collaborative planning cannot fit its mandatory first segment in "
+                "the verified worker context."
+            ) from exc
+
+    def _run_collaborative_planning_initial_phase(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        admitted_proposal_idea_id: str,
+    ) -> Dict[str, Any]:
+        """Run unfinished private inputs, then reveal them in scheduler order."""
+
+        from core.hitl_planning_discussion import planning_discussion_task_id
+        from core.hitl_proposal_round import run_parallel_proposal_stage
+
+        session = self._begin_or_resume_planning_discussion(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            admitted_proposal_idea_id=admitted_proposal_idea_id,
+        )
+        if session.get("phase") == "opening":
+            return session
+        if session.get("phase") != "initial":
+            raise RuntimeError(
+                "Collaborative planning initial coordinator found an invalid phase."
+            )
+        action = HitlRuntimeState(self.work_dir).snapshot().get(
+            "next_autoresearch_action"
+        )
+        preparation_attempt_id = str((action or {}).get("attempt_id", "")).strip()
+        if not preparation_attempt_id:
+            raise RuntimeError(
+                "Collaborative planning lost its proposal preparation identity."
+            )
+        boundary_validator = self._capture_planning_discussion_boundary(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            session=session,
+        )
+        approved_proposal = self._proposal_text_for(admitted_proposal_idea_id)
+        self._require_initial_planning_discussion_capacity(
+            session=session,
+            attempt_dir=attempt_dir,
+            approved_proposal=approved_proposal,
+        )
+        initial_ids = [
+            planning_discussion_task_id("initial", participant_ordinal=ordinal)
+            for ordinal in range(1, int(session["participant_count"]) + 1)
+        ]
+        unfinished = [
+            task_id
+            for task_id in initial_ids
+            if session["tasks"][task_id].get("result_record_id") != task_id
+        ]
+
+        def run_task(
+            task_id: str,
+            cancel_event: threading.Event,
+        ) -> Dict[str, Any]:
+            return self._run_planning_discussion_task(
+                task_id=task_id,
+                session=session,
+                parent_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                attempt_dir=attempt_dir,
+                boundary_validator=boundary_validator,
+                cancel_event=cancel_event,
+            )
+
+        if unfinished:
+            run_parallel_proposal_stage(
+                unfinished,
+                run_task,
+                maximum_tasks=int(session["participant_count"]),
+            )
+        self._require_proposal_discussion_boundary(
+            boundary_validator,
+            "Collaborative planning initial phase",
+        )
+        return HitlRuntimeState(self.work_dir).advance_planning_discussion_initial(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+        )
 
     def _prepare_ranked_task_runtime(
         self,
@@ -7190,6 +7376,28 @@ def run_hitl_autoresearch_loop(
             **request,
         )
 
+    def planning_discussion_prompt_template_renderer(
+        *,
+        approved_proposal: str,
+        discussion_task_id: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        from agents.planning_discussion import planning_discussion_prompt_template
+
+        prompt, prompt_inputs = planning_discussion_prompt_template(
+            idea=idea,
+            work_dir=work_dir,
+            approved_proposal=approved_proposal,
+            discussion_task_id=discussion_task_id,
+            templates_dir=Path(templates_dir),
+            hitl_mode=normalize_hitl_mode(hitl_mode).value,
+            provider=provider,
+        )
+        public_background = dict(prompt_inputs["public_context"])
+        public_background["whiteboard_active_tips_md"] = prompt_inputs[
+            "whiteboard_active_tips_md"
+        ]
+        return prompt, public_background
+
     def scorer(score_work_dir: Path) -> Dict[str, Any]:
         return run_scorer(
             work_dir=score_work_dir,
@@ -7241,5 +7449,8 @@ def run_hitl_autoresearch_loop(
         additional_agent_runner=additional_agent_runner,
         proposal_assessment_runner=proposal_assessment_runner,
         proposal_prompt_template_renderer=proposal_prompt_template_renderer,
+        planning_discussion_prompt_template_renderer=(
+            planning_discussion_prompt_template_renderer
+        ),
     )
     return controller.run(iterations=iterations)
