@@ -901,7 +901,9 @@ class ResearchRunner:
             recovered_hitl_attempt = recover_interrupted_hitl_autoresearch_attempt(work_dir)
 
         if recovered_hitl_attempt is not None and recovered_hitl_attempt.recovery_classification in {
-            "pending_worker_request", "frontier_decision_transition",
+            "pending_worker_request",
+            "frontier_decision_transition",
+            "proposal_preparation_transition",
         }:
             preserve_initial_inputs = True
 
