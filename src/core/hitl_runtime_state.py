@@ -3321,6 +3321,63 @@ class HitlRuntimeState:
             )
         return command
 
+    def planning_discussion_reopen_recovery_snapshot(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+    ) -> Dict[str, Any]:
+        """Return the exact state-owned boundary for one pending plan reopen."""
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            _action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            handoff = session.get("reopen_handoff")
+            if session.get("phase") != "reopen_pending" or not isinstance(
+                handoff, dict
+            ):
+                raise HitlRuntimeStateError(
+                    "Planning discussion has no pending reopen handoff"
+                )
+            command = self._require_planning_discussion_reopen_owner_unlocked(
+                session=session,
+                parent_node_sha=parent_node_sha,
+                candidate_attempt_id=candidate_attempt_id,
+                worker_request_key=str(handoff.get("worker_request_key", "")).strip(),
+                feedback_ref=str(handoff.get("feedback_ref", "")).strip(),
+            )
+            command_scope = command.get("workspace_fingerprint_scope")
+            command_scope = (
+                dict(command_scope)
+                if isinstance(command_scope, dict) and command_scope
+                else None
+            )
+            if (
+                str(command.get("plan_fingerprint", "")).strip()
+                != handoff.get("plan_fingerprint")
+                or str(command.get("workspace_fingerprint", "")).strip()
+                != handoff.get("workspace_fingerprint")
+                or command_scope != handoff.get("workspace_fingerprint_scope")
+            ):
+                raise HitlRuntimeStateError(
+                    "Planning discussion reopen reviewed boundary is inconsistent"
+                )
+            response = command.get("response")
+            record = response.get("record") if isinstance(response, dict) else None
+            if not isinstance(record, dict):
+                raise HitlRuntimeStateError(
+                    "Planning discussion reopen feedback record is missing"
+                )
+            return {
+                "handoff": self._copy(handoff),
+                "feedback_record": self._copy(record),
+            }
+
     def begin_planning_discussion_reopen(
         self,
         *,

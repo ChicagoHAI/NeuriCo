@@ -2008,6 +2008,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
     )
     planning_discussion_is_exact = False
     planning_discussion_phase: Optional[str] = None
+    planning_admitted_proposal_id = ""
     if planning_discussion_present and isinstance(preparation_action, dict):
         raw_planning = preparation_action.get("planning_discussion")
         if isinstance(raw_planning, dict):
@@ -2028,6 +2029,9 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                 )
                 planning_discussion_phase = str(
                     durable_planning.get("phase", "")
+                ).strip()
+                planning_admitted_proposal_id = str(
+                    durable_planning.get("admitted_proposal_idea_id", "")
                 ).strip()
                 planning_store = PlanningDiscussionRecordStore(attempt_dir)
                 planning_records = planning_store.records()
@@ -2112,6 +2116,35 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                     ):
                         raise RuntimeError(
                             "Planning discussion reopen record does not match its handoff."
+                        )
+                    reopen_boundary = (
+                        runtime_state.planning_discussion_reopen_recovery_snapshot(
+                            parent_node_sha=str(
+                                preparation_action.get("parent_node_sha", "")
+                            ).strip(),
+                            preparation_attempt_id=str(
+                                preparation_action.get("attempt_id", "")
+                            ).strip(),
+                            candidate_attempt_id=attempt_dir.name,
+                        )
+                    )
+                    if reopen_boundary.get("handoff") != handoff:
+                        raise RuntimeError(
+                            "Planning discussion reopen handoff changed during recovery."
+                        )
+                    feedback_record = reopen_boundary.get("feedback_record")
+                    feedback_ref = str(handoff.get("feedback_ref", "")).strip()
+                    logged_feedback = [
+                        record
+                        for record in HitlIdeaLog(work_dir).records()
+                        if record.get("idea_id") == feedback_ref
+                    ]
+                    if len(logged_feedback) != 1 or HitlIdeaLog.logical_payload(
+                        logged_feedback[0]
+                    ) != HitlIdeaLog.logical_payload(feedback_record):
+                        raise RuntimeError(
+                            "Planning discussion reopen feedback idea is missing or "
+                            "inconsistent."
                         )
                     current_whiteboard_sha = (
                         git_state.hitl_autoresearch_whiteboard_history_sha()
@@ -2272,6 +2305,38 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
     pending_response = (
         pending_request.get("response") if isinstance(pending_request, dict) else None
     )
+    planning_approved_plan_handoff = bool(
+        planning_discussion_is_exact
+        and planning_discussion_phase == "final_writing"
+        and isinstance(pending_request, dict)
+        and pending_request.get("kind") == "phase_finish"
+        and pending_request.get("pipeline_stage") == "experiment_runner"
+        and pending_request.get("hitl_stage") == "plan"
+        and pending_request.get("status") == "resolved"
+        and isinstance(pending_response, dict)
+        and pending_response.get("status") == "approved"
+        and isinstance(continuation, dict)
+        and continuation.get("pipeline_stage") == "experiment_runner"
+        and continuation.get("hitl_stage") == "execution"
+        and continuation.get("actor") == "comment_handler"
+        and continuation_provenance == pending_provenance
+        and str(continuation_provenance.get("proposal_idea_id", "")).strip()
+        == planning_admitted_proposal_id
+        and str(continuation.get("prompt_block", "")).strip()
+    )
+    planning_worker_recovery_is_exact = bool(
+        not planning_discussion_present
+        or (
+            isinstance(pending_request, dict)
+            and pending_request.get("pipeline_stage") == "experiment_runner"
+            and pending_request.get("kind") in {"phase_finish", "raised_idea"}
+            and isinstance(continuation, dict)
+            and continuation.get("pipeline_stage") == "experiment_runner"
+            and continuation.get("actor") == "comment_handler"
+            and str(continuation_provenance.get("proposal_idea_id", "")).strip()
+            == planning_admitted_proposal_id
+        )
+    )
     approved_agent_workspace_is_exact = bool(
         preparation_calls_resource_finder
         and preparation_action.get("status") in {"decision_recorded", "resolved"}
@@ -2319,8 +2384,12 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         )
     if (
         ordinary_worker_recovery_allowed
-        and worker_command_requires_resume(pending_request)
+        and (
+            worker_command_requires_resume(pending_request)
+            or planning_approved_plan_handoff
+        )
         and isinstance(continuation, dict)
+        and planning_worker_recovery_is_exact
         and continuation_provenance == pending_provenance
         and str(continuation_provenance.get("attempt_id", "")).strip() == attempt_dir.name
         and str(continuation_provenance.get("parent_node_id", "")).strip()
@@ -3715,6 +3784,19 @@ class HitlAutoResearchController:
         parent_summary = self._frontier_parent_summary(parent_sha)
         runtime = self._proposal_hitl_runtime()
         request_kind = str(pending.get("kind", "")).strip()
+        pending_response = pending.get("response")
+        resume_approved_plan = bool(
+            request_kind == "phase_finish"
+            and pending.get("pipeline_stage") == "experiment_runner"
+            and pending.get("hitl_stage") == "plan"
+            and pending.get("status") == "resolved"
+            and isinstance(pending_response, dict)
+            and pending_response.get("status") == "approved"
+            and continuation.get("pipeline_stage") == "experiment_runner"
+            and continuation.get("hitl_stage") == "execution"
+            and continuation.get("actor") == "comment_handler"
+            and dict(pending.get("provenance") or {}) == provenance
+        )
 
         # Recovery must reconnect to the original evaluator before relaunching
         # a worker; never reconstruct its authority from public candidate files.
@@ -3803,7 +3885,8 @@ class HitlAutoResearchController:
             attempt_id=attempt_id,
             attempt_dir=recovery.removed_attempt_dir,
             sealed_scoring={"path": sealed_path},
-            resume_pending=request_kind != "proposal",
+            resume_pending=(request_kind != "proposal" and not resume_approved_plan),
+            resume_approved_plan=resume_approved_plan,
         )
         scored_candidate = comment_result.get("scored_candidate")
         if not isinstance(scored_candidate, dict):
@@ -7229,6 +7312,7 @@ class HitlAutoResearchController:
         attempt_dir: Path,
         sealed_scoring: Dict[str, Optional[Path]],
         resume_pending: bool = False,
+        resume_approved_plan: bool = False,
     ) -> Dict[str, Any]:
         if self.hitl_comment_mode is None:
             raise RuntimeError("HITL AutoResearch requires a HITL comment-handler runner.")
@@ -7471,11 +7555,25 @@ class HitlAutoResearchController:
                 logs_dir=attempt_dir,
             )
 
-        continuation = runtime.worker_continuation() if resume_pending else None
+        continuation = (
+            runtime.worker_continuation()
+            if resume_pending or resume_approved_plan
+            else None
+        )
         resumed_stage = str((continuation or {}).get("hitl_stage", "")).strip()
-        if resume_pending and resumed_stage not in {"plan", "execution", "review"}:
+        if (resume_pending or resume_approved_plan) and resumed_stage not in {
+            "plan",
+            "execution",
+            "review",
+        }:
             raise RuntimeError("Recovered HITL experiment has no valid worker stage.")
-        initial_stage = resumed_stage if resume_pending else "plan"
+        if resume_approved_plan and resumed_stage != "execution":
+            raise RuntimeError(
+                "Recovered approved plan does not own an execution continuation."
+            )
+        initial_stage = (
+            resumed_stage if resume_pending or resume_approved_plan else "plan"
+        )
         planning_final = (
             self._collaborative_planning_final_session(
                 parent_sha=parent_node_id,
@@ -7533,6 +7631,12 @@ class HitlAutoResearchController:
         try:
             if resume_pending:
                 prompt = _load_hitl_template("worker_resume_pending_request.txt")
+            elif resume_approved_plan:
+                prompt = str((continuation or {}).get("prompt_block", "")).strip()
+                if not prompt:
+                    raise RuntimeError(
+                        "Recovered approved plan has no saved execution prompt."
+                    )
             else:
                 revision_feedback = (
                     self._collaborative_planning_revision_feedback(
@@ -7598,11 +7702,12 @@ class HitlAutoResearchController:
                 prompt=prompt,
                 log_prefix=(
                     "autoresearch_hitl_experiment_resume"
-                    if resume_pending
+                    if resume_pending or resume_approved_plan
                     else "autoresearch_hitl_experiment_plan"
                 ),
                 phase="stage",
                 worker_name="AutoResearch candidate experiment",
+                record_continuation=not resume_approved_plan,
             )
             if finish.get("reopen_discussion"):
                 planning_reopen_transfer = (
