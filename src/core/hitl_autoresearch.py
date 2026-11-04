@@ -2085,10 +2085,44 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                             whiteboard_sha
                         )
                     )
-                else:
-                    planning_whiteboard_is_exact = (
-                        planning_discussion_phase == "final_writing"
+                elif planning_discussion_phase == "final_writing":
+                    planning_whiteboard_is_exact = True
+                elif planning_discussion_phase == "reopen_pending":
+                    handoff = durable_planning.get("reopen_handoff")
+                    if not isinstance(handoff, dict):
+                        raise RuntimeError(
+                            "Planning discussion reopen handoff is missing."
+                        )
+                    reopen_record = planning_by_id.get(
+                        str(handoff.get("reopen_record_id", "")).strip()
                     )
+                    pending = handoff.get("pending_finalization")
+                    if pending is not None:
+                        if (
+                            reopen_record is not None
+                            and reopen_record.get("result") != pending
+                        ):
+                            raise RuntimeError(
+                                "Planning discussion reopen record conflicts with durable intent."
+                            )
+                    elif (
+                        not isinstance(reopen_record, dict)
+                        or reopen_record.get("result", {}).get("feedback_ref")
+                        != handoff.get("feedback_ref")
+                    ):
+                        raise RuntimeError(
+                            "Planning discussion reopen record does not match its handoff."
+                        )
+                    current_whiteboard_sha = (
+                        git_state.hitl_autoresearch_whiteboard_history_sha()
+                    )
+                    planning_whiteboard_is_exact = (
+                        git_state.hitl_autoresearch_whiteboard_matches_commit(
+                            current_whiteboard_sha
+                        )
+                    )
+                else:
+                    planning_whiteboard_is_exact = False
             except (
                 HitlRuntimeStateError,
                 HitlGitStateError,
@@ -2265,7 +2299,8 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                 preparation_workspace_is_exact
                 or (
                     planning_discussion_is_exact
-                    and planning_discussion_phase == "final_writing"
+                    and planning_discussion_phase
+                    in {"final_writing", "reopen_pending"}
                     and preparation_recovery_is_exact
                 )
             )
@@ -4200,14 +4235,40 @@ class HitlAutoResearchController:
                     attempt_dir=attempt_dir,
                     admitted_proposal_idea_id=proposal_idea_id,
                 )
-            comment_result = self._run_candidate_experiment_hitl(
-                proposal=proposal,
-                proposal_idea_id=proposal_idea_id,
-                parent_node_id=parent_sha,
-                attempt_id=attempt_id,
-                attempt_dir=attempt_dir,
-                sealed_scoring=sealed_scoring,
-            )
+            while True:
+                comment_result = self._run_candidate_experiment_hitl(
+                    proposal=proposal,
+                    proposal_idea_id=proposal_idea_id,
+                    parent_node_id=parent_sha,
+                    attempt_id=attempt_id,
+                    attempt_dir=attempt_dir,
+                    sealed_scoring=sealed_scoring,
+                )
+                if not comment_result.get("reopen_discussion"):
+                    break
+                action = HitlRuntimeState(self.work_dir).snapshot().get(
+                    "next_autoresearch_action"
+                )
+                if not isinstance(action, dict):
+                    raise RuntimeError(
+                        "Collaborative planning reopening lost proposal preparation state."
+                    )
+                HitlRuntimeState(self.work_dir).apply_planning_discussion_reopen(
+                    parent_node_sha=parent_sha,
+                    preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
+                    candidate_attempt_id=attempt_dir.name,
+                    reopen_record_id=str(
+                        comment_result.get("reopen_record_id", "")
+                    ).strip(),
+                    whiteboard_boundary_sha=str(
+                        comment_result.get("whiteboard_boundary_sha", "")
+                    ).strip(),
+                )
+                self._run_collaborative_planning_discussion(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                    admitted_proposal_idea_id=proposal_idea_id,
+                )
             if not comment_result.get("success"):
                 error_type = (
                     HitlTerminalRuntimeError
@@ -5914,10 +5975,26 @@ class HitlAutoResearchController:
         """Run the fixed planning protocol to its final-owner boundary."""
 
         from core.hitl_planning_discussion import (
+            PlanningDiscussionRecordStore,
+            planning_discussion_reopen_source_idea_ids,
             planning_discussion_response_task_ids,
             planning_discussion_task_id,
         )
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        action = HitlRuntimeState(self.work_dir).snapshot().get(
+            "next_autoresearch_action"
+        )
+        existing = (
+            action.get("planning_discussion")
+            if isinstance(action, dict)
+            else None
+        )
+        if isinstance(existing, dict) and existing.get("phase") == "reopen_pending":
+            self._recover_collaborative_planning_reopen(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+            )
 
         session = self._run_collaborative_planning_initial_phase(
             parent_sha=parent_sha,
@@ -5945,7 +6022,12 @@ class HitlAutoResearchController:
         def refresh() -> Dict[str, Any]:
             return state.planning_discussion_snapshot(**identity)
 
-        def run_task(task_id: str, current: Dict[str, Any]) -> None:
+        def run_task(
+            task_id: str,
+            current: Dict[str, Any],
+            *,
+            seed_idea_ids: Sequence[str] = (),
+        ) -> None:
             task = current["tasks"].get(task_id)
             if isinstance(task, dict) and task.get("result_record_id") == task_id:
                 return
@@ -5956,6 +6038,7 @@ class HitlAutoResearchController:
                 preparation_attempt_id=preparation_attempt_id,
                 attempt_dir=attempt_dir,
                 boundary_validator=boundary_validator,
+                seed_idea_ids=seed_idea_ids,
             )
 
         while True:
@@ -5963,6 +6046,12 @@ class HitlAutoResearchController:
             session = refresh()
             phase = str(session["phase"])
             round_ordinal = int(session["round_ordinal"])
+            seed_idea_ids: Sequence[str] = ()
+            if phase in {"response", "decision"}:
+                seed_idea_ids = planning_discussion_reopen_source_idea_ids(
+                    session,
+                    PlanningDiscussionRecordStore(attempt_dir).records(),
+                )
             if phase == "final_writing":
                 return session
             if phase == "opening":
@@ -5983,7 +6072,11 @@ class HitlAutoResearchController:
                 for task_id in planning_discussion_response_task_ids(
                     round_ordinal, int(session["participant_count"])
                 ):
-                    run_task(task_id, refresh())
+                    run_task(
+                        task_id,
+                        refresh(),
+                        seed_idea_ids=seed_idea_ids,
+                    )
                 self._require_proposal_discussion_boundary(
                     boundary_validator,
                     f"Collaborative planning round {round_ordinal}",
@@ -6000,7 +6093,11 @@ class HitlAutoResearchController:
                     participant_ordinal=1,
                     round_ordinal=round_ordinal,
                 )
-                run_task(decision_id, session)
+                run_task(
+                    decision_id,
+                    session,
+                    seed_idea_ids=seed_idea_ids,
+                )
                 decision = refresh()["tasks"][decision_id]
                 state.apply_planning_discussion_decision(
                     **identity,
@@ -6011,6 +6108,57 @@ class HitlAutoResearchController:
             raise RuntimeError(
                 f"Collaborative planning cannot run from phase {phase}."
             )
+
+    def _recover_collaborative_planning_reopen(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> None:
+        """Reconcile and apply an accepted plan-owner handoff after interruption."""
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict):
+            raise RuntimeError(
+                "Collaborative planning reopening lost proposal preparation state."
+            )
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        session = state.planning_discussion_snapshot(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+        )
+        if session.get("phase") != "reopen_pending":
+            return
+        runtime = self._proposal_hitl_runtime()
+        runtime.prepare_idea_tool_context(
+            hitl_stage="plan",
+            actor="comment_handler",
+            provenance={
+                "parent_node_id": parent_sha,
+                "attempt_id": attempt_dir.name,
+                "proposal_idea_id": session["admitted_proposal_idea_id"],
+            },
+            requires_human_approval=True,
+            proposal_preparation_attempt_id=preparation_attempt_id,
+            planning_discussion_attempt_dir=attempt_dir,
+            planning_discussion_final_owner=True,
+        )
+        try:
+            reconciled = runtime.reconcile_planning_discussion_reopen()
+            transfer = runtime.prepare_planning_discussion_reopen_transfer(
+                reconciled["reopen_record_id"]
+            )
+        finally:
+            runtime.clear_idea_tool_context()
+        state.apply_planning_discussion_reopen(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+            reopen_record_id=transfer["reopen_record_id"],
+            whiteboard_boundary_sha=transfer["whiteboard_boundary_sha"],
+        )
 
     def _collaborative_planning_final_session(
         self,
@@ -6052,7 +6200,7 @@ class HitlAutoResearchController:
         *,
         parent_sha: str,
         attempt_dir: Path,
-    ) -> Optional[Callable[[str], str]]:
+    ) -> Optional[Callable[..., str]]:
         """Compose canonical planning records with the ordinary plan prompt."""
 
         final = self._collaborative_planning_final_session(
@@ -6070,11 +6218,17 @@ class HitlAutoResearchController:
         manager = self._proposal_hitl_runtime().manager
         summarize_method = getattr(manager, "summarize_planning_discussion", None)
 
-        def build(prompt_template: str) -> str:
+        def build(
+            prompt_template: str,
+            *,
+            allow_reopen: bool = False,
+            reopen_source_idea_ids: Sequence[str] = (),
+        ) -> str:
             from agents.autoresearch_proposer import collect_public_proposal_context
             from agents.planning_discussion import planning_final_owner_prompt_template
             from core.hitl_planning_discussion import (
                 PlanningDiscussionRecordStore,
+                planning_discussion_reopen_source_idea_ids,
                 prepare_planning_discussion_prompt,
             )
             from core.hitl_run_control import (
@@ -6095,6 +6249,44 @@ class HitlAutoResearchController:
                 include_attempt_history=False,
                 hitl_autoresearch_whiteboard=True,
             )
+            store = PlanningDiscussionRecordStore(attempt_dir)
+            applied_source_ids = planning_discussion_reopen_source_idea_ids(
+                current, store.records()
+            )
+            requested_source_ids = tuple(
+                dict.fromkeys(
+                    [
+                        *applied_source_ids,
+                        *(str(item).strip() for item in reopen_source_idea_ids),
+                    ]
+                )
+            )
+            ideas_by_id = {
+                str(record.get("idea_id", "")).strip(): record
+                for record in self._proposal_hitl_runtime().log.records()
+            }
+            if any(
+                not source_id or source_id not in ideas_by_id
+                for source_id in requested_source_ids
+            ):
+                raise RuntimeError(
+                    "Planning discussion reopening references unavailable feedback."
+                )
+            visible_source_ids: list[str] = []
+            pending_source_ids = list(requested_source_ids)
+            while pending_source_ids:
+                source_id = pending_source_ids.pop(0)
+                if source_id in visible_source_ids:
+                    continue
+                record = ideas_by_id.get(source_id)
+                if not isinstance(record, dict):
+                    raise RuntimeError(
+                        "Planning discussion reopening references unavailable feedback."
+                    )
+                visible_source_ids.append(source_id)
+                premises = record.get("premises")
+                if isinstance(premises, list):
+                    pending_source_ids.extend(str(item).strip() for item in premises)
 
             def summarize(
                 public_background: Dict[str, Any],
@@ -6125,16 +6317,177 @@ class HitlAutoResearchController:
                 return value
 
             return prepare_planning_discussion_prompt(
-                store=PlanningDiscussionRecordStore(attempt_dir),
+                store=store,
                 session=current,
                 prompt_template=planning_final_owner_prompt_template(prompt_template),
                 public_background=background,
                 runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
                 summarize=summarize if callable(summarize_method) else None,
                 current_session=current_session,
+                allow_reopen=bool(allow_reopen),
+                reopen_source_ideas=[ideas_by_id[item] for item in visible_source_ids],
             )
 
         return build
+
+    def _collaborative_planning_reopen_capacity_validator(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Optional[Callable[[Dict[str, Any]], None]]:
+        """Build the exact pre-mutation capacity check for one planning reopen."""
+
+        final = self._collaborative_planning_final_session(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        if final is None:
+            return None
+        action, _session = final
+        identity = {
+            "parent_node_sha": parent_sha,
+            "preparation_attempt_id": str(action["attempt_id"]),
+            "candidate_attempt_id": Path(attempt_dir).name,
+        }
+
+        def validate(request: Dict[str, Any]) -> None:
+            from agents.planning_discussion import (
+                planning_discussion_task_prompt_suffix,
+                planning_final_owner_prompt_template,
+            )
+            from core.agent_cli import append_prompt_block
+            from core.hitl_planning_discussion import (
+                PlanningDiscussionRecordStore,
+                planning_discussion_task_id,
+                project_next_planning_discussion_response,
+            )
+
+            current = HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
+                **identity
+            )
+            projected, missing = project_next_planning_discussion_response(current)
+            feedback_record = request.get("feedback_record")
+            if not isinstance(feedback_record, dict):
+                raise ValueError("Planning reopen capacity requires its feedback record.")
+            feedback = str(
+                feedback_record.get("manager_feedback")
+                or feedback_record.get("human_feedback")
+                or ""
+            ).strip()
+            if not feedback:
+                raise ValueError("Planning reopen feedback is empty.")
+            source_records: list[Dict[str, Any]] = []
+            ideas_by_id = {
+                str(record.get("idea_id", "")).strip(): record
+                for record in self._proposal_hitl_runtime().log.records()
+            }
+            pending_ids = [str(feedback_record.get("idea_id", "")).strip()]
+            while pending_ids:
+                idea_id = pending_ids.pop(0)
+                if not idea_id or any(
+                    record.get("idea_id") == idea_id for record in source_records
+                ):
+                    continue
+                record = ideas_by_id.get(idea_id)
+                if not isinstance(record, dict):
+                    raise ValueError(
+                        "Planning reopen capacity references unavailable feedback."
+                    )
+                source_records.append(record)
+                premises = record.get("premises")
+                if isinstance(premises, list):
+                    pending_ids.extend(str(item).strip() for item in premises)
+            next_task_id = planning_discussion_task_id(
+                "response",
+                participant_ordinal=2,
+                round_ordinal=int(projected["round_ordinal"]),
+            )
+            renderer = self.planning_discussion_prompt_template_renderer
+            if not callable(renderer):
+                raise ValueError("Planning reopen has no prompt renderer.")
+            next_template, background = renderer(
+                approved_proposal=self._proposal_text_for(
+                    str(current["admitted_proposal_idea_id"])
+                ),
+                discussion_task_id=next_task_id,
+            )
+            next_template = append_prompt_block(
+                next_template,
+                planning_discussion_task_prompt_suffix(next_task_id),
+            )
+            owner = self._proposal_hitl_runtime()
+            revision_template = planning_final_owner_prompt_template(
+                owner.compose_worker_prompt(
+                    hitl_stage="plan",
+                    phase_prompt=owner.plan_revision_prompt_block(feedback),
+                )
+            )
+            additional = {
+                "record_id": str(request.get("record_id", "")).strip(),
+                "kind": "reopen",
+                "result": dict(request.get("result") or {}),
+            }
+            store = PlanningDiscussionRecordStore(attempt_dir)
+            owner._require_planning_discussion_capacity(
+                projected_session=projected,
+                prompt_templates=(next_template, revision_template),
+                public_background=background,
+                reserve_contributions=missing,
+                additional_records=(additional,),
+                record_store=store,
+                reopen_source_ideas=source_records,
+            )
+
+        return validate
+
+    def _collaborative_planning_revision_feedback(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> str:
+        """Return feedback for the latest applied planning reopen, if any."""
+
+        final = self._collaborative_planning_final_session(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        if final is None:
+            return ""
+        _action, session = final
+        from core.hitl_planning_discussion import (
+            PlanningDiscussionRecordStore,
+            planning_discussion_reopen_source_idea_ids,
+        )
+
+        source_ids = planning_discussion_reopen_source_idea_ids(
+            session,
+            PlanningDiscussionRecordStore(attempt_dir).records(),
+        )
+        if not source_ids:
+            return ""
+        feedback_id = source_ids[-1]
+        record = next(
+            (
+                item
+                for item in self._proposal_hitl_runtime().log.records()
+                if item.get("idea_id") == feedback_id
+            ),
+            None,
+        )
+        if not isinstance(record, dict):
+            raise RuntimeError(
+                "Collaborative planning revision lost its feedback record."
+            )
+        feedback = str(
+            record.get("manager_feedback") or record.get("human_feedback") or ""
+        ).strip()
+        if not feedback:
+            raise RuntimeError(
+                "Collaborative planning revision feedback is empty."
+            )
+        return feedback
 
     def _prepare_ranked_task_runtime(
         self,
@@ -7132,6 +7485,7 @@ class HitlAutoResearchController:
             else None
         )
         planning_owner_context: Dict[str, Any] = {}
+        planning_prompt_builder: Optional[Callable[..., str]] = None
         if planning_final is not None:
             planning_action, planning_session = planning_final
             if (
@@ -7141,10 +7495,28 @@ class HitlAutoResearchController:
                 raise RuntimeError(
                     "Collaborative planning final writing does not match the admitted proposal."
                 )
+            planning_prompt_builder = self._collaborative_planning_owner_prompt_builder(
+                parent_sha=parent_node_id,
+                attempt_dir=attempt_dir,
+            )
+            reopen_capacity_validator = (
+                self._collaborative_planning_reopen_capacity_validator(
+                    parent_sha=parent_node_id,
+                    attempt_dir=attempt_dir,
+                )
+            )
+            if planning_prompt_builder is None or reopen_capacity_validator is None:
+                raise RuntimeError(
+                    "Collaborative planning final owner has no bounded context adapters."
+                )
             planning_owner_context = {
                 "proposal_preparation_attempt_id": str(planning_action["attempt_id"]),
                 "planning_discussion_attempt_dir": attempt_dir,
                 "planning_discussion_final_owner": True,
+                "planning_discussion_prompt_composer": planning_prompt_builder,
+                "planning_discussion_reopen_capacity_validator": (
+                    reopen_capacity_validator
+                ),
             }
         runtime.prepare_idea_tool_context(
             hitl_stage=initial_stage,
@@ -7157,20 +7529,30 @@ class HitlAutoResearchController:
             scoring_repair_cleanup=clear_repairable_scoring_handoff,
             **planning_owner_context,
         )
+        planning_reopen_transfer: Optional[Dict[str, str]] = None
         try:
-            prompt = (
-                _load_hitl_template("worker_resume_pending_request.txt")
-                if resume_pending
-                else runtime.plan_prompt_block(
-                    approved_proposal=proposal,
-                    requires_human_approval=True,
-                )
-            )
-            if not resume_pending:
-                planning_prompt_builder = (
-                    self._collaborative_planning_owner_prompt_builder(
+            if resume_pending:
+                prompt = _load_hitl_template("worker_resume_pending_request.txt")
+            else:
+                revision_feedback = (
+                    self._collaborative_planning_revision_feedback(
                         parent_sha=parent_node_id,
                         attempt_dir=attempt_dir,
+                    )
+                    if planning_prompt_builder is not None
+                    else ""
+                )
+                prompt = (
+                    runtime.compose_worker_prompt(
+                        hitl_stage="plan",
+                        phase_prompt=runtime.plan_revision_prompt_block(
+                            revision_feedback
+                        ),
+                    )
+                    if revision_feedback
+                    else runtime.plan_prompt_block(
+                        approved_proposal=proposal,
+                        requires_human_approval=True,
                     )
                 )
                 if planning_prompt_builder is not None:
@@ -7222,8 +7604,20 @@ class HitlAutoResearchController:
                 phase="stage",
                 worker_name="AutoResearch candidate experiment",
             )
+            if finish.get("reopen_discussion"):
+                planning_reopen_transfer = (
+                    runtime.prepare_planning_discussion_reopen_transfer(
+                        str(finish.get("reopen_record_id", ""))
+                    )
+                )
         finally:
             runtime.clear_idea_tool_context()
+        if planning_reopen_transfer is not None:
+            return {
+                "success": False,
+                "reopen_discussion": True,
+                **planning_reopen_transfer,
+            }
         if not finish or not finish.get("approved"):
             return finish or result
 

@@ -1849,6 +1849,10 @@ class HitlRuntime:
         planning_discussion_attempt_dir: Optional[Path] = None,
         proposal_discussion_final_owner: bool = False,
         planning_discussion_final_owner: bool = False,
+        planning_discussion_prompt_composer: Optional[Callable[..., str]] = None,
+        planning_discussion_reopen_capacity_validator: Optional[
+            Callable[[Dict[str, Any]], None]
+        ] = None,
         scoped_task_cancel_event: Optional[threading.Event] = None,
     ) -> None:
         if hitl_stage not in HITL_STAGES:
@@ -2135,6 +2139,10 @@ class HitlRuntime:
             ),
             "proposal_discussion_final_owner": normalized_discussion_final_owner,
             "planning_discussion_final_owner": normalized_planning_final_owner,
+            "planning_discussion_prompt_composer": planning_discussion_prompt_composer,
+            "planning_discussion_reopen_capacity_validator": (
+                planning_discussion_reopen_capacity_validator
+            ),
             **(
                 {"scoped_task_cancel_event": scoped_task_cancel_event}
                 if scoped_task_cancel_event is not None
@@ -3859,6 +3867,7 @@ class HitlRuntime:
     def log_reported_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
             self._require_active_proposal_discussion_final_owner_mutation()
+            self._require_active_planning_discussion_final_owner_mutation()
             self._require_worker_command("hitl-report-idea")
             self._reject_cancelled_scoped_task_mutation()
             if self._tool_context.get("scoped_task_terminal"):
@@ -4877,6 +4886,286 @@ class HitlRuntime:
         finally:
             self._worker_request_lock.release()
 
+    def _planning_feedback_source_for_reopen(
+        self,
+        task_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Validate the exact unchanged plan-feedback boundary for reopening."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        pending = self._pending_worker_command()
+        continuation = self.worker_continuation()
+        response = pending.get("response") if isinstance(pending, dict) else None
+        record = response.get("record") if isinstance(response, dict) else None
+        provenance = pending.get("provenance") if isinstance(pending, dict) else None
+        identity = task_context["identity"]
+        session = task_context["session"]
+        request_key = str((pending or {}).get("request_key", "")).strip()
+        feedback_ref = str((record or {}).get("idea_id", "")).strip()
+        if (
+            not isinstance(pending, dict)
+            or pending.get("kind") != "phase_finish"
+            or pending.get("pipeline_stage") != "experiment_runner"
+            or pending.get("hitl_stage") != "plan"
+            or pending.get("status") != "resolved"
+            or not isinstance(response, dict)
+            or response.get("status") != "feedback"
+            or not isinstance(record, dict)
+            or not request_key
+            or not feedback_ref
+            or not isinstance(provenance, dict)
+            or str(provenance.get("parent_node_id", "")).strip()
+            != identity["parent_node_sha"]
+            or str(provenance.get("attempt_id", "")).strip()
+            != identity["candidate_attempt_id"]
+            or str(provenance.get("proposal_idea_id", "")).strip()
+            != str(session.get("admitted_proposal_idea_id", "")).strip()
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR planning_reopen_stale\n"
+                "The current worker does not own an exact resolved plan-feedback request."
+            )
+        continuation_provenance = (
+            continuation.get("provenance")
+            if isinstance(continuation, dict)
+            else None
+        )
+        if (
+            not isinstance(continuation, dict)
+            or continuation.get("pipeline_stage") != "experiment_runner"
+            or continuation.get("hitl_stage") != "plan"
+            or continuation.get("actor") != "comment_handler"
+            or continuation_provenance != provenance
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR planning_reopen_stale\n"
+                "The plan-feedback request no longer owns this plan continuation."
+            )
+        logged = [
+            item for item in self.log.records() if item.get("idea_id") == feedback_ref
+        ]
+        if len(logged) != 1 or HitlIdeaLog.logical_payload(logged[0]) != HitlIdeaLog.logical_payload(record):
+            raise HitlValidationError(
+                "HITL_ERROR planning_reopen_feedback\n"
+                "The finalized plan feedback record is missing or inconsistent."
+            )
+        plan_fingerprint = str(pending.get("plan_fingerprint", "")).strip()
+        workspace_fingerprint = str(
+            pending.get("workspace_fingerprint", "")
+        ).strip()
+        scope = pending.get("workspace_fingerprint_scope")
+        scope = dict(scope) if isinstance(scope, dict) and scope else None
+        if (
+            not plan_fingerprint
+            or self._current_plan_fingerprint() != plan_fingerprint
+            or not workspace_fingerprint
+            or HitlWorkspaceWriteGuard.public_fingerprint(
+                self.work_dir,
+                scope=scope,
+            )
+            != workspace_fingerprint
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR planning_reopen_boundary\n"
+                "The reviewed plan or workspace has changed. Continue the existing "
+                "direct revision; reopening is available only before editing."
+            )
+        from core.hitl_git_state import HitlGitStateStore
+
+        git_state = HitlGitStateStore(self.work_dir)
+        whiteboard_sha = git_state.hitl_autoresearch_whiteboard_history_sha()
+        if not git_state.hitl_autoresearch_whiteboard_matches_commit(whiteboard_sha):
+            raise HitlValidationError(
+                "HITL_ERROR planning_reopen_boundary\n"
+                "The live whiteboard does not match its canonical history."
+            )
+        return {
+            "worker_request_key": request_key,
+            "feedback_ref": feedback_ref,
+            "feedback_record": logged[0],
+            "whiteboard_boundary_sha": whiteboard_sha,
+        }
+
+    def reopen_planning_discussion(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Record one eligible plan-owner handoff back to planning discussion."""
+
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            with self._tool_lock:
+                from core.hitl_discussion import reopen_discussion_record_id
+                from core.hitl_planning_discussion import (
+                    PlanningDiscussionRecordStore,
+                    normalize_planning_discussion_record,
+                )
+                from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+
+                task_context = self._planning_discussion_final_owner_state_context()
+                session = task_context["session"]
+                next_round = int(session["round_ordinal"]) + 1
+                if next_round > int(session["max_response_rounds"]):
+                    raise HitlValidationError(
+                        "HITL_ERROR discussion_round_limit\n"
+                        "This planning meeting has used all configured response rounds. "
+                        "Revise the plan directly."
+                    )
+                if not isinstance(payload, dict) or set(payload) != {"reason"}:
+                    raise HitlValidationError(
+                        "Discussion reopening requires exactly one nonempty reason."
+                    )
+                source = self._planning_feedback_source_for_reopen(task_context)
+                record_id = reopen_discussion_record_id(next_round)
+                try:
+                    result = normalize_planning_discussion_record(
+                        record_id,
+                        "reopen",
+                        {
+                            "reason": payload.get("reason"),
+                            "feedback_ref": source["feedback_ref"],
+                        },
+                    )["result"]
+                except ValueError as exc:
+                    raise HitlValidationError(str(exc)) from exc
+                capacity = self._tool_context.get(
+                    "planning_discussion_reopen_capacity_validator"
+                )
+                if not callable(capacity):
+                    raise HitlValidationError(
+                        "Collaborative planning has no reopen capacity validator."
+                    )
+                try:
+                    capacity(
+                        {
+                            "record_id": record_id,
+                            "result": result,
+                            "feedback_record": source["feedback_record"],
+                        }
+                    )
+                except ValueError as exc:
+                    raise HitlValidationError(
+                        "HITL_ERROR discussion_context_too_large\n"
+                        "The next planning response round and later revision cannot "
+                        "fit the verified worker context. Revise the plan directly."
+                    ) from exc
+                state = HitlRuntimeState(self.work_dir)
+                try:
+                    state.begin_planning_discussion_reopen(
+                        **task_context["identity"],
+                        worker_request_key=source["worker_request_key"],
+                        feedback_ref=source["feedback_ref"],
+                        reopen_record_id=record_id,
+                        result=result,
+                    )
+                    PlanningDiscussionRecordStore(
+                        Path(self._tool_context["planning_discussion_attempt_dir"])
+                    ).append(record_id=record_id, kind="reopen", result=result)
+                    state.complete_planning_discussion_reopen_finalization(
+                        **task_context["identity"],
+                        reopen_record_id=record_id,
+                        result=result,
+                    )
+                except HitlRuntimeStateError as exc:
+                    raise HitlValidationError(str(exc)) from exc
+                commands = self._tool_context.get("allowed_worker_commands")
+                if isinstance(commands, set):
+                    commands.discard("hitl-report-idea")
+                    commands.discard("hitl-finish-phase")
+                    self._write_idea_tool_commands()
+                self._tool_context["planning_discussion_reopen_record_id"] = record_id
+                return {
+                    "status": "recorded",
+                    "record_id": record_id,
+                    "instruction": (
+                        "Runtime recorded the handoff. Stop this plan-owner session now; "
+                        "the same planning meeting will continue after runtime settles it."
+                    ),
+                }
+        finally:
+            self._worker_request_lock.release()
+
+    def reopen_discussion(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Dispatch the shared reopen command by authenticated final-owner context."""
+
+        if bool(self._tool_context.get("planning_discussion_final_owner")):
+            return self.reopen_planning_discussion(payload)
+        return self.reopen_proposal_discussion(payload)
+
+    def reconcile_planning_discussion_reopen(self) -> Dict[str, str]:
+        """Finish an accepted planning reopen append after interruption."""
+
+        with self._tool_lock:
+            from core.hitl_planning_discussion import PlanningDiscussionRecordStore
+            from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+
+            task_context = self._planning_discussion_final_owner_state_context()
+            session = task_context["session"]
+            handoff = session.get("reopen_handoff")
+            if session.get("phase") != "reopen_pending" or not isinstance(
+                handoff, dict
+            ):
+                raise HitlValidationError(
+                    "Collaborative planning has no accepted reopen handoff to recover."
+                )
+            record_id = str(handoff.get("reopen_record_id", "")).strip()
+            store = PlanningDiscussionRecordStore(
+                Path(self._tool_context["planning_discussion_attempt_dir"])
+            )
+            pending = handoff.get("pending_finalization")
+            if pending is not None:
+                try:
+                    record = store.append(
+                        record_id=record_id,
+                        kind="reopen",
+                        result=pending,
+                    )
+                    HitlRuntimeState(
+                        self.work_dir
+                    ).complete_planning_discussion_reopen_finalization(
+                        **task_context["identity"],
+                        reopen_record_id=record_id,
+                        result=record["result"],
+                    )
+                except (HitlRuntimeStateError, RuntimeError, ValueError) as exc:
+                    raise HitlValidationError(str(exc)) from exc
+            else:
+                matches = [
+                    record
+                    for record in store.records()
+                    if record.get("record_id") == record_id
+                ]
+                if len(matches) != 1 or matches[0].get("kind") != "reopen":
+                    raise HitlValidationError(
+                        "Planning discussion reopen record is missing or duplicated."
+                    )
+            return {"status": "recorded", "reopen_record_id": record_id}
+
+    def prepare_planning_discussion_reopen_transfer(
+        self,
+        reopen_record_id: str,
+    ) -> Dict[str, str]:
+        """Revalidate the reviewed plan boundary before ownership transfer."""
+
+        with self._tool_lock:
+            task_context = self._planning_discussion_final_owner_state_context()
+            session = task_context["session"]
+            handoff = session.get("reopen_handoff")
+            record_id = str(reopen_record_id).strip()
+            if (
+                session.get("phase") != "reopen_pending"
+                or not isinstance(handoff, dict)
+                or handoff.get("pending_finalization") is not None
+                or handoff.get("reopen_record_id") != record_id
+            ):
+                raise HitlValidationError(
+                    "Collaborative planning reopening is not ready to transfer ownership."
+                )
+            source = self._planning_feedback_source_for_reopen(task_context)
+            return {
+                "reopen_record_id": record_id,
+                "whiteboard_boundary_sha": source["whiteboard_boundary_sha"],
+            }
+
     def prepare_proposal_discussion_reopen_transfer(
         self,
         reopen_record_id: str,
@@ -5143,7 +5432,7 @@ class HitlRuntime:
         except HitlRuntimeStateError as exc:
             raise HitlValidationError(str(exc)) from exc
         if (
-            session.get("phase") != "final_writing"
+            session.get("phase") not in {"final_writing", "reopen_pending"}
             or str(session.get("admitted_proposal_idea_id", "")).strip()
             != str(provenance.get("proposal_idea_id", "")).strip()
         ):
@@ -5205,6 +5494,19 @@ class HitlRuntime:
                 "This proposer has already returned control to the collaborative "
                 "discussion. Stop this worker session; do not report more ideas or "
                 "submit another proposal."
+            )
+
+    def _require_active_planning_discussion_final_owner_mutation(self) -> None:
+        """Reject plan-owner writes after discussion ownership is transferred."""
+
+        if not bool(self._tool_context.get("planning_discussion_final_owner")):
+            return
+        task_context = self._planning_discussion_final_owner_state_context()
+        if task_context["session"].get("phase") != "final_writing":
+            raise HitlValidationError(
+                "HITL_ERROR planning_discussion_ownership_transferred\n"
+                "This plan owner has returned control to collaborative planning. "
+                "Stop this worker session; do not report more ideas or finish the phase."
             )
 
     @staticmethod
@@ -5270,6 +5572,9 @@ class HitlRuntime:
         """Prepare bounded public meeting context for one planning turn."""
 
         from core.hitl_planning_discussion import prepare_planning_discussion_prompt
+        from core.hitl_planning_discussion import (
+            planning_discussion_reopen_source_idea_ids,
+        )
         from core.hitl_run_control import current_hitl_run_budget_prompt
         from core.hitl_runtime_state import HitlRuntimeState
 
@@ -5314,9 +5619,22 @@ class HitlRuntime:
                     **task_context["identity"]
                 )
 
+            store = self._planning_discussion_record_store()
+            source_ids = planning_discussion_reopen_source_idea_ids(
+                task_context["session"], store.records()
+            )
+            ideas_by_id = {
+                str(record.get("idea_id", "")).strip(): record
+                for record in self.log.records()
+            }
+            if any(source_id not in ideas_by_id for source_id in source_ids):
+                raise HitlValidationError(
+                    "Planning discussion reopening references unavailable feedback."
+                )
+
             try:
                 return prepare_planning_discussion_prompt(
-                    store=self._planning_discussion_record_store(),
+                    store=store,
                     session=task_context["session"],
                     prompt_template=prompt_template,
                     public_background=public_background,
@@ -5325,6 +5643,7 @@ class HitlRuntime:
                     ),
                     summarize=summarize if callable(summarize_method) else None,
                     current_session=current_session,
+                    reopen_source_ideas=[ideas_by_id[item] for item in source_ids],
                 )
             except (RuntimeError, ValueError) as exc:
                 raise HitlValidationError(str(exc)) from exc
@@ -5338,6 +5657,7 @@ class HitlRuntime:
         reserve_contributions: int,
         additional_records: Sequence[Dict[str, Any]] = (),
         record_store: Optional[Any] = None,
+        reopen_source_ideas: Sequence[Dict[str, Any]] = (),
     ) -> None:
         """Check one projected planning segment with the shared context budget."""
 
@@ -5399,6 +5719,7 @@ class HitlRuntime:
                 additional_records=additional_records,
                 reserve_tokens=reserve_tokens,
                 persist_cache=False,
+                reopen_source_ideas=reopen_source_ideas,
             )
 
     def _validate_planning_discussion_task_capacity(
@@ -6954,6 +7275,7 @@ class HitlRuntime:
 
     def _finish_tool_phase_locked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._tool_lock:
+            self._require_active_planning_discussion_final_owner_mutation()
             pending = self._pending_worker_command()
             if (
                 isinstance(pending, dict)
@@ -7156,6 +7478,14 @@ class HitlRuntime:
                     raise HitlValidationError(
                         "Manager phase finish review must return status 'approved' or 'feedback'."
                     )
+                if (
+                    status == "feedback"
+                    and hitl_stage == "plan"
+                    and bool(
+                        self._tool_context.get("planning_discussion_final_owner")
+                    )
+                ):
+                    return {**review, "record": dict(finalized["record"])}
                 return review
 
             def persist_scoring_approval(review: Dict[str, Any]) -> Dict[str, Any]:
@@ -7352,6 +7682,23 @@ class HitlRuntime:
         """
         self._require_default_worker_state("worker exit continuation state")
         self._join_live_worker_request_handler()
+        if bool(self._tool_context.get("planning_discussion_final_owner")):
+            task_context = self._planning_discussion_final_owner_state_context()
+            if task_context["session"].get("phase") == "reopen_pending":
+                reconciled = self.reconcile_planning_discussion_reopen()
+                return {
+                    "status": "reopen_discussion",
+                    "approved": False,
+                    "replacement": False,
+                    "reopen_discussion": True,
+                    "reopen_record_id": reconciled["reopen_record_id"],
+                    "worker_exit_warning": (
+                        f"{worker_name} exited after returning plan feedback to the "
+                        "collaborative planning meeting. Runtime retained the accepted handoff."
+                        if not result.get("success")
+                        else ""
+                    ),
+                }
         cancelled = self._cancelled_worker_command_result(
             result,
             phase=phase,
@@ -7476,12 +7823,42 @@ class HitlRuntime:
                 )
         return {**result, "success": False, "hitl": True, "phase": phase, "error": error}
 
-    def _finish_feedback_prompt_block(self, *, hitl_stage: str, feedback: str) -> str:
+    def _finish_feedback_prompt_block(
+        self,
+        *,
+        hitl_stage: str,
+        feedback: str,
+        feedback_ref: str = "",
+    ) -> str:
         if hitl_stage == "plan":
             phase_prompt = self.plan_revision_prompt_block(feedback)
         else:
             phase_prompt = self.review_prompt_block(feedback)
-        return self.compose_worker_prompt(hitl_stage=hitl_stage, phase_prompt=phase_prompt)
+        prompt = self.compose_worker_prompt(
+            hitl_stage=hitl_stage,
+            phase_prompt=phase_prompt,
+        )
+        if (
+            hitl_stage == "plan"
+            and bool(self._tool_context.get("planning_discussion_final_owner"))
+        ):
+            composer = self._tool_context.get("planning_discussion_prompt_composer")
+            if not callable(composer):
+                raise HitlValidationError(
+                    "Collaborative plan feedback has no meeting-context composer."
+                )
+            prompt = str(
+                composer(
+                    prompt,
+                    allow_reopen=True,
+                    reopen_source_idea_ids=(feedback_ref,),
+                )
+            ).strip()
+            if not prompt:
+                raise HitlValidationError(
+                    "Collaborative plan feedback produced an empty continuation."
+                )
+        return prompt
 
     def _normalize_phase_finish_feedback(
         self,
@@ -7507,10 +7884,70 @@ class HitlRuntime:
         next_phase = "plan" if human_resolved_plan else (
             "review" if hitl_stage == "execution" else hitl_stage
         )
-        prompt_block = self._finish_feedback_prompt_block(
-            hitl_stage=next_phase,
-            feedback=feedback,
-        )
+        normalized_record = dict(record) if isinstance(record, dict) else None
+        feedback_ref = str((normalized_record or {}).get("idea_id", "")).strip()
+        if (
+            next_phase == "plan"
+            and bool(self._tool_context.get("planning_discussion_final_owner"))
+            and not feedback_ref
+        ):
+            raise HitlValidationError(
+                "Collaborative plan feedback is missing its finalized feedback idea."
+            )
+        try:
+            prompt_block = self._finish_feedback_prompt_block(
+                hitl_stage=next_phase,
+                feedback=feedback,
+                feedback_ref=feedback_ref,
+            )
+        except ValueError:
+            if not (
+                next_phase == "plan"
+                and bool(self._tool_context.get("planning_discussion_final_owner"))
+            ):
+                raise
+            message = (
+                "Collaborative plan feedback cannot fit the verified worker context "
+                "after meeting compaction. Runtime will restore the clean candidate "
+                "boundary."
+            )
+            self._phase_finish_result = {
+                "called": True,
+                "status": "restart_stage",
+                "hitl_stage": next_phase,
+                "plan_fingerprint": plan_fingerprint,
+                "workspace_fingerprint": workspace_fingerprint,
+                "summary": summary,
+                "related_artifacts": related_artifacts,
+                "manager_feedback": message,
+                "context": str(review.get("context", "")),
+                "next_phase": "complete",
+                "final": True,
+                **(
+                    {"record": normalized_record}
+                    if normalized_record is not None
+                    else {}
+                ),
+            }
+            return self._remember_phase_finish_response(
+                request_key,
+                {
+                    "status": "restart_stage",
+                    "feedback": message,
+                    "next_phase": "complete",
+                    "instruction": (
+                        "Runtime cannot launch the complete collaborative plan revision. "
+                        "Stop this worker session now."
+                    ),
+                    "prompt_block": "",
+                    "final": True,
+                    **(
+                        {"record": normalized_record}
+                        if normalized_record is not None
+                        else {}
+                    ),
+                },
+            )
         current_stage = str(
             self._tool_context.get("hitl_stage", self.current_hitl_stage)
         ).strip()
@@ -7523,7 +7960,6 @@ class HitlRuntime:
                 status="running",
             )
 
-        normalized_record = dict(record) if isinstance(record, dict) else None
         self._phase_finish_result = {
             "called": True,
             "status": "feedback",
@@ -7538,13 +7974,24 @@ class HitlRuntime:
             "final": False,
             **({"record": normalized_record} if normalized_record is not None else {}),
         }
+        collaborative_plan_feedback = bool(
+            next_phase == "plan"
+            and self._tool_context.get("planning_discussion_final_owner")
+        )
         instruction = (
-            "Apply this plan feedback, update the living plan, then "
-            "call hitl-finish-phase again."
-            if human_resolved_plan
+            "Before editing the reviewed plan, decide whether this feedback needs "
+            "another planning discussion round. If needed, call "
+            "hitl-reopen-discussion and stop only when runtime records the handoff. "
+            "Otherwise revise the living plan directly and call hitl-finish-phase again."
+            if collaborative_plan_feedback
             else (
-                "Apply this feedback in the current phase, update the living "
-                "plan/current artifacts, then call hitl-finish-phase again."
+                "Apply this plan feedback, update the living plan, then "
+                "call hitl-finish-phase again."
+                if human_resolved_plan
+                else (
+                    "Apply this feedback in the current phase, update the living "
+                    "plan/current artifacts, then call hitl-finish-phase again."
+                )
             )
         )
         response = {
@@ -8092,7 +8539,7 @@ class HitlRuntime:
                         return
                     if self.path == "/discussion/reopen":
                         runtime._require_worker_command("hitl-reopen-discussion")
-                        result = runtime.reopen_proposal_discussion(payload)
+                        result = runtime.reopen_discussion(payload)
                         self._send_json(
                             200,
                             {

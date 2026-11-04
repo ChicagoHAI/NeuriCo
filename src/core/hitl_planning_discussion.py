@@ -14,7 +14,9 @@ from core.hitl_discussion import (
     normalize_discussion_contribution_result,
     normalize_discussion_decision_result,
     parse_discussion_task_id,
+    parse_reopen_discussion_record_id,
     prepare_discussion_prompt,
+    reopen_discussion_record_id,
 )
 from core.hitl_planning_mode import (
     COLLABORATIVE_PLANNING_MODE,
@@ -78,17 +80,33 @@ def normalize_planning_discussion_record(
     if not isinstance(kind, str):
         raise ValueError("Discussion record kind is invalid.")
     normalized_kind = kind.strip().lower()
-    identity = parse_discussion_task_id(record_id)
     if normalized_kind == "contribution":
+        identity = parse_discussion_task_id(record_id)
         if identity.phase not in {"initial", "opening", "response"}:
             raise ValueError("Contribution records require a speaking task ID.")
         normalized_result = normalize_discussion_contribution_result(result)
     elif normalized_kind == "decision":
+        identity = parse_discussion_task_id(record_id)
         if identity.phase != "decision":
             raise ValueError("Decision records require a lead decision task ID.")
         normalized_result = normalize_discussion_decision_result(result)
+    elif normalized_kind == "reopen":
+        parse_reopen_discussion_record_id(record_id)
+        if not isinstance(result, Mapping) or set(result) != {"reason", "feedback_ref"}:
+            raise ValueError(
+                "Planning reopen result requires exactly reason and feedback_ref."
+            )
+        reason = str(result.get("reason", "")).strip()
+        feedback_ref = str(result.get("feedback_ref", "")).strip()
+        if not reason or _IDEA_ID.fullmatch(feedback_ref) is None:
+            raise ValueError(
+                "Planning reopen result requires a nonempty reason and feedback idea ID."
+            )
+        normalized_result = {"reason": reason, "feedback_ref": feedback_ref}
     else:
-        raise ValueError("Planning discussion record kind must be contribution or decision.")
+        raise ValueError(
+            "Planning discussion record kind must be contribution, decision, or reopen."
+        )
     return {
         "record_id": str(record_id),
         "kind": normalized_kind,
@@ -178,7 +196,7 @@ def planning_discussion_expected_task_ids(
                 )
             )
     if phase == "decision" or (
-        phase == "final_writing"
+        phase in {"final_writing", "reopen_pending"}
         and round_ordinal < int(session["max_response_rounds"])
     ):
         task_ids.append(
@@ -221,6 +239,9 @@ def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
         "round_ordinal",
         "tasks",
     }
+    phase = session.get("phase")
+    if phase == "reopen_pending":
+        required_keys.add("reopen_handoff")
     if set(session) != required_keys:
         raise ValueError(
             "Planning discussion state contains missing or unsupported fields"
@@ -261,9 +282,8 @@ def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
         or base_idea_number < int(proposal_id[1:])
     ):
         raise ValueError("Planning discussion idea boundary is invalid")
-    phase = session.get("phase")
     round_ordinal = session.get("round_ordinal")
-    if phase not in {"initial", "opening", "response", "decision", "final_writing"}:
+    if phase not in PLANNING_DISCUSSION_PHASES:
         raise ValueError("Planning discussion phase is not implemented")
     if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
         raise ValueError("Planning discussion round ordinal is invalid")
@@ -272,6 +292,48 @@ def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
             raise ValueError("Planning discussion has a round before responses begin")
     elif not 1 <= round_ordinal <= int(config.discussion_rounds):
         raise ValueError("Planning discussion round ordinal is invalid")
+    if phase == "reopen_pending":
+        handoff = session.get("reopen_handoff")
+        if not isinstance(handoff, dict):
+            raise ValueError("Planning discussion reopen handoff is missing")
+        required_handoff = {
+            "worker_request_key",
+            "feedback_ref",
+            "plan_fingerprint",
+            "workspace_fingerprint",
+            "workspace_fingerprint_scope",
+            "reopen_record_id",
+        }
+        allowed_handoff = {*required_handoff, "pending_finalization"}
+        if set(handoff) != required_handoff and set(handoff) != allowed_handoff:
+            raise ValueError("Planning discussion reopen handoff has invalid fields")
+        if (
+            not str(handoff.get("worker_request_key", "")).strip()
+            or _IDEA_ID.fullmatch(str(handoff.get("feedback_ref", ""))) is None
+            or not str(handoff.get("plan_fingerprint", "")).strip()
+            or not str(handoff.get("workspace_fingerprint", "")).strip()
+        ):
+            raise ValueError("Planning discussion reopen handoff identity is invalid")
+        reopen = parse_reopen_discussion_record_id(handoff.get("reopen_record_id"))
+        if reopen.round_ordinal != round_ordinal + 1:
+            raise ValueError("Planning discussion reopen handoff round is invalid")
+        from core.hitl_workspace_guard import WorkspaceGuardScope
+
+        scope = handoff.get("workspace_fingerprint_scope")
+        normalized_scope = (
+            None if scope is None else WorkspaceGuardScope.from_value(scope).to_dict()
+        )
+        if scope != normalized_scope:
+            raise ValueError("Planning discussion reopen workspace scope is not canonical")
+        pending = handoff.get("pending_finalization")
+        if "pending_finalization" in handoff:
+            normalized = normalize_planning_discussion_record(
+                handoff["reopen_record_id"], "reopen", pending
+            )["result"]
+            if pending != normalized:
+                raise ValueError(
+                    "Planning discussion reopen finalization intent is not normalized"
+                )
     tasks = session.get("tasks")
     if not isinstance(tasks, dict):
         raise ValueError("Planning discussion tasks must be an object")
@@ -328,7 +390,7 @@ def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
             raise ValueError(
                 "Planning discussion advanced before member responses completed"
             )
-        if phase == "final_writing" and round_ordinal < int(
+        if phase in {"final_writing", "reopen_pending"} and round_ordinal < int(
             config.discussion_rounds
         ):
             decision_id = planning_discussion_task_id(
@@ -439,6 +501,11 @@ def _planning_record_public_text(record: Mapping[str, Any]) -> str:
         if result.get("pass") is True:
             return "pass: true"
         return str(result["contribution"])
+    if record["kind"] == "reopen":
+        return (
+            f"reason:\n{result['reason']}\n"
+            f"feedback_ref: {result['feedback_ref']}"
+        )
     return f"choice: {result['choice']}\nreason:\n{result['reason']}"
 
 
@@ -498,7 +565,63 @@ def permitted_planning_discussion_record_ids(
 ) -> tuple[str, ...]:
     """Derive readable planning records from authoritative session state."""
 
-    return published_planning_discussion_task_ids(session)
+    permitted = [
+        *published_planning_discussion_task_ids(session),
+        *required_planning_discussion_reopen_record_ids(session),
+    ]
+    return tuple(sorted(set(permitted), key=discussion_record_sort_key))
+
+
+def required_planning_discussion_reopen_record_ids(
+    session: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Derive applied reopen records from authoritative planning progress."""
+
+    round_ordinal = int(session.get("round_ordinal", 0))
+    tasks = session.get("tasks")
+    if not isinstance(tasks, Mapping):
+        raise ValueError("Planning discussion tasks must be an object.")
+    required: list[str] = []
+    for prior_round in range(1, round_ordinal):
+        decision_id = planning_discussion_task_id(
+            "decision", participant_ordinal=1, round_ordinal=prior_round
+        )
+        decision = tasks.get(decision_id)
+        if (
+            not isinstance(decision, Mapping)
+            or decision.get("result_record_id") != decision_id
+            or decision.get("choice") not in {"continue", "finalize"}
+        ):
+            raise ValueError("Planning discussion prior-round decision is incomplete.")
+        if decision.get("choice") == "finalize":
+            required.append(reopen_discussion_record_id(prior_round + 1))
+    return tuple(required)
+
+
+def planning_discussion_reopen_source_idea_ids(
+    session: Mapping[str, Any],
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return the feedback idea attached to the latest applied reopening."""
+
+    required = required_planning_discussion_reopen_record_ids(session)
+    if not required:
+        return ()
+    records_by_id = {
+        str(record.get("record_id", "")).strip(): record for record in records
+    }
+    latest = records_by_id.get(required[-1])
+    if not isinstance(latest, Mapping) or latest.get("kind") != "reopen":
+        raise RuntimeError("Required planning discussion reopen record is missing.")
+    result = latest.get("result")
+    feedback_ref = (
+        str(result.get("feedback_ref", "")).strip()
+        if isinstance(result, Mapping)
+        else ""
+    )
+    if _IDEA_ID.fullmatch(feedback_ref) is None:
+        raise RuntimeError("Planning discussion reopen feedback reference is invalid.")
+    return (feedback_ref,)
 
 
 def project_initial_planning_discussion_segment(
@@ -558,6 +681,32 @@ def project_initial_planning_discussion_segment(
         )
     )
     return opening_projection, (projected, missing)
+
+
+def project_next_planning_discussion_response(
+    session: Mapping[str, Any],
+) -> tuple[dict[str, Any], int]:
+    """Project one feedback-triggered response round without mutating state."""
+
+    projected = json.loads(json.dumps(dict(session)))
+    if projected.get("phase") != "final_writing":
+        raise ValueError("Planning discussion reopening requires final writing.")
+    next_round = int(projected.get("round_ordinal", 0)) + 1
+    if next_round > int(projected.get("max_response_rounds", 0)):
+        raise ValueError("Planning discussion cannot reopen beyond its round limit.")
+    tasks = projected.get("tasks")
+    if not isinstance(tasks, dict):
+        raise ValueError("Planning discussion tasks must be an object.")
+    response_ids = planning_discussion_response_task_ids(
+        next_round, int(projected["participant_count"])
+    )
+    for task_id in response_ids:
+        tasks[task_id] = {"kind": "contribution", "result_record_id": None}
+    projected["round_ordinal"] = next_round
+    projected["phase"] = "response"
+    projected.pop("reopen_handoff", None)
+    validate_planning_discussion_shape(projected)
+    return projected, len(response_ids)
 
 
 def project_planning_discussion_task_result(
@@ -659,6 +808,8 @@ def prepare_planning_discussion_prompt(
     reserve_tokens: int = 0,
     maximum_prompt_chars: Optional[int] = None,
     persist_cache: bool = True,
+    allow_reopen: bool = False,
+    reopen_source_ideas: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Apply the shared bounded-context engine to planning records."""
 
@@ -683,6 +834,8 @@ def prepare_planning_discussion_prompt(
                 summary=summary,
                 source_record_ids=source_ids,
                 original_records=originals,
+                allow_reopen=allow_reopen,
+                reopen_source_ideas=reopen_source_ideas,
             )
         ),
         worker_context_tokens=PROPOSAL_DISCUSSION_WORKER_CONTEXT_TOKENS,
@@ -711,7 +864,15 @@ def protected_planning_discussion_record_ids(
         return permitted
     protected: list[str] = []
     for record_id in permitted:
-        task = parse_discussion_task_id(record_id)
+        try:
+            task = parse_discussion_task_id(record_id)
+        except ValueError:
+            reopen = parse_reopen_discussion_record_id(record_id)
+            if reopen.round_ordinal == round_ordinal or (
+                phase == "response" and reopen.round_ordinal == round_ordinal - 1
+            ):
+                protected.append(record_id)
+            continue
         if task.phase == "initial" and phase == "response" and round_ordinal == 1:
             protected.append(record_id)
             continue
@@ -734,7 +895,7 @@ def protected_planning_discussion_record_ids(
             protected.append(record_id)
             continue
         if (
-            phase in {"decision", "final_writing"}
+            phase in {"decision", "final_writing", "reopen_pending"}
             and task.phase == "decision"
             and task.round_ordinal == round_ordinal
         ):

@@ -3266,6 +3266,277 @@ class HitlRuntimeState:
             self._save_unlocked()
             return self._copy(session)
 
+    def _require_planning_discussion_reopen_owner_unlocked(
+        self,
+        *,
+        session: Dict[str, Any],
+        parent_node_sha: str,
+        candidate_attempt_id: str,
+        worker_request_key: str,
+        feedback_ref: str,
+    ) -> Dict[str, Any]:
+        """Require the existing resolved plan-feedback request and continuation."""
+
+        command = self._state.get("pending_worker_command")
+        response = command.get("response") if isinstance(command, dict) else None
+        record = response.get("record") if isinstance(response, dict) else None
+        provenance = command.get("provenance") if isinstance(command, dict) else None
+        if (
+            not isinstance(command, dict)
+            or command.get("request_key") != worker_request_key
+            or command.get("kind") != "phase_finish"
+            or command.get("pipeline_stage") != "experiment_runner"
+            or command.get("hitl_stage") != "plan"
+            or command.get("status") != "resolved"
+            or not isinstance(response, dict)
+            or response.get("status") != "feedback"
+            or not isinstance(record, dict)
+            or record.get("idea_id") != feedback_ref
+            or not isinstance(provenance, dict)
+            or str(provenance.get("parent_node_id", "")).strip()
+            != str(parent_node_sha).strip()
+            or str(provenance.get("attempt_id", "")).strip()
+            != str(candidate_attempt_id).strip()
+            or str(provenance.get("proposal_idea_id", "")).strip()
+            != str(session.get("admitted_proposal_idea_id", "")).strip()
+        ):
+            raise HitlRuntimeStateError(
+                "Planning discussion reopen no longer owns its plan-feedback request"
+            )
+        continuation = self._state.get("worker_continuation")
+        continuation_provenance = (
+            continuation.get("provenance")
+            if isinstance(continuation, dict)
+            else None
+        )
+        if (
+            not isinstance(continuation, dict)
+            or continuation.get("pipeline_stage") != "experiment_runner"
+            or continuation.get("hitl_stage") != "plan"
+            or continuation.get("actor") != "comment_handler"
+            or continuation_provenance != provenance
+        ):
+            raise HitlRuntimeStateError(
+                "Planning discussion reopen no longer owns its plan continuation"
+            )
+        return command
+
+    def begin_planning_discussion_reopen(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        worker_request_key: str,
+        feedback_ref: str,
+        reopen_record_id: str,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Persist a plan owner's handoff before appending its public record."""
+
+        from core.hitl_discussion import parse_reopen_discussion_record_id
+        from core.hitl_planning_discussion import normalize_planning_discussion_record
+
+        try:
+            normalized = normalize_planning_discussion_record(
+                reopen_record_id, "reopen", result
+            )["result"]
+            reopen = parse_reopen_discussion_record_id(reopen_record_id)
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            command = self._require_planning_discussion_reopen_owner_unlocked(
+                session=session,
+                parent_node_sha=parent_node_sha,
+                candidate_attempt_id=candidate_attempt_id,
+                worker_request_key=str(worker_request_key).strip(),
+                feedback_ref=str(feedback_ref).strip(),
+            )
+            scope = command.get("workspace_fingerprint_scope")
+            scope = dict(scope) if isinstance(scope, dict) and scope else None
+            handoff = {
+                "worker_request_key": str(worker_request_key).strip(),
+                "feedback_ref": str(feedback_ref).strip(),
+                "plan_fingerprint": str(command.get("plan_fingerprint", "")).strip(),
+                "workspace_fingerprint": str(
+                    command.get("workspace_fingerprint", "")
+                ).strip(),
+                "workspace_fingerprint_scope": scope,
+                "reopen_record_id": str(reopen_record_id).strip(),
+                "pending_finalization": normalized,
+            }
+            if not handoff["plan_fingerprint"] or not handoff["workspace_fingerprint"]:
+                raise HitlRuntimeStateError(
+                    "Planning discussion reopen has no reviewed workspace boundary"
+                )
+            if session["phase"] == "reopen_pending":
+                existing = session.get("reopen_handoff")
+                if existing == handoff or (
+                    isinstance(existing, dict)
+                    and existing.get("pending_finalization") is None
+                    and {key: existing.get(key) for key in handoff if key != "pending_finalization"}
+                    == {key: value for key, value in handoff.items() if key != "pending_finalization"}
+                ):
+                    return self._copy(session)
+                raise HitlRuntimeStateError(
+                    "Planning discussion already owns a different reopen handoff"
+                )
+            next_round = int(session["round_ordinal"]) + 1
+            if (
+                session["phase"] != "final_writing"
+                or next_round > int(session["max_response_rounds"])
+                or reopen.round_ordinal != next_round
+            ):
+                raise HitlRuntimeStateError(
+                    "Planning discussion cannot reopen from this round"
+                )
+            session["phase"] = "reopen_pending"
+            session["reopen_handoff"] = handoff
+            try:
+                validate_planning_discussion_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            action["planning_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
+
+    def complete_planning_discussion_reopen_finalization(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        reopen_record_id: str,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Commit the public planning-reopen record reference."""
+
+        from core.hitl_planning_discussion import normalize_planning_discussion_record
+
+        try:
+            normalized = normalize_planning_discussion_record(
+                reopen_record_id, "reopen", result
+            )["result"]
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            handoff = session.get("reopen_handoff")
+            if (
+                session.get("phase") != "reopen_pending"
+                or not isinstance(handoff, dict)
+                or handoff.get("reopen_record_id") != str(reopen_record_id).strip()
+            ):
+                raise HitlRuntimeStateError(
+                    "Planning discussion reopen finalization identity is stale"
+                )
+            pending = handoff.get("pending_finalization")
+            if pending is None:
+                return self._copy(session)
+            if pending != normalized:
+                raise HitlRuntimeStateError(
+                    "Planning discussion reopen finalization conflicts with durable intent"
+                )
+            handoff.pop("pending_finalization", None)
+            try:
+                validate_planning_discussion_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            action["planning_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
+
+    def apply_planning_discussion_reopen(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        reopen_record_id: str,
+        whiteboard_boundary_sha: str,
+    ) -> Dict[str, Any]:
+        """Transfer the settled plan owner back to the next response round."""
+
+        from core.hitl_discussion import parse_reopen_discussion_record_id
+        from core.hitl_planning_discussion import planning_discussion_response_task_ids
+
+        try:
+            reopen = parse_reopen_discussion_record_id(reopen_record_id)
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        whiteboard_sha = self._normalized_whiteboard_boundary_sha(
+            whiteboard_boundary_sha, subject="Planning discussion"
+        )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            if (
+                session["phase"] == "response"
+                and session["round_ordinal"] == reopen.round_ordinal
+                and session["whiteboard_boundary_sha"] == whiteboard_sha
+            ):
+                return self._copy(session)
+            handoff = session.get("reopen_handoff")
+            if (
+                session.get("phase") != "reopen_pending"
+                or not isinstance(handoff, dict)
+                or handoff.get("pending_finalization") is not None
+                or handoff.get("reopen_record_id") != reopen.record_id
+                or reopen.round_ordinal != int(session["round_ordinal"]) + 1
+            ):
+                raise HitlRuntimeStateError(
+                    "Planning discussion reopen handoff identity is stale"
+                )
+            self._require_planning_discussion_reopen_owner_unlocked(
+                session=session,
+                parent_node_sha=parent_node_sha,
+                candidate_attempt_id=candidate_attempt_id,
+                worker_request_key=handoff["worker_request_key"],
+                feedback_ref=handoff["feedback_ref"],
+            )
+            for task_id in planning_discussion_response_task_ids(
+                reopen.round_ordinal, int(session["participant_count"])
+            ):
+                session["tasks"][task_id] = {
+                    "kind": "contribution",
+                    "result_record_id": None,
+                }
+            session["phase"] = "response"
+            session["round_ordinal"] = reopen.round_ordinal
+            session["workspace_fingerprint"] = handoff["workspace_fingerprint"]
+            session["workspace_fingerprint_scope"] = handoff[
+                "workspace_fingerprint_scope"
+            ]
+            session["whiteboard_boundary_sha"] = whiteboard_sha
+            session.pop("reopen_handoff", None)
+            try:
+                validate_planning_discussion_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            action["planning_discussion"] = session
+            self._state["pending_worker_command"] = None
+            self._state["worker_continuation"] = None
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
+
     def planning_discussion_task_snapshot(
         self,
         *,
