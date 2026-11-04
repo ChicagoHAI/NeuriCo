@@ -375,9 +375,14 @@ def render_hitl_template(name: str, **kwargs: Any) -> str:
 
 
 def _resolve_manager_option(response: str, options: List[Dict[str, str]]) -> Dict[str, str]:
+    raw = response.strip()
+    if raw == "CUSTOM":
+        return {"decision": "CUSTOM", "feedback": raw}
     resolved = _resolve_option_decision(response, options)
     if resolved["decision"] == "CUSTOM":
-        raise HitlValidationError("Manager-resolved decision must match a substantive option")
+        raise HitlValidationError(
+            "Manager-resolved decision must match a substantive option or explicitly use CUSTOM"
+        )
     return resolved
 
 

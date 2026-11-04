@@ -72,16 +72,17 @@ Finalize as B/manager with:
 {
   "level": "B",
   "actor": "manager",
-  "context": "neutral self-contained manager context",
+  "context": "self-contained reason for the manager resolution",
   "options": ["the worker's substantive options; omit for evidence ideas"],
-  "decision": "one selected option_id; required for decision ideas",
+  "decision": "one selected option_id, or CUSTOM; required for decision ideas",
   "manager_feedback": "concrete worker-facing instruction"
 }
 
-For decision ideas, preserve the worker's substantive options and select one of
-them. Do not add `CUSTOM`, routing options, or a new research direction. For
-evidence ideas, omit options and decision. Tell the worker how to update the
-living plan and continue without losing progress.
+For decision ideas, preserve the worker's substantive options. Select one when
+it accurately represents the resolution. Otherwise, use `CUSTOM` and state the
+scope-preserving resolution in manager_feedback. Do not add routing options or a
+new research direction. For evidence ideas, omit options and decision. Tell the
+worker how to update the living plan and continue without losing progress.
 
 Pipeline stage: {{ pipeline_stage }}
 Living plan:
@@ -121,9 +122,9 @@ Schema for B-level manager resolution:
 {
   "level": "B",
   "actor": "manager",
-  "context": "neutral self-contained manager context",
+  "context": "self-contained reason for the manager resolution",
   "options": ["substantive workflow choices for decision ideas; omit for evidence ideas"],
-  "decision": "selected option_id; required for decision ideas",
+  "decision": "selected option_id, or CUSTOM; required for decision ideas",
   "manager_feedback": "worker-facing feedback to put into the plan"
 }
 
@@ -141,9 +142,12 @@ Schema for A-level human resolution:
 
 For decision ideas:
 - preserve the worker's substantive options;
-- you may clarify wording or boundaries, but do not add new substantive options;
+- you may clarify their wording or boundaries, but keep any manager-authored
+  resolution in manager_feedback rather than adding it to options;
 - do not create routing options such as "ask human" or "ask manager";
-- for B-level manager resolution, the decision must match one returned option;
+- for B-level manager resolution, select one returned option when it accurately
+  represents the resolution; otherwise use `CUSTOM` and state the manager's
+  resolution in manager_feedback;
 - for A-level human resolution, if the human selected one of the options, use
   that option id; if the human gave custom feedback, use `CUSTOM` and
   put the raw content in `human_feedback`.

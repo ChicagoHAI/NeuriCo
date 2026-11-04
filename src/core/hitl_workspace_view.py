@@ -899,6 +899,12 @@ class HitlWorkspaceView:
     @staticmethod
     def _decision_option_text(idea: Dict[str, Any]) -> str:
         selected = str(idea.get("decision", "")).strip()
+        if selected == "CUSTOM":
+            return (
+                str(idea.get("human_feedback", "")).strip()
+                or str(idea.get("manager_feedback", "")).strip()
+                or selected
+            )
         for option in idea.get("options", []):
             if isinstance(option, str):
                 option_id = option_text = option

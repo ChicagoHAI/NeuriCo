@@ -1133,7 +1133,7 @@ class HitlManager:
                     )
                     if submitted_options != expected_options:
                         raise ValueError(
-                            "Auto HITL must select from the worker's existing decision options."
+                            "Auto HITL must preserve the worker's existing decision options."
                         )
                     data["options"] = raised_idea.get("options", [])
             else:
