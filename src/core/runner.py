@@ -54,7 +54,6 @@ from core.compute_backend import (
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_planning_mode import (
-    COLLABORATIVE_PLANNING_MODE,
     PlanningModeConfig,
     normalize_planning_mode_config,
     require_managed_autoresearch_planning_mode,
@@ -500,10 +499,6 @@ class ResearchRunner:
                 hitl_autoresearch or hitl_continue_autoresearch
             ),
         )
-        if selected_planning_mode.mode == COLLABORATIVE_PLANNING_MODE:
-            raise RuntimeError(
-                "Collaborative planning mode is not available until its runtime is installed."
-            )
         if hitl_work_dir is not None and not hitl:
             raise ValueError("hitl_work_dir is valid only with a managed research entry mode.")
         selected_hitl_mode = normalize_hitl_mode(hitl_mode)

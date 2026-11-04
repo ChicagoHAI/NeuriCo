@@ -35,6 +35,16 @@ from core.hitl_lock import (
     resolve_hitl_manager_provider,
     select_hitl_manager_provider,
 )
+from core.hitl_planning_mode import (
+    COLLABORATIVE_PLANNING_MODE,
+    DEFAULT_COLLABORATIVE_PLANNING_DISCUSSION_ROUNDS,
+    DEFAULT_COLLABORATIVE_PLANNING_PARTICIPANT_COUNT,
+    MAX_COLLABORATIVE_PLANNING_DISCUSSION_ROUNDS,
+    MAX_COLLABORATIVE_PLANNING_PARTICIPANT_COUNT,
+    MIN_COLLABORATIVE_PLANNING_DISCUSSION_ROUNDS,
+    MIN_COLLABORATIVE_PLANNING_PARTICIPANT_COUNT,
+    SINGLE_PLANNING_MODE,
+)
 from core.hitl_manager_react import HitlManager
 from core.hitl_proposal_round import (
     COLLABORATIVE_PROPOSAL_MODE,
@@ -1038,6 +1048,9 @@ class HitlTerminalChannel(UserChannel):
             reviewer_count = None
             participant_count = None
             discussion_rounds = None
+            planning_mode = SINGLE_PLANNING_MODE
+            planning_participant_count = None
+            planning_discussion_rounds = None
             iterations = 1
             time_limit_seconds = None
             if operation == "research" and workflow == "autoresearch":
@@ -1078,6 +1091,29 @@ class HitlTerminalChannel(UserChannel):
                         DEFAULT_COLLABORATIVE_DISCUSSION_ROUNDS,
                         minimum=MIN_COLLABORATIVE_DISCUSSION_ROUNDS,
                         maximum=MAX_COLLABORATIVE_DISCUSSION_ROUNDS,
+                        cancellable=True,
+                    )
+                planning_choice = self._read_choice(
+                    "Planning [single] (single/collaborative): ",
+                    "single",
+                    {"single", "collaborative"},
+                    "Choose single or collaborative planning.",
+                    cancellable=True,
+                )
+                if planning_choice == "collaborative":
+                    planning_mode = COLLABORATIVE_PLANNING_MODE
+                    planning_participant_count = self._read_integer(
+                        "Planning participants [5] (3-10, including lead): ",
+                        DEFAULT_COLLABORATIVE_PLANNING_PARTICIPANT_COUNT,
+                        minimum=MIN_COLLABORATIVE_PLANNING_PARTICIPANT_COUNT,
+                        maximum=MAX_COLLABORATIVE_PLANNING_PARTICIPANT_COUNT,
+                        cancellable=True,
+                    )
+                    planning_discussion_rounds = self._read_integer(
+                        "Planning response rounds [3] (1-10): ",
+                        DEFAULT_COLLABORATIVE_PLANNING_DISCUSSION_ROUNDS,
+                        minimum=MIN_COLLABORATIVE_PLANNING_DISCUSSION_ROUNDS,
+                        maximum=MAX_COLLABORATIVE_PLANNING_DISCUSSION_ROUNDS,
                         cancellable=True,
                     )
                 iterations = self._read_integer(
@@ -1150,6 +1186,19 @@ class HitlTerminalChannel(UserChannel):
                                     "discussion_rounds": discussion_rounds,
                                 }
                                 if proposal_mode == COLLABORATIVE_PROPOSAL_MODE
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "planning_mode": planning_mode,
+                                    "planning_participant_count": (
+                                        planning_participant_count
+                                    ),
+                                    "planning_discussion_rounds": (
+                                        planning_discussion_rounds
+                                    ),
+                                }
+                                if planning_mode == COLLABORATIVE_PLANNING_MODE
                                 else {}
                             ),
                         }

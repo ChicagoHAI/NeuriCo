@@ -334,10 +334,6 @@ def main() -> int:
             participant_count=request.get("planning_participant_count"),
             discussion_rounds=request.get("planning_discussion_rounds"),
         )
-        if planning_mode_config.mode == COLLABORATIVE_PLANNING_MODE:
-            raise RuntimeError(
-                "Collaborative planning mode is not available until its runtime is installed."
-            )
         project_root = PROJECT_ROOT.resolve()
         _load_project_environment(project_root)
         request_id = str(request["request_id"])

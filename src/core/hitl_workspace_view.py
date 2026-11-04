@@ -27,6 +27,15 @@ from core.hitl_paths import (
     hitl_state_dir,
     hitl_stop_request_path,
 )
+from core.hitl_planning_discussion import (
+    planning_discussion_task_id,
+    validate_planning_discussion_shape,
+)
+from core.hitl_planning_mode import (
+    COLLABORATIVE_PLANNING_MODE,
+    PENDING_PLANNING_POLICY_FIELD,
+    normalize_pending_planning_policy,
+)
 from core.hitl_proposal_discussion import proposal_discussion_task_id
 from core.hitl_proposal_round import (
     COLLABORATIVE_PROPOSAL_MODE,
@@ -556,6 +565,130 @@ class HitlWorkspaceView:
             "next_action": next_step,
         }
 
+    @staticmethod
+    def _collaborative_planning_status(next_action: Dict[str, Any]) -> Dict[str, Any]:
+        """Derive planning progress from the authoritative discussion session."""
+
+        session = next_action.get("planning_discussion")
+        if (
+            next_action.get("kind") != "prepare_proposal"
+            or next_action.get("status") != "resolved"
+            or not isinstance(session, dict)
+        ):
+            return {}
+        try:
+            session = validate_planning_discussion_shape(session)
+        except ValueError as exc:
+            raise HitlWorkspaceViewError(
+                f"Invalid collaborative planning configuration: {exc}"
+            ) from exc
+        tasks = session["tasks"]
+        participant_count = int(session["participant_count"])
+        maximum_rounds = int(session["max_response_rounds"])
+        round_ordinal = int(session["round_ordinal"])
+        phase = str(session["phase"])
+
+        def completed(task_ids: List[str]) -> int:
+            return sum(
+                1
+                for task_id in task_ids
+                if bool(str(tasks[task_id].get("result_record_id") or "").strip())
+            )
+
+        if phase == "initial":
+            task_ids = [
+                planning_discussion_task_id(
+                    "initial",
+                    participant_ordinal=ordinal,
+                )
+                for ordinal in range(1, participant_count + 1)
+            ]
+            total = participant_count
+            complete = completed(task_ids)
+            title = "Developing planning approaches"
+            phase_label = f"Initial planning contributions ({complete}/{total})"
+            detail = "Participants are independently developing execution approaches."
+            next_step = "The lead opens the planning discussion after every contribution is ready."
+        elif phase == "opening":
+            total = 1
+            complete = completed(
+                [planning_discussion_task_id("opening", participant_ordinal=1)]
+            )
+            title = "Opening planning discussion"
+            phase_label = f"Planning lead opening ({complete}/1)"
+            detail = "The lead is framing the shared discussion from the initial approaches."
+            next_step = "The other participants respond in the first planning round."
+        elif phase == "response":
+            task_ids = [
+                planning_discussion_task_id(
+                    "response",
+                    participant_ordinal=ordinal,
+                    round_ordinal=round_ordinal,
+                )
+                for ordinal in range(2, participant_count + 1)
+            ]
+            total = participant_count - 1
+            complete = completed(task_ids)
+            title = f"Discussing the execution plan · Round {round_ordinal}"
+            phase_label = f"Planning response round {round_ordinal} ({complete}/{total})"
+            detail = "Participants are refining the plan against the published meeting record."
+            next_step = (
+                "The lead writes the formal plan after this round."
+                if round_ordinal == maximum_rounds
+                else "The lead decides whether to continue or write the formal plan."
+            )
+        elif phase == "decision":
+            total = 1
+            complete = completed(
+                [
+                    planning_discussion_task_id(
+                        "decision",
+                        participant_ordinal=1,
+                        round_ordinal=round_ordinal,
+                    )
+                ]
+            )
+            title = "Choosing whether to continue planning"
+            phase_label = f"Planning lead decision after round {round_ordinal} ({complete}/1)"
+            detail = "The lead is deciding whether another planning round is useful."
+            next_step = "Discussion continues, or the lead writes the formal plan."
+        elif phase == "final_writing":
+            total = 1
+            complete = 0
+            title = "Writing formal plan"
+            phase_label = "Formal plan writing"
+            detail = "The plan owner is writing through the existing planning workflow."
+            next_step = "The manager reviews the plan next."
+        elif phase == "reopen_pending":
+            total = 1
+            complete = 0
+            title = "Reopening planning discussion"
+            phase_label = "Reopening planning handoff"
+            detail = "Accepted manager feedback is being transferred back to the meeting."
+            next_step = "Participants resume within the remaining shared round allowance."
+        else:  # validate_planning_discussion_shape already rejects this.
+            raise HitlWorkspaceViewError(
+                f"Collaborative planning has an invalid phase: {phase or '<missing>'}."
+            )
+        return {
+            "planning_mode": COLLABORATIVE_PLANNING_MODE,
+            "planning_participant_count": participant_count,
+            "planning_discussion_rounds": maximum_rounds,
+            "planning_discussion_phase": phase,
+            "planning_discussion_round_ordinal": round_ordinal,
+            "planning_discussion_rounds_remaining": max(
+                0, maximum_rounds - round_ordinal
+            ),
+            "planning_progress": {
+                "completed": complete,
+                "total": total,
+            },
+            "title": title,
+            "phase_label": phase_label,
+            "detail": detail,
+            "next_action": next_step,
+        }
+
     def _live_status(
         self,
         runtime: Dict[str, Any],
@@ -597,6 +730,35 @@ class HitlWorkspaceView:
                 "Proposal preparation cannot contain ranked and collaborative state."
             )
         proposal_status = collaborative_proposal or ranked_proposal
+        planning_status = self._collaborative_planning_status(next_action)
+        pending_planning_policy = next_action.get(PENDING_PLANNING_POLICY_FIELD)
+        if planning_status and pending_planning_policy is not None:
+            raise HitlWorkspaceViewError(
+                "Collaborative planning cannot retain pending policy after session creation."
+            )
+        planning_configuration: Dict[str, Any] = {}
+        if planning_status:
+            planning_configuration = {
+                "planning_mode": planning_status["planning_mode"],
+                "planning_participant_count": planning_status[
+                    "planning_participant_count"
+                ],
+                "planning_discussion_rounds": planning_status[
+                    "planning_discussion_rounds"
+                ],
+            }
+        elif pending_planning_policy is not None:
+            try:
+                policy = normalize_pending_planning_policy(pending_planning_policy)
+            except ValueError as exc:
+                raise HitlWorkspaceViewError(
+                    f"Invalid pending collaborative planning policy: {exc}"
+                ) from exc
+            planning_configuration = {
+                "planning_mode": COLLABORATIVE_PLANNING_MODE,
+                "planning_participant_count": policy["participant_count"],
+                "planning_discussion_rounds": policy["discussion_rounds"],
+            }
         frontier_transition = runtime.get("frontier_decision_transition")
         frontier_transition = frontier_transition if isinstance(frontier_transition, dict) else {}
         root_transition = runtime.get("initial_root_publication_transition")
@@ -718,6 +880,20 @@ class HitlWorkspaceView:
                         if key in proposal_status
                     }
                 )
+            if planning_configuration:
+                result.update(planning_configuration)
+            if planning_status:
+                result.update(
+                    {
+                        key: planning_status[key]
+                        for key in (
+                            "planning_discussion_phase",
+                            "planning_discussion_round_ordinal",
+                            "planning_discussion_rounds_remaining",
+                            "planning_progress",
+                        )
+                    }
+                )
             return result
 
         human_request = unresolved and bool(
@@ -730,6 +906,12 @@ class HitlWorkspaceView:
         cleanup_pending = str(cleanup.get("status", "")).strip() == "pending"
         continuation_status = str(continuation.get("status", "")).strip()
         proposal_display_status = proposal_status
+        planning_display_status = planning_status
+        if (
+            planning_status.get("planning_discussion_phase") == "final_writing"
+            and (unresolved or continuation_status)
+        ):
+            planning_display_status = {}
         proposal_handoff_complete = bool(
             ranked_proposal.get("proposal_round_stage") == "selected"
             or collaborative_proposal.get("proposal_discussion_phase")
@@ -792,6 +974,8 @@ class HitlWorkspaceView:
         def durable_boundary_labels() -> tuple[str, str]:
             if unresolved:
                 return pending_labels()
+            if planning_display_status:
+                return "Experiment", str(planning_display_status["phase_label"])
             if proposal_display_status:
                 return "Experiment", str(proposal_display_status["phase_label"])
             if action_status in {"pending", "decision_recorded"}:
@@ -826,6 +1010,7 @@ class HitlWorkspaceView:
 
         has_pending_work = bool(
             unresolved
+            or planning_status
             or proposal_status
             or action_status in {"pending", "decision_recorded"}
             or frontier_status not in {"", "completed"}
@@ -1087,6 +1272,17 @@ class HitlWorkspaceView:
                 record=pending,
                 display_stage=review_stage,
                 display_phase=review_phase,
+            )
+
+        if planning_display_status:
+            return projected(
+                "researching",
+                str(planning_display_status["title"]),
+                str(planning_display_status["detail"]),
+                next_step=str(planning_display_status["next_action"]),
+                record=next_action,
+                display_stage="Experiment",
+                display_phase=str(planning_display_status["phase_label"]),
             )
 
         if proposal_display_status:
