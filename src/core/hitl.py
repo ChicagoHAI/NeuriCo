@@ -1175,7 +1175,7 @@ class HitlRuntime:
             finalized["record"] = self.log.append(record, idempotent=True)
             return review
 
-        self.manager.review_raised_idea(
+        review = self.manager.review_raised_idea(
             pipeline_stage=self.pipeline_stage,
             raised_idea=raised_idea,
             plan_text=self._read_optional(self.paths.plan_path),
@@ -1190,12 +1190,9 @@ class HitlRuntime:
                 self._tool_context.get("baseline_candidate_manifest") or {}
             ),
         )
-        try:
-            return finalized["record"]
-        except KeyError as exc:
-            raise RuntimeError(
-                "Raised HITL worker request finalized without an audit record."
-            ) from exc
+        if "record" not in finalized:
+            persist_resolution(review)
+        return finalized["record"]
 
     def prepare_idea_tool_context(
         self,
