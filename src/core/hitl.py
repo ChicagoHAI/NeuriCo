@@ -2157,49 +2157,64 @@ class HitlRuntime:
                     "reason_for_escalation",
                     "Raised HITL idea",
                 )
-                request_key = self._raised_idea_request_key(raised_idea)
-                prior = self._raised_idea_results.get(request_key)
-                if prior is not None:
-                    return dict(prior)
-                logged = self.resolve_raised_payload(
-                    raised_idea,
-                    provenance=self._tool_context.get("provenance"),
-                )
-                feedback = str(
-                    logged.get("manager_feedback")
-                    or logged.get("human_feedback")
-                    or logged.get("decision")
-                    or ""
-                ).strip()
-                hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
-                if hitl_stage == "review":
-                    prompt_block = self.compose_worker_prompt(
-                        hitl_stage="review",
-                        phase_prompt=self.review_prompt_block(feedback),
-                    )
-                else:
-                    prompt_block = self.compose_worker_prompt(
-                        hitl_stage="execution",
-                        phase_prompt=self.execution_prompt_block(
-                            mode="continue",
-                            feedback=feedback,
-                        ),
-                    )
-                self._update_worker_continuation(
-                    prompt_block=prompt_block,
-                    hitl_stage=hitl_stage,
-                    status="running",
-                )
-                result = {
-                    "idea_id": logged.get("idea_id"),
-                    "decision": logged.get("decision", ""),
-                    "feedback": feedback,
-                    "prompt_block": prompt_block,
-                }
-                self._raised_idea_results[request_key] = dict(result)
-                return result
+                return self._resolve_prepared_tool_raised_payload(raised_idea)
         finally:
             self._worker_request_lock.release()
+
+    def _resume_prepared_raised_payload(self, raised_idea: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            with self._tool_lock:
+                return self._resolve_prepared_tool_raised_payload(dict(raised_idea))
+        finally:
+            self._worker_request_lock.release()
+
+    def _resolve_prepared_tool_raised_payload(
+        self,
+        raised_idea: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        request_key = self._raised_idea_request_key(raised_idea)
+        prior = self._raised_idea_results.get(request_key)
+        if prior is not None:
+            return dict(prior)
+        logged = self.resolve_raised_payload(
+            raised_idea,
+            provenance=self._tool_context.get("provenance"),
+        )
+        feedback = str(
+            logged.get("manager_feedback")
+            or logged.get("human_feedback")
+            or logged.get("decision")
+            or ""
+        ).strip()
+        hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
+        if hitl_stage == "review":
+            prompt_block = self.compose_worker_prompt(
+                hitl_stage="review",
+                phase_prompt=self.review_prompt_block(feedback),
+            )
+        else:
+            prompt_block = self.compose_worker_prompt(
+                hitl_stage="execution",
+                phase_prompt=self.execution_prompt_block(
+                    mode="continue",
+                    feedback=feedback,
+                ),
+            )
+        self._update_worker_continuation(
+            prompt_block=prompt_block,
+            hitl_stage=hitl_stage,
+            status="running",
+        )
+        result = {
+            "idea_id": logged.get("idea_id"),
+            "decision": logged.get("decision", ""),
+            "feedback": feedback,
+            "prompt_block": prompt_block,
+        }
+        self._raised_idea_results[request_key] = dict(result)
+        return result
 
     def log_frontier_decision(
         self,
@@ -3122,7 +3137,7 @@ class HitlRuntime:
             raised_idea = pending.get("raised_idea")
             if not isinstance(raised_idea, dict):
                 raise HitlValidationError("Pending raised idea request has no worker payload.")
-            return self.resolve_tool_raised_payload(raised_idea)
+            return self._resume_prepared_raised_payload(raised_idea)
         if kind == "proposal":
             proposal_payload = pending.get("proposal_payload")
             if not isinstance(proposal_payload, dict):
