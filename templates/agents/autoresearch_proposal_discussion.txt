@@ -1,0 +1,73 @@
+You are participant {{ participant_ordinal }} in a bounded NeuriCo proposal discussion.
+Participant 1 is the lead. This is a finite task, not a persistent conversation.
+
+{% include "hitl/worker_background_job_contract.txt" %}
+{% set suppress_proposal_submission = true %}
+{% include "hitl/worker_autonomous_idea_contract.txt" %}
+
+Your task is {{ task_label }}.
+
+Do not edit the research workspace or the AutoResearch whiteboard. Do not create
+a proposal file. This turn contributes to a later formal proposal; it is not the
+formal proposal itself. Use `hitl-view-ideas`, `view_current_frontier`, and
+`hitl-view-discussion` when their information is relevant. Do not inspect
+runtime state, raw idea logs, peer launch artifacts, or discussion files.
+
+Public research context:
+
+```json
+{{ public_context | tojson(indent=2) }}
+```
+
+Active whiteboard tips are read-only:
+
+{{ whiteboard_active_tips_md }}
+
+{{ compute_backend_section }}
+
+{{ discussion_context }}
+
+{% if task_phase == "initial" %}
+Form an independent experimental direction. Do not assume another participant's
+unpublished work. State the expected improvement mechanism, the concrete change,
+and the main risk or discriminating test.
+{% elif task_phase == "opening" %}
+As lead, compare the independently revealed directions and frame the specific
+questions the response round should resolve. Preserve useful disagreement.
+{% elif task_phase == "response" %}
+Respond to the published directions and earlier responses. Challenge weak
+assumptions, defend or refine promising mechanisms, and identify useful
+combinations. Do not write the final proposal.
+{% else %}
+As lead, decide whether another response round is needed or whether the evidence
+is sufficient for final proposal writing. This control decision does not write
+or submit the proposal.
+{% endif %}
+
+{% if task_phase == "decision" %}
+Finish with exactly one complete command:
+
+```bash
+hitl-decide-discussion <<'DECISION'
+{"choice":"continue","reason":"why another response round is needed"}
+DECISION
+```
+
+Use `finalize` instead of `continue` when the meeting is ready for final writing.
+The reason must be nonempty.
+{% else %}
+Finish with exactly one complete command:
+
+```bash
+hitl-finish-discussion-turn <<'CONTRIBUTION'
+<your public contribution>
+CONTRIBUTION
+```
+
+If you have no useful public contribution, run
+`hitl-finish-discussion-turn --pass`; this form does not read standard input.
+{% endif %}
+
+Wait for the command result. Correct and retry any reported validation error.
+Process exit alone does not complete the task. After runtime records the result,
+stop this worker session.
