@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from core.hitl_discussion import (
     DiscussionRecordStore,
@@ -132,7 +132,7 @@ def new_planning_discussion(
 
 
 def validate_initial_planning_discussion_shape(session: Any) -> dict[str, Any]:
-    """Validate the only planning-session phase introduced before coordination."""
+    """Validate the initial planning phase, including durable task progress."""
 
     if not isinstance(session, dict):
         raise ValueError("Planning discussion state is missing")
@@ -208,15 +208,89 @@ def validate_initial_planning_discussion_shape(session: Any) -> dict[str, Any]:
             max_response_rounds=int(config.discussion_rounds),
         )
         task = tasks[task_id]
-        if (
-            identity.phase != "initial"
-            or not isinstance(task, dict)
-            or set(task) != {"kind", "result_record_id"}
-            or task.get("kind") != "contribution"
-            or task.get("result_record_id") is not None
-        ):
+        if identity.phase != "initial":
             raise ValueError("New planning discussion task shape is invalid")
+        validate_planning_discussion_task_shape(task_id, task)
     return session
+
+
+def validate_planning_discussion_task_shape(
+    task_id: str,
+    task: Any,
+) -> dict[str, Any]:
+    """Validate the PR207 task lifecycle fields for one planning turn."""
+
+    if not isinstance(task, dict):
+        raise ValueError("Planning discussion task must be an object")
+    identity = parse_discussion_task_id(task_id)
+    expected_kind = "decision" if identity.phase == "decision" else "contribution"
+    allowed_keys = {
+        "kind",
+        "result_record_id",
+        "pending_finalization",
+        "consecutive_provider_failures",
+        "choice",
+    }
+    if set(task) - allowed_keys:
+        raise ValueError("Planning discussion task contains unsupported fields")
+    if task.get("kind") != expected_kind or "result_record_id" not in task:
+        raise ValueError("Planning discussion task kind is invalid")
+    result_record_id = task.get("result_record_id")
+    if result_record_id is not None and result_record_id != task_id:
+        raise ValueError(
+            "Planning discussion task result reference does not match its task ID"
+        )
+    pending = task.get("pending_finalization")
+    if "pending_finalization" in task and pending is None:
+        raise ValueError(
+            "Planning discussion task must omit an empty finalization intent"
+        )
+    if pending is not None:
+        if result_record_id is not None:
+            raise ValueError(
+                "Completed planning discussion task cannot retain finalization intent"
+            )
+        normalized = normalize_planning_discussion_record(
+            task_id,
+            expected_kind,
+            pending,
+        )["result"]
+        if pending != normalized:
+            raise ValueError(
+                "Planning discussion task finalization intent is not normalized"
+            )
+    failures = task.get("consecutive_provider_failures")
+    if "consecutive_provider_failures" in task and failures is None:
+        raise ValueError(
+            "Planning discussion task must omit an empty provider-failure counter"
+        )
+    if failures is not None and (
+        isinstance(failures, bool)
+        or not isinstance(failures, int)
+        or failures < 1
+        or result_record_id is not None
+        or pending is not None
+    ):
+        raise ValueError("Planning discussion provider-failure counter is invalid")
+    choice = task.get("choice")
+    if "choice" in task and choice is None:
+        raise ValueError("Planning discussion task must omit an empty scheduling choice")
+    if expected_kind == "decision" and result_record_id is not None:
+        if choice not in {"continue", "finalize"}:
+            raise ValueError(
+                "Completed planning discussion decision requires its scheduling choice"
+            )
+    elif choice is not None:
+        raise ValueError(
+            "Only a completed planning discussion decision retains a choice"
+        )
+    if result_record_id is not None and (
+        "pending_finalization" in task or "consecutive_provider_failures" in task
+    ):
+        raise ValueError(
+            "Completed planning discussion task contains transient state"
+        )
+    return task
 
 
 def _planning_record_public_text(record: Mapping[str, Any]) -> str:
@@ -285,3 +359,25 @@ def permitted_planning_discussion_record_ids(
     """Derive readable planning records from authoritative session state."""
 
     return published_planning_discussion_task_ids(session)
+
+
+def render_planning_discussion_context(
+    *,
+    summary: str,
+    source_record_ids: Sequence[str],
+    original_records: Sequence[Mapping[str, Any]],
+    allow_reopen: bool = False,
+    reopen_source_ideas: Sequence[Mapping[str, Any]] = (),
+) -> str:
+    """Render the existing planning-specific public meeting block."""
+
+    from core.hitl import _load_hitl_template
+
+    return _load_hitl_template(
+        "worker_planning_discussion_context.txt",
+        discussion_summary=str(summary).strip(),
+        summary_source_record_ids=list(source_record_ids),
+        original_discussion_records=[dict(record) for record in original_records],
+        allow_reopen=bool(allow_reopen),
+        reopen_source_ideas=[dict(record) for record in reopen_source_ideas],
+    ).strip()

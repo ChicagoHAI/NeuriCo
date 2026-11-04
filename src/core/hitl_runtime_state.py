@@ -3131,6 +3131,160 @@ class HitlRuntimeState:
                 "task": self._copy(task),
             }
 
+    def record_planning_discussion_task_provider_result(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        discussion_task_id: str,
+        failed: bool,
+    ) -> int:
+        if not isinstance(failed, bool):
+            raise HitlRuntimeStateError(
+                "Planning discussion provider result requires failed=true/false"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            task = session["tasks"].get(discussion_task_id)
+            if not isinstance(task, dict) or task.get("result_record_id") is not None:
+                raise HitlRuntimeStateError(
+                    "Planning discussion task is not active"
+                )
+            if task.get("pending_finalization") is not None:
+                raise HitlRuntimeStateError(
+                    "Provider result applies only before discussion task finalization"
+                )
+            if failed:
+                prior = task.get("consecutive_provider_failures", 0)
+                if isinstance(prior, bool) or not isinstance(prior, int) or prior < 0:
+                    raise HitlRuntimeStateError(
+                        "Planning discussion provider-failure counter is invalid"
+                    )
+                count = prior + 1
+                task["consecutive_provider_failures"] = count
+            else:
+                count = 0
+                task.pop("consecutive_provider_failures", None)
+            action["planning_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return count
+
+    def begin_planning_discussion_task_finalization(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        discussion_task_id: str,
+        normalized_output: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        from core.hitl_planning_discussion import (
+            normalize_planning_discussion_record,
+        )
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            task = session["tasks"].get(discussion_task_id)
+            if not isinstance(task, dict) or task.get("result_record_id") is not None:
+                raise HitlRuntimeStateError(
+                    "Planning discussion task is not active"
+                )
+            try:
+                intent = normalize_planning_discussion_record(
+                    discussion_task_id,
+                    task["kind"],
+                    normalized_output,
+                )["result"]
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            existing = task.get("pending_finalization")
+            if existing is not None:
+                if existing == intent:
+                    return self._copy(existing)
+                raise HitlRuntimeStateError(
+                    "Planning discussion task already owns a different finalization intent"
+                )
+            task["pending_finalization"] = intent
+            task.pop("consecutive_provider_failures", None)
+            action["planning_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(intent)
+
+    def complete_planning_discussion_task_finalization(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        discussion_task_id: str,
+        normalized_output: Dict[str, Any],
+        result_record_id: str,
+    ) -> Dict[str, Any]:
+        from core.hitl_planning_discussion import (
+            normalize_planning_discussion_record,
+        )
+
+        record_id = str(result_record_id).strip()
+        if record_id != discussion_task_id:
+            raise HitlRuntimeStateError(
+                "Planning discussion result record must match its task ID"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            task = session["tasks"].get(discussion_task_id)
+            if not isinstance(task, dict):
+                raise HitlRuntimeStateError(
+                    "No matching planning discussion task exists"
+                )
+            try:
+                intent = normalize_planning_discussion_record(
+                    discussion_task_id,
+                    task["kind"],
+                    normalized_output,
+                )["result"]
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            if task.get("result_record_id") is not None:
+                if task.get("result_record_id") == record_id and (
+                    task.get("kind") != "decision"
+                    or task.get("choice") == intent.get("choice")
+                ):
+                    return self._copy(task)
+                raise HitlRuntimeStateError(
+                    "Planning discussion task already references a different result"
+                )
+            if task.get("pending_finalization") != intent:
+                raise HitlRuntimeStateError(
+                    "Planning discussion task has no matching finalization intent"
+                )
+            task["result_record_id"] = record_id
+            if task.get("kind") == "decision":
+                task["choice"] = intent["choice"]
+            task.pop("pending_finalization", None)
+            task.pop("consecutive_provider_failures", None)
+            action["planning_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(task)
+
     @staticmethod
     def _proposal_preparation_planning_policy(
         action: Dict[str, Any],

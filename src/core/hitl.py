@@ -2968,18 +2968,30 @@ class HitlRuntime:
             raise HitlValidationError("Discussion task has no public record directory.")
         return PlanningDiscussionRecordStore(Path(attempt_dir))
 
+    def _discussion_record_store(self, task_context: Dict[str, Any]):
+        if task_context.get("discussion_kind") == "planning":
+            return self._planning_discussion_record_store()
+        return self._proposal_discussion_record_store()
+
     def _normalize_discussion_task_output(
         self,
         payload: Dict[str, Any],
         task_context: Dict[str, Any],
     ) -> Dict[str, Any]:
         from core.hitl_manager_context import estimate_compact_json_tokens
-        from core.hitl_proposal_discussion import normalize_proposal_discussion_record
+        if task_context.get("discussion_kind") == "planning":
+            from core.hitl_planning_discussion import (
+                normalize_planning_discussion_record as normalize_record,
+            )
+        else:
+            from core.hitl_proposal_discussion import (
+                normalize_proposal_discussion_record as normalize_record,
+            )
 
         if not isinstance(payload, dict):
             raise HitlValidationError("Discussion task finish payload must be a JSON object.")
         try:
-            record = normalize_proposal_discussion_record(
+            record = normalize_record(
                 task_context["task_id"],
                 task_context["task"]["kind"],
                 payload,
@@ -3007,7 +3019,7 @@ class HitlRuntime:
             )
         matches = [
             record
-            for record in self._proposal_discussion_record_store().records()
+            for record in self._discussion_record_store(task_context).records()
             if record.get("record_id") == record_id
         ]
         if len(matches) != 1:
@@ -3256,7 +3268,7 @@ class HitlRuntime:
                     "instruction": "The discussion task is recorded. Stop this worker session.",
                 }
 
-            store = self._proposal_discussion_record_store()
+            store = self._discussion_record_store(task_context)
             if task.get("pending_finalization") is None and any(
                 record.get("record_id") == task_context["task_id"]
                 for record in store.records()
@@ -3266,7 +3278,8 @@ class HitlRuntime:
                     "adopt artifact content into task state."
                 )
             if (
-                task.get("pending_finalization") is None
+                task_context["discussion_kind"] == "proposal"
+                and task.get("pending_finalization") is None
                 and normalized.get("choice") == "continue"
             ):
                 self._validate_proposal_discussion_continue_capacity(
@@ -3274,7 +3287,8 @@ class HitlRuntime:
                     result=normalized,
                 )
             if (
-                task.get("pending_finalization") is None
+                task_context["discussion_kind"] == "proposal"
+                and task.get("pending_finalization") is None
                 and normalized.get("choice") == "finalize"
             ):
                 self._validate_proposal_discussion_finalize_capacity(
@@ -3285,8 +3299,13 @@ class HitlRuntime:
                 **task_context["identity"],
                 "discussion_task_id": task_context["task_id"],
             }
+            begin_finalization = (
+                task_context["state"].begin_planning_discussion_task_finalization
+                if task_context["discussion_kind"] == "planning"
+                else task_context["state"].begin_proposal_discussion_task_finalization
+            )
             try:
-                intent = task_context["state"].begin_proposal_discussion_task_finalization(
+                intent = begin_finalization(
                     **state_args,
                     normalized_output=normalized,
                 )
@@ -3300,8 +3319,13 @@ class HitlRuntime:
                 )
             except (RuntimeError, ValueError) as exc:
                 raise HitlValidationError(str(exc)) from exc
+            complete_finalization = (
+                task_context["state"].complete_planning_discussion_task_finalization
+                if task_context["discussion_kind"] == "planning"
+                else task_context["state"].complete_proposal_discussion_task_finalization
+            )
             try:
-                task_context["state"].complete_proposal_discussion_task_finalization(
+                complete_finalization(
                     **state_args,
                     normalized_output=intent,
                     result_record_id=record["record_id"],
@@ -3333,7 +3357,7 @@ class HitlRuntime:
             pending = task.get("pending_finalization")
             matching_records = [
                 record
-                for record in self._proposal_discussion_record_store().records()
+                for record in self._discussion_record_store(task_context).records()
                 if record.get("record_id") == task_context["task_id"]
             ]
             if result_record_id:
@@ -3437,9 +3461,14 @@ class HitlRuntime:
 
             failed = _provider_failure_counter_update(result)
             if failed is not None:
-                failures = task_context[
-                    "state"
-                ].record_proposal_discussion_task_provider_result(
+                record_provider_result = (
+                    task_context["state"].record_planning_discussion_task_provider_result
+                    if task_context["discussion_kind"] == "planning"
+                    else task_context[
+                        "state"
+                    ].record_proposal_discussion_task_provider_result
+                )
+                failures = record_provider_result(
                     **task_context["identity"],
                     discussion_task_id=task_context["task_id"],
                     failed=failed,
@@ -5120,6 +5149,29 @@ class HitlRuntime:
             try:
                 return store.ordered_records(permitted)
             except RuntimeError as exc:
+                raise HitlValidationError(str(exc)) from exc
+
+    def planning_discussion_records_for_prompt(self) -> List[Dict[str, Any]]:
+        """Return planning records authorized for the active finite task."""
+
+        from core.hitl_planning_discussion import (
+            permitted_planning_discussion_record_ids,
+        )
+
+        with self._tool_lock:
+            task_context = self._discussion_task_state_context()
+            if task_context.get("discussion_kind") != "planning":
+                raise HitlValidationError(
+                    "Planning discussion records require a planning task session."
+                )
+            try:
+                permitted = permitted_planning_discussion_record_ids(
+                    task_context["session"]
+                )
+                return self._planning_discussion_record_store().ordered_records(
+                    permitted
+                )
+            except (RuntimeError, ValueError) as exc:
                 raise HitlValidationError(str(exc)) from exc
 
     def register_proposal_discussion_prompt_template(self, prompt_template: str) -> None:

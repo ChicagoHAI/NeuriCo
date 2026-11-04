@@ -4729,6 +4729,88 @@ class HitlAutoResearchController:
             )
         return require_unchanged
 
+    def _capture_planning_discussion_boundary(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        session: Dict[str, Any],
+    ) -> Callable[[], Dict[str, Any]]:
+        """Capture the session-owned read-only planning boundary."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        action = HitlRuntimeState(self.work_dir).snapshot().get(
+            "next_autoresearch_action"
+        )
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+            or not str(action.get("attempt_id", "")).strip()
+        ):
+            raise RuntimeError(
+                "Collaborative planning requires its resolved proposal preparation."
+            )
+        durable = HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=str(action["attempt_id"]),
+            candidate_attempt_id=attempt_dir.name,
+        )
+        if durable != session:
+            raise RuntimeError(
+                "Collaborative planning discussion state changed unexpectedly."
+            )
+        scope = session.get("workspace_fingerprint_scope")
+        expected_fingerprint = str(session.get("workspace_fingerprint", "")).strip()
+        current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=scope,
+        )
+        if not expected_fingerprint or current_fingerprint != expected_fingerprint:
+            raise RuntimeError(
+                "Planning workspace no longer matches its admitted proposal boundary."
+            )
+        public_guard = HitlWorkspaceWriteGuard.capture_public(
+            self.work_dir,
+            scope=scope,
+        )
+        whiteboard_sha = str(session.get("whiteboard_boundary_sha", "")).strip()
+
+        def require_unchanged() -> Dict[str, Any]:
+            issues: list[str] = []
+            public_validation = public_guard.require_unchanged()
+            if not bool(public_validation.get("valid")):
+                raw = public_validation.get("issues", [])
+                issues.extend(
+                    str(item)
+                    for item in (raw if isinstance(raw, list) else [raw])
+                    if str(item).strip()
+                )
+            git_state = HitlGitStateStore(self.work_dir)
+            if not git_state.hitl_autoresearch_whiteboard_history_contains(
+                whiteboard_sha
+            ):
+                issues.append(
+                    "The planning whiteboard boundary is no longer in canonical history."
+                )
+            elif not git_state.hitl_autoresearch_whiteboard_matches_commit(
+                whiteboard_sha
+            ):
+                issues.append(
+                    "The live whiteboard no longer matches the planning boundary."
+                )
+            return {"valid": not issues, "issues": issues}
+
+        initial = require_unchanged()
+        if not bool(initial.get("valid")):
+            raise RuntimeError(
+                "Collaborative planning boundary is invalid: "
+                + "; ".join(str(item) for item in initial.get("issues", []))
+            )
+        return require_unchanged
+
     @staticmethod
     def _require_proposal_discussion_boundary(
         boundary_validator: Callable[[], Dict[str, Any]],
@@ -5251,6 +5333,186 @@ class HitlAutoResearchController:
             return finish
         if not finish.get("complete") or not str(finish.get("record_id", "")).strip():
             raise RuntimeError("Proposal discussion task ended without a recorded result.")
+        return finish
+
+    def _prepare_planning_discussion_task_runtime(
+        self,
+        *,
+        task_id: str,
+        session: Dict[str, Any],
+        parent_sha: str,
+        preparation_attempt_id: str,
+        attempt_dir: Path,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        seed_idea_ids: Sequence[str] = (),
+        cancel_event: Optional[threading.Event] = None,
+    ) -> HitlRuntime:
+        """Bind one planning participant to the admitted proposal and session."""
+
+        from core.hitl_discussion import parse_discussion_task_id
+
+        identity = parse_discussion_task_id(task_id)
+        profile = (
+            "planning_discussion_decision"
+            if identity.phase == "decision"
+            else "planning_discussion_turn"
+        )
+        task = session.get("tasks", {}).get(task_id)
+        if not isinstance(task, dict):
+            raise RuntimeError("Planning discussion task set is invalid.")
+        task_runtime = self._new_discussion_task_runtime(task_id)
+        try:
+            task_runtime.prepare_idea_tool_context(
+                hitl_stage="plan",
+                command_profile=profile,
+                actor="comment_handler",
+                proposal_preparation_attempt_id=preparation_attempt_id,
+                planning_discussion_attempt_dir=attempt_dir,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": attempt_dir.name,
+                    "proposal_idea_id": session["admitted_proposal_idea_id"],
+                    "discussion_turn_id": task_id,
+                },
+                idea_visibility={
+                    "base_idea_number": session["base_idea_number"],
+                    "whiteboard_boundary_sha": session["whiteboard_boundary_sha"],
+                    "seed_idea_ids": list(seed_idea_ids),
+                },
+                phase_finish_validator=boundary_validator,
+                scoped_task_cancel_event=cancel_event,
+            )
+        except BaseException:
+            task_runtime.clear_idea_tool_context()
+            raise
+        return task_runtime
+
+    def _run_planning_discussion_task(
+        self,
+        *,
+        task_id: str,
+        session: Dict[str, Any],
+        parent_sha: str,
+        preparation_attempt_id: str,
+        attempt_dir: Path,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        seed_idea_ids: Sequence[str] = (),
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Dict[str, Any]:
+        """Run one planning task through the established finite replacement loop."""
+
+        if self.proposal_assessment_runner is None:
+            raise RuntimeError("Planning discussion requires its configured agent runner.")
+        from agents.planning_discussion import planning_discussion_task_prompt_suffix
+        from core.hitl_discussion import parse_discussion_task_id
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        task_identity = parse_discussion_task_id(task_id)
+        proposal_id = str(session.get("admitted_proposal_idea_id", "")).strip()
+        proposal_record = next(
+            (
+                record
+                for record in self._proposal_hitl_runtime().log.records()
+                if record.get("idea_id") == proposal_id
+                and record.get("idea_type") == "proposal"
+            ),
+            None,
+        )
+        if not isinstance(proposal_record, dict):
+            raise RuntimeError(
+                "Planning discussion lost its admitted proposal record."
+            )
+        task_runtime = self._prepare_planning_discussion_task_runtime(
+            task_id=task_id,
+            session=session,
+            parent_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            attempt_dir=attempt_dir,
+            boundary_validator=boundary_validator,
+            seed_idea_ids=seed_idea_ids,
+            cancel_event=cancel_event,
+        )
+        task_prompt = planning_discussion_task_prompt_suffix(task_id)
+
+        def require_boundary() -> None:
+            validation = boundary_validator()
+            if bool(validation.get("valid")):
+                return
+            raw = validation.get("issues", [])
+            issues = raw if isinstance(raw, list) else [raw]
+            detail = "; ".join(str(item) for item in issues if str(item).strip())
+            raise RuntimeError(
+                "Planning discussion task crossed its read-only boundary"
+                + (f": {detail}" if detail else ".")
+            )
+
+        try:
+            require_boundary()
+            reconciled = task_runtime.reconcile_proposal_discussion_task()
+            if reconciled.get("complete") or reconciled.get("cancelled"):
+                return reconciled
+
+            def launch_worker(
+                prompt: str,
+                _log_prefix: str,
+                *,
+                record_continuation: bool,
+            ) -> Dict[str, Any]:
+                if record_continuation:
+                    raise RuntimeError(
+                        "Planning discussion tasks must not record global worker "
+                        "continuation."
+                    )
+                raise_if_hitl_run_stop_requested()
+                require_boundary()
+                if cancel_event is not None and cancel_event.is_set():
+                    return {
+                        "success": False,
+                        "return_code": None,
+                        "timed_out": False,
+                        "stopped": False,
+                        "cancelled": True,
+                        "background_processes_terminated": False,
+                        "provider_process_failed": False,
+                    }
+                return self.proposal_assessment_runner(
+                    role="planning_discussion",
+                    idea=self.idea,
+                    approved_proposal=str(proposal_record["proposal"]),
+                    discussion_task_id=task_id,
+                    discussion_records=(
+                        task_runtime.planning_discussion_records_for_prompt()
+                    ),
+                    task_dir=attempt_dir / "planning_discussion" / "tasks" / task_id,
+                    prompt_suffix=prompt,
+                    env_extra=task_runtime.idea_tool_env(),
+                    cancel_event=cancel_event,
+                    output_prefix=task_id,
+                )
+
+            _result, finish = run_worker_with_replacements(
+                runtime=task_runtime,
+                launch_worker=launch_worker,
+                prompt=task_prompt,
+                log_prefix=task_id.replace("/", "_"),
+                phase="plan",
+                worker_name=task_identity.display_label,
+                record_continuation=False,
+                result_after_exit=lambda result: (
+                    task_runtime.proposal_discussion_task_result_after_worker_exit(
+                        result,
+                        replacement_prompt=task_prompt,
+                        worker_name=task_identity.display_label,
+                    )
+                ),
+            )
+            require_boundary()
+        finally:
+            task_runtime.clear_idea_tool_context()
+        if finish.get("cancelled"):
+            return finish
+        if not finish.get("complete") or not str(finish.get("record_id", "")).strip():
+            raise RuntimeError("Planning discussion task ended without a recorded result.")
         return finish
 
     def _prepare_ranked_task_runtime(
@@ -6772,6 +7034,7 @@ def run_hitl_autoresearch_loop(
         run_autoresearch_proposer,
     )
     from agents.proposal_discussion import run_proposal_discussion_task
+    from agents.planning_discussion import run_planning_discussion_task
     from agents.proposal_assessment import run_proposal_reviewer, run_proposal_verifier
     from agents.comment_handler import build_comment_handler_launch
     from core.agent_runner import run_prebuilt_cli_agent
@@ -6907,6 +7170,7 @@ def run_hitl_autoresearch_loop(
         role = str(request.pop("role", "")).strip()
         runners = {
             "discussion": run_proposal_discussion_task,
+            "planning_discussion": run_planning_discussion_task,
             "verifier": run_proposal_verifier,
             "reviewer": run_proposal_reviewer,
         }
@@ -6916,7 +7180,11 @@ def run_hitl_autoresearch_loop(
             work_dir=work_dir,
             provider=provider,
             templates_dir=templates_dir,
-            timeout=proposal_timeout,
+            timeout=(
+                comment_timeout
+                if role == "planning_discussion"
+                else proposal_timeout
+            ),
             full_permissions=full_permissions,
             hitl_mode=normalize_hitl_mode(hitl_mode).value,
             **request,
