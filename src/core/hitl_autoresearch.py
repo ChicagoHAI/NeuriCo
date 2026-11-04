@@ -1132,6 +1132,14 @@ def _archive_failed_hitl_attempt(
                 dirs_exist_ok=True,
                 symlinks=True,
             )
+        planning_discussion = Path(source_attempt_dir) / "planning_discussion"
+        if planning_discussion.is_dir() and not planning_discussion.is_symlink():
+            shutil.copytree(
+                planning_discussion,
+                archive_dir / "planning_discussion",
+                dirs_exist_ok=True,
+                symlinks=True,
+            )
     return archive_dir
 
 
