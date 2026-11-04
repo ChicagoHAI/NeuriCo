@@ -1171,6 +1171,7 @@ class HitlManager:
                 "hitl_stage": raised_idea.get("hitl_stage", "execution"),
                 "raised_idea": raised_idea,
                 "hitl_mode": selected_mode.value,
+                "provenance": provenance,
             },
             prompt=prompt,
             validate=validate,
