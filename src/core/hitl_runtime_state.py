@@ -3070,7 +3070,35 @@ class HitlRuntimeState:
     ) -> Dict[str, Any]:
         """Publish the complete initial set and make the lead opening active."""
 
-        from core.hitl_planning_discussion import planning_discussion_task_id
+        return self.advance_planning_discussion(
+            parent_node_sha=parent_node_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=candidate_attempt_id,
+            expected_phase="initial",
+            round_ordinal=0,
+        )
+
+    def advance_planning_discussion(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        expected_phase: str,
+        round_ordinal: int,
+    ) -> Dict[str, Any]:
+        """Advance one completed speaking phase through the fixed protocol."""
+
+        from core.hitl_planning_discussion import (
+            planning_discussion_response_task_ids,
+            planning_discussion_task_complete,
+            planning_discussion_task_id,
+        )
+
+        if expected_phase not in {"initial", "opening", "response"}:
+            raise HitlRuntimeStateError(
+                "Planning discussion cannot advance from this phase"
+            )
 
         with self._locked():
             self._state = self._load_unlocked() or self._default()
@@ -3079,31 +3107,156 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
             )
-            if session.get("phase") == "opening":
+            current_phase = str(session["phase"])
+            current_round = int(session["round_ordinal"])
+            if expected_phase == "initial" and current_phase == "opening" and current_round == 0:
                 return self._copy(session)
-            if session.get("phase") != "initial":
+            if expected_phase == "opening" and current_phase == "response" and current_round == 1:
+                return self._copy(session)
+            if (
+                expected_phase == "response"
+                and current_round == round_ordinal
+                and current_phase in {"decision", "final_writing"}
+            ):
+                return self._copy(session)
+            if current_phase != expected_phase or current_round != round_ordinal:
                 raise HitlRuntimeStateError(
-                    "Planning discussion initial phase is no longer active"
+                    "Planning discussion advance identity is stale"
                 )
-            initial_ids = [
-                planning_discussion_task_id("initial", participant_ordinal=ordinal)
-                for ordinal in range(1, int(session["participant_count"]) + 1)
-            ]
+            if expected_phase == "initial":
+                active_ids = [
+                    planning_discussion_task_id(
+                        "initial", participant_ordinal=ordinal
+                    )
+                    for ordinal in range(1, int(session["participant_count"]) + 1)
+                ]
+            elif expected_phase == "opening":
+                active_ids = [
+                    planning_discussion_task_id("opening", participant_ordinal=1)
+                ]
+            else:
+                active_ids = planning_discussion_response_task_ids(
+                    current_round, int(session["participant_count"])
+                )
             if any(
-                session["tasks"][task_id].get("result_record_id") != task_id
-                for task_id in initial_ids
+                not planning_discussion_task_complete(session["tasks"][task_id])
+                for task_id in active_ids
             ):
                 raise HitlRuntimeStateError(
-                    "Planning discussion cannot open before every initial contribution"
+                    "Planning discussion cannot advance before every active task completes"
                 )
-            opening_id = planning_discussion_task_id(
-                "opening", participant_ordinal=1
+            if expected_phase == "initial":
+                opening_id = planning_discussion_task_id(
+                    "opening", participant_ordinal=1
+                )
+                session["tasks"][opening_id] = {
+                    "kind": "contribution",
+                    "result_record_id": None,
+                }
+                session["phase"] = "opening"
+            elif expected_phase == "opening":
+                session["round_ordinal"] = 1
+                for task_id in planning_discussion_response_task_ids(
+                    1, int(session["participant_count"])
+                ):
+                    session["tasks"][task_id] = {
+                        "kind": "contribution",
+                        "result_record_id": None,
+                    }
+                session["phase"] = "response"
+            elif current_round == int(session["max_response_rounds"]):
+                session["phase"] = "final_writing"
+            else:
+                decision_id = planning_discussion_task_id(
+                    "decision",
+                    participant_ordinal=1,
+                    round_ordinal=current_round,
+                )
+                session["tasks"][decision_id] = {
+                    "kind": "decision",
+                    "result_record_id": None,
+                }
+                session["phase"] = "decision"
+            try:
+                validate_planning_discussion_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            action["planning_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(session)
+
+    def apply_planning_discussion_decision(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        round_ordinal: int,
+        choice: str,
+    ) -> Dict[str, Any]:
+        """Apply one recorded lead decision to scheduling state."""
+
+        from core.hitl_planning_discussion import (
+            planning_discussion_response_task_ids,
+            planning_discussion_task_complete,
+            planning_discussion_task_id,
+        )
+
+        normalized_choice = str(choice).strip().lower()
+        if normalized_choice not in {"continue", "finalize"}:
+            raise HitlRuntimeStateError(
+                "Planning discussion decision must be continue or finalize"
             )
-            session["tasks"][opening_id] = {
-                "kind": "contribution",
-                "result_record_id": None,
-            }
-            session["phase"] = "opening"
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action, session = self._planning_discussion_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+            )
+            if (
+                normalized_choice == "continue"
+                and session["phase"] == "response"
+                and session["round_ordinal"] == round_ordinal + 1
+            ) or (
+                normalized_choice == "finalize"
+                and session["phase"] == "final_writing"
+                and session["round_ordinal"] == round_ordinal
+            ):
+                return self._copy(session)
+            if session["phase"] != "decision" or session["round_ordinal"] != round_ordinal:
+                raise HitlRuntimeStateError(
+                    "Planning discussion decision identity is stale"
+                )
+            decision_id = planning_discussion_task_id(
+                "decision", participant_ordinal=1, round_ordinal=round_ordinal
+            )
+            decision = session["tasks"].get(decision_id)
+            if (
+                not planning_discussion_task_complete(decision)
+                or decision.get("choice") != normalized_choice
+            ):
+                raise HitlRuntimeStateError(
+                    "Planning discussion decision is not durably ready"
+                )
+            if normalized_choice == "continue":
+                next_round = round_ordinal + 1
+                if next_round > int(session["max_response_rounds"]):
+                    raise HitlRuntimeStateError(
+                        "Planning discussion cannot continue beyond its round limit"
+                    )
+                for task_id in planning_discussion_response_task_ids(
+                    next_round, int(session["participant_count"])
+                ):
+                    session["tasks"][task_id] = {
+                        "kind": "contribution",
+                        "result_record_id": None,
+                    }
+                session["round_ordinal"] = next_round
+                session["phase"] = "response"
+            else:
+                session["phase"] = "final_writing"
             try:
                 validate_planning_discussion_shape(session)
             except ValueError as exc:

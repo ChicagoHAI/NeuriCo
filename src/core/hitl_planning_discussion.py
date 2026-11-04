@@ -134,6 +134,74 @@ def new_planning_discussion(
     }
 
 
+def planning_discussion_response_task_ids(
+    round_ordinal: int,
+    participant_count: int,
+) -> list[str]:
+    """Return one response round in fixed participant order."""
+
+    return [
+        planning_discussion_task_id(
+            "response",
+            participant_ordinal=ordinal,
+            round_ordinal=round_ordinal,
+        )
+        for ordinal in range(2, participant_count + 1)
+    ]
+
+
+def planning_discussion_expected_task_ids(
+    session: Mapping[str, Any],
+) -> list[str]:
+    """Derive the exact durable task set for an implemented meeting phase."""
+
+    participant_count = int(session["participant_count"])
+    round_ordinal = int(session["round_ordinal"])
+    phase = str(session["phase"])
+    task_ids = [
+        planning_discussion_task_id("initial", participant_ordinal=ordinal)
+        for ordinal in range(1, participant_count + 1)
+    ]
+    if phase == "initial":
+        return task_ids
+    task_ids.append(planning_discussion_task_id("opening", participant_ordinal=1))
+    if phase == "opening":
+        return task_ids
+    for ordinal in range(1, round_ordinal + 1):
+        task_ids.extend(
+            planning_discussion_response_task_ids(ordinal, participant_count)
+        )
+        if ordinal < round_ordinal:
+            task_ids.append(
+                planning_discussion_task_id(
+                    "decision", participant_ordinal=1, round_ordinal=ordinal
+                )
+            )
+    if phase == "decision" or (
+        phase == "final_writing"
+        and round_ordinal < int(session["max_response_rounds"])
+    ):
+        task_ids.append(
+            planning_discussion_task_id(
+                "decision", participant_ordinal=1, round_ordinal=round_ordinal
+            )
+        )
+    return task_ids
+
+
+def planning_discussion_task_complete(task: Any) -> bool:
+    """Return whether one task has a settled durable record reference."""
+
+    if not isinstance(task, Mapping):
+        return False
+    record_id = task.get("result_record_id")
+    return bool(
+        isinstance(record_id, str)
+        and record_id.strip()
+        and task.get("pending_finalization") is None
+    )
+
+
 def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
     """Validate the implemented planning phases and durable task progress."""
 
@@ -194,41 +262,86 @@ def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
     ):
         raise ValueError("Planning discussion idea boundary is invalid")
     phase = session.get("phase")
-    if phase not in {"initial", "opening"} or session.get("round_ordinal") != 0:
+    round_ordinal = session.get("round_ordinal")
+    if phase not in {"initial", "opening", "response", "decision", "final_writing"}:
         raise ValueError("Planning discussion phase is not implemented")
+    if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
+        raise ValueError("Planning discussion round ordinal is invalid")
+    if phase in {"initial", "opening"}:
+        if round_ordinal != 0:
+            raise ValueError("Planning discussion has a round before responses begin")
+    elif not 1 <= round_ordinal <= int(config.discussion_rounds):
+        raise ValueError("Planning discussion round ordinal is invalid")
     tasks = session.get("tasks")
     if not isinstance(tasks, dict):
         raise ValueError("Planning discussion tasks must be an object")
-    expected_ids = {
-        planning_discussion_task_id("initial", participant_ordinal=ordinal)
-        for ordinal in range(1, int(config.participant_count) + 1)
-    }
-    opening_id = planning_discussion_task_id("opening", participant_ordinal=1)
-    if phase == "opening":
-        expected_ids.add(opening_id)
-    if set(tasks) != expected_ids:
+    expected_ids = planning_discussion_expected_task_ids(session)
+    if set(tasks) != set(expected_ids):
         raise ValueError("Planning discussion task set does not match its phase")
     for task_id in expected_ids:
-        identity = validate_planning_discussion_task_id(
+        validate_planning_discussion_task_id(
             task_id,
             participant_count=int(config.participant_count),
             max_response_rounds=int(config.discussion_rounds),
         )
-        task = tasks[task_id]
-        if identity.phase not in {"initial", phase}:
-            raise ValueError("Planning discussion task shape is invalid")
-        validate_planning_discussion_task_shape(task_id, task)
-    if phase == "opening":
-        incomplete = [
-            task_id
-            for task_id in expected_ids
-            if task_id != opening_id
-            and tasks[task_id].get("result_record_id") != task_id
-        ]
-        if incomplete:
+        validate_planning_discussion_task_shape(task_id, tasks[task_id])
+    initial_ids = [
+        planning_discussion_task_id("initial", participant_ordinal=ordinal)
+        for ordinal in range(1, int(config.participant_count) + 1)
+    ]
+    if phase != "initial" and not all(
+        planning_discussion_task_complete(tasks[task_id]) for task_id in initial_ids
+    ):
+        raise ValueError(
+            "Planning discussion advanced before initial contributions completed"
+        )
+    if phase not in {"initial", "opening"}:
+        opening_id = planning_discussion_task_id("opening", participant_ordinal=1)
+        if not planning_discussion_task_complete(tasks[opening_id]):
             raise ValueError(
-                "Planning discussion cannot open before every initial contribution"
+                "Planning discussion advanced before the lead opening completed"
             )
+    if round_ordinal:
+        for prior_round in range(1, round_ordinal):
+            prior_ids = planning_discussion_response_task_ids(
+                prior_round, int(config.participant_count)
+            )
+            prior_ids.append(
+                planning_discussion_task_id(
+                    "decision", participant_ordinal=1, round_ordinal=prior_round
+                )
+            )
+            if not all(
+                planning_discussion_task_complete(tasks[task_id])
+                for task_id in prior_ids
+            ):
+                raise ValueError(
+                    "Planning discussion has an incomplete earlier response round"
+                )
+        current_ids = planning_discussion_response_task_ids(
+            round_ordinal, int(config.participant_count)
+        )
+        if phase != "response" and not all(
+            planning_discussion_task_complete(tasks[task_id])
+            for task_id in current_ids
+        ):
+            raise ValueError(
+                "Planning discussion advanced before member responses completed"
+            )
+        if phase == "final_writing" and round_ordinal < int(
+            config.discussion_rounds
+        ):
+            decision_id = planning_discussion_task_id(
+                "decision", participant_ordinal=1, round_ordinal=round_ordinal
+            )
+            decision = tasks[decision_id]
+            if (
+                not planning_discussion_task_complete(decision)
+                or decision.get("choice") != "finalize"
+            ):
+                raise ValueError(
+                    "Planning discussion final writing requires a finalized lead decision"
+                )
     return session
 
 
@@ -447,6 +560,90 @@ def project_initial_planning_discussion_segment(
     return opening_projection, (projected, missing)
 
 
+def project_planning_discussion_task_result(
+    session: Mapping[str, Any],
+    *,
+    task_id: str,
+    result: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Project one accepted task and its immediate scheduler transition."""
+
+    projected = json.loads(json.dumps(dict(session)))
+    identity = validate_planning_discussion_task_id(
+        task_id,
+        participant_count=projected.get("participant_count"),
+        max_response_rounds=projected.get("max_response_rounds"),
+    )
+    if identity.phase != projected.get("phase"):
+        raise ValueError("Planning discussion task is not active.")
+    task = projected.get("tasks", {}).get(task_id)
+    if not isinstance(task, dict) or task.get("result_record_id") is not None:
+        raise ValueError("Planning discussion task is not available.")
+    record = normalize_planning_discussion_record(task_id, task["kind"], result)
+    task["result_record_id"] = task_id
+    task.pop("pending_finalization", None)
+    task.pop("consecutive_provider_failures", None)
+    if task["kind"] == "decision":
+        task["choice"] = record["result"]["choice"]
+
+    participant_count = int(projected["participant_count"])
+    round_ordinal = int(projected["round_ordinal"])
+    if identity.phase == "opening":
+        projected["round_ordinal"] = 1
+        for response_id in planning_discussion_response_task_ids(
+            1, participant_count
+        ):
+            projected["tasks"][response_id] = {
+                "kind": "contribution",
+                "result_record_id": None,
+            }
+        projected["phase"] = "response"
+    elif identity.phase == "response":
+        response_ids = planning_discussion_response_task_ids(
+            round_ordinal, participant_count
+        )
+        if all(
+            planning_discussion_task_complete(projected["tasks"][response_id])
+            for response_id in response_ids
+        ):
+            if round_ordinal == int(projected["max_response_rounds"]):
+                projected["phase"] = "final_writing"
+            else:
+                decision_id = planning_discussion_task_id(
+                    "decision",
+                    participant_ordinal=1,
+                    round_ordinal=round_ordinal,
+                )
+                projected["tasks"][decision_id] = {
+                    "kind": "decision",
+                    "result_record_id": None,
+                }
+                projected["phase"] = "decision"
+    elif identity.phase == "decision":
+        choice = record["result"]["choice"]
+        if choice == "continue":
+            next_round = round_ordinal + 1
+            if next_round > int(projected["max_response_rounds"]):
+                raise ValueError(
+                    "Planning discussion cannot continue beyond its round limit."
+                )
+            for response_id in planning_discussion_response_task_ids(
+                next_round, participant_count
+            ):
+                projected["tasks"][response_id] = {
+                    "kind": "contribution",
+                    "result_record_id": None,
+                }
+            projected["round_ordinal"] = next_round
+            projected["phase"] = "response"
+        else:
+            projected["phase"] = "final_writing"
+    else:
+        raise ValueError("Initial contributions do not schedule individual turns.")
+    validate_planning_discussion_shape(projected)
+    return projected, record
+
+
 def prepare_planning_discussion_prompt(
     *,
     store: PlanningDiscussionRecordStore,
@@ -471,14 +668,6 @@ def prepare_planning_discussion_prompt(
         PROPOSAL_DISCUSSION_WORKER_CONTEXT_TOKENS,
     )
 
-    def protected(
-        snapshot: Mapping[str, Any],
-        permitted: Sequence[str],
-    ) -> Sequence[str]:
-        if str(snapshot.get("phase", "")) in {"initial", "opening", "response"}:
-            return tuple(permitted)
-        return ()
-
     return prepare_discussion_prompt(
         store=store,
         session=session,
@@ -488,7 +677,7 @@ def prepare_planning_discussion_prompt(
         public_background=public_background,
         normalize_record=normalize_planning_discussion_record,
         permitted_record_ids=permitted_planning_discussion_record_ids,
-        protected_record_ids=protected,
+        protected_record_ids=protected_planning_discussion_record_ids,
         render_context=lambda summary, source_ids, originals: (
             render_planning_discussion_context(
                 summary=summary,
@@ -507,6 +696,50 @@ def prepare_planning_discussion_prompt(
         maximum_prompt_chars=maximum_prompt_chars,
         persist_cache=persist_cache,
     )
+
+
+def protected_planning_discussion_record_ids(
+    session: Mapping[str, Any],
+    permitted_record_ids: Sequence[str],
+) -> tuple[str, ...]:
+    """Keep the current planning exchange verbatim during compaction."""
+
+    phase = str(session.get("phase", "")).strip()
+    round_ordinal = int(session.get("round_ordinal", 0))
+    permitted = tuple(str(record_id) for record_id in permitted_record_ids)
+    if phase in {"initial", "opening"}:
+        return permitted
+    protected: list[str] = []
+    for record_id in permitted:
+        task = parse_discussion_task_id(record_id)
+        if task.phase == "initial" and phase == "response" and round_ordinal == 1:
+            protected.append(record_id)
+            continue
+        if task.phase == "opening" and (
+            round_ordinal == 1 or (phase == "response" and round_ordinal == 2)
+        ):
+            protected.append(record_id)
+            continue
+        if task.phase == "response" and (
+            task.round_ordinal == round_ordinal
+            or (phase == "response" and task.round_ordinal == round_ordinal - 1)
+        ):
+            protected.append(record_id)
+            continue
+        if (
+            phase == "response"
+            and task.phase == "decision"
+            and task.round_ordinal == round_ordinal - 1
+        ):
+            protected.append(record_id)
+            continue
+        if (
+            phase in {"decision", "final_writing"}
+            and task.phase == "decision"
+            and task.round_ordinal == round_ordinal
+        ):
+            protected.append(record_id)
+    return tuple(protected)
 
 
 def render_planning_discussion_context(

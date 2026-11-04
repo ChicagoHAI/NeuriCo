@@ -3295,6 +3295,15 @@ class HitlRuntime:
                     task_context=task_context,
                     result=normalized,
                 )
+            if (
+                task_context["discussion_kind"] == "planning"
+                and task.get("pending_finalization") is None
+                and task_context["task_identity"].phase != "initial"
+            ):
+                self._validate_planning_discussion_task_capacity(
+                    task_context=task_context,
+                    result=normalized,
+                )
             state_args = {
                 **task_context["identity"],
                 "discussion_task_id": task_context["task_id"],
@@ -5179,6 +5188,8 @@ class HitlRuntime:
         *,
         prompt_template: str,
         public_background: Dict[str, Any],
+        next_prompt_template: str = "",
+        final_prompt_template: str = "",
     ) -> str:
         """Prepare bounded public meeting context for one planning turn."""
 
@@ -5191,6 +5202,35 @@ class HitlRuntime:
             if task_context.get("discussion_kind") != "planning":
                 raise HitlValidationError(
                     "Planning discussion context requires a planning task session."
+                )
+            self._tool_context["planning_discussion_next_prompt_template"] = str(
+                next_prompt_template
+            )
+            self._tool_context["planning_discussion_final_prompt_template"] = str(
+                final_prompt_template
+            )
+            self._tool_context["planning_discussion_public_background"] = dict(
+                public_background
+            )
+            summarize_method = getattr(
+                self.manager, "summarize_planning_discussion", None
+            )
+
+            def summarize(
+                background: Dict[str, Any],
+                prior_summary: str,
+                records: List[Dict[str, Any]],
+            ) -> str:
+                if not callable(summarize_method):
+                    raise ValueError(
+                        "Planning discussion compaction requires the configured HITL manager."
+                    )
+                return str(
+                    summarize_method(
+                        public_background=background,
+                        prior_summary=prior_summary,
+                        records=records,
+                    )
                 )
 
             def current_session() -> Dict[str, Any]:
@@ -5207,6 +5247,7 @@ class HitlRuntime:
                     runtime_budget_prompt=current_hitl_run_budget_prompt(
                         self.work_dir
                     ),
+                    summarize=summarize if callable(summarize_method) else None,
                     current_session=current_session,
                 )
             except (RuntimeError, ValueError) as exc:
@@ -5219,6 +5260,7 @@ class HitlRuntime:
         prompt_templates: Sequence[str],
         public_background: Dict[str, Any],
         reserve_contributions: int,
+        additional_records: Sequence[Dict[str, Any]] = (),
         record_store: Optional[Any] = None,
     ) -> None:
         """Check one projected planning segment with the shared context budget."""
@@ -5249,6 +5291,26 @@ class HitlRuntime:
             reserve_contributions
             * MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS
         )
+        summarize_method = getattr(
+            self.manager, "summarize_planning_discussion", None
+        )
+
+        def summarize(
+            background: Dict[str, Any],
+            prior_summary: str,
+            records: List[Dict[str, Any]],
+        ) -> str:
+            if not callable(summarize_method):
+                raise ValueError(
+                    "Planning discussion compaction requires the configured HITL manager."
+                )
+            return str(
+                summarize_method(
+                    public_background=background,
+                    prior_summary=prior_summary,
+                    records=records,
+                )
+            )
         store = record_store or self._planning_discussion_record_store()
         for template in templates:
             prepare_planning_discussion_prompt(
@@ -5257,9 +5319,81 @@ class HitlRuntime:
                 prompt_template=template,
                 public_background=public_background,
                 runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
+                summarize=summarize if callable(summarize_method) else None,
+                additional_records=additional_records,
                 reserve_tokens=reserve_tokens,
                 persist_cache=False,
             )
+
+    def _validate_planning_discussion_task_capacity(
+        self,
+        *,
+        task_context: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> None:
+        """Reject a turn before it makes the next mandatory prompt impossible."""
+
+        from core.hitl_discussion import parse_discussion_task_id
+        from core.hitl_planning_discussion import (
+            PLANNING_DISCUSSION_CONTEXT_MARKER,
+            project_planning_discussion_task_result,
+        )
+
+        next_template = str(
+            self._tool_context.get("planning_discussion_next_prompt_template", "")
+        )
+        final_template = str(
+            self._tool_context.get("planning_discussion_final_prompt_template", "")
+        )
+        background = self._tool_context.get("planning_discussion_public_background")
+        if (
+            final_template.count(PLANNING_DISCUSSION_CONTEXT_MARKER) != 1
+            or not isinstance(background, dict)
+        ):
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_unavailable\n"
+                "Runtime cannot verify the remaining planning discussion and formal plan."
+            )
+        try:
+            projected, additional = project_planning_discussion_task_result(
+                task_context["session"],
+                task_id=task_context["task_id"],
+                result=result,
+            )
+            incomplete_contributions = sum(
+                1
+                for task_id, task in projected["tasks"].items()
+                if parse_discussion_task_id(task_id).phase == "response"
+                and task.get("result_record_id") != task_id
+            )
+            templates: list[tuple[Dict[str, Any], str, int]] = []
+            if projected["phase"] != "final_writing":
+                if next_template.count(PLANNING_DISCUSSION_CONTEXT_MARKER) != 1:
+                    raise ValueError(
+                        "Planning discussion next-turn template is unavailable."
+                    )
+                templates.append(
+                    (projected, next_template, incomplete_contributions)
+                )
+            final_projection = json.loads(json.dumps(projected))
+            final_projection["phase"] = "final_writing"
+            templates.append(
+                (final_projection, final_template, incomplete_contributions)
+            )
+            for capacity_session, template, reserve in templates:
+                self._require_planning_discussion_capacity(
+                    projected_session=capacity_session,
+                    prompt_templates=(template,),
+                    public_background=background,
+                    reserve_contributions=reserve,
+                    additional_records=(additional,),
+                )
+        except ValueError as exc:
+            raise HitlValidationError(
+                "HITL_ERROR discussion_context_too_large\n"
+                "This result would make a required planning turn or the formal plan "
+                "prompt exceed the verified context budget. Revise this result and retry."
+            ) from exc
 
     def register_proposal_discussion_prompt_template(self, prompt_template: str) -> None:
         """Retain the current final-owner template for reopen capacity validation."""

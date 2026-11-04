@@ -5409,8 +5409,13 @@ class HitlAutoResearchController:
 
         if self.proposal_assessment_runner is None:
             raise RuntimeError("Planning discussion requires its configured agent runner.")
-        from agents.planning_discussion import planning_discussion_task_prompt_suffix
+        from agents.planning_discussion import (
+            planning_discussion_task_prompt_suffix,
+            planning_final_owner_prompt_template,
+        )
+        from core.agent_cli import append_prompt_block
         from core.hitl_discussion import parse_discussion_task_id
+        from core.hitl_planning_discussion import planning_discussion_task_id
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
         task_identity = parse_discussion_task_id(task_id)
@@ -5438,7 +5443,60 @@ class HitlAutoResearchController:
             seed_idea_ids=seed_idea_ids,
             cancel_event=cancel_event,
         )
-        task_prompt = planning_discussion_task_prompt_suffix(task_id)
+        try:
+            task_prompt = planning_discussion_task_prompt_suffix(task_id)
+            next_prompt_template = ""
+            final_prompt_template = ""
+            if task_identity.phase != "initial":
+                renderer = self.planning_discussion_prompt_template_renderer
+                if not callable(renderer):
+                    raise RuntimeError(
+                        "Collaborative planning requires its prompt-template renderer."
+                    )
+                participant_count = int(session["participant_count"])
+                round_ordinal = int(session["round_ordinal"])
+                next_task_id = ""
+                if task_identity.phase == "opening":
+                    next_task_id = planning_discussion_task_id(
+                        "response", participant_ordinal=2, round_ordinal=1
+                    )
+                elif task_identity.phase == "response":
+                    if task_identity.participant_ordinal < participant_count:
+                        next_task_id = planning_discussion_task_id(
+                            "response",
+                            participant_ordinal=task_identity.participant_ordinal + 1,
+                            round_ordinal=round_ordinal,
+                        )
+                    elif round_ordinal < int(session["max_response_rounds"]):
+                        next_task_id = planning_discussion_task_id(
+                            "decision",
+                            participant_ordinal=1,
+                            round_ordinal=round_ordinal,
+                        )
+                elif task_identity.phase == "decision":
+                    next_task_id = planning_discussion_task_id(
+                        "response",
+                        participant_ordinal=2,
+                        round_ordinal=round_ordinal + 1,
+                    )
+                if next_task_id:
+                    next_template, _background = renderer(
+                        approved_proposal=str(proposal_record["proposal"]),
+                        discussion_task_id=next_task_id,
+                    )
+                    next_prompt_template = append_prompt_block(
+                        next_template,
+                        planning_discussion_task_prompt_suffix(next_task_id),
+                    )
+                final_prompt_template = planning_final_owner_prompt_template(
+                    self._proposal_hitl_runtime().plan_prompt_block(
+                        approved_proposal=str(proposal_record["proposal"]),
+                        requires_human_approval=True,
+                    )
+                )
+        except BaseException:
+            task_runtime.clear_idea_tool_context()
+            raise
 
         def require_boundary() -> None:
             validation = boundary_validator()
@@ -5491,6 +5549,8 @@ class HitlAutoResearchController:
                         task_runtime.prepare_planning_discussion_prompt(
                             prompt_template=template,
                             public_background=background,
+                            next_prompt_template=next_prompt_template,
+                            final_prompt_template=final_prompt_template,
                         )
                     ),
                     task_dir=attempt_dir / "planning_discussion" / "tasks" / task_id,
@@ -5636,7 +5696,12 @@ class HitlAutoResearchController:
             attempt_dir=attempt_dir,
             admitted_proposal_idea_id=admitted_proposal_idea_id,
         )
-        if session.get("phase") == "opening":
+        if session.get("phase") in {
+            "opening",
+            "response",
+            "decision",
+            "final_writing",
+        }:
             return session
         if session.get("phase") != "initial":
             raise RuntimeError(
@@ -5700,6 +5765,114 @@ class HitlAutoResearchController:
             preparation_attempt_id=preparation_attempt_id,
             candidate_attempt_id=attempt_dir.name,
         )
+
+    def _run_collaborative_planning_discussion(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        admitted_proposal_idea_id: str,
+    ) -> Dict[str, Any]:
+        """Run the fixed planning protocol to its final-owner boundary."""
+
+        from core.hitl_planning_discussion import (
+            planning_discussion_response_task_ids,
+            planning_discussion_task_id,
+        )
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        session = self._run_collaborative_planning_initial_phase(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            admitted_proposal_idea_id=admitted_proposal_idea_id,
+        )
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        preparation_attempt_id = str((action or {}).get("attempt_id", "")).strip()
+        if not preparation_attempt_id:
+            raise RuntimeError(
+                "Collaborative planning lost its proposal preparation identity."
+            )
+        identity = {
+            "parent_node_sha": parent_sha,
+            "preparation_attempt_id": preparation_attempt_id,
+            "candidate_attempt_id": attempt_dir.name,
+        }
+        boundary_validator = self._capture_planning_discussion_boundary(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            session=session,
+        )
+
+        def refresh() -> Dict[str, Any]:
+            return state.planning_discussion_snapshot(**identity)
+
+        def run_task(task_id: str, current: Dict[str, Any]) -> None:
+            task = current["tasks"].get(task_id)
+            if isinstance(task, dict) and task.get("result_record_id") == task_id:
+                return
+            self._run_planning_discussion_task(
+                task_id=task_id,
+                session=current,
+                parent_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                attempt_dir=attempt_dir,
+                boundary_validator=boundary_validator,
+            )
+
+        while True:
+            raise_if_hitl_run_stop_requested()
+            session = refresh()
+            phase = str(session["phase"])
+            round_ordinal = int(session["round_ordinal"])
+            if phase == "final_writing":
+                return session
+            if phase == "opening":
+                opening_id = planning_discussion_task_id(
+                    "opening", participant_ordinal=1
+                )
+                run_task(opening_id, session)
+                self._require_proposal_discussion_boundary(
+                    boundary_validator, "Collaborative planning opening"
+                )
+                state.advance_planning_discussion(
+                    **identity,
+                    expected_phase="opening",
+                    round_ordinal=0,
+                )
+                continue
+            if phase == "response":
+                for task_id in planning_discussion_response_task_ids(
+                    round_ordinal, int(session["participant_count"])
+                ):
+                    run_task(task_id, refresh())
+                self._require_proposal_discussion_boundary(
+                    boundary_validator,
+                    f"Collaborative planning round {round_ordinal}",
+                )
+                state.advance_planning_discussion(
+                    **identity,
+                    expected_phase="response",
+                    round_ordinal=round_ordinal,
+                )
+                continue
+            if phase == "decision":
+                decision_id = planning_discussion_task_id(
+                    "decision",
+                    participant_ordinal=1,
+                    round_ordinal=round_ordinal,
+                )
+                run_task(decision_id, session)
+                decision = refresh()["tasks"][decision_id]
+                state.apply_planning_discussion_decision(
+                    **identity,
+                    round_ordinal=round_ordinal,
+                    choice=str(decision.get("choice", "")),
+                )
+                continue
+            raise RuntimeError(
+                f"Collaborative planning cannot run from phase {phase}."
+            )
 
     def _prepare_ranked_task_runtime(
         self,
