@@ -33,7 +33,7 @@ Good moments to log:
 Do not wait until the end of the phase to reconstruct the trail. Log ideas as
 they become clear, then keep working.
 
-{% if hitl_stage == "proposal" %}
+{% if hitl_stage == "proposal" and not suppress_proposal_submission %}
 Proposal idea:
 
 Before choosing the next proposal, run `view_current_frontier` when you need

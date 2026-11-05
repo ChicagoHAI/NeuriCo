@@ -410,6 +410,24 @@ class HitlTerminalUI:
             budget = terminal_safe_text(live.get("budget_remaining") or "").strip()
             if budget:
                 lines.append(f"  Budget remaining: {budget}")
+        if live.get("proposal_mode") == "independent_ranked":
+            proposer_count = terminal_safe_text(live.get("proposer_count") or "").strip()
+            reviewer_count = terminal_safe_text(live.get("reviewer_count") or "").strip()
+            lines.append(
+                "  Proposals: Independent ranked"
+                f" ({proposer_count} proposers, {reviewer_count} reviewers)"
+            )
+        elif live.get("proposal_mode") == "collaborative":
+            participant_count = terminal_safe_text(
+                live.get("participant_count") or ""
+            ).strip()
+            discussion_rounds = terminal_safe_text(
+                live.get("discussion_rounds") or ""
+            ).strip()
+            lines.append(
+                "  Proposals: Collaborative"
+                f" ({participant_count} participants, {discussion_rounds} response rounds)"
+            )
         if detail:
             lines.extend(self._wrap_paragraph(detail, indent="  "))
         if next_action:

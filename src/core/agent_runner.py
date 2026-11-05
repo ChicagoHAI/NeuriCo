@@ -46,6 +46,25 @@ from core.security import remove_github_credentials, sanitize_text
 from core.hitl_util import utc_now
 
 
+_AGENT_CONSOLE_LOCK = threading.Lock()
+
+
+def write_agent_console(
+    text: str = "",
+    *,
+    prefix: Optional[str] = None,
+    end: str = "\n",
+) -> None:
+    """Write one agent console line atomically, with an optional task label."""
+
+    rendered = str(text)
+    if prefix:
+        lines = rendered.splitlines(keepends=True)
+        rendered = "".join(f"[{prefix}] {line}" for line in lines) or f"[{prefix}] "
+    with _AGENT_CONSOLE_LOCK:
+        print(rendered, end=end)
+
+
 class RunTracker:
     """
     Tracks a single agent invocation via .neurico/runs/<run_id>/.
@@ -232,6 +251,8 @@ def run_prebuilt_cli_agent(
     tracker: Optional[RunTracker] = None,
     provider: Optional[str] = None,
     defer_provider_failure_to_runtime: bool = False,
+    cancel_event: Optional[threading.Event] = None,
+    output_prefix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute a caller-constructed CLI command with streaming capture.
@@ -240,7 +261,10 @@ def run_prebuilt_cli_agent(
     backend setup/cleanup. This helper only handles subprocess execution,
     sanitized output streaming, optional wall-clock timeout, and reaping.
     """
-    from core.hitl_run_control import current_hitl_run_budget_prompt
+    from core.hitl_run_control import (
+        current_hitl_run_budget_prompt,
+        hitl_run_stop_requested,
+    )
 
     budget_context = current_hitl_run_budget_prompt(work_dir)
     if budget_context:
@@ -253,10 +277,31 @@ def run_prebuilt_cli_agent(
     start_time = time.time()
     timed_out = False
     stopped = False
+    cancelled = False
     background_processes_terminated = False
     return_code: Optional[int] = None
     process_env = dict(env)
     remove_github_credentials(process_env)
+
+    if cancel_event is not None and cancel_event.is_set():
+        stopped = hitl_run_stop_requested()
+        cancelled = not stopped
+        log_file.write_text("", encoding="utf-8")
+        transcript_file.write_text("", encoding="utf-8")
+        if stopped and tracker is not None:
+            tracker.mark_stopped()
+        return {
+            "success": False,
+            "return_code": None,
+            "elapsed_time": time.time() - start_time,
+            "log_file": str(log_file),
+            "transcript_file": str(transcript_file),
+            "timed_out": False,
+            "stopped": stopped,
+            "cancelled": cancelled,
+            "background_processes_terminated": False,
+            "provider_process_failed": False,
+        }
 
     with (
         open(log_file, "w", encoding="utf-8") as log_f,
@@ -316,7 +361,7 @@ def run_prebuilt_cli_agent(
                     return
                 if line is None:
                     continue
-                print(line, end="")
+                write_agent_console(line, prefix=output_prefix, end="")
                 log_f.write(line)
                 transcript_f.write(line)
 
@@ -330,10 +375,12 @@ def run_prebuilt_cli_agent(
             return_code = poll() if callable(poll) else process.wait(timeout=0)
             if return_code is not None:
                 break
-            from core.hitl_run_control import hitl_run_stop_requested
-
             if hitl_run_stop_requested():
                 stopped = True
+                _terminate_process_group(process)
+                break
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
                 _terminate_process_group(process)
                 break
             if deadline is not None and time.time() >= deadline:
@@ -342,7 +389,7 @@ def run_prebuilt_cli_agent(
                 break
             time.sleep(0.05)
 
-        if timed_out or stopped:
+        if timed_out or stopped or cancelled:
             try:
                 return_code = process.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -365,6 +412,7 @@ def run_prebuilt_cli_agent(
         and return_code not in {None, 0}
         and not timed_out
         and not stopped
+        and not cancelled
         and not background_processes_terminated
     )
     if (
@@ -383,9 +431,10 @@ def run_prebuilt_cli_agent(
         (return_code == 0)
         and not timed_out
         and not stopped
+        and not cancelled
         and not background_processes_terminated
     )
-    return {
+    result = {
         "success": success,
         "return_code": return_code,
         "elapsed_time": elapsed,
@@ -396,6 +445,9 @@ def run_prebuilt_cli_agent(
         "background_processes_terminated": background_processes_terminated,
         "provider_process_failed": provider_process_failed,
     }
+    if cancel_event is not None:
+        result["cancelled"] = cancelled
+    return result
 
 
 def _terminate_process_group(process: subprocess.Popen) -> None:
