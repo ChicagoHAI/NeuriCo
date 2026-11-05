@@ -2018,6 +2018,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
     )
     planning_discussion_is_exact = False
     planning_read_only_workspace_is_exact = False
+    planning_reopen_workspace_is_exact = False
     planning_discussion_phase: Optional[str] = None
     planning_admitted_proposal_id = ""
     if planning_discussion_present and isinstance(preparation_action, dict):
@@ -2154,6 +2155,13 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                         raise RuntimeError(
                             "Planning discussion reopen handoff changed during recovery."
                         )
+                    planning_reopen_workspace_is_exact = (
+                        HitlWorkspaceWriteGuard.public_fingerprint(
+                            work_dir,
+                            scope=handoff.get("workspace_fingerprint_scope"),
+                        )
+                        == handoff["workspace_fingerprint"]
+                    )
                     feedback_record = reopen_boundary.get("feedback_record")
                     feedback_ref = str(handoff.get("feedback_ref", "")).strip()
                     logged_feedback = [
@@ -2377,7 +2385,59 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             scope=pending_request.get("workspace_fingerprint_scope"),
         )
     )
-    if coordination_present:
+    if planning_discussion_present and planning_discussion_phase in {
+        "final_writing", "reopen_pending"
+    }:
+        # Preparation's rollback descriptor is retired before planning starts.
+        # Recover only through the boundary owned by the current planning phase.
+        planning_transition_is_exact = False
+        if preparation_metadata_is_exact:
+            if planning_discussion_phase == "reopen_pending":
+                planning_transition_is_exact = planning_reopen_workspace_is_exact
+            else:
+                upstream_approval_is_exact = bool(
+                    isinstance(pending_request, dict)
+                    and pending_request.get("kind") == "proposal"
+                    and pending_request.get("pipeline_stage") == "experiment_runner"
+                    and pending_request.get("status") == "resolved"
+                    and pending_request.get("proposal_idea_id")
+                    == planning_admitted_proposal_id
+                    and isinstance(pending_response, dict)
+                    and pending_response.get("status") == "approved"
+                    and str(pending_request.get("candidate_attempt_id", "")).strip()
+                    in {"", attempt_dir.name}
+                    and (
+                        not ranked_round_present
+                        or pending_request.get("manager_selection_decision_idea_id")
+                        == durable_round["selection"].get("decision_idea_id")
+                    )
+                )
+                # A failed held-request recovery must never fall through to a
+                # fresh plan owner, even if the workspace happens to match.
+                if pending_request is None or upstream_approval_is_exact:
+                    if continuation is None:
+                        planning_transition_is_exact = (
+                            HitlWorkspaceWriteGuard.public_fingerprint(
+                                work_dir,
+                                scope=durable_planning.get("workspace_fingerprint_scope"),
+                            )
+                            == durable_planning["workspace_fingerprint"]
+                        )
+                    else:
+                        planning_transition_is_exact = bool(
+                            continuation.get("pipeline_stage") == "experiment_runner"
+                            and continuation.get("hitl_stage") == "plan"
+                            and continuation.get("actor") == "comment_handler"
+                            and continuation_provenance.get("parent_node_id")
+                            == current_best_sha
+                            and continuation_provenance.get("attempt_id") == attempt_dir.name
+                            and continuation_provenance.get("proposal_idea_id")
+                            == planning_admitted_proposal_id
+                        )
+        preparation_is_exact = bool(
+            preparation_metadata_is_exact and planning_transition_is_exact
+        )
+    elif coordination_present:
         preparation_is_exact = bool(
             preparation_metadata_is_exact
             and (
@@ -2387,12 +2447,6 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                     and planning_discussion_phase
                     in {"initial", "opening", "response", "decision"}
                     and planning_read_only_workspace_is_exact
-                )
-                or (
-                    planning_discussion_is_exact
-                    and planning_discussion_phase
-                    in {"final_writing", "reopen_pending"}
-                    and preparation_recovery_is_exact
                 )
             )
         )
