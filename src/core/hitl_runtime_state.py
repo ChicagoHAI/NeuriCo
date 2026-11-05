@@ -2918,15 +2918,15 @@ class HitlRuntimeState:
                     "Approved ranked proposal request does not match its selection decision"
                 )
 
-    def settle_approved_proposal_handoff_for_planning(
+    def _approved_proposal_handoff_for_planning_unlocked(
         self,
         *,
         parent_node_sha: str,
         preparation_attempt_id: str,
         candidate_attempt_id: str,
         admitted_proposal_idea_id: str,
-    ) -> None:
-        """Finish the admitted proposer's durable handoff to collaborative planning."""
+    ) -> Dict[str, Any]:
+        """Validate ownership without settling the proposal handoff."""
 
         parent, preparation, candidate = self._planning_discussion_identity(
             parent_node_sha=parent_node_sha,
@@ -2938,33 +2938,30 @@ class HitlRuntimeState:
             raise HitlRuntimeStateError(
                 "Planning discussion requires an admitted proposal idea ID"
             )
-        with self._locked():
-            self._state = self._load_unlocked() or self._default()
-            action = self._proposal_preparation_unlocked(
-                parent_node_sha=parent,
-                preparation_attempt_id=preparation,
+        action = self._proposal_preparation_unlocked(
+            parent_node_sha=parent,
+            preparation_attempt_id=preparation,
+        )
+        if action.get("planning_discussion") is not None:
+            raise HitlRuntimeStateError(
+                "Planning discussion proposal handoff is already complete"
             )
-            if action.get("planning_discussion") is not None:
-                raise HitlRuntimeStateError(
-                    "Planning discussion proposal handoff is already complete"
-                )
-            if self._proposal_preparation_planning_policy(action) is None:
-                raise HitlRuntimeStateError(
-                    "Proposal preparation has no collaborative planning policy"
-                )
-            self._require_terminal_proposal_for_planning(
-                action,
-                candidate_attempt_id=candidate,
-                admitted_proposal_idea_id=proposal_id,
+        if self._proposal_preparation_planning_policy(action) is None:
+            raise HitlRuntimeStateError(
+                "Proposal preparation has no collaborative planning policy"
             )
-            self._require_approved_proposal_handoff_unlocked(
-                action=action,
-                candidate_attempt_id=candidate,
-                admitted_proposal_idea_id=proposal_id,
-            )
-            continuation = self._state.get("worker_continuation")
-            if continuation is None:
-                return
+        self._require_terminal_proposal_for_planning(
+            action,
+            candidate_attempt_id=candidate,
+            admitted_proposal_idea_id=proposal_id,
+        )
+        self._require_approved_proposal_handoff_unlocked(
+            action=action,
+            candidate_attempt_id=candidate,
+            admitted_proposal_idea_id=proposal_id,
+        )
+        continuation = self._state.get("worker_continuation")
+        if continuation is not None:
             provenance = (
                 continuation.get("provenance")
                 if isinstance(continuation, dict)
@@ -2982,6 +2979,50 @@ class HitlRuntimeState:
                 raise HitlRuntimeStateError(
                     "Approved proposal does not own the current worker continuation"
                 )
+        return self._copy(
+            {
+                "command": self._state["pending_worker_command"],
+                "continuation": continuation,
+            }
+        )
+
+    def approved_proposal_handoff_for_planning_snapshot(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        admitted_proposal_idea_id: str,
+    ) -> Dict[str, Any]:
+        """Read the validated ownership of an approved proposal awaiting planning."""
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            return self._approved_proposal_handoff_for_planning_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                admitted_proposal_idea_id=admitted_proposal_idea_id,
+            )
+
+    def settle_approved_proposal_handoff_for_planning(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        admitted_proposal_idea_id: str,
+    ) -> None:
+        """Finish the admitted proposer's durable handoff to collaborative planning."""
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            handoff = self._approved_proposal_handoff_for_planning_unlocked(
+                parent_node_sha=parent_node_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=candidate_attempt_id,
+                admitted_proposal_idea_id=admitted_proposal_idea_id,
+            )
+            if handoff["continuation"] is None:
+                return
             self._state["worker_continuation"] = None
             self._save_unlocked()
 

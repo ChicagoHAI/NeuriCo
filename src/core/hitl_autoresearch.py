@@ -2210,6 +2210,43 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
     coordination_present = bool(
         ranked_round_present or discussion_present or planning_discussion_present
     )
+    approved_single_proposal_handoff_is_exact = False
+    if (
+        not coordination_present
+        and isinstance(preparation_action, dict)
+        and preparation_action.get("kind") == "prepare_proposal"
+        and preparation_action.get("status") == "resolved"
+        and preparation_action.get(PENDING_PLANNING_POLICY_FIELD) is not None
+        and isinstance(pending_request, dict)
+        and pending_request.get("kind") == "proposal"
+        and pending_request.get("status") == "resolved"
+        and isinstance(pending_request.get("response"), dict)
+        and pending_request["response"].get("status") == "approved"
+    ):
+        proposal_id = str(pending_request.get("proposal_idea_id", "")).strip()
+        try:
+            runtime_state.approved_proposal_handoff_for_planning_snapshot(
+                parent_node_sha=current_best_sha,
+                preparation_attempt_id=str(preparation_action.get("attempt_id", "")).strip(),
+                candidate_attempt_id=attempt_dir.name,
+                admitted_proposal_idea_id=proposal_id,
+            )
+            proposals = [
+                record for record in HitlIdeaLog(work_dir).records()
+                if record.get("idea_id") == proposal_id
+            ]
+            prepared_sha = _resolved_proposal_base(preparation_action)
+            approved_single_proposal_handoff_is_exact = bool(
+                len(proposals) == 1
+                and proposals[0].get("idea_type") == "proposal"
+                and proposals[0].get("parent_node_id") == current_best_sha
+                and proposals[0].get("attempt_id") == attempt_dir.name
+                and str(proposals[0].get("proposal", "")).strip()
+                and prepared_sha
+                and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
+            )
+        except (HitlRuntimeStateError, OSError, RuntimeError, ValueError):
+            pass
     ordinary_worker_recovery_allowed = bool(
         (not ranked_round_present or (ranked_round_is_exact and ranked_round_stage == "selected"))
         and (
@@ -2241,6 +2278,7 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                 coordination_present
                 or str(preparation_action.get("attempt_id", "")).strip()
                 == attempt_dir.name
+                or approved_single_proposal_handoff_is_exact
             )
         )
         and isinstance(preparation_action.get("additional_agent_ordinal"), int)
@@ -2436,6 +2474,10 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                         )
         preparation_is_exact = bool(
             preparation_metadata_is_exact and planning_transition_is_exact
+        )
+    elif approved_single_proposal_handoff_is_exact:
+        preparation_is_exact = bool(
+            preparation_metadata_is_exact and preparation_workspace_is_exact
         )
     elif coordination_present:
         preparation_is_exact = bool(
