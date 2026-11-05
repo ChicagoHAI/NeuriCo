@@ -22,7 +22,7 @@ import threading
 import secrets
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence
 
 from core.hitl_discussion import MAX_DISCUSSION_CONTRIBUTION_ESTIMATED_TOKENS
 from core.hitl_lock import exclusive_file_lock
@@ -1588,9 +1588,13 @@ class HitlRuntime:
 
         return HitlManager(config, work_dir=work_dir, channel=channel)
 
-    def _autoresearch_candidate_prompt_context(self) -> Dict[str, Any]:
-        provenance = self._tool_context.get("provenance")
-        if not isinstance(provenance, dict):
+    def _autoresearch_candidate_prompt_context(
+        self,
+        provenance: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if provenance is None:
+            provenance = self._tool_context.get("provenance")
+        if not isinstance(provenance, Mapping):
             provenance = {}
         assigned_candidate_sha = str(provenance.get("parent_node_id", "")).strip()
         autoresearch_attempt = bool(
@@ -1608,6 +1612,7 @@ class HitlRuntime:
         approved_proposal: str = "",
         *,
         requires_human_approval: Optional[bool] = None,
+        provenance: Optional[Mapping[str, Any]] = None,
     ) -> str:
         if requires_human_approval is None:
             requires_human_approval = self.requires_human_plan_approval
@@ -1623,7 +1628,7 @@ class HitlRuntime:
             hitl_stage="plan",
             allow_raised_ideas=False,
             hitl_mode=self.hitl_mode.value,
-            **self._autoresearch_candidate_prompt_context(),
+            **self._autoresearch_candidate_prompt_context(provenance),
         )
 
     def execution_prompt_block(self, mode: str = "execute", feedback: str = "") -> str:
@@ -5631,6 +5636,10 @@ class HitlRuntime:
                 raise HitlValidationError(
                     "Planning discussion reopening references unavailable feedback."
                 )
+            reopen_source_ideas = [ideas_by_id[item] for item in source_ids]
+            self._tool_context["planning_discussion_reopen_source_ideas"] = [
+                dict(record) for record in reopen_source_ideas
+            ]
 
             try:
                 return prepare_planning_discussion_prompt(
@@ -5643,7 +5652,7 @@ class HitlRuntime:
                     ),
                     summarize=summarize if callable(summarize_method) else None,
                     current_session=current_session,
-                    reopen_source_ideas=[ideas_by_id[item] for item in source_ids],
+                    reopen_source_ideas=reopen_source_ideas,
                 )
             except (RuntimeError, ValueError) as exc:
                 raise HitlValidationError(str(exc)) from exc
@@ -5743,9 +5752,15 @@ class HitlRuntime:
             self._tool_context.get("planning_discussion_final_prompt_template", "")
         )
         background = self._tool_context.get("planning_discussion_public_background")
+        raw_reopen_source_ideas = self._tool_context.get(
+            "planning_discussion_reopen_source_ideas",
+            (),
+        )
         if (
             final_template.count(PLANNING_DISCUSSION_CONTEXT_MARKER) != 1
             or not isinstance(background, dict)
+            or not isinstance(raw_reopen_source_ideas, (list, tuple))
+            or any(not isinstance(record, dict) for record in raw_reopen_source_ideas)
         ):
             raise HitlValidationError(
                 "HITL_ERROR discussion_context_unavailable\n"
@@ -5784,6 +5799,7 @@ class HitlRuntime:
                     public_background=background,
                     reserve_contributions=reserve,
                     additional_records=(additional,),
+                    reopen_source_ideas=raw_reopen_source_ideas,
                 )
         except ValueError as exc:
             raise HitlValidationError(

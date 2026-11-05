@@ -5881,11 +5881,25 @@ class HitlAutoResearchController:
                         next_template,
                         planning_discussion_task_prompt_suffix(next_task_id),
                     )
-                final_prompt_template = planning_final_owner_prompt_template(
-                    self._proposal_hitl_runtime().plan_prompt_block(
+                revision_feedback = self._planning_discussion_revision_feedback(
+                    session=session,
+                    attempt_dir=attempt_dir,
+                )
+                owner_prompt = (
+                    task_runtime.compose_worker_prompt(
+                        hitl_stage="plan",
+                        phase_prompt=task_runtime.plan_revision_prompt_block(
+                            revision_feedback
+                        ),
+                    )
+                    if revision_feedback
+                    else task_runtime.plan_prompt_block(
                         approved_proposal=str(proposal_record["proposal"]),
                         requires_human_approval=True,
                     )
+                )
+                final_prompt_template = planning_final_owner_prompt_template(
+                    owner_prompt
                 )
         except BaseException:
             task_runtime.clear_idea_tool_context()
@@ -6056,6 +6070,11 @@ class HitlAutoResearchController:
             self._proposal_hitl_runtime().plan_prompt_block(
                 approved_proposal=approved_proposal,
                 requires_human_approval=True,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": attempt_dir.name,
+                    "proposal_idea_id": session["admitted_proposal_idea_id"],
+                },
             )
         )
         final_projection = json.loads(json.dumps(response_session))
@@ -6655,21 +6674,14 @@ class HitlAutoResearchController:
 
         return validate
 
-    def _collaborative_planning_revision_feedback(
+    def _planning_discussion_revision_feedback(
         self,
         *,
-        parent_sha: str,
+        session: Dict[str, Any],
         attempt_dir: Path,
     ) -> str:
-        """Return feedback for the latest applied planning reopen, if any."""
+        """Return the feedback attached to the latest applied planning reopen."""
 
-        final = self._collaborative_planning_final_session(
-            parent_sha=parent_sha,
-            attempt_dir=attempt_dir,
-        )
-        if final is None:
-            return ""
-        _action, session = final
         from core.hitl_planning_discussion import (
             PlanningDiscussionRecordStore,
             planning_discussion_reopen_source_idea_ids,
@@ -6702,6 +6714,26 @@ class HitlAutoResearchController:
                 "Collaborative planning revision feedback is empty."
             )
         return feedback
+
+    def _collaborative_planning_revision_feedback(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> str:
+        """Return feedback for the latest applied planning reopen, if any."""
+
+        final = self._collaborative_planning_final_session(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        if final is None:
+            return ""
+        _action, session = final
+        return self._planning_discussion_revision_feedback(
+            session=session,
+            attempt_dir=attempt_dir,
+        )
 
     def _prepare_ranked_task_runtime(
         self,
