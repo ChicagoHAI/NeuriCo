@@ -6349,7 +6349,12 @@ class HitlRuntime:
             if not isinstance(response, dict):
                 raise HitlValidationError("Resolved HITL worker request has no runtime response.")
             if kind == "raised_idea":
-                return self._normalize_raised_resolution(response)
+                raised_idea = pending.get("raised_idea")
+                if not isinstance(raised_idea, dict):
+                    raise HitlValidationError(
+                        "Resolved raised idea request has no worker payload."
+                    )
+                return self._resume_prepared_raised_payload(raised_idea)
             if (
                 kind == "phase_finish"
                 and str(response.get("status", "")).strip() == "feedback"
