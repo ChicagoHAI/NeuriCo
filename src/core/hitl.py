@@ -2959,7 +2959,7 @@ class HitlRuntime:
                 + "\nRestore the task workspace boundary, then retry the same finish command."
             )
 
-    def _validate_discussion_task_workspace(self) -> None:
+    def _validate_discussion_task_workspace(self, *, discussion_kind: str) -> None:
         validator = self._tool_context.get("phase_finish_validator")
         if not callable(validator):
             raise HitlValidationError(
@@ -2983,7 +2983,7 @@ class HitlRuntime:
                 f"- {str(issue)}" for issue in issues if str(issue).strip()
             )
             raise HitlValidationError(
-                "HITL_ERROR proposal_discussion_workspace_boundary\n"
+                f"HITL_ERROR {discussion_kind}_discussion_workspace_boundary\n"
                 "Runtime rejected this result because the discussion task changed "
                 "its read-only workspace or whiteboard boundary."
                 + (f"\n{details}" if details else "")
@@ -3294,7 +3294,9 @@ class HitlRuntime:
         with self._tool_lock:
             self._reject_cancelled_scoped_task_mutation()
             task_context = self._discussion_task_state_context(allow_completed=True)
-            self._validate_discussion_task_workspace()
+            self._validate_discussion_task_workspace(
+                discussion_kind=task_context["discussion_kind"]
+            )
             normalized = self._normalize_discussion_task_output(payload, task_context)
             task = task_context["task"]
             if task.get("result_record_id") is not None:
@@ -3402,7 +3404,9 @@ class HitlRuntime:
                     "record_id": None,
                 }
             task_context = self._discussion_task_state_context(allow_completed=True)
-            self._validate_discussion_task_workspace()
+            self._validate_discussion_task_workspace(
+                discussion_kind=task_context["discussion_kind"]
+            )
             task = task_context["task"]
             result_record_id = str(task.get("result_record_id") or "").strip()
             pending = task.get("pending_finalization")
@@ -3462,7 +3466,9 @@ class HitlRuntime:
 
         with self._tool_lock:
             task_context = self._discussion_task_state_context(allow_completed=True)
-            self._validate_discussion_task_workspace()
+            self._validate_discussion_task_workspace(
+                discussion_kind=task_context["discussion_kind"]
+            )
             if task_context["task"].get("result_record_id") is not None:
                 record = self._validate_discussion_result_reference(task_context)
                 self._tool_context["scoped_task_terminal"] = True
