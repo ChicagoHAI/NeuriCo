@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import hashlib
 import inspect
 import json
 import os
 import re
 import shutil
+import threading
 
 from core.autoresearch import (
     AGENT_LOCAL_PATTERNS,
@@ -41,6 +42,7 @@ from core.autoresearch_common import (
 )
 from core.hitl import (
     HitlIdeaLog,
+    HitlProposalDiscussionCapacityError,
     HitlRuntime,
     _load_hitl_template,
     log_frontier_decision_record,
@@ -59,7 +61,7 @@ from core.hitl_artifact_snapshots import (
     validate_hitl_artifact_snapshot,
 )
 from core.hitl_git import delete_git_ref
-from core.hitl_git_state import HitlGitStateStore
+from core.hitl_git_state import HitlGitStateError, HitlGitStateStore
 from core.hitl_manager_inbox import HitlManagerInbox
 from core.hitl_paths import (
     hitl_artifact_contract_path,
@@ -68,6 +70,13 @@ from core.hitl_paths import (
     hitl_stop_request_path,
 )
 from core.hitl_mode import HitlMode, normalize_hitl_mode
+from core.hitl_proposal_round import (
+    COLLABORATIVE_PROPOSAL_MODE,
+    INDEPENDENT_RANKED_PROPOSAL_MODE,
+    KemenyYoungResult,
+    ProposalModeConfig,
+    normalize_proposal_mode_config,
+)
 from core.hitl_run_control import HitlRunStopRequested
 from core.hitl_runtime_state import (
     HitlRuntimeState,
@@ -98,6 +107,7 @@ from core.scoring_seal import (
 
 HitlCommentModeHook = Callable[..., Dict[str, Any]]
 AdditionalAgentHook = Callable[..., Dict[str, Any]]
+ProposalPromptTemplateHook = Callable[..., str]
 MAX_ACTIVE_HITL_FRONTIER_NODES = 10
 
 
@@ -1131,6 +1141,14 @@ def _archive_failed_hitl_attempt(
                     dirs_exist_ok=True,
                     symlinks=True,
                 )
+        discussion = Path(source_attempt_dir) / "proposal_discussion"
+        if discussion.is_dir() and not discussion.is_symlink():
+            shutil.copytree(
+                discussion,
+                archive_dir / "proposal_discussion",
+                dirs_exist_ok=True,
+                symlinks=True,
+            )
     return archive_dir
 
 
@@ -1818,6 +1836,197 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             frontier_transition=frontier_transition,
         )
     preparation_action = runtime_state.snapshot().get("next_autoresearch_action")
+    ranked_round_present = bool(
+        isinstance(preparation_action, dict)
+        and "proposal_round" in preparation_action
+    )
+    ranked_round_is_exact = False
+    ranked_round_stage: Optional[str] = None
+    if ranked_round_present and isinstance(preparation_action, dict):
+        raw_round = preparation_action.get("proposal_round")
+        if isinstance(raw_round, dict):
+            try:
+                round_ordinal = int(raw_round.get("round_ordinal"))
+                durable_round = runtime_state.proposal_round_snapshot(
+                    parent_node_sha=str(
+                        preparation_action.get("parent_node_sha", "")
+                    ).strip(),
+                    preparation_attempt_id=str(
+                        preparation_action.get("attempt_id", "")
+                    ).strip(),
+                    candidate_attempt_id=attempt_dir.name,
+                    round_ordinal=round_ordinal,
+                )
+                whiteboard_is_frozen = HitlGitStateStore(
+                    work_dir
+                ).hitl_autoresearch_whiteboard_matches_attempt_boundary(marker)
+            except (
+                HitlRuntimeStateError,
+                HitlGitStateError,
+                OSError,
+                TypeError,
+                ValueError,
+            ):
+                pass
+            else:
+                prepared_sha = _resolved_proposal_base(preparation_action)
+                ranked_round_stage = str(durable_round.get("stage", "")).strip()
+                ranked_round_is_exact = bool(
+                    preparation_action.get("status") == "resolved"
+                    and str(preparation_action.get("parent_node_sha", "")).strip()
+                    == current_best_sha
+                    and attempt_dir.parent.name == current_best_sha
+                    and durable_round == raw_round
+                    and whiteboard_is_frozen
+                    and prepared_sha
+                    and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
+                )
+    discussion_present = bool(
+        isinstance(preparation_action, dict)
+        and "proposal_discussion" in preparation_action
+    )
+    discussion_is_exact = False
+    discussion_phase: Optional[str] = None
+    if discussion_present and isinstance(preparation_action, dict):
+        raw_session = preparation_action.get("proposal_discussion")
+        if isinstance(raw_session, dict) and not ranked_round_present:
+            try:
+                from core.hitl_proposal_discussion import (
+                    ProposalDiscussionRecordStore,
+                    permitted_proposal_discussion_record_ids,
+                )
+
+                durable_session = runtime_state.proposal_discussion_snapshot(
+                    parent_node_sha=str(
+                        preparation_action.get("parent_node_sha", "")
+                    ).strip(),
+                    preparation_attempt_id=str(
+                        preparation_action.get("attempt_id", "")
+                    ).strip(),
+                    candidate_attempt_id=attempt_dir.name,
+                )
+                discussion_phase = str(durable_session.get("phase", "")).strip()
+                record_store = ProposalDiscussionRecordStore(attempt_dir)
+                records = record_store.records()
+                records_by_id = {
+                    str(record.get("record_id", "")).strip(): record
+                    for record in records
+                }
+                record_store.ordered_records(
+                    permitted_proposal_discussion_record_ids(durable_session)
+                )
+                for task_id, task in durable_session["tasks"].items():
+                    record = records_by_id.get(task_id)
+                    result_record_id = str(
+                        task.get("result_record_id") or ""
+                    ).strip()
+                    pending = task.get("pending_finalization")
+                    if result_record_id:
+                        if record is None or result_record_id != task_id:
+                            raise RuntimeError(
+                                "Proposal discussion task result record is missing."
+                            )
+                        if (
+                            record["kind"] == "decision"
+                            and record["result"].get("choice")
+                            != task.get("choice")
+                        ):
+                            raise RuntimeError(
+                                "Proposal discussion decision does not match durable "
+                                "scheduling state."
+                            )
+                    elif pending is not None:
+                        if record is not None and record.get("result") != pending:
+                            raise RuntimeError(
+                                "Proposal discussion task record conflicts with durable intent."
+                            )
+                    elif record is not None:
+                        raise RuntimeError(
+                            "Proposal discussion contains an unreferenced task record."
+                        )
+
+                git_state = HitlGitStateStore(work_dir)
+                if discussion_phase in {"initial", "opening", "response", "decision"}:
+                    whiteboard_sha = str(
+                        durable_session.get("whiteboard_boundary_sha", "")
+                    ).strip()
+                    whiteboard_is_exact = bool(
+                        git_state.hitl_autoresearch_whiteboard_history_contains(
+                            whiteboard_sha
+                        )
+                        and git_state.hitl_autoresearch_whiteboard_matches_commit(
+                            whiteboard_sha
+                        )
+                    )
+                elif discussion_phase == "final_writing":
+                    whiteboard_is_exact = True
+                elif discussion_phase == "reopen_pending":
+                    handoff = durable_session.get("reopen_handoff")
+                    if not isinstance(handoff, dict):
+                        raise RuntimeError(
+                            "Proposal discussion reopen handoff is missing."
+                        )
+                    reopen_record = records_by_id.get(
+                        str(handoff.get("reopen_record_id", "")).strip()
+                    )
+                    pending = handoff.get("pending_finalization")
+                    if pending is not None:
+                        if (
+                            reopen_record is not None
+                            and reopen_record.get("result") != pending
+                        ):
+                            raise RuntimeError(
+                                "Proposal discussion reopen record conflicts with durable intent."
+                            )
+                    elif (
+                        not isinstance(reopen_record, dict)
+                        or reopen_record.get("result", {}).get("proposal_idea_id")
+                        != handoff.get("proposal_idea_id")
+                        or reopen_record.get("result", {}).get("feedback_ref")
+                        != handoff.get("feedback_ref")
+                    ):
+                        raise RuntimeError(
+                            "Proposal discussion reopen record does not match its handoff."
+                        )
+                    current_whiteboard_sha = (
+                        git_state.hitl_autoresearch_whiteboard_history_sha()
+                    )
+                    whiteboard_is_exact = (
+                        git_state.hitl_autoresearch_whiteboard_matches_commit(
+                            current_whiteboard_sha
+                        )
+                    )
+                else:
+                    whiteboard_is_exact = False
+            except (
+                HitlRuntimeStateError,
+                HitlGitStateError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ):
+                pass
+            else:
+                prepared_sha = _resolved_proposal_base(preparation_action)
+                discussion_is_exact = bool(
+                    preparation_action.get("status") == "resolved"
+                    and str(preparation_action.get("parent_node_sha", "")).strip()
+                    == current_best_sha
+                    and attempt_dir.parent.name == current_best_sha
+                    and durable_session == raw_session
+                    and whiteboard_is_exact
+                    and prepared_sha
+                    and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
+                )
+    ordinary_worker_recovery_allowed = bool(
+        (
+            not ranked_round_present
+            and not discussion_present
+        )
+        or (ranked_round_is_exact and ranked_round_stage == "selected")
+        or (discussion_is_exact and discussion_phase == "final_writing")
+    )
     preparation_metadata_is_exact = (
         isinstance(preparation_action, dict)
         and preparation_action.get("kind") == "prepare_proposal"
@@ -1825,8 +2034,16 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         in {"pending", "decision_recorded", "resolved", "cancelled"}
         and str(preparation_action.get("parent_node_sha", "")).strip()
         == current_best_sha
-        and str(preparation_action.get("attempt_id", "")).strip()
-        == attempt_dir.name
+        and (
+            ranked_round_is_exact
+            if ranked_round_present
+            else (
+                discussion_is_exact
+                if discussion_present
+                else str(preparation_action.get("attempt_id", "")).strip()
+                == attempt_dir.name
+            )
+        )
         and isinstance(preparation_action.get("additional_agent_ordinal"), int)
         and int(preparation_action["additional_agent_ordinal"]) >= 1
         and bool(str(preparation_action.get("workspace_fingerprint", "")).strip())
@@ -1847,7 +2064,9 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         else {}
     )
     dynamic_agent_request = (
-        isinstance(pending_request, dict)
+        not ranked_round_present
+        and not discussion_present
+        and isinstance(pending_request, dict)
         and pending_request.get("pipeline_stage") == "resource_finder"
     )
     dynamic_agent_matches_attempt = (
@@ -1938,25 +2157,37 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             scope=pending_request.get("workspace_fingerprint_scope"),
         )
     )
-    preparation_is_exact = bool(
-        preparation_metadata_is_exact
-        and (
-            preparation_workspace_is_exact
-            or preparation_recovery_is_exact
-            or (
-                preparation_action.get("status") in {"decision_recorded", "resolved"}
-                and (resumable_agent_request or approved_agent_workspace_is_exact)
+    if ranked_round_present or discussion_present:
+        preparation_is_exact = bool(
+            preparation_metadata_is_exact and preparation_workspace_is_exact
+        )
+    else:
+        preparation_is_exact = bool(
+            preparation_metadata_is_exact
+            and (
+                preparation_workspace_is_exact
+                or preparation_recovery_is_exact
+                or (
+                    preparation_action.get("status") in {"decision_recorded", "resolved"}
+                    and (resumable_agent_request or approved_agent_workspace_is_exact)
+                )
             )
         )
-    )
     if (
-        worker_command_requires_resume(pending_request)
+        ordinary_worker_recovery_allowed
+        and worker_command_requires_resume(pending_request)
         and isinstance(continuation, dict)
         and continuation_provenance == pending_provenance
         and str(continuation_provenance.get("attempt_id", "")).strip() == attempt_dir.name
         and str(continuation_provenance.get("parent_node_id", "")).strip()
         == current_best_sha
         and (not dynamic_agent_request or resumable_agent_request)
+        and (
+            not discussion_present
+            or str(continuation.get("hitl_stage", "")).strip()
+            in {"plan", "execution", "review"}
+            or preparation_workspace_is_exact
+        )
     ):
         return HitlRecoveryResult(
             marker=marker,
@@ -2171,6 +2402,7 @@ def continue_hitl_autoresearch(
     manager_config: Optional[Dict[str, Any]] = None,
     recovered_attempt: Optional[HitlRecoveryResult] = None,
     hitl_mode: HitlMode | str = HitlMode.FULL,
+    proposal_mode_config: Optional[ProposalModeConfig] = None,
 ) -> Dict[str, Any]:
     """Continue only from the runtime-selected HITL frontier node."""
     print()
@@ -2185,6 +2417,7 @@ def continue_hitl_autoresearch(
     runtime_state = HitlRuntimeState(work_dir)
     recovery = recovered_attempt or recover_interrupted_hitl_attempt_if_needed(work_dir)
     selected_hitl_mode = _adopt_run_hitl_mode(work_dir, hitl_mode)
+    selected_proposal_mode = normalize_proposal_mode_config(proposal_mode_config)
     pending_worker_request = bool(
         recovery and recovery.recovery_classification == "pending_worker_request"
     )
@@ -2299,6 +2532,7 @@ def continue_hitl_autoresearch(
         or pending_proposal_preparation
         else None,
         hitl_mode=selected_hitl_mode,
+        proposal_mode_config=selected_proposal_mode,
     )
     payload = autoresearch_result_payload(result)
     payload["initial_sha"] = lineage_source_sha
@@ -2338,7 +2572,10 @@ class HitlAutoResearchController:
         hitl_comment_mode: Optional[HitlCommentModeHook] = None,
         pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
         hitl_mode: HitlMode | str = HitlMode.FULL,
+        proposal_mode_config: Optional[ProposalModeConfig] = None,
         additional_agent_runner: Optional[AdditionalAgentHook] = None,
+        proposal_assessment_runner: Optional[Callable[..., Dict[str, Any]]] = None,
+        proposal_prompt_template_renderer: Optional[ProposalPromptTemplateHook] = None,
     ):
         self.idea = idea
         self.idea_id = idea_id
@@ -2348,11 +2585,23 @@ class HitlAutoResearchController:
         self.proposal_generator = proposal_generator
         self.scorer = scorer
         self.hitl_runtime = hitl_runtime
+        # Rollback replaces attempt-local runtime wrappers, not the run-owned
+        # manager and channel that were injected by the launcher.
+        self._hitl_run_binding = (
+            (hitl_runtime.manager, hitl_runtime.channel)
+            if hitl_runtime is not None
+            else None
+        )
         self.hitl_comment_mode = hitl_comment_mode
         self.hitl_frontier = HitlFrontierStore(self.work_dir)
         self.pending_hitl_recovery = pending_hitl_recovery
         self.hitl_mode = normalize_hitl_mode(hitl_mode)
+        self.proposal_mode_config = normalize_proposal_mode_config(
+            proposal_mode_config
+        )
         self.additional_agent_runner = additional_agent_runner
+        self.proposal_assessment_runner = proposal_assessment_runner
+        self.proposal_prompt_template_renderer = proposal_prompt_template_renderer
 
     def run(self, iterations: int) -> AutoResearchRunResult:
         """
@@ -3268,12 +3517,13 @@ class HitlAutoResearchController:
         verify_sealed_scoring_manifest(sealed_path)
 
         if request_kind == "proposal":
-            runtime.prepare_idea_tool_context(
-                hitl_stage="proposal",
-                actor="autoresearch_proposer",
-                provenance={"parent_node_id": parent_sha, "attempt_id": attempt_id},
+            self._prepare_proposal_owner_tool_context(
+                runtime,
+                parent_sha=parent_sha,
+                attempt_dir=recovery.removed_attempt_dir,
                 proposal_review_path=recovery.removed_attempt_dir / "proposal_review.json",
             )
+            reopen_transfer: Optional[Dict[str, str]] = None
             try:
                 proposal_result = self._call_proposal_generator(
                     parent_sha=parent_sha,
@@ -3288,9 +3538,37 @@ class HitlAutoResearchController:
                     worker_name="Recovered AutoResearch proposal generator",
                 )
                 _raise_if_hitl_worker_stopped(proposal_result)
+                if submission.get("reopen_discussion"):
+                    reopen_transfer = runtime.prepare_proposal_discussion_reopen_transfer(
+                        str(submission.get("reopen_record_id", ""))
+                    )
             finally:
                 runtime.clear_idea_tool_context()
-            if submission.get("status") != "approved":
+            if reopen_transfer is not None:
+                action = HitlRuntimeState(self.work_dir).snapshot().get(
+                    "next_autoresearch_action"
+                )
+                if not isinstance(action, dict):
+                    raise RuntimeError(
+                        "Recovered discussion reopening lost proposal preparation state."
+                    )
+                HitlRuntimeState(self.work_dir).apply_proposal_discussion_reopen(
+                    parent_node_sha=parent_sha,
+                    preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
+                    candidate_attempt_id=recovery.removed_attempt_dir.name,
+                    reopen_record_id=reopen_transfer["reopen_record_id"],
+                    whiteboard_boundary_sha=reopen_transfer[
+                        "whiteboard_boundary_sha"
+                    ],
+                )
+                proposal, proposal_idea_id = (
+                    self._run_collaborative_proposal_admission_loop(
+                        parent_sha=parent_sha,
+                        attempt_dir=recovery.removed_attempt_dir,
+                        attempt_history=self._attempt_history_for(parent_sha),
+                    )
+                )
+            elif submission.get("status") != "approved":
                 return self._discard_unscored_hitl_attempt(
                     parent_sha=parent_sha,
                     attempt_dir=recovery.removed_attempt_dir,
@@ -3305,8 +3583,9 @@ class HitlAutoResearchController:
                     ),
                     terminal_failure=bool(submission.get("hitl_terminal_failure")),
                 )
-            proposal = str(submission.get("proposal", "")).strip()
-            proposal_idea_id = str(submission.get("proposal_idea_id", "")).strip()
+            else:
+                proposal = str(submission.get("proposal", "")).strip()
+                proposal_idea_id = str(submission.get("proposal_idea_id", "")).strip()
         else:
             proposal = self._proposal_text_for(proposal_idea_id)
 
@@ -3715,12 +3994,30 @@ class HitlAutoResearchController:
                 existing_sealed_path = sealed_dir_for(self.work_dir)
                 sealed_path = existing_sealed_path if existing_sealed_path.is_dir() else None
             sealed_scoring["path"] = sealed_path
-            proposal, proposal_idea_id = self._run_proposal_admission_loop(
+            proposal_mode = self._proposal_mode_config_for_attempt(
                 parent_sha=parent_sha,
                 attempt_dir=attempt_dir,
-                attempt_id=attempt_id,
-                attempt_history=attempt_history,
             )
+            if proposal_mode.mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
+                proposal, proposal_idea_id = self._run_ranked_proposal_admission_loop(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                    attempt_history=attempt_history,
+                )
+            elif proposal_mode.mode == COLLABORATIVE_PROPOSAL_MODE:
+                proposal, proposal_idea_id = (
+                    self._run_collaborative_proposal_admission_loop(
+                        parent_sha=parent_sha,
+                        attempt_dir=attempt_dir,
+                        attempt_history=attempt_history,
+                    )
+                )
+            else:
+                proposal, proposal_idea_id = self._run_proposal_admission_loop(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                    attempt_history=attempt_history,
+                )
             comment_result = self._run_candidate_experiment_hitl(
                 proposal=proposal,
                 proposal_idea_id=proposal_idea_id,
@@ -3902,17 +4199,14 @@ class HitlAutoResearchController:
         *,
         parent_sha: str,
         attempt_dir: Path,
-        attempt_id: str,
         attempt_history: list[Dict[str, Any]],
-    ) -> tuple[str, str]:
+        allow_discussion_reopen: bool = False,
+    ) -> tuple[str, str] | Dict[str, str]:
         runtime = self._proposal_hitl_runtime()
-        runtime.prepare_idea_tool_context(
-            hitl_stage="proposal",
-            actor="autoresearch_proposer",
-            provenance={
-                "parent_node_id": parent_sha,
-                "attempt_id": attempt_id,
-            },
+        self._prepare_proposal_owner_tool_context(
+            runtime,
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
             proposal_review_path=attempt_dir / "proposal_review.json",
         )
         try:
@@ -3946,6 +4240,14 @@ class HitlAutoResearchController:
                     worker_name="AutoResearch proposal generator",
                 )
                 _raise_if_hitl_worker_stopped(proposal_result)
+            if submission.get("reopen_discussion"):
+                if not allow_discussion_reopen:
+                    raise RuntimeError(
+                        "Proposal discussion reopening is unavailable in this proposal mode."
+                    )
+                return runtime.prepare_proposal_discussion_reopen_transfer(
+                    str(submission.get("reopen_record_id", ""))
+                )
         finally:
             runtime.clear_idea_tool_context()
         if submission.get("status") != "approved":
@@ -3960,6 +4262,1606 @@ class HitlAutoResearchController:
         if not proposal or not proposal_idea_id:
             raise RuntimeError("HITL proposal admission did not return an approved proposal.")
         return proposal, proposal_idea_id
+
+    def _capture_ranked_proposal_boundary(
+        self,
+        *,
+        parent_sha: str,
+        preparation_attempt_id: str,
+    ) -> Callable[[], Dict[str, Any]]:
+        """Capture the one read-only boundary shared by a ranked proposal round."""
+
+        from core.hitl_paths import HITL_WHITEBOARD_RELATIVE_PATH
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        action = HitlRuntimeState(self.work_dir).snapshot().get("next_autoresearch_action")
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+            or str(action.get("attempt_id", "")).strip() != preparation_attempt_id
+        ):
+            raise RuntimeError(
+                "Independent-ranked proposal generation requires its resolved preparation."
+            )
+        scope = action.get("workspace_fingerprint_scope")
+        expected_fingerprint = str(action.get("workspace_fingerprint", "")).strip()
+        current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=scope,
+        )
+        if not expected_fingerprint or current_fingerprint != expected_fingerprint:
+            raise RuntimeError(
+                "Prepared proposal workspace no longer matches its approved boundary."
+            )
+        public_guard = HitlWorkspaceWriteGuard.capture_public(
+            self.work_dir,
+            scope=scope,
+        )
+        whiteboard_guard = HitlWorkspaceWriteGuard.capture_paths(
+            self.work_dir,
+            [HITL_WHITEBOARD_RELATIVE_PATH.as_posix()],
+        )
+
+        def require_unchanged() -> Dict[str, Any]:
+            issues = []
+            for validation in (
+                public_guard.require_unchanged(),
+                whiteboard_guard.require_unchanged(),
+            ):
+                if not bool(validation.get("valid")):
+                    raw_issues = validation.get("issues", [])
+                    issues.extend(
+                        str(issue)
+                        for issue in (
+                            raw_issues if isinstance(raw_issues, list) else [raw_issues]
+                        )
+                        if str(issue).strip()
+                    )
+            return {"valid": not issues, "issues": issues}
+
+        return require_unchanged
+
+    def _proposal_mode_config_for_attempt(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> ProposalModeConfig:
+        """Resolve proposal policy from durable state before launch policy."""
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict):
+            return getattr(
+                self,
+                "proposal_mode_config",
+                ProposalModeConfig(mode="single"),
+            )
+
+        existing_discussion = action.get("proposal_discussion")
+        existing_round = action.get("proposal_round")
+        if existing_discussion is not None and existing_round is not None:
+            raise RuntimeError(
+                "Proposal preparation cannot own ranked and collaborative state together."
+            )
+        if existing_discussion is not None:
+            session = state.proposal_discussion_snapshot(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
+                candidate_attempt_id=Path(attempt_dir).name,
+            )
+            return normalize_proposal_mode_config(
+                COLLABORATIVE_PROPOSAL_MODE,
+                participant_count=session.get("participant_count"),
+                discussion_rounds=session.get("max_response_rounds"),
+            )
+        if existing_round is None:
+            return getattr(
+                self,
+                "proposal_mode_config",
+                ProposalModeConfig(mode="single"),
+            )
+
+        if not isinstance(existing_round, dict):
+            raise RuntimeError("Ranked proposal round state is invalid.")
+        round_ordinal = existing_round.get("round_ordinal")
+        if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
+            raise RuntimeError("Ranked proposal round state is invalid.")
+        round_state = state.proposal_round_snapshot(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
+            candidate_attempt_id=Path(attempt_dir).name,
+            round_ordinal=round_ordinal,
+        )
+        return normalize_proposal_mode_config(
+            INDEPENDENT_RANKED_PROPOSAL_MODE,
+            proposer_count=round_state.get("proposer_count"),
+            reviewer_count=round_state.get("reviewer_count"),
+        )
+
+    def _begin_or_resume_ranked_proposal_round(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Dict[str, Any]:
+        """Open round one on the current live workspace, or resume its durable round."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        owner = self._proposal_hitl_runtime()
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict):
+            raise RuntimeError("Ranked proposer stage has no proposal preparation state.")
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        existing_round = action.get("proposal_round")
+        if existing_round is not None:
+            if not isinstance(existing_round, dict):
+                raise RuntimeError("Ranked proposal round state is invalid.")
+            round_ordinal = existing_round.get("round_ordinal")
+            if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
+                raise RuntimeError("Ranked proposal round state is invalid.")
+            return state.proposal_round_snapshot(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+                round_ordinal=round_ordinal,
+            )
+
+        config = self.proposal_mode_config
+        if config.mode != INDEPENDENT_RANKED_PROPOSAL_MODE:
+            raise RuntimeError("Ranked proposer stage requires independent-ranked mode.")
+        if config.proposer_count is None or config.reviewer_count is None:
+            raise RuntimeError("Ranked proposer stage requires proposer and reviewer counts.")
+
+        idea_numbers = [
+            int(idea_id[1:])
+            for record in owner.log.records()
+            if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+            and idea_id[1:].isdigit()
+        ]
+        workspace_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=action.get("workspace_fingerprint_scope"),
+        )
+        return state.begin_proposal_round(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+            workspace_fingerprint=workspace_fingerprint,
+            base_idea_number=max(idea_numbers, default=0),
+            proposer_count=config.proposer_count,
+            reviewer_count=config.reviewer_count,
+        )
+
+    def _new_ranked_task_runtime(self, task_id: str) -> HitlRuntime:
+        """Create one isolated tool runtime for one ranked proposal task."""
+
+        owner = self._proposal_hitl_runtime()
+        return HitlRuntime(
+            self.work_dir,
+            "experiment_runner",
+            channel=owner.channel,
+            manager=owner.manager,
+            use_hitl_autoresearch_whiteboard=True,
+            hitl_mode=self.hitl_mode,
+            tool_scope=task_id,
+        )
+
+    def _begin_or_resume_proposal_discussion(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Dict[str, Any]:
+        """Open one discussion on the restored prepared workspace, or resume it."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        owner = self._proposal_hitl_runtime()
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+        ):
+            raise RuntimeError(
+                "Collaborative proposal generation requires its resolved preparation."
+            )
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        existing = action.get("proposal_discussion")
+        if existing is not None:
+            return state.proposal_discussion_snapshot(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+            )
+        if action.get("proposal_round") is not None:
+            raise RuntimeError(
+                "Proposal preparation cannot own ranked and collaborative state together."
+            )
+        config = self.proposal_mode_config
+        if (
+            config.mode != COLLABORATIVE_PROPOSAL_MODE
+            or config.participant_count is None
+            or config.discussion_rounds is None
+        ):
+            raise RuntimeError("Collaborative proposer stage requires its configured bounds.")
+        scope = action.get("workspace_fingerprint_scope")
+        current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=scope,
+        )
+
+        attempt_marker = self._attempt_id(attempt_dir)
+        git_state = HitlGitStateStore(self.work_dir)
+        whiteboard_boundary_sha = (
+            git_state.hitl_autoresearch_whiteboard_attempt_boundary_sha(
+                attempt_marker
+            )
+        )
+        if not git_state.hitl_autoresearch_whiteboard_matches_commit(
+            whiteboard_boundary_sha
+        ):
+            raise RuntimeError(
+                "Collaborative proposal discussion does not match its whiteboard boundary."
+            )
+        idea_numbers = [
+            int(idea_id[1:])
+            for record in owner.log.records()
+            if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+            and idea_id[1:].isdigit()
+        ]
+        return state.begin_proposal_discussion(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+            workspace_fingerprint=current_fingerprint,
+            base_idea_number=max(idea_numbers, default=0),
+            whiteboard_boundary_sha=whiteboard_boundary_sha,
+            participant_count=int(config.participant_count),
+            max_response_rounds=int(config.discussion_rounds),
+        )
+
+    def _capture_proposal_discussion_boundary(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        session: Dict[str, Any],
+    ) -> Callable[[], Dict[str, Any]]:
+        """Capture the public workspace and exact retained whiteboard boundary."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        action = HitlRuntimeState(self.work_dir).snapshot().get(
+            "next_autoresearch_action"
+        )
+        if (
+            not isinstance(action, dict)
+            or action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+            or str(action.get("attempt_id", "")).strip() == ""
+        ):
+            raise RuntimeError(
+                "Collaborative proposal discussion requires its resolved preparation."
+            )
+        state = HitlRuntimeState(self.work_dir)
+        durable = state.proposal_discussion_snapshot(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=str(action["attempt_id"]),
+            candidate_attempt_id=attempt_dir.name,
+        )
+        if durable != session:
+            raise RuntimeError("Collaborative proposal discussion state changed unexpectedly.")
+        scope = action.get("workspace_fingerprint_scope")
+        expected_fingerprint = str(action.get("workspace_fingerprint", "")).strip()
+        current_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+            self.work_dir,
+            scope=scope,
+        )
+        if not expected_fingerprint or current_fingerprint != expected_fingerprint:
+            raise RuntimeError(
+                "Prepared proposal workspace no longer matches its approved boundary."
+            )
+        public_guard = HitlWorkspaceWriteGuard.capture_public(
+            self.work_dir,
+            scope=scope,
+        )
+        whiteboard_sha = str(session.get("whiteboard_boundary_sha", "")).strip()
+
+        def require_unchanged() -> Dict[str, Any]:
+            issues: list[str] = []
+            public_validation = public_guard.require_unchanged()
+            if not bool(public_validation.get("valid")):
+                raw = public_validation.get("issues", [])
+                issues.extend(
+                    str(item)
+                    for item in (raw if isinstance(raw, list) else [raw])
+                    if str(item).strip()
+                )
+            git_state = HitlGitStateStore(self.work_dir)
+            if not git_state.hitl_autoresearch_whiteboard_history_contains(
+                whiteboard_sha
+            ):
+                issues.append(
+                    "The discussion whiteboard boundary is no longer in canonical history."
+                )
+            elif not git_state.hitl_autoresearch_whiteboard_matches_commit(
+                whiteboard_sha
+            ):
+                issues.append(
+                    "The live whiteboard no longer matches the discussion boundary."
+                )
+            return {"valid": not issues, "issues": issues}
+
+        initial = require_unchanged()
+        if not bool(initial.get("valid")):
+            raise RuntimeError(
+                "Collaborative proposal discussion boundary is invalid: "
+                + "; ".join(str(item) for item in initial.get("issues", []))
+            )
+        return require_unchanged
+
+    @staticmethod
+    def _require_proposal_discussion_boundary(
+        boundary_validator: Callable[[], Dict[str, Any]],
+        label: str,
+    ) -> None:
+        validation = boundary_validator()
+        if bool(validation.get("valid")):
+            return
+        raw = validation.get("issues", [])
+        issues = raw if isinstance(raw, list) else [raw]
+        detail = "; ".join(str(item) for item in issues if str(item).strip())
+        raise RuntimeError(
+            f"{label} crossed the collaborative proposal boundary"
+            + (f": {detail}" if detail else ".")
+        )
+
+    def _run_collaborative_proposal_admission_loop(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_history: list[Dict[str, Any]],
+    ) -> tuple[str, str]:
+        """Alternate bounded discussion segments with ordinary final writing."""
+
+        while True:
+            session = self._begin_or_resume_proposal_discussion(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+            )
+            if session.get("phase") == "reopen_pending":
+                self._recover_collaborative_proposal_reopen(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                )
+            self._run_collaborative_proposal_discussion_segment(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+                attempt_history=attempt_history,
+            )
+            outcome = self._run_proposal_admission_loop(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+                attempt_history=attempt_history,
+                allow_discussion_reopen=True,
+            )
+            if isinstance(outcome, tuple):
+                return outcome
+            state = HitlRuntimeState(self.work_dir)
+            action = state.snapshot().get("next_autoresearch_action")
+            if not isinstance(action, dict):
+                raise RuntimeError(
+                    "Collaborative discussion reopening lost proposal preparation state."
+                )
+            state.apply_proposal_discussion_reopen(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
+                candidate_attempt_id=attempt_dir.name,
+                reopen_record_id=outcome["reopen_record_id"],
+                whiteboard_boundary_sha=outcome["whiteboard_boundary_sha"],
+            )
+
+    def _recover_collaborative_proposal_reopen(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> None:
+        """Replay an accepted reopen handoff before any proposer is relaunched."""
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict):
+            raise RuntimeError(
+                "Collaborative discussion reopening lost proposal preparation state."
+            )
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        runtime = self._proposal_hitl_runtime()
+        runtime.prepare_idea_tool_context(
+            hitl_stage="proposal",
+            actor="autoresearch_proposer",
+            provenance={
+                "parent_node_id": parent_sha,
+                "attempt_id": attempt_dir.name,
+            },
+            proposal_review_path=attempt_dir / "proposal_review.json",
+            proposal_preparation_attempt_id=preparation_attempt_id,
+            proposal_discussion_attempt_dir=attempt_dir,
+            proposal_discussion_final_owner=True,
+        )
+        try:
+            reconciled = runtime.reconcile_proposal_discussion_reopen()
+            transfer = runtime.prepare_proposal_discussion_reopen_transfer(
+                reconciled["reopen_record_id"]
+            )
+        finally:
+            runtime.clear_idea_tool_context()
+        state.apply_proposal_discussion_reopen(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+            reopen_record_id=transfer["reopen_record_id"],
+            whiteboard_boundary_sha=transfer["whiteboard_boundary_sha"],
+        )
+
+    def _validate_automatic_final_writing_capacity(
+        self,
+        *,
+        session: Dict[str, Any],
+        attempt_dir: Path,
+        final_prompt_template: str,
+    ) -> None:
+        """Validate the exact formal prompt before a capped meeting advances."""
+
+        from agents.autoresearch_proposer import (
+            MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+            collect_public_proposal_context,
+        )
+        from core.hitl_proposal_discussion import (
+            ProposalDiscussionRecordStore,
+            project_proposal_discussion_final_writing,
+        )
+
+        if (
+            session.get("phase") != "response"
+            or session.get("round_ordinal") != session.get("max_response_rounds")
+        ):
+            raise RuntimeError(
+                "Automatic final-writing validation requires the completed last round."
+            )
+        projected, additional = project_proposal_discussion_final_writing(session)
+        public_background = collect_public_proposal_context(
+            self.work_dir,
+            include_attempt_history=False,
+            hitl_autoresearch_whiteboard=True,
+        )
+        try:
+            self._proposal_hitl_runtime()._require_proposal_discussion_capacity(
+                projected_session=projected,
+                prompt_templates=(final_prompt_template,),
+                public_background=public_background,
+                reserve_contributions=0,
+                additional_records=additional,
+                maximum_prompt_chars=MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+                record_store=ProposalDiscussionRecordStore(attempt_dir),
+            )
+        except ValueError as exc:
+            raise HitlTerminalRuntimeError(
+                "Formal proposal writing exceeds the verified context budget after "
+                "the final discussion round."
+            ) from exc
+
+    def _run_collaborative_proposal_discussion_segment(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_history: Optional[list[Dict[str, Any]]] = None,
+    ) -> None:
+        """Run the active bounded discussion segment to final writing."""
+
+        from core.hitl_proposal_discussion import (
+            ProposalDiscussionRecordStore,
+            proposal_discussion_reopen_source_idea_ids,
+            proposal_discussion_task_id,
+        )
+        from core.hitl_proposal_round import (
+            MAX_COLLABORATIVE_PARTICIPANT_COUNT,
+            run_parallel_proposal_stage,
+        )
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        owner = self._proposal_hitl_runtime()
+        state = HitlRuntimeState(self.work_dir)
+        session = self._begin_or_resume_proposal_discussion(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        if session.get("phase") == "final_writing":
+            return
+        if session.get("phase") == "reopen_pending":
+            raise RuntimeError(
+                "Collaborative discussion reopening must transfer ownership before "
+                "discussion tasks resume."
+            )
+        owner.require_scoped_task_session_boundary()
+        renderer = getattr(self, "proposal_prompt_template_renderer", None)
+        if renderer is None:
+            raise RuntimeError(
+                "Collaborative proposal generation requires its formal prompt renderer."
+            )
+        final_prompt_template = renderer(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            attempt_history=attempt_history or [],
+        )
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict):
+            raise RuntimeError("Collaborative proposal discussion has no preparation state.")
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        identity = {
+            "parent_node_sha": parent_sha,
+            "preparation_attempt_id": preparation_attempt_id,
+            "candidate_attempt_id": attempt_dir.name,
+        }
+        boundary_validator = self._capture_proposal_discussion_boundary(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            session=session,
+        )
+
+        def refresh() -> Dict[str, Any]:
+            return state.proposal_discussion_snapshot(**identity)
+
+        def run_task(
+            task_id: str,
+            *,
+            seed_idea_ids: Sequence[str] = (),
+            cancel_event: Optional[threading.Event] = None,
+        ) -> None:
+            raise_if_hitl_run_stop_requested()
+            owner.require_scoped_task_session_boundary()
+            current = refresh()
+            self._require_proposal_discussion_boundary(
+                boundary_validator,
+                f"Proposal discussion task {task_id}",
+            )
+            self._run_proposal_discussion_task(
+                task_id=task_id,
+                session=current,
+                parent_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                attempt_dir=attempt_dir,
+                boundary_validator=boundary_validator,
+                seed_idea_ids=seed_idea_ids,
+                cancel_event=cancel_event,
+                final_prompt_template=final_prompt_template,
+            )
+            self._require_proposal_discussion_boundary(
+                boundary_validator,
+                f"Proposal discussion task {task_id}",
+            )
+
+        while True:
+            raise_if_hitl_run_stop_requested()
+            session = refresh()
+            phase = str(session["phase"])
+            participant_count = int(session["participant_count"])
+            round_ordinal = int(session["round_ordinal"])
+            seed_idea_ids: Sequence[str] = ()
+            if phase in {"response", "decision"}:
+                records = ProposalDiscussionRecordStore(attempt_dir).records()
+                seed_idea_ids = proposal_discussion_reopen_source_idea_ids(
+                    session,
+                    records,
+                )
+            if phase == "final_writing":
+                break
+            if phase == "initial":
+                initial_task_ids = [
+                    proposal_discussion_task_id(
+                        "initial",
+                        participant_ordinal=ordinal,
+                    )
+                    for ordinal in range(1, participant_count + 1)
+                ]
+
+                def run_initial_task(
+                    task_id: str,
+                    cancel_event: threading.Event,
+                ) -> None:
+                    run_task(task_id, cancel_event=cancel_event)
+
+                run_parallel_proposal_stage(
+                    initial_task_ids,
+                    run_initial_task,
+                    maximum_tasks=MAX_COLLABORATIVE_PARTICIPANT_COUNT,
+                )
+                self._require_proposal_discussion_boundary(
+                    boundary_validator,
+                    "Proposal discussion initial stage",
+                )
+                state.advance_proposal_discussion(
+                    **identity,
+                    expected_phase="initial",
+                    round_ordinal=0,
+                )
+                continue
+            if phase == "opening":
+                run_task(
+                    proposal_discussion_task_id(
+                        "opening",
+                        participant_ordinal=1,
+                    )
+                )
+                self._require_proposal_discussion_boundary(
+                    boundary_validator,
+                    "Proposal discussion opening",
+                )
+                state.advance_proposal_discussion(
+                    **identity,
+                    expected_phase="opening",
+                    round_ordinal=0,
+                )
+                continue
+            if phase == "response":
+                for ordinal in range(2, participant_count + 1):
+                    run_task(
+                        proposal_discussion_task_id(
+                            "response",
+                            participant_ordinal=ordinal,
+                            round_ordinal=round_ordinal,
+                        ),
+                        seed_idea_ids=seed_idea_ids,
+                    )
+                if round_ordinal == int(session["max_response_rounds"]):
+                    self._validate_automatic_final_writing_capacity(
+                        session=refresh(),
+                        attempt_dir=attempt_dir,
+                        final_prompt_template=final_prompt_template,
+                    )
+                self._require_proposal_discussion_boundary(
+                    boundary_validator,
+                    f"Proposal discussion round {round_ordinal}",
+                )
+                state.advance_proposal_discussion(
+                    **identity,
+                    expected_phase="response",
+                    round_ordinal=round_ordinal,
+                )
+                continue
+            if phase == "decision":
+                decision_id = proposal_discussion_task_id(
+                    "decision",
+                    participant_ordinal=1,
+                    round_ordinal=round_ordinal,
+                )
+                run_task(decision_id, seed_idea_ids=seed_idea_ids)
+                decision = refresh()["tasks"][decision_id]
+                state.apply_proposal_discussion_decision(
+                    **identity,
+                    round_ordinal=round_ordinal,
+                    choice=str(decision.get("choice", "")),
+                )
+                continue
+            raise RuntimeError(
+                f"Collaborative proposal discussion cannot run from phase {phase}."
+            )
+
+        return None
+
+    def _new_discussion_task_runtime(self, task_id: str) -> HitlRuntime:
+        """Create one isolated tool runtime for one finite discussion task."""
+
+        owner = self._proposal_hitl_runtime()
+        return HitlRuntime(
+            self.work_dir,
+            "experiment_runner",
+            channel=owner.channel,
+            manager=owner.manager,
+            use_hitl_autoresearch_whiteboard=True,
+            hitl_mode=self.hitl_mode,
+            tool_scope=task_id,
+        )
+
+    def _prepare_discussion_task_runtime(
+        self,
+        *,
+        task_id: str,
+        session: Dict[str, Any],
+        parent_sha: str,
+        preparation_attempt_id: str,
+        attempt_dir: Path,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        seed_idea_ids: Sequence[str] = (),
+        cancel_event: Optional[threading.Event] = None,
+    ) -> HitlRuntime:
+        """Bind one finite participant runtime to authoritative meeting state."""
+
+        from core.hitl_proposal_discussion import parse_proposal_discussion_task_id
+
+        identity = parse_proposal_discussion_task_id(task_id)
+        profile = (
+            "proposal_discussion_decision"
+            if identity.phase == "decision"
+            else "proposal_discussion_turn"
+        )
+        task = session.get("tasks", {}).get(task_id)
+        if not isinstance(task, dict):
+            raise RuntimeError("Proposal discussion task set is invalid.")
+        task_runtime = self._new_discussion_task_runtime(task_id)
+        try:
+            task_runtime.prepare_idea_tool_context(
+                hitl_stage="proposal",
+                command_profile=profile,
+                actor="autoresearch_proposer",
+                proposal_preparation_attempt_id=preparation_attempt_id,
+                proposal_discussion_attempt_dir=attempt_dir,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": attempt_dir.name,
+                    "discussion_turn_id": task_id,
+                },
+                idea_visibility={
+                    "base_idea_number": session["base_idea_number"],
+                    "whiteboard_boundary_sha": session["whiteboard_boundary_sha"],
+                    "seed_idea_ids": list(seed_idea_ids),
+                },
+                phase_finish_validator=boundary_validator,
+                scoped_task_cancel_event=cancel_event,
+            )
+        except BaseException:
+            task_runtime.clear_idea_tool_context()
+            raise
+        return task_runtime
+
+    def _run_proposal_discussion_task(
+        self,
+        *,
+        task_id: str,
+        session: Dict[str, Any],
+        parent_sha: str,
+        preparation_attempt_id: str,
+        attempt_dir: Path,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        seed_idea_ids: Sequence[str] = (),
+        cancel_event: Optional[threading.Event] = None,
+        final_prompt_template: str = "",
+    ) -> Dict[str, Any]:
+        """Run one logical discussion task through finite replacements."""
+
+        if self.proposal_assessment_runner is None:
+            raise RuntimeError("Proposal discussion requires its configured agent runner.")
+        from agents.proposal_discussion import proposal_discussion_task_prompt_suffix
+        from core.hitl_proposal_discussion import parse_proposal_discussion_task_id
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        task_identity = parse_proposal_discussion_task_id(task_id)
+        task_runtime = self._prepare_discussion_task_runtime(
+            task_id=task_id,
+            session=session,
+            parent_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            attempt_dir=attempt_dir,
+            boundary_validator=boundary_validator,
+            seed_idea_ids=seed_idea_ids,
+            cancel_event=cancel_event,
+        )
+        task_prompt = proposal_discussion_task_prompt_suffix(task_id)
+        try:
+            reconciled = task_runtime.reconcile_proposal_discussion_task()
+            if reconciled.get("complete") or reconciled.get("cancelled"):
+                return reconciled
+
+            def launch_worker(
+                prompt: str,
+                _log_prefix: str,
+                *,
+                record_continuation: bool,
+            ) -> Dict[str, Any]:
+                if record_continuation:
+                    raise RuntimeError(
+                        "Proposal discussion tasks must not record global worker continuation."
+                    )
+                raise_if_hitl_run_stop_requested()
+                if cancel_event is not None and cancel_event.is_set():
+                    return {
+                        "success": False,
+                        "return_code": None,
+                        "timed_out": False,
+                        "stopped": False,
+                        "cancelled": True,
+                        "background_processes_terminated": False,
+                        "provider_process_failed": False,
+                    }
+                try:
+                    return self.proposal_assessment_runner(
+                        role="discussion",
+                        idea=self.idea,
+                        discussion_task_id=task_id,
+                        discussion_records=(),
+                        prompt_builder=(
+                            lambda prompt_template, public_background, capacity_templates: (
+                                task_runtime.prepare_proposal_discussion_prompt(
+                                    prompt_template=prompt_template,
+                                    public_background=public_background,
+                                    capacity_prompt_templates=capacity_templates,
+                                    final_prompt_template=final_prompt_template,
+                                )
+                            )
+                        ),
+                        task_dir=attempt_dir / "proposal_discussion" / "tasks" / task_id,
+                        prompt_suffix=prompt,
+                        env_extra=task_runtime.idea_tool_env(),
+                        cancel_event=cancel_event,
+                        output_prefix=task_id,
+                    )
+                except HitlProposalDiscussionCapacityError as exc:
+                    raise HitlTerminalRuntimeError(str(exc)) from exc
+
+            _result, finish = run_worker_with_replacements(
+                runtime=task_runtime,
+                launch_worker=launch_worker,
+                prompt=task_prompt,
+                log_prefix=task_id.replace("/", "_"),
+                phase="proposal",
+                worker_name=task_identity.display_label,
+                record_continuation=False,
+                result_after_exit=lambda result: (
+                    task_runtime.proposal_discussion_task_result_after_worker_exit(
+                        result,
+                        replacement_prompt=task_prompt,
+                        worker_name=task_identity.display_label,
+                    )
+                ),
+            )
+        finally:
+            task_runtime.clear_idea_tool_context()
+        if finish.get("cancelled"):
+            return finish
+        if not finish.get("complete") or not str(finish.get("record_id", "")).strip():
+            raise RuntimeError("Proposal discussion task ended without a recorded result.")
+        return finish
+
+    def _prepare_ranked_task_runtime(
+        self,
+        *,
+        task_id: str,
+        role: str,
+        round_state: Dict[str, Any],
+        parent_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        cancel_event: Optional[threading.Event] = None,
+    ) -> tuple[HitlRuntime, list[tuple[str, str]]]:
+        """Build the one canonical authenticated context for a ranked task."""
+
+        from core.hitl_proposal_round import (
+            proposal_round_results,
+            reviewer_presentation_order,
+        )
+
+        task = round_state.get("tasks", {}).get(task_id)
+        if not isinstance(task, dict) or task.get("role") != role:
+            raise RuntimeError("Ranked proposal task set is invalid.")
+        profile = {
+            "proposer": ("proposal", "proposal_candidate", "autoresearch_proposer"),
+            "verifier": ("review", "proposal_verifier", "proposal_verifier"),
+            "reviewer": ("review", "proposal_reviewer", "proposal_reviewer"),
+        }.get(role)
+        if profile is None:
+            raise RuntimeError("Ranked proposal task role is invalid.")
+
+        presentation_pairs: list[tuple[str, str]] = []
+        if role == "proposer":
+            seed_idea_ids: list[str] = []
+        elif role == "verifier":
+            assigned_id = str(task.get("assigned_proposal_idea_id") or "").strip()
+            if not assigned_id:
+                raise RuntimeError("Ranked verifier task has no assigned proposal.")
+            seed_idea_ids = [assigned_id]
+        else:
+            dependencies = proposal_round_results(round_state)
+            verification_by_candidate = dict(
+                zip(
+                    dependencies["candidate_ids"],
+                    dependencies["verification_ids"],
+                    strict=True,
+                )
+            )
+            presentation = reviewer_presentation_order(
+                parent_node_id=parent_sha,
+                candidate_attempt_id=candidate_attempt_id,
+                reviewer_task_id=task_id,
+                canonical_candidate_ids=dependencies["candidate_ids"],
+            )
+            presentation_pairs = [
+                (candidate_id, verification_by_candidate[candidate_id])
+                for candidate_id in presentation
+            ]
+            seed_idea_ids = [
+                *dependencies["candidate_ids"],
+                *dependencies["verification_ids"],
+            ]
+
+        hitl_stage, command_profile, actor = profile
+        task_runtime = self._new_ranked_task_runtime(task_id)
+        try:
+            task_runtime.prepare_idea_tool_context(
+                hitl_stage=hitl_stage,
+                command_profile=command_profile,
+                actor=actor,
+                proposal_preparation_attempt_id=preparation_attempt_id,
+                provenance={
+                    "parent_node_id": parent_sha,
+                    "attempt_id": candidate_attempt_id,
+                    "proposal_task_id": task_id,
+                },
+                idea_visibility={
+                    "base_idea_number": round_state["base_idea_number"],
+                    "seed_idea_ids": seed_idea_ids,
+                    **(
+                        {"proposal_verification_pairs": presentation_pairs}
+                        if role == "reviewer"
+                        else {}
+                    ),
+                },
+                proposal_submission_validator=(
+                    boundary_validator if role == "proposer" else None
+                ),
+                phase_finish_validator=(
+                    boundary_validator if role != "proposer" else None
+                ),
+                scoped_task_cancel_event=cancel_event,
+            )
+        except BaseException:
+            task_runtime.clear_idea_tool_context()
+            raise
+        return task_runtime, presentation_pairs
+
+    def _apply_ranked_proposal_selection(
+        self,
+        *,
+        identity: Dict[str, Any],
+        aggregate: KemenyYoungResult,
+        selection: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Record and apply one durable manager choice without a second proposal."""
+
+        from core.hitl_proposal_round import (
+            aggregate_proposal_round_reviews,
+            proposal_selection_decision_record,
+        )
+
+        state = HitlRuntimeState(self.work_dir)
+        round_state = state.proposal_round_snapshot(**identity)
+        reproduced = aggregate_proposal_round_reviews(
+            round_state,
+            self._proposal_hitl_runtime().log.records(),
+        )
+        if reproduced != aggregate:
+            raise RuntimeError(
+                "Proposal review aggregation changed before manager selection was applied."
+            )
+        if round_state.get("selection") != selection:
+            raise RuntimeError("Recorded manager choice changed before it could be applied.")
+        decision_payload = proposal_selection_decision_record(
+            round_state=round_state,
+            aggregate=reproduced,
+            parent_node_id=identity["parent_node_sha"],
+        )
+        decision = self._proposal_hitl_runtime().log.append(
+            decision_payload,
+            idempotent=True,
+        )
+        recorded_decision_id = str(selection.get("decision_idea_id") or "").strip()
+        if recorded_decision_id and recorded_decision_id != decision["idea_id"]:
+            raise RuntimeError(
+                "Recorded proposal choice references a different manager decision idea."
+            )
+        recorded_selection = state.record_proposal_selection_decision(
+            **identity,
+            choice=str(selection["choice"]),
+            proposal_idea_id=selection.get("proposal_idea_id"),
+            decision_idea_id=decision["idea_id"],
+        )
+        if recorded_selection["choice"] == "select":
+            next_state = state.complete_proposal_selection(**identity)
+        else:
+            idea_numbers = [
+                int(idea_id[1:])
+                for record in self._proposal_hitl_runtime().log.records()
+                if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+                and idea_id[1:].isdigit()
+            ]
+            next_state = state.begin_next_proposal_round(
+                **identity,
+                base_idea_number=max(idea_numbers, default=0),
+            )
+        return {
+            "selection": recorded_selection,
+            "decision_idea_id": decision["idea_id"],
+            "proposal_round": next_state,
+        }
+
+    def _run_independent_ranked_proposal_round(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_history: list[Dict[str, Any]],
+        boundary_validator: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> tuple[Dict[str, Any], KemenyYoungResult]:
+        """Run or resume the durable stage-local tasks of one ranked proposal round."""
+
+        from core.agent_runner import next_attempt_number
+        from core.hitl_proposal_round import (
+            aggregate_proposal_round_reviews,
+            parse_proposal_task_id,
+            proposal_round_results,
+            proposal_selection_decision_record,
+            proposal_task_id,
+            run_parallel_proposal_stage,
+        )
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        config = self._proposal_mode_config_for_attempt(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        if config.mode != INDEPENDENT_RANKED_PROPOSAL_MODE:
+            raise RuntimeError("Ranked proposer stage requires independent-ranked mode.")
+        if config.proposer_count is None or config.reviewer_count is None:
+            raise RuntimeError("Ranked proposer stage requires proposer and reviewer counts.")
+
+        owner = self._proposal_hitl_runtime()
+        owner.require_scoped_task_session_boundary()
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict):
+            raise RuntimeError("Ranked proposer stage has no proposal preparation state.")
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        round_state = self._begin_or_resume_ranked_proposal_round(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        config = normalize_proposal_mode_config(
+            INDEPENDENT_RANKED_PROPOSAL_MODE,
+            proposer_count=round_state.get("proposer_count"),
+            reviewer_count=round_state.get("reviewer_count"),
+        )
+        if boundary_validator is None:
+            boundary_validator = self._capture_ranked_proposal_boundary(
+                parent_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+            )
+        identity = {
+            "parent_node_sha": parent_sha,
+            "preparation_attempt_id": preparation_attempt_id,
+            "candidate_attempt_id": attempt_dir.name,
+            "round_ordinal": int(round_state["round_ordinal"]),
+        }
+        if round_state.get("stage") not in {
+            "proposing",
+            "verifying",
+            "reviewing",
+            "manager_selection",
+            "selected",
+        }:
+            raise RuntimeError("Ranked proposal round has an invalid stage.")
+
+        round_dir = (
+            Path(attempt_dir)
+            / "proposal_round"
+            / f"r{round_state['round_ordinal']}"
+        )
+        def require_boundary(label: str) -> None:
+            raise_if_hitl_run_stop_requested()
+            boundary = boundary_validator()
+            if not bool(boundary.get("valid")):
+                raise RuntimeError(
+                    f"{label} changed its shared read-only boundary: "
+                    + "; ".join(str(issue) for issue in boundary.get("issues", []))
+                )
+
+        stage_order = {
+            "proposing": 0,
+            "verifying": 1,
+            "reviewing": 2,
+            "manager_selection": 3,
+            "selected": 4,
+        }
+
+        def task_runtime_for(
+            role: str,
+            task_id: str,
+            cancel_event: Optional[threading.Event] = None,
+        ) -> tuple[HitlRuntime, list[tuple[str, str]], Dict[str, Any]]:
+            current_round = state.proposal_round_snapshot(**identity)
+            task_runtime, presentation_pairs = self._prepare_ranked_task_runtime(
+                task_id=task_id,
+                role=role,
+                round_state=current_round,
+                parent_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+                boundary_validator=boundary_validator,
+                cancel_event=cancel_event,
+            )
+            return task_runtime, presentation_pairs, current_round
+
+        def cancelled_launch_result() -> Dict[str, Any]:
+            return {
+                "success": False,
+                "return_code": None,
+                "timed_out": False,
+                "stopped": False,
+                "cancelled": True,
+                "background_processes_terminated": False,
+                "provider_process_failed": False,
+            }
+
+        def validate_completed_role(role: str, count: int) -> None:
+            for ordinal in range(1, count + 1):
+                task_id = proposal_task_id(
+                    int(identity["round_ordinal"]),
+                    role,
+                    ordinal,
+                )
+                task_runtime, _pairs, _current = task_runtime_for(role, task_id)
+                try:
+                    result = task_runtime.reconcile_ranked_proposal_task()
+                finally:
+                    task_runtime.clear_idea_tool_context()
+                if not result.get("complete"):
+                    raise RuntimeError(
+                        f"Completed ranked {role} stage contains an incomplete task."
+                    )
+
+        verifier_prompt = (
+            "Complete the scientific assessment of the assigned proposal and finish "
+            "through hitl-finish-proposal-verification."
+        )
+
+        def run_verifier_task(
+            task_id: str,
+            cancel_event: threading.Event,
+        ) -> Dict[str, Any]:
+            if self.proposal_assessment_runner is None:
+                raise RuntimeError("No ranked proposal assessment runner is configured.")
+            raise_if_hitl_run_stop_requested()
+            task_runtime, _pairs, current_round = task_runtime_for(
+                "verifier",
+                task_id,
+                cancel_event,
+            )
+            task = current_round["tasks"][task_id]
+            assigned_proposal_id = str(
+                task.get("assigned_proposal_idea_id") or ""
+            ).strip()
+            try:
+                reconciled = task_runtime.reconcile_ranked_proposal_task()
+                if reconciled.get("complete") or reconciled.get("cancelled"):
+                    return reconciled
+
+                def launch_verifier(
+                    prompt: str,
+                    _log_prefix: str,
+                    *,
+                    record_continuation: bool,
+                ) -> Dict[str, Any]:
+                    if record_continuation:
+                        raise RuntimeError(
+                            "Ranked proposal tasks must not record global worker continuation."
+                        )
+                    raise_if_hitl_run_stop_requested()
+                    if cancel_event.is_set():
+                        return cancelled_launch_result()
+                    return self.proposal_assessment_runner(
+                        role="verifier",
+                        assigned_proposal_idea_id=assigned_proposal_id,
+                        task_dir=round_dir / task_id,
+                        prompt_suffix=prompt,
+                        env_extra=task_runtime.idea_tool_env(),
+                        cancel_event=cancel_event,
+                        output_prefix=task_id,
+                    )
+
+                _result, finish = run_worker_with_replacements(
+                    runtime=task_runtime,
+                    launch_worker=launch_verifier,
+                    prompt=verifier_prompt,
+                    log_prefix=task_id,
+                    phase="review",
+                    worker_name=f"Proposal verifier {task_id}",
+                    record_continuation=False,
+                    result_after_exit=lambda result: (
+                        task_runtime.ranked_task_result_after_worker_exit(
+                            result,
+                            replacement_prompt=verifier_prompt,
+                            worker_name=f"Proposal verifier {task_id}",
+                        )
+                    ),
+                )
+            finally:
+                task_runtime.clear_idea_tool_context()
+            if finish.get("cancelled"):
+                return finish
+            if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
+                raise RuntimeError(
+                    "Ranked verifier task ended without a recorded assessment."
+                )
+            return finish
+
+        if round_state.get("stage") == "proposing":
+            task_prompt = (
+                "Generate one independent proposal candidate and submit it through "
+                "hitl-submit-proposal. Stop after runtime records the candidate."
+            )
+            proposer_task_ids = [
+                proposal_task_id(int(identity["round_ordinal"]), "proposer", ordinal)
+                for ordinal in range(1, config.proposer_count + 1)
+            ]
+
+            def run_proposer_task(
+                task_id: str,
+                cancel_event: threading.Event,
+            ) -> Dict[str, Any]:
+                raise_if_hitl_run_stop_requested()
+                task_runtime, _pairs, _current = task_runtime_for(
+                    "proposer",
+                    task_id,
+                    cancel_event,
+                )
+                try:
+                    reconciled = task_runtime.reconcile_ranked_proposal_task()
+                    if reconciled.get("cancelled"):
+                        return reconciled
+                    if reconciled.get("complete"):
+                        finish = reconciled
+                    else:
+                        task_dir = round_dir / task_id
+
+                        def launch_worker(
+                            prompt: str,
+                            _log_prefix: str,
+                            *,
+                            record_continuation: bool,
+                        ) -> Dict[str, Any]:
+                            if record_continuation:
+                                raise RuntimeError(
+                                    "Ranked proposal tasks must not record global worker continuation."
+                                )
+                            raise_if_hitl_run_stop_requested()
+                            if cancel_event.is_set():
+                                return cancelled_launch_result()
+                            launch_number = next_attempt_number(
+                                task_dir,
+                                lambda attempt: f"launch_{attempt}",
+                            )
+                            launch_dir = task_dir / f"launch_{launch_number}"
+                            launch_dir.mkdir(parents=True)
+                            return self._call_proposal_generator(
+                                parent_sha=parent_sha,
+                                attempt_dir=attempt_dir,
+                                attempt_history=attempt_history,
+                                prompt_suffix=prompt,
+                                env_extra=task_runtime.idea_tool_env(),
+                                launch_dir=launch_dir,
+                                candidate_recording=True,
+                                cancel_event=cancel_event,
+                                output_prefix=task_id,
+                            )
+
+                        _result, finish = run_worker_with_replacements(
+                            runtime=task_runtime,
+                            launch_worker=launch_worker,
+                            prompt=task_prompt,
+                            log_prefix=task_id,
+                            phase="proposal",
+                            worker_name=f"Independent proposal generator {task_id}",
+                            record_continuation=False,
+                            result_after_exit=lambda result: (
+                                task_runtime.ranked_task_result_after_worker_exit(
+                                    result,
+                                    replacement_prompt=task_prompt,
+                                    worker_name=f"Independent proposal generator {task_id}",
+                                )
+                            ),
+                        )
+                finally:
+                    task_runtime.clear_idea_tool_context()
+                if finish.get("cancelled"):
+                    return finish
+                if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
+                    raise RuntimeError(
+                        "Ranked proposal task ended without a recorded candidate."
+                    )
+                state.ensure_proposal_verifier_task(
+                    **identity,
+                    proposer_task_id=task_id,
+                )
+                proposer_identity = parse_proposal_task_id(task_id)
+                verifier_task_id = proposal_task_id(
+                    proposer_identity.round_ordinal,
+                    "verifier",
+                    proposer_identity.ordinal,
+                )
+                return run_verifier_task(verifier_task_id, cancel_event)
+
+            run_parallel_proposal_stage(proposer_task_ids, run_proposer_task)
+            require_boundary("Ranked proposal stage")
+            round_state = state.advance_proposal_round(
+                **identity,
+                expected_stage="proposing",
+            )
+        else:
+            validate_completed_role("proposer", int(config.proposer_count))
+            require_boundary("Ranked proposal recovery")
+            round_state = state.proposal_round_snapshot(**identity)
+
+        if round_state.get("stage") == "verifying":
+            if self.proposal_assessment_runner is None:
+                raise RuntimeError("No ranked proposal assessment runner is configured.")
+            verifier_task_ids = [
+                proposal_task_id(int(identity["round_ordinal"]), "verifier", ordinal)
+                for ordinal in range(1, config.proposer_count + 1)
+            ]
+
+            run_parallel_proposal_stage(verifier_task_ids, run_verifier_task)
+            require_boundary("Ranked verifier stage")
+            round_state = state.advance_proposal_round(
+                **identity,
+                expected_stage="verifying",
+            )
+        elif stage_order[str(round_state.get("stage"))] > stage_order["verifying"]:
+            validate_completed_role("verifier", int(config.proposer_count))
+            require_boundary("Ranked verifier recovery")
+            round_state = state.proposal_round_snapshot(**identity)
+
+        if round_state.get("stage") == "reviewing":
+            if self.proposal_assessment_runner is None:
+                raise RuntimeError("No ranked proposal assessment runner is configured.")
+            task_prompt = (
+                "Complete the independent comparative review and finish through "
+                "hitl-finish-proposal-review with one complete ranking."
+            )
+            reviewer_task_ids = [
+                proposal_task_id(int(identity["round_ordinal"]), "reviewer", ordinal)
+                for ordinal in range(1, config.reviewer_count + 1)
+            ]
+
+            def run_reviewer_task(
+                task_id: str,
+                cancel_event: threading.Event,
+            ) -> Dict[str, Any]:
+                raise_if_hitl_run_stop_requested()
+                task_runtime, presentation_pairs, _current = task_runtime_for(
+                    "reviewer",
+                    task_id,
+                    cancel_event,
+                )
+                try:
+                    reconciled = task_runtime.reconcile_ranked_proposal_task()
+                    if reconciled.get("complete") or reconciled.get("cancelled"):
+                        return reconciled
+
+                    def launch_reviewer(
+                        prompt: str,
+                        _log_prefix: str,
+                        *,
+                        record_continuation: bool,
+                    ) -> Dict[str, Any]:
+                        if record_continuation:
+                            raise RuntimeError(
+                                "Ranked proposal tasks must not record global worker continuation."
+                            )
+                        raise_if_hitl_run_stop_requested()
+                        if cancel_event.is_set():
+                            return cancelled_launch_result()
+                        return self.proposal_assessment_runner(
+                            role="reviewer",
+                            candidate_verification_pairs=presentation_pairs,
+                            task_dir=round_dir / task_id,
+                            prompt_suffix=prompt,
+                            env_extra=task_runtime.idea_tool_env(),
+                            cancel_event=cancel_event,
+                            output_prefix=task_id,
+                        )
+
+                    _result, finish = run_worker_with_replacements(
+                        runtime=task_runtime,
+                        launch_worker=launch_reviewer,
+                        prompt=task_prompt,
+                        log_prefix=task_id,
+                        phase="review",
+                        worker_name=f"Proposal reviewer {task_id}",
+                        record_continuation=False,
+                        result_after_exit=lambda result: (
+                            task_runtime.ranked_task_result_after_worker_exit(
+                                result,
+                                replacement_prompt=task_prompt,
+                                worker_name=f"Proposal reviewer {task_id}",
+                            )
+                        ),
+                    )
+                finally:
+                    task_runtime.clear_idea_tool_context()
+                if finish.get("cancelled"):
+                    return finish
+                if not finish.get("complete") or not str(finish.get("idea_id", "")).strip():
+                    raise RuntimeError(
+                        "Ranked reviewer task ended without a recorded review."
+                    )
+                return finish
+
+            run_parallel_proposal_stage(reviewer_task_ids, run_reviewer_task)
+            require_boundary("Ranked reviewer stage")
+            round_state = state.advance_proposal_round(
+                **identity,
+                expected_stage="reviewing",
+            )
+        elif stage_order[str(round_state.get("stage"))] > stage_order["reviewing"]:
+            validate_completed_role("reviewer", int(config.reviewer_count))
+            require_boundary("Ranked reviewer recovery")
+            round_state = state.proposal_round_snapshot(**identity)
+
+        dependencies = proposal_round_results(round_state)
+        aggregate = aggregate_proposal_round_reviews(
+            round_state,
+            owner.log.records(),
+        )
+        if round_state.get("stage") == "selected":
+            selection = round_state.get("selection")
+            if not isinstance(selection, dict):
+                raise RuntimeError("Selected proposal round has no durable manager choice.")
+            decision_round = dict(round_state)
+            decision_round["stage"] = "manager_selection"
+            expected_decision = proposal_selection_decision_record(
+                round_state=decision_round,
+                aggregate=aggregate,
+                parent_node_id=parent_sha,
+            )
+            decision_id = str(selection.get("decision_idea_id") or "").strip()
+            matches = [
+                record
+                for record in owner.log.records()
+                if str(record.get("idea_id", "")).strip() == decision_id
+            ]
+            if len(matches) != 1 or HitlIdeaLog.logical_payload(
+                matches[0]
+            ) != HitlIdeaLog.logical_payload(expected_decision):
+                raise RuntimeError(
+                    "Selected proposal references an invalid manager decision idea."
+                )
+            return round_state, aggregate
+
+        manager = owner.manager
+        begin_selection = getattr(manager, "begin_proposal_selection", None)
+        if not callable(begin_selection):
+            raise RuntimeError("No HITL manager proposal-selection boundary is configured.")
+        candidate_verification_pairs = list(
+            zip(
+                dependencies["candidate_ids"],
+                dependencies["verification_ids"],
+                strict=True,
+            )
+        )
+        prompt = _load_hitl_template(
+            "manager_select_proposal.txt",
+            parent_node_id=parent_sha,
+            candidate_verification_pairs=candidate_verification_pairs,
+            review_idea_ids=list(aggregate.source_review_idea_ids),
+            aggregation_algorithm=aggregate.algorithm,
+            optimal_rankings=[list(ranking) for ranking in aggregate.optimal_rankings],
+        )
+        selection_result = begin_selection(
+            prompt,
+            **identity,
+            boundary_validator=boundary_validator,
+            on_decision=lambda selection: self._apply_ranked_proposal_selection(
+                identity=identity,
+                aggregate=aggregate,
+                selection=selection,
+            ),
+        )
+        selected_round = selection_result.get("proposal_round")
+        if not isinstance(selected_round, dict):
+            raise RuntimeError("Manager proposal selection did not return proposal round state.")
+        return selected_round, aggregate
+
+    def _run_ranked_proposal_admission_loop(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_history: list[Dict[str, Any]],
+    ) -> tuple[str, str]:
+        """Run ranked rounds until one selected proposal passes existing admission."""
+
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        runtime = self._proposal_hitl_runtime()
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        preparation_attempt_id = (
+            str(action.get("attempt_id", "")).strip()
+            if isinstance(action, dict)
+            else ""
+        )
+        self._begin_or_resume_ranked_proposal_round(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        boundary_validator = self._capture_ranked_proposal_boundary(
+            parent_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+        )
+        while True:
+            raise_if_hitl_run_stop_requested()
+            round_state, _aggregate = self._run_independent_ranked_proposal_round(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+                attempt_history=attempt_history,
+                boundary_validator=boundary_validator,
+            )
+            if round_state.get("stage") == "proposing":
+                continue
+            selection = round_state.get("selection")
+            if (
+                round_state.get("stage") != "selected"
+                or not isinstance(selection, dict)
+                or selection.get("choice") != "select"
+            ):
+                raise RuntimeError("Ranked proposal selection did not produce a selected proposal.")
+            proposal_idea_id = str(selection.get("proposal_idea_id", "")).strip()
+            selection_decision_id = str(selection.get("decision_idea_id", "")).strip()
+            if not proposal_idea_id or not selection_decision_id:
+                raise RuntimeError("Selected proposal is missing its durable manager decision.")
+
+            boundary = boundary_validator()
+            if not bool(boundary.get("valid")):
+                raise RuntimeError(
+                    "Selected proposal admission started from an invalid shared boundary."
+                )
+            admission = runtime.review_selected_ranked_proposal(
+                proposal_idea_id=proposal_idea_id,
+                manager_selection_decision_idea_id=selection_decision_id,
+                proposal_review_path=attempt_dir / "proposal_review.json",
+            )
+            if admission.get("status") == "approved":
+                proposal = str(admission.get("proposal", "")).strip()
+                if not proposal:
+                    raise RuntimeError("Approved selected proposal is missing its text.")
+                return proposal, proposal_idea_id
+            if admission.get("status") != "feedback":
+                raise RuntimeError("Selected proposal admission returned an invalid status.")
+
+            idea_numbers = [
+                int(idea_id[1:])
+                for record in runtime.log.records()
+                if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+                and idea_id[1:].isdigit()
+            ]
+            state.begin_next_proposal_round(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=str(round_state["candidate_attempt_id"]),
+                round_ordinal=int(round_state["round_ordinal"]),
+                base_idea_number=max(idea_numbers, default=0),
+                non_admitted_proposal_idea_id=proposal_idea_id,
+            )
 
     def _run_candidate_experiment_hitl(
         self,
@@ -4365,7 +6267,15 @@ class HitlAutoResearchController:
         attempt_history: list[Dict[str, Any]],
         prompt_suffix: str = "",
         env_extra: Optional[Dict[str, str]] = None,
+        launch_dir: Optional[Path] = None,
+        candidate_recording: bool = False,
+        cancel_event: Optional[threading.Event] = None,
+        output_prefix: str = "",
     ) -> Any:
+        prompt_builder = self._collaborative_final_prompt_builder(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
         return invoke_proposal_generator(
             self.proposal_generator,
             idea=self.idea,
@@ -4375,13 +6285,199 @@ class HitlAutoResearchController:
             attempt_history=attempt_history,
             prompt_suffix=prompt_suffix,
             env_extra=env_extra,
+            launch_dir=launch_dir,
+            candidate_recording=candidate_recording,
+            cancel_event=cancel_event,
+            output_prefix=output_prefix,
+            prompt_builder=prompt_builder,
         )
+
+    def _collaborative_final_writing_session(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Return the exact final-writing session, when this attempt owns one."""
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict) or action.get("proposal_discussion") is None:
+            return None
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        if (
+            action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+            or not preparation_attempt_id
+        ):
+            raise RuntimeError(
+                "Collaborative final writing does not match its proposal preparation."
+            )
+        session = state.proposal_discussion_snapshot(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=Path(attempt_dir).name,
+        )
+        if session.get("phase") != "final_writing":
+            raise RuntimeError(
+                "Ordinary proposal generation cannot start before discussion final writing."
+            )
+        return action, session
+
+    def _prepare_proposal_owner_tool_context(
+        self,
+        runtime: HitlRuntime,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        proposal_review_path: Path,
+    ) -> None:
+        """Prepare the ordinary proposer, adding only final-owner discussion reads."""
+
+        final_writing = self._collaborative_final_writing_session(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        extra: Dict[str, Any] = {}
+        if final_writing is not None:
+            action, _session = final_writing
+            extra = {
+                "proposal_preparation_attempt_id": str(action["attempt_id"]),
+                "proposal_discussion_attempt_dir": attempt_dir,
+                "proposal_discussion_final_owner": True,
+            }
+        runtime.prepare_idea_tool_context(
+            hitl_stage="proposal",
+            actor="autoresearch_proposer",
+            provenance={
+                "parent_node_id": parent_sha,
+                "attempt_id": attempt_dir.name,
+            },
+            proposal_review_path=proposal_review_path,
+            **extra,
+        )
+
+    def _collaborative_final_prompt_builder(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Optional[Callable[[str], str]]:
+        """Attach bounded meeting history to every matching proposer launch."""
+
+        final_writing = self._collaborative_final_writing_session(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+        )
+        if final_writing is None:
+            return None
+        action, _session = final_writing
+        preparation_attempt_id = str(action["attempt_id"])
+        identity = {
+            "parent_node_sha": parent_sha,
+            "preparation_attempt_id": preparation_attempt_id,
+            "candidate_attempt_id": Path(attempt_dir).name,
+        }
+        manager = self._proposal_hitl_runtime().manager
+        summarize_method = getattr(manager, "summarize_proposal_discussion", None)
+
+        def build(prompt_template: str) -> str:
+            from agents.autoresearch_proposer import (
+                MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+                collect_public_proposal_context,
+            )
+            from core.hitl_proposal_discussion import (
+                ProposalDiscussionRecordStore,
+                prepare_proposal_discussion_prompt,
+                proposal_discussion_reopen_source_idea_ids,
+            )
+            from core.hitl_run_control import (
+                current_hitl_run_budget_prompt,
+                raise_if_hitl_run_stop_requested,
+            )
+
+            raise_if_hitl_run_stop_requested()
+            self._proposal_hitl_runtime().register_proposal_discussion_prompt_template(
+                prompt_template
+            )
+            current = HitlRuntimeState(self.work_dir).proposal_discussion_snapshot(
+                **identity
+            )
+            if current.get("phase") != "final_writing":
+                raise RuntimeError(
+                    "Collaborative final-writing context no longer owns this proposer."
+                )
+            public_background = collect_public_proposal_context(
+                self.work_dir,
+                include_attempt_history=False,
+                hitl_autoresearch_whiteboard=True,
+            )
+            store = ProposalDiscussionRecordStore(attempt_dir)
+            source_ids = proposal_discussion_reopen_source_idea_ids(
+                current,
+                store.records(),
+            )
+            ideas_by_id = {
+                str(record.get("idea_id", "")): record
+                for record in self._proposal_hitl_runtime().log.records()
+            }
+            if any(idea_id not in ideas_by_id for idea_id in source_ids):
+                raise RuntimeError(
+                    "Proposal discussion reopening references an unavailable finalized idea."
+                )
+
+            def summarize(
+                background: Dict[str, Any],
+                prior_summary: str,
+                records: List[Dict[str, Any]],
+            ) -> str:
+                if not callable(summarize_method):
+                    raise ValueError(
+                        "Proposal discussion compaction requires the configured HITL manager."
+                    )
+                return str(
+                    summarize_method(
+                        public_background=background,
+                        prior_summary=prior_summary,
+                        records=records,
+                    )
+                )
+
+            def current_session() -> Dict[str, Any]:
+                raise_if_hitl_run_stop_requested()
+                value = HitlRuntimeState(self.work_dir).proposal_discussion_snapshot(
+                    **identity
+                )
+                if value.get("phase") != "final_writing":
+                    raise RuntimeError(
+                        "Collaborative final-writing context became stale."
+                    )
+                return value
+
+            return prepare_proposal_discussion_prompt(
+                store=store,
+                session=current,
+                prompt_template=prompt_template,
+                public_background=public_background,
+                runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
+                summarize=summarize if callable(summarize_method) else None,
+                current_session=current_session,
+                allow_reopen=True,
+                reopen_source_ideas=[ideas_by_id[idea_id] for idea_id in source_ids],
+                maximum_prompt_chars=MAX_AUTORESEARCH_PROPOSER_PROMPT_CHARS,
+            )
+
+        return build
 
     def _proposal_hitl_runtime(self) -> HitlRuntime:
         if self.hitl_runtime is None:
+            binding = getattr(self, "_hitl_run_binding", None)
             self.hitl_runtime = HitlRuntime(
                 self.work_dir,
                 "experiment_runner",
+                manager=binding[0] if binding is not None else None,
+                channel=binding[1] if binding is not None else None,
                 use_hitl_autoresearch_whiteboard=True,
                 hitl_mode=self.hitl_mode,
             )
@@ -4542,18 +6638,26 @@ def run_hitl_autoresearch_loop(
     hitl_manager_config: Optional[Dict[str, Any]] = None,
     pending_hitl_recovery: Optional[HitlRecoveryResult] = None,
     hitl_mode: HitlMode | str = HitlMode.FULL,
+    proposal_mode_config: Optional[ProposalModeConfig] = None,
 ) -> AutoResearchRunResult:
     """
     Run AutoResearch with NeuriCo's real proposer, comment handler, and scorer.
 
     This is the production integration point used by runner.py in Phase 6.
     """
-    from agents.autoresearch_proposer import run_autoresearch_proposer
+    from agents.autoresearch_proposer import (
+        compose_autoresearch_proposer_prompt_template,
+        generate_autoresearch_proposal_prompt,
+        run_autoresearch_proposer,
+    )
+    from agents.proposal_discussion import run_proposal_discussion_task
+    from agents.proposal_assessment import run_proposal_reviewer, run_proposal_verifier
     from agents.comment_handler import build_comment_handler_launch
     from core.agent_runner import run_prebuilt_cli_agent
     from core.scorer import run_scorer
 
     work_dir = Path(work_dir)
+    selected_proposal_mode = normalize_proposal_mode_config(proposal_mode_config)
     if templates_dir is None:
         templates_dir = Path(__file__).parent.parent.parent / "templates"
 
@@ -4565,6 +6669,11 @@ def run_hitl_autoresearch_loop(
         attempt_history: list[Dict[str, Any]],
         prompt_suffix: str = "",
         env_extra: Optional[Dict[str, str]] = None,
+        launch_dir: Optional[Path] = None,
+        candidate_recording: bool = False,
+        cancel_event: Optional[threading.Event] = None,
+        output_prefix: Optional[str] = None,
+        prompt_builder: Optional[Callable[[str], str]] = None,
     ) -> Dict[str, Any]:
         return run_autoresearch_proposer(
             idea=idea_payload,
@@ -4578,6 +6687,37 @@ def run_hitl_autoresearch_loop(
             attempt_history=attempt_history,
             prompt_suffix=prompt_suffix,
             env_extra=env_extra,
+            launch_dir=launch_dir,
+            candidate_recording=candidate_recording,
+            cancel_event=cancel_event,
+            output_prefix=output_prefix,
+            prompt_builder=prompt_builder,
+        )
+
+    def proposal_prompt_template_renderer(
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        attempt_history: list[Dict[str, Any]],
+    ) -> str:
+        prompt = generate_autoresearch_proposal_prompt(
+            idea=idea,
+            work_dir=work_dir,
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            templates_dir=Path(templates_dir),
+            provider=provider,
+            attempt_history=attempt_history,
+            hitl_idea_reporting=True,
+            hitl_submission=True,
+            hitl_autoresearch_whiteboard=True,
+            hitl_mode=normalize_hitl_mode(hitl_mode).value,
+            candidate_recording=False,
+        )
+        return compose_autoresearch_proposer_prompt_template(
+            prompt,
+            "",
+            include_discussion_context=True,
         )
 
     def hitl_comment_mode(
@@ -4641,6 +6781,25 @@ def run_hitl_autoresearch_loop(
                 )
         return result
 
+    def proposal_assessment_runner(**request: Any) -> Dict[str, Any]:
+        role = str(request.pop("role", "")).strip()
+        runners = {
+            "discussion": run_proposal_discussion_task,
+            "verifier": run_proposal_verifier,
+            "reviewer": run_proposal_reviewer,
+        }
+        if role not in runners:
+            raise RuntimeError(f"Unsupported proposal assessment role: {role}")
+        return runners[role](
+            work_dir=work_dir,
+            provider=provider,
+            templates_dir=templates_dir,
+            timeout=proposal_timeout,
+            full_permissions=full_permissions,
+            hitl_mode=normalize_hitl_mode(hitl_mode).value,
+            **request,
+        )
+
     def scorer(score_work_dir: Path) -> Dict[str, Any]:
         return run_scorer(
             work_dir=score_work_dir,
@@ -4687,6 +6846,9 @@ def run_hitl_autoresearch_loop(
         hitl_comment_mode=hitl_comment_mode,
         pending_hitl_recovery=pending_hitl_recovery,
         hitl_mode=hitl_mode,
+        proposal_mode_config=selected_proposal_mode,
         additional_agent_runner=additional_agent_runner,
+        proposal_assessment_runner=proposal_assessment_runner,
+        proposal_prompt_template_renderer=proposal_prompt_template_renderer,
     )
     return controller.run(iterations=iterations)

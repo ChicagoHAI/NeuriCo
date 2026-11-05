@@ -27,6 +27,12 @@ from core.hitl_paths import (
     hitl_state_dir,
     hitl_stop_request_path,
 )
+from core.hitl_proposal_discussion import proposal_discussion_task_id
+from core.hitl_proposal_round import (
+    COLLABORATIVE_PROPOSAL_MODE,
+    INDEPENDENT_RANKED_PROPOSAL_MODE,
+    normalize_proposal_mode_config,
+)
 from core.hitl_whiteboard import hitl_whiteboard_path
 from core.whiteboard import MAX_TIP_CONTENT_CHARS
 
@@ -283,6 +289,273 @@ class HitlWorkspaceView:
         path = self.work_dir / ".neurico" / "pipeline_state.json"
         return _read_object(path, "pipeline state") if path.exists() else {}
 
+    @staticmethod
+    def _ranked_proposal_status(next_action: Dict[str, Any]) -> Dict[str, Any]:
+        """Derive interface progress from the authoritative nested round."""
+        round_state = next_action.get("proposal_round")
+        if (
+            next_action.get("kind") != "prepare_proposal"
+            or next_action.get("status") != "resolved"
+            or not isinstance(round_state, dict)
+        ):
+            return {}
+        try:
+            config = normalize_proposal_mode_config(
+                INDEPENDENT_RANKED_PROPOSAL_MODE,
+                proposer_count=round_state.get("proposer_count"),
+                reviewer_count=round_state.get("reviewer_count"),
+            )
+        except ValueError as exc:
+            raise HitlWorkspaceViewError(
+                f"Invalid ranked proposal round configuration: {exc}"
+            ) from exc
+        tasks = round_state.get("tasks")
+        if not isinstance(tasks, dict):
+            raise HitlWorkspaceViewError("Ranked proposal round tasks must be an object.")
+
+        stage = str(round_state.get("stage", "")).strip()
+        stages = {
+            "verifying": (
+                "verifier",
+                int(config.proposer_count or 0),
+                "Verifying proposals",
+                "Independent verifiers are assessing the candidate experiments.",
+                "Ranking begins after every verification is complete.",
+            ),
+            "reviewing": (
+                "reviewer",
+                int(config.reviewer_count or 0),
+                "Ranking proposals",
+                "Independent reviewers are ranking the verified candidates.",
+                "The rankings are aggregated after every review is complete.",
+            ),
+        }
+
+        def completed_for_role(role: str) -> int:
+            return sum(
+                1
+                for task in tasks.values()
+                if isinstance(task, dict)
+                and task.get("role") == role
+                and bool(str(task.get("result_idea_id") or "").strip())
+            )
+
+        if stage == "proposing":
+            total = int(config.proposer_count or 0)
+            completed = completed_for_role("proposer")
+            verification_started = any(
+                isinstance(task, dict) and task.get("role") == "verifier"
+                for task in tasks.values()
+            )
+            if verification_started:
+                verified = completed_for_role("verifier")
+                label = "Generating and verifying proposals"
+                phase_label = (
+                    f"Proposals ({completed}/{total}) · "
+                    f"Verifications ({verified}/{total})"
+                )
+                detail = (
+                    "Completed proposals are verified immediately; proposal generation "
+                    "and verification may overlap."
+                )
+                next_step = (
+                    "Ranking begins after every proposal and verification is complete."
+                )
+            else:
+                label = "Generating proposals"
+                phase_label = f"{label} ({completed}/{total})"
+                detail = "Independent proposers are developing candidate experiments."
+                next_step = "Each completed proposal enters verification immediately."
+        elif stage in stages:
+            role, total, label, detail, next_step = stages[stage]
+            completed = completed_for_role(role)
+            phase_label = f"{label} ({completed}/{total})"
+        elif stage == "manager_selection":
+            total = 1
+            completed = 1 if isinstance(round_state.get("selection"), dict) else 0
+            label = "Recording proposal selection" if completed else "Selecting proposal"
+            detail = (
+                "The manager's proposal selection is being recorded."
+                if completed
+                else "The manager is selecting from the aggregated ranking."
+            )
+            next_step = "The selected proposal enters the existing admission path."
+            phase_label = f"{label} ({completed}/{total})"
+        elif stage == "selected":
+            total = completed = 1
+            label = "Proposal selected"
+            detail = "The selected proposal is entering the existing admission path."
+            next_step = "The existing proposal workflow continues automatically."
+            phase_label = f"{label} ({completed}/{total})"
+        else:
+            raise HitlWorkspaceViewError(
+                f"Ranked proposal round has an invalid stage: {stage or '<missing>'}."
+            )
+        return {
+            "proposal_mode": INDEPENDENT_RANKED_PROPOSAL_MODE,
+            "proposer_count": config.proposer_count,
+            "reviewer_count": config.reviewer_count,
+            "proposal_round_stage": stage,
+            "proposal_progress": {
+                "completed": completed,
+                "total": total,
+            },
+            "title": label,
+            "phase_label": phase_label,
+            "detail": detail,
+            "next_action": next_step,
+        }
+
+    @staticmethod
+    def _collaborative_proposal_status(next_action: Dict[str, Any]) -> Dict[str, Any]:
+        """Derive meeting progress from the authoritative discussion session."""
+
+        session = next_action.get("proposal_discussion")
+        if (
+            next_action.get("kind") != "prepare_proposal"
+            or next_action.get("status") != "resolved"
+            or not isinstance(session, dict)
+        ):
+            return {}
+        try:
+            config = normalize_proposal_mode_config(
+                COLLABORATIVE_PROPOSAL_MODE,
+                participant_count=session.get("participant_count"),
+                discussion_rounds=session.get("max_response_rounds"),
+            )
+        except ValueError as exc:
+            raise HitlWorkspaceViewError(
+                f"Invalid collaborative proposal configuration: {exc}"
+            ) from exc
+        tasks = session.get("tasks")
+        if not isinstance(tasks, dict):
+            raise HitlWorkspaceViewError(
+                "Collaborative proposal discussion tasks must be an object."
+            )
+        participant_count = int(config.participant_count or 0)
+        maximum_rounds = int(config.discussion_rounds or 0)
+        round_ordinal = session.get("round_ordinal")
+        if isinstance(round_ordinal, bool) or not isinstance(round_ordinal, int):
+            raise HitlWorkspaceViewError(
+                "Collaborative proposal discussion round must be an integer."
+            )
+        phase = str(session.get("phase", "")).strip()
+        if (
+            phase in {"initial", "opening"}
+            and round_ordinal != 0
+        ) or (
+            phase in {"response", "decision", "final_writing", "reopen_pending"}
+            and not 1 <= round_ordinal <= maximum_rounds
+        ):
+            raise HitlWorkspaceViewError(
+                "Collaborative proposal discussion has an invalid round for its phase."
+            )
+
+        def completed(task_ids: List[str]) -> int:
+            count = 0
+            for task_id in task_ids:
+                task = tasks.get(task_id)
+                if not isinstance(task, dict):
+                    raise HitlWorkspaceViewError(
+                        "Collaborative proposal discussion is missing an active task."
+                    )
+                if bool(str(task.get("result_record_id") or "").strip()):
+                    count += 1
+            return count
+
+        if phase == "initial":
+            task_ids = [
+                proposal_discussion_task_id(
+                    "initial",
+                    participant_ordinal=ordinal,
+                )
+                for ordinal in range(1, participant_count + 1)
+            ]
+            total = participant_count
+            complete = completed(task_ids)
+            title = "Developing initial directions"
+            phase_label = f"Initial contributions ({complete}/{total})"
+            detail = "Participants are independently developing possible experiments."
+            next_step = "The lead opens the shared discussion after every contribution is ready."
+        elif phase == "opening":
+            total = 1
+            complete = completed(
+                [proposal_discussion_task_id("opening", participant_ordinal=1)]
+            )
+            title = "Opening proposal discussion"
+            phase_label = f"Lead opening ({complete}/1)"
+            detail = "The lead is framing the shared discussion from the initial directions."
+            next_step = "The other participants respond in the first discussion round."
+        elif phase == "response":
+            task_ids = [
+                proposal_discussion_task_id(
+                    "response",
+                    participant_ordinal=ordinal,
+                    round_ordinal=round_ordinal,
+                )
+                for ordinal in range(2, participant_count + 1)
+            ]
+            total = participant_count - 1
+            complete = completed(task_ids)
+            title = f"Discussing proposal directions · Round {round_ordinal}"
+            phase_label = f"Response round {round_ordinal} ({complete}/{total})"
+            detail = "Participants are responding to the lead and the published meeting record."
+            next_step = (
+                "The lead writes the proposal after this round."
+                if round_ordinal == maximum_rounds
+                else "The lead decides whether to continue or write the proposal."
+            )
+        elif phase == "decision":
+            total = 1
+            complete = completed(
+                [
+                    proposal_discussion_task_id(
+                        "decision",
+                        participant_ordinal=1,
+                        round_ordinal=round_ordinal,
+                    )
+                ]
+            )
+            title = "Choosing whether to continue discussion"
+            phase_label = f"Lead decision after round {round_ordinal} ({complete}/1)"
+            detail = "The lead is deciding whether another response round is useful."
+            next_step = "Discussion continues, or the lead writes the proposal."
+        elif phase == "final_writing":
+            total = 1
+            complete = 0
+            title = "Writing final proposal"
+            phase_label = "Final proposal writing"
+            detail = "The lead is writing one proposal through the existing admission workflow."
+            next_step = "The manager reviews the proposal next."
+        elif phase == "reopen_pending":
+            total = 1
+            complete = 0
+            title = "Reopening proposal discussion"
+            phase_label = "Reopening handoff"
+            detail = "Accepted manager feedback is being transferred back to the meeting."
+            next_step = "The participants resume within the remaining shared round allowance."
+        else:
+            raise HitlWorkspaceViewError(
+                "Collaborative proposal discussion has an invalid phase: "
+                f"{phase or '<missing>'}."
+            )
+        return {
+            "proposal_mode": COLLABORATIVE_PROPOSAL_MODE,
+            "participant_count": config.participant_count,
+            "discussion_rounds": config.discussion_rounds,
+            "proposal_discussion_phase": phase,
+            "discussion_round_ordinal": round_ordinal,
+            "discussion_rounds_remaining": max(0, maximum_rounds - round_ordinal),
+            "proposal_progress": {
+                "completed": complete,
+                "total": total,
+            },
+            "title": title,
+            "phase_label": phase_label,
+            "detail": detail,
+            "next_action": next_step,
+        }
+
     def _live_status(
         self,
         runtime: Dict[str, Any],
@@ -336,6 +609,13 @@ class HitlWorkspaceView:
         continuation = continuation if isinstance(continuation, dict) else {}
         next_action = runtime.get("next_autoresearch_action")
         next_action = next_action if isinstance(next_action, dict) else {}
+        ranked_proposal = self._ranked_proposal_status(next_action)
+        collaborative_proposal = self._collaborative_proposal_status(next_action)
+        if ranked_proposal and collaborative_proposal:
+            raise HitlWorkspaceViewError(
+                "Proposal preparation cannot contain ranked and collaborative state."
+            )
+        proposal_status = collaborative_proposal or ranked_proposal
         frontier_transition = runtime.get("frontier_decision_transition")
         frontier_transition = frontier_transition if isinstance(frontier_transition, dict) else {}
         root_transition = runtime.get("initial_root_publication_transition")
@@ -407,7 +687,7 @@ class HitlWorkspaceView:
             visible_stage = stage_label if display_stage is None else display_stage
             visible_phase = phase_label if display_phase is None else display_phase
             label = " · ".join(part for part in (visible_stage, visible_phase) if part) or title
-            return {
+            result = {
                 "state": state,
                 "active": active,
                 "can_launch": not active,
@@ -441,6 +721,26 @@ class HitlWorkspaceView:
                 "next_action": next_step,
                 "reason": str(record.get("reason", "")) if isinstance(record, dict) else "",
             }
+            if proposal_status:
+                result.update(
+                    {
+                        key: proposal_status[key]
+                        for key in (
+                            "proposal_mode",
+                            "proposer_count",
+                            "reviewer_count",
+                            "participant_count",
+                            "discussion_rounds",
+                            "proposal_round_stage",
+                            "proposal_discussion_phase",
+                            "discussion_round_ordinal",
+                            "discussion_rounds_remaining",
+                            "proposal_progress",
+                        )
+                        if key in proposal_status
+                    }
+                )
+            return result
 
         human_request = unresolved and bool(
             pending.get("human_request_record_id")
@@ -451,6 +751,18 @@ class HitlWorkspaceView:
         root_status = str(root_transition.get("status", "")).strip()
         cleanup_pending = str(cleanup.get("status", "")).strip() == "pending"
         continuation_status = str(continuation.get("status", "")).strip()
+        proposal_display_status = proposal_status
+        proposal_handoff_complete = bool(
+            ranked_proposal.get("proposal_round_stage") == "selected"
+            or collaborative_proposal.get("proposal_discussion_phase")
+            == "final_writing"
+        )
+        if (
+            proposal_handoff_complete
+            and continuation_status
+            and phase in {"plan", "execution", "review"}
+        ):
+            proposal_display_status = {}
         launch_status = self._launch_status()
         launch_state = str(launch_status.get("status", "")).strip()
         github_publication = launch_status.get("github_publication")
@@ -502,6 +814,8 @@ class HitlWorkspaceView:
         def durable_boundary_labels() -> tuple[str, str]:
             if unresolved:
                 return pending_labels()
+            if proposal_display_status:
+                return "Experiment", str(proposal_display_status["phase_label"])
             if action_status in {"pending", "decision_recorded"}:
                 kind = str(next_action.get("kind", "")).strip()
                 if kind == "prune_frontier":
@@ -534,6 +848,7 @@ class HitlWorkspaceView:
 
         has_pending_work = bool(
             unresolved
+            or proposal_status
             or action_status in {"pending", "decision_recorded"}
             or frontier_status not in {"", "completed"}
             or root_status not in {"", "completed"}
@@ -562,6 +877,7 @@ class HitlWorkspaceView:
                     display_phase="",
                 )
             if launch_state in {"starting", "running"}:
+                interrupted_stage, interrupted_phase = durable_boundary_labels()
                 return projected(
                     "interrupted",
                     "Research interrupted",
@@ -569,8 +885,14 @@ class HitlWorkspaceView:
                     next_step="Continue from the latest recoverable progress.",
                     record=launch_status,
                     active=False,
-                    display_stage="Interrupted",
-                    display_phase="",
+                    display_stage=(
+                        interrupted_stage if proposal_display_status else "Interrupted"
+                    ),
+                    display_phase=(
+                        f"{interrupted_phase} interrupted"
+                        if proposal_display_status
+                        else ""
+                    ),
                 )
             if launch_state == "stopped":
                 exhausted = launch_status.get("reason") == "budget_exhausted"
@@ -654,6 +976,8 @@ class HitlWorkspaceView:
                     record = cleanup
                 elif continuation_status:
                     record = continuation
+                else:
+                    record = next_action
                 paused_stage, paused_phase = durable_boundary_labels()
                 return projected(
                     "paused",
@@ -785,6 +1109,19 @@ class HitlWorkspaceView:
                 record=pending,
                 display_stage=review_stage,
                 display_phase=review_phase,
+            )
+
+        if proposal_display_status:
+            return projected(
+                "saving"
+                if proposal_display_status.get("proposal_round_stage") == "selected"
+                else "researching",
+                str(proposal_display_status["title"]),
+                str(proposal_display_status["detail"]),
+                next_step=str(proposal_display_status["next_action"]),
+                record=next_action,
+                display_stage="Experiment",
+                display_phase=str(proposal_display_status["phase_label"]),
             )
 
         if action_status in {"pending", "decision_recorded"}:
@@ -1132,14 +1469,20 @@ class HitlWorkspaceView:
         log = HitlIdeaLog(self.work_dir)
         records = log.records()
         seen: set[str] = set()
+        validated_records: List[Dict[str, Any]] = []
         for record in records:
             try:
-                HitlIdeaLog.validate(record, existing_ids=seen)
+                HitlIdeaLog.validate(
+                    record,
+                    existing_ids=seen,
+                    existing_records=validated_records,
+                )
             except HitlValidationError as exc:
                 raise HitlWorkspaceViewError(
                     f"Invalid finalized HITL idea {record.get('idea_id', '<unknown>')}: {exc}"
                 ) from exc
             seen.add(str(record["idea_id"]))
+            validated_records.append(record)
         return records
 
     def _frontier(self) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
