@@ -2867,7 +2867,6 @@ class HitlRuntimeState:
     ) -> None:
         command = self._state.get("pending_worker_command")
         response = command.get("response") if isinstance(command, dict) else None
-        continuation = self._state.get("worker_continuation")
         if (
             not isinstance(command, dict)
             or command.get("kind") != "proposal"
@@ -2876,7 +2875,6 @@ class HitlRuntimeState:
             or command.get("proposal_idea_id") != admitted_proposal_idea_id
             or not isinstance(response, dict)
             or response.get("status") != "approved"
-            or isinstance(continuation, dict)
         ):
             raise HitlRuntimeStateError(
                 "Planning discussion requires a settled approved proposal request"
@@ -2897,6 +2895,73 @@ class HitlRuntimeState:
                 raise HitlRuntimeStateError(
                     "Approved ranked proposal request does not match its selection decision"
                 )
+
+    def settle_approved_proposal_handoff_for_planning(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+        admitted_proposal_idea_id: str,
+    ) -> None:
+        """Finish the admitted proposer's durable handoff to collaborative planning."""
+
+        parent, preparation, candidate = self._planning_discussion_identity(
+            parent_node_sha=parent_node_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=candidate_attempt_id,
+        )
+        proposal_id = str(admitted_proposal_idea_id).strip()
+        if _IDEA_ID.fullmatch(proposal_id) is None:
+            raise HitlRuntimeStateError(
+                "Planning discussion requires an admitted proposal idea ID"
+            )
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            action = self._proposal_preparation_unlocked(
+                parent_node_sha=parent,
+                preparation_attempt_id=preparation,
+            )
+            if action.get("planning_discussion") is not None:
+                raise HitlRuntimeStateError(
+                    "Planning discussion proposal handoff is already complete"
+                )
+            if self._proposal_preparation_planning_policy(action) is None:
+                raise HitlRuntimeStateError(
+                    "Proposal preparation has no collaborative planning policy"
+                )
+            self._require_terminal_proposal_for_planning(
+                action,
+                candidate_attempt_id=candidate,
+                admitted_proposal_idea_id=proposal_id,
+            )
+            self._require_approved_proposal_handoff_unlocked(
+                action=action,
+                candidate_attempt_id=candidate,
+                admitted_proposal_idea_id=proposal_id,
+            )
+            continuation = self._state.get("worker_continuation")
+            if continuation is None:
+                return
+            provenance = (
+                continuation.get("provenance")
+                if isinstance(continuation, dict)
+                else None
+            )
+            if (
+                not isinstance(continuation, dict)
+                or continuation.get("pipeline_stage") != "experiment_runner"
+                or continuation.get("hitl_stage") != "proposal"
+                or continuation.get("actor") != "autoresearch_proposer"
+                or not isinstance(provenance, dict)
+                or str(provenance.get("parent_node_id", "")).strip() != parent
+                or str(provenance.get("attempt_id", "")).strip() != candidate
+            ):
+                raise HitlRuntimeStateError(
+                    "Approved proposal does not own the current worker continuation"
+                )
+            self._state["worker_continuation"] = None
+            self._save_unlocked()
 
     def _planning_discussion_unlocked(
         self,
@@ -3025,6 +3090,10 @@ class HitlRuntimeState:
                 candidate_attempt_id=candidate,
                 admitted_proposal_idea_id=proposal_id,
             )
+            if isinstance(self._state.get("worker_continuation"), dict):
+                raise HitlRuntimeStateError(
+                    "Planning discussion requires a settled approved proposal request"
+                )
             session = new_planning_discussion(
                 candidate_attempt_id=candidate,
                 admitted_proposal_idea_id=proposal_id,

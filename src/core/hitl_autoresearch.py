@@ -4294,7 +4294,17 @@ class HitlAutoResearchController:
                 parent_sha=parent_sha,
                 attempt_dir=attempt_dir,
             )
-            if proposal_mode.mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
+            recovered_proposal = (
+                self._recover_admitted_proposal_for_planning(
+                    parent_sha=parent_sha,
+                    attempt_dir=attempt_dir,
+                )
+                if resume_attempt_dir is not None
+                else None
+            )
+            if recovered_proposal is not None:
+                proposal, proposal_idea_id = recovered_proposal
+            elif proposal_mode.mode == INDEPENDENT_RANKED_PROPOSAL_MODE:
                 proposal, proposal_idea_id = self._run_ranked_proposal_admission_loop(
                     parent_sha=parent_sha,
                     attempt_dir=attempt_dir,
@@ -4861,6 +4871,96 @@ class HitlAutoResearchController:
             participant_count=int(config.participant_count),
             max_response_rounds=int(config.discussion_rounds),
         )
+
+    def _recover_admitted_proposal_for_planning(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+    ) -> Optional[Tuple[str, str]]:
+        """Resume the durable proposal-to-planning handoff after interruption."""
+
+        from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+        state = HitlRuntimeState(self.work_dir)
+        action = state.snapshot().get("next_autoresearch_action")
+        if not isinstance(action, dict) or (
+            action.get("planning_discussion") is None
+            and action.get(PENDING_PLANNING_POLICY_FIELD) is None
+        ):
+            return None
+        preparation_attempt_id = str(action.get("attempt_id", "")).strip()
+        if (
+            action.get("kind") != "prepare_proposal"
+            or action.get("status") != "resolved"
+            or str(action.get("parent_node_sha", "")).strip() != parent_sha
+            or not preparation_attempt_id
+        ):
+            raise RuntimeError(
+                "Collaborative planning recovery does not match its proposal preparation."
+            )
+
+        session = None
+        if action.get("planning_discussion") is not None:
+            session = state.planning_discussion_snapshot(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+            )
+            proposal_id = str(session.get("admitted_proposal_idea_id", "")).strip()
+        else:
+            command = state.pending_worker_command()
+            response = command.get("response") if isinstance(command, dict) else None
+            if (
+                not isinstance(command, dict)
+                or command.get("kind") != "proposal"
+                or command.get("pipeline_stage") != "experiment_runner"
+                or command.get("status") != "resolved"
+                or not isinstance(response, dict)
+                or response.get("status") != "approved"
+            ):
+                return None
+            proposal_id = str(command.get("proposal_idea_id", "")).strip()
+
+        proposal_records = [
+            record
+            for record in self._proposal_hitl_runtime().log.records()
+            if record.get("idea_id") == proposal_id
+        ]
+        if len(proposal_records) != 1:
+            raise RuntimeError(
+                "Collaborative planning recovery requires one admitted proposal record."
+            )
+        proposal_record = proposal_records[0]
+        proposal = str(proposal_record.get("proposal", "")).strip()
+        if (
+            proposal_record.get("idea_type") != "proposal"
+            or proposal_record.get("parent_node_id") != parent_sha
+            or proposal_record.get("attempt_id") != attempt_dir.name
+            or not proposal
+        ):
+            raise RuntimeError(
+                "Collaborative planning recovery found a stale admitted proposal record."
+            )
+
+        if session is None:
+            scope = action.get("workspace_fingerprint_scope")
+            expected_fingerprint = str(action.get("workspace_fingerprint", "")).strip()
+            observed_fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+                self.work_dir,
+                scope=scope,
+            )
+            if not expected_fingerprint or observed_fingerprint != expected_fingerprint:
+                raise RuntimeError(
+                    "Collaborative planning recovery no longer matches its approved workspace."
+                )
+            state.settle_approved_proposal_handoff_for_planning(
+                parent_node_sha=parent_sha,
+                preparation_attempt_id=preparation_attempt_id,
+                candidate_attempt_id=attempt_dir.name,
+                admitted_proposal_idea_id=proposal_id,
+            )
+        return proposal, proposal_id
 
     def _begin_or_resume_planning_discussion(
         self,
