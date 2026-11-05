@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import json
 import re
+import threading
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from core.hitl_discussion import (
@@ -32,6 +34,102 @@ PLANNING_DISCUSSION_PHASES = frozenset(
 _LOCAL_ATTEMPT_ID = re.compile(r"^attempt_[0-9]+$")
 _IDEA_ID = re.compile(r"^I[0-9]+$")
 _FULL_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+@dataclass(frozen=True)
+class PlanningDiscussionCoordinator:
+    """Run the fixed planning protocol through caller-bound runtime services."""
+
+    snapshot: Callable[[], dict[str, Any]]
+    advance: Callable[[str, int], dict[str, Any]]
+    apply_decision: Callable[[int, str], dict[str, Any]]
+    run_task: Callable[
+        [str, dict[str, Any], Sequence[str], Optional[threading.Event]], None
+    ]
+    prepare_initial: Callable[[dict[str, Any]], None]
+    check_boundary: Callable[[str], None]
+    reopen_source_idea_ids: Callable[[dict[str, Any]], Sequence[str]]
+    check_stop: Callable[[], None]
+
+    def run_initial(self, session: Mapping[str, Any]) -> dict[str, Any]:
+        """Finish the private initial set and publish it together."""
+
+        current = dict(session)
+        if current.get("phase") != "initial":
+            return current
+        self.prepare_initial(current)
+        task_ids = [
+            planning_discussion_task_id("initial", participant_ordinal=ordinal)
+            for ordinal in range(1, int(current["participant_count"]) + 1)
+        ]
+        unfinished = [
+            task_id
+            for task_id in task_ids
+            if current["tasks"][task_id].get("result_record_id") != task_id
+        ]
+        if unfinished:
+            from core.hitl_proposal_round import run_parallel_proposal_stage
+
+            def run_one(
+                task_id: str,
+                cancel_event: threading.Event,
+            ) -> None:
+                self.run_task(task_id, current, (), cancel_event)
+
+            run_parallel_proposal_stage(
+                unfinished,
+                run_one,
+                maximum_tasks=int(current["participant_count"]),
+            )
+        self.check_boundary("Collaborative planning initial phase")
+        return self.advance("initial", 0)
+
+    def run(self, session: Mapping[str, Any]) -> dict[str, Any]:
+        """Resume at the first unfinished task and reach final writing."""
+
+        current = self.run_initial(session)
+        while True:
+            self.check_stop()
+            current = self.snapshot()
+            phase = str(current["phase"])
+            round_ordinal = int(current["round_ordinal"])
+            if phase == "final_writing":
+                return current
+            seed_idea_ids: Sequence[str] = ()
+            if phase in {"response", "decision"}:
+                seed_idea_ids = self.reopen_source_idea_ids(current)
+            if phase == "opening":
+                task_id = planning_discussion_task_id(
+                    "opening", participant_ordinal=1
+                )
+                self.run_task(task_id, current, seed_idea_ids, None)
+                self.check_boundary("Collaborative planning opening")
+                self.advance("opening", 0)
+                continue
+            if phase == "response":
+                for task_id in planning_discussion_response_task_ids(
+                    round_ordinal, int(current["participant_count"])
+                ):
+                    refreshed = self.snapshot()
+                    self.run_task(task_id, refreshed, seed_idea_ids, None)
+                self.check_boundary(
+                    f"Collaborative planning round {round_ordinal}"
+                )
+                self.advance("response", round_ordinal)
+                continue
+            if phase == "decision":
+                task_id = planning_discussion_task_id(
+                    "decision",
+                    participant_ordinal=1,
+                    round_ordinal=round_ordinal,
+                )
+                self.run_task(task_id, current, seed_idea_ids, None)
+                decision = self.snapshot()["tasks"][task_id]
+                self.apply_decision(round_ordinal, str(decision.get("choice", "")))
+                continue
+            raise RuntimeError(
+                f"Collaborative planning cannot run from phase {phase}."
+            )
 
 
 def planning_discussion_task_id(

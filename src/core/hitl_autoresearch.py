@@ -6225,9 +6225,6 @@ class HitlAutoResearchController:
     ) -> Dict[str, Any]:
         """Run unfinished private inputs, then reveal them in scheduler order."""
 
-        from core.hitl_planning_discussion import planning_discussion_task_id
-        from core.hitl_proposal_round import run_parallel_proposal_stage
-
         session = self._begin_or_resume_planning_discussion(
             parent_sha=parent_sha,
             attempt_dir=attempt_dir,
@@ -6257,51 +6254,107 @@ class HitlAutoResearchController:
             attempt_dir=attempt_dir,
             session=session,
         )
-        approved_proposal = self._proposal_text_for(admitted_proposal_idea_id)
-        self._require_initial_planning_discussion_capacity(
+        coordinator = self._planning_discussion_coordinator(
             parent_sha=parent_sha,
-            session=session,
+            preparation_attempt_id=preparation_attempt_id,
             attempt_dir=attempt_dir,
-            approved_proposal=approved_proposal,
+            boundary_validator=boundary_validator,
+            admitted_proposal_idea_id=admitted_proposal_idea_id,
         )
-        initial_ids = [
-            planning_discussion_task_id("initial", participant_ordinal=ordinal)
-            for ordinal in range(1, int(session["participant_count"]) + 1)
-        ]
-        unfinished = [
-            task_id
-            for task_id in initial_ids
-            if session["tasks"][task_id].get("result_record_id") != task_id
-        ]
+        return coordinator.run_initial(session)
+
+    def _planning_discussion_coordinator(
+        self,
+        *,
+        parent_sha: str,
+        preparation_attempt_id: str,
+        attempt_dir: Path,
+        boundary_validator: Callable[[], Dict[str, Any]],
+        admitted_proposal_idea_id: str,
+    ):
+        """Bind the shared planning protocol to candidate-planning services."""
+
+        from core.hitl_planning_discussion import (
+            PlanningDiscussionCoordinator,
+            PlanningDiscussionRecordStore,
+            planning_discussion_reopen_source_idea_ids,
+        )
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        state = HitlRuntimeState(self.work_dir)
+        identity = {
+            "parent_node_sha": parent_sha,
+            "preparation_attempt_id": preparation_attempt_id,
+            "candidate_attempt_id": attempt_dir.name,
+        }
+
+        def snapshot() -> Dict[str, Any]:
+            return state.planning_discussion_snapshot(**identity)
+
+        def advance(expected_phase: str, round_ordinal: int) -> Dict[str, Any]:
+            if expected_phase == "initial":
+                return state.advance_planning_discussion_initial(**identity)
+            return state.advance_planning_discussion(
+                **identity,
+                expected_phase=expected_phase,
+                round_ordinal=round_ordinal,
+            )
+
+        def apply_decision(round_ordinal: int, choice: str) -> Dict[str, Any]:
+            return state.apply_planning_discussion_decision(
+                **identity,
+                round_ordinal=round_ordinal,
+                choice=choice,
+            )
 
         def run_task(
             task_id: str,
-            cancel_event: threading.Event,
-        ) -> Dict[str, Any]:
-            return self._run_planning_discussion_task(
+            current: Dict[str, Any],
+            seed_idea_ids: Sequence[str],
+            cancel_event: Optional[threading.Event],
+        ) -> None:
+            task = current["tasks"].get(task_id)
+            if isinstance(task, dict) and task.get("result_record_id") == task_id:
+                return
+            self._run_planning_discussion_task(
                 task_id=task_id,
-                session=session,
+                session=current,
                 parent_sha=parent_sha,
                 preparation_attempt_id=preparation_attempt_id,
                 attempt_dir=attempt_dir,
                 boundary_validator=boundary_validator,
+                seed_idea_ids=seed_idea_ids,
                 cancel_event=cancel_event,
             )
 
-        if unfinished:
-            run_parallel_proposal_stage(
-                unfinished,
-                run_task,
-                maximum_tasks=int(session["participant_count"]),
+        def prepare_initial(current: Dict[str, Any]) -> None:
+            self._require_initial_planning_discussion_capacity(
+                parent_sha=parent_sha,
+                session=current,
+                attempt_dir=attempt_dir,
+                approved_proposal=self._proposal_text_for(
+                    admitted_proposal_idea_id
+                ),
             )
-        self._require_proposal_discussion_boundary(
-            boundary_validator,
-            "Collaborative planning initial phase",
-        )
-        return HitlRuntimeState(self.work_dir).advance_planning_discussion_initial(
-            parent_node_sha=parent_sha,
-            preparation_attempt_id=preparation_attempt_id,
-            candidate_attempt_id=attempt_dir.name,
+
+        def check_boundary(label: str) -> None:
+            self._require_proposal_discussion_boundary(boundary_validator, label)
+
+        def reopen_source_idea_ids(current: Dict[str, Any]) -> Sequence[str]:
+            return planning_discussion_reopen_source_idea_ids(
+                current,
+                PlanningDiscussionRecordStore(attempt_dir).records(),
+            )
+
+        return PlanningDiscussionCoordinator(
+            snapshot=snapshot,
+            advance=advance,
+            apply_decision=apply_decision,
+            run_task=run_task,
+            prepare_initial=prepare_initial,
+            check_boundary=check_boundary,
+            reopen_source_idea_ids=reopen_source_idea_ids,
+            check_stop=raise_if_hitl_run_stop_requested,
         )
 
     def _run_collaborative_planning_discussion(
@@ -6312,14 +6365,6 @@ class HitlAutoResearchController:
         admitted_proposal_idea_id: str,
     ) -> Dict[str, Any]:
         """Run the fixed planning protocol to its final-owner boundary."""
-
-        from core.hitl_planning_discussion import (
-            PlanningDiscussionRecordStore,
-            planning_discussion_reopen_source_idea_ids,
-            planning_discussion_response_task_ids,
-            planning_discussion_task_id,
-        )
-        from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
         action = HitlRuntimeState(self.work_dir).snapshot().get(
             "next_autoresearch_action"
@@ -6349,106 +6394,19 @@ class HitlAutoResearchController:
             raise RuntimeError(
                 "Collaborative planning lost its proposal preparation identity."
             )
-        identity = {
-            "parent_node_sha": parent_sha,
-            "preparation_attempt_id": preparation_attempt_id,
-            "candidate_attempt_id": attempt_dir.name,
-        }
         boundary_validator = self._capture_planning_discussion_boundary(
             parent_sha=parent_sha,
             attempt_dir=attempt_dir,
             session=session,
         )
-
-        def refresh() -> Dict[str, Any]:
-            return state.planning_discussion_snapshot(**identity)
-
-        def run_task(
-            task_id: str,
-            current: Dict[str, Any],
-            *,
-            seed_idea_ids: Sequence[str] = (),
-        ) -> None:
-            task = current["tasks"].get(task_id)
-            if isinstance(task, dict) and task.get("result_record_id") == task_id:
-                return
-            self._run_planning_discussion_task(
-                task_id=task_id,
-                session=current,
-                parent_sha=parent_sha,
-                preparation_attempt_id=preparation_attempt_id,
-                attempt_dir=attempt_dir,
-                boundary_validator=boundary_validator,
-                seed_idea_ids=seed_idea_ids,
-            )
-
-        while True:
-            raise_if_hitl_run_stop_requested()
-            session = refresh()
-            phase = str(session["phase"])
-            round_ordinal = int(session["round_ordinal"])
-            seed_idea_ids: Sequence[str] = ()
-            if phase in {"response", "decision"}:
-                seed_idea_ids = planning_discussion_reopen_source_idea_ids(
-                    session,
-                    PlanningDiscussionRecordStore(attempt_dir).records(),
-                )
-            if phase == "final_writing":
-                return session
-            if phase == "opening":
-                opening_id = planning_discussion_task_id(
-                    "opening", participant_ordinal=1
-                )
-                run_task(opening_id, session)
-                self._require_proposal_discussion_boundary(
-                    boundary_validator, "Collaborative planning opening"
-                )
-                state.advance_planning_discussion(
-                    **identity,
-                    expected_phase="opening",
-                    round_ordinal=0,
-                )
-                continue
-            if phase == "response":
-                for task_id in planning_discussion_response_task_ids(
-                    round_ordinal, int(session["participant_count"])
-                ):
-                    run_task(
-                        task_id,
-                        refresh(),
-                        seed_idea_ids=seed_idea_ids,
-                    )
-                self._require_proposal_discussion_boundary(
-                    boundary_validator,
-                    f"Collaborative planning round {round_ordinal}",
-                )
-                state.advance_planning_discussion(
-                    **identity,
-                    expected_phase="response",
-                    round_ordinal=round_ordinal,
-                )
-                continue
-            if phase == "decision":
-                decision_id = planning_discussion_task_id(
-                    "decision",
-                    participant_ordinal=1,
-                    round_ordinal=round_ordinal,
-                )
-                run_task(
-                    decision_id,
-                    session,
-                    seed_idea_ids=seed_idea_ids,
-                )
-                decision = refresh()["tasks"][decision_id]
-                state.apply_planning_discussion_decision(
-                    **identity,
-                    round_ordinal=round_ordinal,
-                    choice=str(decision.get("choice", "")),
-                )
-                continue
-            raise RuntimeError(
-                f"Collaborative planning cannot run from phase {phase}."
-            )
+        coordinator = self._planning_discussion_coordinator(
+            parent_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            attempt_dir=attempt_dir,
+            boundary_validator=boundary_validator,
+            admitted_proposal_idea_id=admitted_proposal_idea_id,
+        )
+        return coordinator.run(session)
 
     def _recover_collaborative_planning_reopen(
         self,
