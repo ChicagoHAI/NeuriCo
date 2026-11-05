@@ -2010,11 +2010,14 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                     and prepared_sha
                     and CheckpointManager(work_dir).checkpoint_exists(prepared_sha)
                 )
+    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
     planning_discussion_present = bool(
         isinstance(preparation_action, dict)
         and "planning_discussion" in preparation_action
     )
     planning_discussion_is_exact = False
+    planning_read_only_workspace_is_exact = False
     planning_discussion_phase: Optional[str] = None
     planning_admitted_proposal_id = ""
     if planning_discussion_present and isinstance(preparation_action, dict):
@@ -2095,6 +2098,17 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
                         )
                         and git_state.hitl_autoresearch_whiteboard_matches_commit(
                             whiteboard_sha
+                        )
+                    )
+                    planning_read_only_workspace_is_exact = bool(
+                        str(
+                            durable_planning.get("workspace_fingerprint", "")
+                        ).strip()
+                        == HitlWorkspaceWriteGuard.public_fingerprint(
+                            work_dir,
+                            scope=durable_planning.get(
+                                "workspace_fingerprint_scope"
+                            ),
                         )
                     )
                 elif planning_discussion_phase == "final_writing":
@@ -2269,8 +2283,6 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
         and preparation_decision.get("choice") == "call_additional_agent"
         and preparation_decision.get("agent") == "resource_finder"
     )
-    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
-
     preparation_recovery = (
         preparation_action.get("recovery")
         if isinstance(preparation_action, dict)
@@ -2370,6 +2382,12 @@ def recover_interrupted_hitl_attempt_if_needed(work_dir: Path) -> Optional[HitlR
             preparation_metadata_is_exact
             and (
                 preparation_workspace_is_exact
+                or (
+                    planning_discussion_is_exact
+                    and planning_discussion_phase
+                    in {"initial", "opening", "response", "decision"}
+                    and planning_read_only_workspace_is_exact
+                )
                 or (
                     planning_discussion_is_exact
                     and planning_discussion_phase
