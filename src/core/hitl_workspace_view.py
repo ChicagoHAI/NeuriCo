@@ -1041,6 +1041,9 @@ class HitlWorkspaceView:
                 )
             if launch_state in {"starting", "running"}:
                 interrupted_stage, interrupted_phase = durable_boundary_labels()
+                show_coordination_boundary = bool(
+                    proposal_display_status or planning_display_status
+                )
                 return projected(
                     "interrupted",
                     "Research interrupted",
@@ -1049,11 +1052,11 @@ class HitlWorkspaceView:
                     record=launch_status,
                     active=False,
                     display_stage=(
-                        interrupted_stage if proposal_display_status else "Interrupted"
+                        interrupted_stage if show_coordination_boundary else "Interrupted"
                     ),
                     display_phase=(
                         f"{interrupted_phase} interrupted"
-                        if proposal_display_status
+                        if show_coordination_boundary
                         else ""
                     ),
                 )
