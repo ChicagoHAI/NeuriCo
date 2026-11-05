@@ -1182,16 +1182,16 @@ class HitlManager:
                     data.get("options", raised_idea.get("options")),
                     error_prefix="Decision resolution",
                 )
-                if selected_mode is HitlMode.AUTO:
-                    expected_options = _normalize_options(raised_idea.get("options"))
-                    submitted_options = _normalize_options(
-                        data.get("options", raised_idea.get("options"))
+                expected_options = _normalize_options(raised_idea.get("options"))
+                submitted_options = _normalize_options(
+                    data.get("options", raised_idea.get("options"))
+                )
+                if submitted_options != expected_options:
+                    raise ValueError(
+                        "Raised-idea resolution must preserve the worker's existing "
+                        "decision options."
                     )
-                    if submitted_options != expected_options:
-                        raise ValueError(
-                            "Auto HITL must preserve the worker's existing decision options."
-                        )
-                    data["options"] = raised_idea.get("options", [])
+                data["options"] = raised_idea.get("options", [])
             else:
                 data.pop("options", None)
                 data.pop("decision", None)

@@ -1708,7 +1708,7 @@ class HitlRuntime:
         finalized: Dict[str, Dict[str, Any]] = {}
 
         def persist_resolution(review: Dict[str, Any]) -> Dict[str, Any]:
-            decision_options = self._raised_idea_decision_options(raised_idea, review)
+            decision_options = self._raised_idea_decision_options(raised_idea)
             level = str(review.get("level", "")).strip()
             actor = str(review.get("actor", "")).strip()
             if (level, actor) not in {("B", "manager"), ("A", "human")}:
@@ -7880,14 +7880,12 @@ class HitlRuntime:
     def _raised_idea_decision_options(
         self,
         raised_idea: Dict[str, Any],
-        review: Dict[str, Any],
     ) -> List[str]:
         if raised_idea["idea_type"] != "decision":
             return []
-        raw_options = review.get("options", raised_idea.get("options"))
         return _validate_substantive_options(
-            raw_options,
-            error_prefix="Manager-reviewed decision",
+            raised_idea.get("options"),
+            error_prefix="Raised decision idea",
         )
 
     def _plan_artifact(self) -> List[Dict[str, str]]:
