@@ -59,17 +59,21 @@ def generate_instructions(prompt: str, work_dir: str, use_scribe: bool = False,
     from templates.prompt_generator import PromptGenerator
 
     generator = PromptGenerator(workspace_mode=read_workspace_mode(Path(work_dir)))
+    generator_kwargs = {
+        "domain": domain,
+        "idea_spec": idea_spec,
+        "provider": provider,
+        "scoring_enabled": scoring_enabled,
+        "phase_name": phase_name,
+    }
+    if focused_autoresearch:
+        generator_kwargs["focused_autoresearch"] = True
     try:
         return generator.generate_session_instructions(
             prompt,
             work_dir,
             use_scribe,
-            domain=domain,
-            idea_spec=idea_spec,
-            provider=provider,
-            scoring_enabled=scoring_enabled,
-            phase_name=phase_name,
-            focused_autoresearch=focused_autoresearch,
+            **generator_kwargs,
         )
     except TypeError:
         # Backwards compatibility: old Docker images don't support 'domain' parameter
