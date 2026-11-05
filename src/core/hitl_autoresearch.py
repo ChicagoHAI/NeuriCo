@@ -3892,7 +3892,7 @@ class HitlAutoResearchController:
                 attempt_dir=recovery.removed_attempt_dir,
                 admitted_proposal_idea_id=proposal_idea_id,
             )
-        comment_result = self._run_candidate_experiment_hitl(
+        comment_result = self._run_candidate_with_planning_reopens(
             proposal=proposal,
             proposal_idea_id=proposal_idea_id,
             parent_node_id=parent_sha,
@@ -4335,40 +4335,14 @@ class HitlAutoResearchController:
                 attempt_dir=attempt_dir,
                 admitted_proposal_idea_id=proposal_idea_id,
             )
-            while True:
-                comment_result = self._run_candidate_experiment_hitl(
-                    proposal=proposal,
-                    proposal_idea_id=proposal_idea_id,
-                    parent_node_id=parent_sha,
-                    attempt_id=attempt_id,
-                    attempt_dir=attempt_dir,
-                    sealed_scoring=sealed_scoring,
-                )
-                if not comment_result.get("reopen_discussion"):
-                    break
-                action = HitlRuntimeState(self.work_dir).snapshot().get(
-                    "next_autoresearch_action"
-                )
-                if not isinstance(action, dict):
-                    raise RuntimeError(
-                        "Collaborative planning reopening lost proposal preparation state."
-                    )
-                HitlRuntimeState(self.work_dir).apply_planning_discussion_reopen(
-                    parent_node_sha=parent_sha,
-                    preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
-                    candidate_attempt_id=attempt_dir.name,
-                    reopen_record_id=str(
-                        comment_result.get("reopen_record_id", "")
-                    ).strip(),
-                    whiteboard_boundary_sha=str(
-                        comment_result.get("whiteboard_boundary_sha", "")
-                    ).strip(),
-                )
-                self._run_collaborative_planning_discussion(
-                    parent_sha=parent_sha,
-                    attempt_dir=attempt_dir,
-                    admitted_proposal_idea_id=proposal_idea_id,
-                )
+            comment_result = self._run_candidate_with_planning_reopens(
+                proposal=proposal,
+                proposal_idea_id=proposal_idea_id,
+                parent_node_id=parent_sha,
+                attempt_id=attempt_id,
+                attempt_dir=attempt_dir,
+                sealed_scoring=sealed_scoring,
+            )
             if not comment_result.get("success"):
                 error_type = (
                     HitlTerminalRuntimeError
@@ -7433,6 +7407,57 @@ class HitlAutoResearchController:
                 base_idea_number=max(idea_numbers, default=0),
                 non_admitted_proposal_idea_id=proposal_idea_id,
             )
+
+    def _run_candidate_with_planning_reopens(
+        self,
+        *,
+        proposal: str,
+        proposal_idea_id: str,
+        parent_node_id: str,
+        attempt_id: str,
+        attempt_dir: Path,
+        sealed_scoring: Dict[str, Optional[Path]],
+        resume_pending: bool = False,
+        resume_approved_plan: bool = False,
+    ) -> Dict[str, Any]:
+        """Run the candidate worker through any accepted planning reopenings."""
+
+        while True:
+            result = self._run_candidate_experiment_hitl(
+                proposal=proposal,
+                proposal_idea_id=proposal_idea_id,
+                parent_node_id=parent_node_id,
+                attempt_id=attempt_id,
+                attempt_dir=attempt_dir,
+                sealed_scoring=sealed_scoring,
+                resume_pending=resume_pending,
+                resume_approved_plan=resume_approved_plan,
+            )
+            if not result.get("reopen_discussion"):
+                return result
+            action = HitlRuntimeState(self.work_dir).snapshot().get(
+                "next_autoresearch_action"
+            )
+            if not isinstance(action, dict):
+                raise RuntimeError(
+                    "Collaborative planning reopening lost proposal preparation state."
+                )
+            HitlRuntimeState(self.work_dir).apply_planning_discussion_reopen(
+                parent_node_sha=parent_node_id,
+                preparation_attempt_id=str(action.get("attempt_id", "")).strip(),
+                candidate_attempt_id=attempt_dir.name,
+                reopen_record_id=str(result.get("reopen_record_id", "")).strip(),
+                whiteboard_boundary_sha=str(
+                    result.get("whiteboard_boundary_sha", "")
+                ).strip(),
+            )
+            self._run_collaborative_planning_discussion(
+                parent_sha=parent_node_id,
+                attempt_dir=attempt_dir,
+                admitted_proposal_idea_id=proposal_idea_id,
+            )
+            resume_pending = False
+            resume_approved_plan = False
 
     def _run_candidate_experiment_hitl(
         self,
