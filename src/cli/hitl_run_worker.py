@@ -112,6 +112,14 @@ def _load_request(path: Path) -> Dict[str, Any]:
         raise ValueError("HITL launch request has an unsupported operation.")
     if value["operation"] == "construct_baseline" and value["workflow"] != "ordinary":
         raise ValueError("Baseline construction requires an Ordinary research workspace.")
+    focused_autoresearch = value.get("focused_autoresearch", False)
+    if type(focused_autoresearch) is not bool:
+        raise ValueError("HITL launch request has an invalid focused-mode setting.")
+    if focused_autoresearch and (
+        value["operation"] != "research" or value["workflow"] != "autoresearch"
+    ):
+        raise ValueError("Focused mode is supported only for AutoResearch.")
+    value["focused_autoresearch"] = focused_autoresearch
     from core.hitl_run_control import validate_run_time_limit
 
     value["time_limit_seconds"] = validate_run_time_limit(value.get("time_limit_seconds"))
@@ -217,6 +225,12 @@ def _finalize_stopped_run(
             "workflow": request.get("workflow", "autoresearch"),
             "hitl_mode": request.get("hitl_mode", "full"),
             "provider": request.get("provider", ""),
+            **(
+                {"focused_autoresearch": request.get("focused_autoresearch", False)}
+                if request.get("workflow") == "autoresearch"
+                and request.get("operation", "research") == "research"
+                else {}
+            ),
             "reason": stop_reason,
         }
         if recovery is not None:
@@ -248,6 +262,12 @@ def _finalize_stopped_run(
                 "workflow": request.get("workflow", "autoresearch"),
                 "hitl_mode": request.get("hitl_mode", "full"),
                 "provider": request.get("provider", ""),
+                **(
+                    {"focused_autoresearch": request.get("focused_autoresearch", False)}
+                    if request.get("workflow") == "autoresearch"
+                    and request.get("operation", "research") == "research"
+                    else {}
+                ),
                 "recovery_required": True,
                 "reason": stop_reason,
                 "message": (
@@ -273,6 +293,7 @@ def main() -> int:
     run_scope = ExitStack()
     try:
         request = _load_request(claimed)
+        request.setdefault("focused_autoresearch", False)
         work_dir = Path(str(request["work_dir"])).resolve()
         hitl_mode = normalize_hitl_mode(request.get("hitl_mode")).value
         request["hitl_mode"] = hitl_mode
@@ -313,6 +334,12 @@ def main() -> int:
                     "workflow": request["workflow"],
                     "hitl_mode": hitl_mode,
                     "interface": request["interface"],
+                    **(
+                        {"focused_autoresearch": request["focused_autoresearch"]}
+                        if request["workflow"] == "autoresearch"
+                        and request.get("operation", "research") == "research"
+                        else {}
+                    ),
                 },
             )
         )
@@ -332,6 +359,12 @@ def main() -> int:
                 "workflow": request["workflow"],
                 "hitl_mode": hitl_mode,
                 "provider": request["provider"],
+                **(
+                    {"focused_autoresearch": request["focused_autoresearch"]}
+                    if request["workflow"] == "autoresearch"
+                    and request.get("operation", "research") == "research"
+                    else {}
+                ),
             },
         )
         with log_path.open("a", encoding="utf-8") as output:
@@ -369,6 +402,7 @@ def main() -> int:
                         hitl_continue_autoresearch=(
                             str(request["interface"]) if continuation else None
                         ),
+                        focused_autoresearch=request["focused_autoresearch"],
                     )
                 result = runner.run_research(
                     str(request["idea_id"]),
@@ -393,6 +427,12 @@ def main() -> int:
             "workflow": request["workflow"],
             "hitl_mode": hitl_mode,
             "provider": request["provider"],
+            **(
+                {"focused_autoresearch": request["focused_autoresearch"]}
+                if request["workflow"] == "autoresearch"
+                and request.get("operation", "research") == "research"
+                else {}
+            ),
             "success": bool(result.get("success", False)),
         }
         if isinstance(publication, dict):
@@ -434,6 +474,12 @@ def main() -> int:
                     "workflow": request.get("workflow", "autoresearch"),
                     "hitl_mode": request.get("hitl_mode", "full"),
                     "provider": request.get("provider", ""),
+                    **(
+                        {"focused_autoresearch": request.get("focused_autoresearch", False)}
+                        if request.get("workflow") == "autoresearch"
+                        and request.get("operation", "research") == "research"
+                        else {}
+                    ),
                     **(
                         {"reason": stop_reason, "recovery_required": True}
                         if stop_reason

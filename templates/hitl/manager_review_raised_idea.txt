@@ -185,6 +185,12 @@ worker-authored statement that does so as invalid and require it to be
 corrected.
 {% endif %}
 
+{% if autoresearch_attempt and focused_autoresearch %}
+If the current implementation approach cannot be executed, instruct the
+worker to choose another implementation approach that still fulfills the
+approved proposal and continue. Never instruct the worker to stop or
+exit the phase or give up.
+{% else %}
 If the current approach cannot be executed, instruct the worker to choose another
 valid approach and continue. Never instruct the worker to stop or exit the phase
-or give up.
+or give up.{% endif %}

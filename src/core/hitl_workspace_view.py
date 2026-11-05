@@ -575,6 +575,25 @@ class HitlWorkspaceView:
             else ""
         )
         workflow_locked = bool(pipeline)
+        pipeline_focus = pipeline.get("focused_autoresearch")
+        if pipeline_focus is not None and type(pipeline_focus) is not bool:
+            raise HitlWorkspaceViewError(
+                "Pipeline state has an invalid focused AutoResearch setting."
+            )
+        launch_status = self._launch_status() if not pipeline else {}
+        transient_focus = (owner or {}).get(
+            "focused_autoresearch",
+            launch_status.get("focused_autoresearch", False),
+        )
+        if type(transient_focus) is not bool:
+            transient_focus = False
+        focused_autoresearch = (
+            bool(pipeline_focus)
+            if pipeline_focus is not None
+            else bool(transient_focus)
+            if not pipeline
+            else False
+        )
         from core.hitl_autoresearch import managed_baseline_construction_eligibility
 
         baseline_eligibility = managed_baseline_construction_eligibility(
@@ -685,6 +704,9 @@ class HitlWorkspaceView:
                 "operation": operation if operation in {"research", "construct_baseline"} else "research",
                 "workflow": workflow if workflow in {"ordinary", "autoresearch"} else "autoresearch",
                 "workflow_locked": workflow_locked,
+                "focused_autoresearch": (
+                    focused_autoresearch if workflow == "autoresearch" else False
+                ),
                 "hitl_mode": hitl_mode if hitl_mode in {"full", "auto"} else "full",
                 "provider": provider,
                 "started_at": started_at,

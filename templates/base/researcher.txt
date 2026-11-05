@@ -30,7 +30,8 @@ Use these resources to inform your experimental design.
                         RESEARCH METHODOLOGY
 ═══════════════════════════════════════════════════════════════════════════════
 
-PHASE 0: MOTIVATION & NOVELTY ASSESSMENT (CRITICAL - DO NOT SKIP)
+{% if focused_autoresearch %}PHASE 0: MOTIVATION & APPROACH RATIONALE (CRITICAL - DO NOT SKIP){% else %}PHASE 0: MOTIVATION & NOVELTY ASSESSMENT (CRITICAL - DO NOT SKIP){% endif %}
+
 ─────────────────────────────────────────────────────────────────────────────
 
 Before ANY experimental work, you MUST establish:
@@ -40,17 +41,32 @@ Before ANY experimental work, you MUST establish:
    - Who benefits from this research?
    - What's the potential impact?
 
-2. WHAT Makes It Novel
+{% if focused_autoresearch %}2. WHY Pursue the Selected Direction
+   - How could it improve the solution to the task?
+   - What evidence supports this approach?
+   - What assumptions or limitations need investigation?{% else %}2. WHAT Makes It Novel
    - How does this differ from existing work?
    - What gap in the literature does it fill?
-   - What new insight or method does it contribute?
+   - What new insight or method does it contribute?{% endif %}
+
 
 3. WHY These Experiments
    - Why are these specific experiments necessary?
    - What will we learn from each experiment?
    - How do results connect to the hypothesis?
 
-DELIVERABLE: Add a "Motivation & Novelty" section to planning.md:
+{% if focused_autoresearch %}DELIVERABLE: Add a "Motivation & Approach Rationale" section to planning.md:
+
+## Motivation & Approach Rationale
+
+### Why This Research Matters
+[2-3 sentences on importance and impact]
+
+### Evidence for the Selected Direction
+[What evidence supports pursuing this approach?]
+
+### Assumptions and Limitations
+[What needs investigation to determine whether this approach works?]{% else %}DELIVERABLE: Add a "Motivation & Novelty" section to planning.md:
 
 ## Motivation & Novelty Assessment
 
@@ -61,7 +77,8 @@ DELIVERABLE: Add a "Motivation & Novelty" section to planning.md:
 [Based on literature_review.md, what's missing?]
 
 ### Our Novel Contribution
-[What new thing are we testing/proposing?]
+[What new thing are we testing/proposing?]{% endif %}
+
 
 ### Experiment Justification
 For each planned experiment:
@@ -76,7 +93,8 @@ AFTER COMPLETING PHASE 0: IMMEDIATELY BEGIN PHASE 1
 ─────────────────────────────────────────────────────────────────────────────
 
 ✓ You have established WHY this research matters
-✓ You have identified WHAT makes it novel
+{% if focused_autoresearch %}✓ You have explained WHY the selected direction is worth investigating{% else %}✓ You have identified WHAT makes it novel{% endif %}
+
 ✓ NOW proceed to detailed planning
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -107,7 +125,10 @@ Before writing any code, create a detailed research plan:
 
 4. Experimental Design
    - Choose appropriate methods and tools (justify your choices)
-   - Use datasets and baselines identified in resources.md
+{% if focused_autoresearch %}   - Use relevant datasets identified in resources.md. Include baseline work
+     only when needed to evaluate the selected direction or when explicitly
+     required by the user. Reuse existing baselines where available.{% else %}   - Use datasets and baselines identified in resources.md{% endif %}
+
    - Design control conditions
    - Plan sample sizes and statistical tests
    - Identify potential confounds and how to mitigate them
@@ -158,10 +179,14 @@ Must include:
 ...
 
 ### Baselines
-[What will you compare against and why?]
+{% if focused_autoresearch %}[Which baselines, if any, are needed to evaluate or support the selected direction
+or explicitly required by the user? Explain why.]{% else %}[What will you compare against and why?]{% endif %}
+
 
 ### Evaluation Metrics
-[How will you measure success? Why these metrics?]
+{% if focused_autoresearch %}[Use the evaluation requirements in scoring/interface.md.
+Explain how the planned experiments address them.]{% else %}[How will you measure success? Why these metrics?]{% endif %}
+
 
 ### Statistical Analysis Plan
 [What statistical tests? What significance level?]
@@ -216,7 +241,10 @@ Execute your plan systematically and carefully:
 
 3. Implementation (adapt to your research type)
    ✓ Follow the approach outlined in your research plan
-   ✓ Implement reference methods or baselines first (if applicable)
+{% if focused_autoresearch %}   ✓ Implement reference methods or baselines only when needed to evaluate
+     or support the selected direction or when explicitly required by the
+     user. Reuse existing implementations where available.{% else %}   ✓ Implement reference methods or baselines first (if applicable){% endif %}
+
    ✓ Implement your proposed method, analysis, or computational workflow
    ✓ Establish a validation pipeline before running full experiments
    ✓ See domain-specific guidelines for detailed implementation guidance
@@ -314,7 +342,9 @@ Interpret results rigorously using chain-of-thought reasoning:
    - Look for patterns across different conditions
 
 2. Comparative Analysis
-   - Compare against all baselines
+{% if focused_autoresearch %}   - Compare against baselines only when needed to evaluate or improve
+     the selected direction or when explicitly required by the user.{% else %}   - Compare against all baselines{% endif %}
+
    - Use appropriate statistical tests (see domain-specific guidance)
    - Calculate effect sizes (Cohen's d, eta-squared, etc.)
    - Consider practical significance vs statistical significance
@@ -362,7 +392,9 @@ For each result, ask yourself:
 AFTER COMPLETING PHASE 3: IMMEDIATELY BEGIN PHASE 4
 ─────────────────────────────────────────────────────────────────────────────
 
-✓ Verify your analysis is complete with statistical tests and visualizations
+{% if focused_autoresearch %}✓ Verify your analysis is complete, using statistical tests where appropriate
+  and visualizations when they help interpret results or diagnose problems.{% else %}✓ Verify your analysis is complete with statistical tests and visualizations{% endif %}
+
 ✓ NOW PROCEED to documentation - this is the final phase
 ✓ Document all your findings, methodology, and results in REPORT.md
 
@@ -381,7 +413,9 @@ Use markdown files for documentation that will be read (easier to navigate).
 
 DELIVERABLE 1: REPORT.md
 
-This is the primary research report. Include these sections:
+{% if focused_autoresearch %}This is a comprehensive technical record of the selected directions.
+Include these sections:{% else %}This is the primary research report. Include these sections:{% endif %}
+
 
 ## 1. Executive Summary
 - Research question in one sentence
@@ -402,13 +436,17 @@ This is the primary research report. Include these sections:
 
 ## 4. Results
 - Key findings with supporting data and figures
-- Tables comparing methods, conditions, or systems
-- Visualizations with clear labels, units, and legends
+{% if focused_autoresearch %}- Tables comparing methods, conditions, or systems when they help explain the findings
+- When including visualizations, use clear labels, units, and legends{% else %}- Tables comparing methods, conditions, or systems
+- Visualizations with clear labels, units, and legends{% endif %}
+
 - Output file locations (results/, figures/, etc.)
 
 ## 5. Analysis & Discussion
 - Interpretation in context of hypothesis
-- Comparison to baselines, prior work, or literature values
+{% if focused_autoresearch %}- Comparisons to baselines, prior work, or literature values when they
+  help explain the findings or guide improvements{% else %}- Comparison to baselines, prior work, or literature values{% endif %}
+
 - Statistical significance and effect sizes where applicable
 - Error analysis and failure modes
 - Surprises and unexpected insights

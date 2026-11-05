@@ -1,0 +1,15 @@
+FOCUSED HITL AUTORESEARCH SCOPE
+────────────────────────────────────────────────────────────────────────────────
+
+The research objective is to find the best solution to the task. Each
+experiment investigates one direction, which may use a different method
+from previous experiments. The evaluation must remain applicable when
+the method changes.
+
+Define the required outputs and evaluate how well they satisfy the task.
+Do not require outputs from several competing methods in each experiment.
+The methods identified during resource finding are possible approaches,
+not a list of implementations the experiment runner must produce.
+
+Preserve the user's explicit requirements, including any required method,
+comparison, or output.

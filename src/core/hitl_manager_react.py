@@ -1204,8 +1204,15 @@ class HitlManager:
             and str(provenance.get("attempt_id", "")).strip()
             and str(provenance.get("proposal_idea_id", "")).strip()
         )
+        focused_autoresearch = False
+        if autoresearch_attempt:
+            from core.pipeline_orchestrator import PipelineState
+
+            focused_autoresearch = PipelineState.read_focused_autoresearch(self.work_dir)
         prompt = _load_hitl_template(
             "manager_review_raised_idea.txt",
+            focused_autoresearch=focused_autoresearch,
+            parent_node_id=assigned_candidate_sha,
             pipeline_stage=pipeline_stage,
             requesting_actor=str(raised_idea.get("actor", "")).strip(),
             plan_text=plan_text,
@@ -1343,8 +1350,15 @@ class HitlManager:
             and str(provenance.get("attempt_id", "")).strip()
             and str(provenance.get("proposal_idea_id", "")).strip()
         )
+        focused_autoresearch = False
+        if autoresearch_attempt:
+            from core.pipeline_orchestrator import PipelineState
+
+            focused_autoresearch = PipelineState.read_focused_autoresearch(self.work_dir)
         prompt = _load_hitl_template(
             "manager_review_phase_finish.txt",
+            focused_autoresearch=focused_autoresearch,
+            parent_node_id=assigned_candidate_sha,
             pipeline_stage=pipeline_stage,
             hitl_stage=hitl_stage,
             plan_text=plan_text,
@@ -1492,12 +1506,15 @@ class HitlManager:
             **({"legality_only": True} if legality_only else {}),
             **(request_context or {}),
         }
+        from core.pipeline_orchestrator import PipelineState
+
         prompt = _load_hitl_template(
             (
                 "manager_review_selected_proposal.txt"
                 if legality_only
                 else "manager_review_proposal.txt"
             ),
+            focused_autoresearch=PipelineState.read_focused_autoresearch(self.work_dir),
             pipeline_stage=pipeline_stage,
             proposal_text=proposal_text,
             hitl_mode=selected_mode.value,

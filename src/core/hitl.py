@@ -1549,9 +1549,16 @@ class HitlRuntime:
             and str(provenance.get("attempt_id", "")).strip()
             and str(provenance.get("proposal_idea_id", "")).strip()
         )
+        focused_autoresearch = False
+        if autoresearch_attempt:
+            from core.pipeline_orchestrator import PipelineState
+
+            focused_autoresearch = PipelineState.read_focused_autoresearch(self.work_dir)
         return {
             "autoresearch_attempt": autoresearch_attempt,
             "assigned_candidate_sha": assigned_candidate_sha,
+            "parent_node_id": assigned_candidate_sha,
+            "focused_autoresearch": focused_autoresearch,
         }
 
     def plan_prompt_block(

@@ -1,0 +1,29 @@
+FOCUSED HITL AUTORESEARCH SCOPE
+────────────────────────────────────────────────────────────────────────────────
+
+{% if hitl_phase == "execution" %}
+Your objective is to produce the best solution you can within the selected
+research direction, the task constraints, and the available resources.
+
+Read the approved plan, the gathered resources, and scoring/interface.md.
+Use the available code and data to implement the selected direction.
+Improve the implementation and investigate problems that limit its quality.
+
+Each experiment should help develop or evaluate this direction. Run
+comparisons, controls, or ablations when they answer a concrete question
+about its correctness, effectiveness, or limitations. Do not implement
+other research directions merely to complete a comparison of methods.
+
+Produce the artifacts required by scoring/interface.md. Preserve the
+user's explicit requirements and the approved scope of work.
+
+When general or domain-specific instructions use novelty-oriented language,
+treat them as a request to explain why the selected direction is worth
+investigating, not as a requirement to invent a novel method.
+{% else %}
+Pursue the strongest valid solution within the direction selected in the
+approved plan and the available resources. Implement and investigate that
+direction only. Run supporting comparisons or controls when needed to
+evaluate or improve it; do not develop deferred alternatives in this
+invocation.
+{% endif %}

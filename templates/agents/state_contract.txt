@@ -23,6 +23,7 @@ Keep the notes concise enough to be useful as a handoff. If STATE.md does not
 exist, create it with the marker pair above before starting Phase 1. Do not
 claim a phase is complete until its expected artifacts exist on disk.
 
+{% if not focused_autoresearch %}
 DIRECTION BUDGET
 ────────────────────────────────────────────────────────────────────────────────
 
@@ -32,4 +33,4 @@ information gain, and implementation feasibility. Keep only the top
 {{ max_directions }} directions for implementation and experimentation. Record
 the rejected directions and the reason for pruning in planning.md or STATE.md.
 Do not expand the search space later unless new evidence invalidates the
-ranking; if that happens, update the ranking and explain the change in STATE.md.
+ranking; if that happens, update the ranking and explain the change in STATE.md.{% endif %}

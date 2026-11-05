@@ -1,3 +1,19 @@
+{% if focused_autoresearch %}
+The parent checkpoint is `{{ parent_node_id }}`. Use it as the starting
+point for implementing the approved proposal. The candidate you produce
+must retain the approved modification and satisfy scoring/interface.md.
+
+Use development tests to find defects, improve the implementation, choose
+settings that retain the modification, and understand the results. These
+tests are not official evaluation. You may compare with the parent, but
+must not replace the candidate with the unchanged parent or disable the
+modification because an internal comparison favors the parent.
+
+A valid implementation may finish even when internal results are worse
+than the parent's. Repair implementation and interface defects; do not
+substitute parent artifacts for an incomplete or broken candidate. When
+the work is ready, follow the existing HITL completion instructions.
+{% else %}
 You must work only on the candidate assigned to you:
 `{{ assigned_candidate_sha }}`. It is illegal for you to reject, replace, or
 abandon this candidate. Your sole responsibility is to continue improving it
@@ -7,4 +23,4 @@ If you create your own tests to guide development, you must treat their results
 as non-authoritative references only. Your tests may be incomplete, incorrect,
 or based on invalid assumptions. You must not turn them into requirements or
 use them as grounds for rejecting, replacing, abandoning, or stopping work on
-the candidate.
+the candidate.{% endif %}
