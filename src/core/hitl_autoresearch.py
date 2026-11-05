@@ -3886,6 +3886,12 @@ class HitlAutoResearchController:
 
         if not proposal or not proposal_idea_id:
             raise RuntimeError("Recovered HITL attempt has no admitted proposal.")
+        if request_kind == "proposal":
+            self._run_collaborative_planning_if_configured(
+                parent_sha=parent_sha,
+                attempt_dir=recovery.removed_attempt_dir,
+                admitted_proposal_idea_id=proposal_idea_id,
+            )
         comment_result = self._run_candidate_experiment_hitl(
             proposal=proposal,
             proposal_idea_id=proposal_idea_id,
@@ -4324,18 +4330,11 @@ class HitlAutoResearchController:
                     attempt_dir=attempt_dir,
                     attempt_history=attempt_history,
                 )
-            preparation = HitlRuntimeState(self.work_dir).snapshot().get(
-                "next_autoresearch_action"
+            self._run_collaborative_planning_if_configured(
+                parent_sha=parent_sha,
+                attempt_dir=attempt_dir,
+                admitted_proposal_idea_id=proposal_idea_id,
             )
-            if isinstance(preparation, dict) and (
-                preparation.get("planning_discussion") is not None
-                or preparation.get(PENDING_PLANNING_POLICY_FIELD) is not None
-            ):
-                self._run_collaborative_planning_discussion(
-                    parent_sha=parent_sha,
-                    attempt_dir=attempt_dir,
-                    admitted_proposal_idea_id=proposal_idea_id,
-                )
             while True:
                 comment_result = self._run_candidate_experiment_hitl(
                     proposal=proposal,
@@ -4870,6 +4869,29 @@ class HitlAutoResearchController:
             whiteboard_boundary_sha=whiteboard_boundary_sha,
             participant_count=int(config.participant_count),
             max_response_rounds=int(config.discussion_rounds),
+        )
+
+    def _run_collaborative_planning_if_configured(
+        self,
+        *,
+        parent_sha: str,
+        attempt_dir: Path,
+        admitted_proposal_idea_id: str,
+    ) -> None:
+        """Enter the durable planning session after one proposal admission."""
+
+        action = HitlRuntimeState(self.work_dir).snapshot().get(
+            "next_autoresearch_action"
+        )
+        if not isinstance(action, dict) or (
+            action.get("planning_discussion") is None
+            and action.get(PENDING_PLANNING_POLICY_FIELD) is None
+        ):
+            return
+        self._run_collaborative_planning_discussion(
+            parent_sha=parent_sha,
+            attempt_dir=attempt_dir,
+            admitted_proposal_idea_id=admitted_proposal_idea_id,
         )
 
     def _recover_admitted_proposal_for_planning(
