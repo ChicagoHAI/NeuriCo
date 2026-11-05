@@ -6602,32 +6602,15 @@ class HitlAutoResearchController:
                     ]
                 )
             )
-            ideas_by_id = {
-                str(record.get("idea_id", "")).strip(): record
-                for record in self._proposal_hitl_runtime().log.records()
-            }
-            if any(
-                not source_id or source_id not in ideas_by_id
-                for source_id in requested_source_ids
-            ):
+            try:
+                source_records = HitlIdeaLog.premise_closure(
+                    self._proposal_hitl_runtime().log.records(),
+                    seed_idea_ids=requested_source_ids,
+                )
+            except ValueError as exc:
                 raise RuntimeError(
                     "Planning discussion reopening references unavailable feedback."
-                )
-            visible_source_ids: list[str] = []
-            pending_source_ids = list(requested_source_ids)
-            while pending_source_ids:
-                source_id = pending_source_ids.pop(0)
-                if source_id in visible_source_ids:
-                    continue
-                record = ideas_by_id.get(source_id)
-                if not isinstance(record, dict):
-                    raise RuntimeError(
-                        "Planning discussion reopening references unavailable feedback."
-                    )
-                visible_source_ids.append(source_id)
-                premises = record.get("premises")
-                if isinstance(premises, list):
-                    pending_source_ids.extend(str(item).strip() for item in premises)
+                ) from exc
 
             def summarize(
                 public_background: Dict[str, Any],
@@ -6666,7 +6649,7 @@ class HitlAutoResearchController:
                 summarize=summarize if callable(summarize_method) else None,
                 current_session=current_session,
                 allow_reopen=bool(allow_reopen),
-                reopen_source_ideas=[ideas_by_id[item] for item in visible_source_ids],
+                reopen_source_ideas=source_records,
             )
 
         return build
@@ -6718,27 +6701,10 @@ class HitlAutoResearchController:
             ).strip()
             if not feedback:
                 raise ValueError("Planning reopen feedback is empty.")
-            source_records: list[Dict[str, Any]] = []
-            ideas_by_id = {
-                str(record.get("idea_id", "")).strip(): record
-                for record in self._proposal_hitl_runtime().log.records()
-            }
-            pending_ids = [str(feedback_record.get("idea_id", "")).strip()]
-            while pending_ids:
-                idea_id = pending_ids.pop(0)
-                if not idea_id or any(
-                    record.get("idea_id") == idea_id for record in source_records
-                ):
-                    continue
-                record = ideas_by_id.get(idea_id)
-                if not isinstance(record, dict):
-                    raise ValueError(
-                        "Planning reopen capacity references unavailable feedback."
-                    )
-                source_records.append(record)
-                premises = record.get("premises")
-                if isinstance(premises, list):
-                    pending_ids.extend(str(item).strip() for item in premises)
+            source_records = HitlIdeaLog.premise_closure(
+                self._proposal_hitl_runtime().log.records(),
+                seed_idea_ids=[str(feedback_record.get("idea_id", "")).strip()],
+            )
             next_task_id = planning_discussion_task_id(
                 "response",
                 participant_ordinal=2,

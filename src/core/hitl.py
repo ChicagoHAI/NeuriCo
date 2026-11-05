@@ -1011,6 +1011,32 @@ class HitlIdeaLog:
             return []
         return read_jsonl(self.path)
 
+    @staticmethod
+    def premise_closure(
+        records: Iterable[Dict[str, Any]],
+        *,
+        seed_idea_ids: Iterable[str],
+    ) -> List[Dict[str, Any]]:
+        """Resolve finalized seeds and their premises in seed-first order."""
+        records_by_id = {
+            str(record.get("idea_id", "")).strip(): record for record in records
+        }
+        pending = _normalize_premises(list(seed_idea_ids))
+        seen: set[str] = set()
+        result: List[Dict[str, Any]] = []
+        for idea_id in pending:
+            if idea_id in seen:
+                continue
+            record = records_by_id.get(idea_id)
+            if record is None:
+                raise HitlValidationError(
+                    "Idea premise closure references an unavailable finalized idea."
+                )
+            seen.add(idea_id)
+            result.append(dict(record))
+            pending.extend(_normalize_premises(record.get("premises")))
+        return result
+
     def render_for_agent(
         self,
         *,
@@ -5634,15 +5660,9 @@ class HitlRuntime:
             source_ids = planning_discussion_reopen_source_idea_ids(
                 task_context["session"], store.records()
             )
-            ideas_by_id = {
-                str(record.get("idea_id", "")).strip(): record
-                for record in self.log.records()
-            }
-            if any(source_id not in ideas_by_id for source_id in source_ids):
-                raise HitlValidationError(
-                    "Planning discussion reopening references unavailable feedback."
-                )
-            reopen_source_ideas = [ideas_by_id[item] for item in source_ids]
+            reopen_source_ideas = HitlIdeaLog.premise_closure(
+                self.log.records(), seed_idea_ids=source_ids
+            )
             self._tool_context["planning_discussion_reopen_source_ideas"] = [
                 dict(record) for record in reopen_source_ideas
             ]
