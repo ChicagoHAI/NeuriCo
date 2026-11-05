@@ -15,6 +15,7 @@ import time
 _PR_SET_CHILD_SUBREAPER = 36
 _DESCENDANT_TERMINATION_GRACE_SECONDS = 1.0
 _DESCENDANT_KILL_GRACE_SECONDS = 1.0
+_SUCCESSFUL_COMPLETION_EXIT_CODES = frozenset({0, 124})
 
 
 def _linux_process_rows() -> list[tuple[int, int, int]]:
@@ -192,11 +193,13 @@ def terminate_owned_descendants() -> bool:
 
 
 def supervise(command: list[str]) -> int:
-    """Keep Linux descendants owned until the manager and providers are gone.
+    """Keep Linux descendants owned until the manager's outcome is known.
 
     A separate supervisor keeps the subreaper alive even when the manager
     exits during cooperative shutdown or gets stuck unwinding its own stack.
-    The adapter's existing timeout remains responsible for escalation.
+    The adapter's existing timeout remains responsible for escalation. Failed,
+    cancelled, and forcibly terminated runs clean every retained descendant;
+    successful runs release task services for Harbor's verifier.
     """
     if not enable_child_subreaper():
         # Harbor uses Linux. Preserve the original PID and signal behavior for
@@ -205,6 +208,7 @@ def supervise(command: list[str]) -> int:
 
     interrupted = False
     terminated = False
+    completed_exit_code: int | None = None
 
     def request_interrupt(_signum: int, _frame: object) -> None:
         nonlocal interrupted
@@ -218,15 +222,20 @@ def supervise(command: list[str]) -> int:
     signal.signal(signal.SIGTERM, request_termination)
     try:
         if terminated:
-            return 128 + signal.SIGTERM
+            completed_exit_code = 128 + signal.SIGTERM
+            return completed_exit_code
         child = subprocess.Popen(command, start_new_session=True)
         interrupt_forwarded = False
         while True:
             if terminated:
-                return 128 + signal.SIGTERM
+                completed_exit_code = 128 + signal.SIGTERM
+                return completed_exit_code
             return_code = child.poll()
             if return_code is not None:
-                return return_code if return_code >= 0 else 128 - return_code
+                completed_exit_code = (
+                    return_code if return_code >= 0 else 128 - return_code
+                )
+                return completed_exit_code
             if interrupted and not interrupt_forwarded:
                 try:
                     child.send_signal(signal.SIGINT)
@@ -239,7 +248,18 @@ def supervise(command: list[str]) -> int:
         # interrupt cleanup before adopted children have been killed/reaped.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        terminate_owned_descendants()
+        if (
+            interrupted
+            or terminated
+            or completed_exit_code not in _SUCCESSFUL_COMPLETION_EXIT_CODES
+        ):
+            terminate_owned_descendants()
+        else:
+            # Provider launchers already reject and terminate their own
+            # lingering process groups before NeuriCo can report success. Any
+            # live descendants left here belong to the task and must remain
+            # available to Harbor's verifier after this supervisor exits.
+            _reap_exited_children()
 
 
 if __name__ == "__main__":

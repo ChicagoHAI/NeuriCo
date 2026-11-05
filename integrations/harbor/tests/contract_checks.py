@@ -284,8 +284,8 @@ def test_cancellation_retains_provider_started_during_shutdown(
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="child subreapers are Linux-specific")
-@pytest.mark.parametrize("exit_code", [0, 1, 10, 124])
-def test_supervisor_preserves_manager_result_and_reaps_orphans(
+@pytest.mark.parametrize("exit_code", [1, 10])
+def test_supervisor_preserves_manager_failure_and_reaps_orphans(
     tmp_path: Path, exit_code: int
 ) -> None:
     provider_pid_file = tmp_path / "provider.pid"
@@ -317,6 +317,43 @@ def test_supervisor_preserves_manager_result_and_reaps_orphans(
         if provider_pid_file.is_file():
             try:
                 os.killpg(int(provider_pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="child subreapers are Linux-specific")
+@pytest.mark.parametrize("exit_code", [0, 124])
+def test_supervisor_preserves_task_service_after_success(
+    tmp_path: Path, exit_code: int
+) -> None:
+    service_pid_file = tmp_path / "service.pid"
+    code = (
+        "import os, subprocess, sys; from pathlib import Path; "
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], "
+        "start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"Path({str(service_pid_file)!r}).write_text(str(p.pid)); os._exit({exit_code})"
+    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "neurico_harbor_agent.process_control",
+                sys.executable,
+                "-c",
+                code,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == exit_code, result.stderr
+        service_pid = int(service_pid_file.read_text())
+        os.kill(service_pid, 0)
+    finally:
+        if service_pid_file.is_file():
+            try:
+                os.killpg(int(service_pid_file.read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
 

@@ -43,7 +43,12 @@ for human input.
   groups. A dedicated Linux supervisor retains orphaned provider processes
   until cleanup finishes, including providers started during shutdown. It
   remains independent of the manager so stalled manager cleanup cannot lose
-  process ownership. Harbor's ACP launcher does not
+  process ownership. Failed, cancelled, and forcibly terminated runs clean all
+  retained descendants. After normal completion or completed native budget
+  finalization, detached task services remain available to Harbor's verifier;
+  NeuriCo's provider launchers have already rejected and terminated any
+  lingering provider process group before those outcomes can be reported.
+  Harbor's ACP launcher does not
   currently expose its resolved hard deadline to the agent, so the Harbor
   timeout and the smaller NeuriCo budget are explicit paired job settings.
 - The requested Harbor model is advertised as an ACP session configuration
