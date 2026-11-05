@@ -5819,6 +5819,12 @@ class HitlAutoResearchController:
             raise RuntimeError(
                 "Planning discussion lost its admitted proposal record."
             )
+        candidate_prompt_context = {
+            "assigned_candidate_sha": parent_sha,
+            "autoresearch_attempt": bool(
+                parent_sha and attempt_dir.name and proposal_id
+            ),
+        }
         task_runtime = self._prepare_planning_discussion_task_runtime(
             task_id=task_id,
             session=session,
@@ -5869,6 +5875,7 @@ class HitlAutoResearchController:
                     next_template, _background = renderer(
                         approved_proposal=str(proposal_record["proposal"]),
                         discussion_task_id=next_task_id,
+                        **candidate_prompt_context,
                     )
                     next_prompt_template = append_prompt_block(
                         next_template,
@@ -5944,6 +5951,7 @@ class HitlAutoResearchController:
                     env_extra=task_runtime.idea_tool_env(),
                     cancel_event=cancel_event,
                     output_prefix=task_id,
+                    **candidate_prompt_context,
                 )
 
             _result, finish = run_worker_with_replacements(
@@ -5974,6 +5982,7 @@ class HitlAutoResearchController:
     def _require_initial_planning_discussion_capacity(
         self,
         *,
+        parent_sha: str,
         session: Dict[str, Any],
         attempt_dir: Path,
         approved_proposal: str,
@@ -5997,11 +6006,20 @@ class HitlAutoResearchController:
                 "Collaborative planning requires its prompt-template renderer."
             )
         participant_count = int(session["participant_count"])
+        candidate_prompt_context = {
+            "assigned_candidate_sha": parent_sha,
+            "autoresearch_attempt": bool(
+                parent_sha
+                and attempt_dir.name
+                and str(session.get("admitted_proposal_idea_id", "")).strip()
+            ),
+        }
 
         def render(task_id: str) -> tuple[str, Dict[str, Any]]:
             template, background = renderer(
                 approved_proposal=approved_proposal,
                 discussion_task_id=task_id,
+                **candidate_prompt_context,
             )
             return (
                 append_prompt_block(
@@ -6108,6 +6126,7 @@ class HitlAutoResearchController:
         )
         approved_proposal = self._proposal_text_for(admitted_proposal_idea_id)
         self._require_initial_planning_discussion_capacity(
+            parent_sha=parent_sha,
             session=session,
             attempt_dir=attempt_dir,
             approved_proposal=approved_proposal,
@@ -6600,6 +6619,12 @@ class HitlAutoResearchController:
                     str(current["admitted_proposal_idea_id"])
                 ),
                 discussion_task_id=next_task_id,
+                assigned_candidate_sha=parent_sha,
+                autoresearch_attempt=bool(
+                    parent_sha
+                    and attempt_dir.name
+                    and str(current["admitted_proposal_idea_id"]).strip()
+                ),
             )
             next_template = append_prompt_block(
                 next_template,
@@ -8510,6 +8535,8 @@ def run_hitl_autoresearch_loop(
         *,
         approved_proposal: str,
         discussion_task_id: str,
+        assigned_candidate_sha: str,
+        autoresearch_attempt: bool,
     ) -> tuple[str, Dict[str, Any]]:
         from agents.planning_discussion import planning_discussion_prompt_template
 
@@ -8518,6 +8545,8 @@ def run_hitl_autoresearch_loop(
             work_dir=work_dir,
             approved_proposal=approved_proposal,
             discussion_task_id=discussion_task_id,
+            assigned_candidate_sha=assigned_candidate_sha,
+            autoresearch_attempt=autoresearch_attempt,
             templates_dir=Path(templates_dir),
             hitl_mode=normalize_hitl_mode(hitl_mode).value,
             provider=provider,
