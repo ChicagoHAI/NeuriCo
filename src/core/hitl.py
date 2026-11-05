@@ -5064,27 +5064,28 @@ class HitlRuntime:
                     )["result"]
                 except ValueError as exc:
                     raise HitlValidationError(str(exc)) from exc
-                capacity = self._tool_context.get(
-                    "planning_discussion_reopen_capacity_validator"
-                )
-                if not callable(capacity):
-                    raise HitlValidationError(
-                        "Collaborative planning has no reopen capacity validator."
+                if session.get("phase") == "final_writing":
+                    capacity = self._tool_context.get(
+                        "planning_discussion_reopen_capacity_validator"
                     )
-                try:
-                    capacity(
-                        {
-                            "record_id": record_id,
-                            "result": result,
-                            "feedback_record": source["feedback_record"],
-                        }
-                    )
-                except ValueError as exc:
-                    raise HitlValidationError(
-                        "HITL_ERROR discussion_context_too_large\n"
-                        "The next planning response round and later revision cannot "
-                        "fit the verified worker context. Revise the plan directly."
-                    ) from exc
+                    if not callable(capacity):
+                        raise HitlValidationError(
+                            "Collaborative planning has no reopen capacity validator."
+                        )
+                    try:
+                        capacity(
+                            {
+                                "record_id": record_id,
+                                "result": result,
+                                "feedback_record": source["feedback_record"],
+                            }
+                        )
+                    except ValueError as exc:
+                        raise HitlValidationError(
+                            "HITL_ERROR discussion_context_too_large\n"
+                            "The next planning response round and later revision cannot "
+                            "fit the verified worker context. Revise the plan directly."
+                        ) from exc
                 state = HitlRuntimeState(self.work_dir)
                 try:
                     state.begin_planning_discussion_reopen(
