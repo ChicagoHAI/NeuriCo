@@ -2819,6 +2819,28 @@ class HitlRuntimeState:
             )
         return parent, preparation, candidate
 
+    def _record_planning_discussion_phase_unlocked(
+        self,
+        session: Dict[str, Any],
+    ) -> None:
+        """Record the current planning boundary through the shared UI event path."""
+
+        phase = str(session["phase"])
+        round_ordinal = int(session["round_ordinal"])
+        if phase == "final_writing":
+            activity = "working"
+        elif phase in {"initial", "opening"}:
+            activity = f"discussion_{phase}"
+        elif phase == "reopen_pending":
+            activity = f"discussion_reopen_pending_{round_ordinal + 1}"
+        else:
+            activity = f"discussion_{phase}_{round_ordinal}"
+        self._record_phase_transition_unlocked(
+            stage="experiment_runner",
+            phase="plan",
+            activity=activity,
+        )
+
     @staticmethod
     def _require_terminal_proposal_for_planning(
         action: Dict[str, Any],
@@ -3111,6 +3133,7 @@ class HitlRuntimeState:
             action["planning_discussion"] = session
             action.pop(PENDING_PLANNING_POLICY_FIELD, None)
             self._state["next_autoresearch_action"] = action
+            self._record_planning_discussion_phase_unlocked(session)
             self._save_unlocked()
             return self._copy(session)
 
@@ -3252,6 +3275,7 @@ class HitlRuntimeState:
                 raise HitlRuntimeStateError(str(exc)) from exc
             action["planning_discussion"] = session
             self._state["next_autoresearch_action"] = action
+            self._record_planning_discussion_phase_unlocked(session)
             self._save_unlocked()
             return self._copy(session)
 
@@ -3332,6 +3356,7 @@ class HitlRuntimeState:
                 raise HitlRuntimeStateError(str(exc)) from exc
             action["planning_discussion"] = session
             self._state["next_autoresearch_action"] = action
+            self._record_planning_discussion_phase_unlocked(session)
             self._save_unlocked()
             return self._copy(session)
 
@@ -3530,6 +3555,7 @@ class HitlRuntimeState:
                 raise HitlRuntimeStateError(str(exc)) from exc
             action["planning_discussion"] = session
             self._state["next_autoresearch_action"] = action
+            self._record_planning_discussion_phase_unlocked(session)
             self._save_unlocked()
             return self._copy(session)
 
@@ -3660,6 +3686,7 @@ class HitlRuntimeState:
             self._state["pending_worker_command"] = None
             self._state["worker_continuation"] = None
             self._state["next_autoresearch_action"] = action
+            self._record_planning_discussion_phase_unlocked(session)
             self._save_unlocked()
             return self._copy(session)
 
