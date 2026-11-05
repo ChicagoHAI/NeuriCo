@@ -6192,6 +6192,8 @@ class HitlAutoResearchController:
             attempt_dir=attempt_dir,
             admitted_proposal_idea_id=admitted_proposal_idea_id,
         )
+        if session.get("phase") == "final_writing":
+            return session
         state = HitlRuntimeState(self.work_dir)
         action = state.snapshot().get("next_autoresearch_action")
         preparation_attempt_id = str((action or {}).get("attempt_id", "")).strip()
