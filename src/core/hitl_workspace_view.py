@@ -997,8 +997,9 @@ class HitlWorkspaceView:
             stage_planning_worker_after_plan = bool(
                 continuation_after_plan or pending_after_plan
             )
-            stage_completed = bool(
-                (pipeline.get("stages") or {})
+            initial_stage_completed = bool(
+                stage_planning_owner.get("kind") == "initial_stage"
+                and (pipeline.get("stages") or {})
                 .get(stage_planning_stage, {})
                 .get("status")
                 == "completed"
@@ -1006,7 +1007,10 @@ class HitlWorkspaceView:
             if (
                 stage_planning_status.get("planning_discussion_phase")
                 == "final_writing"
-                and (stage_planning_worker_after_plan or stage_completed)
+                and (
+                    stage_planning_worker_after_plan
+                    or initial_stage_completed
+                )
             ):
                 planning_display_status = {}
         elif (
