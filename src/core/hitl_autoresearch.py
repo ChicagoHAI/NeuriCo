@@ -399,6 +399,7 @@ def run_fresh_hitl_autoresearch_initial_node(
     channel: Optional[Any] = None,
     manager_config: Optional[Dict[str, Any]] = None,
     hitl_mode: HitlMode | str = HitlMode.FULL,
+    planning_mode_config: Optional[PlanningModeConfig] = None,
 ) -> InitialAutoResearchNodeResult:
     """Run the initial scored experiment through the HITL pipeline."""
     from core.pipeline_orchestrator import ResearchPipelineOrchestrator
@@ -431,6 +432,7 @@ def run_fresh_hitl_autoresearch_initial_node(
         hitl_manager_config=manager_config,
         hitl_autoresearch=True,
         hitl_mode=selected_hitl_mode,
+        planning_mode_config=planning_mode_config,
     ).run_pipeline(
         idea=idea,
         provider=provider,

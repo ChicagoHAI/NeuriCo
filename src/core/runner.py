@@ -1321,6 +1321,7 @@ class ResearchRunner:
                             channel=hitl_host.channel,
                             manager_config=hitl_host.manager.config,
                             hitl_mode=selected_hitl_mode,
+                            planning_mode_config=selected_planning_mode,
                         )
                     else:
                         initial_result = construct_fresh_initial_node(**initial_args)

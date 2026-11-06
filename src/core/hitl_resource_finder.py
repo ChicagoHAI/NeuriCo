@@ -11,8 +11,15 @@ from core.hitl import HitlValidationError, RequiredArtifact, verify_required_art
 from core.hitl_stage_runtime import (
     StagePlanningMeetingHandle,
     continue_worker_after_planning_reopens,
+    prepare_stage_planning_meeting_handle,
     run_plan_centered_hitl_stage,
 )
+from core.hitl_planning_mode import (
+    COLLABORATIVE_PLANNING_MODE,
+    PlanningModeConfig,
+    normalize_planning_mode_config,
+)
+from core.hitl_runtime_state import HitlRuntimeState
 from core.research_environment import read_workspace_mode
 
 
@@ -64,6 +71,9 @@ def run_resource_finder_hitl(
     logs_dir: Optional[Path] = None,
     preserve_log_history: bool = False,
     planning_meeting: Optional[StagePlanningMeetingHandle] = None,
+    planning_mode_config: Optional[PlanningModeConfig] = None,
+    planning_meeting_owner: Optional[Dict[str, Any]] = None,
+    planning_meeting_record_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Run the established resource-finder plan/execution/review lifecycle."""
     root = Path(work_dir)
@@ -81,6 +91,53 @@ def run_resource_finder_hitl(
         )
         for phase in ("plan", "execution", "review")
     }
+    planning_factory = None
+    if planning_meeting_owner is not None:
+        attachment = HitlRuntimeState(root).stage_planning_discussion_attachment()
+        selected_planning = normalize_planning_mode_config(planning_mode_config)
+        if attachment is not None:
+            if attachment.get("owner") != planning_meeting_owner:
+                raise RuntimeError(
+                    "Another stage invocation already owns a planning discussion."
+                )
+            meeting_session = dict(attachment["session"])
+            participant_count = int(meeting_session["participant_count"])
+            discussion_rounds = int(meeting_session["max_response_rounds"])
+        elif selected_planning.mode == COLLABORATIVE_PLANNING_MODE:
+            participant_count = int(selected_planning.participant_count or 0)
+            discussion_rounds = int(selected_planning.discussion_rounds or 0)
+        else:
+            participant_count = 0
+            discussion_rounds = 0
+        if participant_count:
+            if planning_meeting_record_root is None:
+                raise RuntimeError(
+                    "Collaborative resource planning requires its record directory."
+                )
+            from agents.planning_discussion import stage_planning_discussion_subject
+
+            def planning_factory() -> StagePlanningMeetingHandle:
+                return prepare_stage_planning_meeting_handle(
+                    runtime=runtime,
+                    idea=idea,
+                    owner=planning_meeting_owner,
+                    subject=stage_planning_discussion_subject(
+                        pipeline_stage=runtime.pipeline_stage,
+                        planning_context=worker_prompt_contexts["plan"],
+                    ),
+                    participant_count=participant_count,
+                    max_response_rounds=discussion_rounds,
+                    record_root=planning_meeting_record_root,
+                    worker_prompt_contexts=worker_prompt_contexts,
+                    provenance=provenance,
+                    provider=provider,
+                    templates_dir=templates_dir,
+                    timeout=timeout,
+                    full_permissions=full_permissions,
+                )
+
+            if attachment is not None and planning_meeting is None:
+                planning_meeting = planning_factory()
 
     def validate_outputs() -> Dict[str, Any]:
         return validate_resource_finder_outputs(root)
@@ -161,4 +218,5 @@ def run_resource_finder_hitl(
         provenance=provenance,
         force_fresh_plan=force_fresh_plan,
         planning_meeting=planning_meeting,
+        planning_meeting_factory=planning_factory,
     )

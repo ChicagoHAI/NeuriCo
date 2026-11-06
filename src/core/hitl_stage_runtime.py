@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional
+import threading
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
 from core.hitl_run_control import (
@@ -23,6 +24,7 @@ WorkerLauncher = Callable[..., Dict[str, Any]]
 StageResultHandler = Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]
 StageFailureHandler = Callable[[Dict[str, Any]], Dict[str, Any]]
 WorkerResultAfterExit = Callable[[Dict[str, Any]], Dict[str, Any]]
+StagePlanningMeetingFactory = Callable[[], "StagePlanningMeetingHandle"]
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,8 @@ class StagePlanningMeetingHandle:
     coordinator: Any
     worker_prompt_contexts: Dict[str, str]
     provenance: Dict[str, Any]
+    templates_dir: Optional[Path] = None
+    provider: str = "claude"
 
     def _participant_prompt(self, task_id: str) -> tuple[str, Dict[str, Any]]:
         from agents.planning_discussion import planning_discussion_prompt_template
@@ -50,7 +54,9 @@ class StagePlanningMeetingHandle:
             discussion_task_id=task_id,
             assigned_candidate_sha="",
             autoresearch_attempt=False,
+            templates_dir=self.templates_dir,
             hitl_mode=self.runtime.hitl_mode.value,
+            provider=self.provider,
         )
         background = dict(inputs["public_context"])
         background["whiteboard_active_tips_md"] = inputs[
@@ -163,6 +169,457 @@ class StagePlanningMeetingHandle:
         return self.coordinator.run(session)
 
 
+def prepare_stage_planning_meeting_handle(
+    *,
+    runtime: Any,
+    idea: Dict[str, Any],
+    owner: Mapping[str, Any],
+    subject: Mapping[str, Any],
+    participant_count: int,
+    max_response_rounds: int,
+    record_root: Path,
+    worker_prompt_contexts: Dict[str, str],
+    provenance: Optional[Dict[str, Any]],
+    provider: str,
+    templates_dir: Path,
+    timeout: Optional[int],
+    full_permissions: bool,
+) -> StagePlanningMeetingHandle:
+    """Create or bind one stage meeting through the shared planning services."""
+
+    from agents.planning_discussion import (
+        planning_discussion_prompt_template,
+        planning_discussion_task_prompt_suffix,
+        planning_final_owner_prompt_template,
+        run_planning_discussion_task,
+    )
+    from core.agent_cli import append_prompt_block
+    from core.hitl import HitlRuntime, compose_hitl_worker_prompt
+    from core.hitl_discussion import parse_discussion_task_id
+    from core.hitl_git_state import HitlGitStateStore
+    from core.hitl_paths import HITL_WHITEBOARD_RELATIVE_PATH
+    from core.hitl_planning_discussion import (
+        PlanningDiscussionRecordStore,
+        planning_discussion_reopen_source_idea_ids,
+        planning_discussion_revision_feedback,
+        planning_discussion_task_id,
+        prepare_collaborative_planning_meeting,
+        prepare_stage_planning_discussion,
+        require_initial_planning_discussion_capacity,
+    )
+    from core.hitl_run_control import raise_if_hitl_run_stop_requested
+    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+    normalized_provenance = dict(provenance or {})
+    record_store = PlanningDiscussionRecordStore.from_root(Path(record_root))
+    whiteboard_path = Path(runtime.work_dir) / Path(HITL_WHITEBOARD_RELATIVE_PATH)
+    whiteboard_sha: Optional[str] = None
+    if whiteboard_path.is_file():
+        git_state = HitlGitStateStore(runtime.work_dir)
+        whiteboard_sha = git_state.hitl_autoresearch_whiteboard_history_sha()
+        if not git_state.hitl_autoresearch_whiteboard_matches_commit(whiteboard_sha):
+            raise RuntimeError(
+                "Collaborative planning does not match its current whiteboard boundary."
+            )
+    idea_numbers = [
+        int(idea_id[1:])
+        for record in runtime.log.records()
+        if (idea_id := str(record.get("idea_id", "")).strip()).startswith("I")
+        and idea_id[1:].isdigit()
+    ]
+    state_binding, session = prepare_stage_planning_discussion(
+        runtime=runtime,
+        owner=owner,
+        participant_count=participant_count,
+        max_response_rounds=max_response_rounds,
+        record_store=record_store,
+        whiteboard_boundary_sha=whiteboard_sha,
+        base_idea_number=max(idea_numbers, default=0),
+    )
+
+    scope = session.get("workspace_fingerprint_scope")
+    expected_fingerprint = str(session.get("workspace_fingerprint", "")).strip()
+    if (
+        not expected_fingerprint
+        or HitlWorkspaceWriteGuard.public_fingerprint(
+            runtime.work_dir,
+            scope=scope,
+        )
+        != expected_fingerprint
+    ):
+        raise RuntimeError(
+            "Stage planning workspace no longer matches its discussion boundary."
+        )
+    public_guard = HitlWorkspaceWriteGuard.capture_public(
+        runtime.work_dir,
+        scope=scope,
+    )
+    whiteboard_guard = HitlWorkspaceWriteGuard.capture_paths(
+        runtime.work_dir,
+        [HITL_WHITEBOARD_RELATIVE_PATH.as_posix()],
+    )
+    boundary_fingerprint = expected_fingerprint
+
+    def require_boundary() -> Dict[str, Any]:
+        nonlocal public_guard, whiteboard_guard, boundary_fingerprint
+        current_session = state_binding.snapshot()
+        current_fingerprint = str(
+            current_session.get("workspace_fingerprint", "")
+        ).strip()
+        current_scope = current_session.get("workspace_fingerprint_scope")
+        if current_fingerprint != boundary_fingerprint:
+            if (
+                not current_fingerprint
+                or HitlWorkspaceWriteGuard.public_fingerprint(
+                    runtime.work_dir,
+                    scope=current_scope,
+                )
+                != current_fingerprint
+            ):
+                return {
+                    "valid": False,
+                    "issues": [
+                        "The planning workspace no longer matches its reopened boundary."
+                    ],
+                }
+            public_guard = HitlWorkspaceWriteGuard.capture_public(
+                runtime.work_dir,
+                scope=current_scope,
+            )
+            whiteboard_guard = HitlWorkspaceWriteGuard.capture_paths(
+                runtime.work_dir,
+                [HITL_WHITEBOARD_RELATIVE_PATH.as_posix()],
+            )
+            boundary_fingerprint = current_fingerprint
+        issues: list[str] = []
+        for validation in (
+            public_guard.require_unchanged(),
+            whiteboard_guard.require_unchanged(),
+        ):
+            if not bool(validation.get("valid")):
+                raw = validation.get("issues", [])
+                issues.extend(
+                    str(item)
+                    for item in (raw if isinstance(raw, list) else [raw])
+                    if str(item).strip()
+                )
+        boundary = current_session.get("whiteboard_boundary_sha")
+        if boundary is not None:
+            git_state = HitlGitStateStore(runtime.work_dir)
+            if not git_state.hitl_autoresearch_whiteboard_history_contains(
+                str(boundary)
+            ):
+                issues.append(
+                    "The planning whiteboard boundary is no longer in canonical history."
+                )
+            elif not git_state.hitl_autoresearch_whiteboard_matches_commit(
+                str(boundary)
+            ):
+                issues.append(
+                    "The live whiteboard no longer matches the planning boundary."
+                )
+        return {"valid": not issues, "issues": issues}
+
+    initial_boundary = require_boundary()
+    if not initial_boundary["valid"]:
+        raise RuntimeError(
+            "Collaborative planning boundary is invalid: "
+            + "; ".join(initial_boundary["issues"])
+        )
+
+    def render_participant(task_id: str) -> tuple[str, Dict[str, Any]]:
+        prompt, inputs = planning_discussion_prompt_template(
+            idea=idea,
+            work_dir=runtime.work_dir,
+            approved_proposal="",
+            planning_subject=subject,
+            discussion_task_id=task_id,
+            assigned_candidate_sha="",
+            autoresearch_attempt=False,
+            templates_dir=templates_dir,
+            hitl_mode=runtime.hitl_mode.value,
+            provider=provider,
+        )
+        background = dict(inputs["public_context"])
+        background["whiteboard_active_tips_md"] = inputs[
+            "whiteboard_active_tips_md"
+        ]
+        return prompt, background
+
+    def owner_base_prompt(current: Mapping[str, Any]) -> str:
+        feedback = planning_discussion_revision_feedback(
+            session=current,
+            record_store=record_store,
+            idea_records=runtime.log.records(),
+        )
+        phase_prompt = (
+            runtime.plan_revision_prompt_block(feedback)
+            if feedback
+            else runtime.plan_prompt_block()
+        )
+        return compose_hitl_worker_prompt(
+            worker_prompt_contexts,
+            hitl_stage="plan",
+            phase_prompt=phase_prompt,
+        )
+
+    def check_boundary(label: str) -> None:
+        validation = require_boundary()
+        if validation["valid"]:
+            return
+        detail = "; ".join(str(item) for item in validation["issues"])
+        raise RuntimeError(
+            f"{label} crossed the collaborative planning boundary"
+            + (f": {detail}" if detail else ".")
+        )
+
+    def run_task(
+        task_id: str,
+        current: Dict[str, Any],
+        seed_idea_ids: Sequence[str],
+        cancel_event: Optional[threading.Event],
+    ) -> None:
+        task = current.get("tasks", {}).get(task_id)
+        if isinstance(task, dict) and task.get("result_record_id") == task_id:
+            return
+        runtime.require_scoped_task_session_boundary()
+        identity = parse_discussion_task_id(task_id)
+        profile = (
+            "planning_discussion_decision"
+            if identity.phase == "decision"
+            else "planning_discussion_turn"
+        )
+        task_runtime = HitlRuntime(
+            runtime.work_dir,
+            runtime.pipeline_stage,
+            channel=runtime.channel,
+            manager=runtime.manager,
+            use_hitl_autoresearch_whiteboard=(
+                runtime.use_hitl_autoresearch_whiteboard
+            ),
+            hitl_mode=runtime.hitl_mode,
+            tool_scope=task_id,
+        )
+        try:
+            task_runtime.prepare_idea_tool_context(
+                hitl_stage="plan",
+                command_profile=profile,
+                actor=runtime.pipeline_stage,
+                provenance={
+                    **normalized_provenance,
+                    "discussion_turn_id": task_id,
+                },
+                idea_visibility={
+                    "base_idea_number": current["base_idea_number"],
+                    "whiteboard_boundary_sha": current[
+                        "whiteboard_boundary_sha"
+                    ],
+                    "seed_idea_ids": list(seed_idea_ids),
+                },
+                planning_discussion_record_dir=record_store.root,
+                planning_discussion_stage_owner=dict(owner),
+                phase_finish_validator=require_boundary,
+                scoped_task_cancel_event=cancel_event,
+            )
+            task_prompt = planning_discussion_task_prompt_suffix(task_id)
+            next_prompt_template = ""
+            if identity.phase != "initial":
+                participant_count = int(current["participant_count"])
+                round_ordinal = int(current["round_ordinal"])
+                next_task_id = ""
+                if identity.phase == "opening":
+                    next_task_id = planning_discussion_task_id(
+                        "response", participant_ordinal=2, round_ordinal=1
+                    )
+                elif identity.phase == "response":
+                    if identity.participant_ordinal < participant_count:
+                        next_task_id = planning_discussion_task_id(
+                            "response",
+                            participant_ordinal=identity.participant_ordinal + 1,
+                            round_ordinal=round_ordinal,
+                        )
+                    elif round_ordinal < int(current["max_response_rounds"]):
+                        next_task_id = planning_discussion_task_id(
+                            "decision",
+                            participant_ordinal=1,
+                            round_ordinal=round_ordinal,
+                        )
+                elif identity.phase == "decision":
+                    next_task_id = planning_discussion_task_id(
+                        "response",
+                        participant_ordinal=2,
+                        round_ordinal=round_ordinal + 1,
+                    )
+                if next_task_id:
+                    next_template, _ = render_participant(next_task_id)
+                    next_prompt_template = append_prompt_block(
+                        next_template,
+                        planning_discussion_task_prompt_suffix(next_task_id),
+                    )
+            final_prompt_template = planning_final_owner_prompt_template(
+                owner_base_prompt(current)
+            )
+
+            check_boundary(f"Planning discussion task {task_id}")
+            reconciled = task_runtime.reconcile_proposal_discussion_task()
+            if reconciled.get("complete") or reconciled.get("cancelled"):
+                return
+
+            def launch_worker(
+                prompt: str,
+                _log_prefix: str,
+                *,
+                record_continuation: bool,
+            ) -> Dict[str, Any]:
+                if record_continuation:
+                    raise RuntimeError(
+                        "Planning discussion tasks must not record global worker continuation."
+                    )
+                raise_if_hitl_run_stop_requested()
+                check_boundary(f"Planning discussion task {task_id}")
+                if cancel_event is not None and cancel_event.is_set():
+                    return {
+                        "success": False,
+                        "return_code": None,
+                        "timed_out": False,
+                        "stopped": False,
+                        "cancelled": True,
+                        "background_processes_terminated": False,
+                        "provider_process_failed": False,
+                    }
+                return run_planning_discussion_task(
+                    idea=idea,
+                    work_dir=runtime.work_dir,
+                    approved_proposal="",
+                    planning_subject=subject,
+                    discussion_task_id=task_id,
+                    discussion_records=(),
+                    assigned_candidate_sha="",
+                    autoresearch_attempt=False,
+                    prompt_builder=lambda template, background: (
+                        task_runtime.prepare_planning_discussion_prompt(
+                            prompt_template=template,
+                            public_background=background,
+                            next_prompt_template=next_prompt_template,
+                            final_prompt_template=final_prompt_template,
+                        )
+                    ),
+                    task_dir=record_store.tasks_root / task_id,
+                    provider=provider,
+                    env_extra=task_runtime.idea_tool_env(),
+                    templates_dir=templates_dir,
+                    prompt_suffix=prompt,
+                    hitl_mode=runtime.hitl_mode.value,
+                    timeout=timeout,
+                    full_permissions=full_permissions,
+                    cancel_event=cancel_event,
+                    output_prefix=task_id,
+                )
+
+            _result, finish = run_worker_with_replacements(
+                runtime=task_runtime,
+                launch_worker=launch_worker,
+                prompt=task_prompt,
+                log_prefix=task_id.replace("/", "_"),
+                phase="plan",
+                worker_name=identity.display_label,
+                record_continuation=False,
+                result_after_exit=lambda result: (
+                    task_runtime.proposal_discussion_task_result_after_worker_exit(
+                        result,
+                        replacement_prompt=task_prompt,
+                        worker_name=identity.display_label,
+                    )
+                ),
+            )
+            check_boundary(f"Planning discussion task {task_id}")
+        finally:
+            task_runtime.clear_idea_tool_context()
+        if finish.get("cancelled"):
+            return
+        if not finish.get("complete") or not str(
+            finish.get("record_id", "")
+        ).strip():
+            raise RuntimeError(
+                "Planning discussion task ended without a recorded result."
+            )
+
+    def prepare_initial(current: Dict[str, Any]) -> None:
+        participant_count = int(current["participant_count"])
+
+        def full_prompt(task_id: str) -> tuple[str, Dict[str, Any]]:
+            template, background = render_participant(task_id)
+            return (
+                append_prompt_block(
+                    template,
+                    planning_discussion_task_prompt_suffix(task_id),
+                ),
+                background,
+            )
+
+        initial_prompt, background = full_prompt(
+            planning_discussion_task_id(
+                "initial", participant_ordinal=participant_count
+            )
+        )
+        opening_prompt, _ = full_prompt(
+            planning_discussion_task_id("opening", participant_ordinal=1)
+        )
+        response_prompt, _ = full_prompt(
+            planning_discussion_task_id(
+                "response",
+                participant_ordinal=participant_count,
+                round_ordinal=1,
+            )
+        )
+        try:
+            require_initial_planning_discussion_capacity(
+                runtime=runtime,
+                session=current,
+                record_store=record_store,
+                initial_prompt_template=initial_prompt,
+                opening_prompt_template=opening_prompt,
+                response_prompt_template=response_prompt,
+                final_owner_prompt_template=planning_final_owner_prompt_template(
+                    owner_base_prompt(current)
+                ),
+                public_background=background,
+            )
+        except ValueError as exc:
+            from core.hitl import HitlTerminalRuntimeError
+
+            raise HitlTerminalRuntimeError(
+                "Collaborative planning cannot fit its mandatory first segment in "
+                "the verified worker context."
+            ) from exc
+
+    coordinator = prepare_collaborative_planning_meeting(
+        state_binding=state_binding,
+        run_task=run_task,
+        prepare_initial=prepare_initial,
+        check_boundary=check_boundary,
+        reopen_source_idea_ids=lambda current: (
+            planning_discussion_reopen_source_idea_ids(
+                current,
+                record_store.records(),
+            )
+        ),
+        check_stop=raise_if_hitl_run_stop_requested,
+    )
+    return StagePlanningMeetingHandle(
+        runtime=runtime,
+        idea=idea,
+        owner=dict(owner),
+        subject=dict(subject),
+        state_binding=state_binding,
+        record_store=record_store,
+        coordinator=coordinator,
+        worker_prompt_contexts=dict(worker_prompt_contexts),
+        provenance=normalized_provenance,
+        templates_dir=Path(templates_dir),
+        provider=provider,
+    )
+
 def run_worker_with_replacements(
     *,
     runtime: Any,
@@ -265,6 +722,7 @@ def run_plan_centered_hitl_stage(
     provenance: Optional[Dict[str, Any]] = None,
     force_fresh_plan: bool = False,
     planning_meeting: Optional[StagePlanningMeetingHandle] = None,
+    planning_meeting_factory: Optional[StagePlanningMeetingFactory] = None,
 ) -> Dict[str, Any]:
     """Run the shared plan/execution state machine for ordinary HITL stages."""
     # A held request's saved phase takes precedence over plan approval on restart.
@@ -363,6 +821,8 @@ def run_plan_centered_hitl_stage(
         "plan_has_required_approval",
         runtime.plan_has_human_approval,
     )():
+        if planning_meeting is None and planning_meeting_factory is not None:
+            planning_meeting = planning_meeting_factory()
         if planning_meeting is not None:
             planning_meeting.run_or_resume(
                 requires_human_approval=getattr(
