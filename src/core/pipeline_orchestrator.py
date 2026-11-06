@@ -102,6 +102,8 @@ from core.hitl_mode import HitlMode, normalize_hitl_mode
 from core.hitl_paths import hitl_artifact_contract_path
 from core.hitl_stage_runtime import (
     HitlStageRollback,
+    StagePlanningMeetingHandle,
+    continue_worker_after_planning_reopens,
     run_plan_centered_hitl_stage,
     run_worker_with_replacements,
 )
@@ -558,6 +560,15 @@ class ResearchPipelineOrchestrator:
         ref = str(boundary.get("hitl_snapshot_ref", ""))
         if not ref.startswith("refs/neurico/hitl-rollback/"):
             raise RuntimeError("Invalid initial-stage snapshot reference.")
+        stage = str(boundary.get("stage", "")).strip()
+        if stage:
+            HitlRuntimeState(self.work_dir).clear_stage_planning_discussion(
+                owner={
+                    "kind": "initial_stage",
+                    "pipeline_stage": stage,
+                    "rollback_ref": ref,
+                }
+            )
         HitlGitStateStore(self.work_dir).discard(ref)
         artifact_snapshot_id = str(boundary.get("artifact_snapshot_id", "")).strip()
         if artifact_snapshot_id:
@@ -733,6 +744,25 @@ class ResearchPipelineOrchestrator:
                     )
                 return
         rollback.discard(cleanup_label=cleanup_label)
+
+    def _clear_completed_stage_planning_meeting(
+        self,
+        *,
+        stage: str,
+        rollback: HitlStageRollback,
+    ) -> None:
+        """Retire only the meeting owned by this completed stage boundary."""
+
+        runtime_state = HitlRuntimeState(self.work_dir)
+        if runtime_state.stage_planning_discussion_attachment() is None:
+            return
+        runtime_state.clear_stage_planning_discussion(
+            owner={
+                "kind": "initial_stage",
+                "pipeline_stage": stage,
+                "rollback_ref": rollback.hitl_snapshot.ref,
+            }
+        )
 
     def _restore_stage_rollback(
         self, rollback: HitlStageRollback, runtime: HitlRuntime, reason: str
@@ -1667,6 +1697,10 @@ class ResearchPipelineOrchestrator:
             finish: Dict[str, Any],
         ) -> Dict[str, Any]:
             self.state.complete_stage("resource_finder", True, result.get("outputs"))
+            self._clear_completed_stage_planning_meeting(
+                stage="resource_finder",
+                rollback=rollback,
+            )
             discard_completed_rollback_snapshot()
             return {
                 **result,
@@ -2037,6 +2071,7 @@ class ResearchPipelineOrchestrator:
         scoring_enabled: bool = False,
         scorer_timeout: Optional[int] = 600,
         sealed_dir: Optional[Path] = None,
+        planning_meeting: Optional[StagePlanningMeetingHandle] = None,
     ) -> Dict[str, Any]:
         """Run experiment_runner through the plan-centered HITL workflow."""
         print()
@@ -2155,6 +2190,10 @@ class ResearchPipelineOrchestrator:
             self.state.complete_stage("experiment_runner", True, worker_result)
             if self.hitl_autoresearch and isinstance(finish_result.get("scorer_result"), dict):
                 self.state.complete_stage(SCORER_STAGE, True, finish_result["scorer_result"])
+            self._clear_completed_stage_planning_meeting(
+                stage="experiment_runner",
+                rollback=rollback,
+            )
             discard_completed_rollback_snapshot()
             completed = {
                 **worker_result,
@@ -2374,32 +2413,81 @@ class ResearchPipelineOrchestrator:
             )
             if resumed is not None:
                 result, finish = resumed
+                result, finish = continue_worker_after_planning_reopens(
+                    runtime=runtime,
+                    launch_worker=launch_worker,
+                    worker_name="experiment_runner",
+                    plan_log_prefix="hitl/experiment_runner_hitl_plan",
+                    result=result,
+                    finish=finish,
+                    planning_meeting=planning_meeting,
+                    owner_tool_options={
+                        "requires_human_approval": (
+                            runtime.requires_human_plan_approval
+                        ),
+                        "allow_scoring_approval": scoring_enabled,
+                        "phase_finish_validator": artifact_validator,
+                        "scoring_handler": (
+                            score_in_background if scoring_enabled else None
+                        ),
+                        "scoring_repair_cleanup": (
+                            discard_repairable_scoring_handoff
+                            if scoring_enabled
+                            else None
+                        ),
+                    },
+                )
                 return complete_approved_worker(result) if finish.get("approved") else finalize_failed(finish or result)
             plan_approved = runtime.plan_has_required_approval()
 
             if not plan_approved:
-                runtime.prepare_idea_tool_context(
-                    hitl_stage="plan",
-                    actor="experiment_runner",
-                    requires_human_approval=runtime.requires_human_plan_approval,
-                    allow_scoring_approval=scoring_enabled,
-                    phase_finish_validator=artifact_validator,
-                    scoring_handler=score_in_background if scoring_enabled else None,
-                    scoring_repair_cleanup=(
-                        discard_repairable_scoring_handoff if scoring_enabled else None
+                owner_tool_options = {
+                    "requires_human_approval": (
+                        runtime.requires_human_plan_approval
                     ),
-                    worker_prompt_contexts=worker_prompt_contexts,
-                )
+                    "allow_scoring_approval": scoring_enabled,
+                    "phase_finish_validator": artifact_validator,
+                    "scoring_handler": (
+                        score_in_background if scoring_enabled else None
+                    ),
+                    "scoring_repair_cleanup": (
+                        discard_repairable_scoring_handoff
+                        if scoring_enabled
+                        else None
+                    ),
+                }
+                if planning_meeting is not None:
+                    planning_meeting.run_or_resume()
+                    planning_meeting.prepare_owner_tools(**owner_tool_options)
+                    plan_prompt = planning_meeting.owner_prompt()
+                else:
+                    runtime.prepare_idea_tool_context(
+                        hitl_stage="plan",
+                        actor="experiment_runner",
+                        worker_prompt_contexts=worker_prompt_contexts,
+                        **owner_tool_options,
+                    )
+                    plan_prompt = runtime.compose_worker_prompt(
+                        hitl_stage="plan",
+                        phase_prompt=runtime.plan_prompt_block(),
+                    )
                 result, finish = run_worker_with_replacements(
                     runtime=runtime,
                     launch_worker=launch_worker,
                     worker_name="experiment_runner",
-                    prompt=runtime.compose_worker_prompt(
-                        hitl_stage="plan",
-                        phase_prompt=runtime.plan_prompt_block(),
-                    ),
+                    prompt=plan_prompt,
                     log_prefix="hitl/experiment_runner_hitl_plan",
                     phase="stage",
+                )
+                result, finish = continue_worker_after_planning_reopens(
+                    runtime=runtime,
+                    launch_worker=launch_worker,
+                    worker_name="experiment_runner",
+                    plan_log_prefix="hitl/experiment_runner_hitl_plan",
+                    result=result,
+                    finish=finish,
+                    planning_meeting=planning_meeting,
+                    owner_tool_options=owner_tool_options,
                 )
                 if finish and finish.get("approved"):
                     return complete_approved_worker(result)
@@ -2655,6 +2743,7 @@ class ResearchPipelineOrchestrator:
             Callable[[Path], Dict[str, Any]]
         ] = None,
         persist_required_contract: bool = True,
+        planning_meeting: Optional[StagePlanningMeetingHandle] = None,
     ) -> Dict[str, Any]:
         """Run forward rule-maker HITL or reopen its review for scoring repair."""
         print()
@@ -2760,6 +2849,10 @@ class ResearchPipelineOrchestrator:
                         reviewed_scope,
                     )
             self.state.complete_stage(RULE_MAKER_STAGE, True, result.get("outputs"))
+            self._clear_completed_stage_planning_meeting(
+                stage=RULE_MAKER_STAGE,
+                rollback=rollback,
+            )
             discard_completed_rollback_snapshot()
             completed = {
                 **result,
@@ -2815,6 +2908,27 @@ class ResearchPipelineOrchestrator:
             )
             if resumed is not None:
                 result, finish = resumed
+                result, finish = continue_worker_after_planning_reopens(
+                    runtime=runtime,
+                    launch_worker=launch_worker,
+                    worker_name=RULE_MAKER_STAGE,
+                    plan_log_prefix="hitl/rule_maker_hitl_plan",
+                    result=result,
+                    finish=finish,
+                    planning_meeting=planning_meeting,
+                    owner_tool_options={
+                        "requires_human_approval": getattr(
+                            runtime, "requires_human_plan_approval", True
+                        ),
+                        "plan_finish_validator": plan_finish_validator,
+                        "phase_finish_validator": rule_maker_artifact_validator,
+                        "allow_scoring_approval": bool(scoring_handler),
+                        "scoring_handler": scoring_handler,
+                        "scoring_repair_cleanup": scoring_repair_cleanup,
+                        "baseline_construction": baseline_construction,
+                        "baseline_candidate_manifest": baseline_candidate_manifest,
+                    },
+                )
                 return complete_approved(result, finish) if finish.get("approved") else finalize_failed(finish or result)
             if repair_feedback:
                 runtime.prepare_idea_tool_context(
@@ -2861,6 +2975,7 @@ class ResearchPipelineOrchestrator:
                 scoring_repair_cleanup=scoring_repair_cleanup,
                 baseline_construction=baseline_construction,
                 baseline_candidate_manifest=baseline_candidate_manifest,
+                planning_meeting=planning_meeting,
             )
 
         except HitlRunStopRequested:

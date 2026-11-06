@@ -1552,6 +1552,24 @@ def log_frontier_decision_record(
     return log.append(record, idempotent=True)
 
 
+def compose_hitl_worker_prompt(
+    worker_prompt_contexts: Optional[Mapping[str, Any]],
+    *,
+    hitl_stage: str,
+    phase_prompt: str,
+) -> str:
+    """Join one existing stage source context with its HITL phase contract."""
+
+    if not worker_prompt_contexts:
+        return str(phase_prompt)
+    source_context = str(worker_prompt_contexts.get(hitl_stage, "")).strip()
+    if not source_context:
+        raise HitlValidationError(
+            f"HITL worker prompt context is missing for phase {hitl_stage!r}."
+        )
+    return f"{source_context}\n\n{str(phase_prompt).strip()}\n"
+
+
 class HitlRuntime:
     """Small orchestration helper for one plan-centered HITL stage."""
 
@@ -1722,15 +1740,11 @@ class HitlRuntime:
         that do not have an external stage-worker source prompt keep their
         dedicated prompt contract unchanged.
         """
-        contexts = self._tool_context.get("worker_prompt_contexts")
-        if not contexts:
-            return phase_prompt
-        source_context = str(contexts.get(hitl_stage, "")).strip()
-        if not source_context:
-            raise HitlValidationError(
-                f"HITL worker prompt context is missing for phase {hitl_stage!r}."
-            )
-        return f"{source_context}\n\n{phase_prompt.strip()}\n"
+        return compose_hitl_worker_prompt(
+            self._tool_context.get("worker_prompt_contexts"),
+            hitl_stage=hitl_stage,
+            phase_prompt=phase_prompt,
+        )
 
     def proposal_replacement_prompt_block(self, feedback: str) -> str:
         return _load_hitl_template(
@@ -5123,12 +5137,15 @@ class HitlRuntime:
         provenance = pending.get("provenance") if isinstance(pending, dict) else None
         identity = task_context["identity"]
         session = task_context["session"]
+        stage_owner = self._tool_context.get("planning_discussion_stage_owner")
+        expected_provenance = dict(self._tool_context.get("provenance") or {})
+        stage_planning = isinstance(stage_owner, dict)
         request_key = str((pending or {}).get("request_key", "")).strip()
         feedback_ref = str((record or {}).get("idea_id", "")).strip()
         if (
             not isinstance(pending, dict)
             or pending.get("kind") != "phase_finish"
-            or pending.get("pipeline_stage") != "experiment_runner"
+            or pending.get("pipeline_stage") != self.pipeline_stage
             or pending.get("hitl_stage") != "plan"
             or pending.get("status") != "resolved"
             or not isinstance(response, dict)
@@ -5137,12 +5154,21 @@ class HitlRuntime:
             or not request_key
             or not feedback_ref
             or not isinstance(provenance, dict)
-            or str(provenance.get("parent_node_id", "")).strip()
-            != identity["parent_node_sha"]
-            or str(provenance.get("attempt_id", "")).strip()
-            != identity["candidate_attempt_id"]
-            or str(provenance.get("proposal_idea_id", "")).strip()
-            != str(session.get("admitted_proposal_idea_id", "")).strip()
+            or (
+                stage_planning
+                and dict(provenance) != expected_provenance
+            )
+            or (
+                not stage_planning
+                and (
+                    str(provenance.get("parent_node_id", "")).strip()
+                    != identity["parent_node_sha"]
+                    or str(provenance.get("attempt_id", "")).strip()
+                    != identity["candidate_attempt_id"]
+                    or str(provenance.get("proposal_idea_id", "")).strip()
+                    != str(session.get("admitted_proposal_idea_id", "")).strip()
+                )
+            )
         ):
             raise HitlValidationError(
                 "HITL_ERROR planning_reopen_stale\n"
@@ -5155,9 +5181,10 @@ class HitlRuntime:
         )
         if (
             not isinstance(continuation, dict)
-            or continuation.get("pipeline_stage") != "experiment_runner"
+            or continuation.get("pipeline_stage") != self.pipeline_stage
             or continuation.get("hitl_stage") != "plan"
-            or continuation.get("actor") != "comment_handler"
+            or continuation.get("actor")
+            != str(self._tool_context.get("actor", self.pipeline_stage))
             or continuation_provenance != provenance
         ):
             raise HitlValidationError(
@@ -5193,15 +5220,19 @@ class HitlRuntime:
                 "The reviewed plan or workspace has changed. Continue the existing "
                 "direct revision; reopening is available only before editing."
             )
-        from core.hitl_git_state import HitlGitStateStore
+        whiteboard_sha = session.get("whiteboard_boundary_sha")
+        if whiteboard_sha is not None:
+            from core.hitl_git_state import HitlGitStateStore
 
-        git_state = HitlGitStateStore(self.work_dir)
-        whiteboard_sha = git_state.hitl_autoresearch_whiteboard_history_sha()
-        if not git_state.hitl_autoresearch_whiteboard_matches_commit(whiteboard_sha):
-            raise HitlValidationError(
-                "HITL_ERROR planning_reopen_boundary\n"
-                "The live whiteboard does not match its canonical history."
-            )
+            git_state = HitlGitStateStore(self.work_dir)
+            whiteboard_sha = git_state.hitl_autoresearch_whiteboard_history_sha()
+            if not git_state.hitl_autoresearch_whiteboard_matches_commit(
+                whiteboard_sha
+            ):
+                raise HitlValidationError(
+                    "HITL_ERROR planning_reopen_boundary\n"
+                    "The live whiteboard does not match its canonical history."
+                )
         return {
             "worker_request_key": request_key,
             "feedback_ref": feedback_ref,
@@ -5218,10 +5249,9 @@ class HitlRuntime:
             with self._tool_lock:
                 from core.hitl_discussion import reopen_discussion_record_id
                 from core.hitl_planning_discussion import (
-                    PlanningDiscussionRecordStore,
                     normalize_planning_discussion_record,
                 )
-                from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+                from core.hitl_runtime_state import HitlRuntimeStateError
 
                 task_context = self._planning_discussion_final_owner_state_context()
                 session = task_context["session"]
@@ -5271,20 +5301,21 @@ class HitlRuntime:
                             "The next planning response round and later revision cannot "
                             "fit the verified worker context. Revise the plan directly."
                         ) from exc
-                state = HitlRuntimeState(self.work_dir)
                 try:
-                    state.begin_planning_discussion_reopen(
-                        **task_context["identity"],
+                    task_context["planning_binding"].begin_reopen(
                         worker_request_key=source["worker_request_key"],
                         feedback_ref=source["feedback_ref"],
                         reopen_record_id=record_id,
                         result=result,
                     )
-                    PlanningDiscussionRecordStore(
-                        Path(self._tool_context["planning_discussion_attempt_dir"])
-                    ).append(record_id=record_id, kind="reopen", result=result)
-                    state.complete_planning_discussion_reopen_finalization(
-                        **task_context["identity"],
+                    self._planning_discussion_record_store().append(
+                        record_id=record_id,
+                        kind="reopen",
+                        result=result,
+                    )
+                    task_context[
+                        "planning_binding"
+                    ].complete_reopen_finalization(
                         reopen_record_id=record_id,
                         result=result,
                     )
@@ -5318,8 +5349,7 @@ class HitlRuntime:
         """Finish an accepted planning reopen append after interruption."""
 
         with self._tool_lock:
-            from core.hitl_planning_discussion import PlanningDiscussionRecordStore
-            from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+            from core.hitl_runtime_state import HitlRuntimeStateError
 
             task_context = self._planning_discussion_final_owner_state_context()
             session = task_context["session"]
@@ -5331,9 +5361,7 @@ class HitlRuntime:
                     "Collaborative planning has no accepted reopen handoff to recover."
                 )
             record_id = str(handoff.get("reopen_record_id", "")).strip()
-            store = PlanningDiscussionRecordStore(
-                Path(self._tool_context["planning_discussion_attempt_dir"])
-            )
+            store = self._planning_discussion_record_store()
             pending = handoff.get("pending_finalization")
             if pending is not None:
                 try:
@@ -5342,10 +5370,9 @@ class HitlRuntime:
                         kind="reopen",
                         result=pending,
                     )
-                    HitlRuntimeState(
-                        self.work_dir
-                    ).complete_planning_discussion_reopen_finalization(
-                        **task_context["identity"],
+                    task_context[
+                        "planning_binding"
+                    ].complete_reopen_finalization(
                         reopen_record_id=record_id,
                         result=record["result"],
                     )
@@ -5366,7 +5393,7 @@ class HitlRuntime:
     def prepare_planning_discussion_reopen_transfer(
         self,
         reopen_record_id: str,
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Any]:
         """Revalidate the reviewed plan boundary before ownership transfer."""
 
         with self._tool_lock:

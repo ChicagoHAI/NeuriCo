@@ -950,6 +950,130 @@ def apply_planning_discussion_decision_to_session(
     return session
 
 
+def begin_planning_discussion_reopen_in_session(
+    session: dict[str, Any],
+    *,
+    handoff: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist one normalized formal-owner handoff in either state envelope."""
+
+    reopen_record = str(handoff.get("reopen_record_id", "")).strip()
+    reopen = parse_reopen_discussion_record_id(reopen_record)
+    normalized = dict(handoff)
+    if "pending_finalization" in normalized:
+        normalized["pending_finalization"] = normalize_planning_discussion_record(
+            reopen_record,
+            "reopen",
+            normalized["pending_finalization"],
+        )["result"]
+    if session["phase"] == "reopen_pending":
+        existing = session.get("reopen_handoff")
+        if existing == normalized or (
+            isinstance(existing, dict)
+            and existing.get("pending_finalization") is None
+            and {
+                key: existing.get(key)
+                for key in normalized
+                if key != "pending_finalization"
+            }
+            == {
+                key: value
+                for key, value in normalized.items()
+                if key != "pending_finalization"
+            }
+        ):
+            return session
+        raise ValueError("Planning discussion already owns a different reopen handoff")
+    next_round = int(session["round_ordinal"]) + 1
+    if (
+        session["phase"] != "final_writing"
+        or next_round > int(session["max_response_rounds"])
+        or reopen.round_ordinal != next_round
+    ):
+        raise ValueError("Planning discussion cannot reopen from this round")
+    session["phase"] = "reopen_pending"
+    session["reopen_handoff"] = normalized
+    validate_planning_discussion_envelope(session)
+    return session
+
+
+def complete_planning_discussion_reopen_in_session(
+    session: dict[str, Any],
+    *,
+    reopen_record_id: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Commit the public reopen record reference in either state envelope."""
+
+    record_id = str(reopen_record_id).strip()
+    normalized = normalize_planning_discussion_record(
+        record_id,
+        "reopen",
+        result,
+    )["result"]
+    handoff = session.get("reopen_handoff")
+    if (
+        session.get("phase") != "reopen_pending"
+        or not isinstance(handoff, dict)
+        or handoff.get("reopen_record_id") != record_id
+    ):
+        raise ValueError("Planning discussion reopen finalization identity is stale")
+    pending = handoff.get("pending_finalization")
+    if pending is None:
+        return session
+    if pending != normalized:
+        raise ValueError(
+            "Planning discussion reopen finalization conflicts with durable intent"
+        )
+    handoff.pop("pending_finalization", None)
+    validate_planning_discussion_envelope(session)
+    return session
+
+
+def apply_planning_discussion_reopen_to_session(
+    session: dict[str, Any],
+    *,
+    reopen_record_id: str,
+    whiteboard_boundary_sha: str | None,
+) -> dict[str, Any]:
+    """Transfer a settled formal owner into the next shared response round."""
+
+    reopen = parse_reopen_discussion_record_id(reopen_record_id)
+    if (
+        session["phase"] == "response"
+        and session["round_ordinal"] == reopen.round_ordinal
+        and session["whiteboard_boundary_sha"] == whiteboard_boundary_sha
+    ):
+        return session
+    handoff = session.get("reopen_handoff")
+    if (
+        session.get("phase") != "reopen_pending"
+        or not isinstance(handoff, dict)
+        or handoff.get("pending_finalization") is not None
+        or handoff.get("reopen_record_id") != reopen.record_id
+        or reopen.round_ordinal != int(session["round_ordinal"]) + 1
+    ):
+        raise ValueError("Planning discussion reopen handoff identity is stale")
+    for task_id in planning_discussion_response_task_ids(
+        reopen.round_ordinal,
+        int(session["participant_count"]),
+    ):
+        session["tasks"][task_id] = {
+            "kind": "contribution",
+            "result_record_id": None,
+        }
+    session["phase"] = "response"
+    session["round_ordinal"] = reopen.round_ordinal
+    session["workspace_fingerprint"] = handoff["workspace_fingerprint"]
+    session["workspace_fingerprint_scope"] = handoff[
+        "workspace_fingerprint_scope"
+    ]
+    session["whiteboard_boundary_sha"] = whiteboard_boundary_sha
+    session.pop("reopen_handoff", None)
+    validate_planning_discussion_envelope(session)
+    return session
+
+
 def record_planning_discussion_provider_result_in_session(
     session: dict[str, Any],
     *,
@@ -1283,6 +1407,198 @@ def require_initial_planning_discussion_capacity(
             reserve_contributions=reserve,
             record_store=record_store,
         )
+
+
+def planning_final_owner_prompt_composer(
+    *,
+    runtime: Any,
+    state_binding: Any,
+    record_store: PlanningDiscussionRecordStore,
+    public_background: Callable[[], Mapping[str, Any]],
+    check_stop: Callable[[], None],
+) -> Callable[..., str]:
+    """Insert one bounded meeting context into an existing owner prompt."""
+
+    summarize_method = getattr(runtime.manager, "summarize_planning_discussion", None)
+
+    def build(
+        prompt_template: str,
+        *,
+        allow_reopen: bool = False,
+        reopen_source_idea_ids: Sequence[str] = (),
+    ) -> str:
+        from agents.planning_discussion import planning_final_owner_prompt_template
+        from core.hitl import HitlIdeaLog
+        from core.hitl_run_control import current_hitl_run_budget_prompt
+
+        check_stop()
+        current = state_binding.snapshot()
+        if current.get("phase") != "final_writing":
+            raise RuntimeError(
+                "Collaborative planning final-owner context became stale."
+            )
+        background = dict(public_background())
+        applied_source_ids = planning_discussion_reopen_source_idea_ids(
+            current,
+            record_store.records(),
+        )
+        requested_source_ids = tuple(
+            dict.fromkeys(
+                [
+                    *applied_source_ids,
+                    *(str(item).strip() for item in reopen_source_idea_ids),
+                ]
+            )
+        )
+        try:
+            source_records = HitlIdeaLog.premise_closure(
+                runtime.log.records(),
+                seed_idea_ids=requested_source_ids,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "Planning discussion reopening references unavailable feedback."
+            ) from exc
+
+        def summarize(
+            summary_background: dict[str, Any],
+            prior_summary: str,
+            records: list[dict[str, Any]],
+        ) -> str:
+            if not callable(summarize_method):
+                raise ValueError(
+                    "Planning discussion compaction requires the configured HITL manager."
+                )
+            return str(
+                summarize_method(
+                    public_background=summary_background,
+                    prior_summary=prior_summary,
+                    records=records,
+                )
+            )
+
+        def current_session() -> dict[str, Any]:
+            check_stop()
+            value = state_binding.snapshot()
+            if value.get("phase") != "final_writing":
+                raise RuntimeError(
+                    "Collaborative planning final-owner context became stale."
+                )
+            return value
+
+        return prepare_planning_discussion_prompt(
+            store=record_store,
+            session=current,
+            prompt_template=planning_final_owner_prompt_template(prompt_template),
+            public_background=background,
+            runtime_budget_prompt=current_hitl_run_budget_prompt(runtime.work_dir),
+            summarize=summarize if callable(summarize_method) else None,
+            current_session=current_session,
+            allow_reopen=bool(allow_reopen),
+            reopen_source_ideas=source_records,
+        )
+
+    return build
+
+
+def planning_discussion_reopen_capacity_validator(
+    *,
+    runtime: Any,
+    state_binding: Any,
+    record_store: PlanningDiscussionRecordStore,
+    render_participant_prompt: Callable[
+        [str], tuple[str, Mapping[str, Any]]
+    ],
+    render_owner_revision_prompt: Callable[[str], str],
+) -> Callable[[dict[str, Any]], None]:
+    """Build the exact pre-mutation capacity check for one meeting reopen."""
+
+    def validate(request: dict[str, Any]) -> None:
+        from agents.planning_discussion import (
+            planning_discussion_task_prompt_suffix,
+            planning_final_owner_prompt_template,
+        )
+        from core.agent_cli import append_prompt_block
+        from core.hitl import HitlIdeaLog
+
+        current = state_binding.snapshot()
+        projected, missing = project_next_planning_discussion_response(current)
+        feedback_record = request.get("feedback_record")
+        if not isinstance(feedback_record, dict):
+            raise ValueError("Planning reopen capacity requires its feedback record.")
+        feedback = str(
+            feedback_record.get("manager_feedback")
+            or feedback_record.get("human_feedback")
+            or ""
+        ).strip()
+        if not feedback:
+            raise ValueError("Planning reopen feedback is empty.")
+        source_records = HitlIdeaLog.premise_closure(
+            runtime.log.records(),
+            seed_idea_ids=[str(feedback_record.get("idea_id", "")).strip()],
+        )
+        next_task_id = planning_discussion_task_id(
+            "response",
+            participant_ordinal=2,
+            round_ordinal=int(projected["round_ordinal"]),
+        )
+        next_template, background = render_participant_prompt(next_task_id)
+        next_template = append_prompt_block(
+            next_template,
+            planning_discussion_task_prompt_suffix(next_task_id),
+        )
+        revision_template = planning_final_owner_prompt_template(
+            render_owner_revision_prompt(feedback)
+        )
+        additional = {
+            "record_id": str(request.get("record_id", "")).strip(),
+            "kind": "reopen",
+            "result": dict(request.get("result") or {}),
+        }
+        runtime._require_planning_discussion_capacity(
+            projected_session=projected,
+            prompt_templates=(next_template, revision_template),
+            public_background=dict(background),
+            reserve_contributions=missing,
+            additional_records=(additional,),
+            record_store=record_store,
+            reopen_source_ideas=source_records,
+        )
+
+    return validate
+
+
+def planning_discussion_revision_feedback(
+    *,
+    session: Mapping[str, Any],
+    record_store: PlanningDiscussionRecordStore,
+    idea_records: Sequence[Mapping[str, Any]],
+) -> str:
+    """Return the manager feedback referenced by the latest applied reopen."""
+
+    source_ids = planning_discussion_reopen_source_idea_ids(
+        session,
+        record_store.records(),
+    )
+    if not source_ids:
+        return ""
+    feedback_id = source_ids[-1]
+    record = next(
+        (
+            item
+            for item in idea_records
+            if str(item.get("idea_id", "")).strip() == feedback_id
+        ),
+        None,
+    )
+    if not isinstance(record, Mapping):
+        raise RuntimeError("Collaborative planning revision lost its feedback record.")
+    feedback = str(
+        record.get("manager_feedback") or record.get("human_feedback") or ""
+    ).strip()
+    if not feedback:
+        raise RuntimeError("Collaborative planning revision feedback is empty.")
+    return feedback
 
 
 def project_next_planning_discussion_response(

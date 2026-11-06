@@ -6476,103 +6476,27 @@ class HitlAutoResearchController:
             "preparation_attempt_id": str(action["attempt_id"]),
             "candidate_attempt_id": Path(attempt_dir).name,
         }
-        manager = self._proposal_hitl_runtime().manager
-        summarize_method = getattr(manager, "summarize_planning_discussion", None)
+        from agents.autoresearch_proposer import collect_public_proposal_context
+        from core.hitl_planning_discussion import (
+            PlanningDiscussionRecordStore,
+            planning_final_owner_prompt_composer,
+        )
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
-        def build(
-            prompt_template: str,
-            *,
-            allow_reopen: bool = False,
-            reopen_source_idea_ids: Sequence[str] = (),
-        ) -> str:
-            from agents.autoresearch_proposer import collect_public_proposal_context
-            from agents.planning_discussion import planning_final_owner_prompt_template
-            from core.hitl_planning_discussion import (
-                PlanningDiscussionRecordStore,
-                planning_discussion_reopen_source_idea_ids,
-                prepare_planning_discussion_prompt,
-            )
-            from core.hitl_run_control import (
-                current_hitl_run_budget_prompt,
-                raise_if_hitl_run_stop_requested,
-            )
-
-            raise_if_hitl_run_stop_requested()
-            current = HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
-                **identity
-            )
-            if current.get("phase") != "final_writing":
-                raise RuntimeError(
-                    "Collaborative planning final-owner context became stale."
-                )
-            background = collect_public_proposal_context(
+        runtime = self._proposal_hitl_runtime()
+        return planning_final_owner_prompt_composer(
+            runtime=runtime,
+            state_binding=HitlRuntimeState(
+                self.work_dir
+            ).bind_candidate_planning_discussion(**identity),
+            record_store=PlanningDiscussionRecordStore(attempt_dir),
+            public_background=lambda: collect_public_proposal_context(
                 self.work_dir,
                 include_attempt_history=False,
                 hitl_autoresearch_whiteboard=True,
-            )
-            store = PlanningDiscussionRecordStore(attempt_dir)
-            applied_source_ids = planning_discussion_reopen_source_idea_ids(
-                current, store.records()
-            )
-            requested_source_ids = tuple(
-                dict.fromkeys(
-                    [
-                        *applied_source_ids,
-                        *(str(item).strip() for item in reopen_source_idea_ids),
-                    ]
-                )
-            )
-            try:
-                source_records = HitlIdeaLog.premise_closure(
-                    self._proposal_hitl_runtime().log.records(),
-                    seed_idea_ids=requested_source_ids,
-                )
-            except ValueError as exc:
-                raise RuntimeError(
-                    "Planning discussion reopening references unavailable feedback."
-                ) from exc
-
-            def summarize(
-                public_background: Dict[str, Any],
-                prior_summary: str,
-                records: List[Dict[str, Any]],
-            ) -> str:
-                if not callable(summarize_method):
-                    raise ValueError(
-                        "Planning discussion compaction requires the configured HITL manager."
-                    )
-                return str(
-                    summarize_method(
-                        public_background=public_background,
-                        prior_summary=prior_summary,
-                        records=records,
-                    )
-                )
-
-            def current_session() -> Dict[str, Any]:
-                raise_if_hitl_run_stop_requested()
-                value = HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
-                    **identity
-                )
-                if value.get("phase") != "final_writing":
-                    raise RuntimeError(
-                        "Collaborative planning final-owner context became stale."
-                    )
-                return value
-
-            return prepare_planning_discussion_prompt(
-                store=store,
-                session=current,
-                prompt_template=planning_final_owner_prompt_template(prompt_template),
-                public_background=background,
-                runtime_budget_prompt=current_hitl_run_budget_prompt(self.work_dir),
-                summarize=summarize if callable(summarize_method) else None,
-                current_session=current_session,
-                allow_reopen=bool(allow_reopen),
-                reopen_source_ideas=source_records,
-            )
-
-        return build
+            ),
+            check_stop=raise_if_hitl_run_stop_requested,
+        )
 
     def _collaborative_planning_reopen_capacity_validator(
         self,
@@ -6594,50 +6518,28 @@ class HitlAutoResearchController:
             "preparation_attempt_id": str(action["attempt_id"]),
             "candidate_attempt_id": Path(attempt_dir).name,
         }
+        from core.hitl_planning_discussion import (
+            PlanningDiscussionRecordStore,
+            planning_discussion_reopen_capacity_validator,
+        )
 
-        def validate(request: Dict[str, Any]) -> None:
-            from agents.planning_discussion import (
-                planning_discussion_task_prompt_suffix,
-                planning_final_owner_prompt_template,
-            )
-            from core.agent_cli import append_prompt_block
-            from core.hitl_planning_discussion import (
-                PlanningDiscussionRecordStore,
-                planning_discussion_task_id,
-                project_next_planning_discussion_response,
-            )
+        binding = HitlRuntimeState(self.work_dir).bind_candidate_planning_discussion(
+            **identity
+        )
+        owner = self._proposal_hitl_runtime()
 
-            current = HitlRuntimeState(self.work_dir).planning_discussion_snapshot(
-                **identity
-            )
-            projected, missing = project_next_planning_discussion_response(current)
-            feedback_record = request.get("feedback_record")
-            if not isinstance(feedback_record, dict):
-                raise ValueError("Planning reopen capacity requires its feedback record.")
-            feedback = str(
-                feedback_record.get("manager_feedback")
-                or feedback_record.get("human_feedback")
-                or ""
-            ).strip()
-            if not feedback:
-                raise ValueError("Planning reopen feedback is empty.")
-            source_records = HitlIdeaLog.premise_closure(
-                self._proposal_hitl_runtime().log.records(),
-                seed_idea_ids=[str(feedback_record.get("idea_id", "")).strip()],
-            )
-            next_task_id = planning_discussion_task_id(
-                "response",
-                participant_ordinal=2,
-                round_ordinal=int(projected["round_ordinal"]),
-            )
+        def render_participant_prompt(
+            task_id: str,
+        ) -> tuple[str, Dict[str, Any]]:
             renderer = self.planning_discussion_prompt_template_renderer
             if not callable(renderer):
                 raise ValueError("Planning reopen has no prompt renderer.")
-            next_template, background = renderer(
+            current = binding.snapshot()
+            return renderer(
                 approved_proposal=self._proposal_text_for(
                     str(current["admitted_proposal_idea_id"])
                 ),
-                discussion_task_id=next_task_id,
+                discussion_task_id=task_id,
                 assigned_candidate_sha=parent_sha,
                 autoresearch_attempt=bool(
                     parent_sha
@@ -6645,34 +6547,17 @@ class HitlAutoResearchController:
                     and str(current["admitted_proposal_idea_id"]).strip()
                 ),
             )
-            next_template = append_prompt_block(
-                next_template,
-                planning_discussion_task_prompt_suffix(next_task_id),
-            )
-            owner = self._proposal_hitl_runtime()
-            revision_template = planning_final_owner_prompt_template(
-                owner.compose_worker_prompt(
-                    hitl_stage="plan",
-                    phase_prompt=owner.plan_revision_prompt_block(feedback),
-                )
-            )
-            additional = {
-                "record_id": str(request.get("record_id", "")).strip(),
-                "kind": "reopen",
-                "result": dict(request.get("result") or {}),
-            }
-            store = PlanningDiscussionRecordStore(attempt_dir)
-            owner._require_planning_discussion_capacity(
-                projected_session=projected,
-                prompt_templates=(next_template, revision_template),
-                public_background=background,
-                reserve_contributions=missing,
-                additional_records=(additional,),
-                record_store=store,
-                reopen_source_ideas=source_records,
-            )
 
-        return validate
+        return planning_discussion_reopen_capacity_validator(
+            runtime=owner,
+            state_binding=binding,
+            record_store=PlanningDiscussionRecordStore(attempt_dir),
+            render_participant_prompt=render_participant_prompt,
+            render_owner_revision_prompt=lambda feedback: owner.compose_worker_prompt(
+                hitl_stage="plan",
+                phase_prompt=owner.plan_revision_prompt_block(feedback),
+            ),
+        )
 
     def _planning_discussion_revision_feedback(
         self,
@@ -6684,36 +6569,14 @@ class HitlAutoResearchController:
 
         from core.hitl_planning_discussion import (
             PlanningDiscussionRecordStore,
-            planning_discussion_reopen_source_idea_ids,
+            planning_discussion_revision_feedback,
         )
 
-        source_ids = planning_discussion_reopen_source_idea_ids(
-            session,
-            PlanningDiscussionRecordStore(attempt_dir).records(),
+        return planning_discussion_revision_feedback(
+            session=session,
+            record_store=PlanningDiscussionRecordStore(attempt_dir),
+            idea_records=self._proposal_hitl_runtime().log.records(),
         )
-        if not source_ids:
-            return ""
-        feedback_id = source_ids[-1]
-        record = next(
-            (
-                item
-                for item in self._proposal_hitl_runtime().log.records()
-                if item.get("idea_id") == feedback_id
-            ),
-            None,
-        )
-        if not isinstance(record, dict):
-            raise RuntimeError(
-                "Collaborative planning revision lost its feedback record."
-            )
-        feedback = str(
-            record.get("manager_feedback") or record.get("human_feedback") or ""
-        ).strip()
-        if not feedback:
-            raise RuntimeError(
-                "Collaborative planning revision feedback is empty."
-            )
-        return feedback
 
     def _collaborative_planning_revision_feedback(
         self,

@@ -8,7 +8,11 @@ from typing import Any, Callable, Dict, Optional
 from agents.resource_finder import generate_resource_finder_prompt, run_resource_finder
 from core.agent_runner import next_attempt_number
 from core.hitl import HitlValidationError, RequiredArtifact, verify_required_artifacts
-from core.hitl_stage_runtime import run_plan_centered_hitl_stage
+from core.hitl_stage_runtime import (
+    StagePlanningMeetingHandle,
+    continue_worker_after_planning_reopens,
+    run_plan_centered_hitl_stage,
+)
 from core.research_environment import read_workspace_mode
 
 
@@ -59,6 +63,7 @@ def run_resource_finder_hitl(
     execution_log_prefix: Optional[str] = None,
     logs_dir: Optional[Path] = None,
     preserve_log_history: bool = False,
+    planning_meeting: Optional[StagePlanningMeetingHandle] = None,
 ) -> Dict[str, Any]:
     """Run the established resource-finder plan/execution/review lifecycle."""
     root = Path(work_dir)
@@ -120,6 +125,21 @@ def run_resource_finder_hitl(
         )
         if resumed is not None:
             result, finish = resumed
+            result, finish = continue_worker_after_planning_reopens(
+                runtime=runtime,
+                launch_worker=launch_worker,
+                worker_name="resource_finder",
+                plan_log_prefix=f"{log_prefix}_plan",
+                result=result,
+                finish=finish,
+                planning_meeting=planning_meeting,
+                owner_tool_options={
+                    "requires_human_approval": getattr(
+                        runtime, "requires_human_plan_approval", True
+                    ),
+                    "phase_finish_validator": validate_outputs,
+                },
+            )
             return (
                 on_approved(result, finish)
                 if finish.get("approved")
@@ -139,4 +159,5 @@ def run_resource_finder_hitl(
         on_failed=on_failed,
         provenance=provenance,
         force_fresh_plan=force_fresh_plan,
+        planning_meeting=planning_meeting,
     )

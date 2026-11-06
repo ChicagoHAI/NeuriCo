@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 from core.hitl_git_state import HitlGitSnapshot, HitlGitStateStore
 from core.hitl_run_control import (
@@ -23,6 +23,138 @@ WorkerLauncher = Callable[..., Dict[str, Any]]
 StageResultHandler = Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]]
 StageFailureHandler = Callable[[Dict[str, Any]], Dict[str, Any]]
 WorkerResultAfterExit = Callable[[Dict[str, Any]], Dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class StagePlanningMeetingHandle:
+    """In-memory handoff from one stage meeting to its existing plan owner."""
+
+    runtime: Any
+    idea: Dict[str, Any]
+    owner: Dict[str, Any]
+    subject: Mapping[str, Any]
+    state_binding: Any
+    record_store: Any
+    coordinator: Any
+    worker_prompt_contexts: Dict[str, str]
+    provenance: Dict[str, Any]
+
+    def _participant_prompt(self, task_id: str) -> tuple[str, Dict[str, Any]]:
+        from agents.planning_discussion import planning_discussion_prompt_template
+
+        prompt, inputs = planning_discussion_prompt_template(
+            idea=self.idea,
+            work_dir=self.runtime.work_dir,
+            approved_proposal="",
+            planning_subject=self.subject,
+            discussion_task_id=task_id,
+            assigned_candidate_sha="",
+            autoresearch_attempt=False,
+            hitl_mode=self.runtime.hitl_mode.value,
+        )
+        background = dict(inputs["public_context"])
+        background["whiteboard_active_tips_md"] = inputs[
+            "whiteboard_active_tips_md"
+        ]
+        return prompt, background
+
+    def _public_background(self) -> Dict[str, Any]:
+        _prompt, background = self._participant_prompt("initial/p01")
+        return background
+
+    def _prompt_composer(self) -> Callable[..., str]:
+        from core.hitl_planning_discussion import (
+            planning_final_owner_prompt_composer,
+        )
+        from core.hitl_run_control import raise_if_hitl_run_stop_requested
+
+        return planning_final_owner_prompt_composer(
+            runtime=self.runtime,
+            state_binding=self.state_binding,
+            record_store=self.record_store,
+            public_background=self._public_background,
+            check_stop=raise_if_hitl_run_stop_requested,
+        )
+
+    def _reopen_capacity_validator(self) -> Callable[[Dict[str, Any]], None]:
+        from core.hitl import compose_hitl_worker_prompt
+        from core.hitl_planning_discussion import (
+            planning_discussion_reopen_capacity_validator,
+        )
+
+        return planning_discussion_reopen_capacity_validator(
+            runtime=self.runtime,
+            state_binding=self.state_binding,
+            record_store=self.record_store,
+            render_participant_prompt=self._participant_prompt,
+            render_owner_revision_prompt=lambda feedback: compose_hitl_worker_prompt(
+                self.worker_prompt_contexts,
+                hitl_stage="plan",
+                phase_prompt=self.runtime.plan_revision_prompt_block(feedback),
+            ),
+        )
+
+    def prepare_owner_tools(self, **stage_options: Any) -> None:
+        """Give the original stage worker final-writing authority."""
+
+        self.runtime.prepare_idea_tool_context(
+            hitl_stage="plan",
+            actor=self.runtime.pipeline_stage,
+            provenance=self.provenance,
+            worker_prompt_contexts=self.worker_prompt_contexts,
+            planning_discussion_record_dir=self.record_store.root,
+            planning_discussion_stage_owner=self.owner,
+            planning_discussion_final_owner=True,
+            planning_discussion_prompt_composer=self._prompt_composer(),
+            planning_discussion_reopen_capacity_validator=(
+                self._reopen_capacity_validator()
+            ),
+            **stage_options,
+        )
+
+    def owner_prompt(self) -> str:
+        """Compose the exact existing stage prompt with bounded meeting context."""
+
+        from core.hitl import compose_hitl_worker_prompt
+        from core.hitl_planning_discussion import (
+            planning_discussion_revision_feedback,
+        )
+
+        feedback = planning_discussion_revision_feedback(
+            session=self.state_binding.snapshot(),
+            record_store=self.record_store,
+            idea_records=self.runtime.log.records(),
+        )
+        phase_prompt = (
+            self.runtime.plan_revision_prompt_block(feedback)
+            if feedback
+            else self.runtime.plan_prompt_block()
+        )
+        base_prompt = compose_hitl_worker_prompt(
+            self.worker_prompt_contexts,
+            hitl_stage="plan",
+            phase_prompt=phase_prompt,
+        )
+        return self._prompt_composer()(base_prompt)
+
+    def run_or_resume(self) -> Dict[str, Any]:
+        """Resume the shared coordinator at its authoritative durable phase."""
+
+        session = self.state_binding.snapshot()
+        if session.get("phase") == "reopen_pending":
+            raise RuntimeError(
+                "A pending planning reopen must settle before discussion resumes."
+            )
+        return self.coordinator.run(session)
+
+    def apply_reopen(self, transfer: Mapping[str, Any]) -> Dict[str, Any]:
+        """Settle the old owner and continue the same bounded meeting."""
+
+        session = self.state_binding.apply_reopen(
+            reopen_record_id=str(transfer.get("reopen_record_id", "")).strip(),
+            whiteboard_boundary_sha=transfer.get("whiteboard_boundary_sha"),
+        )
+        return self.coordinator.run(session)
 
 
 def run_worker_with_replacements(
@@ -67,6 +199,45 @@ def run_worker_with_replacements(
     return result, finish
 
 
+def continue_worker_after_planning_reopens(
+    *,
+    runtime: Any,
+    launch_worker: WorkerLauncher,
+    worker_name: str,
+    plan_log_prefix: str,
+    result: Dict[str, Any],
+    finish: Dict[str, Any],
+    planning_meeting: Optional[StagePlanningMeetingHandle],
+    owner_tool_options: Mapping[str, Any],
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Resume one existing stage owner after each accepted meeting reopen."""
+
+    reopen_index = 0
+    current_result = result
+    current_finish = finish
+    while current_finish.get("reopen_discussion"):
+        if planning_meeting is None:
+            raise RuntimeError(
+                "A stage worker returned a planning reopen without an active meeting."
+            )
+        transfer = runtime.prepare_planning_discussion_reopen_transfer(
+            str(current_finish.get("reopen_record_id", ""))
+        )
+        runtime.clear_idea_tool_context()
+        planning_meeting.apply_reopen(transfer)
+        planning_meeting.prepare_owner_tools(**dict(owner_tool_options))
+        reopen_index += 1
+        current_result, current_finish = run_worker_with_replacements(
+            runtime=runtime,
+            launch_worker=launch_worker,
+            prompt=planning_meeting.owner_prompt(),
+            log_prefix=f"{plan_log_prefix}_reopen_{reopen_index}",
+            phase="stage",
+            worker_name=worker_name,
+        )
+    return current_result, current_finish
+
+
 def run_plan_centered_hitl_stage(
     *,
     runtime: Any,
@@ -87,6 +258,7 @@ def run_plan_centered_hitl_stage(
     baseline_candidate_manifest: Dict[str, Any] | None = None,
     provenance: Optional[Dict[str, Any]] = None,
     force_fresh_plan: bool = False,
+    planning_meeting: Optional[StagePlanningMeetingHandle] = None,
 ) -> Dict[str, Any]:
     """Run the shared plan/execution state machine for ordinary HITL stages."""
     # A held request's saved phase takes precedence over plan approval on restart.
@@ -104,6 +276,15 @@ def run_plan_centered_hitl_stage(
         and continuation.get("hitl_stage") == "execution"
     )
     resume_pending = worker_command_requires_resume(pending) or resume_approved_plan
+    stage_tool_options = {
+        "plan_finish_validator": plan_finish_validator,
+        "phase_finish_validator": phase_finish_validator,
+        "allow_scoring_approval": allow_scoring_approval,
+        "scoring_handler": scoring_handler,
+        "scoring_repair_cleanup": scoring_repair_cleanup,
+        "baseline_construction": baseline_construction,
+        "baseline_candidate_manifest": baseline_candidate_manifest,
+    }
     if resume_pending:
         saved_phase = str(continuation.get("hitl_stage", "")).strip()
         if (
@@ -125,19 +306,16 @@ def run_plan_centered_hitl_stage(
             raise RuntimeError("Pending HITL stage request has no matching worker continuation.")
         from core.hitl import _load_hitl_template
 
-        runtime.prepare_idea_tool_context(
-            hitl_stage=saved_phase,
-            actor=actor,
-            plan_finish_validator=plan_finish_validator,
-            phase_finish_validator=phase_finish_validator,
-            worker_prompt_contexts=worker_prompt_contexts,
-            allow_scoring_approval=allow_scoring_approval,
-            scoring_handler=scoring_handler,
-            scoring_repair_cleanup=scoring_repair_cleanup,
-            baseline_construction=baseline_construction,
-            baseline_candidate_manifest=baseline_candidate_manifest,
-            provenance=provenance,
-        )
+        if saved_phase == "plan" and planning_meeting is not None:
+            planning_meeting.prepare_owner_tools(**stage_tool_options)
+        else:
+            runtime.prepare_idea_tool_context(
+                hitl_stage=saved_phase,
+                actor=actor,
+                worker_prompt_contexts=worker_prompt_contexts,
+                provenance=provenance,
+                **stage_tool_options,
+            )
         prompt = (
             str(continuation["prompt_block"])
             if resume_approved_plan
@@ -150,41 +328,39 @@ def run_plan_centered_hitl_stage(
         "plan_has_required_approval",
         runtime.plan_has_human_approval,
     )():
-        runtime.prepare_idea_tool_context(
-            hitl_stage="plan",
-            actor=actor,
-            requires_human_approval=getattr(
-                runtime, "requires_human_plan_approval", True
-            ),
-            plan_finish_validator=plan_finish_validator,
-            phase_finish_validator=phase_finish_validator,
-            worker_prompt_contexts=worker_prompt_contexts,
-            allow_scoring_approval=allow_scoring_approval,
-            scoring_handler=scoring_handler,
-            scoring_repair_cleanup=scoring_repair_cleanup,
-            baseline_construction=baseline_construction,
-            baseline_candidate_manifest=baseline_candidate_manifest,
-            provenance=provenance,
-        )
-        prompt = runtime.compose_worker_prompt(
-            hitl_stage="plan",
-            phase_prompt=runtime.plan_prompt_block(),
-        )
+        if planning_meeting is not None:
+            planning_meeting.run_or_resume()
+            planning_meeting.prepare_owner_tools(
+                requires_human_approval=getattr(
+                    runtime, "requires_human_plan_approval", True
+                ),
+                **stage_tool_options,
+            )
+            prompt = planning_meeting.owner_prompt()
+        else:
+            runtime.prepare_idea_tool_context(
+                hitl_stage="plan",
+                actor=actor,
+                requires_human_approval=getattr(
+                    runtime, "requires_human_plan_approval", True
+                ),
+                worker_prompt_contexts=worker_prompt_contexts,
+                provenance=provenance,
+                **stage_tool_options,
+            )
+            prompt = runtime.compose_worker_prompt(
+                hitl_stage="plan",
+                phase_prompt=runtime.plan_prompt_block(),
+            )
         log_prefix = plan_log_prefix
         phase = "stage"
     else:
         runtime.prepare_idea_tool_context(
             hitl_stage="execution",
             actor=actor,
-            plan_finish_validator=plan_finish_validator,
-            phase_finish_validator=phase_finish_validator,
             worker_prompt_contexts=worker_prompt_contexts,
-            allow_scoring_approval=allow_scoring_approval,
-            scoring_handler=scoring_handler,
-            scoring_repair_cleanup=scoring_repair_cleanup,
-            baseline_construction=baseline_construction,
-            baseline_candidate_manifest=baseline_candidate_manifest,
             provenance=provenance,
+            **stage_tool_options,
         )
         prompt = runtime.compose_worker_prompt(
             hitl_stage="execution",
@@ -201,6 +377,21 @@ def run_plan_centered_hitl_stage(
         phase=phase,
         worker_name=worker_name,
         record_continuation=not resume_pending,
+    )
+    result, finish = continue_worker_after_planning_reopens(
+        runtime=runtime,
+        launch_worker=launch_worker,
+        worker_name=worker_name,
+        plan_log_prefix=plan_log_prefix,
+        result=result,
+        finish=finish,
+        planning_meeting=planning_meeting,
+        owner_tool_options={
+            "requires_human_approval": getattr(
+                runtime, "requires_human_plan_approval", True
+            ),
+            **stage_tool_options,
+        },
     )
     if finish and finish.get("approved"):
         return on_approved(result, finish)
