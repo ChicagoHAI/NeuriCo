@@ -237,14 +237,17 @@ def prepare_stage_planning_meeting_handle(
         base_idea_number=max(idea_numbers, default=0),
     )
 
+    discussion_owns_workspace = session.get("phase") in {
+        "initial",
+        "opening",
+        "response",
+        "decision",
+    }
     scope = session.get("workspace_fingerprint_scope")
     expected_fingerprint = str(session.get("workspace_fingerprint", "")).strip()
-    if (
+    if discussion_owns_workspace and (
         not expected_fingerprint
-        or HitlWorkspaceWriteGuard.public_fingerprint(
-            runtime.work_dir,
-            scope=scope,
-        )
+        or HitlWorkspaceWriteGuard.public_fingerprint(runtime.work_dir, scope=scope)
         != expected_fingerprint
     ):
         raise RuntimeError(
@@ -320,12 +323,13 @@ def prepare_stage_planning_meeting_handle(
                 )
         return {"valid": not issues, "issues": issues}
 
-    initial_boundary = require_boundary()
-    if not initial_boundary["valid"]:
-        raise RuntimeError(
-            "Collaborative planning boundary is invalid: "
-            + "; ".join(initial_boundary["issues"])
-        )
+    if discussion_owns_workspace:
+        initial_boundary = require_boundary()
+        if not initial_boundary["valid"]:
+            raise RuntimeError(
+                "Collaborative planning boundary is invalid: "
+                + "; ".join(initial_boundary["issues"])
+            )
 
     def render_participant(task_id: str) -> tuple[str, Dict[str, Any]]:
         prompt, inputs = planning_discussion_prompt_template(
