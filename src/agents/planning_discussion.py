@@ -152,14 +152,18 @@ def generate_planning_discussion_prompt(
     proposal = str(approved_proposal).strip()
     if planning_subject is None and not proposal:
         raise ValueError("Planning discussion requires the admitted proposal content")
-    if planning_subject is None:
+    subject = (
+        _normalize_stage_planning_subject(planning_subject)
+        if planning_subject is not None
+        else None
+    )
+    if subject is None:
         prompt_inputs = _planning_discussion_prompt_inputs(
             idea=idea,
             work_dir=work_dir,
             provider=provider,
         )
     else:
-        subject = _normalize_stage_planning_subject(planning_subject)
         prompt_inputs = {
             "public_context": dict(subject),
             "whiteboard_active_tips_md": "",
@@ -168,12 +172,13 @@ def generate_planning_discussion_prompt(
     return _render_planning_discussion_prompt(
         idea=idea,
         approved_proposal=proposal,
-        planning_subject=planning_subject,
+        planning_subject=subject,
         discussion_task_id=discussion_task_id,
         discussion_context=render_planning_discussion_context(
             summary="",
             source_record_ids=(),
             original_records=discussion_records,
+            pipeline_stage=(subject["pipeline_stage"] if subject is not None else ""),
         ),
         assigned_candidate_sha=assigned_candidate_sha,
         autoresearch_attempt=autoresearch_attempt,

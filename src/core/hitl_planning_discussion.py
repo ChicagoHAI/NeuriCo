@@ -1752,6 +1752,9 @@ def prepare_planning_discussion_prompt(
                 summary=summary,
                 source_record_ids=source_ids,
                 original_records=originals,
+                pipeline_stage=str(
+                    public_background.get("pipeline_stage", "")
+                ).strip(),
                 allow_reopen=allow_reopen,
                 reopen_source_ideas=reopen_source_ideas,
             )
@@ -1826,6 +1829,7 @@ def render_planning_discussion_context(
     summary: str,
     source_record_ids: Sequence[str],
     original_records: Sequence[Mapping[str, Any]],
+    pipeline_stage: str = "",
     allow_reopen: bool = False,
     reopen_source_ideas: Sequence[Mapping[str, Any]] = (),
 ) -> str:
@@ -1838,6 +1842,7 @@ def render_planning_discussion_context(
         discussion_summary=str(summary).strip(),
         summary_source_record_ids=list(source_record_ids),
         original_discussion_records=[dict(record) for record in original_records],
+        pipeline_stage=str(pipeline_stage).strip(),
         allow_reopen=bool(allow_reopen),
         reopen_source_ideas=[dict(record) for record in reopen_source_ideas],
     ).strip()

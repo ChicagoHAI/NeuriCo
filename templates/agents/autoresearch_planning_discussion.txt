@@ -57,7 +57,12 @@ The eventual formal plan must satisfy this existing content contract:
 {{ discussion_context }}
 
 {% if task_phase == "initial" %}
+{% if pipeline_stage == "rule_maker" and not candidate_planning %}
+Independently propose a complete approach for constructing and validating the
+evaluation protocol, solution interface, and evaluator.
+{% else %}
 Independently propose a complete execution approach for the planning task.
+{% endif %}
 Cover concrete steps and dependencies, artifacts to create or change, evidence
 that would show each important step worked, implementation and evaluation risks,
 and conditions requiring escalation or plan revision. Do not assume another
