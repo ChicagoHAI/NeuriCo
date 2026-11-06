@@ -394,6 +394,14 @@ class HitlWorldModelSync:
 
     @staticmethod
     def _decision_rationale(record: Dict[str, Any]) -> str:
+        if (
+            str(record.get("decision", "")).strip() == "CUSTOM"
+            and str(record.get("actor", "")).strip() == "manager"
+        ):
+            return (
+                str(record.get("context", "")).strip()
+                or str(record.get("manager_feedback", "")).strip()
+            )
         return (
             str(record.get("manager_feedback", "")).strip()
             or str(record.get("human_feedback", "")).strip()
@@ -404,7 +412,11 @@ class HitlWorldModelSync:
     def _decision_text(record: Dict[str, Any]) -> str:
         decision = str(record.get("decision", "")).strip()
         if decision == "CUSTOM":
-            return str(record.get("human_feedback", "")).strip() or decision
+            return (
+                str(record.get("human_feedback", "")).strip()
+                or str(record.get("manager_feedback", "")).strip()
+                or decision
+            )
         for option in record.get("options") or []:
             if isinstance(option, dict) and str(option.get("option_id", "")).strip() == decision:
                 return str(option.get("text", "")).strip() or decision

@@ -758,9 +758,14 @@ def render_hitl_template(name: str, **kwargs: Any) -> str:
 
 
 def _resolve_manager_option(response: str, options: List[Dict[str, str]]) -> Dict[str, str]:
+    raw = response.strip()
+    if raw == "CUSTOM":
+        return {"decision": "CUSTOM", "feedback": raw}
     resolved = _resolve_option_decision(response, options)
     if resolved["decision"] == "CUSTOM":
-        raise HitlValidationError("Manager-resolved decision must match a substantive option")
+        raise HitlValidationError(
+            "Manager-resolved decision must match a substantive option or explicitly use CUSTOM"
+        )
     return resolved
 
 
@@ -1710,58 +1715,16 @@ class HitlRuntime:
         finalized: Dict[str, Dict[str, Any]] = {}
 
         def persist_resolution(review: Dict[str, Any]) -> Dict[str, Any]:
-            decision_options = self._raised_idea_decision_options(raised_idea, review)
-            level = str(review.get("level", "")).strip()
-            actor = str(review.get("actor", "")).strip()
-            if (level, actor) not in {("B", "manager"), ("A", "human")}:
-                raise HitlValidationError(
-                    "Manager raised-idea resolution must finalize as B/manager or A/human."
-                )
-            feedback = _require_text(
-                review.get("manager_feedback"),
-                "manager_feedback",
-                "Manager raised-idea resolution",
-            )
-            if raised_idea["idea_type"] == "decision":
-                raw_decision = _require_text(
-                    review.get("decision"),
-                    "decision",
-                    "Finalized raised decision idea",
-                )
-                decision = (
-                    _resolve_option_decision(raw_decision, decision_options)["decision"]
-                    if actor == "human"
-                    else _resolve_manager_option(raw_decision, decision_options)["decision"]
-                )
-            else:
-                decision = str(review.get("decision", feedback)).strip()
-
-            extra: Dict[str, Any] = {"manager_feedback": feedback}
-            if actor == "human":
-                extra["human_feedback"] = _require_text(
-                    review.get("human_feedback"),
-                    "human_feedback",
-                    "Human-resolved raised idea",
-                )
-                extra["manager_escalation_reason"] = str(
-                    review.get("manager_escalation_reason", "")
-                ).strip()
-            if raised_idea["idea_type"] == "decision":
-                extra["options"] = decision_options
-
-            record = self._record_from_raised_idea(
+            record = self._raised_resolution_record(
                 raised_idea=raised_idea,
-                level=level,
-                actor=actor,
-                decision=decision,
-                manager_context=str(review.get("context", raised_idea.get("context", ""))),
-                extra=extra,
+                review=review,
+                provenance=provenance,
+                decision_options=self._raised_idea_decision_options(raised_idea),
             )
-            _apply_runtime_provenance(record, provenance)
             finalized["record"] = self.log.append(record, idempotent=True)
-            return review
+            return {**review, "idea_id": finalized["record"]["idea_id"]}
 
-        self.manager.review_raised_idea(
+        review = self.manager.review_raised_idea(
             pipeline_stage=self.pipeline_stage,
             raised_idea=raised_idea,
             plan_text=self._read_optional(self.paths.plan_path),
@@ -1776,12 +1739,116 @@ class HitlRuntime:
                 self._tool_context.get("baseline_candidate_manifest") or {}
             ),
         )
-        try:
-            return finalized["record"]
-        except KeyError as exc:
-            raise RuntimeError(
-                "Raised HITL worker request finalized without an audit record."
-            ) from exc
+        if "record" not in finalized:
+            return self._recover_raised_resolution(raised_idea, review)
+        return finalized["record"]
+
+    def _recover_raised_resolution(
+        self,
+        raised_idea: Dict[str, Any],
+        review: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Read the finalized record for a resolved request without appending."""
+        if "idea_id" in review:
+            idea_id = _require_text(review.get("idea_id"), "idea_id", "Resolved raised request")
+            record = self._idea_record_by_id(idea_id)
+            if record is None:
+                raise HitlValidationError(
+                    f"Resolved raised request refers to missing finalized idea {idea_id}."
+                )
+            return record
+
+        pending = self._pending_worker_command()
+        if (
+            not isinstance(pending, dict)
+            or pending.get("kind") != "raised_idea"
+            or pending.get("status") != "resolved"
+            or pending.get("raised_idea") != raised_idea
+        ):
+            raise HitlValidationError("No matching resolved raised request exists for replay.")
+        saved_idea = pending["raised_idea"]
+        provenance = (
+            pending.get("provenance")
+            if "provenance" in pending
+            else _runtime_provenance(saved_idea)
+        )
+        # Older Full-HITL finalizations could store manager-rewritten options.
+        # Reconstruct that historical representation only to find its record.
+        decision_options = (
+            _validate_substantive_options(
+                review.get("options", saved_idea.get("options")),
+                error_prefix="Manager-reviewed decision",
+            )
+            if saved_idea["idea_type"] == "decision"
+            else []
+        )
+        expected = self._raised_resolution_record(
+            raised_idea=saved_idea,
+            review=review,
+            provenance=provenance,
+            decision_options=decision_options,
+        )
+        record = self.log.find_equivalent(expected)
+        if record is None:
+            raise HitlValidationError("Resolved raised request has no matching finalized idea.")
+        return record
+
+    def _raised_resolution_record(
+        self,
+        *,
+        raised_idea: Dict[str, Any],
+        review: Dict[str, Any],
+        provenance: Optional[Dict[str, Any]],
+        decision_options: List[Dict[str, str]],
+    ) -> Dict[str, Any]:
+        level = str(review.get("level", "")).strip()
+        actor = str(review.get("actor", "")).strip()
+        if (level, actor) not in {("B", "manager"), ("A", "human")}:
+            raise HitlValidationError(
+                "Manager raised-idea resolution must finalize as B/manager or A/human."
+            )
+        feedback = _require_text(
+            review.get("manager_feedback"),
+            "manager_feedback",
+            "Manager raised-idea resolution",
+        )
+        if raised_idea["idea_type"] == "decision":
+            raw_decision = _require_text(
+                review.get("decision"),
+                "decision",
+                "Finalized raised decision idea",
+            )
+            decision = (
+                _resolve_option_decision(raw_decision, decision_options)["decision"]
+                if actor == "human"
+                else _resolve_manager_option(raw_decision, decision_options)["decision"]
+            )
+        else:
+            decision = str(review.get("decision", feedback)).strip()
+
+        extra: Dict[str, Any] = {"manager_feedback": feedback}
+        if actor == "human":
+            extra["human_feedback"] = _require_text(
+                review.get("human_feedback"),
+                "human_feedback",
+                "Human-resolved raised idea",
+            )
+            extra["manager_escalation_reason"] = str(
+                review.get("manager_escalation_reason", "")
+            ).strip()
+        if raised_idea["idea_type"] == "decision":
+            extra["options"] = decision_options
+
+        record = self._record_from_raised_idea(
+            raised_idea=raised_idea,
+            level=level,
+            actor=actor,
+            decision=decision,
+            manager_context=str(review.get("context", raised_idea.get("context", ""))),
+            extra=extra,
+        )
+        _apply_runtime_provenance(record, provenance)
+        return record
 
     def prepare_idea_tool_context(
         self,
@@ -5424,49 +5491,71 @@ class HitlRuntime:
                     "reason_for_escalation",
                     "Raised HITL idea",
                 )
-                request_key = self._raised_idea_request_key(raised_idea)
-                prior = self._raised_idea_results.get(request_key)
-                if prior is not None:
-                    return dict(prior)
-                logged = self.resolve_raised_payload(
-                    raised_idea,
-                    provenance=self._tool_context.get("provenance"),
-                )
-                feedback = str(
-                    logged.get("manager_feedback")
-                    or logged.get("human_feedback")
-                    or logged.get("decision")
-                    or ""
-                ).strip()
-                hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
-                if hitl_stage == "review":
-                    prompt_block = self.compose_worker_prompt(
-                        hitl_stage="review",
-                        phase_prompt=self.review_prompt_block(feedback),
-                    )
-                else:
-                    prompt_block = self.compose_worker_prompt(
-                        hitl_stage="execution",
-                        phase_prompt=self.execution_prompt_block(
-                            mode="continue",
-                            feedback=feedback,
-                        ),
-                    )
-                self._update_worker_continuation(
-                    prompt_block=prompt_block,
-                    hitl_stage=hitl_stage,
-                    status="running",
-                )
-                result = {
-                    "idea_id": logged.get("idea_id"),
-                    "decision": logged.get("decision", ""),
-                    "feedback": feedback,
-                    "prompt_block": prompt_block,
-                }
-                self._raised_idea_results[request_key] = dict(result)
-                return result
+                return self._resolve_prepared_tool_raised_payload(raised_idea)
         finally:
             self._worker_request_lock.release()
+
+    def _resume_prepared_raised_payload(self, raised_idea: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._worker_request_lock.acquire(blocking=False):
+            raise HitlActiveWorkerRequestError(self._pending_worker_command())
+        try:
+            with self._tool_lock:
+                return self._resolve_prepared_tool_raised_payload(dict(raised_idea))
+        finally:
+            self._worker_request_lock.release()
+
+    def _resolve_prepared_tool_raised_payload(
+        self,
+        raised_idea: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        request_key = self._raised_idea_request_key(raised_idea)
+        prior = self._raised_idea_results.get(request_key)
+        if prior is not None:
+            return dict(prior)
+        logged = self.resolve_raised_payload(
+            raised_idea,
+            provenance=self._tool_context.get("provenance"),
+        )
+        result = self._normalize_raised_resolution(logged)
+        self._raised_idea_results[request_key] = dict(result)
+        return result
+
+    def _normalize_raised_resolution(
+        self,
+        resolution: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Convert a manager raised-idea resolution into a worker continuation."""
+        feedback = str(
+            resolution.get("manager_feedback")
+            or resolution.get("human_feedback")
+            or resolution.get("decision")
+            or ""
+        ).strip()
+        hitl_stage = str(self._tool_context.get("hitl_stage", self.current_hitl_stage))
+        if hitl_stage == "review":
+            prompt_block = self.compose_worker_prompt(
+                hitl_stage="review",
+                phase_prompt=self.review_prompt_block(feedback),
+            )
+        else:
+            prompt_block = self.compose_worker_prompt(
+                hitl_stage="execution",
+                phase_prompt=self.execution_prompt_block(
+                    mode="continue",
+                    feedback=feedback,
+                ),
+            )
+        self._update_worker_continuation(
+            prompt_block=prompt_block,
+            hitl_stage=hitl_stage,
+            status="running",
+        )
+        return {
+            "idea_id": resolution.get("idea_id"),
+            "decision": resolution.get("decision", ""),
+            "feedback": feedback,
+            "prompt_block": prompt_block,
+        }
 
     def log_frontier_decision(
         self,
@@ -6331,6 +6420,13 @@ class HitlRuntime:
             response = pending.get("response")
             if not isinstance(response, dict):
                 raise HitlValidationError("Resolved HITL worker request has no runtime response.")
+            if kind == "raised_idea":
+                raised_idea = pending.get("raised_idea")
+                if not isinstance(raised_idea, dict):
+                    raise HitlValidationError(
+                        "Resolved raised idea request has no worker payload."
+                    )
+                return self._resume_prepared_raised_payload(raised_idea)
             if (
                 kind == "phase_finish"
                 and str(response.get("status", "")).strip() == "feedback"
@@ -6389,7 +6485,7 @@ class HitlRuntime:
             raised_idea = pending.get("raised_idea")
             if not isinstance(raised_idea, dict):
                 raise HitlValidationError("Pending raised idea request has no worker payload.")
-            return self.resolve_tool_raised_payload(raised_idea)
+            return self._resume_prepared_raised_payload(raised_idea)
         if kind == "proposal":
             proposal_payload = pending.get("proposal_payload")
             if not isinstance(proposal_payload, dict):
@@ -7663,7 +7759,9 @@ class HitlRuntime:
                             200,
                             {
                                 "ok": True,
-                                "status": result.get("status"),
+                                "status": result.get("status") or "",
+                                "idea_id": result.get("idea_id") or "",
+                                "decision": result.get("decision") or "",
                                 "feedback": result.get("feedback", ""),
                                 "next_phase": result.get("next_phase", ""),
                                 "instruction": result.get("instruction", ""),
@@ -7854,14 +7952,12 @@ class HitlRuntime:
     def _raised_idea_decision_options(
         self,
         raised_idea: Dict[str, Any],
-        review: Dict[str, Any],
     ) -> List[str]:
         if raised_idea["idea_type"] != "decision":
             return []
-        raw_options = review.get("options", raised_idea.get("options"))
         return _validate_substantive_options(
-            raw_options,
-            error_prefix="Manager-reviewed decision",
+            raised_idea.get("options"),
+            error_prefix="Raised decision idea",
         )
 
     def _plan_artifact(self) -> List[Dict[str, str]]:

@@ -930,21 +930,25 @@ class ResearchRunner:
             recovered_hitl_attempt = recover_interrupted_hitl_autoresearch_attempt(work_dir)
 
         if recovered_hitl_attempt is not None and recovered_hitl_attempt.recovery_classification in {
-            "pending_worker_request", "frontier_decision_transition",
+            "pending_worker_request",
+            "frontier_decision_transition",
+            "proposal_preparation_transition",
         }:
             preserve_initial_inputs = True
 
         if not hitl_construct_baseline:
-            # Create subdirectories
+            # Runtime-private logs remain available during recovery. Public
+            # workspace scaffolding must not change a reviewed boundary.
             (work_dir / "logs").mkdir(parents=True, exist_ok=True)
-            (work_dir / "results").mkdir(parents=True, exist_ok=True)
-            (work_dir / "artifacts").mkdir(parents=True, exist_ok=True)
-            # Only create notebooks/ when using scribe
-            if use_scribe:
-                (work_dir / "notebooks").mkdir(parents=True, exist_ok=True)
 
-            # Copy helper scripts and backend-selected skills to workspace.
+            # Initialize public scaffolding and copy workspace resources only
+            # when runtime does not own an exact reviewed boundary.
             if not preserve_initial_inputs:
+                (work_dir / "results").mkdir(parents=True, exist_ok=True)
+                (work_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+                # Only create notebooks/ when using scribe
+                if use_scribe:
+                    (work_dir / "notebooks").mkdir(parents=True, exist_ok=True)
                 self._copy_workspace_resources(work_dir, compute_backend=compute_backend)
 
             # Stage user-declared local resources (datasets, functions) into the
