@@ -116,6 +116,17 @@ def run_resource_finder_hitl(
                 )
             from agents.planning_discussion import stage_planning_discussion_subject
 
+            discussion_context = generate_resource_finder_prompt(
+                idea,
+                templates_dir,
+                workspace_mode=read_workspace_mode(root).value,
+                hitl_runtime_completion=True,
+                provider=provider,
+                hitl_phase="discussion",
+                objective=objective,
+                invocation_mode=invocation_mode,
+            )
+
             def planning_factory() -> StagePlanningMeetingHandle:
                 return prepare_stage_planning_meeting_handle(
                     runtime=runtime,
@@ -123,7 +134,7 @@ def run_resource_finder_hitl(
                     owner=planning_meeting_owner,
                     subject=stage_planning_discussion_subject(
                         pipeline_stage=runtime.pipeline_stage,
-                        planning_context=worker_prompt_contexts["plan"],
+                        planning_context=discussion_context,
                     ),
                     participant_count=participant_count,
                     max_response_rounds=discussion_rounds,
