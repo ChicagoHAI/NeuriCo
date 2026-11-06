@@ -32,12 +32,17 @@ merged, or removed during the planned developer-document sweep.
 
 | Document | Classification |
 | --- | --- |
-| [`ARCHITECTURE_AND_ROADMAP.md`](ARCHITECTURE_AND_ROADMAP.md) | Architecture, project direction, and roadmap |
+| [`ARCHITECTURE_AND_ROADMAP.md`](ARCHITECTURE_AND_ROADMAP.md) | GitHub-main system map, authority boundaries, implementation decisions, source-backed direction, and agent refresh protocol |
 | [`MULTI_AGENT_IMPLEMENTATION.md`](MULTI_AGENT_IMPLEMENTATION.md) | Multi-agent pipeline implementation notes |
 | [`WORKSPACE_DIRECTORY_CONSISTENCY.md`](WORKSPACE_DIRECTORY_CONSISTENCY.md) | Workspace execution-path verification |
 | [`DOCKER_PERMISSIONS.md`](DOCKER_PERMISSIONS.md) | Docker mount and permission design |
 | [`NEXT_STEPS.md`](NEXT_STEPS.md) | Proposed future work |
 | [`../templates/README.md`](../templates/README.md) | Prompt-template and skill implementation reference |
+
+Software agents working on the NeuriCo source repository should begin with the
+root [`AGENTS.md`](../AGENTS.md). It makes the architecture overview the default
+orientation and defines how to refresh conclusions from GitHub `main`, merged
+PR review records, open PRs, and issues.
 
 ## Legacy documentation
 
