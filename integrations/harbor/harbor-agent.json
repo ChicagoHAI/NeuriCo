@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "neurico",
+  "version": "0.2.0",
+  "protocol": "acp",
+  "runtime": {
+    "kind": "python-uv",
+    "python": "3.12",
+    "project": "integrations/harbor",
+    "lockfile": "uv.lock",
+    "entrypoint": ["python", "-m", "neurico_harbor_agent"]
+  }
+}
