@@ -6275,37 +6275,18 @@ class HitlAutoResearchController:
         """Bind the shared planning protocol to candidate-planning services."""
 
         from core.hitl_planning_discussion import (
-            PlanningDiscussionCoordinator,
             PlanningDiscussionRecordStore,
             planning_discussion_reopen_source_idea_ids,
+            prepare_collaborative_planning_meeting,
         )
         from core.hitl_run_control import raise_if_hitl_run_stop_requested
 
         state = HitlRuntimeState(self.work_dir)
-        identity = {
-            "parent_node_sha": parent_sha,
-            "preparation_attempt_id": preparation_attempt_id,
-            "candidate_attempt_id": attempt_dir.name,
-        }
-
-        def snapshot() -> Dict[str, Any]:
-            return state.planning_discussion_snapshot(**identity)
-
-        def advance(expected_phase: str, round_ordinal: int) -> Dict[str, Any]:
-            if expected_phase == "initial":
-                return state.advance_planning_discussion_initial(**identity)
-            return state.advance_planning_discussion(
-                **identity,
-                expected_phase=expected_phase,
-                round_ordinal=round_ordinal,
-            )
-
-        def apply_decision(round_ordinal: int, choice: str) -> Dict[str, Any]:
-            return state.apply_planning_discussion_decision(
-                **identity,
-                round_ordinal=round_ordinal,
-                choice=choice,
-            )
+        state_binding = state.bind_candidate_planning_discussion(
+            parent_node_sha=parent_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=attempt_dir.name,
+        )
 
         def run_task(
             task_id: str,
@@ -6346,10 +6327,8 @@ class HitlAutoResearchController:
                 PlanningDiscussionRecordStore(attempt_dir).records(),
             )
 
-        return PlanningDiscussionCoordinator(
-            snapshot=snapshot,
-            advance=advance,
-            apply_decision=apply_decision,
+        return prepare_collaborative_planning_meeting(
+            state_binding=state_binding,
             run_task=run_task,
             prepare_initial=prepare_initial,
             check_boundary=check_boundary,

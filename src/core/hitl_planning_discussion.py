@@ -34,6 +34,18 @@ PLANNING_DISCUSSION_PHASES = frozenset(
 _LOCAL_ATTEMPT_ID = re.compile(r"^attempt_[0-9]+$")
 _IDEA_ID = re.compile(r"^I[0-9]+$")
 _FULL_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_SHARED_PLANNING_DISCUSSION_KEYS = {
+    "version",
+    "participant_count",
+    "max_response_rounds",
+    "workspace_fingerprint",
+    "workspace_fingerprint_scope",
+    "whiteboard_boundary_sha",
+    "base_idea_number",
+    "phase",
+    "round_ordinal",
+    "tasks",
+}
 
 
 @dataclass(frozen=True)
@@ -132,6 +144,76 @@ class PlanningDiscussionCoordinator:
             )
 
 
+def prepare_collaborative_planning_meeting(
+    *,
+    state_binding: Any,
+    run_task: Callable[
+        [str, dict[str, Any], Sequence[str], Optional[threading.Event]], None
+    ],
+    prepare_initial: Callable[[dict[str, Any]], None],
+    check_boundary: Callable[[str], None],
+    reopen_source_idea_ids: Callable[[dict[str, Any]], Sequence[str]],
+    check_stop: Callable[[], None],
+) -> PlanningDiscussionCoordinator:
+    """Bind one durable planning location to the shared in-memory coordinator."""
+
+    return PlanningDiscussionCoordinator(
+        snapshot=state_binding.snapshot,
+        advance=state_binding.advance,
+        apply_decision=state_binding.apply_decision,
+        run_task=run_task,
+        prepare_initial=prepare_initial,
+        check_boundary=check_boundary,
+        reopen_source_idea_ids=reopen_source_idea_ids,
+        check_stop=check_stop,
+    )
+
+
+def prepare_stage_planning_discussion(
+    *,
+    runtime: Any,
+    owner: Mapping[str, Any],
+    participant_count: int,
+    max_response_rounds: int,
+    record_store: "PlanningDiscussionRecordStore",
+    whiteboard_boundary_sha: str | None,
+    base_idea_number: int,
+) -> tuple[Any, dict[str, Any]]:
+    """Create or resume a stage session at its existing rollback boundary."""
+
+    from core.hitl_runtime_state import HitlRuntimeState, HitlRuntimeStateError
+    from core.hitl_workspace_guard import HitlWorkspaceWriteGuard
+
+    normalized_owner = normalize_stage_planning_discussion_owner(owner)
+    state = HitlRuntimeState(runtime.work_dir)
+    existing = state.stage_planning_discussion_attachment()
+    if existing is not None:
+        if existing["owner"] != normalized_owner:
+            raise HitlRuntimeStateError(
+                "Another stage invocation already owns a planning discussion"
+            )
+        binding = state.bind_stage_planning_discussion(owner=normalized_owner)
+        return binding, binding.snapshot()
+
+    runtime.require_scoped_task_session_boundary()
+    record_store.root.mkdir(parents=True, exist_ok=True)
+    scope = state.workspace_guard_scope()
+    fingerprint = HitlWorkspaceWriteGuard.public_fingerprint(
+        runtime.work_dir,
+        scope=scope,
+    )
+    session = state.begin_stage_planning_discussion(
+        owner=normalized_owner,
+        participant_count=participant_count,
+        max_response_rounds=max_response_rounds,
+        workspace_fingerprint=fingerprint,
+        workspace_fingerprint_scope=scope,
+        whiteboard_boundary_sha=whiteboard_boundary_sha,
+        base_idea_number=base_idea_number,
+    )
+    return state.bind_stage_planning_discussion(owner=normalized_owner), session
+
+
 def planning_discussion_task_id(
     phase: str,
     *,
@@ -226,9 +308,32 @@ def new_planning_discussion(
     """Build the exact initial state for one collaborative planning session."""
 
     return {
-        "version": PLANNING_DISCUSSION_SCHEMA_VERSION,
         "candidate_attempt_id": candidate_attempt_id,
         "admitted_proposal_idea_id": admitted_proposal_idea_id,
+        **new_planning_discussion_session(
+            participant_count=participant_count,
+            max_response_rounds=max_response_rounds,
+            workspace_fingerprint=workspace_fingerprint,
+            workspace_fingerprint_scope=workspace_fingerprint_scope,
+            whiteboard_boundary_sha=whiteboard_boundary_sha,
+            base_idea_number=base_idea_number,
+        ),
+    }
+
+
+def new_planning_discussion_session(
+    *,
+    participant_count: int,
+    max_response_rounds: int,
+    workspace_fingerprint: str,
+    workspace_fingerprint_scope: dict[str, Any] | None,
+    whiteboard_boundary_sha: str | None,
+    base_idea_number: int,
+) -> dict[str, Any]:
+    """Build the task-neutral initial state shared by planning bindings."""
+
+    return {
+        "version": PLANNING_DISCUSSION_SCHEMA_VERSION,
         "participant_count": participant_count,
         "max_response_rounds": max_response_rounds,
         "workspace_fingerprint": workspace_fingerprint,
@@ -247,6 +352,82 @@ def new_planning_discussion(
             }
             for ordinal in range(1, participant_count + 1)
         },
+    }
+
+
+def normalize_stage_planning_discussion_owner(owner: Any) -> dict[str, Any]:
+    """Normalize the existing durable invocation identity for one stage meeting."""
+
+    if not isinstance(owner, Mapping):
+        raise ValueError("Stage planning discussion owner is missing")
+    kind = str(owner.get("kind", "")).strip()
+    stage = str(owner.get("pipeline_stage", "")).strip()
+    rollback_ref = str(owner.get("rollback_ref", "")).strip()
+    if kind == "initial_stage":
+        required = {"kind", "pipeline_stage", "rollback_ref"}
+        if set(owner) != required or not stage or not rollback_ref:
+            raise ValueError("Initial-stage planning discussion owner is invalid")
+        return {
+            "kind": kind,
+            "pipeline_stage": stage,
+            "rollback_ref": rollback_ref,
+        }
+    if kind == "additional_agent":
+        required = {
+            "kind",
+            "pipeline_stage",
+            "rollback_ref",
+            "parent_node_id",
+            "attempt_id",
+            "additional_agent_ordinal",
+        }
+        parent = str(owner.get("parent_node_id", "")).strip()
+        attempt = str(owner.get("attempt_id", "")).strip()
+        ordinal = owner.get("additional_agent_ordinal")
+        if (
+            set(owner) != required
+            or not stage
+            or not rollback_ref
+            or not parent
+            or not attempt
+            or isinstance(ordinal, bool)
+            or not isinstance(ordinal, int)
+            or ordinal < 1
+        ):
+            raise ValueError("Additional-agent planning discussion owner is invalid")
+        return {
+            "kind": kind,
+            "pipeline_stage": stage,
+            "rollback_ref": rollback_ref,
+            "parent_node_id": parent,
+            "attempt_id": attempt,
+            "additional_agent_ordinal": ordinal,
+        }
+    raise ValueError("Stage planning discussion owner kind is invalid")
+
+
+def new_stage_planning_discussion(
+    *,
+    owner: Mapping[str, Any],
+    participant_count: int,
+    max_response_rounds: int,
+    workspace_fingerprint: str,
+    workspace_fingerprint_scope: dict[str, Any] | None,
+    whiteboard_boundary_sha: str | None,
+    base_idea_number: int,
+) -> dict[str, Any]:
+    """Build one stage attachment around the shared planning session."""
+
+    return {
+        "owner": normalize_stage_planning_discussion_owner(owner),
+        "session": new_planning_discussion_session(
+            participant_count=participant_count,
+            max_response_rounds=max_response_rounds,
+            workspace_fingerprint=workspace_fingerprint,
+            workspace_fingerprint_scope=workspace_fingerprint_scope,
+            whiteboard_boundary_sha=whiteboard_boundary_sha,
+            base_idea_number=base_idea_number,
+        ),
     }
 
 
@@ -318,25 +499,12 @@ def planning_discussion_task_complete(task: Any) -> bool:
     )
 
 
-def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
-    """Validate the implemented planning phases and durable task progress."""
+def validate_planning_discussion_session_shape(session: Any) -> dict[str, Any]:
+    """Validate task-neutral planning phases and durable task progress."""
 
     if not isinstance(session, dict):
         raise ValueError("Planning discussion state is missing")
-    required_keys = {
-        "version",
-        "candidate_attempt_id",
-        "admitted_proposal_idea_id",
-        "participant_count",
-        "max_response_rounds",
-        "workspace_fingerprint",
-        "workspace_fingerprint_scope",
-        "whiteboard_boundary_sha",
-        "base_idea_number",
-        "phase",
-        "round_ordinal",
-        "tasks",
-    }
+    required_keys = set(_SHARED_PLANNING_DISCUSSION_KEYS)
     phase = session.get("phase")
     if phase == "reopen_pending":
         required_keys.add("reopen_handoff")
@@ -346,13 +514,6 @@ def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
         )
     if session.get("version") != PLANNING_DISCUSSION_SCHEMA_VERSION:
         raise ValueError("Unsupported planning discussion schema version")
-    if _LOCAL_ATTEMPT_ID.fullmatch(
-        str(session.get("candidate_attempt_id", ""))
-    ) is None:
-        raise ValueError("Planning discussion candidate attempt is invalid")
-    proposal_id = str(session.get("admitted_proposal_idea_id", ""))
-    if _IDEA_ID.fullmatch(proposal_id) is None:
-        raise ValueError("Planning discussion admitted proposal ID is invalid")
     config = normalize_planning_mode_config(
         COLLABORATIVE_PLANNING_MODE,
         participant_count=session.get("participant_count"),
@@ -369,15 +530,18 @@ def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
             raise ValueError(
                 "Planning discussion workspace fingerprint scope is not canonical"
             )
-    if _FULL_GIT_SHA.fullmatch(str(session.get("whiteboard_boundary_sha", ""))) is None:
+    whiteboard_boundary = session.get("whiteboard_boundary_sha")
+    if whiteboard_boundary is not None and _FULL_GIT_SHA.fullmatch(
+        str(whiteboard_boundary)
+    ) is None:
         raise ValueError(
-            "Planning discussion whiteboard boundary must be a full lowercase commit SHA"
+            "Planning discussion whiteboard boundary must be absent or a full lowercase commit SHA"
         )
     base_idea_number = session.get("base_idea_number")
     if (
         isinstance(base_idea_number, bool)
         or not isinstance(base_idea_number, int)
-        or base_idea_number < int(proposal_id[1:])
+        or base_idea_number < 0
     ):
         raise ValueError("Planning discussion idea boundary is invalid")
     round_ordinal = session.get("round_ordinal")
@@ -505,12 +669,82 @@ def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
     return session
 
 
+def validate_planning_discussion_shape(session: Any) -> dict[str, Any]:
+    """Validate the unchanged candidate-planning persisted envelope."""
+
+    if not isinstance(session, dict):
+        raise ValueError("Planning discussion state is missing")
+    required = {
+        *_SHARED_PLANNING_DISCUSSION_KEYS,
+        "candidate_attempt_id",
+        "admitted_proposal_idea_id",
+    }
+    if session.get("phase") == "reopen_pending":
+        required.add("reopen_handoff")
+    if set(session) != required:
+        raise ValueError(
+            "Planning discussion state contains missing or unsupported fields"
+        )
+    candidate = str(session.get("candidate_attempt_id", ""))
+    proposal_id = str(session.get("admitted_proposal_idea_id", ""))
+    if _LOCAL_ATTEMPT_ID.fullmatch(candidate) is None:
+        raise ValueError("Planning discussion candidate attempt is invalid")
+    if _IDEA_ID.fullmatch(proposal_id) is None:
+        raise ValueError("Planning discussion admitted proposal ID is invalid")
+    shared = {
+        key: value
+        for key, value in session.items()
+        if key not in {"candidate_attempt_id", "admitted_proposal_idea_id"}
+    }
+    validate_planning_discussion_session_shape(shared)
+    if int(session["base_idea_number"]) < int(proposal_id[1:]):
+        raise ValueError("Planning discussion idea boundary is invalid")
+    if _FULL_GIT_SHA.fullmatch(
+        str(session.get("whiteboard_boundary_sha", ""))
+    ) is None:
+        raise ValueError(
+            "Planning discussion whiteboard boundary must be a full lowercase commit SHA"
+        )
+    return session
+
+
+def validate_stage_planning_discussion_shape(value: Any) -> dict[str, Any]:
+    """Validate one stage owner and its shared planning session."""
+
+    if not isinstance(value, dict) or set(value) != {"owner", "session"}:
+        raise ValueError("Stage planning discussion attachment is invalid")
+    owner = normalize_stage_planning_discussion_owner(value.get("owner"))
+    if value.get("owner") != owner:
+        raise ValueError("Stage planning discussion owner is not canonical")
+    validate_planning_discussion_session_shape(value.get("session"))
+    return value
+
+
+def validate_planning_discussion_envelope(session: Any) -> dict[str, Any]:
+    """Validate either the candidate envelope or a shared stage session."""
+
+    if isinstance(session, dict) and (
+        "candidate_attempt_id" in session or "admitted_proposal_idea_id" in session
+    ):
+        return validate_planning_discussion_shape(session)
+    return validate_planning_discussion_session_shape(session)
+
+
 def validate_initial_planning_discussion_shape(session: Any) -> dict[str, Any]:
     """Require the exact initial shape used when a session is created."""
 
     validated = validate_planning_discussion_shape(session)
     if validated.get("phase") != "initial":
         raise ValueError("New planning discussion must remain in its initial phase")
+    return validated
+
+
+def validate_initial_stage_planning_discussion_shape(value: Any) -> dict[str, Any]:
+    """Require a newly attached stage meeting to remain at its initial boundary."""
+
+    validated = validate_stage_planning_discussion_shape(value)
+    if validated["session"].get("phase") != "initial":
+        raise ValueError("New stage planning discussion must remain in its initial phase")
     return validated
 
 
@@ -590,6 +824,223 @@ def validate_planning_discussion_task_shape(
         raise ValueError(
             "Completed planning discussion task contains transient state"
         )
+    return task
+
+
+def advance_planning_discussion_session(
+    session: dict[str, Any],
+    *,
+    expected_phase: str,
+    round_ordinal: int,
+) -> dict[str, Any]:
+    """Apply one idempotent phase advance to either persisted envelope."""
+
+    if expected_phase not in {"initial", "opening", "response"}:
+        raise ValueError("Planning discussion cannot advance from this phase")
+    current_phase = str(session["phase"])
+    current_round = int(session["round_ordinal"])
+    if expected_phase == "initial" and current_phase == "opening" and current_round == 0:
+        return session
+    if expected_phase == "opening" and current_phase == "response" and current_round == 1:
+        return session
+    if (
+        expected_phase == "response"
+        and current_round == round_ordinal
+        and current_phase in {"decision", "final_writing"}
+    ):
+        return session
+    if current_phase != expected_phase or current_round != round_ordinal:
+        raise ValueError("Planning discussion advance identity is stale")
+    if expected_phase == "initial":
+        active_ids = [
+            planning_discussion_task_id("initial", participant_ordinal=ordinal)
+            for ordinal in range(1, int(session["participant_count"]) + 1)
+        ]
+    elif expected_phase == "opening":
+        active_ids = [planning_discussion_task_id("opening", participant_ordinal=1)]
+    else:
+        active_ids = planning_discussion_response_task_ids(
+            current_round, int(session["participant_count"])
+        )
+    if any(
+        not planning_discussion_task_complete(session["tasks"][task_id])
+        for task_id in active_ids
+    ):
+        raise ValueError(
+            "Planning discussion cannot advance before every active task completes"
+        )
+    if expected_phase == "initial":
+        opening_id = planning_discussion_task_id("opening", participant_ordinal=1)
+        session["tasks"][opening_id] = {
+            "kind": "contribution",
+            "result_record_id": None,
+        }
+        session["phase"] = "opening"
+    elif expected_phase == "opening":
+        session["round_ordinal"] = 1
+        for task_id in planning_discussion_response_task_ids(
+            1, int(session["participant_count"])
+        ):
+            session["tasks"][task_id] = {
+                "kind": "contribution",
+                "result_record_id": None,
+            }
+        session["phase"] = "response"
+    elif current_round == int(session["max_response_rounds"]):
+        session["phase"] = "final_writing"
+    else:
+        decision_id = planning_discussion_task_id(
+            "decision", participant_ordinal=1, round_ordinal=current_round
+        )
+        session["tasks"][decision_id] = {
+            "kind": "decision",
+            "result_record_id": None,
+        }
+        session["phase"] = "decision"
+    return session
+
+
+def apply_planning_discussion_decision_to_session(
+    session: dict[str, Any],
+    *,
+    round_ordinal: int,
+    choice: str,
+) -> dict[str, Any]:
+    """Apply one durable lead decision to either persisted envelope."""
+
+    normalized_choice = str(choice).strip().lower()
+    if normalized_choice not in {"continue", "finalize"}:
+        raise ValueError("Planning discussion decision must be continue or finalize")
+    if (
+        normalized_choice == "continue"
+        and session["phase"] == "response"
+        and session["round_ordinal"] == round_ordinal + 1
+    ) or (
+        normalized_choice == "finalize"
+        and session["phase"] == "final_writing"
+        and session["round_ordinal"] == round_ordinal
+    ):
+        return session
+    if session["phase"] != "decision" or session["round_ordinal"] != round_ordinal:
+        raise ValueError("Planning discussion decision identity is stale")
+    decision_id = planning_discussion_task_id(
+        "decision", participant_ordinal=1, round_ordinal=round_ordinal
+    )
+    decision = session["tasks"].get(decision_id)
+    if (
+        not planning_discussion_task_complete(decision)
+        or decision.get("choice") != normalized_choice
+    ):
+        raise ValueError("Planning discussion decision is not durably ready")
+    if normalized_choice == "continue":
+        next_round = round_ordinal + 1
+        if next_round > int(session["max_response_rounds"]):
+            raise ValueError("Planning discussion cannot continue beyond its round limit")
+        for task_id in planning_discussion_response_task_ids(
+            next_round, int(session["participant_count"])
+        ):
+            session["tasks"][task_id] = {
+                "kind": "contribution",
+                "result_record_id": None,
+            }
+        session["round_ordinal"] = next_round
+        session["phase"] = "response"
+    else:
+        session["phase"] = "final_writing"
+    return session
+
+
+def record_planning_discussion_provider_result_in_session(
+    session: dict[str, Any],
+    *,
+    task_id: str,
+    failed: bool,
+) -> int:
+    """Update one active task's existing provider-failure counter."""
+
+    if not isinstance(failed, bool):
+        raise ValueError("Planning discussion provider result requires failed=true/false")
+    task = session["tasks"].get(task_id)
+    if not isinstance(task, dict) or task.get("result_record_id") is not None:
+        raise ValueError("Planning discussion task is not active")
+    if task.get("pending_finalization") is not None:
+        raise ValueError(
+            "Provider result applies only before discussion task finalization"
+        )
+    if failed:
+        prior = task.get("consecutive_provider_failures", 0)
+        if isinstance(prior, bool) or not isinstance(prior, int) or prior < 0:
+            raise ValueError("Planning discussion provider-failure counter is invalid")
+        count = prior + 1
+        task["consecutive_provider_failures"] = count
+    else:
+        count = 0
+        task.pop("consecutive_provider_failures", None)
+    return count
+
+
+def begin_planning_discussion_task_finalization_in_session(
+    session: dict[str, Any],
+    *,
+    task_id: str,
+    normalized_output: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist one normalized task intent in either planning location."""
+
+    task = session["tasks"].get(task_id)
+    if not isinstance(task, dict) or task.get("result_record_id") is not None:
+        raise ValueError("Planning discussion task is not active")
+    intent = normalize_planning_discussion_record(
+        task_id, task["kind"], normalized_output
+    )["result"]
+    existing = task.get("pending_finalization")
+    if existing is not None:
+        if existing == intent:
+            return existing
+        raise ValueError(
+            "Planning discussion task already owns a different finalization intent"
+        )
+    task["pending_finalization"] = intent
+    task.pop("consecutive_provider_failures", None)
+    return intent
+
+
+def complete_planning_discussion_task_finalization_in_session(
+    session: dict[str, Any],
+    *,
+    task_id: str,
+    normalized_output: Mapping[str, Any],
+    result_record_id: str,
+) -> dict[str, Any]:
+    """Attach one accepted record reference in either planning location."""
+
+    record_id = str(result_record_id).strip()
+    if record_id != task_id:
+        raise ValueError("Planning discussion result record must match its task ID")
+    task = session["tasks"].get(task_id)
+    if not isinstance(task, dict):
+        raise ValueError("No matching planning discussion task exists")
+    intent = normalize_planning_discussion_record(
+        task_id, task["kind"], normalized_output
+    )["result"]
+    if task.get("result_record_id") is not None:
+        if task.get("result_record_id") == record_id and (
+            task.get("kind") != "decision"
+            or task.get("choice") == intent.get("choice")
+        ):
+            return task
+        raise ValueError(
+            "Planning discussion task already references a different result"
+        )
+    if task.get("pending_finalization") != intent:
+        raise ValueError(
+            "Planning discussion task has no matching finalization intent"
+        )
+    task["result_record_id"] = record_id
+    if task.get("kind") == "decision":
+        task["choice"] = intent["choice"]
+    task.pop("pending_finalization", None)
+    task.pop("consecutive_provider_failures", None)
     return task
 
 
@@ -803,7 +1254,7 @@ def project_next_planning_discussion_response(
     projected["round_ordinal"] = next_round
     projected["phase"] = "response"
     projected.pop("reopen_handoff", None)
-    validate_planning_discussion_shape(projected)
+    validate_planning_discussion_envelope(projected)
     return projected, len(response_ids)
 
 
@@ -887,7 +1338,7 @@ def project_planning_discussion_task_result(
             projected["phase"] = "final_writing"
     else:
         raise ValueError("Initial contributions do not schedule individual turns.")
-    validate_planning_discussion_shape(projected)
+    validate_planning_discussion_envelope(projected)
     return projected, record
 
 

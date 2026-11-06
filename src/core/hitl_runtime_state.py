@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
@@ -20,10 +21,20 @@ from core.hitl_planning_mode import (
     normalize_pending_planning_policy,
 )
 from core.hitl_planning_discussion import (
+    apply_planning_discussion_decision_to_session,
+    begin_planning_discussion_task_finalization_in_session,
+    complete_planning_discussion_task_finalization_in_session,
     new_planning_discussion,
+    new_stage_planning_discussion,
+    normalize_stage_planning_discussion_owner,
+    record_planning_discussion_provider_result_in_session,
+    advance_planning_discussion_session,
     validate_initial_planning_discussion_shape,
+    validate_initial_stage_planning_discussion_shape,
     validate_planning_discussion_shape,
+    validate_planning_discussion_session_shape,
     validate_planning_discussion_task_id,
+    validate_stage_planning_discussion_shape,
 )
 from core.hitl_proposal_discussion import (
     PROPOSAL_DISCUSSION_SCHEMA_VERSION,
@@ -101,6 +112,128 @@ class HitlResolutionReplyStaleError(HitlRuntimeStateError):
     """A durable human reply no longer matches the active worker request."""
 
 
+@dataclass(frozen=True)
+class PlanningDiscussionStateBinding:
+    """Thin access to one candidate or stage planning-state location."""
+
+    runtime_state: "HitlRuntimeState"
+    candidate_identity: Optional[Dict[str, str]] = None
+    stage_owner: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        if (self.candidate_identity is None) == (self.stage_owner is None):
+            raise ValueError(
+                "Planning discussion binding requires exactly one state location"
+            )
+
+    def snapshot(self) -> Dict[str, Any]:
+        if self.stage_owner is not None:
+            return self.runtime_state.stage_planning_discussion_snapshot(
+                owner=self.stage_owner
+            )
+        return self.runtime_state.planning_discussion_snapshot(
+            **dict(self.candidate_identity or {})
+        )
+
+    def advance(self, expected_phase: str, round_ordinal: int) -> Dict[str, Any]:
+        if self.stage_owner is not None:
+            return self.runtime_state.advance_stage_planning_discussion(
+                owner=self.stage_owner,
+                expected_phase=expected_phase,
+                round_ordinal=round_ordinal,
+            )
+        return self.runtime_state.advance_planning_discussion(
+            **dict(self.candidate_identity or {}),
+            expected_phase=expected_phase,
+            round_ordinal=round_ordinal,
+        )
+
+    def apply_decision(self, round_ordinal: int, choice: str) -> Dict[str, Any]:
+        if self.stage_owner is not None:
+            return self.runtime_state.apply_stage_planning_discussion_decision(
+                owner=self.stage_owner,
+                round_ordinal=round_ordinal,
+                choice=choice,
+            )
+        return self.runtime_state.apply_planning_discussion_decision(
+            **dict(self.candidate_identity or {}),
+            round_ordinal=round_ordinal,
+            choice=choice,
+        )
+
+    def task_snapshot(
+        self,
+        discussion_task_id: str,
+        *,
+        require_active: bool = False,
+    ) -> Dict[str, Any]:
+        if self.stage_owner is not None:
+            return self.runtime_state.stage_planning_discussion_task_snapshot(
+                owner=self.stage_owner,
+                discussion_task_id=discussion_task_id,
+                require_active=require_active,
+            )
+        method = (
+            self.runtime_state.active_planning_discussion_task_snapshot
+            if require_active
+            else self.runtime_state.planning_discussion_task_snapshot
+        )
+        return method(
+            **dict(self.candidate_identity or {}),
+            discussion_task_id=discussion_task_id,
+        )
+
+    def record_provider_result(self, discussion_task_id: str, failed: bool) -> int:
+        if self.stage_owner is not None:
+            return self.runtime_state.record_stage_planning_discussion_task_provider_result(
+                owner=self.stage_owner,
+                discussion_task_id=discussion_task_id,
+                failed=failed,
+            )
+        return self.runtime_state.record_planning_discussion_task_provider_result(
+            **dict(self.candidate_identity or {}),
+            discussion_task_id=discussion_task_id,
+            failed=failed,
+        )
+
+    def begin_task_finalization(
+        self,
+        discussion_task_id: str,
+        normalized_output: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if self.stage_owner is not None:
+            return self.runtime_state.begin_stage_planning_discussion_task_finalization(
+                owner=self.stage_owner,
+                discussion_task_id=discussion_task_id,
+                normalized_output=normalized_output,
+            )
+        return self.runtime_state.begin_planning_discussion_task_finalization(
+            **dict(self.candidate_identity or {}),
+            discussion_task_id=discussion_task_id,
+            normalized_output=normalized_output,
+        )
+
+    def complete_task_finalization(
+        self,
+        discussion_task_id: str,
+        normalized_output: Dict[str, Any],
+        result_record_id: str,
+    ) -> Dict[str, Any]:
+        if self.stage_owner is not None:
+            return self.runtime_state.complete_stage_planning_discussion_task_finalization(
+                owner=self.stage_owner,
+                discussion_task_id=discussion_task_id,
+                normalized_output=normalized_output,
+                result_record_id=result_record_id,
+            )
+        return self.runtime_state.complete_planning_discussion_task_finalization(
+            **dict(self.candidate_identity or {}),
+            discussion_task_id=discussion_task_id,
+            normalized_output=normalized_output,
+            result_record_id=result_record_id,
+        )
+
+
 def _now() -> str:
     return utc_now()
 
@@ -138,6 +271,7 @@ class HitlRuntimeState:
                 "immutable_resource_digests": {},
             },
             "next_autoresearch_action": None,
+            "stage_planning_discussion": None,
             "rejected_whiteboard_cleanup": None,
             "frontier_decision_transition": None,
             "bootstrap_prepublication_boundary": None,
@@ -255,6 +389,45 @@ class HitlRuntimeState:
         if not isinstance(events, list):
             return []
         return [self._copy(event) for event in events if isinstance(event, dict)]
+
+    def bind_candidate_planning_discussion(
+        self,
+        *,
+        parent_node_sha: str,
+        preparation_attempt_id: str,
+        candidate_attempt_id: str,
+    ) -> PlanningDiscussionStateBinding:
+        """Bind the unchanged candidate planning-state location."""
+
+        parent, preparation, candidate = self._planning_discussion_identity(
+            parent_node_sha=parent_node_sha,
+            preparation_attempt_id=preparation_attempt_id,
+            candidate_attempt_id=candidate_attempt_id,
+        )
+        return PlanningDiscussionStateBinding(
+            runtime_state=self,
+            candidate_identity={
+                "parent_node_sha": parent,
+                "preparation_attempt_id": preparation,
+                "candidate_attempt_id": candidate,
+            },
+        )
+
+    def bind_stage_planning_discussion(
+        self,
+        *,
+        owner: Dict[str, Any],
+    ) -> PlanningDiscussionStateBinding:
+        """Bind the stage attachment owned by one durable invocation."""
+
+        try:
+            normalized_owner = normalize_stage_planning_discussion_owner(owner)
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        return PlanningDiscussionStateBinding(
+            runtime_state=self,
+            stage_owner=normalized_owner,
+        )
 
     def record_interface_phase(
         self,
@@ -2822,6 +2995,8 @@ class HitlRuntimeState:
     def _record_planning_discussion_phase_unlocked(
         self,
         session: Dict[str, Any],
+        *,
+        pipeline_stage: str = "experiment_runner",
     ) -> None:
         """Record the current planning boundary through the shared UI event path."""
 
@@ -2836,7 +3011,7 @@ class HitlRuntimeState:
         else:
             activity = f"discussion_{phase}_{round_ordinal}"
         self._record_phase_transition_unlocked(
-            stage="experiment_runner",
+            stage=pipeline_stage,
             phase="plan",
             activity=activity,
         )
@@ -3222,17 +3397,6 @@ class HitlRuntimeState:
     ) -> Dict[str, Any]:
         """Advance one completed speaking phase through the fixed protocol."""
 
-        from core.hitl_planning_discussion import (
-            planning_discussion_response_task_ids,
-            planning_discussion_task_complete,
-            planning_discussion_task_id,
-        )
-
-        if expected_phase not in {"initial", "opening", "response"}:
-            raise HitlRuntimeStateError(
-                "Planning discussion cannot advance from this phase"
-            )
-
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             action, session = self._planning_discussion_unlocked(
@@ -3240,77 +3404,12 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
             )
-            current_phase = str(session["phase"])
-            current_round = int(session["round_ordinal"])
-            if expected_phase == "initial" and current_phase == "opening" and current_round == 0:
-                return self._copy(session)
-            if expected_phase == "opening" and current_phase == "response" and current_round == 1:
-                return self._copy(session)
-            if (
-                expected_phase == "response"
-                and current_round == round_ordinal
-                and current_phase in {"decision", "final_writing"}
-            ):
-                return self._copy(session)
-            if current_phase != expected_phase or current_round != round_ordinal:
-                raise HitlRuntimeStateError(
-                    "Planning discussion advance identity is stale"
-                )
-            if expected_phase == "initial":
-                active_ids = [
-                    planning_discussion_task_id(
-                        "initial", participant_ordinal=ordinal
-                    )
-                    for ordinal in range(1, int(session["participant_count"]) + 1)
-                ]
-            elif expected_phase == "opening":
-                active_ids = [
-                    planning_discussion_task_id("opening", participant_ordinal=1)
-                ]
-            else:
-                active_ids = planning_discussion_response_task_ids(
-                    current_round, int(session["participant_count"])
-                )
-            if any(
-                not planning_discussion_task_complete(session["tasks"][task_id])
-                for task_id in active_ids
-            ):
-                raise HitlRuntimeStateError(
-                    "Planning discussion cannot advance before every active task completes"
-                )
-            if expected_phase == "initial":
-                opening_id = planning_discussion_task_id(
-                    "opening", participant_ordinal=1
-                )
-                session["tasks"][opening_id] = {
-                    "kind": "contribution",
-                    "result_record_id": None,
-                }
-                session["phase"] = "opening"
-            elif expected_phase == "opening":
-                session["round_ordinal"] = 1
-                for task_id in planning_discussion_response_task_ids(
-                    1, int(session["participant_count"])
-                ):
-                    session["tasks"][task_id] = {
-                        "kind": "contribution",
-                        "result_record_id": None,
-                    }
-                session["phase"] = "response"
-            elif current_round == int(session["max_response_rounds"]):
-                session["phase"] = "final_writing"
-            else:
-                decision_id = planning_discussion_task_id(
-                    "decision",
-                    participant_ordinal=1,
-                    round_ordinal=current_round,
-                )
-                session["tasks"][decision_id] = {
-                    "kind": "decision",
-                    "result_record_id": None,
-                }
-                session["phase"] = "decision"
             try:
+                advance_planning_discussion_session(
+                    session,
+                    expected_phase=expected_phase,
+                    round_ordinal=round_ordinal,
+                )
                 validate_planning_discussion_shape(session)
             except ValueError as exc:
                 raise HitlRuntimeStateError(str(exc)) from exc
@@ -3330,18 +3429,6 @@ class HitlRuntimeState:
         choice: str,
     ) -> Dict[str, Any]:
         """Apply one recorded lead decision to scheduling state."""
-
-        from core.hitl_planning_discussion import (
-            planning_discussion_response_task_ids,
-            planning_discussion_task_complete,
-            planning_discussion_task_id,
-        )
-
-        normalized_choice = str(choice).strip().lower()
-        if normalized_choice not in {"continue", "finalize"}:
-            raise HitlRuntimeStateError(
-                "Planning discussion decision must be continue or finalize"
-            )
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             action, session = self._planning_discussion_unlocked(
@@ -3349,49 +3436,12 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
             )
-            if (
-                normalized_choice == "continue"
-                and session["phase"] == "response"
-                and session["round_ordinal"] == round_ordinal + 1
-            ) or (
-                normalized_choice == "finalize"
-                and session["phase"] == "final_writing"
-                and session["round_ordinal"] == round_ordinal
-            ):
-                return self._copy(session)
-            if session["phase"] != "decision" or session["round_ordinal"] != round_ordinal:
-                raise HitlRuntimeStateError(
-                    "Planning discussion decision identity is stale"
-                )
-            decision_id = planning_discussion_task_id(
-                "decision", participant_ordinal=1, round_ordinal=round_ordinal
-            )
-            decision = session["tasks"].get(decision_id)
-            if (
-                not planning_discussion_task_complete(decision)
-                or decision.get("choice") != normalized_choice
-            ):
-                raise HitlRuntimeStateError(
-                    "Planning discussion decision is not durably ready"
-                )
-            if normalized_choice == "continue":
-                next_round = round_ordinal + 1
-                if next_round > int(session["max_response_rounds"]):
-                    raise HitlRuntimeStateError(
-                        "Planning discussion cannot continue beyond its round limit"
-                    )
-                for task_id in planning_discussion_response_task_ids(
-                    next_round, int(session["participant_count"])
-                ):
-                    session["tasks"][task_id] = {
-                        "kind": "contribution",
-                        "result_record_id": None,
-                    }
-                session["round_ordinal"] = next_round
-                session["phase"] = "response"
-            else:
-                session["phase"] = "final_writing"
             try:
+                apply_planning_discussion_decision_to_session(
+                    session,
+                    round_ordinal=round_ordinal,
+                    choice=choice,
+                )
                 validate_planning_discussion_shape(session)
             except ValueError as exc:
                 raise HitlRuntimeStateError(str(exc)) from exc
@@ -3811,10 +3861,6 @@ class HitlRuntimeState:
         discussion_task_id: str,
         failed: bool,
     ) -> int:
-        if not isinstance(failed, bool):
-            raise HitlRuntimeStateError(
-                "Planning discussion provider result requires failed=true/false"
-            )
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             action, session = self._planning_discussion_unlocked(
@@ -3822,26 +3868,15 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
             )
-            task = session["tasks"].get(discussion_task_id)
-            if not isinstance(task, dict) or task.get("result_record_id") is not None:
-                raise HitlRuntimeStateError(
-                    "Planning discussion task is not active"
+            try:
+                count = record_planning_discussion_provider_result_in_session(
+                    session,
+                    task_id=discussion_task_id,
+                    failed=failed,
                 )
-            if task.get("pending_finalization") is not None:
-                raise HitlRuntimeStateError(
-                    "Provider result applies only before discussion task finalization"
-                )
-            if failed:
-                prior = task.get("consecutive_provider_failures", 0)
-                if isinstance(prior, bool) or not isinstance(prior, int) or prior < 0:
-                    raise HitlRuntimeStateError(
-                        "Planning discussion provider-failure counter is invalid"
-                    )
-                count = prior + 1
-                task["consecutive_provider_failures"] = count
-            else:
-                count = 0
-                task.pop("consecutive_provider_failures", None)
+                validate_planning_discussion_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
             action["planning_discussion"] = session
             self._state["next_autoresearch_action"] = action
             self._save_unlocked()
@@ -3856,10 +3891,6 @@ class HitlRuntimeState:
         discussion_task_id: str,
         normalized_output: Dict[str, Any],
     ) -> Dict[str, Any]:
-        from core.hitl_planning_discussion import (
-            normalize_planning_discussion_record,
-        )
-
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             action, session = self._planning_discussion_unlocked(
@@ -3867,28 +3898,15 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
             )
-            task = session["tasks"].get(discussion_task_id)
-            if not isinstance(task, dict) or task.get("result_record_id") is not None:
-                raise HitlRuntimeStateError(
-                    "Planning discussion task is not active"
-                )
             try:
-                intent = normalize_planning_discussion_record(
-                    discussion_task_id,
-                    task["kind"],
-                    normalized_output,
-                )["result"]
+                intent = begin_planning_discussion_task_finalization_in_session(
+                    session,
+                    task_id=discussion_task_id,
+                    normalized_output=normalized_output,
+                )
+                validate_planning_discussion_shape(session)
             except ValueError as exc:
                 raise HitlRuntimeStateError(str(exc)) from exc
-            existing = task.get("pending_finalization")
-            if existing is not None:
-                if existing == intent:
-                    return self._copy(existing)
-                raise HitlRuntimeStateError(
-                    "Planning discussion task already owns a different finalization intent"
-                )
-            task["pending_finalization"] = intent
-            task.pop("consecutive_provider_failures", None)
             action["planning_discussion"] = session
             self._state["next_autoresearch_action"] = action
             self._save_unlocked()
@@ -3904,15 +3922,6 @@ class HitlRuntimeState:
         normalized_output: Dict[str, Any],
         result_record_id: str,
     ) -> Dict[str, Any]:
-        from core.hitl_planning_discussion import (
-            normalize_planning_discussion_record,
-        )
-
-        record_id = str(result_record_id).strip()
-        if record_id != discussion_task_id:
-            raise HitlRuntimeStateError(
-                "Planning discussion result record must match its task ID"
-            )
         with self._locked():
             self._state = self._load_unlocked() or self._default()
             action, session = self._planning_discussion_unlocked(
@@ -3920,41 +3929,280 @@ class HitlRuntimeState:
                 preparation_attempt_id=preparation_attempt_id,
                 candidate_attempt_id=candidate_attempt_id,
             )
+            try:
+                task = complete_planning_discussion_task_finalization_in_session(
+                    session,
+                    task_id=discussion_task_id,
+                    normalized_output=normalized_output,
+                    result_record_id=result_record_id,
+                )
+                validate_planning_discussion_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            action["planning_discussion"] = session
+            self._state["next_autoresearch_action"] = action
+            self._save_unlocked()
+            return self._copy(task)
+
+    def _stage_planning_discussion_unlocked(
+        self,
+        *,
+        owner: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        try:
+            expected_owner = normalize_stage_planning_discussion_owner(owner)
+            attachment = validate_stage_planning_discussion_shape(
+                self._state.get("stage_planning_discussion")
+            )
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        if attachment["owner"] != expected_owner:
+            raise HitlRuntimeStateError("Stage planning discussion owner is stale")
+        return attachment, attachment["session"]
+
+    def _save_stage_planning_discussion_unlocked(
+        self,
+        attachment: Dict[str, Any],
+        session: Dict[str, Any],
+    ) -> None:
+        attachment["session"] = session
+        try:
+            validate_stage_planning_discussion_shape(attachment)
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        self._state["stage_planning_discussion"] = attachment
+        self._record_planning_discussion_phase_unlocked(
+            session,
+            pipeline_stage=str(attachment["owner"]["pipeline_stage"]),
+        )
+        self._save_unlocked()
+
+    def begin_stage_planning_discussion(
+        self,
+        *,
+        owner: Dict[str, Any],
+        participant_count: int,
+        max_response_rounds: int,
+        workspace_fingerprint: str,
+        workspace_fingerprint_scope: Optional[Dict[str, Any]],
+        whiteboard_boundary_sha: Optional[str],
+        base_idea_number: int,
+    ) -> Dict[str, Any]:
+        """Attach one planning meeting to an existing durable stage invocation."""
+
+        try:
+            normalized_owner = normalize_stage_planning_discussion_owner(owner)
+            attachment = new_stage_planning_discussion(
+                owner=normalized_owner,
+                participant_count=participant_count,
+                max_response_rounds=max_response_rounds,
+                workspace_fingerprint=str(workspace_fingerprint).strip(),
+                workspace_fingerprint_scope=workspace_fingerprint_scope,
+                whiteboard_boundary_sha=whiteboard_boundary_sha,
+                base_idea_number=base_idea_number,
+            )
+            validate_initial_stage_planning_discussion_shape(attachment)
+        except ValueError as exc:
+            raise HitlRuntimeStateError(str(exc)) from exc
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            existing = self._state.get("stage_planning_discussion")
+            if existing is not None:
+                try:
+                    validated = validate_stage_planning_discussion_shape(existing)
+                except ValueError as exc:
+                    raise HitlRuntimeStateError(str(exc)) from exc
+                if validated["owner"] == normalized_owner:
+                    return self._copy(validated["session"])
+                raise HitlRuntimeStateError(
+                    "Another stage invocation already owns a planning discussion"
+                )
+            self._state["stage_planning_discussion"] = attachment
+            self._record_planning_discussion_phase_unlocked(
+                attachment["session"],
+                pipeline_stage=str(attachment["owner"]["pipeline_stage"]),
+            )
+            self._save_unlocked()
+            return self._copy(attachment["session"])
+
+    def stage_planning_discussion_attachment(self) -> Optional[Dict[str, Any]]:
+        """Return the validated active stage attachment, if one exists."""
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            value = self._state.get("stage_planning_discussion")
+            if value is None:
+                return None
+            try:
+                return self._copy(validate_stage_planning_discussion_shape(value))
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+
+    def stage_planning_discussion_snapshot(
+        self,
+        *,
+        owner: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            _attachment, session = self._stage_planning_discussion_unlocked(owner=owner)
+            return self._copy(session)
+
+    def advance_stage_planning_discussion(
+        self,
+        *,
+        owner: Dict[str, Any],
+        expected_phase: str,
+        round_ordinal: int,
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            attachment, session = self._stage_planning_discussion_unlocked(owner=owner)
+            try:
+                advance_planning_discussion_session(
+                    session,
+                    expected_phase=expected_phase,
+                    round_ordinal=round_ordinal,
+                )
+                validate_planning_discussion_session_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            self._save_stage_planning_discussion_unlocked(attachment, session)
+            return self._copy(session)
+
+    def apply_stage_planning_discussion_decision(
+        self,
+        *,
+        owner: Dict[str, Any],
+        round_ordinal: int,
+        choice: str,
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            attachment, session = self._stage_planning_discussion_unlocked(owner=owner)
+            try:
+                apply_planning_discussion_decision_to_session(
+                    session,
+                    round_ordinal=round_ordinal,
+                    choice=choice,
+                )
+                validate_planning_discussion_session_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            self._save_stage_planning_discussion_unlocked(attachment, session)
+            return self._copy(session)
+
+    def stage_planning_discussion_task_snapshot(
+        self,
+        *,
+        owner: Dict[str, Any],
+        discussion_task_id: str,
+        require_active: bool = False,
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            _attachment, session = self._stage_planning_discussion_unlocked(owner=owner)
+            try:
+                identity = validate_planning_discussion_task_id(
+                    discussion_task_id,
+                    participant_count=int(session["participant_count"]),
+                    max_response_rounds=int(session["max_response_rounds"]),
+                )
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
             task = session["tasks"].get(discussion_task_id)
             if not isinstance(task, dict):
                 raise HitlRuntimeStateError(
                     "No matching planning discussion task exists"
                 )
+            if require_active and (
+                identity.phase != session["phase"]
+                or task.get("result_record_id") is not None
+            ):
+                raise HitlRuntimeStateError("Planning discussion task is not active")
+            if require_active:
+                return {"session": self._copy(session), "task": self._copy(task)}
+            return self._copy(task)
+
+    def record_stage_planning_discussion_task_provider_result(
+        self,
+        *,
+        owner: Dict[str, Any],
+        discussion_task_id: str,
+        failed: bool,
+    ) -> int:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            attachment, session = self._stage_planning_discussion_unlocked(owner=owner)
             try:
-                intent = normalize_planning_discussion_record(
-                    discussion_task_id,
-                    task["kind"],
-                    normalized_output,
-                )["result"]
+                count = record_planning_discussion_provider_result_in_session(
+                    session,
+                    task_id=discussion_task_id,
+                    failed=failed,
+                )
+                validate_planning_discussion_session_shape(session)
             except ValueError as exc:
                 raise HitlRuntimeStateError(str(exc)) from exc
-            if task.get("result_record_id") is not None:
-                if task.get("result_record_id") == record_id and (
-                    task.get("kind") != "decision"
-                    or task.get("choice") == intent.get("choice")
-                ):
-                    return self._copy(task)
-                raise HitlRuntimeStateError(
-                    "Planning discussion task already references a different result"
+            self._save_stage_planning_discussion_unlocked(attachment, session)
+            return count
+
+    def begin_stage_planning_discussion_task_finalization(
+        self,
+        *,
+        owner: Dict[str, Any],
+        discussion_task_id: str,
+        normalized_output: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            attachment, session = self._stage_planning_discussion_unlocked(owner=owner)
+            try:
+                intent = begin_planning_discussion_task_finalization_in_session(
+                    session,
+                    task_id=discussion_task_id,
+                    normalized_output=normalized_output,
                 )
-            if task.get("pending_finalization") != intent:
-                raise HitlRuntimeStateError(
-                    "Planning discussion task has no matching finalization intent"
+                validate_planning_discussion_session_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            self._save_stage_planning_discussion_unlocked(attachment, session)
+            return self._copy(intent)
+
+    def complete_stage_planning_discussion_task_finalization(
+        self,
+        *,
+        owner: Dict[str, Any],
+        discussion_task_id: str,
+        normalized_output: Dict[str, Any],
+        result_record_id: str,
+    ) -> Dict[str, Any]:
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            attachment, session = self._stage_planning_discussion_unlocked(owner=owner)
+            try:
+                task = complete_planning_discussion_task_finalization_in_session(
+                    session,
+                    task_id=discussion_task_id,
+                    normalized_output=normalized_output,
+                    result_record_id=result_record_id,
                 )
-            task["result_record_id"] = record_id
-            if task.get("kind") == "decision":
-                task["choice"] = intent["choice"]
-            task.pop("pending_finalization", None)
-            task.pop("consecutive_provider_failures", None)
-            action["planning_discussion"] = session
-            self._state["next_autoresearch_action"] = action
-            self._save_unlocked()
+                validate_planning_discussion_session_shape(session)
+            except ValueError as exc:
+                raise HitlRuntimeStateError(str(exc)) from exc
+            self._save_stage_planning_discussion_unlocked(attachment, session)
             return self._copy(task)
+
+    def clear_stage_planning_discussion(self, *, owner: Dict[str, Any]) -> None:
+        """Remove only the exact completed or rolled-back stage attachment."""
+
+        with self._locked():
+            self._state = self._load_unlocked() or self._default()
+            value = self._state.get("stage_planning_discussion")
+            if value is None:
+                return
+            self._stage_planning_discussion_unlocked(owner=owner)
+            self._state["stage_planning_discussion"] = None
+            self._save_unlocked()
 
     @staticmethod
     def _proposal_preparation_planning_policy(
