@@ -964,25 +964,18 @@
     const rankedSetup = autoresearchSetup && proposalMode.value === "independent_ranked";
     const collaborativeSetup = autoresearchSetup && proposalMode.value === "collaborative";
     const collaborativePlanningSetup = autoresearchSetup && planningMode.value === "collaborative";
-    const participantsRow = (control) => {
-      control.setAttribute("aria-describedby", "run-participants-hint");
-      return row("Participants", control);
-    };
     const proposals = autoresearchSetup ? q("fieldset", { class: "run-mode-group" }, [
       q("legend", {}, [q("label", { for: proposalMode.id, text: "Proposals" })]),
       proposalMode,
       rankedSetup ? q("div", { class: "run-counts" }, [row("Proposers", proposerCount), row("Reviewers", reviewerCount)]) : null,
-      collaborativeSetup ? q("div", { class: "run-counts" }, [participantsRow(participantCount), row("Rounds", discussionRounds)]) : null,
+      collaborativeSetup ? q("div", { class: "run-counts" }, [row("Team size", participantCount), row("Rounds", discussionRounds)]) : null,
     ]) : null;
     const planning = autoresearchSetup ? q("fieldset", { class: "run-mode-group" }, [
       q("legend", {}, [q("label", { for: planningMode.id, text: "Planning" })]),
       planningMode,
-      collaborativePlanningSetup ? q("div", { class: "run-counts" }, [participantsRow(planningParticipantCount), row("Rounds", planningDiscussionRounds)]) : null,
+      collaborativePlanningSetup ? q("div", { class: "run-counts" }, [row("Team size", planningParticipantCount), row("Rounds", planningDiscussionRounds)]) : null,
     ]) : null;
-    const participantHint = collaborativeSetup || collaborativePlanningSetup
-      ? q("small", { id: "run-participants-hint", class: "run-field-hint", text: "Participant counts include the lead." })
-      : null;
-    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), canConstructBaseline ? row("Action", operation) : null, row("Model", provider), constructingBaseline ? null : row("Research", workflow), row("Auto", hitlMode), proposals, planning, participantHint, autoresearchSetup ? row("Iterations", iterations) : null, autoresearchSetup ? row("Budget", timeLimit) : null, constructingBaseline ? null : q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), constructingBaseline ? null : row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
+    return q("section", { class: "run-panel" }, [q("div", { class: "run-title" }, [q("h2", { text: title }), icon("×", "Close research setup", () => { state.runPanel = false; render(); })]), canConstructBaseline ? row("Action", operation) : null, row("Model", provider), constructingBaseline ? null : row("Research", workflow), row("Auto", hitlMode), proposals, planning, autoresearchSetup ? row("Iterations", iterations) : null, autoresearchSetup ? row("Budget", timeLimit) : null, constructingBaseline ? null : q("label", { class: "check-row" }, [paper, q("span", { text: "Write paper" })]), constructingBaseline ? null : row("Style", style), q("label", { class: "check-row" }, [github, q("span", { text: "Publish to GitHub" })]), q("div", { class: "run-actions" }, [icon("▶", title, start, "run-start")])]);
   }
   function conversation() {
     const shell = q("main", { class: "conversation-shell" }); const thread = q("div", { class: "thread" }); const request = state.snapshot?.inbox?.pending_request; const requestId = String(request?.conversation_record_id || "");
